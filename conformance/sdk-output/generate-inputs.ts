@@ -546,6 +546,12 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
  */
 const CHECK_ONLY = process.argv.includes('--check');
 const drifted: string[] = [];
+// A fixture that cannot be resolved, cannot be compiled, or produces no
+// artifact is a HARD failure in both modes, never a skip. Previously each of
+// those three paths logged and `continue`d, so `--check` reported
+// "inputs match the current compiler" and exited 0 for a fixture whose
+// contract no longer builds at all — the one case the gate exists to catch.
+const failures: string[] = [];
 
 for (const spec of TEST_SPECS) {
   let sourceRel: string;
@@ -553,6 +559,7 @@ for (const spec of TEST_SPECS) {
     sourceRel = resolveTestSource(spec);
   } catch (err: any) {
     console.error(`  ${err.message}`);
+    failures.push(`${spec.name} (source unresolvable: ${err.message})`);
     continue;
   }
   const sourcePath = join(ROOT, sourceRel);
@@ -572,6 +579,7 @@ for (const spec of TEST_SPECS) {
     );
   } catch (err: any) {
     console.error(`  FAILED to compile ${spec.name}: ${err.stderr?.toString().slice(0, 200)}`);
+    failures.push(`${spec.name} (does not compile)`);
     continue;
   }
 
@@ -579,6 +587,7 @@ for (const spec of TEST_SPECS) {
   const artifactPath = join(TMP_DIR, `${sourceBase}.json`);
   if (!existsSync(artifactPath)) {
     console.error(`  No artifact found for ${spec.name} at ${artifactPath}`);
+    failures.push(`${spec.name} (compiler produced no artifact)`);
     continue;
   }
   const artifact = JSON.parse(readFileSync(artifactPath, 'utf-8'));
@@ -622,6 +631,17 @@ for (const spec of TEST_SPECS) {
   if (!existsSync(testDir)) mkdirSync(testDir, { recursive: true });
   writeFileSync(inputPath, rendered);
   console.log(`  Wrote ${spec.name}/input.json`);
+}
+
+if (failures.length > 0) {
+  console.error(
+    `\n\u2717 ${failures.length} sdk-output fixture(s) could not be regenerated at all:\n` +
+      failures.map((f) => `    - ${f}`).join('\n') +
+      `\n\n  These are NOT drift — nothing was compared for them. Whatever input.json is on\n` +
+      `  disk is stale by definition, and the seven-SDK comparison is still running against it.\n` +
+      `  Fix the contract or the spec; do not re-stamp the golden.\n`,
+  );
+  process.exit(1);
 }
 
 if (CHECK_ONLY) {
