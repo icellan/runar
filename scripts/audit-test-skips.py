@@ -9,13 +9,18 @@ fails when:
   * A documenting row claims a `file:line` that no longer carries a skip
     marker (stale row).
 
-Matching policy mirrors the user-facing audit doc:
+Matching policy:
 
-  1. Exact `file:line` match wins.
-  2. Otherwise, fall back to "exact `file` + the enclosing test name
-     appears verbatim somewhere in the row" — used for files where the
-     line numbers churn but the test names are stable (e.g. the long
-     vitest describe.skipIf cascades in cross-compiler.test.ts).
+  1. Exact `file:line` match wins. This is the only SOUND anchor: it is
+     the one the inventory promises is machine-checked.
+  2. Otherwise, within the same file, an unmatched live skip is paired to
+     an unmatched documented site by `snippet_matches_row` (whole-token
+     overlap) and CONSUMED, so a skip whose line merely drifted is not
+     reported as an orphan and a stale row at the same time.
+
+Step 2 is a heuristic and is documented as such: it can still pair a skip
+to a row that does not describe it. Keeping `file:line` accurate is what
+makes this audit meaningful; the fallback only buys tolerance for churn.
 
 The lint surface intentionally mirrors `scripts/lint-no-silent-skips.sh`
 so a reviewer running either tool sees the same cohort.
@@ -501,24 +506,58 @@ def enclosing_test_name(path: str, skip_line: int) -> str | None:
     return None
 
 
-def main() -> int:
-    sites = discover_skip_sites()
-    rows = parse_inventory(INVENTORY_PATH)
-    integrity = check_inventory_integrity(rows, parse_footer_counts(INVENTORY_PATH))
+# Tokens shorter than this are not evidence. The predicate below used to
+# accept len>=2 tokens compared with `in` against the CONCATENATED row prose,
+# i.e. a SUBSTRING test: two-character tokens such as "go", "ir", "is" or "at"
+# occur inside ordinary English words, so nearly every snippet matched nearly
+# every row. Measured on the 164-site / 87-row corpus, that predicate matched a
+# mean of 38.2 rows per snippet (44% of the table) and let 164 of 164 sites be
+# deleted-and-replaced by an unrelated, undocumented skip without the audit
+# noticing. Whole-token comparison at len>=3 cuts that to 15.2 rows per snippet.
+_MIN_TOKEN_LEN = 3
 
-    # Reconciliation can only speak about rows that carry a location. Counting
-    # the parseable subset separately is what makes the "physical rows ==
-    # parsed rows" claim above checkable rather than assumed.
-    located_rows = [r for r in rows if r.sites]
+_TOKEN_SPLIT_RE = re.compile(r"[^A-Za-z0-9_+]+")
 
-    # Match live skips to documented sites WITHOUT depending on exact line
-    # numbers. A skip that merely MOVED (line drift) must not read as both an
-    # orphan (its new line is undocumented) AND a stale row (its old line is
-    # empty) — the failure mode that broke this gate repeatedly on unrelated
-    # insertions. Per file: take exact-line matches first, then pair the
-    # remainder by skip snippet with CONSUMPTION, so a genuinely ADDED skip
-    # (unpaired live) is an orphan and a genuinely REMOVED skip (unpaired doc
-    # site) is stale — line drift alone is forgiven (audit #15/#49).
+
+def _tokens(text: str, min_len: int = 1) -> list[str]:
+    return [t for t in _TOKEN_SPLIT_RE.split(text) if len(t) >= min_len]
+
+
+def snippet_matches_row(snippet: str, row: InventoryRow) -> bool:
+    """Does `snippet` plausibly belong to `row`?
+
+    Used ONLY to pair a skip whose line number has DRIFTED to the row that
+    already documents it; exact `file:line` matches are taken first.
+
+    The comparison is WHOLE-TOKEN against the row's tokenised cells, never a
+    substring test against the concatenated prose. That distinction is the
+    whole gate: `"go" in "...a golden hex..."` is true, `"go" in {"golden",
+    "hex"}` is not.
+
+    This predicate is deliberately conservative but it is NOT sound — see
+    `docs/test-skips.md` ("Anchor accuracy"). A snippet that happens to share
+    two distinctive words with a row still pairs, so a delete-one/add-one edit
+    inside a single file can still slip past. The only sound anchor is the
+    exact `file:line`, which is why `self_test` pins the vacuity floor below.
+    """
+    cell_tokens = set(_tokens(row.test_cell + " " + row.rationale_cell))
+    toks = _tokens(snippet, _MIN_TOKEN_LEN)
+    return sum(1 for t in toks if t in cell_tokens) >= 2
+
+
+def reconcile(
+    sites: list[SkipSite], located_rows: list[InventoryRow]
+) -> tuple[list[SkipSite], list[tuple[InventoryRow, str, int]]]:
+    """Pair live skip sites against documented sites, per file.
+
+    Returns (orphans, stales). Extracted from `main` so `self_test` can drive
+    it directly: this reconciliation is the part of the audit CI actually
+    depends on, and it previously had no test of any kind.
+
+    Exact-line matches are taken first. The remainder is paired by snippet
+    WITH CONSUMPTION, so a skip that merely MOVED is forgiven, while a
+    genuinely ADDED skip is an orphan and a genuinely REMOVED one is stale.
+    """
     live_by_file: dict[str, list[SkipSite]] = {}
     for s in sites:
         live_by_file.setdefault(s.path, []).append(s)
@@ -527,21 +566,9 @@ def main() -> int:
         for path, line in row.sites:
             doc_by_file.setdefault(path, []).append((row, line))
 
-    def snippet_matches_row(snippet: str, row: InventoryRow) -> bool:
-        # A drifted skip keeps its message; pair it to a row that references it —
-        # require >=2 distinctive tokens (len>=2, so short subjects like "SLH"/
-        # "DSA" survive) of the skip snippet to appear in the row's cells so
-        # unrelated messages don't cross-match. This only decides how a DRIFTED
-        # (or added/removed) skip pairs to a row; exact-line matches are handled
-        # first, and counts still catch genuine adds (orphan) / removes (stale).
-        cell = row.test_cell + " " + row.rationale_cell
-        toks = [t for t in re.split(r"[^A-Za-z0-9_+]+", snippet) if len(t) >= 2]
-        hits = sum(1 for t in toks if t in cell)
-        return hits >= 2 or (len(toks) == 1 and toks and toks[0] in cell)
-
     orphans: list[SkipSite] = []
     stales: list[tuple[InventoryRow, str, int]] = []
-    for f in set(live_by_file) | set(doc_by_file):
+    for f in sorted(set(live_by_file) | set(doc_by_file)):
         live = live_by_file.get(f, [])
         docs = doc_by_file.get(f, [])
         live_lines = {s.line for s in live}
@@ -563,6 +590,20 @@ def main() -> int:
         for i, (row, line) in enumerate(rem_docs):
             if not used[i]:
                 stales.append((row, f, line))  # a doc site with no live skip = REMOVED
+    return orphans, stales
+
+
+def main() -> int:
+    sites = discover_skip_sites()
+    rows = parse_inventory(INVENTORY_PATH)
+    integrity = check_inventory_integrity(rows, parse_footer_counts(INVENTORY_PATH))
+
+    # Reconciliation can only speak about rows that carry a location. Counting
+    # the parseable subset separately is what makes the "physical rows ==
+    # parsed rows" claim above checkable rather than assumed.
+    located_rows = [r for r in rows if r.sites]
+
+    orphans, stales = reconcile(sites, located_rows)
 
     orphans.sort(key=lambda s: (s.path, s.line))
     stales.sort(key=lambda t: (t[0].line_in_md, t[2]))
@@ -673,6 +714,72 @@ def self_test() -> int:
     if clean:
         failures.append(f"clean inventory reported problems: {clean}")
 
+    # ------------------------------------------------------------------
+    # Reconciliation path — orphan / stale / drift.
+    #
+    # This is the half of the audit CI actually gates on, and until now it
+    # had NO test at all: `self_test` exercised only the doc-internal
+    # integrity checks. The pairing predicate was a SUBSTRING test over
+    # len>=2 tokens, which matched a mean of 38.2 of 87 rows per snippet
+    # and let every one of the 164 live skip sites be swapped for an
+    # undocumented one without the audit noticing.
+    # ------------------------------------------------------------------
+    F = "a/b_test.go"
+    doc_row = _row(
+        test_cell="`TestWOTS_ScriptExecution` (+ `_TamperedSig`, `_WrongMessage`)",
+        file_line_cell=f"`{F}:10`",
+        rationale_cell=(
+            "WOTS+ script execution is several seconds per test. Run with "
+            "`go test -count=1 ./...` (no `-short`) to enable."
+        ),
+        sites=((F, 10),),
+    )
+    documented = 't.Skip("WOTS+ script execution is slow, skipping in short mode")'
+    # A wholly unrelated skip, lifted verbatim from a TypeScript conformance
+    # test. The old substring predicate PAIRED it with the WOTS+ row above for
+    # one reason: the two-character token `it` occurs inside the word "wi(th)"
+    # of the rationale, and the snippet contains `it` twice, which cleared the
+    # `hits >= 2` bar. Whole-token comparison scores it 0.
+    undocumented = "const run = tier.cmd === null ? it.skip : it;"
+
+    recon_cases: list[tuple[str, list[SkipSite], int, int]] = [
+        # name, live sites, expected orphans, expected stales
+        ("exact file:line reconciles", [SkipSite(F, 10, documented)], 0, 0),
+        ("pure line drift is forgiven", [SkipSite(F, 42, documented)], 0, 0),
+        ("an ADDED skip is an orphan",
+         [SkipSite(F, 10, documented), SkipSite(F, 99, undocumented)], 1, 0),
+        ("a REMOVED skip leaves a stale row", [], 0, 1),
+        # THE REGRESSION CASE. Delete the documented skip, add a different
+        # undocumented one in the same file. Under the old substring
+        # predicate the new skip paired to the orphaned row: not an orphan,
+        # not stale, audit exits 0, and an undocumented skip is invisible.
+        # If the predicate is ever loosened back, this case goes red.
+        ("delete-one/add-one must NOT cancel out",
+         [SkipSite(F, 99, undocumented)], 1, 1),
+    ]
+    for name, live, want_o, want_s in recon_cases:
+        got_o, got_s = reconcile(live, [doc_row])
+        if len(got_o) != want_o or len(got_s) != want_s:
+            failures.append(
+                f"reconcile/{name}: expected {want_o} orphan(s) + {want_s} stale(s), "
+                f"got {len(got_o)} + {len(got_s)}"
+            )
+
+    # Predicate floor, asserted directly so the reason a loosened predicate
+    # fails is legible rather than buried in a reconciliation count.
+    if snippet_matches_row(undocumented, doc_row):
+        failures.append(
+            "snippet_matches_row pairs an unrelated skip message to a row it does "
+            "not describe — the predicate has been loosened back toward substring "
+            "matching"
+        )
+    if not snippet_matches_row(documented, doc_row):
+        failures.append(
+            "snippet_matches_row no longer pairs a drifted skip with its OWN row — "
+            "the predicate is now too strict and every line shift will read as an "
+            "orphan plus a stale row"
+        )
+
     # The generic JUnit annotation must be discoverable; only the
     # ...EnvironmentVariable / ...SystemProperty specialisations were before.
     java_pat = next(p for label, p in SKIP_PATTERNS if ".java" in label.split())
@@ -684,7 +791,10 @@ def self_test() -> int:
         print(f"SELF-TEST FAILED: {f}", file=sys.stderr)
     if failures:
         return 1
-    print(f"OK — self-test: {len(cases)} integrity gates fire, clean input stays silent.")
+    print(
+        f"OK — self-test: {len(cases)} integrity gates fire, "
+        f"{len(recon_cases)} reconciliation cases hold, clean input stays silent."
+    )
     return 0
 
 

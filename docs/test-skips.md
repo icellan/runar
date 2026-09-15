@@ -33,6 +33,26 @@ A skip not in this file is a bug. If you must skip a test:
    on unexpected success. CI lints for the surface markers — see
    `.github/workflows/ci.yml` job `lint-no-silent-skips`.
 
+## Anchor accuracy
+
+The `file:line` in each row is the **only sound anchor**. `scripts/audit-test-skips.py`
+matches a live skip to its row by exact `file:line` first; only if that fails does it
+fall back to pairing leftovers within the same file by whole-token overlap between the
+skip snippet and the row's cells.
+
+That fallback is a churn-tolerance heuristic, not a check. It exists so a skip whose
+line merely drifted is not reported as an orphan skip and a stale row at the same time.
+It cannot tell "the same skip, moved" from "a different skip, added in the same file",
+so a row whose line number is stale is a real defect even while the audit is green:
+it means the audit is pairing on prose instead of on the anchor. Keep the line numbers
+current in the same PR that moves them.
+
+The predicate this fallback uses previously compared tokens as **substrings** of the
+row's concatenated prose, which made it near-vacuous — a two-character token such as
+`it` matches inside the word "with". It now compares whole tokens of length >= 3, and
+`scripts/audit-test-skips.py --self-test` pins both floors: an unrelated snippet must
+not pair, and a drifted skip must still pair with its own row.
+
 ## Categories
 
 - **Environmental** — the test depends on a precondition that the local machine may
@@ -63,7 +83,7 @@ A skip not in this file is a bug. If you must skip a test:
 | `TestGroth16WA_Regtest_Deploy_SP1` (+ `_Spend`, `_Tamper`, `_Tamper2`) | `integration/go/groth16_wa_test.go:418,437,459,506` | Environmental | Witness-assisted Groth16 verifier produces a ~470 KB locking script; full deploy + spend round-trip is multi-second. |
 | `TestGroth16WA_SDK_*` | `integration/go/groth16_wa_sdk_test.go:113,178` | Environmental | Same Groth16 WA cost. |
 | `TestSchnorr_ValidProof` / `TestSchnorr_TamperedProof` | `integration/go/schnorr_zkp_test.go:289,343` | Environmental | Schnorr verifier exercises full secp256k1 EC scalar-mul on the interpreter; multi-second. |
-| `TestCLI_Groth16WA_SP1` | `compilers/go/groth16_wa_cli_test.go:21` | Environmental | Builds the compiler binary and runs an end-to-end CLI invocation against the SP1 v6.0.0 fixture (~10 s). |
+| `TestCLI_Groth16WA_SP1` | `compilers/go/groth16_wa_cli_test.go:22` | Environmental | Builds the compiler binary and runs an end-to-end CLI invocation against the SP1 v6.0.0 fixture (~10 s). |
 | `TestGroth16WA_EndToEnd_SP1Proof_Script` | `packages/runar-go/bn254witness/sp1_script_test.go:207` | Environmental | Script execution of the Groth16-WA verifier against the SP1 fixture is minutes-long on the go-sdk interpreter. |
 | `TestVerifyEvmGuest` / `TestSp1FriEvmGuest_*` | `packages/runar-go/sp1fri/verify_test.go:71`, `compilers/go/codegen/sp1_fri_test.go:2114,2118` | Environmental | The `tests/vectors/sp1/fri/evm-guest/proof.postcard` fixture lives outside git LFS — regenerate via `tests/vectors/sp1/fri/evm-guest/regen/` to enable. |
 | `TestSp1Fri_FoldRow` arity-skip branches | `compilers/go/codegen/sp1_fri_test.go:1274,1600` | Environmental | Test only handles arity = 2; SP1 fixtures use arity = 2, so the skip is a future-proof guard for higher-arity SP1 builds. |
