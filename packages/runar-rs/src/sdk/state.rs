@@ -224,9 +224,15 @@ pub fn flatten_fixed_array_state(
             Some(fa) => fa,
             None => continue,
         };
+        // A non-array value is NOT spread over N leaves: there is nothing
+        // sensible to spread, and `flatten_nested` would manufacture N zeros
+        // and hand them to the interpreter as if they were real state. Matches
+        // `flattenFixedArrayState` in the TS / Go SDKs and
+        // `_flatten_fixed_array_state` in the Python SDK, and the doc comment
+        // above ("Non-array entries are passed through unchanged").
         let value = match state.get(&field.name) {
-            Some(v) => v,
-            None => continue,
+            Some(v @ SdkValue::Array(_)) => v,
+            _ => continue,
         };
         let dims = parse_fixed_array_dims(&field.field_type);
         let flat = flatten_nested(value, &dims);

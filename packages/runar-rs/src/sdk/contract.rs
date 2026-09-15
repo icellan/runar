@@ -6,7 +6,7 @@ use sha2::{Sha256, Digest};
 use bsv::transaction::Transaction as BsvTransaction;
 use bsv::transaction::beef::Beef;
 use super::types::*;
-use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return};
+use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return, flatten_fixed_array_state, regroup_fixed_array_state};
 use super::oppushtx::compute_op_push_tx_with_code_sep_sighash;
 use super::deployment::{
     build_deploy_transaction, select_utxos,
@@ -907,9 +907,19 @@ impl RunarContract {
                 // addDataOutput/addRawOutput payloads, so there is nothing to
                 // fall back TO: an explicit `new_state` covers only the state
                 // field and still leaves the outputs missing.
+                // The interpreter knows only the EXPANDED scalar property
+                // names, so a grouped FixedArray entry has to be spread over
+                // its synthetic leaves first — see `flatten_fixed_array_state`.
+                let empty_fields: Vec<StateField> = Vec::new();
+                let state_fields: &[StateField] = self
+                    .artifact
+                    .state_fields
+                    .as_deref()
+                    .unwrap_or(&empty_fields);
+                let flat_state = flatten_fixed_array_state(&self.state, state_fields);
                 let (state, data_outs, _raw_outs, ordered_outs) =
                     anf_interpreter::compute_new_state_and_data_outputs(
-                        anf, method_name, &self.state, &named_args,
+                        anf, method_name, &flat_state, &named_args,
                         &self.constructor_args,
                     )
                     .map_err(|e| {
@@ -921,7 +931,12 @@ impl RunarContract {
                             method_name, e
                         )
                     })?;
-                auto_computed_state = Some(state);
+                // ...and the post-state comes back under those same
+                // synthetic names. `serialize_state` reads a FixedArray field
+                // from its GROUPED entry ONLY, so without regrouping the
+                // continuation commits the pre-call array and the covenant's
+                // hashOutputs binding rejects the spend.
+                auto_computed_state = Some(regroup_fixed_array_state(&state, state_fields));
                 anf_ordered_outputs = ordered_outs;
                 resolved_data_outputs = data_outs.into_iter().map(|d| ContractOutput {
                     script: d.script,
