@@ -75,6 +75,9 @@ pub const LowerError = error{
     /// ReleaseFast), so the magnitude has to be refused BEFORE the narrowing.
     /// CL-BUG-088.
     LoopCountTooLarge,
+    /// A call to a private method passes an argument count the method's
+    /// parameter list does not match. See `checkPrivateCallArity` (R-189).
+    PrivateCallArityMismatch,
 };
 
 /// Name set used for the "what does the code after this statement still read"
@@ -1094,6 +1097,36 @@ const LowerCtx = struct {
     fn shouldInlinePrivate(self: *const LowerCtx, name: []const u8) bool {
         const m = lookupPrivateMethod(self.contract, name) orelse return false;
         return methodHasAddOutput(m, self.contract) or methodHasAddDataOutput(m, self.contract);
+    }
+
+    /// Refuse a call to a private method whose argument count does not match
+    /// that method's parameter count.
+    ///
+    /// R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+    /// table first, while ANF lowering resolves it against the contract's
+    /// private methods first. A private method that shadows a builtin name
+    /// with a different arity — `private min(a, b, c)` called as `min(x, y)` —
+    /// therefore passes the arity check for `min` the BUILTIN and then lowers
+    /// as `min` the METHOD. Nothing forbids the shadowing.
+    ///
+    /// Downstream, params and args were zipped with `@min(params.len,
+    /// args.len)`, so the surplus was dropped on the floor: the extra argument
+    /// was evaluated and discarded, or the unbound parameter compiled to a
+    /// dangling reference. When the unbound parameter happened to be UNUSED
+    /// the contract compiled clean — an arity mismatch silently accepted. When
+    /// it was used, it surfaced two passes later as "method parameter 'c' is
+    /// not on the stack", naming a pass the author never wrote in.
+    ///
+    /// Refused here, where both counts are known, on every call form and for
+    /// both the inlined and the method_call lowering path.
+    fn checkPrivateCallArity(self: *LowerCtx, name: []const u8, arg_refs: []const []const u8) LowerError!void {
+        const m = lookupPrivateMethod(self.contract, name) orelse return;
+        if (m.params.len == arg_refs.len) return;
+        self.setDiagnostic(
+            "private method '{s}' expects {d} argument(s), got {d}.",
+            .{ name, m.params.len, arg_refs.len },
+        );
+        return LowerError.PrivateCallArityMismatch;
     }
 
     fn addOutputRef(self: *LowerCtx, ref: []const u8) Allocator.Error!void {
@@ -2308,6 +2341,7 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     for (ctx.contract.methods) |method| {
         if (std.mem.eql(u8, method.name, c.callee)) {
             const arg_refs = try lowerArgs(ctx, c.args);
+            try ctx.checkPrivateCallArity(c.callee, arg_refs);
             if (ctx.shouldInlinePrivate(c.callee)) {
                 return try inlinePrivateMethodCall(ctx, c.callee, arg_refs);
             }
@@ -2394,6 +2428,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
     // this.method(...) -> method_call
     if (is_self) {
         const arg_refs = try lowerArgs(ctx, mc.args);
+        try ctx.checkPrivateCallArity(mc.method, arg_refs);
         if (ctx.shouldInlinePrivate(mc.method)) {
             return try inlinePrivateMethodCall(ctx, mc.method, arg_refs);
         }

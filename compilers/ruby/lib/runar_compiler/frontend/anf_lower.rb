@@ -767,6 +767,37 @@ module RunarCompiler
         end
       end
 
+      # Refuse a call to a private method whose argument count does not match
+      # that method's parameter count.
+      #
+      # R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+      # table first, while ANF lowering resolves it against the contract's
+      # private methods first. A private method that shadows a builtin name
+      # with a different arity -- `private min(a, b, c)` called as `min(x, y)`
+      # -- therefore passes the arity check for `min` the BUILTIN and then
+      # lowers as `min` the METHOD. Nothing forbids the shadowing.
+      #
+      # Downstream, params and args were zipped pairwise up to the shorter of
+      # the two, so the surplus was dropped on the floor: the extra argument
+      # was evaluated and discarded, or the unbound parameter compiled to a
+      # dangling reference. When the unbound parameter happened to be UNUSED
+      # the contract compiled clean -- an arity mismatch silently accepted.
+      # When it was used, it surfaced two passes later as "method parameter
+      # 'c' is not on the stack", naming a pass the author never wrote in.
+      #
+      # Refused here, where both counts are known, on every call form
+      # (`m(x)`, `this.m(x)`, member `this.m(x)`) and for both the inlined and
+      # the method_call lowering path.
+      def check_private_call_arity(name, arg_refs)
+        method = get_private_method(name)
+        return if method.nil?
+        return if method.params.size == arg_refs.size
+
+        raise ArgumentError,
+              "private method '#{name}' expects #{method.params.size} " \
+              "argument(s), got #{arg_refs.size}."
+      end
+
       # Whether a call to `name` should be ANF-inlined rather than emitted as
       # a method_call. True iff `name` is a private method that (transitively)
       # emits state outputs (addOutput / addRawOutput) or data outputs
@@ -1837,6 +1868,7 @@ module RunarCompiler
         # this.method(...) via PropertyAccessExpr
         if callee.is_a?(PropertyAccessExpr)
           arg_refs = _lower_args(e.args)
+          check_private_call_arity(callee.property, arg_refs)
           if should_inline_private?(callee.property)
             return inline_private_method_call(callee.property, arg_refs)
           end
@@ -1853,6 +1885,7 @@ module RunarCompiler
            callee.object.is_a?(Identifier) &&
            callee.object.name == "this"
           arg_refs = _lower_args(e.args)
+          check_private_call_arity(callee.property, arg_refs)
           if should_inline_private?(callee.property)
             return inline_private_method_call(callee.property, arg_refs)
           end
@@ -1899,6 +1932,7 @@ module RunarCompiler
           # path as `this.requireOwner(sig)` so downstream stack lowering can
           # inline the body. Keeps .runar.move in sync with .runar.ts.
           if _is_private_method(callee.name)
+            check_private_call_arity(callee.name, arg_refs)
             if should_inline_private?(callee.name)
               return inline_private_method_call(callee.name, arg_refs)
             end

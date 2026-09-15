@@ -954,6 +954,44 @@ impl<'a> LoweringContext<'a> {
         })
     }
 
+    /// Refuse a call to a private method whose argument count does not match
+    /// that method's parameter count.
+    ///
+    /// R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+    /// table first, while ANF lowering resolves it against the contract's
+    /// private methods first. A private method that shadows a builtin name
+    /// with a different arity — `private min(a, b, c)` called as `min(x, y)` —
+    /// therefore passes the arity check for `min` the BUILTIN and then lowers
+    /// as `min` the METHOD. Nothing forbids the shadowing.
+    ///
+    /// Downstream, params and args were zipped with `i < params.len() && i <
+    /// args.len()`, so the surplus was dropped on the floor: the extra
+    /// argument was evaluated and discarded, or the unbound parameter compiled
+    /// to a dangling reference. When the unbound parameter happened to be
+    /// UNUSED the contract compiled clean — an arity mismatch silently
+    /// accepted. When it was used, it surfaced two passes later as "method
+    /// parameter 'c' is not on the stack", naming a pass the author never
+    /// wrote in.
+    ///
+    /// Refused here, where both counts are known, on every call form (`m(x)`,
+    /// `this.m(x)`, member `this.m(x)`) and for both the inlined and the
+    /// `method_call` lowering path.
+    fn check_private_call_arity(&self, name: &str, arg_refs: &[String]) {
+        let method = match self.get_private_method(name) {
+            Some(m) => m,
+            None => return,
+        };
+        if method.params.len() == arg_refs.len() {
+            return;
+        }
+        panic!(
+            "private method '{}' expects {} argument(s), got {}.",
+            name,
+            method.params.len(),
+            arg_refs.len()
+        );
+    }
+
     /// Generate a fresh temporary name.
     fn fresh_temp(&mut self) -> String {
         let name = format!("t{}", self.counter);
@@ -2700,6 +2738,7 @@ fn lower_call_expr(
     // side effects.
     if let Expression::PropertyAccess { property } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+        ctx.check_private_call_arity(property, &arg_refs);
         if ctx.should_inline_private(property) {
             return inline_private_method_call(property, &arg_refs, ctx);
         }
@@ -2719,6 +2758,7 @@ fn lower_call_expr(
             if name == "this" {
                 let arg_refs: Vec<String> =
                     args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+                ctx.check_private_call_arity(property, &arg_refs);
                 if ctx.should_inline_private(property) {
                     return inline_private_method_call(property, &arg_refs, ctx);
                 }
@@ -2772,6 +2812,7 @@ fn lower_call_expr(
         // the body. This keeps .runar.move, .runar.go, and .runar.ts lowering
         // in sync.
         if ctx.is_private_method(name) {
+            ctx.check_private_call_arity(name, &arg_refs);
             if ctx.should_inline_private(name) {
                 return inline_private_method_call(name, &arg_refs, ctx);
             }

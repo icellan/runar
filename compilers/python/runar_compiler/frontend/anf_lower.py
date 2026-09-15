@@ -815,6 +815,38 @@ class _LowerCtx:
                 return m
         return None
 
+    def check_private_call_arity(self, name: str, arg_refs: list[str]) -> None:
+        """Refuse a private-method call whose arg count != the method's params.
+
+        R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+        table first, while ANF lowering resolves it against the contract's
+        private methods first. A private method that shadows a builtin name
+        with a different arity -- `private min(a, b, c)` called as
+        `min(x, y)` -- therefore passes the arity check for `min` the BUILTIN
+        and then lowers as `min` the METHOD. Nothing forbids the shadowing.
+
+        Downstream, params and args were zipped pairwise up to the shorter of
+        the two, so the surplus was dropped on the floor: the extra argument
+        was evaluated and discarded, or the unbound parameter compiled to a
+        dangling reference. When the unbound parameter happened to be UNUSED
+        the contract compiled clean -- an arity mismatch silently accepted.
+        When it was used, it surfaced two passes later as "method parameter
+        'c' is not on the stack", naming a pass the author never wrote in.
+
+        Refused here, where both counts are known, on every call form
+        (`m(x)`, `this.m(x)`, member `this.m(x)`) and for both the inlined and
+        the method_call lowering path.
+        """
+        method = self.get_private_method(name)
+        if method is None:
+            return
+        if len(method.params) == len(arg_refs):
+            return
+        raise ValueError(
+            f"private method '{name}' expects {len(method.params)} "
+            f"argument(s), got {len(arg_refs)}."
+        )
+
     def fresh_temp(self) -> str:
         name = f"t{self._counter}"
         self._counter += 1
@@ -1729,6 +1761,7 @@ class _LowerCtx:
         # effects).
         if isinstance(callee, PropertyAccessExpr):
             arg_refs = self._lower_args(e.args)
+            self.check_private_call_arity(callee.property, arg_refs)
             if self.should_inline_private(callee.property):
                 return self._inline_private_method_call(callee.property, arg_refs)
             this_ref = self.emit(_make_load_const_string("@this"))
@@ -1741,6 +1774,7 @@ class _LowerCtx:
         if isinstance(callee, MemberExpr):
             if isinstance(callee.object, Identifier) and callee.object.name == "this":
                 arg_refs = self._lower_args(e.args)
+                self.check_private_call_arity(callee.property, arg_refs)
                 if self.should_inline_private(callee.property):
                     return self._inline_private_method_call(callee.property, arg_refs)
                 this_ref = self.emit(_make_load_const_string("@this"))
@@ -1782,6 +1816,7 @@ class _LowerCtx:
             # lowering can inline the body. Keeps .runar.move in sync with
             # .runar.ts across all formats.
             if self._is_private_method(callee.name):
+                self.check_private_call_arity(callee.name, arg_refs)
                 if self.should_inline_private(callee.name):
                     return self._inline_private_method_call(callee.name, arg_refs)
                 this_ref = self.emit(_make_load_const_string("@this"))

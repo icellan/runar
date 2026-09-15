@@ -690,6 +690,38 @@ public final class AnfLower {
             return null;
         }
 
+        /**
+         * Refuse a call to a private method whose argument count does not
+         * match that method's parameter count.
+         *
+         * <p>R-189: typecheck resolves a BARE-IDENTIFIER call against the
+         * builtin table first, while ANF lowering resolves it against the
+         * contract's private methods first. A private method that shadows a
+         * builtin name with a different arity — {@code private min(a, b, c)}
+         * called as {@code min(x, y)} — therefore passes the arity check for
+         * {@code min} the BUILTIN and then lowers as {@code min} the METHOD.
+         * Nothing forbids the shadowing.
+         *
+         * <p>Downstream, params and args were zipped up to the shorter of the
+         * two, so the surplus was dropped on the floor: the extra argument was
+         * evaluated and discarded, or the unbound parameter compiled to a
+         * dangling reference. When the unbound parameter happened to be UNUSED
+         * the contract compiled clean — an arity mismatch silently accepted.
+         * When it was used, it surfaced two passes later as "method parameter
+         * 'c' is not on the stack", naming a pass the author never wrote in.
+         *
+         * <p>Refused here, where both counts are known, on every call form
+         * and for both the inlined and the method_call lowering path.
+         */
+        void checkPrivateCallArity(String name, List<String> argRefs) {
+            MethodNode method = getPrivateMethod(name);
+            if (method == null) return;
+            if (method.params().size() == argRefs.size()) return;
+            throw new IllegalStateException(
+                "private method '" + name + "' expects " + method.params().size()
+                    + " argument(s), got " + argRefs.size() + ".");
+        }
+
         // Return true iff `name` is a private method that (transitively)
         // emits state outputs (addOutput / addRawOutput) or data outputs
         // (addDataOutput). Those refs MUST appear in the caller's binding
@@ -1909,6 +1941,7 @@ public final class AnfLower {
             // this.method(...) via PropertyAccessExpr
             if (callee instanceof PropertyAccessExpr pa) {
                 List<String> argRefs = lowerArgs(e.args());
+                checkPrivateCallArity(pa.property(), argRefs);
                 if (shouldInlinePrivate(pa.property())) {
                     return inlinePrivateMethodCall(pa.property(), argRefs);
                 }
@@ -1921,6 +1954,7 @@ public final class AnfLower {
                 && me.object() instanceof Identifier oid
                 && "this".equals(oid.name())) {
                 List<String> argRefs = lowerArgs(e.args());
+                checkPrivateCallArity(me.property(), argRefs);
                 if (shouldInlinePrivate(me.property())) {
                     return inlinePrivateMethodCall(me.property(), argRefs);
                 }
@@ -1951,6 +1985,7 @@ public final class AnfLower {
             if (callee instanceof Identifier id3) {
                 List<String> argRefs = lowerArgs(e.args());
                 if (isPrivateMethod(id3.name())) {
+                    checkPrivateCallArity(id3.name(), argRefs);
                     if (shouldInlinePrivate(id3.name())) {
                         return inlinePrivateMethodCall(id3.name(), argRefs);
                     }

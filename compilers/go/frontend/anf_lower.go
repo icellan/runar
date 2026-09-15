@@ -833,6 +833,40 @@ func (ctx *lowerCtx) shouldInlinePrivate(name string) bool {
 	return eff.HasStateOutput || eff.HasDataOutput
 }
 
+// checkPrivateCallArity refuses a call to a private method whose argument
+// count does not match that method's parameter count.
+//
+// R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin table
+// first (typecheck.go: `if sig, ok := builtinFunctions[id.Name]`), while ANF
+// lowering resolves it against the contract's private methods first. A private
+// method that shadows a builtin name with a different arity — `private min(a,
+// b, c)` called as `min(x, y)` — therefore passes the arity check for `min` the
+// BUILTIN and then lowers as `min` the METHOD. Nothing forbids the shadowing.
+//
+// Downstream, params and args were zipped with `i < len(params) && i <
+// len(args)`, so the surplus was dropped on the floor: the extra argument was
+// evaluated and discarded, or the unbound parameter compiled to a dangling
+// reference. When the unbound parameter happened to be UNUSED the contract
+// compiled clean — an arity mismatch silently accepted. When it was used, it
+// surfaced two passes later as "method parameter 'c' is not on the stack",
+// naming a pass the author never wrote in.
+//
+// The mismatch is refused here, where both counts are known, on every call
+// form (`m(x)`, `this.m(x)`, member `this.m(x)`) and for both the inlined and
+// the method_call lowering path.
+func (ctx *lowerCtx) checkPrivateCallArity(name string, argRefs []string) {
+	method, ok := ctx.getPrivateMethod(name)
+	if !ok {
+		return
+	}
+	if len(argRefs) == len(method.Params) {
+		return
+	}
+	panic(fmt.Sprintf(
+		"private method '%s' expects %d argument(s), got %d.",
+		name, len(method.Params), len(argRefs)))
+}
+
 // getPrivateMethod looks up a private method by name. Returns the method
 // and true if found, zero value and false otherwise.
 func (ctx *lowerCtx) getPrivateMethod(name string) (MethodNode, bool) {
@@ -2309,6 +2343,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	// is a private method with continuation-relevant side effects).
 	if pa, ok := callee.(PropertyAccessExpr); ok {
 		argRefs := ctx.lowerArgs(e.Args)
+		ctx.checkPrivateCallArity(pa.Property, argRefs)
 		if ctx.shouldInlinePrivate(pa.Property) {
 			return ctx.inlinePrivateMethodCall(pa.Property, argRefs)
 		}
@@ -2320,6 +2355,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	if me, ok := callee.(MemberExpr); ok {
 		if id, ok := me.Object.(Identifier); ok && id.Name == "this" {
 			argRefs := ctx.lowerArgs(e.Args)
+			ctx.checkPrivateCallArity(me.Property, argRefs)
 			if ctx.shouldInlinePrivate(me.Property) {
 				return ctx.inlinePrivateMethodCall(me.Property, argRefs)
 			}
@@ -2371,6 +2407,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		// inline the body. This keeps .runar.move, .runar.go, and .runar.ts
 		// lowering in sync.
 		if ctx.isPrivateMethod(id.Name) {
+			ctx.checkPrivateCallArity(id.Name, argRefs)
 			if ctx.shouldInlinePrivate(id.Name) {
 				return ctx.inlinePrivateMethodCall(id.Name, argRefs)
 			}

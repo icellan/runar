@@ -773,6 +773,38 @@ class LoweringContext {
   }
 
   /**
+   * Refuse a call to a private method whose argument count does not match
+   * that method's parameter count.
+   *
+   * R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+   * table first, while ANF lowering resolves it against the contract's
+   * private methods first. A private method that shadows a builtin name with
+   * a different arity — `private min(a, b, c)` called as `min(x, y)` —
+   * therefore passes the arity check for `min` the BUILTIN and then lowers as
+   * `min` the METHOD. Nothing forbids the shadowing.
+   *
+   * Downstream, params and args were zipped with `i < params.length && i <
+   * args.length`, so the surplus was dropped on the floor: the extra argument
+   * was evaluated and discarded, or the unbound parameter compiled to a
+   * dangling reference. When the unbound parameter happened to be UNUSED the
+   * contract compiled clean — an arity mismatch silently accepted. When it was
+   * used, it surfaced two passes later as "method parameter 'c' is not on the
+   * stack", naming a pass the author never wrote in.
+   *
+   * Refused here, where both counts are known, on every call form (`m(x)`,
+   * `this.m(x)`, member `this.m(x)`) and for both the inlined and the
+   * `method_call` lowering path.
+   */
+  checkPrivateCallArity(name: string, argRefs: string[]): void {
+    const method = this.getPrivateMethod(name);
+    if (!method) return;
+    if (method.params.length === argRefs.length) return;
+    throw new Error(
+      `private method '${name}' expects ${method.params.length} argument(s), got ${argRefs.length}.`,
+    );
+  }
+
+  /**
    * Whether a call to `name` should be ANF-inlined rather than emitted
    * as a `method_call`. True iff `name` is a private method that
    * (transitively) emits state outputs (`addOutput` / `addRawOutput`)
@@ -2289,6 +2321,7 @@ function lowerCallExpr(
   // private method with continuation-relevant side effects).
   if (callee.kind === 'property_access') {
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    ctx.checkPrivateCallArity(callee.property, argRefs);
     if (ctx.shouldInlinePrivate(callee.property)) {
       return inlinePrivateMethodCall(callee.property, argRefs, ctx);
     }
@@ -2303,6 +2336,7 @@ function lowerCallExpr(
       callee.object.kind === 'identifier' &&
       callee.object.name === 'this') {
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    ctx.checkPrivateCallArity(callee.property, argRefs);
     if (ctx.shouldInlinePrivate(callee.property)) {
       return inlinePrivateMethodCall(callee.property, argRefs, ctx);
     }
@@ -2322,6 +2356,7 @@ function lowerCallExpr(
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
     const isPrivateMethod = ctx.isPrivateMethod(callee.name);
     if (isPrivateMethod) {
+      ctx.checkPrivateCallArity(callee.name, argRefs);
       if (ctx.shouldInlinePrivate(callee.name)) {
         return inlinePrivateMethodCall(callee.name, argRefs, ctx);
       }

@@ -88,6 +88,7 @@ test {
     _ = @import("tests/readonly_property_assignment.zig");
     _ = @import("tests/property_initializer_literal.zig");
     _ = @import("tests/loop_bound_narrowing.zig");
+    _ = @import("tests/r189_private_call_arity.zig");
     _ = @import("tests/loop_update_clause.zig");
     _ = @import("tests/library_cli_parity.zig");
     _ = @import("tests/n034_ec_fusing_rules.zig");
