@@ -69,7 +69,7 @@ func TestBooleanSpellingOppositePolarity(t *testing.T) {
 }
 
 func TestBooleanSpellingCrossSdkGoldenDeserialize(t *testing.T) {
-	back := DeserializeState(booleanSpellingFields(), booleanSpellingGolden)
+	back := mustDeserializeState(t, booleanSpellingFields(), booleanSpellingGolden)
 	if n, _ := back["count"].(int64); n != 7 {
 		t.Errorf("count: got %v, want 7", back["count"])
 	}
@@ -94,7 +94,7 @@ func TestBooleanSpellingLoneFieldIsOneByte(t *testing.T) {
 		if got != c.want {
 			t.Errorf("boolean %v: got %q, want %q", c.in, got, c.want)
 		}
-		if back, _ := DeserializeState(fields, c.want)["v"].(bool); back != c.in {
+		if back, _ := mustDeserializeState(t, fields, c.want)["v"].(bool); back != c.in {
 			t.Errorf("boolean %v: decoded %v", c.in, back)
 		}
 	}

@@ -71,7 +71,7 @@ func TestStateByteStringRoundTripsEverySingleByte(t *testing.T) {
 	for b := 0; b <= 0xff; b++ {
 		payload := fmt.Sprintf("%02x", b)
 		encoded := encodeStateByteString(payload)
-		decoded := DeserializeState(fields, encoded)
+		decoded := mustDeserializeState(t, fields, encoded)
 		got, _ := decoded["b"].(string)
 		if got != payload {
 			t.Errorf("state roundtrip 0x%02x: encoded=%q -> got %q, want %q", b, encoded, got, payload)

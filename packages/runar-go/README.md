@@ -953,10 +953,10 @@ Returns data outputs recorded by `AddDataOutput` during the last test invocation
 #### `DecodePushData`
 
 ```go
-func DecodePushData(hex string, offset int) (string, int)
+func DecodePushData(hex string, offset int) (string, int, error)
 ```
 
-Decode the push-data element at the given hex offset. Returns the pushed bytes (hex) and the total hex chars consumed. [sdk_state.go](sdk_state.go).
+Decode the push-data element at the given hex offset. Returns the pushed bytes (hex) and the total hex chars consumed. Fails closed (C2): a truncated payload, a truncated `OP_PUSHDATA{1,2,4}` length prefix, or a byte that is not a push opcode returns an error rather than a short/empty value. [sdk_state.go](sdk_state.go).
 
 #### `DecodeScriptInt`
 
@@ -989,10 +989,10 @@ type DeployWithWalletResult struct { Txid, RawTx string }
 #### `DeserializeState`
 
 ```go
-func DeserializeState(fields []StateField, scriptHex string) map[string]interface{}
+func DeserializeState(fields []StateField, scriptHex string) (map[string]interface{}, error)
 ```
 
-Decode state values from a hex-encoded data section (the bytes after `OP_RETURN`). [sdk_state.go](sdk_state.go).
+Decode state values from a hex-encoded data section (the bytes after `OP_RETURN`). Fails closed (C2): the blob must describe EXACTLY the artifact's `StateFields` — a field running past the end, or any byte left over after the last field, is an error, never a default value. [sdk_state.go](sdk_state.go).
 
 #### `Divmod` / `Gcd` / `GcdBig` / `Log2` / `Log2Big`
 
@@ -1069,7 +1069,7 @@ Walk an on-chain locking script using `artifact.ConstructorSlots` and decode eac
 #### `ExtractStateFromScript`
 
 ```go
-func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) map[string]interface{}
+func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) (map[string]interface{}, error)
 ```
 
 Read state from a full locking script hex. Returns `nil` if the artifact has no state fields or no recognizable state section. [sdk_state.go](sdk_state.go).
@@ -1099,6 +1099,8 @@ Reconnect to an existing deployed contract by fetching its deployment transactio
 ```go
 func FromUtxo(artifact *RunarArtifact, utxo UTXO) *RunarContract
 ```
+
+Returns `nil` when the artifact declares state fields and the UTXO script's state section does not decode exactly as those fields describe (C2) — check for it.
 
 Synchronous equivalent of `FromTxId` when the UTXO data is already in hand (e.g. from an overlay service). Does not call the provider. [sdk_contract.go](sdk_contract.go).
 

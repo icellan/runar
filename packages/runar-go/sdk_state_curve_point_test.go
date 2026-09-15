@@ -78,7 +78,7 @@ func TestCurvePointCrossSdkGoldenSerialize(t *testing.T) {
 }
 
 func TestCurvePointCrossSdkGoldenDeserialize(t *testing.T) {
-	back := DeserializeState(curvePointFields(), crossSdkGolden())
+	back := mustDeserializeState(t, curvePointFields(), crossSdkGolden())
 	if n, _ := back["n"].(int64); n != 1 {
 		t.Errorf("n: got %v, want 1", back["n"])
 	}
@@ -112,7 +112,7 @@ func TestCurvePointLoneFieldRoundTrip(t *testing.T) {
 		if len(hex)/2 != c.size {
 			t.Errorf("%s: got %d bytes, want %d", c.fieldType, len(hex)/2, c.size)
 		}
-		if back, _ := DeserializeState(fields, hex)["v"].(string); back != v {
+		if back, _ := mustDeserializeState(t, fields, hex)["v"].(string); back != v {
 			t.Errorf("%s deserialize: got %q, want %q", c.fieldType, back, v)
 		}
 	}

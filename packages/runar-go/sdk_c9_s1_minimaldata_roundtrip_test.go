@@ -45,7 +45,7 @@ func TestC9_StateByteString_MinimalDataRoundtrip(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.label, func(t *testing.T) {
 			encoded := SerializeState(fields, map[string]interface{}{"b": tc.hex})
-			decoded := DeserializeState(fields, encoded)
+			decoded := mustDeserializeState(t, fields, encoded)
 			if got := decoded["b"]; got != tc.hex {
 				t.Errorf("roundtrip %s: got %q, want %q (encoded=%q)", tc.label, got, tc.hex, encoded)
 			}

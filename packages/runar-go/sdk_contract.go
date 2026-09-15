@@ -1780,6 +1780,13 @@ func restoreConstructorArgs(artifact *RunarArtifact, scriptHex string) []interfa
 	return out
 }
 
+// FromUtxo reconnects to a deployed contract from a known UTXO.
+//
+// Returns nil when the artifact declares state fields and utxo.Script's state
+// section does not decode exactly as those fields describe (C2). Callers MUST
+// check for nil: the alternative is a contract that silently presents
+// constructor-initial values as live on-chain state and then signs a
+// continuation output committing to them.
 func FromUtxo(artifact *RunarArtifact, utxo UTXO) *RunarContract {
 	// Recover the real baked-in constructor args from the deployed script so a
 	// restored contract operates on the true values rather than 0 placeholders
@@ -1817,9 +1824,20 @@ func FromUtxo(artifact *RunarArtifact, utxo UTXO) *RunarContract {
 		Script:      utxo.Script,
 	}
 
-	// Extract state if this is a stateful contract
+	// Extract state if this is a stateful contract.
+	//
+	// FAILS CLOSED (C2). utxo.Script is a locking script any third party can
+	// construct, and the state decoded from it is what the next Call commits
+	// to in the continuation output. If it does not decode EXACTLY as the
+	// artifact's StateFields describe, return nil rather than a contract
+	// carrying constructor-initial values dressed up as live on-chain state.
+	// FromUtxo has no error channel, so nil IS the refusal — callers must
+	// check it. FromTxId, which does have one, returns the decode error.
 	if len(artifact.StateFields) > 0 {
-		state := ExtractStateFromScript(artifact, utxo.Script)
+		state, err := ExtractStateFromScript(artifact, utxo.Script)
+		if err != nil {
+			return nil
+		}
 		if state != nil {
 			contract.state = state
 		}
@@ -1888,9 +1906,14 @@ func FromTxId(
 		Script:      output.Script,
 	}
 
-	// Extract state if this is a stateful contract
+	// Extract state if this is a stateful contract. FAILS CLOSED (C2) — see
+	// FromUtxo. This entry point has an error channel, so the refusal carries
+	// its reason.
 	if len(artifact.StateFields) > 0 {
-		state := ExtractStateFromScript(artifact, output.Script)
+		state, err := ExtractStateFromScript(artifact, output.Script)
+		if err != nil {
+			return nil, fmt.Errorf("RunarContract.FromTxId: %w", err)
+		}
 		if state != nil {
 			contract.state = state
 		}
