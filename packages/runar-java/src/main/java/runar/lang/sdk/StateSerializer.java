@@ -283,6 +283,103 @@ public final class StateSerializer {
         return current;
     }
 
+    /**
+     * Spreads every grouped FixedArray entry of a state record ({@code table}
+     * holding a possibly-nested list of length N) over the SYNTHETIC scalar
+     * names the leaves are really called ({@code table__0}..{@code table__3},
+     * {@code grid__0__0}..). The grouped entries are kept as well, for callers
+     * that read them afterwards.
+     *
+     * <p>This is the ANF-interpreter boundary. Pass {@code 03b-expand-fixed-arrays}
+     * runs BEFORE ANF lowering, so the ANF program has no property called
+     * {@code table} at all — every {@code load_prop} / {@code update_prop} in
+     * the method body names one of the synthetic leaves. Handing the interpreter
+     * the grouped map left it evaluating {@code this.table[i]++} against an
+     * ABSENT property and falling back to the property's {@code initialValue};
+     * because a runtime-index write lowers to a per-leaf select it rewrites
+     * EVERY leaf, so a call on a contract restored from chain rewound the whole
+     * array to its deploy-time contents.
+     *
+     * <p>Mirrors {@code flattenFixedArrayState} in packages/runar-sdk/src/contract.ts
+     * and packages/runar-go/sdk_contract.go, and
+     * {@code _flatten_fixed_array_state} in packages/runar-py/runar/sdk/contract.py,
+     * including their two rules: a non-list value is NOT spread over N leaves
+     * (nothing sensible to spread), and an explicitly-supplied scalar wins over
+     * the grouped list it is also spelled inside.
+     */
+    public static Map<String, Object> flattenFixedArrayState(
+        List<StateField> fields,
+        Map<String, Object> state
+    ) {
+        Map<String, Object> out = new LinkedHashMap<>(state);
+        if (fields == null) return out;
+        for (StateField f : fields) {
+            if (f.fixedArray() == null) continue;
+            Object value = state.get(f.name());
+            if (!(value instanceof List)) continue;
+            List<Object> flat = flattenNestedValue(value, parseFixedArrayDims(f.type()));
+            List<String> names = f.fixedArray().syntheticNames();
+            for (int i = 0; i < names.size(); i++) {
+                String synth = names.get(i);
+                if (out.containsKey(synth)) continue;
+                if (i < flat.size()) out.put(synth, flat.get(i));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Rebuilds each grouped FixedArray entry of a state record from the
+     * synthetic scalar leaves the ANF interpreter writes, so the user-facing
+     * {@code state()} and the serializer's grouped fallback both see the
+     * post-call value rather than the pre-call one. Synthetic entries are left
+     * in place; non-FixedArray fields pass through untouched.
+     *
+     * <p>A field whose leaves are entirely absent from the map is left alone:
+     * the method did not touch that array, so there is nothing to reconstruct.
+     * A leaf the method did not write falls back to its pre-call value from the
+     * grouped entry, so a partial write keeps the untouched slots instead of
+     * zeroing them.
+     *
+     * <p>Mirrors {@code regroupFixedArrayState} / {@code _regroup_fixed_array_state}
+     * in the TS, Go and Python SDKs.
+     */
+    public static Map<String, Object> regroupFixedArrayState(
+        List<StateField> fields,
+        Map<String, Object> state
+    ) {
+        Map<String, Object> out = new LinkedHashMap<>(state);
+        if (fields == null) return out;
+        for (StateField f : fields) {
+            if (f.fixedArray() == null) continue;
+            List<String> names = f.fixedArray().syntheticNames();
+            List<Object> flat = new ArrayList<>(names.size());
+            boolean[] written = new boolean[names.size()];
+            boolean sawAny = false;
+            for (int i = 0; i < names.size(); i++) {
+                String synth = names.get(i);
+                if (out.containsKey(synth)) {
+                    flat.add(out.get(synth));
+                    written[i] = true;
+                    sawAny = true;
+                } else {
+                    flat.add(null);
+                }
+            }
+            if (!sawAny) continue;
+            List<Integer> dims = parseFixedArrayDims(f.type());
+            Object prior = state.get(f.name());
+            if (prior instanceof List) {
+                List<Object> priorFlat = flattenNestedValue(prior, dims);
+                for (int i = 0; i < flat.size(); i++) {
+                    if (!written[i] && i < priorFlat.size()) flat.set(i, priorFlat.get(i));
+                }
+            }
+            out.put(f.name(), regroupNestedValue(flat, dims));
+        }
+        return out;
+    }
+
     @SuppressWarnings("unchecked")
     static List<Object> flattenNestedValue(Object value, List<Integer> dims) {
         if (dims.isEmpty()) {

@@ -540,12 +540,26 @@ public final class RunarContract {
             if (artifact.anf() != null) {
                 Map<String, Object> namedArgs = buildNamedArgs(userParams, args);
                 try {
+                    // The interpreter knows only the EXPANDED scalar property
+                    // names, so a grouped FixedArray entry has to be spread
+                    // over its synthetic leaves first — see
+                    // StateSerializer.flattenFixedArrayState.
+                    Map<String, Object> flatState =
+                        StateSerializer.flattenFixedArrayState(artifact.stateFields(), state);
                     AnfInterpreter.ExecutionResult execResult = AnfInterpreter.computeNewStateAndDataOutputs(
-                        artifact.anf(), methodName, state, namedArgs, constructorArgs
+                        artifact.anf(), methodName, flatState, namedArgs, constructorArgs
                     );
                     // Caller-supplied state wins; the interpreter's is the
                     // fallback. The output shape below is taken either way.
-                    if (stateUpdates == null) state.putAll(execResult.newState);
+                    // ...and the post-state comes back under those same
+                    // synthetic names, so regroup before it reaches `state`.
+                    // Without this the grouped entry keeps its pre-call value
+                    // and only StateSerializer's synthetic-key preference keeps
+                    // the continuation bytes honest.
+                    if (stateUpdates == null) {
+                        state.putAll(StateSerializer.regroupFixedArrayState(
+                            artifact.stateFields(), execResult.newState));
+                    }
                     for (AnfInterpreter.DataOutput d : execResult.dataOutputs) {
                         resolvedDataOutputs.add(
                             new TransactionBuilder.DataOutput(d.satoshis(), d.script())
