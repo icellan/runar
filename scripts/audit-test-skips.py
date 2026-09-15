@@ -475,34 +475,116 @@ def check_inventory_integrity(
 # ---------------------------------------------------------------------------
 
 
-def enclosing_test_name(path: str, skip_line: int) -> str | None:
-    """Walk backwards from `skip_line` looking for a recognizable test
-    declaration. Returns the test name if found.
+class ScopeRef(NamedTuple):
+    """The named scope a skip marker governs.
+
+    kind is one of:
+      test    — a test function / method / `describe` / `it` block
+      helper  — a non-test function taking `*testing.T` that skips on behalf
+                of its callers
+      class   — a JUnit class or meta-annotation whose annotation disables
+                every test underneath it
+      module  — a file-level skip that is not a test at all (`run-all.sh`)
+
+    A skip is not always inside a test. A JUnit `@EnabledIfEnvironmentVariable`
+    sits on the CLASS; a pytest `@pytest.mark.skipif` sits above the `def`.
+    Both govern something named, and the inventory had no way to say so, which
+    is why those rows looked unanchorable. Admitting class/module/helper scopes
+    takes the "no anchor extractable" cohort from 15 sites to 0.
+    """
+
+    kind: str
+    name: str
+
+
+# Declarations searched FORWARD from an annotation / decorator, which governs
+# what FOLLOWS it. Walking only backwards is why `@EnabledIf("repoLayout...")`
+# and a module-level `@pytest.mark.skipif(...)` resolved to nothing at all.
+_DECL_FORWARD: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^\s*(?:public|private|protected|static|final|abstract|default|\s)*void\s+(\w+)\s*\("), "test"),
+    (re.compile(r"^\s*(?:public|private|protected|static|final|abstract|\s)*(?:@interface|interface|class|record|enum)\s+(\w+)"), "class"),
+    (re.compile(r"^\s*def\s+(\w+)\s*\("), "test"),
+    (re.compile(r"\b(?:describe|it|test)(?:\.\w+\s*\([^)]*\))?\s*\(\s*['\"]([^'\"]+)['\"]"), "test"),
+    (re.compile(r"\b(?:describe|it|test)(?:\.\w+\s*\([^)]*\))?\s*\(\s*`([^`$]*)"), "test"),
+]
+
+# Declarations searched BACKWARD from an ordinary in-body skip call.
+_DECL_BACKWARD: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^func\s+(Test\w+)\s*\("), "test"),
+    # A helper taking *testing.T that skips for its callers is still a named
+    # scope. Requiring `Test\w+` lost it entirely.
+    (re.compile(r"^func\s+(\w+)\s*\([^)]*testing\.T"), "helper"),
+    (re.compile(r"^\s*def\s+(test_\w+)\s*\("), "test"),
+    (re.compile(r"^\s*(_?\w+)\s*=\s*pytest\.mark\.skip"), "test"),
+    (re.compile(r"^\s*(?:pub\s+)?fn\s+(\w+)\s*\("), "test"),
+    # `describe.skipIf(cond)('name'` — the condition argument sits between the
+    # callee and the title, so a pattern anchored straight to the quote missed
+    # every gated suite in the corpus.
+    (re.compile(r"\b(?:describe|it)(?:\.skipIf\s*\([^)]*\))?\s*\(\s*['\"]([^'\"]+)['\"]"), "test"),
+    # Template-literal titles: keep the STATIC prefix before the first `${`.
+    (re.compile(r"\b(?:describe|it)(?:\.skipIf\s*\([^)]*\))?\s*\(\s*`([^`$]*)"), "test"),
+    (re.compile(r"^\s*(?:public|private|protected|static|final|abstract|default|\s)*void\s+(\w+)\s*\("), "test"),
+    (re.compile(r"^\s*test\s+\"([^\"]+)\""), "test"),
+    (re.compile(r"^\s*(?:def\s+(test_\w+)|(?:it|test|describe)\s+['\"]([^'\"]+)['\"])"), "test"),
+    (re.compile(r"^\s*(?:public|private|protected|static|final|abstract|\s)*(?:@interface|interface|class)\s+(\w+)"), "class"),
+]
+
+# How far back an enclosing declaration may sit. 120 was too small: the skip at
+# sp1_fri_test.go:1293 is 140 lines below its `func Test...`.
+_SCOPE_LOOKBACK = 400
+_SCOPE_LOOKAHEAD = 25
+
+_ANNOTATION_RE = re.compile(r"^\s*@")
+
+
+def _match_decl(
+    pats: list[tuple[re.Pattern[str], str]], line: str
+) -> ScopeRef | None:
+    for pat, kind in pats:
+        m = pat.search(line)
+        if m:
+            for g in m.groups():
+                if g:
+                    return ScopeRef(kind, g.strip())
+    return None
+
+
+def enclosing_scope(path: str, skip_line: int) -> ScopeRef | None:
+    """The named scope the skip at `path:skip_line` governs, or None.
+
+    Replaces `enclosing_test_name`, which sat at this spot and was NEVER
+    CALLED: the module docstring described a name-matching policy that no code
+    implemented. It also resolved only 115 of the corpus's 164 sites. This
+    resolves all 164.
     """
     full = REPO_ROOT / path
     if not full.exists():
         return None
+    if path.endswith(".sh"):
+        # A shell `--- Lang: SKIPPED ---` echo is not a test; its scope is the
+        # script itself.
+        return ScopeRef("module", path.rsplit("/", 1)[-1])
     text = full.read_text(encoding="utf-8", errors="replace").splitlines()
-    if skip_line - 1 >= len(text):
+    if skip_line < 1 or skip_line - 1 >= len(text):
         return None
-    patterns: list[re.Pattern[str]] = [
-        # Go: func TestX(t *testing.T)
-        re.compile(r"^func\s+(Test\w+)\s*\("),
-        # Python: def test_x(...)
-        re.compile(r"^\s*def\s+(test_\w+)\s*\("),
-        # Rust: fn name() inside a #[test] block
-        re.compile(r"^\s*fn\s+(\w+)\s*\("),
-        # JS/TS: describe('name', ... or it('name', ...
-        re.compile(r"\b(?:describe|it)(?:\.skipIf)?\s*\(\s*['\"`]([^'\"`]+)['\"`]"),
-        # Java: void name() (preceded by @Test)
-        re.compile(r"^\s*(?:@\w+\(?[^)]*\)?\s*)*void\s+(\w+)\s*\("),
-    ]
-    for i in range(skip_line - 1, max(skip_line - 60, -1), -1):
-        line = text[i]
-        for pat in patterns:
-            m = pat.search(line)
-            if m:
-                return m.group(1)
+
+    if _ANNOTATION_RE.match(text[skip_line - 1]):
+        for i in range(skip_line - 1, min(skip_line + _SCOPE_LOOKAHEAD, len(text))):
+            hit = _match_decl(_DECL_FORWARD, text[i])
+            if hit:
+                return hit
+
+    for i in range(skip_line - 1, max(skip_line - _SCOPE_LOOKBACK, -1), -1):
+        hit = _match_decl(_DECL_BACKWARD, text[i])
+        if hit:
+            return hit
+
+    # A module-level alias such as `const maybe = javaAvailable ? it : it.skip`
+    # governs the suite declared below it.
+    for i in range(skip_line - 1, min(skip_line + _SCOPE_LOOKAHEAD, len(text))):
+        hit = _match_decl(_DECL_FORWARD, text[i])
+        if hit:
+            return hit
     return None
 
 
@@ -780,6 +862,32 @@ def self_test() -> int:
             "orphan plus a stale row"
         )
 
+    # ------------------------------------------------------------------
+    # Scope extraction — every live skip must resolve to a NAMED SCOPE.
+    #
+    # `enclosing_test_name` was dead code that resolved 115 of 164 sites. The
+    # 49 it missed were not anomalies: JUnit annotations sit on the class,
+    # pytest markers sit above the `def`, `describe.skipIf(cond)(...)` puts the
+    # condition between callee and title, and a Go helper taking *testing.T is
+    # not named `Test*`. Each is a named scope; the extractor just could not
+    # see it. This asserts the whole corpus resolves, per language — a single
+    # unresolved site would silently become an un-anchorable row.
+    # ------------------------------------------------------------------
+    scope_failures: list[str] = []
+    by_kind: dict[str, int] = {}
+    for site in discover_skip_sites():
+        sc = enclosing_scope(site.path, site.line)
+        if sc is None:
+            scope_failures.append(f"{site.path}:{site.line}  {site.snippet[:60]}")
+        else:
+            by_kind[sc.kind] = by_kind.get(sc.kind, 0) + 1
+    if scope_failures:
+        failures.append(
+            "enclosing_scope resolved no named scope for "
+            f"{len(scope_failures)} site(s) — each becomes an un-anchorable "
+            f"row: {scope_failures[:5]}"
+        )
+
     # The generic JUnit annotation must be discoverable; only the
     # ...EnvironmentVariable / ...SystemProperty specialisations were before.
     java_pat = next(p for label, p in SKIP_PATTERNS if ".java" in label.split())
@@ -793,7 +901,9 @@ def self_test() -> int:
         return 1
     print(
         f"OK — self-test: {len(cases)} integrity gates fire, "
-        f"{len(recon_cases)} reconciliation cases hold, clean input stays silent."
+        f"{len(recon_cases)} reconciliation cases hold, "
+        f"every live skip resolves to a named scope ({by_kind}), "
+        f"clean input stays silent."
     )
     return 0
 
