@@ -69,9 +69,9 @@ class ECLinear extends SmartContract {
 # Python's own output — this pin exists precisely to be another tier's opinion
 # of these bytes. Independently equal to what the Ruby and Zig tiers measured.
 EC_LINEAR_REFERENCE_SHA256 = (
-    "922a8ff7be63f46cd49761bc8c398a3020d0cd8880c1739f5314864d5979cb4e"
+    "7214cad88783e09e484fe15f57c3d45fdf4443960c7f7a45731e052065b1bcad"
 )
-EC_LINEAR_REFERENCE_HEX_LEN = 2549484
+EC_LINEAR_REFERENCE_HEX_LEN = 2554314
 
 # Control: no EC calls at all, so `optimize_ec` returns early. Pinned so the
 # fix above cannot be "achieved" by disabling the optimizer.

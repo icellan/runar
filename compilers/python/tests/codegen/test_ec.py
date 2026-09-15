@@ -78,7 +78,7 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # moves: the Jacobian ladders behind ecMul/ecMulGen never call the affine
     # adder, and ecOnCurve still rejects the all-zero point.
     # R-117, the COORDINATE-CANONICITY gate. ecAdd 8279 -> 8297 (+18), ecMul
-    # 130518 -> 130526 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
+    # 130518 -> 131073 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
     # is 8 ops per gated point -- copy x (pick), push p, OP_LESSTHAN, copy y (pick),
     # push p, OP_LESSTHAN, OP_BOOLAND, OP_VERIFY -- and ecAdd gates TWO points, so
     # +18 there rather than +16. The extra two are pick DEPTH, not extra work: this
@@ -94,8 +94,19 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT
     # number rather than a colliding one.
     ("ecAdd",              emit_ec_add,               8297),
-    ("ecMul",              emit_ec_mul,             130526),
-    ("ecMulGen",           emit_ec_mul_gen,         130528),
+    # R-157, the ecMul ON-CURVE-OR-INFINITY gate: ecMul 130526 -> 131073 (+547),
+    # ecMulGen +547. The gate is the whole ecOnCurve body plus a copy/compare against
+    # the all-zero blob and an OP_BOOLOR/OP_VERIFY, run once before the ladder. ecAdd
+    # / ecNegate / ecOnCurve / ecMakePoint / ecPointX / ecPointY are all +0 — this
+    # gate is on the SCALAR LADDER only, because it is the +3n construction inside
+    # ecMul whose soundness needs ord(P) | n. affineAdd has no n-dependent trick and
+    # is correct on whatever curve its operand lies on, so gating it would cost bytes
+    # and break ecAdd(P, O), which R-053 requires.
+    # ecMulGen pays the gate too even though its operand is the compiler-pushed
+    # generator: it is emitted as `push G; swap; ecMul`, and exempting it would mean a
+    # second ecMul spelling whose only difference is a check that can never fail.
+    ("ecMul",              emit_ec_mul,             131073),
+    ("ecMulGen",           emit_ec_mul_gen,         131075),
     ("ecNegate",           emit_ec_negate,             956),
     ("ecOnCurve",          emit_ec_on_curve,           548),
     ("ecModReduce",        emit_ec_mod_reduce,           8),

@@ -889,13 +889,9 @@ func cBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker, c *nistCurve
 // Scalar multiplication (generic for both P-256 and P-384)
 // ===========================================================================
 
-func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams, verifyCanonical bool) {
+func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams) {
 	t := NewECTracker([]string{"_pt", "_k"}, emit)
 	cDecomposePoint(t, "_pt", "ax", "ay", c)
-	// R-117. False on the ECDSA path: see cEmitCoordCanonVerify.
-	if verifyCanonical {
-		cEmitCoordCanonVerify(t, "ax", "ay", c)
-	}
 
 	// k' = k + 3n
 	//
@@ -1439,7 +1435,7 @@ func cEmitVerifyECDSA(
 	t.nm = t.nm[:len(t.nm)-1] // _u1
 	t.nm = t.nm[:len(t.nm)-1] // _G
 
-	cEmitMul(emit, c, g, false)
+	cEmitMul(emit, c, g)
 
 	// After mul, one result point is on the stack
 	t.nm = append(t.nm, "_R1_point")
@@ -1461,7 +1457,7 @@ func cEmitVerifyECDSA(
 	// Remove from tracker, emit mul, push result
 	t.nm = t.nm[:len(t.nm)-1] // _u2
 	t.nm = t.nm[:len(t.nm)-1] // _Q_point
-	cEmitMul(emit, c, g, false)
+	cEmitMul(emit, c, g)
 	t.nm = append(t.nm, "_R2_point")
 
 	// Restore R1 point
@@ -1533,6 +1529,23 @@ func cEmitVerifyECDSA(
 // P-256 public API
 // ===========================================================================
 
+// cEmitPointGate -- R-157, the a = -3 twin of ecEmitPointGate in ec.go; see that
+// comment for the defect, the measurement and the boundary argument. Called from
+// EmitPNNNMul and NOT from inside cEmitMul, because cEmitVerifyECDSA shares that
+// ladder and decompressPubKey / cEmitSigRangeGate have already decided that
+// attacker-chosen bytes must make a total boolean builtin return false rather
+// than abort the script.
+func cEmitPointGate(emit func(StackOp), emitOnCurve func(func(StackOp)), c *nistCurveParams) {
+	emit(StackOp{Op: "over"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: make([]byte, c.coordBytes*2)}})
+	emit(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	emit(StackOp{Op: "push", Value: bigIntPush(2)})
+	emit(StackOp{Op: "pick", Depth: 2})
+	emitOnCurve(emit)
+	emit(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+}
+
 // EmitP256Add adds two P-256 points.
 func EmitP256Add(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pa", "_pb"}, emit)
@@ -1547,7 +1560,9 @@ func EmitP256Add(emit func(StackOp)) {
 
 // EmitP256Mul performs P-256 scalar multiplication.
 func EmitP256Mul(emit func(StackOp)) {
-	cEmitMul(emit, p256CurveParams, p256GroupParams, true)
+	// R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+	cEmitPointGate(emit, EmitP256OnCurve, p256CurveParams)
+	cEmitMul(emit, p256CurveParams, p256GroupParams)
 }
 
 // EmitP256MulGen performs P-256 generator multiplication.
@@ -1663,7 +1678,9 @@ func EmitP384Add(emit func(StackOp)) {
 
 // EmitP384Mul performs P-384 scalar multiplication.
 func EmitP384Mul(emit func(StackOp)) {
-	cEmitMul(emit, p384CurveParams, p384GroupParams, true)
+	// R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+	cEmitPointGate(emit, EmitP384OnCurve, p384CurveParams)
+	cEmitMul(emit, p384CurveParams, p384GroupParams)
 }
 
 // EmitP384MulGen performs P-384 generator multiplication.

@@ -59,7 +59,7 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// mask tail of affineAdd / cAffineAdd. Same +50 on P256Add, P384Add, and
 		// VerifyECDSA_P256 below (VerifyECDSA_P384 has no golden entry here).
 		// R-117, the COORDINATE-CANONICITY gate. ecAdd 8279 -> 8297 (+18), ecMul
-		// 130518 -> 130526 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
+		// 130518 -> 131073 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
 		// is 8 ops per gated point -- copy x (pick), push p, OP_LESSTHAN, copy y (pick),
 		// push p, OP_LESSTHAN, OP_BOOLAND, OP_VERIFY -- and ecAdd gates TWO points, so
 		// +18 there rather than +16. The extra two are pick DEPTH, not extra work: this
@@ -87,12 +87,30 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
 		// bytes must return false from a total boolean builtin rather than abort.
 		{"EcAdd", EmitEcAdd, 8297},
-		{"EcMul", EmitEcMul, 130526},
-		{"EcMulGen", EmitEcMulGen, 130528},
+		// R-157, the ecMul ON-CURVE-OR-INFINITY gate: ecMul 130526 -> 131073 (+547),
+		// ecMulGen +547. The gate is the whole ecOnCurve body plus a copy/compare against
+		// the all-zero blob and an OP_BOOLOR/OP_VERIFY, run once before the ladder. ecAdd
+		// / ecNegate / ecOnCurve / ecMakePoint / ecPointX / ecPointY are all +0 — this
+		// gate is on the SCALAR LADDER only, because it is the +3n construction inside
+		// ecMul whose soundness needs ord(P) | n. affineAdd has no n-dependent trick and
+		// is correct on whatever curve its operand lies on, so gating it would cost bytes
+		// and break ecAdd(P, O), which R-053 requires.
+		// ecMulGen pays the gate too even though its operand is the compiler-pushed
+		// generator: it is emitted as `push G; swap; ecMul`, and exempting it would mean a
+		// second ecMul spelling whose only difference is a check that can never fail.
+		// R-157, the pNNNMul ON-CURVE-OR-INFINITY gate: p256Mul 140047 -> 140620 (+573),
+		// p256MulGen +573, p384Mul 211189 -> 211986 (+797), p384MulGen +797. Same shape as
+		// secp256k1's, with each curve's own on-curve body; the two curves differ only
+		// because their on-curve bodies do. pNNNAdd / pNNNNegate / pNNNOnCurve /
+		// pNNNEncodeCompressed are +0, and so is verifyECDSA_pNNN — the gate is at the
+		// PUBLIC pNNNMul entry point, NOT inside cEmitMul, because verifyECDSA shares that
+		// ladder and must return false rather than abort on attacker-chosen bytes.
+		{"EcMul", EmitEcMul, 131073},
+		{"EcMulGen", EmitEcMulGen, 131075},
 		{"EcNegate", EmitEcNegate, 956},
 		{"EcOnCurve", EmitEcOnCurve, 548},
 		{"P256Add", EmitP256Add, 6737},
-		{"P256Mul", EmitP256Mul, 140047},
+		{"P256Mul", EmitP256Mul, 140620},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
 		// (cEmitLengthGate), signature range gate 1<=r,s<=n-1
@@ -102,7 +120,7 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// +12 more from CL-BUG-095 (Point-length validation, see above).
 		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
 		{"P384Add", EmitP384Add, 11543},
-		{"P384Mul", EmitP384Mul, 211189},
+		{"P384Mul", EmitP384Mul, 211986},
 		// R-135: +3 ops for the exact-signature-length gate
 		// (OP_SIZE, push 2144, OP_EQUALVERIFY). 15488 -> 15491.
 		{"VerifyWOTS", EmitVerifyWOTS, 15491},

@@ -847,11 +847,26 @@ module RunarCompiler
         })
       end
 
-      def self.c_emit_mul(emit, c, g, verify_canonical)
+      # R-157 -- the a = -3 twin of the secp256k1 point gate; see that comment for the
+      # defect, the measurement and the boundary argument. Called from pNNNMul and NOT
+      # from inside the shared ladder, because verifyECDSA shares it and
+      # decompressPubKey / the signature range gate have already decided that
+      # attacker-chosen bytes must make a total boolean builtin return false rather than
+      # abort the script.
+      def self.c_emit_point_gate(emit, emit_on_curve, c)
+        emit.call(make_stack_op(op: "over"))
+        emit.call(make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: ("\x00" * (c.coord_bytes * 2)).b)))
+        emit.call(make_stack_op(op: "opcode", code: "OP_EQUAL"))
+        emit.call(make_stack_op(op: "push", value: big_int_push(2)))
+        emit.call(make_stack_op(op: "pick", depth: 2))
+        emit_on_curve.call(emit)
+        emit.call(make_stack_op(op: "opcode", code: "OP_BOOLOR"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+      end
+
+      def self.c_emit_mul(emit, c, g)
         t = EC::ECTracker.new(["_pt", "_k"], emit)
         c_decompose_point(t, "_pt", "ax", "ay", c)
-        # R-117. False on the ECDSA path: see c_emit_coord_canon_verify.
-        c_emit_coord_canon_verify(t, "ax", "ay", c) if verify_canonical
 
         # k' = k + 3n
         #
@@ -1346,7 +1361,7 @@ module RunarCompiler
         t.nm.pop # _u1
         t.nm.pop # _G
 
-        c_emit_mul(emit, c, g, false)
+        c_emit_mul(emit, c, g)
 
         # After mul, one result point is on the stack
         t.nm.push("_R1_point")
@@ -1368,7 +1383,7 @@ module RunarCompiler
         # Remove from tracker, emit mul, push result
         t.nm.pop # _u2
         t.nm.pop # _Q_point
-        c_emit_mul(emit, c, g, false)
+        c_emit_mul(emit, c, g)
         t.nm.push("_R2_point")
 
         # Restore R1 point
@@ -1432,7 +1447,9 @@ module RunarCompiler
       end
 
       def self.emit_p256_mul(emit)
-        c_emit_mul(emit, P256_CURVE, P256_GROUP, true)
+        # R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        c_emit_point_gate(emit, method(:emit_p256_on_curve), P256_CURVE)
+        c_emit_mul(emit, P256_CURVE, P256_GROUP)
       end
 
       def self.emit_p256_mul_gen(emit)
@@ -1528,7 +1545,9 @@ module RunarCompiler
       end
 
       def self.emit_p384_mul(emit)
-        c_emit_mul(emit, P384_CURVE, P384_GROUP, true)
+        # R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        c_emit_point_gate(emit, method(:emit_p384_on_curve), P384_CURVE)
+        c_emit_mul(emit, P384_CURVE, P384_GROUP)
       end
 
       def self.emit_p384_mul_gen(emit)

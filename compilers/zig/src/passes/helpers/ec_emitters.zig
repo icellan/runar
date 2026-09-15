@@ -1241,9 +1241,67 @@ fn emitScalarReduce(t: *ECTracker, k_name: []const u8, result_name: []const u8) 
     try t.rawBlock(2, result_name, emitFieldModSequence);
 }
 
+/// R-157 -- gate a Point operand of the scalar ladder: it must be ON the curve, or
+/// be the point at infinity. ABORTS otherwise.
+///
+/// ecMul(P, k) does not compute k*P. It computes ((k mod n) + 3n)*P: the MSB-first
+/// ladder adds 3n so a fixed high bit is always set, and +3n is a no-op ONLY when
+/// ord(P) divides n. Cofactor 1 gives ord(P) = n for every point on the curve, so
+/// the trick is sound there and nowhere else. An off-curve point lies on some other
+/// curve y^2 = x^3 + b' of unrelated order, and the ladder silently answers a
+/// different question. Measured on @bsv/sdk's Spend with the off-curve P = (5, 7),
+/// which lies on y^2 = x^3 - 76: ecMul(P, 1n) -> c8b039d1...9438f2ff, which is NOT
+/// P, and matches (1 + 3n)*P on that other curve exactly. So the primitive violated
+/// its own contract for EVERY off-curve input.
+///
+/// The degenerate sub-case is worse. For a 2-torsion point of the other curve --
+/// any (x, 0) -- every multiple collapses to the all-zero blob, because the
+/// ladder's unguarded mixed-add hits H = R = 0 mid-ladder, sets Z3 = 0, and a
+/// Jacobian accumulator at infinity never leaves it. Combined with R-053, which
+/// correctly taught ecAdd that the all-zero blob is the identity, that turns a
+/// Schnorr-shaped s*G == R + e*P check into a free pass.
+///
+/// WHY HERE AND NOT IN THE CALLER: the +3n offset is INTERNAL to ecMul. A caller
+/// cannot see it, cannot know the obligation exists without reading this codegen,
+/// and gains nothing by checking what ecMul can check more cheaply (ecOnCurve is
+/// 0.2% of ecMul). The obligation WAS written down, in all seven tiers, in the
+/// ladder's own docstring -- and nothing enforced it.
+///
+/// WHY NOT ecAdd: affineAdd implements the group law with no n-dependent trick, so
+/// on an off-curve operand it returns the CORRECT sum on that operand's own curve.
+/// It does not lie. And O must keep flowing through ecAdd for R-053 to hold.
+///
+/// WHY O IS EXEMPT, and it is load-bearing: ecMul(P, 0n) returns the all-zero blob,
+/// ecAdd(P, -P) returns it, and the EC optimizer folds to it, so O is a reachable
+/// runtime operand -- while ecOnCurve(O) is false by construction. A bare on-curve
+/// gate would reject the identity this codegen manufactures itself.
+///
+/// This SUBSUMES R-117's coordinate-canonicity gate on the mul builtins, which is
+/// why that call is removed here.
+///
+/// The on-curve body runs over a COPY of the point that sits above the real one.
+/// findDepth searches from the top, so naming the copy "_pt" resolves to the copy
+/// for the whole of emitEcOnCurve, and the original is reachable again the moment
+/// the copy's name is popped.
+fn emitPointGate(t: *ECTracker, point_name: []const u8, coord_bytes: usize) !void {
+    try t.copyToTop(point_name, "_pg_pt");
+    const zeros = try t.allocator.alloc(u8, coord_bytes * 2);
+    @memset(zeros, 0);
+    try t.pushOwnedBytes("_pg_zero", zeros);
+    t.popNames(2);
+    try t.emitOpcode("OP_EQUAL");
+    try t.names.append(t.allocator, "_pg_is_inf");
+    try t.copyToTop(point_name, "_pt");
+    try emitEcOnCurve(t);
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLOR");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 fn emitEcMul(t: *ECTracker, point_name: []const u8, scalar_name: []const u8) !void {
+    // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    try emitPointGate(t, point_name, 32);
     try decomposePoint(t, point_name, "ax", "ay");
-    try emitCoordCanonVerify(t, "ax", "ay");
 
     // "k in [1, n-1]" is a PRECONDITION the caller cannot enforce — the scalar is
     // usually an unlock argument — so reduce it first. See emitScalarReduce.
@@ -1469,8 +1527,8 @@ test "ec helper op-count goldens" {
     // ecMul / ecMulGen / ecNegate / ecOnCurve are untouched.
     const cases = .{
         .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8255) },
-        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 119682) },
-        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 119684) },
+        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 120225) },
+        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 120227) },
         .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 956) },
         .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 545) },
     };

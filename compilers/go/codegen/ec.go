@@ -1175,11 +1175,77 @@ func ecEmitScalarReduce(t *ECTracker, kName, resultName string, n *big.Int) {
 // Stack out: [result_point]
 //
 // Uses 256-iteration double-and-add with Jacobian coordinates.
+// ecEmitPointGate --
+// R-157 -- gate a Point operand of the scalar ladder: it must be ON the curve, or
+// be the point at infinity. ABORTS otherwise. Raw ops, straight-line, run before
+// the ladder's tracker exists.
+//
+// ecMul(P, k) does not compute k*P. It computes ((k mod n) + 3n)*P: the MSB-first
+// ladder adds 3n so a fixed high bit is always set, and +3n is a no-op ONLY when
+// ord(P) divides n. Cofactor 1 gives ord(P) = n for every point on the curve, so
+// the trick is sound there and nowhere else. An off-curve point lies on some other
+// curve y^2 = x^3 + b' of unrelated order, and the ladder silently answers a
+// different question. Measured on @bsv/sdk's Spend with the off-curve P = (5, 7),
+// which lies on y^2 = x^3 - 76:
+//
+//     ecMul(P, 1n) -> c8b039d1...9438f2ff, which is NOT P
+//
+// matching (1 + 3n)*P on that other curve exactly. So the primitive violated its
+// own contract for EVERY off-curve input, not merely a contrived one.
+//
+// The degenerate sub-case is worse. For a 2-torsion point of the other curve --
+// any (x, 0) -- every multiple collapses to the all-zero blob, because the
+// ladder's unguarded mixed-add hits H = R = 0 mid-ladder, sets Z3 = 0, and a
+// Jacobian accumulator at infinity never leaves it. Combined with R-053, which
+// correctly taught ecAdd that the all-zero blob is the identity, that turns a
+// Schnorr-shaped s*G == R + e*P check into a free pass: choose an off-curve P of
+// order 2, e*P is O, R + O is R, and any s with R = s*G verifies with no knowledge
+// of any discrete log.
+//
+// WHY HERE AND NOT IN THE CALLER. The +3n offset is INTERNAL to ecMul. A caller
+// cannot see it, cannot know the obligation exists without reading this codegen,
+// and gains nothing by checking what ecMul can check more cheaply (ecOnCurve is
+// 816 bytes against ecMul's 428 KB -- 0.2%). The obligation WAS written down, in
+// all seven tiers, in the ladder's own docstring: "callers who accept untrusted
+// points must gate them on ecOnCurve first". Nothing enforced it, and the
+// repository's own schnorr-zkp fixture takes its pubKey from a DEPLOYER-supplied
+// constructor slot, where that idiom is not even reachable.
+//
+// WHY NOT ecAdd, which is the other half of the boundary: affineAdd implements the
+// group law with no n-dependent trick, so on an off-curve operand it returns the
+// CORRECT sum on that operand's own curve. It does not lie. And O -- deliberately
+// not on the curve -- must keep flowing through ecAdd for R-053 to hold. Gating
+// the adder would break a working primitive to fix a different one.
+//
+// WHY O IS EXEMPT, and it is load-bearing: ecMul(P, 0n) returns the all-zero blob,
+// ecAdd(P, -P) returns it, and the EC optimizer folds to it, so O is a reachable
+// runtime operand -- while ecOnCurve(O) is false by construction (0^2 != 0^3 + b).
+// A bare on-curve gate would reject the identity this codegen manufactures itself.
+//
+// This SUBSUMES R-117's coordinate-canonicity gate on the mul builtins, which is
+// why that call is removed here rather than left as defence in depth: a
+// non-canonical coordinate makes ecOnCurve false and cannot equal the all-zero
+// blob, so it still aborts, and keeping both would be 74 bytes saying the same
+// thing twice in two places that must agree.
+//
+// Stack in/out: [point, scalar] -- unchanged.
+func ecEmitPointGate(emit func(StackOp), emitOnCurve func(func(StackOp)), coordBytes int) {
+	emit(StackOp{Op: "over"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: make([]byte, coordBytes*2)}})
+	emit(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	emit(StackOp{Op: "push", Value: bigIntPush(2)})
+	emit(StackOp{Op: "pick", Depth: 2})
+	emitOnCurve(emit)
+	emit(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+}
+
 func EmitEcMul(emit func(StackOp)) {
+	// R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+	ecEmitPointGate(emit, EmitEcOnCurve, 32)
 	t := NewECTracker([]string{"_pt", "_k"}, emit)
 	// Decompose to affine base point
 	ecDecomposePoint(t, "_pt", "ax", "ay")
-	ecEmitCoordCanonVerify(t, "ax", "ay")
 
 	// k' = k + 3n: guarantees bit 257 is set.
 	// k ∈ [1, n-1], so k+3n ∈ [3n+1, 4n-1]. Since 3n > 2^257, bit 257

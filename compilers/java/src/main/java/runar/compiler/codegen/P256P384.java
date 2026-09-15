@@ -11,6 +11,7 @@ import runar.compiler.ir.stack.IfOp;
 import runar.compiler.ir.stack.NipOp;
 import runar.compiler.ir.stack.OpcodeOp;
 import runar.compiler.ir.stack.OverOp;
+import runar.compiler.ir.stack.PickOp;
 import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.PushValue;
 import runar.compiler.ir.stack.RotOp;
@@ -859,14 +860,32 @@ public final class P256P384 {
         });
     }
 
+    /**
+     * R-157 — the a = -3 twin of {@code Ec.emitPointGate}; see that javadoc for the
+     * defect, the measurement and the boundary argument. Called from
+     * {@code emitPNNNMul} and NOT from inside {@code cEmitMul}, because
+     * {@code cEmitVerifyECDSA} shares that ladder and {@code cDecompressPubKey} /
+     * {@code cEmitSigRangeGate} have already decided that attacker-chosen bytes must
+     * make a total boolean builtin return false rather than abort the script.
+     */
+    private static void cEmitPointGate(Consumer<StackOp> emit,
+                                       Consumer<Consumer<StackOp>> emitOnCurve,
+                                       int coordBytes) {
+        emit.accept(new OverOp());
+        emit.accept(new PushOp(PushValue.ofHex(Ec.hexOf(new byte[coordBytes * 2]))));
+        emit.accept(new OpcodeOp("OP_EQUAL"));
+        emit.accept(new PushOp(PushValue.of(2)));
+        emit.accept(new PickOp(2));
+        emitOnCurve.accept(emit);
+        emit.accept(new OpcodeOp("OP_BOOLOR"));
+        emit.accept(new OpcodeOp("OP_VERIFY"));
+    }
+
     private static void cEmitMul(Consumer<StackOp> emit, int coordBytes,
                                   ReverseBytesFn revFn, BigInteger fieldP,
-                                  BigInteger pMinus2, BigInteger curveN, BigInteger nMinus2,
-                                  boolean verifyCanonical) {
+                                  BigInteger pMinus2, BigInteger curveN, BigInteger nMinus2) {
         ECTracker t = new ECTracker(List.of("_pt", "_k"), emit);
         cDecomposePoint(t, "_pt", "ax", "ay", coordBytes, revFn);
-        // R-117. False on the ECDSA path: see cEmitCoordCanonVerify.
-        if (verifyCanonical) cEmitCoordCanonVerify(t, "ax", "ay", fieldP);
 
         // k' = k + 3n (three separate adds, matches Go reference)
         //
@@ -1366,7 +1385,7 @@ public final class P256P384 {
         t.nm.remove(t.nm.size() - 1); // _u1
         t.nm.remove(t.nm.size() - 1); // _G
 
-        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2, false);
+        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2);
 
         // After mul, one result point is on the stack
         t.nm.add("_R1_point");
@@ -1387,7 +1406,7 @@ public final class P256P384 {
         // Remove from tracker, emit mul, push result
         t.nm.remove(t.nm.size() - 1); // _u2
         t.nm.remove(t.nm.size() - 1); // _Q_point
-        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2, false);
+        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2);
         t.nm.add("_R2_point");
 
         // Restore R1 point
@@ -1456,7 +1475,9 @@ public final class P256P384 {
     }
 
     public static void emitP256Mul(Consumer<StackOp> emit) {
-        cEmitMul(emit, 32, REV32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2, true);
+        // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        cEmitPointGate(emit, P256P384::emitP256OnCurve, 32);
+        cEmitMul(emit, 32, REV32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2);
     }
 
     public static void emitP256MulGen(Consumer<StackOp> emit) {
@@ -1563,7 +1584,9 @@ public final class P256P384 {
     }
 
     public static void emitP384Mul(Consumer<StackOp> emit) {
-        cEmitMul(emit, 48, REV48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2, true);
+        // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        cEmitPointGate(emit, P256P384::emitP384OnCurve, 48);
+        cEmitMul(emit, 48, REV48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2);
     }
 
     public static void emitP384MulGen(Consumer<StackOp> emit) {

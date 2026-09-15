@@ -849,6 +849,24 @@ def _c_build_jacobian_add_or_double_inline(
 # Scalar multiplication (generic for both P-256 and P-384)
 # ===========================================================================
 
+def _c_emit_point_gate(emit: Callable, emit_on_curve: Callable, coord_bytes: int) -> None:
+    """R-157 -- the a = -3 twin of the secp256k1 point gate; see that comment for the
+    defect, the measurement and the boundary argument. Called from pNNNMul and NOT
+    from inside the shared ladder, because verifyECDSA shares it and
+    decompressPubKey / the signature range gate have already decided that
+    attacker-chosen bytes must make a total boolean builtin return false rather than
+    abort the script.
+    """
+    emit(_make_stack_op(op="over"))
+    emit(_make_stack_op(op="push", value=_make_push_value(kind="bytes", bytes_=bytes(coord_bytes * 2))))
+    emit(_make_stack_op(op="opcode", code="OP_EQUAL"))
+    emit(_make_stack_op(op="push", value=_big_int_push(2)))
+    emit(_make_stack_op(op="pick", depth=2))
+    emit_on_curve(emit)
+    emit(_make_stack_op(op="opcode", code="OP_BOOLOR"))
+    emit(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+
 def _c_emit_mul(
     emit: Callable,
     coord_bytes: int,
@@ -857,14 +875,10 @@ def _c_emit_mul(
     p_minus_2: int,
     curve_n: int,
     n_minus_2: int,
-    verify_canonical: bool,
 ) -> None:
     """Generic scalar multiplication for NIST curves."""
     t = ECTracker(["_pt", "_k"], emit)
     _c_decompose_point(t, "_pt", "ax", "ay", coord_bytes, reverse_bytes_fn)
-    # R-117. False on the ECDSA path: see _c_emit_coord_canon_verify.
-    if verify_canonical:
-        _c_emit_coord_canon_verify(t, "ax", "ay", field_p)
 
     # k' = k + 3n
     #
@@ -1374,7 +1388,7 @@ def _c_emit_verify_ecdsa(
     t.nm.pop()  # _u1
     t.nm.pop()  # _G
 
-    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2, False)
+    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2)
 
     t.nm.append("_R1_point")
 
@@ -1392,7 +1406,7 @@ def _c_emit_verify_ecdsa(
     t.nm.pop()  # _u2
     t.nm.pop()  # _Q_point
 
-    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2, False)
+    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2)
     t.nm.append("_R2_point")
 
     t.from_alt("_R1_point")
@@ -1470,7 +1484,9 @@ def emit_p256_add(emit: Callable) -> None:
 
 def emit_p256_mul(emit: Callable) -> None:
     """P-256 scalar multiplication. Stack in: [point, scalar], out: [result]."""
-    _c_emit_mul(emit, 32, _emit_reverse32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2, True)
+    # R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    _c_emit_point_gate(emit, emit_p256_on_curve, 32)
+    _c_emit_mul(emit, 32, _emit_reverse32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2)
 
 
 def emit_p256_mul_gen(emit: Callable) -> None:
@@ -1592,7 +1608,9 @@ def emit_p384_add(emit: Callable) -> None:
 
 def emit_p384_mul(emit: Callable) -> None:
     """P-384 scalar multiplication. Stack in: [point, scalar], out: [result]."""
-    _c_emit_mul(emit, 48, _emit_reverse48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2, True)
+    # R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    _c_emit_point_gate(emit, emit_p384_on_curve, 48)
+    _c_emit_mul(emit, 48, _emit_reverse48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2)
 
 
 def emit_p384_mul_gen(emit: Callable) -> None:

@@ -198,7 +198,7 @@ fn test_ec_mul_op_count_golden() {
     let ops = collect(|s| emit_ec_mul(s));
     // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
     // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130522, "ecMul op count drift");
+    assert_eq!(count_op_tree(&ops), 131069, "ecMul op count drift");
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn test_ec_mul_gen_op_count_golden() {
     let ops = collect(|s| emit_ec_mul_gen(s));
     // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
     // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130524, "ecMulGen op count drift");
+    assert_eq!(count_op_tree(&ops), 131071, "ecMulGen op count drift");
 }
 
 #[test]

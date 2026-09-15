@@ -1047,18 +1047,34 @@ fn c_emit_coord_canon_verify(t: &mut ECTracker, x_name: &str, y_name: &str, c: &
     });
 }
 
+/// R-157 -- the a = -3 twin of `emit_point_gate` in ec.rs; see that doc comment
+/// for the defect, the measurement and the boundary argument. Called from
+/// `emit_pNNN_mul` and NOT from inside `c_emit_mul`, because `c_emit_verify_ecdsa`
+/// shares that ladder and `decompress_pub_key` / `c_emit_sig_range_gate` have
+/// already decided that attacker-chosen bytes must make a total boolean builtin
+/// return false rather than abort the script.
+fn c_emit_point_gate(
+    emit: &mut dyn FnMut(StackOp),
+    emit_on_curve: fn(&mut dyn FnMut(StackOp)),
+    c: &NistCurveParams,
+) {
+    emit(StackOp::Over);
+    emit(StackOp::Push(PushValue::Bytes(vec![0u8; c.coord_bytes * 2])));
+    emit(StackOp::Opcode("OP_EQUAL".into()));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
+    emit(StackOp::Pick { depth: 2 });
+    emit_on_curve(emit);
+    emit(StackOp::Opcode("OP_BOOLOR".into()));
+    emit(StackOp::Opcode("OP_VERIFY".into()));
+}
+
 fn c_emit_mul(
     emit: &mut dyn FnMut(StackOp),
     c: &NistCurveParams,
     g: &NistGroupParams,
-    verify_canonical: bool,
 ) {
     let mut t = ECTracker::new(&["_pt", "_k"], emit);
     c_decompose_point(&mut t, "_pt", "ax", "ay", c);
-    // R-117. False on the ECDSA path: see c_emit_coord_canon_verify.
-    if verify_canonical {
-        c_emit_coord_canon_verify(&mut t, "ax", "ay", c);
-    }
 
     // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
     //
@@ -1571,7 +1587,7 @@ fn c_emit_verify_ecdsa(
     t.nm.pop(); // _u1
     t.nm.pop(); // _G
 
-    c_emit_mul(t.e, c, g, false);
+    c_emit_mul(t.e, c, g);
 
     // After mul, one result point is on the stack
     t.nm.push("_R1_point".to_string());
@@ -1593,7 +1609,7 @@ fn c_emit_verify_ecdsa(
     // Remove from tracker, emit mul, push result
     t.nm.pop(); // _u2
     t.nm.pop(); // _Q_point
-    c_emit_mul(t.e, c, g, false);
+    c_emit_mul(t.e, c, g);
     t.nm.push("_R2_point".to_string());
 
     // Restore R1 point
@@ -1659,7 +1675,9 @@ pub fn emit_p256_add(emit: &mut dyn FnMut(StackOp)) {
 
 /// p256Mul: P-256 scalar multiplication.
 pub fn emit_p256_mul(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_mul(emit, &P256_CURVE, &P256_GROUP, true);
+    // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    c_emit_point_gate(emit, emit_p256_on_curve, &P256_CURVE);
+    c_emit_mul(emit, &P256_CURVE, &P256_GROUP);
 }
 
 /// p256MulGen: P-256 generator multiplication.
@@ -1776,7 +1794,9 @@ pub fn emit_p384_add(emit: &mut dyn FnMut(StackOp)) {
 
 /// p384Mul: P-384 scalar multiplication.
 pub fn emit_p384_mul(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_mul(emit, &P384_CURVE, &P384_GROUP, true);
+    // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    c_emit_point_gate(emit, emit_p384_on_curve, &P384_CURVE);
+    c_emit_mul(emit, &P384_CURVE, &P384_GROUP);
 }
 
 /// p384MulGen: P-384 generator multiplication.

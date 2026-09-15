@@ -86,8 +86,15 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
     # bytes must return false from a total boolean builtin rather than abort.
     ("p256Add",              emit_p256_add,               6737),
-    ("p256Mul",              emit_p256_mul,             140047),
-    ("p256MulGen",           emit_p256_mul_gen,         140049),
+    # R-157, the pNNNMul ON-CURVE-OR-INFINITY gate: p256Mul 140047 -> 140620 (+573),
+    # p256MulGen +573, p384Mul 211189 -> 211986 (+797), p384MulGen +797. Same shape as
+    # secp256k1's, with each curve's own on-curve body; the two curves differ only
+    # because their on-curve bodies do. pNNNAdd / pNNNNegate / pNNNOnCurve /
+    # pNNNEncodeCompressed are +0, and so is verifyECDSA_pNNN — the gate is at the
+    # PUBLIC pNNNMul entry point, NOT inside cEmitMul, because verifyECDSA shares that
+    # ladder and must return false rather than abort on attacker-chosen bytes.
+    ("p256Mul",              emit_p256_mul,             140620),
+    ("p256MulGen",           emit_p256_mul_gen,         140622),
     ("p256Negate",           emit_p256_negate,             956),
     ("p256OnCurve",          emit_p256_on_curve,           574),
     ("p256EncodeCompressed", emit_p256_encode_compressed,   16),
@@ -110,8 +117,8 @@ def test_p256_op_count(name, fn, expected):
 
 @pytest.mark.parametrize("name,fn,expected", [
     ("p384Add",              emit_p384_add,              11543),
-    ("p384Mul",              emit_p384_mul,             211189),
-    ("p384MulGen",           emit_p384_mul_gen,         211191),
+    ("p384Mul",              emit_p384_mul,             211986),
+    ("p384MulGen",           emit_p384_mul_gen,         211988),
     ("p384Negate",           emit_p384_negate,            1404),
     # p384OnCurve / p384EncodeCompressed / verifyECDSA_P384 were missing from
     # this list while their P-256 peers were pinned, so the P-384 half of the

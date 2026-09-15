@@ -181,8 +181,15 @@ class TestP256P384Codegen < Minitest::Test
     # decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
     # bytes must return false from a total boolean builtin rather than abort.
     "p256Add"              =>   6737,
-    "p256Mul"              => 140047,
-    "p256MulGen"           => 140049,
+    # R-157, the pNNNMul ON-CURVE-OR-INFINITY gate: p256Mul 140047 -> 140620 (+573),
+    # p256MulGen +573, p384Mul 211189 -> 211986 (+797), p384MulGen +797. Same shape as
+    # secp256k1's, with each curve's own on-curve body; the two curves differ only
+    # because their on-curve bodies do. pNNNAdd / pNNNNegate / pNNNOnCurve /
+    # pNNNEncodeCompressed are +0, and so is verifyECDSA_pNNN — the gate is at the
+    # PUBLIC pNNNMul entry point, NOT inside cEmitMul, because verifyECDSA shares that
+    # ladder and must return false rather than abort on attacker-chosen bytes.
+    "p256Mul"              => 140620,
+    "p256MulGen"           => 140622,
     "p256Negate"           =>    956,
     "p256OnCurve"          =>    574,
     "p256EncodeCompressed" =>     16,
@@ -201,8 +208,8 @@ class TestP256P384Codegen < Minitest::Test
 
   P384_GOLDENS = {
     "p384Add"    =>  11543,
-    "p384Mul"    => 211189,
-    "p384MulGen" => 211191,
+    "p384Mul"    => 211986,
+    "p384MulGen" => 211988,
     "p384Negate" =>   1404,
   }.freeze
 

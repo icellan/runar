@@ -888,12 +888,9 @@ function cEmitMul(
   emit: (op: StackOp) => void,
   c: CurveParams,
   g: GroupParams,
-  verifyCanonical: boolean,
 ): void {
   const t = new ECTracker(['_pt', '_k'], emit);
   cDecomposePoint(t, '_pt', 'ax', 'ay', c);
-  // R-117. False on the ECDSA path: see cEmitCoordCanonVerify.
-  if (verifyCanonical) cEmitCoordCanonVerify(t, 'ax', 'ay', c);
 
   // k' = k + 3n: guarantees a fixed high bit for MSB-first double-and-add.
   // For P-256: k ∈ [1, n-1], k+3n ∈ [3n+1, 4n-1], 3n > 2^257, so bit 257 is set.
@@ -1439,7 +1436,7 @@ function cEmitVerifyECDSA(
   t.nm.pop(); // _G
 
   // Emit the mul (it manages its own tracker internally)
-  cEmitMul(emit, c, g, false);
+  cEmitMul(emit, c, g);
 
   // After mul, one result point is on the stack
   t.nm.push('_R1_point');
@@ -1462,7 +1459,7 @@ function cEmitVerifyECDSA(
   // Pop from tracker, emit mul, push result
   t.nm.pop(); // _u2
   t.nm.pop(); // _Q_point
-  cEmitMul(emit, c, g, false);
+  cEmitMul(emit, c, g);
   t.nm.push('_R2_point');
 
   // Restore R1 point
@@ -1523,6 +1520,37 @@ function cEmitVerifyECDSA(
 // ===========================================================================
 
 /**
+ * R-157 — the a = -3 twin of `emitPointGate` in ec-codegen.ts; see that
+ * docstring for the defect, the measurement and the boundary argument. The
+ * ladder here uses the same `k + 3n` construction with the curve's own n, and
+ * `cEmitMul`'s exception analysis is stated, in its own docstring, only for
+ * points on the curve.
+ *
+ * It is called from `pNNNMul` and NOT from inside `cEmitMul`, because
+ * `cEmitVerifyECDSA` shares that ladder and has already decided — see
+ * `decompressPubKey` and `cEmitSigRangeGate` — that attacker-chosen bytes must
+ * make a total boolean builtin return false rather than abort the script. A
+ * gate inside `cEmitMul` would turn `verifyECDSA_pNNN(bad_pubkey, …)` from
+ * `false` into an abort.
+ *
+ * Stack in/out: [point, scalar] — unchanged.
+ */
+function cEmitPointGate(
+  emit: (op: StackOp) => void,
+  emitOnCurve: (e: (op: StackOp) => void) => void,
+  c: CurveParams,
+): void {
+  emit({ op: 'over' });
+  emit({ op: 'push', value: new Uint8Array(c.coordBytes * 2) });
+  emit({ op: 'opcode', code: 'OP_EQUAL' });
+  emit({ op: 'push', value: 2n });
+  emit({ op: 'pick', depth: 2 });
+  emitOnCurve(emit);
+  emit({ op: 'opcode', code: 'OP_BOOLOR' });
+  emit({ op: 'opcode', code: 'OP_VERIFY' });
+}
+
+/**
  * P-256 point addition.
  * Stack in: [P256Point, P256Point] (second on top)
  * Stack out: [P256Point]
@@ -1544,7 +1572,9 @@ export function emitP256Add(emit: (op: StackOp) => void): void {
  * Stack out: [P256Point]
  */
 export function emitP256Mul(emit: (op: StackOp) => void): void {
-  cEmitMul(emit, P256_PARAMS, P256_GROUP, true);
+  // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+  cEmitPointGate(emit, emitP256OnCurve, P256_PARAMS);
+  cEmitMul(emit, P256_PARAMS, P256_GROUP);
 }
 
 /**
@@ -1689,7 +1719,9 @@ export function emitP384Add(emit: (op: StackOp) => void): void {
  * Stack out: [P384Point]
  */
 export function emitP384Mul(emit: (op: StackOp) => void): void {
-  cEmitMul(emit, P384_PARAMS, P384_GROUP, true);
+  // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+  cEmitPointGate(emit, emitP384OnCurve, P384_PARAMS);
+  cEmitMul(emit, P384_PARAMS, P384_GROUP);
 }
 
 /**

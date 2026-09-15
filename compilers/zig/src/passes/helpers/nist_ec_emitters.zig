@@ -1212,25 +1212,84 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
 // Scalar multiplication (generic for P-256 and P-384)
 // ===========================================================================
 
+/// The on-curve predicate body, over the "_pt" already on the tracker.
+///
+/// Extracted verbatim from the pNNNOnCurve dispatch arms so R-157's point gate
+/// can reuse it; both arms now call this, so the predicate's bytes are
+/// unchanged by construction.
+fn emitOnCurveOnTracker(t: *NistTracker) !void {
+    const c = t.params;
+    // CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+    // contracts are told to gate an untrusted point on, so it must stay
+    // total. The flag is ANDed into the result below.
+    try emitLengthGate(t, "_pt", c.coord_bytes * 2, "_len_ok");
+    try decomposePoint(t, "_pt", "_x", "_y");
+    try emitCanonicityGuard(t, "_x", "_y", c.field_p_be);
+    try fieldSqr(t, "_y", c.field_p_be, "_y2");
+    try t.copyToTop("_x", "_x_copy");
+    try t.copyToTop("_x", "_x_copy2");
+    try fieldSqr(t, "_x", c.field_p_be, "_x2");
+    try fieldMul(t, "_x2", "_x_copy", c.field_p_be, "_x3");
+    try fieldMulConst(t, "_x_copy2", 3, c.field_p_be, "_3x");
+    try fieldSub(t, "_x3", "_3x", c.field_p_be, "_x3m3x");
+    try t.pushBigIntBE("_b", c.curve_b_be);
+    try fieldAdd(t, "_x3m3x", "_b", c.field_p_be, "_rhs");
+    try t.toTop("_y2");
+    try t.toTop("_rhs");
+    t.popNames(2);
+    try t.emitOpcode("OP_EQUAL");
+    try t.names.append(t.allocator, "_curve_eq");
+    // on-curve = right width AND canonical AND curve-equation
+    try t.toTop("_canon");
+    try t.toTop("_curve_eq");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_eq_ok");
+    try t.toTop("_len_ok");
+    try t.toTop("_eq_ok");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_result");
+}
+
+/// R-157 -- the a = -3 twin of emitPointGate in ec_emitters.zig; see that comment
+/// for the defect, the measurement and the boundary argument. Called from the
+/// pNNNMul / pNNNMulGen dispatch arms and NOT from emitScalarMulOnTracker, because
+/// emitVerifyECDSA shares that ladder and decompressPubKey / emitSigRangeGate have
+/// already decided that attacker-chosen bytes must make a total boolean builtin
+/// return false rather than abort the script.
+fn emitPointGate(t: *NistTracker, point_name: []const u8) !void {
+    try t.copyToTop(point_name, "_pg_pt");
+    const zeros = try t.allocator.alloc(u8, t.params.coord_bytes * 2);
+    @memset(zeros, 0);
+    try t.pushOwnedBytes("_pg_zero", zeros);
+    t.popNames(2);
+    try t.emitOpcode("OP_EQUAL");
+    try t.names.append(t.allocator, "_pg_is_inf");
+    try t.copyToTop(point_name, "_pt");
+    try emitOnCurveOnTracker(t);
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLOR");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 /// buildScalarMulBundle creates a standalone bundle for scalar multiplication.
 /// Expects exactly two items on the stack: [point, scalar] (scalar on top).
 /// Produces exactly one result item: the result point.
-fn buildScalarMulBundle(allocator: Allocator, params: *const NistCurveParams, verify_canonical: bool) !EcOpBundle {
+fn buildScalarMulBundle(allocator: Allocator, params: *const NistCurveParams) !EcOpBundle {
     var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, params);
     errdefer t.deinit();
-    try emitScalarMulOnTracker(&t, verify_canonical);
+    try emitScalarMulOnTracker(&t);
     return t.takeBundle();
 }
 
 /// emitScalarMulOnTracker performs scalar mul using the tracker's current names.
 /// The tracker must have "_pt" and "_k" as named items (in any position).
-fn emitScalarMulOnTracker(t: *NistTracker, verify_canonical: bool) !void {
+fn emitScalarMulOnTracker(t: *NistTracker) !void {
     const c = t.params;
     const p_be = c.field_p_be;
 
     try decomposePoint(t, "_pt", "ax", "ay");
-    // R-117. False on the ECDSA path: see emitCoordCanonVerify.
-    if (verify_canonical) try emitCoordCanonVerify(t, "ax", "ay", p_be);
 
     // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
     //
@@ -1314,7 +1373,7 @@ fn emitScalarMulOnTracker(t: *NistTracker, verify_canonical: bool) !void {
 /// (point then scalar, scalar on top) and removed their names via popNames(2).
 /// After the call, one result name is appended to the outer tracker.
 fn emitScalarMulInline(outer: *NistTracker, result_name: []const u8) !void {
-    var bundle = try buildScalarMulBundle(outer.allocator, outer.params, false);
+    var bundle = try buildScalarMulBundle(outer.allocator, outer.params);
     errdefer bundle.deinit();
 
     // Transfer owned_bytes pointers to outer tracker, then free the outer slice.
@@ -1885,7 +1944,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p256_mul => {
             var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, &p256_params);
             errdefer t.deinit();
-            try emitScalarMulOnTracker(&t, true);
+            // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+            try emitPointGate(&t, "_pt");
+            try emitScalarMulOnTracker(&t);
             return t.takeBundle();
         },
         .p256_mul_gen => {
@@ -1896,7 +1957,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             @memcpy(g_point[32..64], p256_gy_be[0..]);
             try t.pushOwnedBytes("_pt", g_point);
             try t.swap();
-            try emitScalarMulOnTracker(&t, true);
+            // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+            try emitPointGate(&t, "_pt");
+            try emitScalarMulOnTracker(&t);
             return t.takeBundle();
         },
         .p256_negate => {
@@ -1912,37 +1975,7 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p256_on_curve => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p256_params);
             errdefer t.deinit();
-            // CL-BUG-095: width. Clamp rather than abort — this predicate is what
-            // contracts are told to gate an untrusted point on, so it must stay
-            // total. The flag is ANDed into the result below.
-            try emitLengthGate(&t, "_pt", p256_params.coord_bytes * 2, "_len_ok");
-            try decomposePoint(&t, "_pt", "_x", "_y");
-            try emitCanonicityGuard(&t, "_x", "_y", p256_field_p_be[0..]);
-            try fieldSqr(&t, "_y", p256_field_p_be[0..], "_y2");
-            try t.copyToTop("_x", "_x_copy");
-            try t.copyToTop("_x", "_x_copy2");
-            try fieldSqr(&t, "_x", p256_field_p_be[0..], "_x2");
-            try fieldMul(&t, "_x2", "_x_copy", p256_field_p_be[0..], "_x3");
-            try fieldMulConst(&t, "_x_copy2", 3, p256_field_p_be[0..], "_3x");
-            try fieldSub(&t, "_x3", "_3x", p256_field_p_be[0..], "_x3m3x");
-            try t.pushBigIntBE("_b", p256_b_be[0..]);
-            try fieldAdd(&t, "_x3m3x", "_b", p256_field_p_be[0..], "_rhs");
-            try t.toTop("_y2");
-            try t.toTop("_rhs");
-            t.popNames(2);
-            try t.emitOpcode("OP_EQUAL");
-            try t.names.append(t.allocator, "_curve_eq");
-            // on-curve = right width AND canonical AND curve-equation
-            try t.toTop("_canon");
-            try t.toTop("_curve_eq");
-            t.popNames(2);
-            try t.emitOpcode("OP_BOOLAND");
-            try t.names.append(t.allocator, "_eq_ok");
-            try t.toTop("_len_ok");
-            try t.toTop("_eq_ok");
-            t.popNames(2);
-            try t.emitOpcode("OP_BOOLAND");
-            try t.names.append(t.allocator, "_result");
+            try emitOnCurveOnTracker(&t);
             return t.takeBundle();
         },
         .p256_encode_compressed => {
@@ -2010,7 +2043,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p384_mul => {
             var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, &p384_params);
             errdefer t.deinit();
-            try emitScalarMulOnTracker(&t, true);
+            // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+            try emitPointGate(&t, "_pt");
+            try emitScalarMulOnTracker(&t);
             return t.takeBundle();
         },
         .p384_mul_gen => {
@@ -2021,7 +2056,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             @memcpy(g_point[48..96], p384_gy_be[0..]);
             try t.pushOwnedBytes("_pt", g_point);
             try t.swap();
-            try emitScalarMulOnTracker(&t, true);
+            // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+            try emitPointGate(&t, "_pt");
+            try emitScalarMulOnTracker(&t);
             return t.takeBundle();
         },
         .p384_negate => {
@@ -2037,37 +2074,7 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p384_on_curve => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p384_params);
             errdefer t.deinit();
-            // CL-BUG-095: width. Clamp rather than abort — this predicate is what
-            // contracts are told to gate an untrusted point on, so it must stay
-            // total. The flag is ANDed into the result below.
-            try emitLengthGate(&t, "_pt", p384_params.coord_bytes * 2, "_len_ok");
-            try decomposePoint(&t, "_pt", "_x", "_y");
-            try emitCanonicityGuard(&t, "_x", "_y", p384_field_p_be[0..]);
-            try fieldSqr(&t, "_y", p384_field_p_be[0..], "_y2");
-            try t.copyToTop("_x", "_x_copy");
-            try t.copyToTop("_x", "_x_copy2");
-            try fieldSqr(&t, "_x", p384_field_p_be[0..], "_x2");
-            try fieldMul(&t, "_x2", "_x_copy", p384_field_p_be[0..], "_x3");
-            try fieldMulConst(&t, "_x_copy2", 3, p384_field_p_be[0..], "_3x");
-            try fieldSub(&t, "_x3", "_3x", p384_field_p_be[0..], "_x3m3x");
-            try t.pushBigIntBE("_b", p384_b_be[0..]);
-            try fieldAdd(&t, "_x3m3x", "_b", p384_field_p_be[0..], "_rhs");
-            try t.toTop("_y2");
-            try t.toTop("_rhs");
-            t.popNames(2);
-            try t.emitOpcode("OP_EQUAL");
-            try t.names.append(t.allocator, "_curve_eq");
-            // on-curve = right width AND canonical AND curve-equation
-            try t.toTop("_canon");
-            try t.toTop("_curve_eq");
-            t.popNames(2);
-            try t.emitOpcode("OP_BOOLAND");
-            try t.names.append(t.allocator, "_eq_ok");
-            try t.toTop("_len_ok");
-            try t.toTop("_eq_ok");
-            t.popNames(2);
-            try t.emitOpcode("OP_BOOLAND");
-            try t.names.append(t.allocator, "_result");
+            try emitOnCurveOnTracker(&t);
             return t.takeBundle();
         },
         .p384_encode_compressed => {
@@ -2182,14 +2189,14 @@ test "nist_ec helper op-count goldens" {
     // not move.
     const cases = .{
         .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6695) },
-        .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129203) },
-        .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129205) },
+        .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129771) },
+        .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129773) },
         .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 956) },
         .{ registry.CryptoBuiltin.p256_on_curve, "p256OnCurve", @as(usize, 570) },
         .{ registry.CryptoBuiltin.p256_encode_compressed, "p256EncodeCompressed", @as(usize, 16) },
         .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11501) },
-        .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 194969) },
-        .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 194971) },
+        .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 195761) },
+        .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 195763) },
         .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1404) },
     };
     inline for (cases) |c| {

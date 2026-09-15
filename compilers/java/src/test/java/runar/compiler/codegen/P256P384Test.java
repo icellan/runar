@@ -58,16 +58,16 @@ class P256P384Test {
     void p256MulParity() {
         assertParity("p256Mul",
             P256P384::emitP256Mul,
-            140047, 459824,
-            "7cdb7e5512d7f60a0ab9e77284b42a2a4fb580116e557883978d77d5feef875d");
+            140620, 460761,
+            "379117887c1c1b93443daef49320e692a0fa0276d566760b6c5bee650acf1214");
     }
 
     @Test
     void p256MulGenParity() {
         assertParity("p256MulGen",
             P256P384::emitP256MulGen,
-            140049, 459890,
-            "5165984eee9eb6ec51e1e75d54aed2c2a1c5db6cd9a348e574ab6239012f317f");
+            140622, 460827,
+            "2b5a4c818295beae10632169f1a4b6de23cfce43197ec744445e87d07d985efa");
     }
 
     @Test
@@ -168,16 +168,16 @@ class P256P384Test {
     void p384MulParity() {
         assertParity("p384Mul",
             P256P384::emitP384Mul,
-            211189, 927460,
-            "82c1e9e057d192d672ca3b2e8ca5f9e01fe65e267cc18975b93a0136443d2c75");
+            211986, 928800,
+            "4186ccf99c21e16d8109c807beb06525dcea879aca58b44365acdaeab96d3056");
     }
 
     @Test
     void p384MulGenParity() {
         assertParity("p384MulGen",
             P256P384::emitP384MulGen,
-            211191, 927559,
-            "7834b69797d1bef722f6711ee4ddfdd42a8d80a2ae74350eb58bedabf1249211");
+            211988, 928899,
+            "ad633f2904febc5346c463527d00c074157b68d4011316f27cfda09ac5ade6bb");
     }
 
     @Test

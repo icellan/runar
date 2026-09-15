@@ -379,14 +379,14 @@ fn test_p256_mul_op_count_golden() {
     // Rust emits 4 fewer raw StackOps than Python/Java peers; same pattern
     // as ecMul (see ec_codegen_tests.rs module comment). Final hex is
     // byte-identical (enforced by the conformance harness).
-    assert_eq!(count_op_tree(&ops), 140043, "p256_mul op count drift");
+    assert_eq!(count_op_tree(&ops), 140616, "p256_mul op count drift");
 }
 
 #[test]
 fn test_p256_mul_gen_op_count_golden() {
     let ops = collect(|s| emit_p256_mul_gen(s));
     // See p256_mul_op_count_golden comment.
-    assert_eq!(count_op_tree(&ops), 140045, "p256_mul_gen op count drift");
+    assert_eq!(count_op_tree(&ops), 140618, "p256_mul_gen op count drift");
 }
 
 #[test]
@@ -474,14 +474,14 @@ fn test_p384_add_op_count_golden() {
 fn test_p384_mul_op_count_golden() {
     let ops = collect(|s| emit_p384_mul(s));
     // See ec_codegen_tests.rs module comment for the 4-op divergence pattern.
-    assert_eq!(count_op_tree(&ops), 211185, "p384_mul op count drift");
+    assert_eq!(count_op_tree(&ops), 211982, "p384_mul op count drift");
 }
 
 #[test]
 fn test_p384_mul_gen_op_count_golden() {
     let ops = collect(|s| emit_p384_mul_gen(s));
     // See p384_mul_op_count_golden comment.
-    assert_eq!(count_op_tree(&ops), 211187, "p384_mul_gen op count drift");
+    assert_eq!(count_op_tree(&ops), 211984, "p384_mul_gen op count drift");
 }
 
 #[test]
