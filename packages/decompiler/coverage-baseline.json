@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-05-12T21:36:45.746Z",
+  "generatedAt": "2026-09-15T16:54:59.727101Z",
   "summary": {
-    "byte-match": 63,
+    "byte-match": 81,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
     "skipped": 0
   },
   "pathBreakdown": {
-    "template": 58,
+    "template": 76,
     "assert-recognizer": 1,
     "raw_script": 4
   },
@@ -24,7 +24,17 @@
       "recoveryPath": "template"
     },
     {
+      "id": "all-readonly-cleanstack/AllReadonlyCleanstack",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "arithmetic/Arithmetic",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "asm-raw-script/Anyone",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -64,12 +74,42 @@
       "recoveryPath": "template"
     },
     {
+      "id": "branch-merged-locals/BranchMergedLocals",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "branched-readonly-len/BranchedReadonlyLen",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "bsv20-token/BSV20Token",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
     {
       "id": "bsv21-token/BSV21Token",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "companion-verifier/AttributedToken",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "companion-verifier/CompanionVerifier",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "compiler-directives/Directives",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "cond-write-multi-field/CondWriteMultiField",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -114,7 +154,17 @@
       "recoveryPath": "template"
     },
     {
+      "id": "fixed-array-index/ArrayIndex",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "fixed-array-nested/Grid2x2.v2",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "fixed-array-write/ArrayWrite",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -144,6 +194,31 @@
       "recoveryPath": "template"
     },
     {
+      "id": "integer-boundary/IntegerBoundary",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "intent-current-block-height/IntentCurrentBlockHeight",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "intent-output-p2pkh/IntentOutputP2PKH",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "intent-prev-output-script/IntentPrevOutputScript",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "loop-shapes/LoopShapes",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "math-demo/MathDemo",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -165,6 +240,11 @@
     },
     {
       "id": "multisig-2of3/MultiSig2of3",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "nested-if-multi-reassign/StackTrackerRepro",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -209,11 +289,6 @@
       "recoveryPath": "template"
     },
     {
-      "id": "post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure",
-      "outcome": "byte-match",
-      "recoveryPath": "template"
-    },
-    {
       "id": "post-quantum-wallet/PostQuantumWallet",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -244,6 +319,11 @@
       "recoveryPath": "template"
     },
     {
+      "id": "selector/Selector",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "sha256-compress/Sha256CompressTest",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -259,7 +339,7 @@
       "recoveryPath": "template"
     },
     {
-      "id": "sphincs-wallet/SPHINCSWallet",
+      "id": "state-covenant-mechanics/StateCovenantMechanics",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -279,7 +359,17 @@
       "recoveryPath": "template"
     },
     {
+      "id": "stateful-wots-gate/StatefulWOTSGate",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "stateful/Stateful",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "terminal-varlen-read/TerminalVarlenRead",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

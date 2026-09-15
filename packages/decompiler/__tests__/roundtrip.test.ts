@@ -6,7 +6,8 @@
  *   - Decompile bytes → recovered source.
  *   - Re-compile recovered → bytes'.
  *   - Record byte-match / byte-diff / compile-error.
- *   - Fail CI only on regression vs. coverage-baseline.json.
+ *   - Fail on any deviation from coverage-baseline.json, which must cover the
+ *     live corpus exactly (see `baseline covers the live examples corpus`).
  *
  * Tier 2: every conformance fixture under conformance/sdk-codegen/fixtures/*.json.
  *   - Gated to byte-match for the current v0 in-scope set (initially empty;
@@ -111,19 +112,55 @@ describe('Tier 1: examples coverage matrix', () => {
     expect(files.length).toBeGreaterThan(0);
   });
 
+  const liveIds = files
+    .map(f => relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, ''))
+    .filter(id => !PATHOLOGICAL_DECOMPILE.has(id));
+
+  // The baseline is the authority, and it has to cover the corpus.
+  //
+  // Previously an example with no baseline row fell through to
+  // `expect(outcome).toMatch(/^(byte-match|byte-diff|compile-error|parse-error)$/)`
+  // — a regex enumerating every member of `Outcome`, so no value could fail
+  // it. 20 of the 76 live examples sat on that arm, including the
+  // fund-critical construct families (branch-merged-locals,
+  // cond-write-multi-field, nested-if-multi-reassign, fixed-array-write,
+  // state-covenant-mechanics). Worse, it was one-directional: deleting a row
+  // silently downgraded that example to "always passes", and nothing checked
+  // that the baseline still covered the corpus.
+  //
+  // Both directions are now errors. A new example must be classified and
+  // pinned before it can go green; a deleted row, or a row whose example was
+  // removed, fails here instead of quietly disabling a gate.
+  it('baseline covers the live examples corpus', () => {
+    const listed = [...baseline.keys()].filter(id => !id.startsWith('fixture/'));
+    const missing = liveIds.filter(id => !baseline.has(id)).sort();
+    const stale = listed.filter(id => !liveIds.includes(id)).sort();
+    expect(
+      missing,
+      'examples with no coverage-baseline.json row — classify each and add a row ' +
+        '(an unlisted example is not gated by anything)',
+    ).toEqual([]);
+    expect(
+      stale,
+      'coverage-baseline.json rows with no live example — the contract was deleted ' +
+        'or moved to PATHOLOGICAL_DECOMPILE; drop the row',
+    ).toEqual([]);
+  });
+
   for (const f of files) {
     const id = relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, '');
     const expected = baseline.get(id);
     const testFn = PATHOLOGICAL_DECOMPILE.has(id) ? it.skip : it;
-    testFn(`${id}: outcome${expected ? ` should remain ${expected}` : ' recorded for baseline'}`, () => {
+    testFn(`${id}: outcome should remain ${expected ?? '<unlisted>'}`, () => {
+      expect(
+        expected,
+        `${id} has no coverage-baseline.json row — classify it and add one`,
+      ).toBeDefined();
       const got = classifyExample(f);
-      if (expected === 'byte-match') {
-        // Regression check: a byte-match must stay byte-match.
-        expect(got.outcome, `regression on ${id}: was byte-match`).toBe('byte-match');
-      } else {
-        // Non-strict: record outcome; CI only fails on a byte-match regression.
-        expect(got.outcome).toMatch(/^(byte-match|byte-diff|compile-error|parse-error)$/);
-      }
+      // Every recorded outcome is enforced, not just byte-match: a byte-diff
+      // decaying into a compile-error is a regression too, and an improvement
+      // belongs in the baseline rather than being silently absorbed.
+      expect(got.outcome, `${id}: baseline records ${expected}`).toBe(expected);
     });
   }
 });
