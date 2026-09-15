@@ -1,8 +1,33 @@
 /**
  * Coverage matrix: run the decompiler against every example contract and
- * every conformance fixture, record per-row outcome + recovery path,
- * write the result to coverage.json. Compare against coverage-baseline.json;
- * CI fails only on regression.
+ * every conformance fixture, record per-row outcome + recovery path, and
+ * compare the result against the recorded coverage.json. Any drift — a row
+ * whose outcome or recovery path moved, a row that appeared, a row that
+ * disappeared — exits non-zero.
+ *
+ * The header used to claim it compared against coverage-baseline.json. It
+ * did not: the script had no comparison and no failure path of any kind
+ * (`grep -nE 'exit|throw|baseline'` matched only that sentence), so the
+ * `Decompiler coverage matrix` CI step could not fail and the checked-in
+ * coverage.json drifted 7 rows stale unnoticed.
+ *
+ * coverage.json is the recorded expectation rather than coverage-baseline.json
+ * because it pins strictly more: every row's recoveryPath and detail string,
+ * plus the `skipped` rows that the baseline's vocabulary has no place for. It
+ * is also the artifact CI already uploads. The baseline stays what the Tier 1
+ * / Tier 2 round-trip tests gate on — they classify differently from this
+ * script (no artifact-derived options), so the two are deliberately not
+ * cross-compared.
+ *
+ * This is the same drift-check shape as the `Fingerprint DB drift check` and
+ * `Templates manifest drift check` steps beside it in CI, but self-contained:
+ * the comparison is in the script, so the existing CI step gains a failure
+ * path without a wrapper. `generatedAt` is preserved when nothing moved
+ * semantically (as scripts/generate-templates.ts does) so a re-run never
+ * produces a timestamp-only diff.
+ *
+ * Run: pnpm --filter runar-decompiler run coverage          (write + check)
+ *      pnpm --filter runar-decompiler run coverage -- --check [path]  (check only)
  *
  * Two axes are reported:
  *   - outcome:      byte-match / byte-diff / compile-error / parse-error
@@ -14,7 +39,6 @@
  * fingerprint additions (real symbolic recovery makes the matrix shift
  * left toward `template` / `assert-recognizer`).
  *
- * Run: pnpm --filter runar-decompiler run coverage
  */
 
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs';
@@ -127,7 +151,65 @@ function tryFixture(file: string): Row {
   }
 }
 
+interface Matrix {
+  generatedAt: string;
+  summary: Record<Outcome, number>;
+  pathBreakdown: Record<RecoveryPath, number>;
+  rows: { id: string; outcome: Outcome; recoveryPath?: RecoveryPath; detail?: string }[];
+}
+
+/** Everything except the timestamp — the part a re-run must reproduce exactly. */
+function semanticKey(m: Pick<Matrix, 'summary' | 'pathBreakdown' | 'rows'>): string {
+  return JSON.stringify({ summary: m.summary, pathBreakdown: m.pathBreakdown, rows: m.rows });
+}
+
+function readMatrix(path: string): Matrix | null {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as Matrix;
+  } catch {
+    return null;
+  }
+}
+
+/** Human-readable account of what moved. Empty ⇒ no drift. */
+function describeDrift(prev: Matrix | null, next: Matrix): string[] {
+  if (!prev) return ['no recorded coverage matrix to compare against (absent or unparseable)'];
+  if (semanticKey(prev) === semanticKey(next)) return [];
+
+  const msgs: string[] = [];
+  const p = new Map(prev.rows.map(r => [r.id, r]));
+  const n = new Map(next.rows.map(r => [r.id, r]));
+  const show = (r: { outcome: Outcome; recoveryPath?: RecoveryPath }) =>
+    `${r.outcome}/${r.recoveryPath ?? '-'}`;
+
+  for (const [id, row] of n) {
+    if (!p.has(id)) msgs.push(`  + ${id}: new row (${show(row)})`);
+  }
+  for (const [id, row] of p) {
+    if (!n.has(id)) msgs.push(`  - ${id}: row disappeared (was ${show(row)})`);
+  }
+  for (const [id, row] of n) {
+    const before = p.get(id);
+    if (!before) continue;
+    if (JSON.stringify(before) !== JSON.stringify(row)) {
+      const detail = before.detail === row.detail ? '' : ` [detail: ${before.detail ?? '-'} → ${row.detail ?? '-'}]`;
+      msgs.push(`  ~ ${id}: ${show(before)} → ${show(row)}${detail}`);
+    }
+  }
+  if (msgs.length === 0) {
+    // Rows agree but the derived totals do not — a bug in the aggregation.
+    msgs.push('  ~ summary / pathBreakdown differ while every row agrees');
+  }
+  return msgs;
+}
+
 function main() {
+  const argv = process.argv.slice(2);
+  const checkOnly = argv.includes('--check');
+  const expectedPath = argv.filter(a => !a.startsWith('--'))[0]
+    ?? resolve(__dirname, '..', 'coverage.json');
+
   const rows: Row[] = [];
 
   for (const f of listContractFiles(EXAMPLES_DIR)) {
@@ -157,26 +239,49 @@ function main() {
     if (r.recoveryPath) pathBreakdown[r.recoveryPath]++;
   }
 
-  const out = {
-    generatedAt: new Date().toISOString(),
+  const computed = {
     summary,
     pathBreakdown,
-    rows: rows.map(r => ({
+    // Round-trip through JSON so the comparison sees exactly what a reader of
+    // the file sees (`undefined` fields dropped, key order fixed).
+    rows: JSON.parse(JSON.stringify(rows.map(r => ({
       id: r.id,
       outcome: r.outcome,
       recoveryPath: r.recoveryPath,
       detail: r.detail,
-    })),
+    })))) as Matrix['rows'],
   };
 
-  const outPath = resolve(__dirname, '..', 'coverage.json');
-  writeFileSync(outPath, JSON.stringify(out, null, 2) + '\n', 'utf8');
+  const expected = readMatrix(expectedPath);
+  const drift = describeDrift(expected, { generatedAt: '', ...computed });
 
   console.log('Coverage matrix:');
   for (const k of Object.keys(summary) as Outcome[]) console.log(`  ${k}: ${summary[k]}`);
   console.log('Recovery path breakdown:');
   for (const k of Object.keys(pathBreakdown) as RecoveryPath[]) console.log(`  ${k}: ${pathBreakdown[k]}`);
-  console.log(`  → ${outPath}`);
+
+  const outPath = resolve(__dirname, '..', 'coverage.json');
+  if (!checkOnly) {
+    // Preserve the timestamp when nothing moved, so re-running never produces
+    // a timestamp-only diff on a tracked file.
+    const out: Matrix = {
+      generatedAt: drift.length === 0 && expected ? expected.generatedAt : new Date().toISOString(),
+      ...computed,
+    };
+    writeFileSync(outPath, JSON.stringify(out, null, 2) + '\n', 'utf8');
+    console.log(`  → ${outPath}${drift.length === 0 ? ' (unchanged)' : ''}`);
+  }
+
+  if (drift.length > 0) {
+    console.error(`\nCoverage matrix drift vs ${expectedPath}:`);
+    for (const m of drift) console.error(m);
+    console.error(
+      checkOnly
+        ? '\nRe-run `pnpm --filter runar-decompiler run coverage` to refresh coverage.json, review the diff, and commit it.'
+        : '\ncoverage.json has been refreshed above — review the diff and commit it, then re-run to confirm green.',
+    );
+    process.exit(1);
+  }
 }
 
 main();
