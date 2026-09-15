@@ -88,11 +88,16 @@ maximum:
   decrement is a deliberate, reviewed line in the same commit. The pin only
   ever ratchets down.
 
-The current backlog is anchor rot in two independent dimensions at once: rows
-naming tests that were renamed away (`TestCLI_SP1FriIRGuard` is now
-`TestCLI_IRPath_RefusesUnsoundSP1FriVerifier`; `TestIntegrationCompiler` is now
-`TestTStoGoIntegration`), and bulk rows citing many lines under a single named
-`describe`. Both were invisible while the predicate matched on prose.
+**The pin is currently 0** — every skip in the corpus is anchored, so an
+un-anchored skip fails the build outright rather than joining a backlog.
+
+It was 58 when scope anchoring landed. That backlog was anchor rot in two
+independent dimensions at once: rows naming tests that had been renamed away
+(`TestCLI_SP1FriIRGuard` had become `TestCLI_IRPath_RefusesUnsoundSP1FriVerifier`,
+`TestIntegrationCompiler` had become `TestTStoGoIntegration`), and bulk rows
+citing many lines while naming a single `describe`. Both were invisible for as
+long as the predicate matched on prose, which is the reason to keep the pin at 0
+rather than let a new backlog accumulate.
 
 `scripts/audit-test-skips.py --self-test` pins the floors: an unrelated snippet
 must not pair, a row naming the wrong scope must not pair, a scope name that is
