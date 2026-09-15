@@ -121,11 +121,30 @@ const LOOP_POSITIVE_CONTROL = join(REPO, 'conformance/tests/bounded-loop/expecte
  */
 const METHOD_CALL_POSITIVE_CONTROL = join(REPO, 'conformance/tests/multi-method/expected-ir.json');
 
+/**
+ * The fourth control. `I24`-`I27` (N-132) are about a PROPERTY's
+ * `initialValue`, and none of the three goldens above carries one that the
+ * locking script pushes. `fixed-array-index` carries four, each of which does
+ * move bytes when edited; it has no `compilers` allowlist, and all six IR
+ * tiers emit `7891635a7b756778519c6301147b75677c529c63011e6701286868687c9c`
+ * for it.
+ *
+ * (`property-initializers` also has an `initialValue`, but its only bigint
+ * one is a mutable state field the locking script never pushes: changing it
+ * moves no bytes on any tier, so a probe derived from it would be graded
+ * against a control that never exercised the code path.)
+ */
+const PROPERTY_INIT_POSITIVE_CONTROL = join(
+  REPO,
+  'conformance/tests/fixed-array-index/expected-ir.json',
+);
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],
   ['bounded-loop', LOOP_POSITIVE_CONTROL],
   ['multi-method', METHOD_CALL_POSITIVE_CONTROL],
+  ['fixed-array-index', PROPERTY_INIT_POSITIVE_CONTROL],
 ];
 
 const fixtures = readdirSync(DIR)

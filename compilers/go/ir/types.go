@@ -379,12 +379,50 @@ func (v ANFValue) MarshalJSON() ([]byte, error) {
 // DecodeConstants walks the program and decodes the RawValue fields in
 // load_const bindings into their typed Go representations, and extracts
 // the value reference string for assert/update_prop kinds.
+//
+// N-132: it also decodes PROPERTY initial values, which it never used to walk
+// at all. `ANFProperty.InitialValue` has the same two-armed string encoding as
+// `load_const.value` — a `"…n"` decimal BigInt or a hex ByteString — but only
+// the load_const half of the rule was ever applied, so a `"42n"` initialValue
+// reached pushPropertyValue's hex arm and died on `invalid byte: U+006E 'n'`.
+// The TS reference compiler emits that shape for every bigint initializer it
+// writes, so Go could not consume TS-produced IR for any contract with one.
 func DecodeConstants(program *ANFProgram) error {
+	for pi := range program.Properties {
+		if err := decodePropertyInitialValue(&program.Properties[pi]); err != nil {
+			return fmt.Errorf("property %s: %w", program.Properties[pi].Name, err)
+		}
+	}
 	for mi := range program.Methods {
 		if err := decodeBindings(program.Methods[mi].Body); err != nil {
 			return fmt.Errorf("method %s: %w", program.Methods[mi].Name, err)
 		}
 	}
+	return nil
+}
+
+// decodePropertyInitialValue turns a `"<decimal>n"` InitialValue into a
+// *big.Int, which pushPropertyValue already handles. Every other shape is left
+// exactly as json.Unmarshal produced it: a string without the suffix is a hex
+// ByteString (and `"3030"` must stay two bytes rather than becoming the number
+// 3030), a bool is a bool, a number is a number.
+//
+// isDecimalBigIntLiteral is the same discriminator decodeConstValue uses, so a
+// value means the same thing in both positions by construction rather than by
+// two implementations agreeing.
+func decodePropertyInitialValue(p *ANFProperty) error {
+	s, ok := p.InitialValue.(string)
+	if !ok || !isDecimalBigIntLiteral(s) {
+		return nil
+	}
+	bi := new(big.Int)
+	if _, ok := bi.SetString(s[:len(s)-1], 10); !ok {
+		// Unreachable via isDecimalBigIntLiteral (it has already checked the
+		// body is all ASCII digits), but a decoder that cannot fail is how the
+		// wrong number gets into a locking script — so it fails.
+		return fmt.Errorf("initialValue %q: not a decimal integer", s)
+	}
+	p.InitialValue = bi
 	return nil
 }
 

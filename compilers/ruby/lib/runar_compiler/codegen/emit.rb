@@ -359,11 +359,25 @@ module RunarCompiler
       bytes_str.unpack1("H*")
     end
 
-    # Convert a hex string to a binary string.
+    # Convert a hex string to a binary string, STRICTLY.
     #
-    # @param hex_str [String] hex-encoded string
+    # N-132. This is the SECOND definition of +RunarCompiler::Codegen.hex_to_bytes+
+    # in the tier — +codegen/stack.rb+ defines the same method on the same module,
+    # so whichever file loads last silently wins. Both are kept strict and
+    # identical rather than one being deleted, because which one is live depends
+    # on a require order that neither file states; a one-sided fix would be
+    # correct only by luck. See the note on the stack.rb copy for what +pack+
+    # does with a malformed input and why that reached a locking script.
+    #
+    # @param hex_str [String] hex-encoded string, even length, hex digits only
     # @return [String] binary string
+    # @raise [ArgumentError] if +hex_str+ is not well-formed hex
     def self.hex_to_bytes(hex_str)
+      unless hex_str.length.even?
+        raise ArgumentError, "invalid hex string length: #{hex_str.length}"
+      end
+      raise ArgumentError, "invalid hex string: #{hex_str.inspect}" unless hex_str.match?(/\A[0-9a-fA-F]*\z/)
+
       [hex_str].pack("H*")
     end
 

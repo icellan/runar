@@ -1,0 +1,243 @@
+{
+  "contractName": "ArrayIndex",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "i"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "bin_op",
+            "left": "t0",
+            "op": "===",
+            "right": "t1"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "cond": "t2",
+            "else": [
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_param",
+                  "name": "i"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t6",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t4",
+                  "op": "===",
+                  "right": "t5"
+                }
+              },
+              {
+                "name": "t14",
+                "value": {
+                  "cond": "t6",
+                  "else": [
+                    {
+                      "name": "t8",
+                      "value": {
+                        "kind": "load_param",
+                        "name": "i"
+                      }
+                    },
+                    {
+                      "name": "t9",
+                      "value": {
+                        "kind": "load_const",
+                        "value": 2
+                      }
+                    },
+                    {
+                      "name": "t10",
+                      "value": {
+                        "kind": "bin_op",
+                        "left": "t8",
+                        "op": "===",
+                        "right": "t9"
+                      }
+                    },
+                    {
+                      "name": "t13",
+                      "value": {
+                        "cond": "t10",
+                        "else": [
+                          {
+                            "name": "t12",
+                            "value": {
+                              "kind": "load_prop",
+                              "name": "table__3"
+                            }
+                          }
+                        ],
+                        "kind": "if",
+                        "then": [
+                          {
+                            "name": "t11",
+                            "value": {
+                              "kind": "load_prop",
+                              "name": "table__2"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t7",
+                      "value": {
+                        "kind": "load_prop",
+                        "name": "table__1"
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "table__0"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "bin_op",
+            "left": "t15",
+            "op": "===",
+            "right": "t16"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "assert",
+            "value": "t17"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "lookup",
+      "params": [
+        {
+          "name": "i",
+          "type": "bigint"
+        },
+        {
+          "name": "expected",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "initialValue": "1.5n",
+      "name": "table__0",
+      "readonly": true,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 0,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    },
+    {
+      "initialValue": 20,
+      "name": "table__1",
+      "readonly": true,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 1,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    },
+    {
+      "initialValue": 30,
+      "name": "table__2",
+      "readonly": true,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 2,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    },
+    {
+      "initialValue": 40,
+      "name": "table__3",
+      "readonly": true,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 3,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    }
+  ]
+}

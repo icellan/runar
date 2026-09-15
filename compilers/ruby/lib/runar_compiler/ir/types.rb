@@ -417,12 +417,37 @@ module RunarCompiler
     end
     private_class_method :_anf_param_from_hash
 
+    # Decode +ANFProperty.initialValue+ (N-132).
+    #
+    # The string arm carries two different things and the discriminator is the
+    # trailing +n+, exactly as it is for +load_const.value+:
+    #
+    #   "42n"       a decimal bigint -> 42
+    #   "deadbeef"  a hex ByteString -> "\xde\xad\xbe\xef"
+    #
+    # Only the load_const half of that rule was ever applied, so every string
+    # initialValue went to the hex arm — where +pack("H*")+ does not fail on a
+    # non-hex character, it maps it to +(c & 15) + (c >> 6) * 9+. "42n" came out
+    # as the bytes 0x42 0x70, which is neither of the two things it could have
+    # meant. The TS reference compiler writes "42n" for every bigint property
+    # initializer it emits, so that was the common case, not an edge case.
+    #
+    # Everything else is returned untouched: a string without the suffix stays a
+    # hex ByteString ("3030" is two bytes, not the number 3030), a boolean stays
+    # a boolean, a number stays a number.
+    def self._decode_property_initial_value(raw)
+      return raw[0..-2].to_i if decimal_bigint_literal?(raw)
+
+      raw
+    end
+    private_class_method :_decode_property_initial_value
+
     def self._anf_property_from_hash(d)
       ANFProperty.new(
         name: d.fetch("name", ""),
         type: d.fetch("type", ""),
         readonly: d.fetch("readonly", false),
-        initial_value: d["initialValue"],
+        initial_value: _decode_property_initial_value(d["initialValue"]),
         # N-095: this key is what the artifact assembler regroups expanded
         # FixedArray leaves by. Dropping it here made Ruby unable to read back
         # an ANF it had just written: same script bytes, but the SDK saw four

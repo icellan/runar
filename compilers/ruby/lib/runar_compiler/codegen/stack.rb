@@ -512,9 +512,35 @@ module RunarCompiler::Codegen
     { kind: "bigint", big_int: n }
   end
 
-  # @param h [String] hex string
+  # Decode a hex string into a binary string, STRICTLY.
+  #
+  # N-132: this used to be a bare +[h].pack("H*")+, which cannot fail. +pack+
+  # maps a non-hex character to +(c & 15) + (c >> 6) * 9+ and pads a dangling
+  # nibble with a zero, so it answered every input with SOME bytes:
+  #
+  #   "42n" -> 0x42 0x70    ('n' is 0x6e; 0x6e & 15 = 14, + 9 = 23, << 4 = 0x70)
+  #   "zz"  -> 0x33
+  #   "5"   -> 0x50
+  #
+  # Those bytes went straight into a locking script. Go, Python, Zig and Java
+  # all refuse the same inputs, so Ruby was the only tier emitting them — the
+  # divergence was invisible precisely because a decoder that always succeeds
+  # never shows up as an error anywhere.
+  #
+  # Both call sites (a property's initialValue and a load_const ByteString) want
+  # the strict reading, and there is no third caller.
+  #
+  # +codegen/emit.rb+ defines this SAME method on this SAME module, so whichever
+  # file loads last wins. Both copies are strict and identical; fixing only one
+  # would be correct only by whichever require order happens to hold.
+  #
+  # @param h [String] hex string, even length, hex digits only
   # @return [String] binary string
+  # @raise [ArgumentError] if +h+ is not well-formed hex
   def self.hex_to_bytes(h)
+    raise ArgumentError, "invalid hex string length: #{h.length}" unless h.length.even?
+    raise ArgumentError, "invalid hex string: #{h.inspect}" unless h.match?(/\A[0-9a-fA-F]*\z/)
+
     [h].pack("H*")
   end
 

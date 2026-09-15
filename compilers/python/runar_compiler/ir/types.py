@@ -420,13 +420,37 @@ def _anf_param_from_dict(d: dict[str, Any]) -> ANFParam:
     return ANFParam(name=d.get("name", ""), type=d.get("type", ""))
 
 
+def _decode_property_initial_value(raw: Any) -> Any:
+    """Decode ``ANFProperty.initialValue`` (N-132).
+
+    The string arm carries two different things and the discriminator is the
+    trailing ``n``, exactly as it is for ``load_const.value``::
+
+        "42n"       a decimal bigint -> 42
+        "deadbeef"  a hex ByteString -> b"\\xde\\xad\\xbe\\xef"
+
+    Only the load_const half of that rule was ever applied. A ``"42n"``
+    initialValue therefore reached ``_push_property_value``'s hex arm and died
+    on ``non-hexadecimal number found in fromhex()`` — and the TS reference
+    compiler emits that shape for EVERY bigint property initializer it writes,
+    so this tier could not consume TS-produced IR for any contract with one.
+
+    Everything else is returned untouched: a string without the suffix stays a
+    hex ByteString (``"3030"`` is two bytes, not the number 3030), a bool stays
+    a bool, a number stays a number.
+    """
+    if isinstance(raw, str) and _is_decimal_bigint_literal(raw):
+        return int(raw[:-1])
+    return raw
+
+
 def _anf_property_from_dict(d: dict[str, Any]) -> ANFProperty:
     """Build an ``ANFProperty`` from a raw JSON dict."""
     return ANFProperty(
         name=d.get("name", ""),
         type=d.get("type", ""),
         readonly=d.get("readonly", False),
-        initial_value=d.get("initialValue"),
+        initial_value=_decode_property_initial_value(d.get("initialValue")),
         # N-095: the wire spelling is `syntheticArrayChain` (Go's, and the one
         # `$defs.ANFProperty` declares). Reading only `__syntheticArrayChain`
         # meant this loader could regroup Rust's ANF and nobody else's — not

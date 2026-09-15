@@ -6391,6 +6391,22 @@ fn lower_method_with_private_methods(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Decode a hex string into bytes, STRICTLY.
+///
+/// N-132: the length check was already here, but each pair was then decoded
+/// with `u8::from_str_radix(..).unwrap_or(0)` — so a pair that is not hex
+/// became `0x00` and the function could not fail. Measured on a property's
+/// `initialValue`, where the two callers are: `"zz"` pushed `0x00` and
+/// `"1.5n"` pushed `0x0000`, while go, python, zig and java all refused both.
+/// Bytes in a locking script that the IR did not contain, arrived at by a
+/// decoder with no failure mode — the same shape as the float boundary
+/// (N-131), in the one decoder nobody audited because a bad hex string looks
+/// obviously bad.
+///
+/// Panicking rather than returning `Result` matches the length check directly
+/// above and the rest of this pass: `compile_from_ir_str` wraps stack lowering
+/// in `catch_unwind`, so the refusal reaches the CLI as `Compilation error:
+/// stack lowering: …` and exit 1, exactly as the odd-length case already did.
 fn hex_to_bytes(hex_str: &str) -> Vec<u8> {
     if hex_str.is_empty() {
         return Vec::new();
@@ -6402,7 +6418,10 @@ fn hex_to_bytes(hex_str: &str) -> Vec<u8> {
     );
     (0..hex_str.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap_or(0))
+        .map(|i| {
+            u8::from_str_radix(&hex_str[i..i + 2], 16)
+                .unwrap_or_else(|_| panic!("invalid hex string: {hex_str}"))
+        })
         .collect()
 }
 
