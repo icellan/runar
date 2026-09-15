@@ -59,8 +59,34 @@ public final class StateSerializer {
     /**
      * Deserialises state from the raw hex bytes between the OP_RETURN
      * separator and the end of the script.
+     *
+     * <p>FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out
+     * of a locking script any third party can construct, so it is untrusted
+     * input, and the caller then builds and SIGNS a continuation output
+     * committing to the restored state. A state section that does not describe
+     * EXACTLY {@code fields} is rejected:
+     *
+     * <ul>
+     *   <li>truncation — a field running past the end of the blob throws
+     *       {@link IllegalArgumentException}. Every arm used to be a bare
+     *       {@code hex.substring(offset, offset + N)} that threw a raw
+     *       {@link StringIndexOutOfBoundsException} instead: a JDK bounds error
+     *       escaping the SDK on attacker-controlled input, not a refusal.</li>
+     *   <li>overlong tails — bytes left over after the last declared field
+     *       throw instead of being silently dropped.</li>
+     * </ul>
+     *
+     * <p>Restoring wrong-but-plausible state from a corrupted continuation is
+     * worse than not restoring it at all.
+     *
+     * @throws IllegalArgumentException if the blob does not match {@code fields} exactly
      */
     public static Map<String, Object> deserialize(List<StateField> fields, String scriptHex) {
+        if (scriptHex.length() % 2 != 0) {
+            throw new IllegalArgumentException(
+                "deserializeState: state blob is " + scriptHex.length()
+                    + " hex chars — not a whole number of bytes");
+        }
         List<StateField> sorted = new ArrayList<>(fields);
         sorted.sort(Comparator.comparingInt(StateField::index));
         Map<String, Object> out = new LinkedHashMap<>();
@@ -72,13 +98,19 @@ public final class StateSerializer {
                 int total = f.fixedArray().syntheticNames().size();
                 List<Object> flat = new ArrayList<>(total);
                 for (int i = 0; i < total; i++) {
-                    Object v = decodeStateValue(scriptHex, offset, leafType);
-                    flat.add(v);
+                    flat.add(decodeStateValue(scriptHex, offset, leafType, f.name() + "[" + i + "]"));
                 }
                 out.put(f.name(), regroupNestedValue(flat, dims));
             } else {
-                out.put(f.name(), decodeStateValue(scriptHex, offset, f.type()));
+                out.put(f.name(), decodeStateValue(scriptHex, offset, f.type(), f.name()));
             }
+        }
+        if (offset[0] != scriptHex.length()) {
+            throw new IllegalArgumentException(String.format(
+                "deserializeState: %d unexpected trailing byte(s) after the last state field "
+                    + "(consumed %d of %d bytes) — the state section does not match the "
+                    + "artifact's stateFields",
+                (scriptHex.length() - offset[0]) / 2, offset[0] / 2, scriptHex.length() / 2));
         }
         return out;
     }
@@ -113,8 +145,23 @@ public final class StateSerializer {
             // constructors hard-assert those widths and all seven compilers emit
             // them as fixed raw slices; framing them instead deploys a state
             // section 1-2 bytes long and the first spend fails.
-            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point" ->
-                    String.valueOf(value);
+            //
+            // A MISSING value is refused rather than formatted.
+            // String.valueOf(null) is "null", which is not hex — and the other
+            // six SDKs each invented a DIFFERENT non-hex placeholder for the
+            // same mistake (Go "<nil>", TS "undefined", Python/Ruby ""), a
+            // silent byte divergence on a path whose bytes are committed on
+            // chain. Refusing is the only answer that is the same in every tier.
+            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point" -> {
+                if (value == null) {
+                    throw new IllegalArgumentException(String.format(
+                        "serializeState: state field \"%s\" (%s) has no value. Writing a "
+                            + "placeholder would deploy a state section the contract's own "
+                            + "on-chain reader cannot parse, leaving the output unspendable",
+                        label, fieldType));
+                }
+                yield String.valueOf(value);
+            }
             default -> {
                 String hex = String.valueOf(value);
                 if (hex.isEmpty()) yield "00";
@@ -177,53 +224,51 @@ public final class StateSerializer {
     // Decoding
     // ------------------------------------------------------------------
 
-    static Object decodeStateValue(String hex, int[] offset, String fieldType) {
+    /**
+     * Fixed on-wire width of a state field type in bytes, or {@code null} if the
+     * type is variable-width. The single table {@code encodeStateValue}'s raw
+     * branch and {@code decodeStateValue}'s bounds check both read, so the
+     * writer and the reader cannot drift.
+     */
+    static Integer stateFieldByteWidth(String fieldType) {
         return switch (fieldType) {
-            // Both spellings, matching encodeStateValue — a reader that knows only
-            // "bool" walks a real boolean field as push data and desynchronises
-            // every field after it.
-            case "bool", "boolean" -> {
-                boolean b = !"00".equals(hex.substring(offset[0], offset[0] + 2));
-                offset[0] += 2;
-                yield b;
-            }
-            case "int", "bigint" -> {
-                int hexWidth = 8 * 2;
-                BigInteger v = decodeNum2Bin(hex.substring(offset[0], offset[0] + hexWidth));
-                offset[0] += hexWidth;
-                yield v;
-            }
-            case "PubKey" -> {
-                String s = hex.substring(offset[0], offset[0] + 66);
-                offset[0] += 66;
-                yield s;
-            }
-            case "Addr", "Ripemd160" -> {
-                String s = hex.substring(offset[0], offset[0] + 40);
-                offset[0] += 40;
-                yield s;
-            }
-            case "Sha256" -> {
-                String s = hex.substring(offset[0], offset[0] + 64);
-                offset[0] += 64;
-                yield s;
-            }
-            case "Point", "P256Point" -> {
-                String s = hex.substring(offset[0], offset[0] + 128);
-                offset[0] += 128;
-                yield s;
-            }
-            case "P384Point" -> {
-                String s = hex.substring(offset[0], offset[0] + 192);
-                offset[0] += 192;
-                yield s;
-            }
-            default -> {
-                ScriptUtils.DecodedPush dp = ScriptUtils.decodePushDataState(hex, offset[0]);
-                offset[0] += dp.hexCharsConsumed();
-                yield dp.dataHex();
-            }
+            case "bool", "boolean" -> 1;
+            case "int", "bigint" -> 8;
+            case "PubKey" -> 33;
+            case "Addr", "Ripemd160" -> 20;
+            case "Sha256" -> 32;
+            case "Point", "P256Point" -> 64;
+            case "P384Point" -> 96;
+            default -> null;
         };
+    }
+
+    static Object decodeStateValue(String hex, int[] offset, String fieldType, String label) {
+        Integer width = stateFieldByteWidth(fieldType);
+        if (width == null) {
+            // Variable-length / unknown types: push-data decoding.
+            ScriptUtils.DecodedPush dp = ScriptUtils.decodePushDataState(hex, offset[0]);
+            offset[0] += dp.hexCharsConsumed();
+            return dp.dataHex();
+        }
+        int hexWidth = width * 2;
+        if (offset[0] + hexWidth > hex.length()) {
+            throw new IllegalArgumentException(String.format(
+                "deserializeState: truncated state — field \"%s\" (%s) needs %d byte(s) at "
+                    + "offset %d but only %d byte(s) remain",
+                label, fieldType, width, offset[0] / 2,
+                Math.max(0, hex.length() - offset[0]) / 2));
+        }
+        String data = hex.substring(offset[0], offset[0] + hexWidth);
+        offset[0] += hexWidth;
+        // Both spellings, matching encodeStateValue — a reader that knows only
+        // "bool" walks a real boolean field as push data and desynchronises
+        // every field after it.
+        if (fieldType.equals("bool") || fieldType.equals("boolean")) return !"00".equals(data);
+        // 8 raw bytes LE sign-magnitude (NUM2BIN 8).
+        if (fieldType.equals("int") || fieldType.equals("bigint")) return decodeNum2Bin(data);
+        // Raw fixed-size byte types.
+        return data;
     }
 
     static BigInteger decodeNum2Bin(String hex) {
