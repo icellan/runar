@@ -124,11 +124,17 @@ export class Probe extends SmartContract {
   describe('controls: correct-arity calls compile byte-unchanged', () => {
     // sha256 of the emitted locking-script hex, captured before the guard
     // landed. A moved digest means the guard changed codegen — it must not.
+    //
+    // The four EC digests were RE-STAMPED for R-052 / CL-BUG-095 (the Point
+    // width gate), which deliberately moves those four primitives' bytes. The
+    // five non-EC digests below are the CONTROL and are byte-unchanged, which
+    // is the evidence that the width gate stayed inside the EC / P-256 / P-384
+    // families and did not leak into bn254 / BabyBear / KoalaBear codegen.
     const BASELINE: Record<string, string> = {
-      ecAdd: 'eeb0b1bbe950c4e6b51fc5d35aff41c5b871fb97f19107206248cf3df20f7692',
-      ecPointX: 'c34d6cd025cc8366bed3ba030b0113bede0d087cf40a67eca87823a4f36c7b40',
-      p256Add: '1fc4e34e47758182075d2c275d7cf94e5b7370c82d20b5e79075388474a5ae1e',
-      p384Negate: '970edd05d3a3fbf9fd95cd15de50aee97c048c75628e9a3711466835c32ea33e',
+      ecAdd: 'ae0f63e92b902bbdcddb868b7c0e582fcdfd10662a1f91377a95dfe6f31e0d69',
+      ecPointX: '4579847d2e40a84e69f14ae1f87da077e6937a0aa405d93a0e309cd2edd8c191',
+      p256Add: '36f386bd33c84bc5c5627aa74d527fb1cbe511f8c563c72366ac14fda2e9d855',
+      p384Negate: '4eaadee61ca624f2e3eee766e30d3872f27e9e07eddbe1c5693e512a0030b1a8',
       bn254FieldAdd: 'fe9e984bb631a254e07b304b081a5cc3b0ebe6394302ef48c52e27340c75ca97',
       bn254FieldNeg: '354ac5ea0ab4cb6d88ec17b91b1ae01cc58428414b1f32994e803e93d4457d4e',
       bbFieldAdd: '5b5df5087f008f98f854e17fa41afef1444c6dc41dc97f2ab2740754bcb56f63',

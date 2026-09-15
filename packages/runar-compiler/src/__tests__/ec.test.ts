@@ -251,16 +251,36 @@ describe('EC builtins — op-count goldens (T-11)', () => {
     // 8202 -> 8223 (+21): and it now detects P == -Q (px == qx but py != qy)
     // and forces the all-zero point, instead of taking the tangent and
     // returning an on-curve, plausible, WRONG 2P. +21 bytes of script.
-    ['ecAdd',              emitEcAdd,                8223],
-    ['ecMul',              emitEcMul,              130515],
-    ['ecMulGen',           emitEcMulGen,           130517],
-    ['ecNegate',           emitEcNegate,              945],
-    ['ecOnCurve',          emitEcOnCurve,             533],
+    //
+    // R-052 / CL-BUG-095, the Point WIDTH gate. A `Point` is 64 bytes by
+    // definition and nothing checked it, so a surplus byte was split off and
+    // silently dropped: `ecOnCurve(G || 0xff)` returned TRUE and
+    // `ecEncodeCompressed` took its parity bit from the caller's extra byte.
+    // The deltas below are all structural, which is what makes them portable
+    // to the six other tiers byte-for-byte:
+    //
+    //   +3  per decomposePoint call site — OP_SIZE, push 64, OP_NUMEQUALVERIFY.
+    //       ecAdd decomposes TWICE, hence +6; ecMul / ecMulGen / ecNegate once.
+    //   +15 ecOnCurve — 9 for the clamp-and-flag gate (it must stay a PREDICATE
+    //       and answer `false`, not abort, or `if (ecOnCurve(p))` stops being
+    //       writable), +3 for the decomposePoint gate, +1 for the extra
+    //       OP_BOOLAND folding `_len_ok` in, +2 for rolling the two flags up.
+    //   +3  ecPointX / ecPointY.
+    //
+    // ecEncodeCompressed stays at 16 and that is NOT an oversight: the gate
+    // adds 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
+    // replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence with 3.
+    // Net zero ops, different bytes.
+    ['ecAdd',              emitEcAdd,                8229],
+    ['ecMul',              emitEcMul,              130518],
+    ['ecMulGen',           emitEcMulGen,           130520],
+    ['ecNegate',           emitEcNegate,              948],
+    ['ecOnCurve',          emitEcOnCurve,             548],
     ['ecModReduce',        emitEcModReduce,             8],
     ['ecEncodeCompressed', emitEcEncodeCompressed,     16],
     ['ecMakePoint',        emitEcMakePoint,           467],
-    ['ecPointX',           emitEcPointX,              233],
-    ['ecPointY',           emitEcPointY,              234],
+    ['ecPointX',           emitEcPointX,              236],
+    ['ecPointY',           emitEcPointY,              237],
   ];
 
   for (const [name, fn, expected] of goldens) {

@@ -499,10 +499,27 @@ fn emitUnsignedNumToBeBytes(t: *NistTracker, coord_bytes: usize) !void {
 // Point decompose / compose
 // ===========================================================================
 
+/// CL-BUG-095 — width gate for a point argument, ABORTING form.
+///
+/// A P256Point/P384Point is exactly `2*coord_bytes` bytes (x ‖ y, big-endian,
+/// no prefix) and nothing checked it, so surplus bytes were split off and
+/// silently dropped. Aborting is right for every consumer that produces a VALUE
+/// and has no error channel to report through; the on-curve PREDICATES use the
+/// clamping `emitLengthGate` instead, because for them "no" is an answer. See
+/// `emitPointLenVerify` in ec_emitters.zig for the full argument.
+fn emitPointLenVerify(t: *NistTracker, want: usize) !void {
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushInt(@intCast(want));
+    try t.emitOpcode("OP_NUMEQUALVERIFY");
+}
+
 fn decomposePoint(t: *NistTracker, point_name: []const u8, x_name: []const u8, y_name: []const u8) !void {
     const cb = t.params.coord_bytes;
     try t.toTop(point_name);
     t.popNames(1);
+    // CL-BUG-095: gate the width here, where every consumer that decomposes a
+    // point picks it up.
+    try emitPointLenVerify(t, cb * 2);
     try t.emitPushInt(@intCast(cb));
     try t.emitOpcode("OP_SPLIT");
     try t.names.append(t.allocator, "_dp_xb");
@@ -1875,6 +1892,10 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p256_on_curve => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p256_params);
             errdefer t.deinit();
+            // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+            // contracts are told to gate an untrusted point on, so it must stay
+            // total. The flag is ANDed into the result below.
+            try emitLengthGate(&t, "_pt", p256_params.coord_bytes * 2, "_len_ok");
             try decomposePoint(&t, "_pt", "_x", "_y");
             try emitCanonicityGuard(&t, "_x", "_y", p256_field_p_be[0..]);
             try fieldSqr(&t, "_y", p256_field_p_be[0..], "_y2");
@@ -1891,9 +1912,14 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             t.popNames(2);
             try t.emitOpcode("OP_EQUAL");
             try t.names.append(t.allocator, "_curve_eq");
-            // on-curve = canonical AND curve-equation
+            // on-curve = right width AND canonical AND curve-equation
             try t.toTop("_canon");
             try t.toTop("_curve_eq");
+            t.popNames(2);
+            try t.emitOpcode("OP_BOOLAND");
+            try t.names.append(t.allocator, "_eq_ok");
+            try t.toTop("_len_ok");
+            try t.toTop("_eq_ok");
             t.popNames(2);
             try t.emitOpcode("OP_BOOLAND");
             try t.names.append(t.allocator, "_result");
@@ -1902,31 +1928,30 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p256_encode_compressed => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p256_params);
             errdefer t.deinit();
-            // Split at 32: [x_bytes, y_bytes]
+            // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so
+            // one appended byte flipped the sign of the compressed encoding.
+            // Width is now verified AND the parity byte is read from a fixed
+            // offset. See appendEcEncodeCompressed in crypto_emitters.zig for the
+            // full argument.
             try t.toTop("_pt");
             t.popNames(1);
+            try emitPointLenVerify(&t, 64);
+            // Split at 32: [x_bytes, y_bytes]
             try t.emitPushInt(32);
             try t.emitOpcode("OP_SPLIT");
             try t.names.append(t.allocator, "_x_bytes");
             try t.names.append(t.allocator, "_y_bytes");
-            // Get last byte of y for parity
+            // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
             try t.toTop("_y_bytes");
             t.popNames(1);
-            try t.emitOpcode("OP_SIZE");
-            try t.emitPushInt(1);
-            try t.emitOpcode("OP_SUB");
+            try t.emitPushInt(31);
             try t.emitOpcode("OP_SPLIT");
-            try t.names.append(t.allocator, "_y_prefix");
-            try t.names.append(t.allocator, "_last_byte");
-            // Parity
-            try t.toTop("_last_byte");
-            t.popNames(1);
+            try t.emitOpcode("OP_NIP"); // drop y_head
+            // Stack: [x_bytes, last_byte]
             try t.emitOpcode("OP_BIN2NUM");
             try t.emitPushInt(2);
             try t.emitOpcode("OP_MOD");
             try t.names.append(t.allocator, "_parity");
-            try t.toTop("_y_prefix");
-            try t.drop();
             // [x_bytes, parity]
             const then_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x03} } }});
             errdefer t.allocator.free(then_ops);
@@ -1988,6 +2013,10 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p384_on_curve => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p384_params);
             errdefer t.deinit();
+            // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+            // contracts are told to gate an untrusted point on, so it must stay
+            // total. The flag is ANDed into the result below.
+            try emitLengthGate(&t, "_pt", p384_params.coord_bytes * 2, "_len_ok");
             try decomposePoint(&t, "_pt", "_x", "_y");
             try emitCanonicityGuard(&t, "_x", "_y", p384_field_p_be[0..]);
             try fieldSqr(&t, "_y", p384_field_p_be[0..], "_y2");
@@ -2004,9 +2033,14 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             t.popNames(2);
             try t.emitOpcode("OP_EQUAL");
             try t.names.append(t.allocator, "_curve_eq");
-            // on-curve = canonical AND curve-equation
+            // on-curve = right width AND canonical AND curve-equation
             try t.toTop("_canon");
             try t.toTop("_curve_eq");
+            t.popNames(2);
+            try t.emitOpcode("OP_BOOLAND");
+            try t.names.append(t.allocator, "_eq_ok");
+            try t.toTop("_len_ok");
+            try t.toTop("_eq_ok");
             t.popNames(2);
             try t.emitOpcode("OP_BOOLAND");
             try t.names.append(t.allocator, "_result");
@@ -2015,31 +2049,30 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p384_encode_compressed => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p384_params);
             errdefer t.deinit();
-            // Split at 48: [x_bytes, y_bytes]
+            // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so
+            // one appended byte flipped the sign of the compressed encoding.
+            // Width is now verified AND the parity byte is read from a fixed
+            // offset. See appendEcEncodeCompressed in crypto_emitters.zig for the
+            // full argument.
             try t.toTop("_pt");
             t.popNames(1);
+            try emitPointLenVerify(&t, 96);
+            // Split at 48: [x_bytes, y_bytes]
             try t.emitPushInt(48);
             try t.emitOpcode("OP_SPLIT");
             try t.names.append(t.allocator, "_x_bytes");
             try t.names.append(t.allocator, "_y_bytes");
-            // Get last byte of y for parity
+            // Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
             try t.toTop("_y_bytes");
             t.popNames(1);
-            try t.emitOpcode("OP_SIZE");
-            try t.emitPushInt(1);
-            try t.emitOpcode("OP_SUB");
+            try t.emitPushInt(47);
             try t.emitOpcode("OP_SPLIT");
-            try t.names.append(t.allocator, "_y_prefix");
-            try t.names.append(t.allocator, "_last_byte");
-            // Parity
-            try t.toTop("_last_byte");
-            t.popNames(1);
+            try t.emitOpcode("OP_NIP"); // drop y_head
+            // Stack: [x_bytes, last_byte]
             try t.emitOpcode("OP_BIN2NUM");
             try t.emitPushInt(2);
             try t.emitOpcode("OP_MOD");
             try t.names.append(t.allocator, "_parity");
-            try t.toTop("_y_prefix");
-            try t.drop();
             // [x_bytes, parity]
             const then_ops = try t.allocator.dupe(StackOp, &.{StackOp{ .push = .{ .bytes = &.{0x03} } }});
             errdefer t.allocator.free(then_ops);
@@ -2115,16 +2148,16 @@ test "nist_ec helper op-count goldens" {
     // +225 / +306 bytes) but carry no op-count golden here — the conformance
     // hex is their gate.
     const cases = .{
-        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6639) },
-        .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129192) },
-        .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129194) },
-        .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 945) },
-        .{ registry.CryptoBuiltin.p256_on_curve, "p256OnCurve", @as(usize, 555) },
+        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6645) },
+        .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129195) },
+        .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129197) },
+        .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 948) },
+        .{ registry.CryptoBuiltin.p256_on_curve, "p256OnCurve", @as(usize, 570) },
         .{ registry.CryptoBuiltin.p256_encode_compressed, "p256EncodeCompressed", @as(usize, 16) },
-        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11445) },
-        .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 194958) },
-        .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 194960) },
-        .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1393) },
+        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11451) },
+        .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 194961) },
+        .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 194963) },
+        .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1396) },
     };
     inline for (cases) |c| {
         var bundle = try buildBuiltinOps(std.testing.allocator, c[0]);

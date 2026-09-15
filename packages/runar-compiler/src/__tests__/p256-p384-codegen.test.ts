@@ -106,21 +106,43 @@ describe('NIST P-256 / P-384 codegen — op-count goldens (T-006)', () => {
   //   see. In bytes it is +225 (P-256) / +306 (P-384) standalone, the gap being
   //   the wider n pushes (2 x 48 vs 2 x 32 bytes) and the wider clamp pads
   //   (96 + 49 vs 64 + 33) — 0.023% / 0.015% of the whole script.
+  // Third move, R-052 / CL-BUG-095 — the Point WIDTH gate. A P256Point is 64
+  // bytes and a P384Point is 96, by definition, and NOTHING checked either, so
+  // `p256OnCurve(G || 0xff)` returned TRUE and `pNNNEncodeCompressed` took its
+  // parity bit from the caller's appended byte. Every delta is curve-
+  // INDEPENDENT, which is what makes it a structural gate rather than a
+  // per-bit loop — the two curves pay exactly the same:
+  //
+  //   pNNNAdd             +6  — two cDecomposePoint call sites, 3 ops each
+  //                             (OP_SIZE, push 2*coordBytes, OP_NUMEQUALVERIFY).
+  //   pNNNMul/MulGen/Negate +3 — one call site.
+  //   pNNNOnCurve        +15  — 9 for the clamp-and-flag gate, 3 for the
+  //                             cDecomposePoint gate, 1 for the OP_BOOLAND
+  //                             folding `_len_ok` into the verdict, 2 for the
+  //                             rolls. It CLAMPS rather than aborts because it
+  //                             is the predicate contracts gate untrusted
+  //                             points on; `false` is the right answer.
+  //   verifyECDSA_PNNN   +12  — four internal cDecomposePoint call sites.
+  //
+  // pNNNEncodeCompressed stays at 16: +3 for the gate, -3 because the fixed-
+  // offset parity read (push coordBytes-1, OP_SPLIT, OP_NIP) replaces a 6-op
+  // OP_SIZE/push/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence. Net zero ops,
+  // different bytes.
   const goldens: Array<[name: string, fn: (emit: (op: StackOp) => void) => void, expected: number]> = [
-    ['p256Add',               emitP256Add,                6663],
-    ['p256Mul',               emitP256Mul,              140036],
-    ['p256MulGen',            emitP256MulGen,           140038],
-    ['p256Negate',            emitP256Negate,              945],
-    ['p256OnCurve',           emitP256OnCurve,             559],
+    ['p256Add',               emitP256Add,                6669],
+    ['p256Mul',               emitP256Mul,              140039],
+    ['p256MulGen',            emitP256MulGen,           140041],
+    ['p256Negate',            emitP256Negate,              948],
+    ['p256OnCurve',           emitP256OnCurve,             574],
     ['p256EncodeCompressed',  emitP256EncodeCompressed,     16],
-    ['verifyECDSA_P256',      emitVerifyECDSA_P256,     297331],
-    ['p384Add',               emitP384Add,               11469],
-    ['p384Mul',               emitP384Mul,              211178],
-    ['p384MulGen',            emitP384MulGen,           211180],
-    ['p384Negate',            emitP384Negate,             1393],
-    ['p384OnCurve',           emitP384OnCurve,             783],
+    ['verifyECDSA_P256',      emitVerifyECDSA_P256,     297343],
+    ['p384Add',               emitP384Add,               11475],
+    ['p384Mul',               emitP384Mul,              211181],
+    ['p384MulGen',            emitP384MulGen,           211183],
+    ['p384Negate',            emitP384Negate,             1396],
+    ['p384OnCurve',           emitP384OnCurve,             798],
     ['p384EncodeCompressed',  emitP384EncodeCompressed,     16],
-    ['verifyECDSA_P384',      emitVerifyECDSA_P384,     453307],
+    ['verifyECDSA_P384',      emitVerifyECDSA_P384,     453319],
   ];
 
   for (const [name, fn, expected] of goldens) {

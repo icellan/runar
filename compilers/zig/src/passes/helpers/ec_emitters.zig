@@ -556,9 +556,75 @@ fn fieldInv(t: *ECTracker, a_name: []const u8, result_name: []const u8) !void {
     t.renameTop(result_name);
 }
 
+/// CL-BUG-095 — length gate for a `Point` argument, ABORTING form.
+///
+/// A `Point` is DEFINED as exactly `want` bytes (x ‖ y, big-endian, no prefix).
+/// Nothing checked that: `Point` carries no width in the builtin table, and
+/// every one of these values arrives as an unlock argument, so the blob is
+/// attacker-sized. Surplus bytes were then silently DISCARDED, because
+/// `decomposePoint` splits at the coordinate width and `emitReverse32Raw`
+/// reverses exactly 32 bytes and drops whatever is left over — so
+/// `ecOnCurve(G ‖ 0xff)` returned TRUE and `ecEncodeCompressed` took its parity
+/// bit from the surplus.
+///
+/// This is NOT a new failure channel. An UNDER-length point already aborted, by
+/// accident: `OP_SPLIT` runs off the end of the value. The gate makes the same
+/// outcome explicit, and extends it to the over-length case that used to pass.
+///
+/// Aborting is right for every Point consumer that produces a VALUE and has no
+/// error channel to report through — `ecAdd`, `ecMul`, `ecNegate`, `ecPointX`,
+/// `ecPointY`, `ecEncodeCompressed`. There is no correct value to return for a
+/// blob that is not a point. The PREDICATES (`ecOnCurve` and friends) use
+/// `emitPointLengthGate` below instead, because for them "no" is an answer.
+fn emitPointLenVerify(t: *ECTracker, want: usize) !void {
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushIntRaw(@intCast(want));
+    try t.emitOpcode("OP_NUMEQUALVERIFY");
+}
+
+/// CL-BUG-095 — length gate for a `Point` argument, CLAMPING form: leaves
+/// `[flag, clamped]`, where `clamped` is the value forced to exactly `want`
+/// bytes (`v ‖ 00*want` split at `want`, tail dropped) and `flag` is
+/// `OP_SIZE(v) == want`.
+///
+/// Same shape, and the same reasoning, as `emitLengthGate` in
+/// nist_ec_emitters.zig: the clamp exists so the gate can stay a FLAG. It is
+/// used by the on-curve predicates, whose whole job is to answer "is this an
+/// acceptable point?" over untrusted bytes — and for a wrong-length blob the
+/// correct answer is `false`, not an aborted script. Aborting would break
+/// `if (ecOnCurve(p)) { … } else { … }`, which is the exact idiom this module's
+/// own comments tell contract authors to write. The caller ANDs `flag` into its
+/// boolean result, so whatever the clamped bytes happen to compute can never
+/// make a wrong-length point certify as on-curve.
+///
+/// Branch-free: the emitted op sequence, and the tracker's static stack model,
+/// are identical for every input length.
+fn emitPointLengthGate(t: *ECTracker, name: []const u8, want: usize, flag_name: []const u8) !void {
+    try t.toTop(name);
+    t.popNames(1);
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushIntRaw(@intCast(want));
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.emitRaw(.{ .swap = {} });
+    const pad = try t.allocator.alloc(u8, want);
+    @memset(pad, 0);
+    try t.owned_bytes.append(t.allocator, pad);
+    try t.emitPushBytesRaw(pad);
+    try t.emitOpcode("OP_CAT");
+    try t.emitPushIntRaw(@intCast(want));
+    try t.emitOpcode("OP_SPLIT");
+    try t.emitRaw(.{ .drop = {} });
+    try t.names.append(t.allocator, flag_name);
+    try t.names.append(t.allocator, name);
+}
+
 fn decomposePoint(t: *ECTracker, point_name: []const u8, x_name: []const u8, y_name: []const u8) !void {
     try t.toTop(point_name);
     t.popNames(1);
+    // CL-BUG-095: gate the width here, so every consumer that decomposes a
+    // Point inherits the check. The split at 32 below is only meaningful for a
+    // value that really is 64 bytes.
+    try emitPointLenVerify(t, 64);
     try emitSplit32Sequence(t);
     try t.names.append(t.allocator, "_dp_xb");
     try t.names.append(t.allocator, "_dp_yb");
@@ -1059,6 +1125,14 @@ fn emitEcNegate(t: *ECTracker) !void {
 }
 
 fn emitEcOnCurve(t: *ECTracker) !void {
+    // CL-BUG-095: width. `ecOnCurve(G ‖ 0xff)` returned TRUE — decomposePoint
+    // discarded the surplus byte, so 2^8 distinct blobs all certified as the
+    // same point and a point's identity AS BYTES stopped being unique. Clamp and
+    // remember the width, rather than abort, because this is the predicate
+    // contracts are told to gate untrusted points on and it must stay total; the
+    // flag is ANDed into the result at the end.
+    try emitPointLengthGate(t, "_pt", 64, "_len_ok");
+
     try decomposePoint(t, "_pt", "_x", "_y");
 
     // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
@@ -1089,8 +1163,12 @@ fn emitEcOnCurve(t: *ECTracker) !void {
     try t.toTop("_rhs");
     try t.rawBlock(2, "_curve_eq", emitEqualOpcode);
 
+    // on-curve = right width AND canonical AND curve-equation
     try t.toTop("_canon");
     try t.toTop("_curve_eq");
+    try t.rawBlock(2, "_eq_ok", emitBoolAndOpcode);
+    try t.toTop("_len_ok");
+    try t.toTop("_eq_ok");
     try t.rawBlock(2, "_result", emitBoolAndOpcode);
 }
 
@@ -1183,11 +1261,11 @@ test "ec helper op-count goldens" {
     // where this tracker models it as one `.pick` / `.roll` StackOp, and 5 of
     // the 16 movements here are deep. Same bytes, different counting point.
     const cases = .{
-        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8199) },
-        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 119671) },
-        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 119673) },
-        .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 945) },
-        .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 530) },
+        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8205) },
+        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 119674) },
+        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 119676) },
+        .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 948) },
+        .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 545) },
     };
     inline for (cases) |c| {
         var bundle = try buildBuiltinOps(std.testing.allocator, c[0]);

@@ -46,8 +46,15 @@ class TestN028ECFreshConstBinding < Minitest::Test
         }
     }
   TS
-  EC_LINEAR_REFERENCE_SHA256 = "efcff80d2f183358a0a9803fff7766a65c36de6d4db22e72a68db46d2efefcf7"
-  EC_LINEAR_REFERENCE_HEX_LEN = 2_548_856
+  # Re-stamped for R-052 / CL-BUG-095, the Point width gate: +184 hex chars
+  # (+92 bytes) from the OP_SIZE/OP_NUMEQUALVERIFY checks this contract's
+  # ecAdd / ecMulGen / ecOnCurve call sites now carry. Was
+  # efcff80d2f183358... / 2_548_856. The replacement was derived from the
+  # TYPESCRIPT tier and cross-checked against Ruby's own output, not copied
+  # from this tier — the whole point of the pin is that it is another tier's
+  # opinion of these bytes.
+  EC_LINEAR_REFERENCE_SHA256 = "9206c8cb6cdf5bc1f19b1b0c219800ccd3d988991823fd4a848aea6f10507179"
+  EC_LINEAR_REFERENCE_HEX_LEN = 2_549_040
 
   # Control: no EC calls at all, so +optimize_ec+ returns early. Pinned so the
   # fix above cannot be "achieved" by disabling the optimizer.

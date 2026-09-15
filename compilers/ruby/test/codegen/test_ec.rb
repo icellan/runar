@@ -100,17 +100,36 @@ class TestEcCodegen < Minitest::Test
   # in-process localized-regression gate.
   # ---------------------------------------------------------------------------
 
+  # R-052 / CL-BUG-095, the Point WIDTH gate, moved these goldens. A `Point` is
+  # 64 bytes by definition and nothing checked it, so a surplus byte was split
+  # off and silently dropped: `ecOnCurve(G || 0xff)` returned TRUE and
+  # `ecEncodeCompressed` took its parity bit from the caller's extra byte. The
+  # deltas are structural, which is why they match the six other tiers
+  # byte-for-byte:
+  #
+  #   * +3 per `ec_decompose_point` call site -- OP_SIZE, push 64,
+  #     OP_NUMEQUALVERIFY. `ecAdd` decomposes TWICE, hence +6; `ecMul` /
+  #     `ecMulGen` / `ecNegate` once.
+  #   * +15 `ecOnCurve` -- 9 for the clamp-and-flag gate (it must stay a
+  #     PREDICATE and answer `false`, not abort, or `if (ecOnCurve(p))` stops
+  #     being writable), +3 for the decompose gate, +1 for the extra OP_BOOLAND
+  #     folding `_len_ok` in, +2 for rolling the two flags up.
+  #   * +3 `ecPointX` / `ecPointY`.
+  #
+  # `ecEncodeCompressed` stays at 16 ops and that is NOT an oversight: the gate
+  # adds 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
+  # replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence with 3.
   EC_OP_COUNT_GOLDENS = {
-    "ecAdd"              =>  8223,
-    "ecMul"              => 130515,
-    "ecMulGen"           => 130517,
-    "ecNegate"           =>   945,
-    "ecOnCurve"          =>   533,
+    "ecAdd"              =>  8229,
+    "ecMul"              => 130518,
+    "ecMulGen"           => 130520,
+    "ecNegate"           =>   948,
+    "ecOnCurve"          =>   548,
     "ecModReduce"        =>     8,
     "ecEncodeCompressed" =>     16,
     "ecMakePoint"        =>   467,
-    "ecPointX"           =>   233,
-    "ecPointY"           =>   234,
+    "ecPointX"           =>   236,
+    "ecPointY"           =>   237,
   }.freeze
 
   EC_EMITTERS = {

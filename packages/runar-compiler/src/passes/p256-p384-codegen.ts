@@ -14,7 +14,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
-import { ECTracker } from './ec-codegen.js';
+import { ECTracker, emitPointLenVerify, emitPointLengthGate } from './ec-codegen.js';
 
 // ===========================================================================
 // P-256 constants (secp256r1 / NIST P-256)
@@ -320,7 +320,12 @@ function cGroupInv(t: ECTracker, aName: string, resultName: string, g: GroupPara
  */
 function cDecomposePoint(t: ECTracker, pointName: string, xName: string, yName: string, c: CurveParams): void {
   t.toTop(pointName);
+  // CL-BUG-095: a P256Point/P384Point is exactly 2*coordBytes bytes and
+  // nothing checked it, so surplus bytes were split off and silently dropped.
+  // Gate the width here, where every consumer that decomposes a point picks it
+  // up. See emitPointLenVerify in ec-codegen.ts.
   t.rawBlock([pointName], null, (e) => {
+    emitPointLenVerify(e, c.coordBytes * 2);
     e({ op: 'push', value: BigInt(c.coordBytes) });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
@@ -1549,6 +1554,10 @@ export function emitP256Negate(emit: (op: StackOp) => void): void {
  */
 export function emitP256OnCurve(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
+  // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+  // contracts are told to gate an untrusted point on, so it must stay total.
+  // The flag is ANDed into the result below.
+  emitPointLengthGate(t, '_pt', P256_PARAMS.coordBytes * 2, '_len_ok');
   cDecomposePoint(t, '_pt', '_x', '_y', P256_PARAMS);
   cEmitCanonicityGuard(t, '_x', '_y', P256_PARAMS);
 
@@ -1572,10 +1581,15 @@ export function emitP256OnCurve(emit: (op: StackOp) => void): void {
     e({ op: 'opcode', code: 'OP_EQUAL' });
   });
 
-  // on-curve = canonical AND curve-equation
+  // on-curve = right width AND canonical AND curve-equation
   t.toTop('_canon');
   t.toTop('_curve_eq');
-  t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
+  t.rawBlock(['_canon', '_curve_eq'], '_eq_ok', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  t.toTop('_len_ok');
+  t.toTop('_eq_ok');
+  t.rawBlock(['_len_ok', '_eq_ok'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
 }
@@ -1586,21 +1600,22 @@ export function emitP256OnCurve(emit: (op: StackOp) => void): void {
  * Stack out: [compressed (33 bytes)]
  */
 export function emitP256EncodeCompressed(emit: (op: StackOp) => void): void {
+  // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+  // appended byte flipped the sign of the compressed encoding. Width is now
+  // verified AND the parity byte is read from a fixed offset. See
+  // emitEcEncodeCompressed in ec-codegen.ts for the full argument.
+  emitPointLenVerify(emit, 64);
   // Split at 32: [x_bytes, y_bytes]
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Get last byte of y for parity
-  emit({ op: 'opcode', code: 'OP_SIZE' });
-  emit({ op: 'push', value: 1n });
-  emit({ op: 'opcode', code: 'OP_SUB' });
+  // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+  emit({ op: 'push', value: 31n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Stack: [x_bytes, y_prefix, last_byte]
+  emit({ op: 'opcode', code: 'OP_NIP' }); // drop y_head
+  // Stack: [x_bytes, last_byte]
   emit({ op: 'opcode', code: 'OP_BIN2NUM' });
   emit({ op: 'push', value: 2n });
   emit({ op: 'opcode', code: 'OP_MOD' });
-  // Stack: [x_bytes, y_prefix, parity]
-  emit({ op: 'swap' });
-  emit({ op: 'drop' }); // drop y_prefix
   // Stack: [x_bytes, parity]
   emit({ op: 'if',
     then: [{ op: 'push', value: new Uint8Array([0x03]) }],
@@ -1680,6 +1695,10 @@ export function emitP384Negate(emit: (op: StackOp) => void): void {
  */
 export function emitP384OnCurve(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
+  // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+  // contracts are told to gate an untrusted point on, so it must stay total.
+  // The flag is ANDed into the result below.
+  emitPointLengthGate(t, '_pt', P384_PARAMS.coordBytes * 2, '_len_ok');
   cDecomposePoint(t, '_pt', '_x', '_y', P384_PARAMS);
   cEmitCanonicityGuard(t, '_x', '_y', P384_PARAMS);
 
@@ -1703,10 +1722,15 @@ export function emitP384OnCurve(emit: (op: StackOp) => void): void {
     e({ op: 'opcode', code: 'OP_EQUAL' });
   });
 
-  // on-curve = canonical AND curve-equation
+  // on-curve = right width AND canonical AND curve-equation
   t.toTop('_canon');
   t.toTop('_curve_eq');
-  t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
+  t.rawBlock(['_canon', '_curve_eq'], '_eq_ok', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  t.toTop('_len_ok');
+  t.toTop('_eq_ok');
+  t.rawBlock(['_len_ok', '_eq_ok'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
 }
@@ -1717,21 +1741,22 @@ export function emitP384OnCurve(emit: (op: StackOp) => void): void {
  * Stack out: [compressed (49 bytes)]
  */
 export function emitP384EncodeCompressed(emit: (op: StackOp) => void): void {
+  // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+  // appended byte flipped the sign of the compressed encoding. Width is now
+  // verified AND the parity byte is read from a fixed offset. See
+  // emitEcEncodeCompressed in ec-codegen.ts for the full argument.
+  emitPointLenVerify(emit, 96);
   // Split at 48: [x_bytes, y_bytes]
   emit({ op: 'push', value: 48n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Get last byte of y for parity
-  emit({ op: 'opcode', code: 'OP_SIZE' });
-  emit({ op: 'push', value: 1n });
-  emit({ op: 'opcode', code: 'OP_SUB' });
+  // Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+  emit({ op: 'push', value: 47n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Stack: [x_bytes, y_prefix, last_byte]
+  emit({ op: 'opcode', code: 'OP_NIP' }); // drop y_head
+  // Stack: [x_bytes, last_byte]
   emit({ op: 'opcode', code: 'OP_BIN2NUM' });
   emit({ op: 'push', value: 2n });
   emit({ op: 'opcode', code: 'OP_MOD' });
-  // Stack: [x_bytes, y_prefix, parity]
-  emit({ op: 'swap' });
-  emit({ op: 'drop' }); // drop y_prefix
   // Stack: [x_bytes, parity]
   emit({ op: 'if',
     then: [{ op: 'push', value: new Uint8Array([0x03]) }],

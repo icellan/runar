@@ -332,13 +332,79 @@ function fieldInv(t: ECTracker, aName: string, resultName: string): void {
 // ===========================================================================
 
 /**
+ * CL-BUG-095 — length gate for a `Point` argument, ABORTING form.
+ *
+ * A `Point` is DEFINED as exactly `want` bytes (x ‖ y, big-endian, no prefix).
+ * Nothing checked that: `Point` carries no width in the builtin table, and
+ * every one of these values arrives as an unlock argument, so the blob is
+ * attacker-sized. Surplus bytes were then silently DISCARDED, because
+ * `decomposePoint` splits at the coordinate width and `emitReverse32` reverses
+ * exactly 32 bytes and drops whatever is left over — so `ecOnCurve(G ‖ 0xff)`
+ * returned TRUE and `ecEncodeCompressed` took its parity bit from the surplus.
+ *
+ * This is NOT a new failure channel. An UNDER-length point already aborted, by
+ * accident: `OP_SPLIT` runs off the end of the value. The gate makes the same
+ * outcome explicit, and extends it to the over-length case that used to pass.
+ *
+ * Aborting is right for every Point consumer that produces a VALUE and has no
+ * error channel to report through — `ecAdd`, `ecMul`, `ecNegate`, `ecPointX`,
+ * `ecPointY`, `ecEncodeCompressed`. There is no correct value to return for a
+ * blob that is not a point. The PREDICATES (`ecOnCurve` and friends) use
+ * `emitPointLengthGate` below instead, because for them "no" is an answer.
+ */
+export function emitPointLenVerify(e: (op: StackOp) => void, want: number): void {
+  e({ op: 'opcode', code: 'OP_SIZE' });
+  e({ op: 'push', value: BigInt(want) });
+  e({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' });
+}
+
+/**
+ * CL-BUG-095 — length gate for a `Point` argument, CLAMPING form: leaves
+ * `[flag, clamped]`, where `clamped` is the value forced to exactly `want`
+ * bytes (`v ‖ 00*want` split at `want`, tail dropped) and `flag` is
+ * `OP_SIZE(v) == want`.
+ *
+ * Same shape, and the same reasoning, as `cEmitLengthGate` in
+ * p256-p384-codegen.ts: the clamp exists so the gate can stay a FLAG. It is
+ * used by the on-curve predicates, whose whole job is to answer "is this an
+ * acceptable point?" over untrusted bytes — and for a wrong-length blob the
+ * correct answer is `false`, not an aborted script. Aborting would break
+ * `if (ecOnCurve(p)) { … } else { … }`, which is the exact idiom this module's
+ * own comments tell contract authors to write. The caller ANDs `flag` into its
+ * boolean result, so whatever the clamped bytes happen to compute can never
+ * make a wrong-length point certify as on-curve.
+ *
+ * Branch-free: the emitted op sequence, and the tracker's static stack model,
+ * are identical for every input length.
+ */
+export function emitPointLengthGate(t: ECTracker, name: string, want: number, flagName: string): void {
+  t.toTop(name);
+  t.rawBlock([name], null, (e) => {
+    e({ op: 'opcode', code: 'OP_SIZE' });
+    e({ op: 'push', value: BigInt(want) });
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+    e({ op: 'swap' });
+    e({ op: 'push', value: new Uint8Array(want) });
+    e({ op: 'opcode', code: 'OP_CAT' });
+    e({ op: 'push', value: BigInt(want) });
+    e({ op: 'opcode', code: 'OP_SPLIT' });
+    e({ op: 'drop' });
+  });
+  t.nm.push(flagName);
+  t.nm.push(name);
+}
+
+/**
  * Decompose 64-byte Point → (x_num, y_num) on stack.
  * Consumes pointName, produces xName and yName.
  */
 function decomposePoint(t: ECTracker, pointName: string, xName: string, yName: string): void {
   t.toTop(pointName);
-  // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+  // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) — but only for
+  // a value that really is 64 bytes. CL-BUG-095: gate the width first, here,
+  // so every consumer that decomposes a Point inherits the check.
   t.rawBlock([pointName], null, (e) => {
+    emitPointLenVerify(e, 64);
     e({ op: 'push', value: 32n });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
@@ -1011,6 +1077,15 @@ export function emitEcNegate(emit: (op: StackOp) => void): void {
  */
 export function emitEcOnCurve(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
+
+  // CL-BUG-095: width. `ecOnCurve(G ‖ 0xff)` returned TRUE — decomposePoint
+  // discarded the surplus byte, so 2^8 distinct blobs all certified as the
+  // same point and a point's identity AS BYTES stopped being unique. Clamp and
+  // remember the width, rather than abort, because this is the predicate
+  // contracts are told to gate untrusted points on and it must stay total; the
+  // flag is ANDed into the result at the end.
+  emitPointLengthGate(t, '_pt', 64, '_len_ok');
+
   decomposePoint(t, '_pt', '_x', '_y');
 
   // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
@@ -1052,10 +1127,15 @@ export function emitEcOnCurve(emit: (op: StackOp) => void): void {
     e({ op: 'opcode', code: 'OP_EQUAL' });
   });
 
-  // on-curve = canonical AND curve-equation
+  // on-curve = right width AND canonical AND curve-equation
   t.toTop('_canon');
   t.toTop('_curve_eq');
-  t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
+  t.rawBlock(['_canon', '_curve_eq'], '_eq_ok', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  t.toTop('_len_ok');
+  t.toTop('_eq_ok');
+  t.rawBlock(['_len_ok', '_eq_ok'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
 }
@@ -1082,21 +1162,26 @@ export function emitEcModReduce(emit: (op: StackOp) => void): void {
  * Stack out: [compressed (33 bytes)]
  */
 export function emitEcEncodeCompressed(emit: (op: StackOp) => void): void {
+  // CL-BUG-095, and the reason this one is the sharpest edge of it: the parity
+  // byte used to be taken from the blob's LAST byte (OP_SIZE 1 OP_SUB
+  // OP_SPLIT), not from a fixed offset. So appending one byte FLIPPED THE SIGN
+  // of the compressed encoding — the same 64-byte point compressed to 02‖x or
+  // 03‖x at the caller's choice, and anything that hashes a compressed pubkey
+  // (a P2PKH address, a commitment) became forgeable between the two
+  // spellings. Two independent fixes, both kept: the width is verified, and
+  // the parity byte is read from offset 31 of y whatever the caller sent.
+  emitPointLenVerify(emit, 64);
   // Split at 32: [x_bytes, y_bytes]
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Get last byte of y for parity
-  emit({ op: 'opcode', code: 'OP_SIZE' });
-  emit({ op: 'push', value: 1n });
-  emit({ op: 'opcode', code: 'OP_SUB' });
+  // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+  emit({ op: 'push', value: 31n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Stack: [x_bytes, y_prefix, last_byte]
+  emit({ op: 'opcode', code: 'OP_NIP' }); // drop y_head
+  // Stack: [x_bytes, last_byte]
   emit({ op: 'opcode', code: 'OP_BIN2NUM' });
   emit({ op: 'push', value: 2n });
   emit({ op: 'opcode', code: 'OP_MOD' });
-  // Stack: [x_bytes, y_prefix, parity]
-  emit({ op: 'swap' });
-  emit({ op: 'drop' }); // drop y_prefix
   // Stack: [x_bytes, parity]
   emit({ op: 'if',
     then: [{ op: 'push', value: new Uint8Array([0x03]) }],
@@ -1141,6 +1226,11 @@ export function emitEcMakePoint(emit: (op: StackOp) => void): void {
  * Stack out: [x as bigint]
  */
 export function emitEcPointX(emit: (op: StackOp) => void): void {
+  // CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x —
+  // the split at 32 left an empty tail that `drop` happily removed. ecPointY
+  // on the identical input already aborted, which is how the hole survived: a
+  // short point looked "already rejected".
+  emitPointLenVerify(emit, 64);
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
   emit({ op: 'drop' });
@@ -1157,6 +1247,7 @@ export function emitEcPointX(emit: (op: StackOp) => void): void {
  * Stack out: [y as bigint]
  */
 export function emitEcPointY(emit: (op: StackOp) => void): void {
+  emitPointLenVerify(emit, 64);
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
   emit({ op: 'swap' });

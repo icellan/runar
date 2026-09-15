@@ -162,14 +162,22 @@ class TestP256P384Codegen < Minitest::Test
   # emitters (`p256Mul` / `p384Mul`) are untouched.
   # ---------------------------------------------------------------------------
 
+  # R-052 / CL-BUG-095, the Point WIDTH gate, moved these goldens again. A
+  # P256Point/P384Point is exactly 2*coord_bytes by definition and nothing
+  # checked it, so surplus bytes were split off and dropped. Deltas mirror the
+  # secp256k1 module (see test/codegen/test_ec.rb): +3 per `c_decompose_point`
+  # call site (`p256Add` decomposes twice -> +6), +15 for the on-curve
+  # predicate's clamp-and-flag gate, +12 for `verifyECDSA_*` (four decompose
+  # call sites), and +-0 for `*EncodeCompressed`, where the 3-op gate is paid
+  # for by the fixed-offset parity read replacing a 6-op sequence with 3.
   P256_GOLDENS = {
-    "p256Add"              =>   6663,
-    "p256Mul"              => 140036,
-    "p256MulGen"           => 140038,
-    "p256Negate"           =>    945,
-    "p256OnCurve"          =>    559,
+    "p256Add"              =>   6669,
+    "p256Mul"              => 140039,
+    "p256MulGen"           => 140041,
+    "p256Negate"           =>    948,
+    "p256OnCurve"          =>    574,
     "p256EncodeCompressed" =>     16,
-    "verifyECDSA_P256"     => 297331,
+    "verifyECDSA_P256"     => 297343,
   }.freeze
 
   P256_EMITTERS = {
@@ -183,10 +191,10 @@ class TestP256P384Codegen < Minitest::Test
   }.freeze
 
   P384_GOLDENS = {
-    "p384Add"    =>  11469,
-    "p384Mul"    => 211178,
-    "p384MulGen" => 211180,
-    "p384Negate" =>   1393,
+    "p384Add"    =>  11475,
+    "p384Mul"    => 211181,
+    "p384MulGen" => 211183,
+    "p384Negate" =>   1396,
   }.freeze
 
   P384_EMITTERS = {

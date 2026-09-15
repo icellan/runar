@@ -380,12 +380,75 @@ fn field_inv(t: &mut ECTracker, a_name: &str, result_name: &str) {
 // Point decompose / compose
 // ===========================================================================
 
+/// CL-BUG-095 — length gate for a `Point` argument, ABORTING form.
+///
+/// A `Point` is DEFINED as exactly `want` bytes (x ‖ y, big-endian, no prefix).
+/// Nothing checked that: `Point` carries no width in the builtin table, and
+/// every one of these values arrives as an unlock argument, so the blob is
+/// attacker-sized. Surplus bytes were then silently DISCARDED, because
+/// `decompose_point` splits at the coordinate width and `emit_reverse_32`
+/// reverses exactly 32 bytes and drops whatever is left over — so
+/// `ecOnCurve(G ‖ 0xff)` returned TRUE and `ecEncodeCompressed` took its parity
+/// bit from the surplus.
+///
+/// This is NOT a new failure channel. An UNDER-length point already aborted, by
+/// accident: `OP_SPLIT` runs off the end of the value. The gate makes the same
+/// outcome explicit, and extends it to the over-length case that used to pass.
+///
+/// Aborting is right for every Point consumer that produces a VALUE and has no
+/// error channel to report through — `ecAdd`, `ecMul`, `ecNegate`, `ecPointX`,
+/// `ecPointY`, `ecEncodeCompressed`. There is no correct value to return for a
+/// blob that is not a point. The PREDICATES (`ecOnCurve` and friends) use
+/// `emit_point_length_gate` below instead, because for them "no" is an answer.
+pub fn emit_point_len_verify(e: &mut dyn FnMut(StackOp), want: usize) {
+    e(StackOp::Opcode("OP_SIZE".into()));
+    e(StackOp::Push(PushValue::Int(BigInt::from(want as i128))));
+    e(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+}
+
+/// CL-BUG-095 — length gate for a `Point` argument, CLAMPING form: leaves
+/// `[flag, clamped]`, where `clamped` is the value forced to exactly `want`
+/// bytes (`v ‖ 00*want` split at `want`, tail dropped) and `flag` is
+/// `OP_SIZE(v) == want`.
+///
+/// Same shape, and the same reasoning, as `c_emit_length_gate` in
+/// p256_p384.rs: the clamp exists so the gate can stay a FLAG. It is used by
+/// the on-curve predicates, whose whole job is to answer "is this an acceptable
+/// point?" over untrusted bytes — and for a wrong-length blob the correct answer
+/// is `false`, not an aborted script. Aborting would break
+/// `if (ecOnCurve(p)) { … } else { … }`, which is the exact idiom this module's
+/// own comments tell contract authors to write. The caller ANDs `flag` into its
+/// boolean result, so whatever the clamped bytes happen to compute can never
+/// make a wrong-length point certify as on-curve.
+///
+/// Branch-free: the emitted op sequence, and the tracker's static stack model,
+/// are identical for every input length.
+fn emit_point_length_gate(t: &mut ECTracker, name: &str, want: usize, flag_name: &str) {
+    t.to_top(name);
+    t.raw_block(&[name], None, |e| {
+        e(StackOp::Opcode("OP_SIZE".into()));
+        e(StackOp::Push(PushValue::Int(BigInt::from(want as i128))));
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+        e(StackOp::Swap);
+        e(StackOp::Push(PushValue::Bytes(vec![0u8; want])));
+        e(StackOp::Opcode("OP_CAT".into()));
+        e(StackOp::Push(PushValue::Int(BigInt::from(want as i128))));
+        e(StackOp::Opcode("OP_SPLIT".into()));
+        e(StackOp::Drop);
+    });
+    t.nm.push(flag_name.to_string());
+    t.nm.push(name.to_string());
+}
+
 /// Decompose 64-byte Point -> (x_num, y_num) on stack.
 /// Consumes pointName, produces xName and yName.
 fn decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &str) {
     t.to_top(point_name);
-    // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+    // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) — but only for
+    // a value that really is 64 bytes. CL-BUG-095: gate the width first, here,
+    // so every consumer that decomposes a Point inherits the check.
     t.raw_block(&[point_name], None, |e| {
+        emit_point_len_verify(e, 64);
         e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
@@ -1060,6 +1123,15 @@ pub fn emit_ec_negate(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [boolean]
 pub fn emit_ec_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
+
+    // CL-BUG-095: width. `ecOnCurve(G ‖ 0xff)` returned TRUE — decompose_point
+    // discarded the surplus byte, so 2^8 distinct blobs all certified as the
+    // same point and a point's identity AS BYTES stopped being unique. Clamp and
+    // remember the width, rather than abort, because this is the predicate
+    // contracts are told to gate untrusted points on and it must stay total; the
+    // flag is ANDed into the result at the end.
+    emit_point_length_gate(&mut t, "_pt", 64, "_len_ok");
+
     decompose_point(&mut t, "_pt", "_x", "_y");
 
     // GAP-301: coordinate canonicity. `decompose_point` BIN2NUMs each coordinate
@@ -1101,10 +1173,15 @@ pub fn emit_ec_on_curve(emit: &mut dyn FnMut(StackOp)) {
         e(StackOp::Opcode("OP_EQUAL".into()));
     });
 
-    // on-curve = canonical AND curve-equation
+    // on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon");
     t.to_top("_curve_eq");
-    t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
+    t.raw_block(&["_canon", "_curve_eq"], Some("_eq_ok"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    t.to_top("_len_ok");
+    t.to_top("_eq_ok");
+    t.raw_block(&["_len_ok", "_eq_ok"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
 }
@@ -1127,21 +1204,26 @@ pub fn emit_ec_mod_reduce(emit: &mut dyn FnMut(StackOp)) {
 /// Stack in: [point (64 bytes)]
 /// Stack out: [compressed (33 bytes)]
 pub fn emit_ec_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
+    // CL-BUG-095, and the reason this one is the sharpest edge of it: the parity
+    // byte used to be taken from the blob's LAST byte (OP_SIZE 1 OP_SUB
+    // OP_SPLIT), not from a fixed offset. So appending one byte FLIPPED THE SIGN
+    // of the compressed encoding — the same 64-byte point compressed to 02‖x or
+    // 03‖x at the caller's choice, and anything that hashes a compressed pubkey
+    // (a P2PKH address, a commitment) became forgeable between the two
+    // spellings. Two independent fixes, both kept: the width is verified, and
+    // the parity byte is read from offset 31 of y whatever the caller sent.
+    emit_point_len_verify(emit, 64);
     // Split at 32: [x_bytes, y_bytes]
     emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Get last byte of y for parity
-    emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
-    emit(StackOp::Opcode("OP_SUB".into()));
+    // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(StackOp::Push(PushValue::Int(BigInt::from(31))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Stack: [x_bytes, y_prefix, last_byte]
+    emit(StackOp::Opcode("OP_NIP".into())); // drop y_head
+    // Stack: [x_bytes, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
     emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
-    // Stack: [x_bytes, y_prefix, parity]
-    emit(StackOp::Swap);
-    emit(StackOp::Drop); // drop y_prefix
     // Stack: [x_bytes, parity]
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
@@ -1182,6 +1264,11 @@ pub fn emit_ec_make_point(emit: &mut dyn FnMut(StackOp)) {
 /// Stack in: [point (64 bytes)]
 /// Stack out: [x as bigint]
 pub fn emit_ec_point_x(emit: &mut dyn FnMut(StackOp)) {
+    // CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x —
+    // the split at 32 left an empty tail that `drop` happily removed. ecPointY
+    // on the identical input already aborted, which is how the hole survived: a
+    // short point looked "already rejected".
+    emit_point_len_verify(emit, 64);
     emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     emit(StackOp::Drop);
@@ -1196,6 +1283,7 @@ pub fn emit_ec_point_x(emit: &mut dyn FnMut(StackOp)) {
 /// Stack in: [point (64 bytes)]
 /// Stack out: [y as bigint]
 pub fn emit_ec_point_y(emit: &mut dyn FnMut(StackOp)) {
+    emit_point_len_verify(emit, 64);
     emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
     emit(StackOp::Swap);

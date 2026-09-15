@@ -14,5 +14,9 @@
       "expect": "accept",
       "note": "every EC assertion in testOps() holds on the real Spend engine, including the ecMul(g,2n) and ecAdd(g,g) doubling cases that used to make this script unspendable"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "ccad5948cf0f25f2e889a55ddb3d589d215303ffeb8c2741bed5f0e8f7c99572"
+  },
+  "goldenHashesNote": "R-052 / CL-BUG-095 (no length validation on any Point argument in any tier; ecEncodeCompressed took the parity bit from the blob last byte) moved this golden. The pin is deliberately self-invalidating: any later change to expected-script.hex must come back through this witness, whose spends re-EXECUTE the fixture's actual compiled locking script on the real @bsv/sdk Spend engine with real secp256k1 — which is why this fixture takes provenance path (A) rather than an allowlist hash. Evidence for the new bytes: the defect was reproduced before the fix by execution, not inferred (ecOnCurve(G||0xff) returned TRUE, ecPointX on a 32-byte blob succeeded, and ecEncodeCompressed(G||0x01) flipped the compressed sign from 02 to 03); all seven independently written compilers regenerate these exact bytes (cross-tier parity 20/20, and the pre-regeneration conformance run showed 0 mismatches BETWEEN compilers against 70 unanimous golden mismatches); expected-ir.json is provably unmoved, so the ANF is untouched and only stack lowering changed."
 }

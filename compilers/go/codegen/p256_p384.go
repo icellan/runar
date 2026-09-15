@@ -335,7 +335,12 @@ func cGroupInv(t *ECTracker, aName, resultName string, g *nistGroupParams) {
 
 func cDecomposePoint(t *ECTracker, pointName, xName, yName string, c *nistCurveParams) {
 	t.toTop(pointName)
+	// CL-BUG-095: a P256Point/P384Point is exactly 2*coordBytes bytes and
+	// nothing checked it, so surplus bytes were split off and silently
+	// dropped. Gate the width here, where every consumer that decomposes a
+	// point picks it up. See ecEmitPointLenVerify in ec.go.
 	t.rawBlock([]string{pointName}, "", func(e func(StackOp)) {
+		ecEmitPointLenVerify(e, c.coordBytes*2)
 		e(StackOp{Op: "push", Value: bigIntPush(int64(c.coordBytes))})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
@@ -1545,6 +1550,10 @@ func EmitP256Negate(emit func(StackOp)) {
 // EmitP256OnCurve checks if a P-256 point is on the curve (y^2 = x^3 - 3x + b mod p).
 func EmitP256OnCurve(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
+	// CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+	// contracts are told to gate an untrusted point on, so it must stay
+	// total. The flag is ANDed into the result below.
+	cEmitLengthGate(t, "_pt", p256CurveParams.coordBytes*2, "_len_ok")
 	cDecomposePoint(t, "_pt", "_x", "_y", p256CurveParams)
 	cEmitCanonicityGuard(t, "_x", "_y", p256CurveParams)
 
@@ -1568,31 +1577,36 @@ func EmitP256OnCurve(emit func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
 	})
 
-	// on-curve = canonical AND curve-equation
+	// on-curve = right width AND canonical AND curve-equation
 	t.toTop("_canon")
 	t.toTop("_curve_eq")
-	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_eq_ok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	t.toTop("_len_ok")
+	t.toTop("_eq_ok")
+	t.rawBlock([]string{"_len_ok", "_eq_ok"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 }
 
 // EmitP256EncodeCompressed encodes a P-256 point as 33-byte compressed pubkey.
 func EmitP256EncodeCompressed(emit func(StackOp)) {
+	// CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+	// appended byte flipped the sign of the compressed encoding. Width is now
+	// verified AND the parity byte is read from a fixed offset.
+	ecEmitPointLenVerify(emit, 64)
 	// Split at 32: [x_bytes, y_bytes]
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Get last byte of y for parity
-	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
-	emit(StackOp{Op: "push", Value: bigIntPush(1)})
-	emit(StackOp{Op: "opcode", Code: "OP_SUB"})
+	// Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+	emit(StackOp{Op: "push", Value: bigIntPush(31)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Stack: [x_bytes, y_prefix, last_byte]
+	emit(StackOp{Op: "nip"}) // drop y_head
+	// Stack: [x_bytes, last_byte]
 	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	emit(StackOp{Op: "push", Value: bigIntPush(2)})
 	emit(StackOp{Op: "opcode", Code: "OP_MOD"})
-	// Stack: [x_bytes, y_prefix, parity]
-	emit(StackOp{Op: "swap"})
-	emit(StackOp{Op: "drop"}) // drop y_prefix
 	// Stack: [x_bytes, parity]
 	emit(StackOp{Op: "if",
 		Then: []StackOp{{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x03}}}},
@@ -1648,6 +1662,10 @@ func EmitP384Negate(emit func(StackOp)) {
 // EmitP384OnCurve checks if a P-384 point is on the curve.
 func EmitP384OnCurve(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
+	// CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+	// contracts are told to gate an untrusted point on, so it must stay
+	// total. The flag is ANDed into the result below.
+	cEmitLengthGate(t, "_pt", p384CurveParams.coordBytes*2, "_len_ok")
 	cDecomposePoint(t, "_pt", "_x", "_y", p384CurveParams)
 	cEmitCanonicityGuard(t, "_x", "_y", p384CurveParams)
 
@@ -1671,31 +1689,36 @@ func EmitP384OnCurve(emit func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
 	})
 
-	// on-curve = canonical AND curve-equation
+	// on-curve = right width AND canonical AND curve-equation
 	t.toTop("_canon")
 	t.toTop("_curve_eq")
-	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_eq_ok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	t.toTop("_len_ok")
+	t.toTop("_eq_ok")
+	t.rawBlock([]string{"_len_ok", "_eq_ok"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 }
 
 // EmitP384EncodeCompressed encodes a P-384 point as 49-byte compressed pubkey.
 func EmitP384EncodeCompressed(emit func(StackOp)) {
+	// CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+	// appended byte flipped the sign of the compressed encoding. Width is now
+	// verified AND the parity byte is read from a fixed offset.
+	ecEmitPointLenVerify(emit, 96)
 	// Split at 48: [x_bytes, y_bytes]
 	emit(StackOp{Op: "push", Value: bigIntPush(48)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Get last byte of y for parity
-	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
-	emit(StackOp{Op: "push", Value: bigIntPush(1)})
-	emit(StackOp{Op: "opcode", Code: "OP_SUB"})
+	// Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+	emit(StackOp{Op: "push", Value: bigIntPush(47)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Stack: [x_bytes, y_prefix, last_byte]
+	emit(StackOp{Op: "nip"}) // drop y_head
+	// Stack: [x_bytes, last_byte]
 	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	emit(StackOp{Op: "push", Value: bigIntPush(2)})
 	emit(StackOp{Op: "opcode", Code: "OP_MOD"})
-	// Stack: [x_bytes, y_prefix, parity]
-	emit(StackOp{Op: "swap"})
-	emit(StackOp{Op: "drop"}) // drop y_prefix
 	// Stack: [x_bytes, parity]
 	emit(StackOp{Op: "if",
 		Then: []StackOp{{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x03}}}},

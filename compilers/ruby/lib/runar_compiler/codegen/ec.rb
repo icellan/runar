@@ -488,10 +488,84 @@ module RunarCompiler
       # @param point_name [String]
       # @param x_name [String]
       # @param y_name [String]
+      # CL-BUG-095 -- length gate for a +Point+ argument, ABORTING form.
+      #
+      # A +Point+ is DEFINED as exactly +want+ bytes (x || y, big-endian, no
+      # prefix). Nothing checked that: +Point+ carries no width in the builtin
+      # table, and every one of these values arrives as an unlock argument, so
+      # the blob is attacker-sized. Surplus bytes were then silently DISCARDED,
+      # because +ec_decompose_point+ splits at the coordinate width and
+      # +ec_emit_reverse32+ reverses exactly 32 bytes and drops whatever is left
+      # over -- so +ecOnCurve(G || 0xff)+ returned TRUE and +ecEncodeCompressed+
+      # took its parity bit from the surplus.
+      #
+      # This is NOT a new failure channel. An UNDER-length point already
+      # aborted, by accident: +OP_SPLIT+ runs off the end of the value. The gate
+      # makes the same outcome explicit, and extends it to the over-length case
+      # that used to pass.
+      #
+      # Aborting is right for every Point consumer that produces a VALUE and has
+      # no error channel to report through -- +ecAdd+, +ecMul+, +ecNegate+,
+      # +ecPointX+, +ecPointY+, +ecEncodeCompressed+. There is no correct value
+      # to return for a blob that is not a point. The PREDICATES (+ecOnCurve+
+      # and friends) use +emit_point_length_gate+ below instead, because for
+      # them "no" is an answer.
+      #
+      # @param e [Proc] emit callback
+      # @param want [Integer] required byte width
+      def self.emit_point_len_verify(e, want)
+        e.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
+        e.call(make_stack_op(op: "push", value: big_int_push(want)))
+        e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUALVERIFY"))
+      end
+
+      # CL-BUG-095 -- length gate for a +Point+ argument, CLAMPING form: leaves
+      # +[flag, clamped]+, where +clamped+ is the value forced to exactly +want+
+      # bytes (+v || 00*want+ split at +want+, tail dropped) and +flag+ is
+      # +OP_SIZE(v) == want+.
+      #
+      # Same shape, and the same reasoning, as +c_emit_length_gate+ in
+      # p256_p384.rb: the clamp exists so the gate can stay a FLAG. It is used
+      # by the on-curve predicates, whose whole job is to answer "is this an
+      # acceptable point?" over untrusted bytes -- and for a wrong-length blob
+      # the correct answer is +false+, not an aborted script. Aborting would
+      # break +if (ecOnCurve(p)) { ... } else { ... }+, which is the exact idiom
+      # this module's own comments tell contract authors to write. The caller
+      # ANDs +flag+ into its boolean result, so whatever the clamped bytes
+      # happen to compute can never make a wrong-length point certify as
+      # on-curve.
+      #
+      # Branch-free: the emitted op sequence, and the tracker's static stack
+      # model, are identical for every input length.
+      #
+      # @param t [ECTracker]
+      # @param name [String] name of the point on the stack
+      # @param want [Integer] required byte width
+      # @param flag_name [String] name for the length flag
+      def self.emit_point_length_gate(t, name, want, flag_name)
+        t.to_top(name)
+        t.raw_block([name], "", ->(e) {
+          e.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
+          e.call(make_stack_op(op: "push", value: big_int_push(want)))
+          e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL"))
+          e.call(make_stack_op(op: "swap"))
+          e.call(make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: "\x00".b * want)))
+          e.call(make_stack_op(op: "opcode", code: "OP_CAT"))
+          e.call(make_stack_op(op: "push", value: big_int_push(want)))
+          e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
+          e.call(make_stack_op(op: "drop"))
+        })
+        t.nm.push(flag_name)
+        t.nm.push(name)
+      end
+
       def self.ec_decompose_point(t, point_name, x_name, y_name)
         t.to_top(point_name)
-        # OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+        # OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) -- but only
+        # for a value that really is 64 bytes. CL-BUG-095: gate the width first,
+        # here, so every consumer that decomposes a Point inherits the check.
         split_fn = ->(e) {
+          emit_point_len_verify(e, 64)
           e.call(make_stack_op(op: "push", value: big_int_push(32)))
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         }
@@ -1181,6 +1255,16 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_ec_on_curve(emit)
         t = ECTracker.new(["_pt"], emit)
+
+        # CL-BUG-095: width. +ecOnCurve(G || 0xff)+ returned TRUE --
+        # ec_decompose_point discarded the surplus byte, so 2^8 distinct blobs
+        # all certified as the same point and a point's identity AS BYTES
+        # stopped being unique. Clamp and remember the width, rather than abort,
+        # because this is the predicate contracts are told to gate untrusted
+        # points on and it must stay total; the flag is ANDed into the result at
+        # the end.
+        emit_point_length_gate(t, "_pt", 64, "_len_ok")
+
         ec_decompose_point(t, "_pt", "_x", "_y")
 
         # GAP-301: coordinate canonicity. `ec_decompose_point` BIN2NUMs each
@@ -1215,10 +1299,13 @@ module RunarCompiler
         t.to_top("_rhs")
         t.raw_block(["_y2", "_rhs"], "_curve_eq", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) })
 
-        # on-curve = canonical AND curve-equation
+        # on-curve = right width AND canonical AND curve-equation
         t.to_top("_canon")
         t.to_top("_curve_eq")
-        t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.raw_block(["_canon", "_curve_eq"], "_eq_ok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.to_top("_len_ok")
+        t.to_top("_eq_ok")
+        t.raw_block(["_len_ok", "_eq_ok"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
       end
 
       # Compute ((value % mod) + mod) % mod.
@@ -1245,21 +1332,27 @@ module RunarCompiler
       #
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_ec_encode_compressed(emit)
+        # CL-BUG-095, and the reason this one is the sharpest edge of it: the
+        # parity byte used to be taken from the blob's LAST byte (OP_SIZE 1
+        # OP_SUB OP_SPLIT), not from a fixed offset. So appending one byte
+        # FLIPPED THE SIGN of the compressed encoding -- the same 64-byte point
+        # compressed to 02||x or 03||x at the caller's choice, and anything that
+        # hashes a compressed pubkey (a P2PKH address, a commitment) became
+        # forgeable between the two spellings. Two independent fixes, both kept:
+        # the width is verified, and the parity byte is read from offset 31 of y
+        # whatever the caller sent.
+        emit_point_len_verify(emit, 64)
         # Split at 32: [x_bytes, y_bytes]
         emit.call(make_stack_op(op: "push", value: big_int_push(32)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
-        # Get last byte of y for parity
-        emit.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
-        emit.call(make_stack_op(op: "push", value: big_int_push(1)))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SUB"))
+        # Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.call(make_stack_op(op: "push", value: big_int_push(31)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
-        # Stack: [x_bytes, y_prefix, last_byte]
+        emit.call(make_stack_op(op: "opcode", code: "OP_NIP")) # drop y_head
+        # Stack: [x_bytes, last_byte]
         emit.call(make_stack_op(op: "opcode", code: "OP_BIN2NUM"))
         emit.call(make_stack_op(op: "push", value: big_int_push(2)))
         emit.call(make_stack_op(op: "opcode", code: "OP_MOD"))
-        # Stack: [x_bytes, y_prefix, parity]
-        emit.call(make_stack_op(op: "swap"))
-        emit.call(make_stack_op(op: "drop")) # drop y_prefix
         # Stack: [x_bytes, parity]
         emit.call(make_stack_op(
           op: "if",
@@ -1307,6 +1400,11 @@ module RunarCompiler
       #
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_ec_point_x(emit)
+        # CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x
+        # -- the split at 32 left an empty tail that +drop+ happily removed.
+        # ecPointY on the identical input already aborted, which is how the hole
+        # survived: a short point looked "already rejected".
+        emit_point_len_verify(emit, 64)
         emit.call(make_stack_op(op: "push", value: big_int_push(32)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         emit.call(make_stack_op(op: "drop"))
@@ -1324,6 +1422,7 @@ module RunarCompiler
       #
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_ec_point_y(emit)
+        emit_point_len_verify(emit, 64)
         emit.call(make_stack_op(op: "push", value: big_int_push(32)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         emit.call(make_stack_op(op: "swap"))

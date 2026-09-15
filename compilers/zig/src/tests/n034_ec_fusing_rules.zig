@@ -221,11 +221,18 @@ test "N-034 A: rule 10 binds the folded scalar into the method body" {
 
 test "N-034 A: fused small-scalar hex matches the six-tier reference" {
     // ts / go / rust / java / python / ruby, byte-identical.
+    // Re-stamped under CL-BUG-095 (+92 bytes: the ecAdd, ecMulGen and ecOnCurve
+    // point width gates). Was 2548856 / efcff80d2f183358…
+    // CROSS-VERIFIED against the TypeScript tier, which is what this golden
+    // claims to be — the TS compiler produces exactly 2549040 chars /
+    // 9206c8cb… for this source at the default fold setting. The value is
+    // therefore another tier's opinion of these bytes, not this tier grading
+    // itself.
     try expectHexDigest(
         SRC_SMALL,
         "ECLinear.runar.ts",
-        2548856,
-        "efcff80d2f183358a0a9803fff7766a65c36de6d4db22e72a68db46d2efefcf7",
+        2549040,
+        "9206c8cb6cdf5bc1f19b1b0c219800ccd3d988991823fd4a848aea6f10507179",
     );
 }
 
@@ -255,11 +262,13 @@ test "N-034 B: rule 10 folds scalars that exceed i128" {
 test "N-034 B: fused oversize-scalar hex matches the six-tier reference" {
     // ts / go / rust / java / python / ruby, byte-identical. Before the fix
     // Zig emitted 1748648 chars (sha 9391969994f3b865…) — the unfused script.
+    // Re-stamped under CL-BUG-095 (+92 bytes). Was 2549054 / 463305e40283e609…
+    // CROSS-VERIFIED against the TypeScript tier: 2549238 / c6cce153… exactly.
     try expectHexDigest(
         SRC_BIG,
         "ECBig.runar.ts",
-        2549054,
-        "463305e40283e6097253d609296c0e42d0a634d2e5ef0dcde7874d0d3a2a2339",
+        2549238,
+        "c6cce153be1063b5f2728dea5519f8a03b32f78b7278b573651e2b5aa7b01741",
     );
 }
 
@@ -270,11 +279,21 @@ test "N-034 B: fused oversize-scalar hex matches the six-tier reference" {
 test "N-034 control: EC contract with no fusible pair is byte-unchanged" {
     // Arms the optimizer (an EC call is present, so `optimize` does not return
     // early) but no rule fires. Six-tier reference.
+    // Re-stamped under CL-BUG-095 (+84 bytes). Was 850588 / 9219589a0856da1b…
+    // CROSS-VERIFIED against the TypeScript tier: 850756 / a3e5c0d4… exactly.
+    // Note this control moves by +84 while the two fusing cases above move by
+    // +92: it has no ecAdd, so it does not pay that emitter's two decompose
+    // gates — which is itself evidence the delta tracks the gate and nothing
+    // else.
+    // The delta is EXACTLY the gate and nothing else: an opcode-level diff of
+    // the two scripts is three insertions — OP_SIZE/<64>/OP_NUMEQUALVERIFY at
+    // the ecMulGen decompose, the 9-op clamping gate plus the same 3-op verify
+    // at ecOnCurve, and the second OP_BOOLAND that ANDs the width flag in.
     try expectHexDigest(
         SRC_EC_NO_FUSION,
         "ECCtl.runar.ts",
-        850588,
-        "9219589a0856da1bdaaf128317cae254da084995e4d2f58459f274b8b277c317",
+        850756,
+        "a3e5c0d431dddc70fdfccec4222dd3f500b0228e459f68c4539966bf05fd6e3c",
     );
 }
 

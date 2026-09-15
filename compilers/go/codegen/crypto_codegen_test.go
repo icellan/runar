@@ -46,22 +46,31 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		{"Sha256Finalize", EmitSha256Finalize, 63941},
 		{"Blake3Compress", EmitBlake3Compress, 10373},
 		{"Blake3Hash", EmitBlake3Hash, 10387},
-		{"EcAdd", EmitEcAdd, 8223},
-		{"EcMul", EmitEcMul, 130515},
-		{"EcMulGen", EmitEcMulGen, 130517},
-		{"EcNegate", EmitEcNegate, 945},
-		{"EcOnCurve", EmitEcOnCurve, 533},
-		{"P256Add", EmitP256Add, 6663},
-		{"P256Mul", EmitP256Mul, 140036},
+		// CL-BUG-095 (Point-length validation) deltas below: a Point/pubkey
+		// blob was never checked against its defined width, so surplus bytes
+		// were silently dropped by decomposePoint / cDecomposePoint. ecAdd,
+		// ecMul, ecMulGen, ecNegate, p256Add, p256Mul inherit an abort-form
+		// length check (emitPointLenVerify) via decomposePoint; ecOnCurve /
+		// p256OnCurve gain a clamp-form length gate (emitPointLengthGate)
+		// plus a second BOOLAND; VerifyECDSA_P256 inherits the abort-form
+		// check via cDecomposePoint inside cEmitVerifyECDSA's point additions.
+		{"EcAdd", EmitEcAdd, 8229},
+		{"EcMul", EmitEcMul, 130518},
+		{"EcMulGen", EmitEcMulGen, 130520},
+		{"EcNegate", EmitEcNegate, 948},
+		{"EcOnCurve", EmitEcOnCurve, 548},
+		{"P256Add", EmitP256Add, 6669},
+		{"P256Mul", EmitP256Mul, 140039},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
 		// (cEmitLengthGate), signature range gate 1<=r,s<=n-1
 		// (cEmitSigRangeGate), and the pubkey prefix-byte check folded into
 		// cDecompressPubKey's _dk_valid. P-384 carries the identical fix but
 		// has no golden entry in this table.
-		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297331},
-		{"P384Add", EmitP384Add, 11469},
-		{"P384Mul", EmitP384Mul, 211178},
+		// +12 more from CL-BUG-095 (Point-length validation, see above).
+		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297343},
+		{"P384Add", EmitP384Add, 11475},
+		{"P384Mul", EmitP384Mul, 211181},
 		{"VerifyWOTS", EmitVerifyWOTS, 15488},
 	}
 	for _, tc := range cases {

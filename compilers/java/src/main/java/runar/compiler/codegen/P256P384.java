@@ -300,7 +300,12 @@ public final class P256P384 {
                                         String xName, String yName,
                                         int coordBytes, ReverseBytesFn revFn) {
         t.toTop(pointName);
+        // CL-BUG-095: a P256Point/P384Point is exactly 2*coordBytes bytes and
+        // nothing checked it, so surplus bytes were split off and silently dropped.
+        // Gate the width here, where every consumer that decomposes a point picks it
+        // up. See Ec.emitPointLenVerify.
         t.rawBlock(List.of(pointName), "", e -> {
+            Ec.emitPointLenVerify(e, coordBytes * 2);
             e.accept(new PushOp(PushValue.of(coordBytes)));
             e.accept(new OpcodeOp("OP_SPLIT"));
         });
@@ -1444,6 +1449,10 @@ public final class P256P384 {
 
     public static void emitP256OnCurve(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
+        // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+        // contracts are told to gate an untrusted point on, so it must stay total.
+        // The flag is ANDed into the result below.
+        Ec.emitPointLengthGate(t, "_pt", 32 * 2, "_len_ok");
         cDecomposePoint(t, "_pt", "_x", "_y", 32, REV32);
         cEmitCanonicityGuard(t, "_x", "_y", P256_P);
 
@@ -1465,28 +1474,34 @@ public final class P256P384 {
         t.rawBlock(List.of("_y2", "_rhs"), "_curve_eq",
             e -> e.accept(new OpcodeOp("OP_EQUAL")));
 
-        // on-curve = canonical AND curve-equation
+        // on-curve = right width AND canonical AND curve-equation
         t.toTop("_canon");
         t.toTop("_curve_eq");
-        t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
+        t.rawBlock(List.of("_canon", "_curve_eq"), "_eq_ok",
+            e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.toTop("_len_ok");
+        t.toTop("_eq_ok");
+        t.rawBlock(List.of("_len_ok", "_eq_ok"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
     }
 
     public static void emitP256EncodeCompressed(Consumer<StackOp> emit) {
+        // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+        // appended byte flipped the sign of the compressed encoding. Width is now
+        // verified AND the parity byte is read from a fixed offset. See
+        // Ec.emitEcEncodeCompressed for the full argument.
+        Ec.emitPointLenVerify(emit, 64);
         // Split at 32: [x_bytes, y_bytes]
         emit.accept(new PushOp(PushValue.of(32)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
-        // Last byte of y for parity
-        emit.accept(new OpcodeOp("OP_SIZE"));
-        emit.accept(new PushOp(PushValue.of(1)));
-        emit.accept(new OpcodeOp("OP_SUB"));
+        // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.accept(new PushOp(PushValue.of(31)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
+        emit.accept(new OpcodeOp("OP_NIP")); // drop y_head
+        // Stack: [x_bytes, last_byte]
         emit.accept(new OpcodeOp("OP_BIN2NUM"));
         emit.accept(new PushOp(PushValue.of(2)));
         emit.accept(new OpcodeOp("OP_MOD"));
-        // Stack: [x_bytes, y_prefix, parity]
-        emit.accept(new SwapOp());
-        emit.accept(new DropOp());
         // Stack: [x_bytes, parity]
         emit.accept(new IfOp(
             List.of(new PushOp(PushValue.ofHex("03"))),
@@ -1537,6 +1552,10 @@ public final class P256P384 {
 
     public static void emitP384OnCurve(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
+        // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+        // contracts are told to gate an untrusted point on, so it must stay total.
+        // The flag is ANDed into the result below.
+        Ec.emitPointLengthGate(t, "_pt", 48 * 2, "_len_ok");
         cDecomposePoint(t, "_pt", "_x", "_y", 48, REV48);
         cEmitCanonicityGuard(t, "_x", "_y", P384_P);
 
@@ -1556,25 +1575,33 @@ public final class P256P384 {
         t.rawBlock(List.of("_y2", "_rhs"), "_curve_eq",
             e -> e.accept(new OpcodeOp("OP_EQUAL")));
 
-        // on-curve = canonical AND curve-equation
+        // on-curve = right width AND canonical AND curve-equation
         t.toTop("_canon");
         t.toTop("_curve_eq");
-        t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
+        t.rawBlock(List.of("_canon", "_curve_eq"), "_eq_ok",
+            e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.toTop("_len_ok");
+        t.toTop("_eq_ok");
+        t.rawBlock(List.of("_len_ok", "_eq_ok"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
     }
 
     public static void emitP384EncodeCompressed(Consumer<StackOp> emit) {
+        // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+        // appended byte flipped the sign of the compressed encoding. Width is now
+        // verified AND the parity byte is read from a fixed offset. See
+        // Ec.emitEcEncodeCompressed for the full argument.
+        Ec.emitPointLenVerify(emit, 96);
         emit.accept(new PushOp(PushValue.of(48)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
-        emit.accept(new OpcodeOp("OP_SIZE"));
-        emit.accept(new PushOp(PushValue.of(1)));
-        emit.accept(new OpcodeOp("OP_SUB"));
+        // Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.accept(new PushOp(PushValue.of(47)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
+        emit.accept(new OpcodeOp("OP_NIP")); // drop y_head
+        // Stack: [x_bytes, last_byte]
         emit.accept(new OpcodeOp("OP_BIN2NUM"));
         emit.accept(new PushOp(PushValue.of(2)));
         emit.accept(new OpcodeOp("OP_MOD"));
-        emit.accept(new SwapOp());
-        emit.accept(new DropOp());
         emit.accept(new IfOp(
             List.of(new PushOp(PushValue.ofHex("03"))),
             List.of(new PushOp(PushValue.ofHex("02")))));

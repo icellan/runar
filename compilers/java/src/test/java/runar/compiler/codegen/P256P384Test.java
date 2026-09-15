@@ -45,48 +45,48 @@ class P256P384Test {
     void p256AddParity() {
         assertParity("p256Add",
             P256P384::emitP256Add,
-            6663, 19906,
-            "589550be7906bc2326968d6d2efc48dad59702510b0fd881ea9ee81e5f2fc41e");
+            6669, 19914,
+            "82ff3a783dca04ca4b846e65daf2e49471bfd1dc37fc210572feeac36a7eecee");
     }
 
     @Test
     void p256MulParity() {
         assertParity("p256Mul",
             P256P384::emitP256Mul,
-            140036, 459746,
-            "3f491aae5052651c50af692d7a2c16984e329bf5c790d18249af27171c442e17");
+            140039, 459750,
+            "62892961974b9d2876eb38adc0a031b065593392b137834c27d01f5e8c8a5012");
     }
 
     @Test
     void p256MulGenParity() {
         assertParity("p256MulGen",
             P256P384::emitP256MulGen,
-            140038, 459812,
-            "4e6e4fc58b14b14e9ab6c42a6adf8882d562d73b3754d6c28178a80b9b43a54a");
+            140041, 459816,
+            "c98d7e25ccea8453e9f952007ba65065d0ef4299e284e8da78cdecc99d0704d6");
     }
 
     @Test
     void p256NegateParity() {
         assertParity("p256Negate",
             P256P384::emitP256Negate,
-            945, 1018,
-            "92527f4c693de2e9ad7207842fc80cae1735abcef68bf26ce32b14a70dec6c2f");
+            948, 1022,
+            "5b37aa42c6d68635717ba72ebafc31509fa1c20ab0b284de4823e4bcc14b4425");
     }
 
     @Test
     void p256OnCurveParity() {
         assertParity("p256OnCurve",
             P256P384::emitP256OnCurve,
-            559, 858,
-            "3ae633ac4a1039e19b9c79e993e6f3567199a6d138d9e71f62edb58e8f124219");
+            574, 940,
+            "218e2c15582b847eb8479d7d5c9787a60b9fa97f6ab50bdc277be6201a50e8e8");
     }
 
     @Test
     void p256EncodeCompressedParity() {
         assertParity("p256EncodeCompressed",
             P256P384::emitP256EncodeCompressed,
-            16, 19,
-            "a4481881396c90da361f987c4adc581125b09103bfb6bd11f3d5acc5be1635d1");
+            16, 21,
+            "6fabc7557f72bcbe35f7fa63715afa3d5f30d54924e8ef48ef879caa1c011ab0");
     }
 
     /**
@@ -142,8 +142,8 @@ class P256P384Test {
     void verifyEcdsaP256Parity() {
         assertParity("verifyECDSA_P256",
             P256P384::emitVerifyECDSA_P256,
-            297331, 974024,
-            "1b8077057d1f724348e603a79b7ebab7ef6b0c36cdf669323e2d4483ab9c4f77");
+            297343, 974040,
+            "7d7b4a48bc71689811beac7697571bf138a16bdb9d38e18ad518c221eca2c91c");
     }
 
     // --------------------------------------------------------------
@@ -155,48 +155,48 @@ class P256P384Test {
     void p384AddParity() {
         assertParity("p384Add",
             P256P384::emitP384Add,
-            11469, 46710,
-            "744c9376b1c89f0152ff83c0a0ad8940b1b963e489f4e95ecbf3582057c4266c");
+            11475, 46718,
+            "268fd9f01227183d29239f75525fd134a3154b7724cddcb1f6db92b16c34a35d");
     }
 
     @Test
     void p384MulParity() {
         assertParity("p384Mul",
             P256P384::emitP384Mul,
-            211178, 927350,
-            "ca64d51df61e1ba9f5fd26113cbff649036ee96c00d2d1d27442486e93520fb4");
+            211181, 927354,
+            "1e624453c21308e9594ff29ef8998bac39f630013a3d7451362ac6f3f1b7d3f9");
     }
 
     @Test
     void p384MulGenParity() {
         assertParity("p384MulGen",
             P256P384::emitP384MulGen,
-            211180, 927449,
-            "5a5149b884fac627c5b46488bfcb55c7bf5f275b255ed83026c193e8cb42250a");
+            211183, 927453,
+            "bb02d07492fabeeacf6996b3c60761fd658d96c77b08ea9037a34a68d540c005");
     }
 
     @Test
     void p384NegateParity() {
         assertParity("p384Negate",
             P256P384::emitP384Negate,
-            1393, 1498,
-            "147e2c655c23973481673628c1d0151034a5945462fb26828a6c8c1748b15cdc");
+            1396, 1502,
+            "3c81439f4619e265c0f8cb30f3107d461b522af0c89241fa51d84bee862ba863");
     }
 
     @Test
     void p384OnCurveParity() {
         assertParity("p384OnCurve",
             P256P384::emitP384OnCurve,
-            783, 1227,
-            "2d8d5ea7a9f059dc3087b62564feed5fac7c24c795e2142c2252e499b18bffe7");
+            798, 1342,
+            "94a8fdd5522fc28ec1e497bc94cb734d98bf778cd82d362a5977aebf28708a07");
     }
 
     @Test
     void p384EncodeCompressedParity() {
         assertParity("p384EncodeCompressed",
             P256P384::emitP384EncodeCompressed,
-            16, 19,
-            "e32d98f40a17d26f70ce433663a01e3c476073419ab6109964d00cfbb57d6eae");
+            16, 21,
+            "0445ab05c849a3528caa951da2d8202ebba4c29a11237b8695b73773cb01c508");
     }
 
     /**
@@ -218,8 +218,8 @@ class P256P384Test {
     void verifyEcdsaP384Parity() {
         assertParity("verifyECDSA_P384",
             P256P384::emitVerifyECDSA_P384,
-            453307, 1987394,
-            "665371eff2690394d04ecbc2195d556d79103849c40b2bafe75ef2fdb5d3d1f9");
+            453319, 1987410,
+            "850f67a8e7046364d6dbef399f24d22c0072584f324e0778d16e8f90e2374da0");
     }
 
     // --------------------------------------------------------------

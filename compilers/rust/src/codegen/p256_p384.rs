@@ -12,7 +12,7 @@
 //! an optimized Jacobian doubling formula.
 
 use super::stack::{PushValue, StackOp};
-use super::ec::emit_reverse_32;
+use super::ec::{emit_point_len_verify, emit_reverse_32};
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
 use std::sync::LazyLock;
@@ -484,7 +484,12 @@ fn c_group_inv(t: &mut ECTracker, a_name: &str, result_name: &str, g: &NistGroup
 
 fn c_decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &str, c: &NistCurveParams) {
     t.to_top(point_name);
+    // CL-BUG-095: a P256Point/P384Point is exactly 2*coord_bytes bytes and
+    // nothing checked it, so surplus bytes were split off and silently dropped.
+    // Gate the width here, where every consumer that decomposes a point picks it
+    // up. See emit_point_len_verify in ec.rs.
     t.raw_block(&[point_name], None, |e| {
+        emit_point_len_verify(e, c.coord_bytes * 2);
         e(StackOp::Push(PushValue::Int(BigInt::from(c.coord_bytes as i128))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
@@ -1624,6 +1629,10 @@ pub fn emit_p256_negate(emit: &mut dyn FnMut(StackOp)) {
 /// p256OnCurve: check if a P-256 point is on the curve (y^2 = x^3 - 3x + b mod p).
 pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
+    // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+    // contracts are told to gate an untrusted point on, so it must stay total.
+    // The flag is ANDed into the result below.
+    c_emit_length_gate(&mut t, "_pt", P256_CURVE.coord_bytes * 2, "_len_ok");
     c_decompose_point(&mut t, "_pt", "_x", "_y", &P256_CURVE);
     c_emit_canonicity_guard(&mut t, "_x", "_y", &P256_CURVE);
 
@@ -1647,31 +1656,37 @@ pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
         e(StackOp::Opcode("OP_EQUAL".into()));
     });
 
-    // on-curve = canonical AND curve-equation
+    // on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon");
     t.to_top("_curve_eq");
-    t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
+    t.raw_block(&["_canon", "_curve_eq"], Some("_eq_ok"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    t.to_top("_len_ok");
+    t.to_top("_eq_ok");
+    t.raw_block(&["_len_ok", "_eq_ok"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
 }
 
 /// p256EncodeCompressed: encode a P-256 point as 33-byte compressed pubkey.
 pub fn emit_p256_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
+    // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+    // appended byte flipped the sign of the compressed encoding. Width is now
+    // verified AND the parity byte is read from a fixed offset. See
+    // emit_ec_encode_compressed in ec.rs for the full argument.
+    emit_point_len_verify(emit, 64);
     // Split at 32: [x_bytes, y_bytes]
     emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Get last byte of y for parity
-    emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
-    emit(StackOp::Opcode("OP_SUB".into()));
+    // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(StackOp::Push(PushValue::Int(BigInt::from(31))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Stack: [x_bytes, y_prefix, last_byte]
+    emit(StackOp::Opcode("OP_NIP".into())); // drop y_head
+    // Stack: [x_bytes, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
     emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
-    // Stack: [x_bytes, y_prefix, parity]
-    emit(StackOp::Swap);
-    emit(StackOp::Drop); // drop y_prefix
     // Stack: [x_bytes, parity]
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
@@ -1727,6 +1742,10 @@ pub fn emit_p384_negate(emit: &mut dyn FnMut(StackOp)) {
 /// p384OnCurve: check if a P-384 point is on the curve.
 pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
+    // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+    // contracts are told to gate an untrusted point on, so it must stay total.
+    // The flag is ANDed into the result below.
+    c_emit_length_gate(&mut t, "_pt", P384_CURVE.coord_bytes * 2, "_len_ok");
     c_decompose_point(&mut t, "_pt", "_x", "_y", &P384_CURVE);
     c_emit_canonicity_guard(&mut t, "_x", "_y", &P384_CURVE);
 
@@ -1750,31 +1769,37 @@ pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
         e(StackOp::Opcode("OP_EQUAL".into()));
     });
 
-    // on-curve = canonical AND curve-equation
+    // on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon");
     t.to_top("_curve_eq");
-    t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
+    t.raw_block(&["_canon", "_curve_eq"], Some("_eq_ok"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    t.to_top("_len_ok");
+    t.to_top("_eq_ok");
+    t.raw_block(&["_len_ok", "_eq_ok"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
 }
 
 /// p384EncodeCompressed: encode a P-384 point as 49-byte compressed pubkey.
 pub fn emit_p384_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
+    // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+    // appended byte flipped the sign of the compressed encoding. Width is now
+    // verified AND the parity byte is read from a fixed offset. See
+    // emit_ec_encode_compressed in ec.rs for the full argument.
+    emit_point_len_verify(emit, 96);
     // Split at 48: [x_bytes, y_bytes]
     emit(StackOp::Push(PushValue::Int(BigInt::from(48))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Get last byte of y for parity
-    emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
-    emit(StackOp::Opcode("OP_SUB".into()));
+    // Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(StackOp::Push(PushValue::Int(BigInt::from(47))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Stack: [x_bytes, y_prefix, last_byte]
+    emit(StackOp::Opcode("OP_NIP".into())); // drop y_head
+    // Stack: [x_bytes, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
     emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
-    // Stack: [x_bytes, y_prefix, parity]
-    emit(StackOp::Swap);
-    emit(StackOp::Drop); // drop y_prefix
     // Stack: [x_bytes, parity]
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],

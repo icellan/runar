@@ -307,7 +307,12 @@ module RunarCompiler
 
       def self.c_decompose_point(t, point_name, x_name, y_name, c)
         t.to_top(point_name)
+        # CL-BUG-095: a P256Point/P384Point is exactly 2*coord_bytes bytes and
+        # nothing checked it, so surplus bytes were split off and silently
+        # dropped. Gate the width here, where every consumer that decomposes a
+        # point picks it up. See emit_point_len_verify in ec.rb.
         split_fn = ->(e) {
+          EC.emit_point_len_verify(e, c.coord_bytes * 2)
           e.call(make_stack_op(op: "push", value: big_int_push(c.coord_bytes)))
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         }
@@ -1427,6 +1432,10 @@ module RunarCompiler
 
       def self.emit_p256_on_curve(emit)
         t = EC::ECTracker.new(["_pt"], emit)
+        # CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+        # contracts are told to gate an untrusted point on, so it must stay
+        # total. The flag is ANDed into the result below.
+        EC.emit_point_length_gate(t, "_pt", P256_CURVE.coord_bytes * 2, "_len_ok")
         c_decompose_point(t, "_pt", "_x", "_y", P256_CURVE)
         c_emit_canonicity_guard(t, "_x", "_y", P256_CURVE)
 
@@ -1445,24 +1454,30 @@ module RunarCompiler
         t.to_top("_rhs")
         t.raw_block(["_y2", "_rhs"], "_curve_eq", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) })
 
-        # on-curve = canonical AND curve-equation
+        # on-curve = right width AND canonical AND curve-equation
         t.to_top("_canon")
         t.to_top("_curve_eq")
-        t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.raw_block(["_canon", "_curve_eq"], "_eq_ok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.to_top("_len_ok")
+        t.to_top("_eq_ok")
+        t.raw_block(["_len_ok", "_eq_ok"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
       end
 
       def self.emit_p256_encode_compressed(emit)
+        # CL-BUG-095: the parity byte was taken from the blob's LAST byte, so
+        # one appended byte flipped the sign of the compressed encoding. Width
+        # is now verified AND the parity byte is read from a fixed offset. See
+        # emit_ec_encode_compressed in ec.rb for the full argument.
+        EC.emit_point_len_verify(emit, 64)
         emit.call(make_stack_op(op: "push", value: big_int_push(32)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
-        emit.call(make_stack_op(op: "push", value: big_int_push(1)))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SUB"))
+        # Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.call(make_stack_op(op: "push", value: big_int_push(31)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_NIP")) # drop y_head
         emit.call(make_stack_op(op: "opcode", code: "OP_BIN2NUM"))
         emit.call(make_stack_op(op: "push", value: big_int_push(2)))
         emit.call(make_stack_op(op: "opcode", code: "OP_MOD"))
-        emit.call(make_stack_op(op: "swap"))
-        emit.call(make_stack_op(op: "drop"))
         emit.call(make_stack_op(
           op: "if",
           then: [make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: "\x03".b))],
@@ -1509,6 +1524,10 @@ module RunarCompiler
 
       def self.emit_p384_on_curve(emit)
         t = EC::ECTracker.new(["_pt"], emit)
+        # CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+        # contracts are told to gate an untrusted point on, so it must stay
+        # total. The flag is ANDed into the result below.
+        EC.emit_point_length_gate(t, "_pt", P384_CURVE.coord_bytes * 2, "_len_ok")
         c_decompose_point(t, "_pt", "_x", "_y", P384_CURVE)
         c_emit_canonicity_guard(t, "_x", "_y", P384_CURVE)
 
@@ -1527,24 +1546,30 @@ module RunarCompiler
         t.to_top("_rhs")
         t.raw_block(["_y2", "_rhs"], "_curve_eq", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) })
 
-        # on-curve = canonical AND curve-equation
+        # on-curve = right width AND canonical AND curve-equation
         t.to_top("_canon")
         t.to_top("_curve_eq")
-        t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.raw_block(["_canon", "_curve_eq"], "_eq_ok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.to_top("_len_ok")
+        t.to_top("_eq_ok")
+        t.raw_block(["_len_ok", "_eq_ok"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
       end
 
       def self.emit_p384_encode_compressed(emit)
+        # CL-BUG-095: the parity byte was taken from the blob's LAST byte, so
+        # one appended byte flipped the sign of the compressed encoding. Width
+        # is now verified AND the parity byte is read from a fixed offset. See
+        # emit_ec_encode_compressed in ec.rb for the full argument.
+        EC.emit_point_len_verify(emit, 96)
         emit.call(make_stack_op(op: "push", value: big_int_push(48)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
-        emit.call(make_stack_op(op: "push", value: big_int_push(1)))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SUB"))
+        # Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.call(make_stack_op(op: "push", value: big_int_push(47)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_NIP")) # drop y_head
         emit.call(make_stack_op(op: "opcode", code: "OP_BIN2NUM"))
         emit.call(make_stack_op(op: "push", value: big_int_push(2)))
         emit.call(make_stack_op(op: "opcode", code: "OP_MOD"))
-        emit.call(make_stack_op(op: "swap"))
-        emit.call(make_stack_op(op: "drop"))
         emit.call(make_stack_op(
           op: "if",
           then: [make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: "\x03".b))],

@@ -359,9 +359,78 @@ public final class Ec {
         e.accept(new DropOp());
     }
 
+    /**
+     * CL-BUG-095 — length gate for a {@code Point} argument, ABORTING form.
+     *
+     * <p>A {@code Point} is DEFINED as exactly {@code want} bytes (x ‖ y, big-endian,
+     * no prefix). Nothing checked that: {@code Point} carries no width in the builtin
+     * table, and every one of these values arrives as an unlock argument, so the blob
+     * is attacker-sized. Surplus bytes were then silently DISCARDED, because
+     * {@code decomposePoint} splits at the coordinate width and {@code emitReverse32}
+     * reverses exactly 32 bytes and drops whatever is left over — so
+     * {@code ecOnCurve(G ‖ 0xff)} returned TRUE and {@code ecEncodeCompressed} took its
+     * parity bit from the surplus.
+     *
+     * <p>This is NOT a new failure channel. An UNDER-length point already aborted, by
+     * accident: {@code OP_SPLIT} runs off the end of the value. The gate makes the same
+     * outcome explicit, and extends it to the over-length case that used to pass.
+     *
+     * <p>Aborting is right for every Point consumer that produces a VALUE and has no
+     * error channel to report through — {@code ecAdd}, {@code ecMul}, {@code ecNegate},
+     * {@code ecPointX}, {@code ecPointY}, {@code ecEncodeCompressed}. There is no correct
+     * value to return for a blob that is not a point. The PREDICATES ({@code ecOnCurve}
+     * and friends) use {@link #emitPointLengthGate} instead, because for them "no" is an
+     * answer.
+     */
+    public static void emitPointLenVerify(Consumer<StackOp> e, int want) {
+        e.accept(new OpcodeOp("OP_SIZE"));
+        e.accept(new PushOp(PushValue.of(want)));
+        e.accept(new OpcodeOp("OP_NUMEQUALVERIFY"));
+    }
+
+    /**
+     * CL-BUG-095 — length gate for a {@code Point} argument, CLAMPING form: leaves
+     * {@code [flag, clamped]}, where {@code clamped} is the value forced to exactly
+     * {@code want} bytes ({@code v ‖ 00*want} split at {@code want}, tail dropped) and
+     * {@code flag} is {@code OP_SIZE(v) == want}.
+     *
+     * <p>Same shape, and the same reasoning, as {@code cEmitLengthGate} in
+     * P256P384.java: the clamp exists so the gate can stay a FLAG. It is used by the
+     * on-curve predicates, whose whole job is to answer "is this an acceptable point?"
+     * over untrusted bytes — and for a wrong-length blob the correct answer is
+     * {@code false}, not an aborted script. Aborting would break
+     * {@code if (ecOnCurve(p)) { … } else { … }}, which is the exact idiom this module's
+     * own comments tell contract authors to write. The caller ANDs {@code flag} into its
+     * boolean result, so whatever the clamped bytes happen to compute can never make a
+     * wrong-length point certify as on-curve.
+     *
+     * <p>Branch-free: the emitted op sequence, and the tracker's static stack model, are
+     * identical for every input length.
+     */
+    public static void emitPointLengthGate(ECTracker t, String name, int want, String flagName) {
+        t.toTop(name);
+        t.rawBlock(List.of(name), "", e -> {
+            e.accept(new OpcodeOp("OP_SIZE"));
+            e.accept(new PushOp(PushValue.of(want)));
+            e.accept(new OpcodeOp("OP_NUMEQUAL"));
+            e.accept(new SwapOp());
+            e.accept(new PushOp(PushValue.ofHex(hexOf(new byte[want]))));
+            e.accept(new OpcodeOp("OP_CAT"));
+            e.accept(new PushOp(PushValue.of(want)));
+            e.accept(new OpcodeOp("OP_SPLIT"));
+            e.accept(new DropOp());
+        });
+        t.nm.add(flagName);
+        t.nm.add(name);
+    }
+
     private static void decomposePoint(ECTracker t, String pointName, String xName, String yName) {
         t.toTop(pointName);
+        // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) — but only for
+        // a value that really is 64 bytes. CL-BUG-095: gate the width first, here,
+        // so every consumer that decomposes a Point inherits the check.
         t.rawBlock(List.of(pointName), "", e -> {
+            emitPointLenVerify(e, 64);
             e.accept(new PushOp(PushValue.of(32)));
             e.accept(new OpcodeOp("OP_SPLIT"));
         });
@@ -957,6 +1026,15 @@ public final class Ec {
 
     public static void emitEcOnCurve(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
+
+        // CL-BUG-095: width. `ecOnCurve(G ‖ 0xff)` returned TRUE — decomposePoint
+        // discarded the surplus byte, so 2^8 distinct blobs all certified as the
+        // same point and a point's identity AS BYTES stopped being unique. Clamp and
+        // remember the width, rather than abort, because this is the predicate
+        // contracts are told to gate untrusted points on and it must stay total; the
+        // flag is ANDed into the result at the end.
+        emitPointLengthGate(t, "_pt", 64, "_len_ok");
+
         decomposePoint(t, "_pt", "_x", "_y");
 
         // GAP-301: coordinate canonicity. decomposePoint BIN2NUMs each coordinate
@@ -994,10 +1072,14 @@ public final class Ec {
         t.rawBlock(List.of("_y2", "_rhs"), "_curve_eq",
             e -> e.accept(new OpcodeOp("OP_EQUAL")));
 
-        // on-curve = canonical AND curve-equation
+        // on-curve = right width AND canonical AND curve-equation
         t.toTop("_canon");
         t.toTop("_curve_eq");
-        t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
+        t.rawBlock(List.of("_canon", "_curve_eq"), "_eq_ok",
+            e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.toTop("_len_ok");
+        t.toTop("_eq_ok");
+        t.rawBlock(List.of("_len_ok", "_eq_ok"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
     }
 
@@ -1013,21 +1095,26 @@ public final class Ec {
     }
 
     public static void emitEcEncodeCompressed(Consumer<StackOp> emit) {
+        // CL-BUG-095, and the reason this one is the sharpest edge of it: the parity
+        // byte used to be taken from the blob's LAST byte (OP_SIZE 1 OP_SUB
+        // OP_SPLIT), not from a fixed offset. So appending one byte FLIPPED THE SIGN
+        // of the compressed encoding — the same 64-byte point compressed to 02‖x or
+        // 03‖x at the caller's choice, and anything that hashes a compressed pubkey
+        // (a P2PKH address, a commitment) became forgeable between the two
+        // spellings. Two independent fixes, both kept: the width is verified, and
+        // the parity byte is read from offset 31 of y whatever the caller sent.
+        emitPointLenVerify(emit, 64);
         // Split at 32: [x_bytes, y_bytes]
         emit.accept(new PushOp(PushValue.of(32)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
-        // Get last byte of y for parity
-        emit.accept(new OpcodeOp("OP_SIZE"));
-        emit.accept(new PushOp(PushValue.of(1)));
-        emit.accept(new OpcodeOp("OP_SUB"));
+        // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.accept(new PushOp(PushValue.of(31)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
-        // Stack: [x_bytes, y_prefix, last_byte]
+        emit.accept(new OpcodeOp("OP_NIP")); // drop y_head
+        // Stack: [x_bytes, last_byte]
         emit.accept(new OpcodeOp("OP_BIN2NUM"));
         emit.accept(new PushOp(PushValue.of(2)));
         emit.accept(new OpcodeOp("OP_MOD"));
-        // Stack: [x_bytes, y_prefix, parity]
-        emit.accept(new SwapOp());
-        emit.accept(new DropOp());
         // Stack: [x_bytes, parity]
         emit.accept(new IfOp(
             List.of(new PushOp(PushValue.ofHex("03"))),
@@ -1060,6 +1147,11 @@ public final class Ec {
     }
 
     public static void emitEcPointX(Consumer<StackOp> emit) {
+        // CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x —
+        // the split at 32 left an empty tail that `drop` happily removed. ecPointY
+        // on the identical input already aborted, which is how the hole survived: a
+        // short point looked "already rejected".
+        emitPointLenVerify(emit, 64);
         emit.accept(new PushOp(PushValue.of(32)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
         emit.accept(new DropOp());
@@ -1070,6 +1162,7 @@ public final class Ec {
     }
 
     public static void emitEcPointY(Consumer<StackOp> emit) {
+        emitPointLenVerify(emit, 64);
         emit.accept(new PushOp(PushValue.of(32)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
         emit.accept(new SwapOp());

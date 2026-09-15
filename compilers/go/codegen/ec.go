@@ -362,12 +362,61 @@ func ecFieldInv(t *ECTracker, aName, resultName string) {
 // Point decompose / compose
 // ===========================================================================
 
+// ecEmitPointLenVerify -- CL-BUG-095 -- is a length gate for a `Point`
+// argument, ABORTING form.
+//
+// A `Point` is DEFINED as exactly `want` bytes (x || y, big-endian, no
+// prefix). Nothing checked that: surplus bytes were silently discarded
+// because decomposePoint splits at the coordinate width and the reversal
+// helper reverses exactly that many bytes and drops the remainder. Aborting
+// is right here because every caller of this form produces a VALUE with no
+// error channel to report through (ecAdd, ecMul, ecNegate, ecPointX,
+// ecPointY, ecEncodeCompressed) -- there is no correct value to return for a
+// blob that is not a point. Predicates use ecEmitPointLengthGate instead,
+// because for them "no" is an answer.
+func ecEmitPointLenVerify(e func(StackOp), want int) {
+	e(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+	e(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+}
+
+// ecEmitPointLengthGate -- CL-BUG-095 -- is a length gate for a `Point`
+// argument, CLAMPING form: leaves [flag, clamped] on the tracker, where
+// clamped is the value forced to exactly want bytes (v || 00*want, split at
+// want, tail dropped) and flag is OP_SIZE(v) == want.
+//
+// Used by the on-curve predicates, whose whole job is to answer "is this an
+// acceptable point?" over untrusted bytes -- for a wrong-length blob the
+// correct answer is false, not an aborted script. The caller ANDs flag into
+// its boolean result, so whatever the clamped bytes happen to compute can
+// never make a wrong-length point certify as on-curve. Same shape as
+// cEmitLengthGate in p256_p384.go.
+func ecEmitPointLengthGate(t *ECTracker, name string, want int, flagName string) {
+	t.toTop(name)
+	t.rawBlock([]string{name}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_SIZE"})
+		e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+		e(StackOp{Op: "swap"})
+		e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: make([]byte, want)}})
+		e(StackOp{Op: "opcode", Code: "OP_CAT"})
+		e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		e(StackOp{Op: "drop"})
+	})
+	t.nm = append(t.nm, flagName)
+	t.nm = append(t.nm, name)
+}
+
 // ecDecomposePoint decomposes a 64-byte Point into (x_num, y_num) on stack.
 // Consumes pointName, produces xName and yName.
 func ecDecomposePoint(t *ECTracker, pointName, xName, yName string) {
 	t.toTop(pointName)
-	// OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+	// OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) -- but only
+	// for a value that really is 64 bytes. CL-BUG-095: gate the width first,
+	// here, so every consumer that decomposes a Point inherits the check.
 	t.rawBlock([]string{pointName}, "", func(e func(StackOp)) {
+		ecEmitPointLenVerify(e, 64)
 		e(StackOp{Op: "push", Value: bigIntPush(32)})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
@@ -1067,6 +1116,13 @@ func EmitEcNegate(emit func(StackOp)) {
 // Stack out: [boolean]
 func EmitEcOnCurve(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
+
+	// CL-BUG-095: width. `ecOnCurve(G || 0xff)` returned TRUE -- decomposePoint
+	// discarded the surplus byte. Clamp and remember the width, rather than
+	// abort, because this predicate must stay total; the flag is ANDed into
+	// the result at the end.
+	ecEmitPointLengthGate(t, "_pt", 64, "_len_ok")
+
 	ecDecomposePoint(t, "_pt", "_x", "_y")
 
 	// GAP-301: coordinate canonicity. ecDecomposePoint BIN2NUMs each coordinate
@@ -1108,10 +1164,15 @@ func EmitEcOnCurve(emit func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
 	})
 
-	// on-curve = canonical AND curve-equation
+	// on-curve = right width AND canonical AND curve-equation
 	t.toTop("_canon")
 	t.toTop("_curve_eq")
-	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_eq_ok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	t.toTop("_len_ok")
+	t.toTop("_eq_ok")
+	t.rawBlock([]string{"_len_ok", "_eq_ok"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 }
@@ -1134,21 +1195,22 @@ func EmitEcModReduce(emit func(StackOp)) {
 // Stack in: [point (64 bytes)]
 // Stack out: [compressed (33 bytes)]
 func EmitEcEncodeCompressed(emit func(StackOp)) {
+	// CL-BUG-095: the parity byte used to be taken from the blob's LAST byte
+	// (OP_SIZE, OP_SUB 1, OP_SPLIT), not a fixed offset -- so appending one
+	// byte flipped the sign of the compressed encoding. Width is now verified
+	// AND the parity byte is read from a fixed offset.
+	ecEmitPointLenVerify(emit, 64)
 	// Split at 32: [x_bytes, y_bytes]
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Get last byte of y for parity
-	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
-	emit(StackOp{Op: "push", Value: bigIntPush(1)})
-	emit(StackOp{Op: "opcode", Code: "OP_SUB"})
+	// Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+	emit(StackOp{Op: "push", Value: bigIntPush(31)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Stack: [x_bytes, y_prefix, last_byte]
+	emit(StackOp{Op: "nip"}) // drop y_head
+	// Stack: [x_bytes, last_byte]
 	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	emit(StackOp{Op: "push", Value: bigIntPush(2)})
 	emit(StackOp{Op: "opcode", Code: "OP_MOD"})
-	// Stack: [x_bytes, y_prefix, parity]
-	emit(StackOp{Op: "swap"})
-	emit(StackOp{Op: "drop"}) // drop y_prefix
 	// Stack: [x_bytes, parity]
 	emit(StackOp{Op: "if",
 		Then: []StackOp{{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x03}}}},
@@ -1189,6 +1251,9 @@ func EmitEcMakePoint(emit func(StackOp)) {
 // Stack in: [point (64 bytes)]
 // Stack out: [x as bigint]
 func EmitEcPointX(emit func(StackOp)) {
+	// CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x --
+	// the split at 32 left an empty tail that `drop` happily removed.
+	ecEmitPointLenVerify(emit, 64)
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	emit(StackOp{Op: "drop"})
@@ -1203,6 +1268,7 @@ func EmitEcPointX(emit func(StackOp)) {
 // Stack in: [point (64 bytes)]
 // Stack out: [y as bigint]
 func EmitEcPointY(emit func(StackOp)) {
+	ecEmitPointLenVerify(emit, 64)
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	emit(StackOp{Op: "swap"})

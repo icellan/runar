@@ -27,6 +27,8 @@ from runar_compiler.codegen.ec import (
     _make_stack_op,
     _make_push_value,
     _big_int_push,
+    emit_point_len_verify,
+    emit_point_length_gate,
 )
 
 # ===========================================================================
@@ -279,7 +281,12 @@ def _c_decompose_point(
 ) -> None:
     t.to_top(point_name)
 
+    # CL-BUG-095: a P256Point/P384Point is exactly 2*coord_bytes bytes and
+    # nothing checked it, so surplus bytes were split off and silently dropped.
+    # Gate the width here, where every consumer that decomposes a point picks it
+    # up. See emit_point_len_verify in ec.py.
     def _split(e: Callable) -> None:
+        emit_point_len_verify(e, coord_bytes * 2)
         e(_make_stack_op(op="push", value=_big_int_push(coord_bytes)))
         e(_make_stack_op(op="opcode", code="OP_SPLIT"))
 
@@ -1460,6 +1467,10 @@ def emit_p256_negate(emit: Callable) -> None:
 def emit_p256_on_curve(emit: Callable) -> None:
     """Check if a P-256 point is on the curve (y^2 = x^3 - 3x + b mod p)."""
     t = ECTracker(["_pt"], emit)
+    # CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+    # contracts are told to gate an untrusted point on, so it must stay total.
+    # The flag is ANDed into the result below.
+    emit_point_length_gate(t, "_pt", 64, "_len_ok")
     _c_decompose_point(t, "_pt", "_x", "_y", 32, _emit_reverse32)
     _c_emit_canonicity_guard(t, "_x", "_y", P256_P)
 
@@ -1478,25 +1489,34 @@ def emit_p256_on_curve(emit: Callable) -> None:
     t.to_top("_rhs")
     t.raw_block(["_y2", "_rhs"], "_curve_eq", lambda e: e(_make_stack_op(op="opcode", code="OP_EQUAL")))
 
-    # on-curve = canonical AND curve-equation
+    # on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon")
     t.to_top("_curve_eq")
-    t.raw_block(["_canon", "_curve_eq"], "_result", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+    t.raw_block(["_canon", "_curve_eq"], "_eq_ok", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+    t.to_top("_len_ok")
+    t.to_top("_eq_ok")
+    t.raw_block(["_len_ok", "_eq_ok"], "_result", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
 
 
 def emit_p256_encode_compressed(emit: Callable) -> None:
     """Encode a P-256 point as 33-byte compressed pubkey."""
+    # CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+    # appended byte flipped the sign of the compressed encoding. Width is now
+    # verified AND the parity byte is read from a fixed offset. See
+    # emit_ec_encode_compressed in ec.py for the full argument.
+    emit_point_len_verify(emit, 64)
+    # Split at 32: [x_bytes, y_bytes]
     emit(_make_stack_op(op="push", value=_big_int_push(32)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
-    emit(_make_stack_op(op="opcode", code="OP_SIZE"))
-    emit(_make_stack_op(op="push", value=_big_int_push(1)))
-    emit(_make_stack_op(op="opcode", code="OP_SUB"))
+    # Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(_make_stack_op(op="push", value=_big_int_push(31)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
+    emit(_make_stack_op(op="opcode", code="OP_NIP"))  # drop y_head
+    # Stack: [x_bytes, last_byte]
     emit(_make_stack_op(op="opcode", code="OP_BIN2NUM"))
     emit(_make_stack_op(op="push", value=_big_int_push(2)))
     emit(_make_stack_op(op="opcode", code="OP_MOD"))
-    emit(_make_stack_op(op="swap"))
-    emit(_make_stack_op(op="drop"))
+    # Stack: [x_bytes, parity]
     emit(_make_stack_op(
         op="if",
         then=[_make_stack_op(op="push", value=_make_push_value(kind="bytes", bytes_=b"\x03"))],
@@ -1565,6 +1585,10 @@ def emit_p384_negate(emit: Callable) -> None:
 def emit_p384_on_curve(emit: Callable) -> None:
     """Check if a P-384 point is on the curve (y^2 = x^3 - 3x + b mod p)."""
     t = ECTracker(["_pt"], emit)
+    # CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+    # contracts are told to gate an untrusted point on, so it must stay total.
+    # The flag is ANDed into the result below.
+    emit_point_length_gate(t, "_pt", 96, "_len_ok")
     _c_decompose_point(t, "_pt", "_x", "_y", 48, _emit_reverse48)
     _c_emit_canonicity_guard(t, "_x", "_y", P384_P)
 
@@ -1583,25 +1607,34 @@ def emit_p384_on_curve(emit: Callable) -> None:
     t.to_top("_rhs")
     t.raw_block(["_y2", "_rhs"], "_curve_eq", lambda e: e(_make_stack_op(op="opcode", code="OP_EQUAL")))
 
-    # on-curve = canonical AND curve-equation
+    # on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon")
     t.to_top("_curve_eq")
-    t.raw_block(["_canon", "_curve_eq"], "_result", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+    t.raw_block(["_canon", "_curve_eq"], "_eq_ok", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+    t.to_top("_len_ok")
+    t.to_top("_eq_ok")
+    t.raw_block(["_len_ok", "_eq_ok"], "_result", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
 
 
 def emit_p384_encode_compressed(emit: Callable) -> None:
     """Encode a P-384 point as 49-byte compressed pubkey."""
+    # CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+    # appended byte flipped the sign of the compressed encoding. Width is now
+    # verified AND the parity byte is read from a fixed offset. See
+    # emit_ec_encode_compressed in ec.py for the full argument.
+    emit_point_len_verify(emit, 96)
+    # Split at 48: [x_bytes, y_bytes]
     emit(_make_stack_op(op="push", value=_big_int_push(48)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
-    emit(_make_stack_op(op="opcode", code="OP_SIZE"))
-    emit(_make_stack_op(op="push", value=_big_int_push(1)))
-    emit(_make_stack_op(op="opcode", code="OP_SUB"))
+    # Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(_make_stack_op(op="push", value=_big_int_push(47)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
+    emit(_make_stack_op(op="opcode", code="OP_NIP"))  # drop y_head
+    # Stack: [x_bytes, last_byte]
     emit(_make_stack_op(op="opcode", code="OP_BIN2NUM"))
     emit(_make_stack_op(op="push", value=_big_int_push(2)))
     emit(_make_stack_op(op="opcode", code="OP_MOD"))
-    emit(_make_stack_op(op="swap"))
-    emit(_make_stack_op(op="drop"))
+    # Stack: [x_bytes, parity]
     emit(_make_stack_op(
         op="if",
         then=[_make_stack_op(op="push", value=_make_push_value(kind="bytes", bytes_=b"\x03"))],

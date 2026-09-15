@@ -50,16 +50,36 @@ def _count_op_tree(ops: list[StackOp]) -> int:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,fn,expected", [
-    ("ecAdd",              emit_ec_add,               8223),
-    ("ecMul",              emit_ec_mul,             130515),
-    ("ecMulGen",           emit_ec_mul_gen,         130517),
-    ("ecNegate",           emit_ec_negate,             945),
-    ("ecOnCurve",          emit_ec_on_curve,           533),
+    # R-052 / CL-BUG-095, the Point WIDTH gate. A ``Point`` is 64 bytes by
+    # definition and nothing checked it, so a surplus byte was split off and
+    # silently dropped: ``ecOnCurve(G || 0xff)`` returned TRUE and
+    # ``ecEncodeCompressed`` took its parity bit from the caller's extra byte.
+    # The deltas below are all structural, which is what makes them portable to
+    # the six other tiers byte-for-byte:
+    #
+    #   +3  per _ec_decompose_point call site -- OP_SIZE, push 64,
+    #       OP_NUMEQUALVERIFY. ecAdd decomposes TWICE, hence +6; ecMul /
+    #       ecMulGen / ecNegate once.
+    #   +15 ecOnCurve -- 9 for the clamp-and-flag gate (it must stay a PREDICATE
+    #       and answer ``false``, not abort, or ``if (ecOnCurve(p))`` stops
+    #       being writable), +3 for the decompose gate, +1 for the extra
+    #       OP_BOOLAND folding ``_len_ok`` in, +2 for rolling the two flags up.
+    #   +3  ecPointX / ecPointY.
+    #
+    # ecEncodeCompressed stays at 16 and that is NOT an oversight: the gate adds
+    # 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
+    # replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/swap/drop sequence with 3. Net
+    # zero ops, different bytes.
+    ("ecAdd",              emit_ec_add,               8229),
+    ("ecMul",              emit_ec_mul,             130518),
+    ("ecMulGen",           emit_ec_mul_gen,         130520),
+    ("ecNegate",           emit_ec_negate,             948),
+    ("ecOnCurve",          emit_ec_on_curve,           548),
     ("ecModReduce",        emit_ec_mod_reduce,           8),
     ("ecEncodeCompressed", emit_ec_encode_compressed,   16),
     ("ecMakePoint",        emit_ec_make_point,         467),
-    ("ecPointX",           emit_ec_point_x,            233),
-    ("ecPointY",           emit_ec_point_y,            234),
+    ("ecPointX",           emit_ec_point_x,            236),
+    ("ecPointY",           emit_ec_point_y,            237),
 ])
 def test_op_count(name, fn, expected):
     ops: list[StackOp] = []

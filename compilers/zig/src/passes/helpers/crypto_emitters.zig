@@ -82,18 +82,41 @@ pub fn appendEcModReduce(builder: *Builder) !void {
     try builder.emitOp("OP_MOD");
 }
 
+/// CL-BUG-095 — a `Point` is DEFINED as exactly `want` bytes (x ‖ y,
+/// big-endian, no prefix) and nothing checked it. Surplus bytes were silently
+/// DISCARDED, because the split at 32 keeps only what it asked for. Aborting is
+/// right for these three consumers: they produce a VALUE and have no error
+/// channel, and there is no correct value to return for a blob that is not a
+/// point. See `emitPointLenVerify` in ec_emitters.zig for the full argument —
+/// and note an UNDER-length point already aborted by accident (`OP_SPLIT` runs
+/// off the end), so this adds no new failure channel.
+fn appendPointLenVerify(builder: *Builder, want: i64) !void {
+    try builder.emitOp("OP_SIZE");
+    try builder.emitPushInt(want);
+    try builder.emitOp("OP_NUMEQUALVERIFY");
+}
+
 pub fn appendEcEncodeCompressed(builder: *Builder) !void {
+    // CL-BUG-095, and the reason this one is the sharpest edge of it: the parity
+    // byte used to be taken from the blob's LAST byte (OP_SIZE 1 OP_SUB
+    // OP_SPLIT), not from a fixed offset. So appending one byte FLIPPED THE SIGN
+    // of the compressed encoding — the same 64-byte point compressed to 02‖x or
+    // 03‖x at the caller's choice, and anything that hashes a compressed pubkey
+    // (a P2PKH address, a commitment) became forgeable between the two
+    // spellings. Two independent fixes, both kept: the width is verified, and
+    // the parity byte is read from offset 31 of y whatever the caller sent.
+    try appendPointLenVerify(builder, 64);
+    // Split at 32: [x_bytes, y_bytes]
     try builder.emitPushInt(32);
     try builder.emitOp("OP_SPLIT");
-    try builder.emitOp("OP_SIZE");
-    try builder.emitPushInt(1);
-    try builder.emitOp("OP_SUB");
+    // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+    try builder.emitPushInt(31);
     try builder.emitOp("OP_SPLIT");
+    try builder.emitOp("OP_NIP"); // drop y_head
+    // Stack: [x_bytes, last_byte]
     try builder.emitOp("OP_BIN2NUM");
     try builder.emitPushInt(2);
     try builder.emitOp("OP_MOD");
-    try builder.emitOp("OP_SWAP");
-    try builder.emitOp("OP_DROP");
     try builder.emitOp("OP_IF");
     try builder.emitPushInt(3);
     try builder.emitOp("OP_ELSE");
@@ -112,6 +135,11 @@ pub fn appendEcMakePoint(builder: *Builder) !void {
 }
 
 pub fn appendEcPointX(builder: *Builder) !void {
+    // CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x —
+    // the split at 32 left an empty tail that OP_DROP happily removed. ecPointY
+    // on the identical input already aborted, which is how the hole survived: a
+    // short point looked "already rejected".
+    try appendPointLenVerify(builder, 64);
     try builder.emitPushInt(32);
     try builder.emitOp("OP_SPLIT");
     try builder.emitOp("OP_DROP");
@@ -150,6 +178,7 @@ fn appendUnsignedNumToBigEndianBytes32(builder: *Builder) !void {
 }
 
 pub fn appendEcPointY(builder: *Builder) !void {
+    try appendPointLenVerify(builder, 64);
     try builder.emitPushInt(32);
     try builder.emitOp("OP_SPLIT");
     try builder.emitOp("OP_SWAP");
@@ -220,13 +249,20 @@ test "ec point helpers include numeric conversion steps" {
     var point_x_list: std.ArrayListUnmanaged(CryptoInstruction) = .empty;
     defer point_x_list.deinit(allocator);
     try appendBuiltinInstructions(&point_x_list, allocator, .ec_point_x);
-    try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 32 }, point_x_list.items[0]);
+    // CL-BUG-095: the width gate is the first thing emitted, before the split.
+    try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_SIZE" }, point_x_list.items[0]);
+    try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 64 }, point_x_list.items[1]);
+    try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_NUMEQUALVERIFY" }, point_x_list.items[2]);
+    try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 32 }, point_x_list.items[3]);
     try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_BIN2NUM" }, point_x_list.items[point_x_list.items.len - 1]);
 
     var point_y_list: std.ArrayListUnmanaged(CryptoInstruction) = .empty;
     defer point_y_list.deinit(allocator);
     try appendBuiltinInstructions(&point_y_list, allocator, .ec_point_y);
-    try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 32 }, point_y_list.items[0]);
+    try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_SIZE" }, point_y_list.items[0]);
+    try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 64 }, point_y_list.items[1]);
+    try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_NUMEQUALVERIFY" }, point_y_list.items[2]);
+    try std.testing.expectEqualDeep(CryptoInstruction{ .push_int = 32 }, point_y_list.items[3]);
     try std.testing.expectEqualDeep(CryptoInstruction{ .op_name = "OP_BIN2NUM" }, point_y_list.items[point_y_list.items.len - 1]);
 
     var make_point_list: std.ArrayListUnmanaged(CryptoInstruction) = .empty;
