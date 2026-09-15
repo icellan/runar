@@ -78,6 +78,10 @@ pub const LowerError = error{
     /// A call to a private method passes an argument count the method's
     /// parameter list does not match. See `checkPrivateCallArity` (R-189).
     PrivateCallArityMismatch,
+    /// A private method selected for ANF inlining lowered to zero bindings, so
+    /// the call site has no value to reference. See
+    /// `inlinePrivateMethodCall` (R-290).
+    EmptyInlinedPrivateBody,
 };
 
 /// Name set used for the "what does the code after this statement still read"
@@ -2496,8 +2500,30 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
     if (end_index > start_index) {
         return ctx.bindings.items[end_index - 1].name;
     }
-    // Empty body — emit a placeholder so the caller has a ref.
-    return try ctx.emit(makeLoadConstString(ctx.allocator, "@void"));
+    // R-290: the body emitted nothing, so there is no value for the caller
+    // to reference.
+    //
+    // Refuse it. The alternative is what was here before: a `load_const "@void"`
+    // sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+    // special-cased). It survived pass 4 and died in pass 6's hex decoder —
+    // "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+    // messages that name neither the method nor the problem, and that only fire
+    // because the string happens to be odd-length and non-hex. An even-length
+    // sentinel would decode to zeros in the Rust decoder's
+    // `from_str_radix(..).unwrap_or(0)` and reach the script.
+    //
+    // Reachable from source that parses, validates and type-checks: declare a public
+    // method BEFORE two same-named privates. The side-effect summary resolves the
+    // name through a last-wins map and caches the OUTPUT-EMITTING one, so
+    // `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+    // whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+    // IR, `--hex` exit 1 with the hex-decoder message.
+    ctx.setDiagnostic(
+        "private method '{s}' was inlined but produced no bindings, so the call " ++
+            "site has no value to reference.",
+        .{method_name},
+    );
+    return LowerError.EmptyInlinedPrivateBody;
 }
 
 /// Lower one arm of a ternary, guaranteeing the arm ENDS with the binding that

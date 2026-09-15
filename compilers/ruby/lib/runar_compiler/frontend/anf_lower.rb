@@ -842,11 +842,29 @@ module RunarCompiler
 
         aliased_params.reverse_each { |p| pop_param_alias(p) }
 
-        if end_index > start_index
-          @bindings[end_index - 1].name
-        else
-          emit(Frontend._make_load_const_string("@void"))
-        end
+        return @bindings[end_index - 1].name if end_index > start_index
+
+        # R-290: the body emitted nothing, so there is no value for the caller
+        # to reference.
+        #
+        # Refuse it. The alternative is what was here before: a `load_const "@void"`
+        # sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+        # special-cased). It survived pass 4 and died in pass 6's hex decoder —
+        # "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+        # messages that name neither the method nor the problem, and that only fire
+        # because the string happens to be odd-length and non-hex. An even-length
+        # sentinel would decode to zeros in the Rust decoder's
+        # `from_str_radix(..).unwrap_or(0)` and reach the script.
+        #
+        # Reachable from source that parses, validates and type-checks: declare a public
+        # method BEFORE two same-named privates. The side-effect summary resolves the
+        # name through a last-wins map and caches the OUTPUT-EMITTING one, so
+        # `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+        # whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+        # IR, `--hex` exit 1 with the hex-decoder message.
+        raise ArgumentError,
+              "private method '#{method_name}' was inlined but produced no " \
+              "bindings, so the call site has no value to reference."
       end
 
       # Generate a fresh temp name.
