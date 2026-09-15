@@ -154,6 +154,7 @@ fn canonical_json_rejection_vectors() {
     assert!(!rvs.is_empty(), "canonical_json_rejection_vectors empty");
     for v in rvs {
         let id = v["_vector_id"].as_str().unwrap_or("?");
+        let key = v["input_object_key"].as_str().unwrap();
         let units = v["input_value_utf16_units"].as_array().unwrap();
         // Encode each code unit as its 3-byte UTF-8 form (illegal for
         // surrogates).
@@ -164,15 +165,42 @@ fn canonical_json_rejection_vectors() {
             bytes.push(0x80 | (((cp >> 6) & 0x3f) as u8));
             bytes.push(0x80 | ((cp & 0x3f) as u8));
         }
-        // The gate: Rust's safe string constructors MUST reject this byte
-        // sequence. canonical_json is therefore never reachable with a lone
-        // surrogate in well-formed (non-unsafe) Rust code.
-        let r = std::str::from_utf8(&bytes);
+        // Gate 1 (type level): Rust's safe string constructors MUST reject
+        // this byte sequence, so canonical_json is unreachable with a lone
+        // surrogate in non-unsafe code.
         assert!(
-            r.is_err(),
+            std::str::from_utf8(&bytes).is_err(),
             "vector {id}: str::from_utf8 unexpectedly accepted lone-surrogate bytes; \
              the Rust tier's canonical_json correct-by-construction gate is broken — \
              canonical_json itself must now reject lone surrogates explicitly"
+        );
+
+        // R-262: gate 1 alone tests the Rust standard library, not this tier —
+        // the test as written never called canonical_json at all, so it could
+        // not have failed for anything this crate does. The two assertions
+        // below exercise the tier's ACTUAL wire path.
+
+        // Gate 2 (wire path): the way a lone surrogate really arrives is as a
+        // `\ud800` escape inside a JSON document, so assert the parser that
+        // feeds canonical_json refuses it rather than folding it to U+FFFD.
+        let doc = format!(r#"{{"{key}":"\ud800"}}"#);
+        assert!(
+            serde_json::from_str::<Value>(&doc).is_err(),
+            "vector {id}: serde_json accepted a lone-surrogate escape, so one can reach canonical_json"
+        );
+
+        // CONTROL: the same document shape, the same key, the same code path —
+        // the only change is that the surrogate is now PAIRED (U+1F600). It
+        // must parse AND serialise, byte-identically to every other tier.
+        // Without this, gate 2 would pass for a parser that rejects
+        // everything.
+        let good_doc = format!(r#"{{"{key}":"\ud83d\ude00"}}"#);
+        let good: Value = serde_json::from_str(&good_doc)
+            .unwrap_or_else(|e| panic!("vector {id}: paired-surrogate control failed to parse: {e}"));
+        assert_eq!(
+            canonical_json(&good).expect("paired-surrogate control"),
+            format!("{{\"{key}\":\"{}\"}}", '\u{1F600}'),
+            "vector {id}: paired-surrogate control"
         );
     }
 }

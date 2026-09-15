@@ -79,15 +79,32 @@ def test_signing_vectors(fixture: dict) -> None:
 def test_canonical_json_rejection_vectors(fixture: dict) -> None:
     """RFC 8785 §3.2.2.2: canonical_json MUST reject malformed Unicode
     (lone surrogate). See audits/canonical-json-rfc8785-parity.md §3 rec 6 (D6).
+
+    R-262: this used to assert ``pytest.raises(Exception)`` — ANY error. That
+    passes for any reason at all, proven by neutering canonical_json to raise
+    an unrelated ValueError on every input: the test stayed green. It now
+    asserts the tier's specific error type AND a message discriminator, and
+    pairs each vector with a control whose ONLY difference is that the
+    surrogate is PAIRED, so a rejection can be attributed to the lone
+    surrogate rather than to the harness's string construction or to a guard
+    that rejects everything.
     """
     for v in fixture["canonical_json_rejection_vectors"]:
+        vid = v.get("_vector_id", "?")
+        key = v["input_object_key"]
         # Build the input string from UTF-16 code units so we don't rely on
         # the JSON parser's lone-surrogate handling (which diverges by tier).
         units = v["input_value_utf16_units"]
         bad_str = "".join(chr(u) for u in units)
-        input_obj = {v["input_object_key"]: bad_str}
-        with pytest.raises(Exception):  # noqa: B017 — any error is acceptable
-            canonical_json(input_obj)
+        with pytest.raises(ValueError, match="lone surrogate") as exc:
+            canonical_json({key: bad_str})
+        assert "U+D800" in str(exc.value), f"{vid}: {exc.value}"
+
+        # CONTROL: the same object, same key, same code path — the only change
+        # is that U+D800 is now the HIGH half of a valid pair (U+1F600). It
+        # must serialise, and byte-identically to every other tier.
+        good = canonical_json({key: "\ud83d\ude00".encode("utf-16", "surrogatepass").decode("utf-16")})
+        assert good == '{"' + key + '":"\U0001F600"}', f"{vid}: control produced {good!r}"
 
 
 def test_payload_depth_vectors(fixture: dict) -> None:

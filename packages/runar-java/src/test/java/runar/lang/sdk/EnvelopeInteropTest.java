@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -194,17 +195,27 @@ class EnvelopeInteropTest {
             String bad = new String(chars);
             Map<String, Object> input = new java.util.LinkedHashMap<>();
             input.put(key, bad);
-            Throwable caught = null;
-            String got = null;
-            try {
-                got = Envelope.canonicalJson(input);
-            } catch (Throwable t) {
-                caught = t;
-            }
-            if (caught == null) {
-                throw new AssertionError(
-                    "vector " + id + ": canonical_json MUST reject lone surrogate; got " + got);
-            }
+            // R-262: this used to catch Throwable and assert only that
+            // SOMETHING was thrown, which passes for any reason at all —
+            // proven by neutering canonicalJson to throw unconditionally,
+            // after which the test stayed green. Assert the specific type and
+            // a message discriminator instead.
+            IllegalArgumentException e = assertThrows(
+                IllegalArgumentException.class,
+                () -> Envelope.canonicalJson(input),
+                "vector " + id + ": canonicalJson MUST reject the lone surrogate");
+            assertTrue(e.getMessage().contains("surrogate"),
+                "vector " + id + ": rejected for the wrong reason: " + e.getMessage());
+
+            // CONTROL: the same map, the same key, the same code path — the
+            // only change is that U+D800 is now the HIGH half of a valid pair
+            // (U+1F600). It must serialise, and byte-identically to every
+            // other tier. Without this the test passes for a guard that
+            // rejects everything.
+            Map<String, Object> good = new java.util.LinkedHashMap<>();
+            good.put(key, "\uD83D\uDE00");
+            assertEquals("{\"" + key + "\":\"\uD83D\uDE00\"}", Envelope.canonicalJson(good),
+                "vector " + id + ": paired-surrogate control");
         }
     }
     // -------------------------------------------------------------------

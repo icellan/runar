@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -216,6 +217,26 @@ func TestEnvelopeInterop_CanonicalJSONRejectionVectors(t *testing.T) {
 		got, err := CanonicalJSON(input)
 		if err == nil {
 			t.Errorf("vector %s: CanonicalJSON did NOT reject lone surrogate; got %s", id, got)
+			continue
+		}
+		// R-262: assert WHY it was rejected. This used to check only that err
+		// was non-nil, which passes for any reason at all — proven by
+		// neutering CanonicalJSON to fail unconditionally, after which the
+		// test stayed green.
+		if !strings.Contains(err.Error(), "lone surrogate") {
+			t.Errorf("vector %s: rejected for the wrong reason: %v", id, err)
+		}
+
+		// CONTROL: the same map, the same key, the same code path — the only
+		// change is that U+D800 is now the HIGH half of a valid pair
+		// (U+1F600). It must serialise, and byte-identically to every other
+		// tier. Without this the test passes for a guard that rejects
+		// everything.
+		good, err := CanonicalJSON(map[string]any{key: "\U0001F600"})
+		if err != nil {
+			t.Errorf("vector %s: control (paired surrogate) was rejected: %v", id, err)
+		} else if want := "{\"" + key + "\":\"\U0001F600\"}"; good != want {
+			t.Errorf("vector %s: control got %s want %s", id, good, want)
 		}
 	}
 }

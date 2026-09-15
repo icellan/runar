@@ -280,8 +280,32 @@ test "interop: canonical_json rejects malformed Unicode (D6)" {
             defer allocator.free(got);
             std.debug.print("vector did NOT reject lone surrogate; got {s}\n", .{got});
             return error.TestExpectedError;
-        } else |_| {
-            // Any error is acceptable — the gate requires rejection.
+        } else |err| {
+            // R-262: assert WHICH error. `else |_| {}` accepted any error at
+            // all — proven vacuous by neutering canonicalJson to return
+            // error.OutOfMemory unconditionally, after which this test stayed
+            // green.
+            try std.testing.expectEqual(envelope.CanonicalError.LoneSurrogate, err);
+        }
+
+        // CONTROL: the same object, the same key, the same code path — the
+        // only change is that U+D800 is now the HIGH half of a valid pair
+        // (U+1F600). It must serialise, and byte-identically to every other
+        // tier. Without this the test passes for a guard that rejects
+        // everything.
+        {
+            const good_kvs = try allocator.alloc(envelope.Value.KeyValue, 1);
+            const good_value: envelope.Value = .{ .Object = good_kvs };
+            good_kvs[0] = .{
+                .key = try allocator.dupe(u8, key),
+                .value = .{ .String = try allocator.dupe(u8, "\u{1F600}") },
+            };
+            defer freeValue(allocator, good_value);
+            const good = try envelope.canonicalJson(allocator, good_value);
+            defer allocator.free(good);
+            const want = try std.fmt.allocPrint(allocator, "{{\"{s}\":\"😀\"}}", .{key});
+            defer allocator.free(want);
+            try std.testing.expectEqualStrings(want, good);
         }
     }
 }

@@ -69,9 +69,19 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
       bad_str = bytes.pack('C*').force_encoding('UTF-16BE')
       input = { v['input_object_key'] => bad_str }
       expect { Runar::SDK::Envelope.canonical_json(input) }.to(
-        raise_error(StandardError),
-        "vector #{v['_vector_id']}: canonical_json MUST reject lone surrogate"
+        raise_error(ArgumentError, /malformed Unicode|lone surrogate/),
+        "vector #{v['_vector_id']}: canonical_json MUST reject the lone surrogate as a typed " \
+        'canonical-JSON ArgumentError, not merely raise something'
       )
+
+      # CONTROL: same object, same key, same code path — the only change is
+      # that U+D800 is now the HIGH half of a valid pair (U+1F600). It must
+      # serialise, and byte-identically to every other tier. Without this the
+      # example passes for a guard that rejects every input.
+      good = Runar::SDK::Envelope.canonical_json(
+        { v['input_object_key'] => [0xD83D, 0xDE00].pack('n*').force_encoding('UTF-16BE') }
+      )
+      expect(good).to eq(%({"#{v['input_object_key']}":"\u{1F600}"}))
     end
   end
   # R-260. verify_envelope must bound payload nesting ITSELF rather than
