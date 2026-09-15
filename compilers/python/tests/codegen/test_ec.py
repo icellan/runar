@@ -70,7 +70,14 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
     # replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/swap/drop sequence with 3. Net
     # zero ops, different bytes.
-    ("ecAdd",              emit_ec_add,               8229),
+    #
+    # R-053 / CL-BUG-096, the infinity-operand case of the affine adder:
+    # +50 to ``ecAdd`` alone (emit_affine_infinity_select -- the pinf/qinf
+    # zero tests, the usep/useq/user masks and the two three-way selects,
+    # minus the four drops and two notinf OP_MULs it replaced). Nothing else
+    # moves: the Jacobian ladders behind ecMul/ecMulGen never call the affine
+    # adder, and ecOnCurve still rejects the all-zero point.
+    ("ecAdd",              emit_ec_add,               8279),
     ("ecMul",              emit_ec_mul,             130518),
     ("ecMulGen",           emit_ec_mul_gen,         130520),
     ("ecNegate",           emit_ec_negate,             948),

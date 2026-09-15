@@ -545,27 +545,11 @@ func cAffineAdd(t *ECTracker, c *nistCurveParams) {
 	t.copyToTop("py", "_py2")
 	cFieldSub(t, "_s_px_rx", "_py2", "ry", c)
 
-	// Clean up original points
-	t.toTop("px")
-	t.drop()
-	t.toTop("py")
-	t.drop()
-	t.toTop("qx")
-	t.drop()
-	t.toTop("qy")
-	t.drop()
-
-	// P == -Q -> force the all-zero point (see the header comment).
-	t.toTop("rx")
-	t.copyToTop("_notinf", "_notinf_x")
-	t.rawBlock([]string{"rx", "_notinf_x"}, "rx", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_MUL"})
-	})
-	t.toTop("ry")
-	t.toTop("_notinf")
-	t.rawBlock([]string{"ry", "_notinf"}, "ry", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_MUL"})
-	})
+	// CL-BUG-096: pNNNAdd(P, O) returned an off-curve blob for the same reason
+	// secp256k1's did -- the adder had no infinity-operand case, while
+	// pNNNMul(P, 0n) hands it exactly that value. Same branch-free select,
+	// which also subsumes the standalone `notinf` mask that used to live here.
+	emitAffineInfinitySelect(t)
 }
 
 // ===========================================================================

@@ -71,10 +71,14 @@ class EcTest {
         // OP_SUB/OP_NOT that build `notinf`, the two OP_MULs that mask rx/ry,
         // and the picks/rolls that feed them. All 1-byte ops, hence op count
         // and byte count move together.
-        assertEquals(8229, countOpTree(ops), "ecAdd op count drift");
+        //
+        // CL-BUG-096 then added a further +50 / +50: emitAffineInfinitySelect
+        // replaces the four toTop/drop cleanups and the two `notinf` OP_MULs
+        // with the pinf/qinf/usep/useq/user select. Again all 1-byte ops.
+        assertEquals(8279, countOpTree(ops), "ecAdd op count drift");
 
         String hex = emitHex(ops);
-        assertEquals(25434, hex.length() / 2, "ecAdd hex byte count drift");
+        assertEquals(25484, hex.length() / 2, "ecAdd hex byte count drift");
     }
 
     @Test

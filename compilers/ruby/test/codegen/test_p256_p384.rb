@@ -171,13 +171,13 @@ class TestP256P384Codegen < Minitest::Test
   # call sites), and +-0 for `*EncodeCompressed`, where the 3-op gate is paid
   # for by the fixed-offset parity read replacing a 6-op sequence with 3.
   P256_GOLDENS = {
-    "p256Add"              =>   6669,
+    "p256Add"              =>   6719,
     "p256Mul"              => 140039,
     "p256MulGen"           => 140041,
     "p256Negate"           =>    948,
     "p256OnCurve"          =>    574,
     "p256EncodeCompressed" =>     16,
-    "verifyECDSA_P256"     => 297343,
+    "verifyECDSA_P256"     => 297393,
   }.freeze
 
   P256_EMITTERS = {
@@ -191,7 +191,7 @@ class TestP256P384Codegen < Minitest::Test
   }.freeze
 
   P384_GOLDENS = {
-    "p384Add"    =>  11475,
+    "p384Add"    =>  11525,
     "p384Mul"    => 211181,
     "p384MulGen" => 211183,
     "p384Negate" =>   1396,

@@ -749,22 +749,171 @@ fn affineAdd(t: *ECTracker) !void {
     try t.copyToTop("py", "_py2");
     try fieldSub(t, "_s_px_rx", "_py2", "ry");
 
-    try t.toTop("px");
-    try t.drop();
-    try t.toTop("py");
-    try t.drop();
-    try t.toTop("qx");
-    try t.drop();
-    try t.toTop("qy");
-    try t.drop();
+    // CL-BUG-096: select over the infinity operands and the P == -Q case, and
+    // consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+    // mask that used to live here. See emitAffineInfinitySelect.
+    try emitAffineInfinitySelect(t);
+}
 
-    // P == -Q -> force the all-zero point (see the header comment).
-    try t.toTop("rx");
-    try t.copyToTop("_notinf", "_notinf_x");
-    try t.rawBlock(2, "rx", emitMulOpcode);
-    try t.toTop("ry");
+/// CL-BUG-096 — the infinity-operand case of affine addition, shared by
+/// secp256k1 and the two NIST curves because it is pure integer masking and
+/// touches no field parameter. Generic over the tracker type for exactly that
+/// reason: `ECTracker` and `nist_ec_emitters.NistTracker` are separate structs
+/// in this tier, and the alternative to `anytype` is writing the same 48 ops
+/// out twice and hoping the two copies never drift.
+///
+/// The group law has an identity, and this codegen has a representation for it:
+/// the ALL-ZERO blob. It is not a theoretical value — the codegen MANUFACTURES
+/// it, from `ecMul(P, k)` whenever k = 0 (mod n), from affineAdd's own P + (-P)
+/// masking, and from the `ec-mul-zero` / `ec-add-negate-cancel` rewrites in the
+/// EC optimizer. `affineAdd` nonetheless had no case for it: fed (G, O) it took
+/// the chord path with s = Gy/Gx and returned an off-curve blob from a script
+/// that SUCCEEDED.
+///
+/// And the always-on EC optimizer already believed the right answer:
+/// `ec-add-identity-right` / `-left` rewrite `ecAdd($x, INFINITY)` to `$x`. So
+/// the same source meant "P" with the optimizer on and "garbage" with it off.
+/// Fixing the adder rather than deleting the two rules is the only option that
+/// works, because the rules cannot see a zero scalar that only exists at
+/// runtime — deleting them would leave the runtime path just as wrong and
+/// rewrite nothing.
+///
+/// Branch-free, in the style the rest of this adder uses. Exactly one of the
+/// three masks is 1 and the other two are 0, so the sum selects one term:
+///
+///   pinf = (px == 0) AND (py == 0)          P is O
+///   qinf = (qx == 0) AND (qy == 0)          Q is O
+///   usep = qinf AND NOT pinf                -> answer is P
+///   useq = pinf                             -> answer is Q  (covers O + O = O)
+///   user = notinf AND NOT(pinf OR qinf)     -> answer is the computed sum
+///
+/// `user` folds in the pre-existing `notinf` mask (the P == -Q case), so
+/// P + (-P) still yields the all-zero blob and nothing about that case changes.
+///
+/// Requiring BOTH coordinates to be zero is load-bearing, not belt-and-braces.
+/// x = 0 has genuine curve points whenever the curve's b is a quadratic residue
+/// — (0, sqrt(b)) — and testing x alone would map them to O. y = 0 has none on
+/// any of these three curves (all have prime order, so no point of order 2), but
+/// the conjunction makes that fact not need to be true.
+///
+/// Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+/// [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+///
+/// Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+/// rx, ry in their place.
+pub fn emitAffineInfinitySelect(t: anytype) !void {
+    // pinf = (px == 0) AND (py == 0)
+    try t.copyToTop("px", "_px_z");
+    try t.pushInt("_zero_px", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_pxz");
+
+    try t.copyToTop("py", "_py_z");
+    try t.pushInt("_zero_py", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_pyz");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_pinf");
+
+    // qinf = (qx == 0) AND (qy == 0)
+    try t.copyToTop("qx", "_qx_z");
+    try t.pushInt("_zero_qx", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_qxz");
+
+    try t.copyToTop("qy", "_qy_z");
+    try t.pushInt("_zero_qy", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_qyz");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_qinf");
+
+    // usep = qinf AND NOT pinf
+    try t.copyToTop("_qinf", "_usep_q");
+    try t.copyToTop("_pinf", "_usep_p");
+    t.popNames(2);
+    try t.emitOpcode("OP_NOT");
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_usep");
+
+    // useq = pinf
+    try t.copyToTop("_pinf", "_useq");
+
+    // user = notinf AND NOT(pinf OR qinf)
+    try t.toTop("_pinf");
+    try t.toTop("_qinf");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLOR");
+    try t.names.append(t.allocator, "_anyinf");
+
     try t.toTop("_notinf");
-    try t.rawBlock(2, "ry", emitMulOpcode);
+    try t.toTop("_anyinf");
+    t.popNames(2);
+    try t.emitOpcode("OP_NOT");
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_user");
+
+    // rx = px*usep + qx*useq + rx*user
+    try t.toTop("px");
+    try t.copyToTop("_usep", "_usep_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_selx_p");
+
+    try t.toTop("qx");
+    try t.copyToTop("_useq", "_useq_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_selx_q");
+
+    try t.toTop("rx");
+    try t.copyToTop("_user", "_user_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_selx_r");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "_selx_qr");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "rx");
+
+    // ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+    try t.toTop("py");
+    try t.toTop("_usep");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_sely_p");
+
+    try t.toTop("qy");
+    try t.toTop("_useq");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_sely_q");
+
+    try t.toTop("ry");
+    try t.toTop("_user");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_sely_r");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "_sely_qr");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "ry");
 }
 
 fn jacobianDouble(t: *ECTracker) !void {
@@ -1260,8 +1409,18 @@ test "ec helper op-count goldens" {
     // they emit a deep pick/roll as two ops (push depth, then OP_PICK/OP_ROLL)
     // where this tracker models it as one `.pick` / `.roll` StackOp, and 5 of
     // the 16 movements here are deep. Same bytes, different counting point.
+    //
+    // ecAdd 8199 -> 8239 (+34): CL-BUG-096, emitAffineInfinitySelect. The adder
+    // had no case for the point at infinity — the all-zero blob this codegen
+    // MANUFACTURES from ecMul(P, 0n) — so ecAdd(G, O) took the chord path and
+    // returned an off-curve blob from a script that SUCCEEDED, while the
+    // always-on optimizer rewrote the same source to G. The select subsumes the
+    // notinf mask it replaces, so P + (-P) is unchanged. The peers book this as
+    // +50 OPS under the deep-pick/roll convention above: measured here, the
+    // weighted count goes 8229 -> 8279, exactly +50. Nothing else moves —
+    // ecMul / ecMulGen / ecNegate / ecOnCurve are untouched.
     const cases = .{
-        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8205) },
+        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8239) },
         .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 119674) },
         .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 119676) },
         .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 948) },

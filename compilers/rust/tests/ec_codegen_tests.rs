@@ -185,7 +185,12 @@ fn test_ec_add_op_count_golden() {
     // OP_SUB/OP_NOT that build `notinf`, the two OP_MULs that mask rx/ry, and
     // the picks/rolls feeding them. All 1-byte ops, so the op count and the
     // byte count move together.
-    assert_eq!(count_op_tree(&ops), 8229, "ecAdd op count drift");
+    // R-053 / CL-BUG-096 — the infinity-operand select adds another +50 here.
+    // It replaces the four px/py/qx/qy drops and the two standalone `notinf`
+    // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
+    // and four OP_ADD selects and the picks/rolls feeding them. Measured on
+    // this tier's own baseline, not copied from TypeScript.
+    assert_eq!(count_op_tree(&ops), 8279, "ecAdd op count drift");
 }
 
 #[test]

@@ -12,7 +12,7 @@
 //! an optimized Jacobian doubling formula.
 
 use super::stack::{PushValue, StackOp};
-use super::ec::{emit_point_len_verify, emit_reverse_32};
+use super::ec::{emit_affine_infinity_select, emit_point_len_verify, emit_reverse_32, AffineSelectTracker};
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
 use std::sync::LazyLock;
@@ -584,6 +584,30 @@ fn c_emit_canonicity_guard(t: &mut ECTracker, x_name: &str, y_name: &str, c: &Ni
     });
 }
 
+/// Lets the shared `emit_affine_infinity_select` (ec.rs) drive this module's
+/// own `ECTracker` — the two trackers are separate types, the select is one
+/// implementation. See the helper's doc comment for why it is pure masking.
+impl<'a> AffineSelectTracker for ECTracker<'a> {
+    fn sel_copy_to_top(&mut self, name: &str, alias: &str) {
+        let d = self.find_depth(name);
+        self.pick(d, alias);
+    }
+    fn sel_push_int(&mut self, name: &str, v: i128) {
+        self.push_int(name, v);
+    }
+    fn sel_to_top(&mut self, name: &str) {
+        let d = self.find_depth(name);
+        self.roll(d);
+    }
+    fn sel_raw_ops(&mut self, consume: &[&str], produce: &str, codes: &[&str]) {
+        self.raw_block(consume, Some(produce), |e| {
+            for c in codes {
+                e(StackOp::Opcode((*c).into()));
+            }
+        });
+    }
+}
+
 fn c_affine_add(t: &mut ECTracker, c: &NistCurveParams) {
     // The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
     // denominator is zero and the correct slope is the TANGENT,
@@ -695,23 +719,11 @@ fn c_affine_add(t: &mut ECTracker, c: &NistCurveParams) {
     t.copy_to_top("py", "_py2");
     c_field_sub(t, "_s_px_rx", "_py2", "ry", c);
 
-    // Clean up original points
-    t.to_top("px"); t.drop();
-    t.to_top("py"); t.drop();
-    t.to_top("qx"); t.drop();
-    t.to_top("qy"); t.drop();
-
-    // P == -Q -> force the all-zero point (see the header comment).
-    t.to_top("rx");
-    t.copy_to_top("_notinf", "_notinf_x");
-    t.raw_block(&["rx", "_notinf_x"], Some("rx"), |e| {
-        e(StackOp::Opcode("OP_MUL".into()));
-    });
-    t.to_top("ry");
-    t.to_top("_notinf");
-    t.raw_block(&["ry", "_notinf"], Some("ry"), |e| {
-        e(StackOp::Opcode("OP_MUL".into()));
-    });
+    // CL-BUG-096: `pNNNAdd(P, O)` returned an off-curve blob for the same reason
+    // secp256k1's did — the adder had no infinity-operand case, while
+    // `pNNNMul(P, 0n)` hands it exactly that value. Same branch-free select,
+    // which also subsumes the standalone `notinf` mask that used to live here.
+    emit_affine_infinity_select(t);
 }
 
 // ===========================================================================

@@ -271,7 +271,20 @@ describe('EC builtins — op-count goldens (T-11)', () => {
     // adds 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
     // replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence with 3.
     // Net zero ops, different bytes.
-    ['ecAdd',              emitEcAdd,                8229],
+    //
+    // 8229 -> 8279 (+50): R-053 / CL-BUG-096, the infinity-operand case. The
+    // adder had no case for the point at infinity even though this codegen
+    // MANUFACTURES that value (ecMul(P, k) for k = 0 mod n, affineAdd's own
+    // P + (-P) masking, and the ec-mul-zero / ec-add-negate-cancel rewrites),
+    // so ecAdd(G, O) returned an off-curve blob from a SUCCEEDING script while
+    // the always-on optimizer rewrote the same expression to the identity.
+    // The +50 is the branch-free three-way select (pinf / qinf / usep / useq /
+    // user plus the two three-term coordinate selects); it SUBSUMES the two
+    // standalone `notinf` OP_MULs it replaces, which is why it is +50 and not
+    // +52. ONLY the adders move: ecMul / ecMulGen / ecNegate / ecOnCurve /
+    // ecPointX / ecPointY / ecEncodeCompressed are all +0, because the select
+    // lives entirely inside affineAdd.
+    ['ecAdd',              emitEcAdd,                8279],
     ['ecMul',              emitEcMul,              130518],
     ['ecMulGen',           emitEcMulGen,           130520],
     ['ecNegate',           emitEcNegate,              948],

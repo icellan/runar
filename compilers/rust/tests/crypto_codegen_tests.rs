@@ -365,7 +365,12 @@ fn test_p256_add_op_count_golden() {
     // OP_NUMEQUAL on y, the OP_BOOLAND folding it into `cond`, OP_SUB/OP_NOT
     // for `notinf`, two OP_MULs masking rx/ry, plus the picks/rolls feeding
     // them. Every one is a 1-byte op, so op count and byte count move together.
-    assert_eq!(count_op_tree(&ops), 6669, "p256_add op count drift");
+    // R-053 / CL-BUG-096 — the infinity-operand select adds another +50 here.
+    // It replaces the four px/py/qx/qy drops and the two standalone `notinf`
+    // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
+    // and four OP_ADD selects and the picks/rolls feeding them. Measured on
+    // this tier's own baseline, not copied from TypeScript.
+    assert_eq!(count_op_tree(&ops), 6719, "p256_add op count drift");
 }
 
 #[test]
@@ -444,7 +449,10 @@ fn test_verify_ecdsa_p256_op_count_golden() {
     // it pays 306 bytes rather than 225 purely on wider constants — +49 in the
     // length gates (49/96-byte pads) and +32 in the range gate (two 50-byte
     // pushes of n). Both totals match the TS reference.
-    assert_eq!(count_op_tree(&ops), 297335, "verify_ecdsa_p256 op count drift");
+    // R-053 / CL-BUG-096 — +50 more: verify_ecdsa_p256 calls c_affine_add
+    // once, so it pays the infinity-operand select exactly once. See
+    // test_p256_add_op_count_golden.
+    assert_eq!(count_op_tree(&ops), 297385, "verify_ecdsa_p256 op count drift");
 }
 
 // -- P-384 -----------------------------------------------------------------
@@ -454,7 +462,12 @@ fn test_p384_add_op_count_golden() {
     let ops = collect(|s| emit_p384_add(s));
     // 11448 -> 11469 (+21 ops / +21 bytes): same affine-add P == -Q -> O mask
     // as ecAdd / p256Add, see test_p256_add_op_count_golden.
-    assert_eq!(count_op_tree(&ops), 11475, "p384_add op count drift");
+    // R-053 / CL-BUG-096 — the infinity-operand select adds another +50 here.
+    // It replaces the four px/py/qx/qy drops and the two standalone `notinf`
+    // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
+    // and four OP_ADD selects and the picks/rolls feeding them. Measured on
+    // this tier's own baseline, not copied from TypeScript.
+    assert_eq!(count_op_tree(&ops), 11525, "p384_add op count drift");
 }
 
 #[test]

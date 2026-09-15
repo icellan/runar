@@ -603,21 +603,143 @@ public final class Ec {
         t.copyToTop("py", "_py2");
         fieldSub(t, "_s_px_rx", "_py2", "ry");
 
-        // Clean up original points
-        t.toTop("px"); t.drop();
-        t.toTop("py"); t.drop();
-        t.toTop("qx"); t.drop();
-        t.toTop("qy"); t.drop();
+        // CL-BUG-096: select over the infinity operands and the P == -Q case, and
+        // consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+        // mask that used to live here. See emitAffineInfinitySelect.
+        emitAffineInfinitySelect(t);
+    }
 
-        // P == -Q -> force the all-zero point (see the header comment).
+    /**
+     * CL-BUG-096 — the infinity-operand case of affine addition, shared by
+     * secp256k1 and the two NIST curves because it is pure integer masking and
+     * touches no field parameter.
+     *
+     * <p>The group law has an identity, and this codegen has a representation for
+     * it: the ALL-ZERO blob. It is not a theoretical value — the codegen
+     * MANUFACTURES it, from {@code ecMul(P, k)} whenever k = 0 (mod n), from
+     * affineAdd's own P + (-P) masking, and from the {@code ec-mul-zero} /
+     * {@code ec-add-negate-cancel} rewrites in optimizer/ec-rules.json.
+     * {@code affineAdd} nonetheless had no case for it: fed (G, O) it took the
+     * chord path with s = Gy/Gx and returned an off-curve blob from a script that
+     * SUCCEEDED.
+     *
+     * <p>And the always-on EC optimizer already believed the right answer:
+     * {@code ec-add-identity-right} / {@code -left} rewrite
+     * {@code ecAdd($x, INFINITY)} to {@code $x}. So the same source meant "P" with
+     * the optimizer on and "garbage" with it off. Fixing the adder rather than
+     * deleting the two rules is the only option that works, because the rules
+     * cannot see a zero scalar that only exists at runtime.
+     *
+     * <p>Branch-free, in the style the rest of this adder uses. Exactly one of the
+     * three masks is 1 and the other two are 0, so the sum selects one term:
+     *
+     * <pre>
+     *   pinf = (px == 0) AND (py == 0)          P is O
+     *   qinf = (qx == 0) AND (qy == 0)          Q is O
+     *   usep = qinf AND NOT pinf                -&gt; answer is P
+     *   useq = pinf                             -&gt; answer is Q  (covers O + O = O)
+     *   user = notinf AND NOT(pinf OR qinf)     -&gt; answer is the computed sum
+     * </pre>
+     *
+     * <p>{@code user} folds in the pre-existing {@code notinf} mask (the P == -Q
+     * case), so P + (-P) still yields the all-zero blob and nothing about that case
+     * changes.
+     *
+     * <p>Requiring BOTH coordinates to be zero is load-bearing, not
+     * belt-and-braces. x = 0 has genuine curve points whenever the curve's b is a
+     * quadratic residue — (0, sqrt(b)) — and testing x alone would map them to O.
+     * y = 0 has none on any of these three curves (all have prime order, so no
+     * point of order 2), but the conjunction makes that fact not need to be true.
+     *
+     * <p>Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+     * [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+     *
+     * <p>Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+     * rx, ry in their place.
+     */
+    public static void emitAffineInfinitySelect(ECTracker t) {
+        // pinf = (px == 0) AND (py == 0)
+        t.copyToTop("px", "_px_z");
+        t.pushInt("_zero_px", 0);
+        t.rawBlock(List.of("_px_z", "_zero_px"), "_pxz",
+            e -> e.accept(new OpcodeOp("OP_NUMEQUAL")));
+        t.copyToTop("py", "_py_z");
+        t.pushInt("_zero_py", 0);
+        t.rawBlock(List.of("_py_z", "_zero_py"), "_pyz",
+            e -> e.accept(new OpcodeOp("OP_NUMEQUAL")));
+        t.rawBlock(List.of("_pxz", "_pyz"), "_pinf",
+            e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+
+        // qinf = (qx == 0) AND (qy == 0)
+        t.copyToTop("qx", "_qx_z");
+        t.pushInt("_zero_qx", 0);
+        t.rawBlock(List.of("_qx_z", "_zero_qx"), "_qxz",
+            e -> e.accept(new OpcodeOp("OP_NUMEQUAL")));
+        t.copyToTop("qy", "_qy_z");
+        t.pushInt("_zero_qy", 0);
+        t.rawBlock(List.of("_qy_z", "_zero_qy"), "_qyz",
+            e -> e.accept(new OpcodeOp("OP_NUMEQUAL")));
+        t.rawBlock(List.of("_qxz", "_qyz"), "_qinf",
+            e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+
+        // usep = qinf AND NOT pinf
+        t.copyToTop("_qinf", "_usep_q");
+        t.copyToTop("_pinf", "_usep_p");
+        t.rawBlock(List.of("_usep_q", "_usep_p"), "_usep", e -> {
+            e.accept(new OpcodeOp("OP_NOT"));
+            e.accept(new OpcodeOp("OP_BOOLAND"));
+        });
+
+        // useq = pinf
+        t.copyToTop("_pinf", "_useq");
+
+        // user = notinf AND NOT(pinf OR qinf)
+        t.toTop("_pinf");
+        t.toTop("_qinf");
+        t.rawBlock(List.of("_pinf", "_qinf"), "_anyinf",
+            e -> e.accept(new OpcodeOp("OP_BOOLOR")));
+        t.toTop("_notinf");
+        t.toTop("_anyinf");
+        t.rawBlock(List.of("_notinf", "_anyinf"), "_user", e -> {
+            e.accept(new OpcodeOp("OP_NOT"));
+            e.accept(new OpcodeOp("OP_BOOLAND"));
+        });
+
+        // rx = px*usep + qx*useq + rx*user
+        t.toTop("px");
+        t.copyToTop("_usep", "_usep_x");
+        t.rawBlock(List.of("px", "_usep_x"), "_selx_p",
+            e -> e.accept(new OpcodeOp("OP_MUL")));
+        t.toTop("qx");
+        t.copyToTop("_useq", "_useq_x");
+        t.rawBlock(List.of("qx", "_useq_x"), "_selx_q",
+            e -> e.accept(new OpcodeOp("OP_MUL")));
         t.toTop("rx");
-        t.copyToTop("_notinf", "_notinf_x");
-        t.rawBlock(List.of("rx", "_notinf_x"), "rx",
+        t.copyToTop("_user", "_user_x");
+        t.rawBlock(List.of("rx", "_user_x"), "_selx_r",
+            e -> e.accept(new OpcodeOp("OP_MUL")));
+        t.rawBlock(List.of("_selx_q", "_selx_r"), "_selx_qr",
+            e -> e.accept(new OpcodeOp("OP_ADD")));
+        t.rawBlock(List.of("_selx_p", "_selx_qr"), "rx",
+            e -> e.accept(new OpcodeOp("OP_ADD")));
+
+        // ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+        t.toTop("py");
+        t.toTop("_usep");
+        t.rawBlock(List.of("py", "_usep"), "_sely_p",
+            e -> e.accept(new OpcodeOp("OP_MUL")));
+        t.toTop("qy");
+        t.toTop("_useq");
+        t.rawBlock(List.of("qy", "_useq"), "_sely_q",
             e -> e.accept(new OpcodeOp("OP_MUL")));
         t.toTop("ry");
-        t.toTop("_notinf");
-        t.rawBlock(List.of("ry", "_notinf"), "ry",
+        t.toTop("_user");
+        t.rawBlock(List.of("ry", "_user"), "_sely_r",
             e -> e.accept(new OpcodeOp("OP_MUL")));
+        t.rawBlock(List.of("_sely_q", "_sely_r"), "_sely_qr",
+            e -> e.accept(new OpcodeOp("OP_ADD")));
+        t.rawBlock(List.of("_sely_p", "_sely_qr"), "ry",
+            e -> e.accept(new OpcodeOp("OP_ADD")));
     }
 
     // ==================================================================

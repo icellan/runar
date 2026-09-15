@@ -65,7 +65,18 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # offset parity read (push coord_bytes-1, OP_SPLIT, OP_NIP) replaces a 6-op
     # OP_SIZE/push/OP_SUB/OP_SPLIT/swap/drop sequence. Net zero ops, different
     # bytes.
-    ("p256Add",              emit_p256_add,               6669),
+    #
+    # R-053 / CL-BUG-096 -- the infinity-operand case of the affine adder,
+    # shared verbatim with secp256k1 because it is pure integer masking with no
+    # field parameter. Curve-independent again:
+    #
+    #   pNNNAdd           +50  -- emit_affine_infinity_select replaces the four
+    #                             drops and the two `notinf` OP_MULs.
+    #   verifyECDSA_PNNN  +50  -- it calls _c_affine_add exactly once.
+    #
+    # pNNNMul / pNNNMulGen / pNNNOnCurve / pNNNNegate move by 0: the ladders run
+    # in Jacobian coordinates and never reach the affine adder.
+    ("p256Add",              emit_p256_add,               6719),
     ("p256Mul",              emit_p256_mul,             140039),
     ("p256MulGen",           emit_p256_mul_gen,         140041),
     ("p256Negate",           emit_p256_negate,             948),
@@ -75,7 +86,7 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # gates -- two length gates on `_sig` / `_pk`, the 1 <= r,s <= n-1 range
     # gate, the SEC1 prefix-byte check inside decompression, and the ANDs that
     # fold all of it into one `_input_ok` flag.
-    ("verifyECDSA_P256",     emit_verify_ecdsa_p256,    297343),
+    ("verifyECDSA_P256",     emit_verify_ecdsa_p256,    297393),
 ])
 def test_p256_op_count(name, fn, expected):
     ops: list[StackOp] = []
@@ -89,7 +100,7 @@ def test_p256_op_count(name, fn, expected):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,fn,expected", [
-    ("p384Add",              emit_p384_add,              11475),
+    ("p384Add",              emit_p384_add,              11525),
     ("p384Mul",              emit_p384_mul,             211181),
     ("p384MulGen",           emit_p384_mul_gen,         211183),
     ("p384Negate",           emit_p384_negate,            1396),
@@ -98,7 +109,7 @@ def test_p256_op_count(name, fn, expected):
     # R-052 width gate had no golden at all. Same numbers the TS tier pins.
     ("p384OnCurve",          emit_p384_on_curve,           798),
     ("p384EncodeCompressed", emit_p384_encode_compressed,   16),
-    ("verifyECDSA_P384",     emit_verify_ecdsa_p384,    453319),
+    ("verifyECDSA_P384",     emit_verify_ecdsa_p384,    453369),
 ])
 def test_p384_op_count(name, fn, expected):
     ops: list[StackOp] = []

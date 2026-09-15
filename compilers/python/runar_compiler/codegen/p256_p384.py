@@ -29,6 +29,7 @@ from runar_compiler.codegen.ec import (
     _big_int_push,
     emit_point_len_verify,
     emit_point_length_gate,
+    emit_affine_infinity_select,
 )
 
 # ===========================================================================
@@ -496,24 +497,11 @@ def _c_affine_add(t: ECTracker, field_p: int, p_minus_2: int) -> None:
     t.copy_to_top("py", "_py2")
     _c_field_sub(t, "_s_px_rx", "_py2", "ry", field_p)
 
-    t.to_top("px")
-    t.drop()
-    t.to_top("py")
-    t.drop()
-    t.to_top("qx")
-    t.drop()
-    t.to_top("qy")
-    t.drop()
-
-    # P == -Q -> force the all-zero point (see the header comment).
-    t.to_top("rx")
-    t.copy_to_top("_notinf", "_notinf_x")
-    t.raw_block(["rx", "_notinf_x"], "rx",
-                lambda e: e(_make_stack_op(op="opcode", code="OP_MUL")))
-    t.to_top("ry")
-    t.to_top("_notinf")
-    t.raw_block(["ry", "_notinf"], "ry",
-                lambda e: e(_make_stack_op(op="opcode", code="OP_MUL")))
+    # CL-BUG-096: `pNNNAdd(P, O)` returned an off-curve blob for the same reason
+    # secp256k1's did -- the adder had no infinity-operand case, while
+    # `pNNNMul(P, 0n)` hands it exactly that value. Same branch-free select,
+    # which also subsumes the standalone `notinf` mask that used to live here.
+    emit_affine_infinity_select(t)
 
 
 # ===========================================================================

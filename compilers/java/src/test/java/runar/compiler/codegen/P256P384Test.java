@@ -40,13 +40,18 @@ class P256P384Test {
      * {@code cond}, OP_SUB/OP_NOT for {@code notinf}, two OP_MULs masking rx/ry,
      * plus the picks/rolls feeding them. Every one of those is a 1-byte op, so the
      * op count and the byte count move by the same amount.
+     *
+     * <p>CL-BUG-096 adds a further +50 / +50 on top, shared by all three curves:
+     * {@link Ec#emitAffineInfinitySelect} replaces the four toTop/drop cleanups
+     * and the two {@code notinf} OP_MULs with the pinf/qinf/usep/useq/user
+     * select. All 1-byte ops again.
      */
     @Test
     void p256AddParity() {
         assertParity("p256Add",
             P256P384::emitP256Add,
-            6669, 19914,
-            "82ff3a783dca04ca4b846e65daf2e49471bfd1dc37fc210572feeac36a7eecee");
+            6719, 19964,
+            "e3202a70aca125fb7a8be542ecd94231041ae0df2cca2a83be86f7850cd57934");
     }
 
     @Test
@@ -142,8 +147,8 @@ class P256P384Test {
     void verifyEcdsaP256Parity() {
         assertParity("verifyECDSA_P256",
             P256P384::emitVerifyECDSA_P256,
-            297343, 974040,
-            "7d7b4a48bc71689811beac7697571bf138a16bdb9d38e18ad518c221eca2c91c");
+            297393, 974090,
+            "c94bb4a39d339b75b7cfd5403d443c0f2154b380a49a1c3c33b47fefab06b1e9");
     }
 
     // --------------------------------------------------------------
@@ -155,8 +160,8 @@ class P256P384Test {
     void p384AddParity() {
         assertParity("p384Add",
             P256P384::emitP384Add,
-            11475, 46718,
-            "268fd9f01227183d29239f75525fd134a3154b7724cddcb1f6db92b16c34a35d");
+            11525, 46768,
+            "772b93d8b887505cae60bfb4fd5700fa164eb361ac1730b8d68c0b77e4c11b0a");
     }
 
     @Test
@@ -218,8 +223,8 @@ class P256P384Test {
     void verifyEcdsaP384Parity() {
         assertParity("verifyECDSA_P384",
             P256P384::emitVerifyECDSA_P384,
-            453319, 1987410,
-            "850f67a8e7046364d6dbef399f24d22c0072584f324e0778d16e8f90e2374da0");
+            453369, 1987460,
+            "08dfb06168c1ed75f18e4943a6151d5d65bac852c4ec42d631738fe7a27c5a20");
     }
 
     // --------------------------------------------------------------

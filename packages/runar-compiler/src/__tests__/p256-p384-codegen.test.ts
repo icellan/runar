@@ -128,21 +128,28 @@ describe('NIST P-256 / P-384 codegen — op-count goldens (T-006)', () => {
   // offset parity read (push coordBytes-1, OP_SPLIT, OP_NIP) replaces a 6-op
   // OP_SIZE/push/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence. Net zero ops,
   // different bytes.
+  // Fourth move, R-053 / CL-BUG-096 — the infinity-operand case of the affine
+  // adder. Exactly +50 on pNNNAdd and on verifyECDSA_PNNN (which calls
+  // cAffineAdd once, for R1 + R2), and +0 on everything else, because the
+  // branch-free three-way select lives entirely inside cAffineAdd. It is +50
+  // rather than +52 because it SUBSUMES the two standalone `notinf` OP_MULs it
+  // replaces. Curve-INDEPENDENT again, for the same reason as the width gate:
+  // it is a fixed-shape select, not a per-bit loop.
   const goldens: Array<[name: string, fn: (emit: (op: StackOp) => void) => void, expected: number]> = [
-    ['p256Add',               emitP256Add,                6669],
+    ['p256Add',               emitP256Add,                6719],
     ['p256Mul',               emitP256Mul,              140039],
     ['p256MulGen',            emitP256MulGen,           140041],
     ['p256Negate',            emitP256Negate,              948],
     ['p256OnCurve',           emitP256OnCurve,             574],
     ['p256EncodeCompressed',  emitP256EncodeCompressed,     16],
-    ['verifyECDSA_P256',      emitVerifyECDSA_P256,     297343],
-    ['p384Add',               emitP384Add,               11475],
+    ['verifyECDSA_P256',      emitVerifyECDSA_P256,     297393],
+    ['p384Add',               emitP384Add,               11525],
     ['p384Mul',               emitP384Mul,              211181],
     ['p384MulGen',            emitP384MulGen,           211183],
     ['p384Negate',            emitP384Negate,             1396],
     ['p384OnCurve',           emitP384OnCurve,             798],
     ['p384EncodeCompressed',  emitP384EncodeCompressed,     16],
-    ['verifyECDSA_P384',      emitVerifyECDSA_P384,     453319],
+    ['verifyECDSA_P384',      emitVerifyECDSA_P384,     453369],
   ];
 
   for (const [name, fn, expected] of goldens) {

@@ -628,26 +628,154 @@ func ecAffineAdd(t *ECTracker) {
 	t.copyToTop("py", "_py2")
 	ecFieldSub(t, "_s_px_rx", "_py2", "ry")
 
-	// Clean up original points
-	t.toTop("px")
-	t.drop()
-	t.toTop("py")
-	t.drop()
-	t.toTop("qx")
-	t.drop()
-	t.toTop("qy")
-	t.drop()
+	// CL-BUG-096: select over the infinity operands and the P == -Q case, and
+	// consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+	// mask that used to live here. See emitAffineInfinitySelect.
+	emitAffineInfinitySelect(t)
+}
 
-	// P == -Q -> force the all-zero point (see the header comment).
+// emitAffineInfinitySelect handles the infinity-operand case of affine
+// addition, shared by secp256k1 and the two NIST curves because it is pure
+// integer masking and touches no field parameter.
+//
+// The group law has an identity, and this codegen has a representation for it:
+// the ALL-ZERO blob. It is not a theoretical value -- the codegen MANUFACTURES
+// it, from ecMul(P, k) whenever k = 0 (mod n), from affineAdd's own P + (-P)
+// masking, and from the ec-mul-zero / ec-add-negate-cancel rewrites in
+// optimizer/ec-rules.json. affineAdd nonetheless had no case for it: fed
+// (G, O) it took the chord path with s = Gy/Gx and returned an off-curve blob
+// from a script that SUCCEEDED.
+//
+// And the always-on EC optimizer already believed the right answer:
+// ec-add-identity-right / -left rewrite ecAdd($x, INFINITY) to $x. So the
+// same source meant "P" with the optimizer on and "garbage" with it off.
+// Fixing the adder rather than deleting the two rules is the only option that
+// works, because the rules cannot see a zero scalar that only exists at
+// runtime -- deleting them would leave the runtime path just as wrong and
+// rewrite nothing.
+//
+// Branch-free, in the style the rest of this adder uses. Exactly one of the
+// three masks is 1 and the other two are 0, so the sum selects one term:
+//
+//	pinf = (px == 0) AND (py == 0)          P is O
+//	qinf = (qx == 0) AND (qy == 0)          Q is O
+//	usep = qinf AND NOT pinf                -> answer is P
+//	useq = pinf                             -> answer is Q  (covers O + O = O)
+//	user = notinf AND NOT(pinf OR qinf)     -> answer is the computed sum
+//
+// `user` folds in the pre-existing `notinf` mask (the P == -Q case), so
+// P + (-P) still yields the all-zero blob and nothing about that case changes.
+//
+// Requiring BOTH coordinates to be zero is load-bearing, not belt-and-braces.
+// x = 0 has genuine curve points whenever the curve's b is a quadratic
+// residue -- (0, sqrt(b)) -- and testing x alone would map them to O. y = 0
+// has none on any of these three curves (all have prime order, so no point of
+// order 2), but the conjunction makes that fact not need to be true.
+//
+// Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+// [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+//
+// Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+// rx, ry in their place.
+func emitAffineInfinitySelect(t *ECTracker) {
+	// pinf = (px == 0) AND (py == 0)
+	t.copyToTop("px", "_px_z")
+	t.pushInt("_zero_px", 0)
+	t.rawBlock([]string{"_px_z", "_zero_px"}, "_pxz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.copyToTop("py", "_py_z")
+	t.pushInt("_zero_py", 0)
+	t.rawBlock([]string{"_py_z", "_zero_py"}, "_pyz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.rawBlock([]string{"_pxz", "_pyz"}, "_pinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// qinf = (qx == 0) AND (qy == 0)
+	t.copyToTop("qx", "_qx_z")
+	t.pushInt("_zero_qx", 0)
+	t.rawBlock([]string{"_qx_z", "_zero_qx"}, "_qxz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.copyToTop("qy", "_qy_z")
+	t.pushInt("_zero_qy", 0)
+	t.rawBlock([]string{"_qy_z", "_zero_qy"}, "_qyz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.rawBlock([]string{"_qxz", "_qyz"}, "_qinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// usep = qinf AND NOT pinf
+	t.copyToTop("_qinf", "_usep_q")
+	t.copyToTop("_pinf", "_usep_p")
+	t.rawBlock([]string{"_usep_q", "_usep_p"}, "_usep", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NOT"})
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// useq = pinf
+	t.copyToTop("_pinf", "_useq")
+
+	// user = notinf AND NOT(pinf OR qinf)
+	t.toTop("_pinf")
+	t.toTop("_qinf")
+	t.rawBlock([]string{"_pinf", "_qinf"}, "_anyinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+	})
+	t.toTop("_notinf")
+	t.toTop("_anyinf")
+	t.rawBlock([]string{"_notinf", "_anyinf"}, "_user", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NOT"})
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// rx = px*usep + qx*useq + rx*user
+	t.toTop("px")
+	t.copyToTop("_usep", "_usep_x")
+	t.rawBlock([]string{"px", "_usep_x"}, "_selx_p", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.toTop("qx")
+	t.copyToTop("_useq", "_useq_x")
+	t.rawBlock([]string{"qx", "_useq_x"}, "_selx_q", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
 	t.toTop("rx")
-	t.copyToTop("_notinf", "_notinf_x")
-	t.rawBlock([]string{"rx", "_notinf_x"}, "rx", func(e func(StackOp)) {
+	t.copyToTop("_user", "_user_x")
+	t.rawBlock([]string{"rx", "_user_x"}, "_selx_r", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.rawBlock([]string{"_selx_q", "_selx_r"}, "_selx_qr", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+	t.rawBlock([]string{"_selx_p", "_selx_qr"}, "rx", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+
+	// ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+	t.toTop("py")
+	t.toTop("_usep")
+	t.rawBlock([]string{"py", "_usep"}, "_sely_p", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.toTop("qy")
+	t.toTop("_useq")
+	t.rawBlock([]string{"qy", "_useq"}, "_sely_q", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_MUL"})
 	})
 	t.toTop("ry")
-	t.toTop("_notinf")
-	t.rawBlock([]string{"ry", "_notinf"}, "ry", func(e func(StackOp)) {
+	t.toTop("_user")
+	t.rawBlock([]string{"ry", "_user"}, "_sely_r", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.rawBlock([]string{"_sely_q", "_sely_r"}, "_sely_qr", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+	t.rawBlock([]string{"_sely_p", "_sely_qr"}, "ry", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
 }
 

@@ -661,23 +661,154 @@ fn affine_add(t: &mut ECTracker) {
     t.copy_to_top("py", "_py2");
     field_sub(t, "_s_px_rx", "_py2", "ry");
 
-    // Clean up original points
-    t.to_top("px"); t.drop();
-    t.to_top("py"); t.drop();
-    t.to_top("qx"); t.drop();
-    t.to_top("qy"); t.drop();
+    // CL-BUG-096: select over the infinity operands and the P == -Q case, and
+    // consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+    // mask that used to live here. See emit_affine_infinity_select.
+    emit_affine_infinity_select(t);
+}
 
-    // P == -Q -> force the all-zero point (see the header comment).
-    t.to_top("rx");
-    t.copy_to_top("_notinf", "_notinf_x");
-    t.raw_block(&["rx", "_notinf_x"], Some("rx"), |e| {
-        e(StackOp::Opcode("OP_MUL".into()));
-    });
-    t.to_top("ry");
-    t.to_top("_notinf");
-    t.raw_block(&["ry", "_notinf"], Some("ry"), |e| {
-        e(StackOp::Opcode("OP_MUL".into()));
-    });
+// ===========================================================================
+// CL-BUG-096 — infinity-operand select, shared by all three curves
+// ===========================================================================
+
+/// The subset of the tracker surface `emit_affine_infinity_select` needs.
+///
+/// `ec.rs` and `p256_p384.rs` each carry their own private `ECTracker` (the
+/// duplication predates this fix), so the one shared implementation reaches
+/// both through this trait rather than being written twice. The helper only
+/// ever emits plain opcodes, so `sel_raw_ops` takes a code list instead of the
+/// general `raw_block` closure.
+pub trait AffineSelectTracker {
+    fn sel_copy_to_top(&mut self, name: &str, alias: &str);
+    fn sel_push_int(&mut self, name: &str, v: i128);
+    fn sel_to_top(&mut self, name: &str);
+    fn sel_raw_ops(&mut self, consume: &[&str], produce: &str, codes: &[&str]);
+}
+
+impl<'a> AffineSelectTracker for ECTracker<'a> {
+    fn sel_copy_to_top(&mut self, name: &str, alias: &str) {
+        let d = self.find_depth(name);
+        self.pick(d, alias);
+    }
+    fn sel_push_int(&mut self, name: &str, v: i128) {
+        self.push_int(name, v);
+    }
+    fn sel_to_top(&mut self, name: &str) {
+        let d = self.find_depth(name);
+        self.roll(d);
+    }
+    fn sel_raw_ops(&mut self, consume: &[&str], produce: &str, codes: &[&str]) {
+        self.raw_block(consume, Some(produce), |e| {
+            for c in codes {
+                e(StackOp::Opcode((*c).into()));
+            }
+        });
+    }
+}
+
+/// CL-BUG-096 — the infinity-operand case of affine addition, shared by
+/// secp256k1 and the two NIST curves because it is pure integer masking and
+/// touches no field parameter.
+///
+/// The group law has an identity, and this codegen has a representation for it:
+/// the ALL-ZERO blob. It is not a theoretical value — the codegen MANUFACTURES
+/// it, from `ecMul(P, k)` whenever k ≡ 0 (mod n), from affine_add's own P + (−P)
+/// masking, and from the `ec-mul-zero` / `ec-add-negate-cancel` rewrites in
+/// optimizer/ec-rules.json. `affine_add` nonetheless had no case for it: fed
+/// (G, O) it took the chord path with s = Gy/Gx and returned an off-curve blob
+/// from a script that SUCCEEDED.
+///
+/// And the always-on EC optimizer already believed the right answer:
+/// `ec-add-identity-right` / `-left` rewrite `ecAdd($x, INFINITY)` to `$x`. So
+/// the same source meant "P" with the optimizer on and "garbage" with it off.
+/// Fixing the adder rather than deleting the two rules is the only option that
+/// works, because the rules cannot see a zero scalar that only exists at
+/// runtime — deleting them would leave the runtime path just as wrong and
+/// rewrite nothing.
+///
+/// Branch-free, in the style the rest of this adder uses. Exactly one of the
+/// three masks is 1 and the other two are 0, so the sum selects one term:
+///
+///   pinf = (px == 0) AND (py == 0)          P is O
+///   qinf = (qx == 0) AND (qy == 0)          Q is O
+///   usep = qinf AND NOT pinf                -> answer is P
+///   useq = pinf                             -> answer is Q  (covers O + O = O)
+///   user = notinf AND NOT(pinf OR qinf)     -> answer is the computed sum
+///
+/// `user` folds in the pre-existing `notinf` mask (the P == −Q case), so P + (−P)
+/// still yields the all-zero blob and nothing about that case changes.
+///
+/// Requiring BOTH coordinates to be zero is load-bearing, not belt-and-braces.
+/// x = 0 has genuine curve points whenever the curve's b is a quadratic residue
+/// — (0, sqrt(b)) — and testing x alone would map them to O. y = 0 has none on
+/// any of these three curves (all have prime order, so no point of order 2), but
+/// the conjunction makes that fact not need to be true.
+///
+/// Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+/// [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+///
+/// Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+/// rx, ry in their place.
+pub fn emit_affine_infinity_select<T: AffineSelectTracker + ?Sized>(t: &mut T) {
+    // pinf = (px == 0) AND (py == 0)
+    t.sel_copy_to_top("px", "_px_z");
+    t.sel_push_int("_zero_px", 0);
+    t.sel_raw_ops(&["_px_z", "_zero_px"], "_pxz", &["OP_NUMEQUAL"]);
+    t.sel_copy_to_top("py", "_py_z");
+    t.sel_push_int("_zero_py", 0);
+    t.sel_raw_ops(&["_py_z", "_zero_py"], "_pyz", &["OP_NUMEQUAL"]);
+    t.sel_raw_ops(&["_pxz", "_pyz"], "_pinf", &["OP_BOOLAND"]);
+
+    // qinf = (qx == 0) AND (qy == 0)
+    t.sel_copy_to_top("qx", "_qx_z");
+    t.sel_push_int("_zero_qx", 0);
+    t.sel_raw_ops(&["_qx_z", "_zero_qx"], "_qxz", &["OP_NUMEQUAL"]);
+    t.sel_copy_to_top("qy", "_qy_z");
+    t.sel_push_int("_zero_qy", 0);
+    t.sel_raw_ops(&["_qy_z", "_zero_qy"], "_qyz", &["OP_NUMEQUAL"]);
+    t.sel_raw_ops(&["_qxz", "_qyz"], "_qinf", &["OP_BOOLAND"]);
+
+    // usep = qinf AND NOT pinf
+    t.sel_copy_to_top("_qinf", "_usep_q");
+    t.sel_copy_to_top("_pinf", "_usep_p");
+    t.sel_raw_ops(&["_usep_q", "_usep_p"], "_usep", &["OP_NOT", "OP_BOOLAND"]);
+
+    // useq = pinf
+    t.sel_copy_to_top("_pinf", "_useq");
+
+    // user = notinf AND NOT(pinf OR qinf)
+    t.sel_to_top("_pinf");
+    t.sel_to_top("_qinf");
+    t.sel_raw_ops(&["_pinf", "_qinf"], "_anyinf", &["OP_BOOLOR"]);
+    t.sel_to_top("_notinf");
+    t.sel_to_top("_anyinf");
+    t.sel_raw_ops(&["_notinf", "_anyinf"], "_user", &["OP_NOT", "OP_BOOLAND"]);
+
+    // rx = px*usep + qx*useq + rx*user
+    t.sel_to_top("px");
+    t.sel_copy_to_top("_usep", "_usep_x");
+    t.sel_raw_ops(&["px", "_usep_x"], "_selx_p", &["OP_MUL"]);
+    t.sel_to_top("qx");
+    t.sel_copy_to_top("_useq", "_useq_x");
+    t.sel_raw_ops(&["qx", "_useq_x"], "_selx_q", &["OP_MUL"]);
+    t.sel_to_top("rx");
+    t.sel_copy_to_top("_user", "_user_x");
+    t.sel_raw_ops(&["rx", "_user_x"], "_selx_r", &["OP_MUL"]);
+    t.sel_raw_ops(&["_selx_q", "_selx_r"], "_selx_qr", &["OP_ADD"]);
+    t.sel_raw_ops(&["_selx_p", "_selx_qr"], "rx", &["OP_ADD"]);
+
+    // ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+    t.sel_to_top("py");
+    t.sel_to_top("_usep");
+    t.sel_raw_ops(&["py", "_usep"], "_sely_p", &["OP_MUL"]);
+    t.sel_to_top("qy");
+    t.sel_to_top("_useq");
+    t.sel_raw_ops(&["qy", "_useq"], "_sely_q", &["OP_MUL"]);
+    t.sel_to_top("ry");
+    t.sel_to_top("_user");
+    t.sel_raw_ops(&["ry", "_user"], "_sely_r", &["OP_MUL"]);
+    t.sel_raw_ops(&["_sely_q", "_sely_r"], "_sely_qr", &["OP_ADD"]);
+    t.sel_raw_ops(&["_sely_p", "_sely_qr"], "ry", &["OP_ADD"]);
 }
 
 // ===========================================================================

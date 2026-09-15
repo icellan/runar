@@ -120,7 +120,7 @@ class TestEcCodegen < Minitest::Test
   # adds 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
   # replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence with 3.
   EC_OP_COUNT_GOLDENS = {
-    "ecAdd"              =>  8229,
+    "ecAdd"              =>  8279,
     "ecMul"              => 130518,
     "ecMulGen"           => 130520,
     "ecNegate"           =>   948,

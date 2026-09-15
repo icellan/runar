@@ -54,12 +54,16 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// p256OnCurve gain a clamp-form length gate (emitPointLengthGate)
 		// plus a second BOOLAND; VerifyECDSA_P256 inherits the abort-form
 		// check via cDecomposePoint inside cEmitVerifyECDSA's point additions.
-		{"EcAdd", EmitEcAdd, 8229},
+		// CL-BUG-096 (affine-adder infinity-operand select, R-053): +50 ops for
+		// emitAffineInfinitySelect, which replaces the old cleanup + notinf-only
+		// mask tail of affineAdd / cAffineAdd. Same +50 on P256Add, P384Add, and
+		// VerifyECDSA_P256 below (VerifyECDSA_P384 has no golden entry here).
+		{"EcAdd", EmitEcAdd, 8279},
 		{"EcMul", EmitEcMul, 130518},
 		{"EcMulGen", EmitEcMulGen, 130520},
 		{"EcNegate", EmitEcNegate, 948},
 		{"EcOnCurve", EmitEcOnCurve, 548},
-		{"P256Add", EmitP256Add, 6669},
+		{"P256Add", EmitP256Add, 6719},
 		{"P256Mul", EmitP256Mul, 140039},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
@@ -68,8 +72,8 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// cDecompressPubKey's _dk_valid. P-384 carries the identical fix but
 		// has no golden entry in this table.
 		// +12 more from CL-BUG-095 (Point-length validation, see above).
-		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297343},
-		{"P384Add", EmitP384Add, 11475},
+		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
+		{"P384Add", EmitP384Add, 11525},
 		{"P384Mul", EmitP384Mul, 211181},
 		{"VerifyWOTS", EmitVerifyWOTS, 15488},
 	}

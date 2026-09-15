@@ -131,9 +131,12 @@ export class Probe extends SmartContract {
     // is the evidence that the width gate stayed inside the EC / P-256 / P-384
     // families and did not leak into bn254 / BabyBear / KoalaBear codegen.
     const BASELINE: Record<string, string> = {
-      ecAdd: 'ae0f63e92b902bbdcddb868b7c0e582fcdfd10662a1f91377a95dfe6f31e0d69',
+      // R-053 / CL-BUG-096 re-stamped ONLY the two adder digests. ecPointX and
+      // p384Negate below are unchanged, which is the control: the infinity
+      // select lives inside affineAdd and must not reach any other emitter.
+      ecAdd: '07126934f9be1ab99385e0372ca4f0bc790a02dddd844059fca1e21d5c8ff3de',
       ecPointX: '4579847d2e40a84e69f14ae1f87da077e6937a0aa405d93a0e309cd2edd8c191',
-      p256Add: '36f386bd33c84bc5c5627aa74d527fb1cbe511f8c563c72366ac14fda2e9d855',
+      p256Add: '5867a9276b3da34e0b23f2218fbc0f65dd04de89bb2bbee24eb885e9c9707177',
       p384Negate: '4eaadee61ca624f2e3eee766e30d3872f27e9e07eddbe1c5693e512a0030b1a8',
       bn254FieldAdd: 'fe9e984bb631a254e07b304b081a5cc3b0ebe6394302ef48c52e27340c75ca97',
       bn254FieldNeg: '354ac5ea0ab4cb6d88ec17b91b1ae01cc58428414b1f32994e803e93d4457d4e',

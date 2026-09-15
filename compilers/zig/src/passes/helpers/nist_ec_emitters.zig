@@ -345,7 +345,7 @@ const NistTracker = struct {
         try self.ops.append(self.allocator, op);
     }
 
-    fn emitOpcode(self: *NistTracker, code: []const u8) !void {
+    pub fn emitOpcode(self: *NistTracker, code: []const u8) !void {
         try self.emitRaw(.{ .opcode = code });
     }
 
@@ -353,7 +353,7 @@ const NistTracker = struct {
         try self.emitRaw(.{ .push = .{ .integer = value } });
     }
 
-    fn pushInt(self: *NistTracker, name: ?[]const u8, value: i64) !void {
+    pub fn pushInt(self: *NistTracker, name: ?[]const u8, value: i64) !void {
         try self.emitPushInt(value);
         try self.names.append(self.allocator, name);
     }
@@ -425,11 +425,11 @@ const NistTracker = struct {
         try self.names.append(self.allocator, name);
     }
 
-    fn toTop(self: *NistTracker, name: []const u8) !void {
+    pub fn toTop(self: *NistTracker, name: []const u8) !void {
         try self.roll(try self.findDepth(name));
     }
 
-    fn copyToTop(self: *NistTracker, name: []const u8, copy_name: ?[]const u8) !void {
+    pub fn copyToTop(self: *NistTracker, name: []const u8, copy_name: ?[]const u8) !void {
         try self.pick(try self.findDepth(name), copy_name);
     }
 
@@ -439,7 +439,7 @@ const NistTracker = struct {
         }
     }
 
-    fn popNames(self: *NistTracker, count: usize) void {
+    pub fn popNames(self: *NistTracker, count: usize) void {
         var i: usize = 0;
         while (i < count and self.names.items.len > 0) : (i += 1) {
             _ = self.names.pop();
@@ -863,26 +863,11 @@ fn affineAdd(t: *NistTracker, p_be: []const u8) !void {
     try t.copyToTop("py", "_py2");
     try fieldSub(t, "_s_px_rx", "_py2", p_be, "ry");
 
-    try t.toTop("px");
-    try t.drop();
-    try t.toTop("py");
-    try t.drop();
-    try t.toTop("qx");
-    try t.drop();
-    try t.toTop("qy");
-    try t.drop();
-
-    // P == -Q -> force the all-zero point (see the header comment).
-    try t.toTop("rx");
-    try t.copyToTop("_notinf", "_notinf_x");
-    t.popNames(2);
-    try t.emitOpcode("OP_MUL");
-    try t.names.append(t.allocator, "rx");
-    try t.toTop("ry");
-    try t.toTop("_notinf");
-    t.popNames(2);
-    try t.emitOpcode("OP_MUL");
-    try t.names.append(t.allocator, "ry");
+    // CL-BUG-096: `pNNNAdd(P, O)` returned an off-curve blob for the same reason
+    // secp256k1's did — the adder had no infinity-operand case, while
+    // `pNNNMul(P, 0n)` hands it exactly that value. Same branch-free select,
+    // which also subsumes the standalone `notinf` mask that used to live here.
+    try ec.emitAffineInfinitySelect(t);
 }
 
 // ===========================================================================
@@ -2147,14 +2132,23 @@ test "nist_ec helper op-count goldens" {
     // validation gates — length clamp, r/s range, prefix byte — for a further
     // +225 / +306 bytes) but carry no op-count golden here — the conformance
     // hex is their gate.
+    // p256Add 6645 -> 6679 and p384Add 11451 -> 11485 (+34 each): CL-BUG-096,
+    // `ec.emitAffineInfinitySelect`. `pNNNAdd(P, O)` returned an off-curve blob
+    // for the same reason secp256k1's did — no infinity-operand case, while
+    // `pNNNMul(P, 0n)` hands the adder exactly that value. Curve-independent
+    // again: the same op sequence for both curves, only push widths differ.
+    // Peers book it as +50 OPS under the deep-pick/roll convention noted above;
+    // measured here, the weighted counts go 6669 -> 6719 and 11475 -> 11525,
+    // exactly +50 each. p256Mul / p384Mul / *MulGen / *Negate / p256OnCurve do
+    // not move.
     const cases = .{
-        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6645) },
+        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6679) },
         .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129195) },
         .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129197) },
         .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 948) },
         .{ registry.CryptoBuiltin.p256_on_curve, "p256OnCurve", @as(usize, 570) },
         .{ registry.CryptoBuiltin.p256_encode_compressed, "p256EncodeCompressed", @as(usize, 16) },
-        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11451) },
+        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11485) },
         .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 194961) },
         .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 194963) },
         .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1396) },
