@@ -18,6 +18,53 @@ use ir::loader::{load_ir, load_ir_from_str};
 
 use std::path::Path;
 
+// ---------------------------------------------------------------------------
+// Pass guards (R-224)
+// ---------------------------------------------------------------------------
+
+/// Run one compiler pass with the same panic discipline passes 4 and 5 already
+/// had: a panic raised inside it becomes an `Err` carrying the payload, and the
+/// default panic hook's "thread 'main' panicked at src/…" banner never reaches
+/// the user.
+///
+/// Before R-224 only passes 4 and 5 were wrapped. Passes 1, 2, 3, 3b, 4.25 and
+/// 4.5 ran bare, so an `unreachable!()` / `unwrap()` inside any of them —
+/// `frontend::expand_fixed_arrays` alone holds a dozen — would unwind straight
+/// out of the compiler: a crash report for a library embedder, and for the CLI
+/// a backtrace invitation instead of a diagnostic. The Go / TS / Python / Zig /
+/// Ruby / Java tiers all turn a pass-level panic into a diagnostic; this makes
+/// the Rust tier do it for EVERY pass rather than for two of them.
+///
+/// This is a containment boundary, not a licence to panic: no source is known
+/// to reach one of those sites today.
+fn guarded_pass<T>(prefix: &str, f: impl FnOnce() -> T) -> Result<T, refusal::Refusal> {
+    refusal::catch_refusal(prefix, || {
+        #[cfg(test)]
+        test_panic_point(prefix);
+        f()
+    })
+}
+
+/// Test-only panic injection for `guarded_pass`.
+///
+/// Every guard in this file is a catch-all for a site no input is known to
+/// reach, so the only way to test that the guard is actually THERE is to raise
+/// a panic at the boundary on purpose. `#[cfg(test)]`, so release builds carry
+/// neither the check nor the thread-local.
+#[cfg(test)]
+thread_local! {
+    static PANIC_IN_PASS: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_panic_point(prefix: &str) {
+    let armed = PANIC_IN_PASS.with(|c| c.borrow().as_deref() == Some(prefix));
+    if armed {
+        panic!("injected pass panic");
+    }
+}
+
 /// Options controlling the compilation pipeline.
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
@@ -271,7 +318,8 @@ pub fn compile_from_source_str_with_options(
     opts: &CompileOptions,
 ) -> Result<RunarArtifact, String> {
     // Pass 1: Parse (auto-selects parser based on file extension)
-    let parse_result = frontend::parser::parse_source(source, file_name);
+    let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
+        .map_err(|e| e.message)?;
     if !parse_result.errors.is_empty() {
         let error_msgs: Vec<String> = parse_result.errors.iter().map(|e| e.to_string()).collect();
         return Err(format!("Parse errors:\n  {}", error_msgs.join("\n  ")));
@@ -282,7 +330,8 @@ pub fn compile_from_source_str_with_options(
         .ok_or_else(|| "No contract found in source file".to_string())?;
 
     // Pass 2: Validate
-    let validation = frontend::validator::validate(&contract);
+    let validation = guarded_pass("validate", || frontend::validator::validate(&contract))
+        .map_err(|e| e.message)?;
     if !validation.errors.is_empty() {
         return Err(format!(
             "Validation errors:\n  {}",
@@ -294,7 +343,8 @@ pub fn compile_from_source_str_with_options(
     }
 
     // Pass 3: Type-check
-    let tc_result = frontend::typecheck::typecheck(&contract);
+    let tc_result = guarded_pass("type check", || frontend::typecheck::typecheck(&contract))
+        .map_err(|e| e.message)?;
     if !tc_result.errors.is_empty() {
         return Err(format!(
             "Type-check errors:\n  {}",
@@ -303,7 +353,10 @@ pub fn compile_from_source_str_with_options(
     }
 
     // Pass 3b: Expand fixed-size array properties into scalar siblings.
-    let expand_result = frontend::expand_fixed_arrays::expand_fixed_arrays(&contract);
+    let expand_result = guarded_pass("expand fixed arrays", || {
+        frontend::expand_fixed_arrays::expand_fixed_arrays(&contract)
+    })
+    .map_err(|e| e.message)?;
     if !expand_result.errors.is_empty() {
         let error_msgs: Vec<String> = expand_result
             .errors
@@ -331,12 +384,17 @@ pub fn compile_from_source_str_with_options(
 
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
-        anf_program = frontend::constant_fold::fold_constants(&anf_program);
+        anf_program = guarded_pass("constant folding", || {
+            frontend::constant_fold::fold_constants(&anf_program)
+        })
+        .map_err(|e| e.message)?;
     }
 
     // Pass 4.5: EC optimization. Delegates internally to frontend::dce
     // for dead-binding cleanup after any EC rewrite.
-    let anf_program = frontend::anf_optimize::optimize_ec(anf_program);
+    let anf_program =
+        guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program))
+            .map_err(|e| e.message)?;
 
     // Passes 5-6: Backend (stack lowering + emit)
     // Constant folding already ran above; skip it in compile_from_program.
@@ -374,7 +432,8 @@ pub fn compile_source_str_to_ir_with_options(
     file_name: Option<&str>,
     opts: &CompileOptions,
 ) -> Result<ir::ANFProgram, String> {
-    let parse_result = frontend::parser::parse_source(source, file_name);
+    let parse_result = guarded_pass("parse", || frontend::parser::parse_source(source, file_name))
+        .map_err(|e| e.message)?;
     if !parse_result.errors.is_empty() {
         let error_msgs: Vec<String> = parse_result.errors.iter().map(|e| e.to_string()).collect();
         return Err(format!("Parse errors:\n  {}", error_msgs.join("\n  ")));
@@ -384,7 +443,8 @@ pub fn compile_source_str_to_ir_with_options(
         .contract
         .ok_or_else(|| "No contract found in source file".to_string())?;
 
-    let validation = frontend::validator::validate(&contract);
+    let validation = guarded_pass("validate", || frontend::validator::validate(&contract))
+        .map_err(|e| e.message)?;
     if !validation.errors.is_empty() {
         return Err(format!(
             "Validation errors:\n  {}",
@@ -392,7 +452,8 @@ pub fn compile_source_str_to_ir_with_options(
         ));
     }
 
-    let tc_result = frontend::typecheck::typecheck(&contract);
+    let tc_result = guarded_pass("type check", || frontend::typecheck::typecheck(&contract))
+        .map_err(|e| e.message)?;
     if !tc_result.errors.is_empty() {
         return Err(format!(
             "Type-check errors:\n  {}",
@@ -401,7 +462,10 @@ pub fn compile_source_str_to_ir_with_options(
     }
 
     // Pass 3b: Expand fixed-size array properties into scalar siblings.
-    let expand_result = frontend::expand_fixed_arrays::expand_fixed_arrays(&contract);
+    let expand_result = guarded_pass("expand fixed arrays", || {
+        frontend::expand_fixed_arrays::expand_fixed_arrays(&contract)
+    })
+    .map_err(|e| e.message)?;
     if !expand_result.errors.is_empty() {
         let error_msgs: Vec<String> = expand_result
             .errors
@@ -429,10 +493,14 @@ pub fn compile_source_str_to_ir_with_options(
 
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
-        anf_program = frontend::constant_fold::fold_constants(&anf_program);
+        anf_program = guarded_pass("constant folding", || {
+            frontend::constant_fold::fold_constants(&anf_program)
+        })
+        .map_err(|e| e.message)?;
     }
 
-    Ok(frontend::anf_optimize::optimize_ec(anf_program))
+    guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program))
+        .map_err(|e| e.message)
 }
 
 /// Run only the parse + validate passes on a source string.
@@ -460,12 +528,16 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     // Pass 4.25: Constant folding (optional, in case we receive unoptimized ANF from IR)
     let mut program = program.clone();
     if !opts.disable_constant_folding {
-        program = frontend::constant_fold::fold_constants(&program);
+        program = guarded_pass("constant folding", || {
+            frontend::constant_fold::fold_constants(&program)
+        })
+        .map_err(|e| e.message)?;
     }
 
     // Pass 4.5: EC optimization (in case we receive unoptimized ANF from IR).
     // Delegates internally to frontend::dce for dead-binding cleanup.
-    let optimized = frontend::anf_optimize::optimize_ec(program);
+    let optimized = guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(program))
+        .map_err(|e| e.message)?;
 
     // Pass 5: Stack lowering
     let mut stack_methods = lower_to_stack(&optimized)?;
@@ -481,7 +553,8 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     }
 
     // Pass 6: Emit
-    let emit_result = emit(&stack_methods)?;
+    let emit_result = guarded_pass("emit", || emit(&stack_methods))
+        .map_err(|e| e.message)??;
 
     let artifact = assemble_artifact(
         &optimized,
@@ -518,7 +591,14 @@ pub fn compile_from_source_str_with_result(
     let mut result = CompileResult::new();
 
     // Pass 1: Parse (auto-selects parser based on file extension)
-    let parse_result = frontend::parser::parse_source(source, file_name);
+    let parse_result =
+        match guarded_pass("parse", || frontend::parser::parse_source(source, file_name)) {
+            Ok(r) => r,
+            Err(e) => {
+                result.diagnostics.push(Diagnostic::error(e.message, e.loc));
+                return result;
+            }
+        };
     result.diagnostics.extend(parse_result.errors);
     result.contract = parse_result.contract;
 
@@ -539,7 +619,13 @@ pub fn compile_from_source_str_with_result(
 
     // Pass 2: Validate
     let contract = result.contract.as_ref().unwrap();
-    let validation = frontend::validator::validate(contract);
+    let validation = match guarded_pass("validate", || frontend::validator::validate(contract)) {
+        Ok(v) => v,
+        Err(e) => {
+            result.diagnostics.push(Diagnostic::error(e.message, e.loc));
+            return result;
+        }
+    };
     result.diagnostics.extend(validation.errors);
     result.diagnostics.extend(validation.warnings);
 
@@ -553,7 +639,13 @@ pub fn compile_from_source_str_with_result(
     }
 
     // Pass 3: Type-check
-    let tc_result = frontend::typecheck::typecheck(contract);
+    let tc_result = match guarded_pass("type check", || frontend::typecheck::typecheck(contract)) {
+        Ok(t) => t,
+        Err(e) => {
+            result.diagnostics.push(Diagnostic::error(e.message, e.loc));
+            return result;
+        }
+    };
     result.diagnostics.extend(tc_result.errors);
 
     if result.has_errors() {
@@ -566,7 +658,15 @@ pub fn compile_from_source_str_with_result(
     }
 
     // Pass 3b: Expand fixed-size array properties into scalar siblings.
-    let expand_result = frontend::expand_fixed_arrays::expand_fixed_arrays(contract);
+    let expand_result = match guarded_pass("expand fixed arrays", || {
+        frontend::expand_fixed_arrays::expand_fixed_arrays(contract)
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            result.diagnostics.push(Diagnostic::error(e.message, e.loc));
+            return result;
+        }
+    };
     if !expand_result.errors.is_empty() {
         result.diagnostics.extend(expand_result.errors);
     }
@@ -601,11 +701,26 @@ pub fn compile_from_source_str_with_result(
 
     // Pass 4.25: Constant folding (optional)
     if !opts.disable_constant_folding {
-        anf_program = frontend::constant_fold::fold_constants(&anf_program);
+        anf_program = match guarded_pass("constant folding", || {
+            frontend::constant_fold::fold_constants(&anf_program)
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                result.diagnostics.push(Diagnostic::error(e.message, e.loc));
+                return result;
+            }
+        };
     }
 
     // Pass 4.5: EC optimization (delegates internally to frontend::dce)
-    anf_program = frontend::anf_optimize::optimize_ec(anf_program);
+    anf_program =
+        match guarded_pass("ec optimization", || frontend::anf_optimize::optimize_ec(anf_program)) {
+            Ok(p) => p,
+            Err(e) => {
+                result.diagnostics.push(Diagnostic::error(e.message, e.loc));
+                return result;
+            }
+        };
     result.anf = Some(anf_program.clone());
 
     // Issue #109: warn when DCE strips an un-annotated readonly field. Such a
@@ -638,9 +753,7 @@ pub fn compile_from_source_str_with_result(
     }
 
     // Pass 5: Stack lowering (catch panics)
-    let stack_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lower_to_stack(&anf_program)
-    }));
+    let stack_result = guarded_pass("stack lowering", || lower_to_stack(&anf_program));
 
     let mut stack_methods = match stack_result {
         Ok(Ok(methods)) => methods,
@@ -653,15 +766,8 @@ pub fn compile_from_source_str_with_result(
             result.diagnostics.push(Diagnostic::error(e.message.clone(), loc));
             return result;
         }
-        Err(panic_val) => {
-            let msg = if let Some(s) = panic_val.downcast_ref::<&str>() {
-                format!("stack lowering panic: {}", s)
-            } else if let Some(s) = panic_val.downcast_ref::<String>() {
-                format!("stack lowering panic: {}", s)
-            } else {
-                "stack lowering panic: unknown error".to_string()
-            };
-            result.diagnostics.push(Diagnostic::error(msg, None));
+        Err(e) => {
+            result.diagnostics.push(Diagnostic::error(e.message, e.loc));
             return result;
         }
     };
@@ -696,9 +802,7 @@ pub fn compile_from_source_str_with_result(
     }
 
     // Pass 6: Emit (catch panics)
-    let emit_result_outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        emit(&stack_methods)
-    }));
+    let emit_result_outer = guarded_pass("emit", || emit(&stack_methods));
 
     match emit_result_outer {
         Ok(Ok(emit_result)) => {
@@ -733,15 +837,8 @@ pub fn compile_from_source_str_with_result(
                 None,
             ));
         }
-        Err(panic_val) => {
-            let msg = if let Some(s) = panic_val.downcast_ref::<&str>() {
-                format!("emit panic: {}", s)
-            } else if let Some(s) = panic_val.downcast_ref::<String>() {
-                format!("emit panic: {}", s)
-            } else {
-                "emit panic: unknown error".to_string()
-            };
-            result.diagnostics.push(Diagnostic::error(msg, None));
+        Err(e) => {
+            result.diagnostics.push(Diagnostic::error(e.message, e.loc));
         }
     }
 
@@ -772,4 +869,133 @@ pub fn compile_from_source_with_result(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "contract.ts".to_string());
     compile_from_source_str_with_result(&source, Some(&file_name), opts)
+}
+
+// ---------------------------------------------------------------------------
+// R-224: every pass is behind a guard
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pass_guard_tests {
+    use super::*;
+
+    /// A contract that reaches every pass: it parses, validates, type-checks,
+    /// survives fixed-array expansion, folds a constant, runs the EC/DCE
+    /// optimiser, lowers to stack and emits.
+    const SRC: &str = r#"
+import { StatefulSmartContract, assert } from 'runar-lang';
+
+class Guarded extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public bump(step: bigint) {
+    assert(step > 0n);
+    this.count = this.count + step + (2n * 3n);
+    this.addOutput(1000n, this.count);
+  }
+}
+"#;
+
+    fn arm(pass: &str) {
+        PANIC_IN_PASS.with(|c| *c.borrow_mut() = Some(pass.to_string()));
+    }
+
+    fn disarm() {
+        PANIC_IN_PASS.with(|c| *c.borrow_mut() = None);
+    }
+
+    /// Control: with nothing armed the contract compiles. If this ever fails,
+    /// the two tests below are vacuous.
+    #[test]
+    fn control_contract_compiles() {
+        disarm();
+        let artifact = compile_from_source_str(SRC, Some("Guarded.runar.ts"))
+            .expect("control contract must compile");
+        assert!(!artifact.script.is_empty(), "control produced an empty script");
+    }
+
+    /// A panic raised inside ANY frontend pass on the primary `Result` path
+    /// comes back as an `Err`, prefixed with the pass that raised it — never as
+    /// an unwind out of the compiler.
+    #[test]
+    fn primary_path_guards_every_pass() {
+        for pass in [
+            "parse",
+            "validate",
+            "type check",
+            "expand fixed arrays",
+            "constant folding",
+            "ec optimization",
+            "emit",
+        ] {
+            arm(pass);
+            let outcome = compile_from_source_str(SRC, Some("Guarded.runar.ts"));
+            disarm();
+            let err = outcome.expect_err(&format!("pass '{}' swallowed the injected panic", pass));
+            assert!(
+                err.starts_with(pass),
+                "pass '{}' reported through the wrong guard: {}",
+                pass,
+                err
+            );
+            assert!(
+                err.contains("injected pass panic"),
+                "pass '{}' lost the panic payload: {}",
+                pass,
+                err
+            );
+        }
+    }
+
+    /// Same, for the diagnostic-collecting entry point the CLI's `--source`
+    /// route uses. Pass 5 and pass 6 are reachable here too.
+    #[test]
+    fn diagnostic_path_guards_every_pass() {
+        for pass in [
+            "parse",
+            "validate",
+            "type check",
+            "expand fixed arrays",
+            "constant folding",
+            "ec optimization",
+            "stack lowering",
+            "emit",
+        ] {
+            arm(pass);
+            let result = compile_from_source_str_with_result(
+                SRC,
+                Some("Guarded.runar.ts"),
+                &CompileOptions::default(),
+            );
+            disarm();
+            assert!(
+                !result.success,
+                "pass '{}' swallowed the injected panic and reported success",
+                pass
+            );
+            let joined = result
+                .diagnostics
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                joined.contains("injected pass panic"),
+                "pass '{}' lost the panic payload: {}",
+                pass,
+                joined
+            );
+            assert!(
+                joined.contains(pass),
+                "pass '{}' reported through the wrong guard: {}",
+                pass,
+                joined
+            );
+        }
+    }
 }
