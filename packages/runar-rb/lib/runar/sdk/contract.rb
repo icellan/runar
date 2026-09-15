@@ -501,14 +501,22 @@ module Runar
         anf_ordered_outputs = []
         if is_stateful && @artifact.anf
           named_args = build_named_args(user_params, resolved_args)
+          # The interpreter knows only the EXPANDED scalar property names, so a
+          # grouped FixedArray entry has to be spread over its synthetic leaves
+          # first — see flatten_fixed_array_state.
+          flat_state = flatten_fixed_array_state(@state, @artifact.state_fields)
           computed_state, anf_data_outputs, _anf_raw_outputs, anf_ordered_outputs =
             ANFInterpreter.compute_new_state_and_data_outputs(
-              @artifact.anf, method_name, @state, named_args,
+              @artifact.anf, method_name, flat_state, named_args,
               constructor_args: @constructor_args
             )
           if opts.new_state.nil?
             opts = opts.dup
-            opts.new_state = computed_state
+            # ...and the post-state comes back under those same synthetic names.
+            # serialize_state reads a FixedArray field from its GROUPED entry
+            # ONLY, so without regrouping the continuation commits the pre-call
+            # array and the covenant's hashOutputs binding rejects the spend.
+            opts.new_state = regroup_fixed_array_state(computed_state, @artifact.state_fields)
           end
           if resolved_data_outputs.empty? && anf_data_outputs.any?
             resolved_data_outputs = anf_data_outputs.map do |d|
@@ -1342,6 +1350,85 @@ module Runar
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
+
+      # Spread every grouped FixedArray entry of a state record (+table+ holding
+      # a possibly-nested array of length N) over the SYNTHETIC scalar names the
+      # leaves are really called (+table__0+..+table__3+, +grid__0__0+..). The
+      # grouped entries are kept as well, for callers that read them afterwards.
+      #
+      # This is the ANF-interpreter boundary. Pass +03b-expand-fixed-arrays+ runs
+      # BEFORE ANF lowering, so the ANF program has no property called +table+ at
+      # all — every +load_prop+ / +update_prop+ in the method body names one of
+      # the synthetic leaves. Handing the interpreter the grouped map left it
+      # evaluating +@table[i] += 1+ against an ABSENT property and falling back to
+      # the property's initialValue; because a runtime-index write lowers to a
+      # per-leaf select it rewrites EVERY leaf, so a call on a contract restored
+      # from chain rewound the whole array to its deploy-time contents.
+      #
+      # Mirrors +flattenFixedArrayState+ in packages/runar-sdk/src/contract.ts,
+      # +_flatten_fixed_array_state+ in packages/runar-py/runar/sdk/contract.py
+      # and +flattenFixedArrayState+ in packages/runar-go/sdk_contract.go,
+      # including their two rules: a non-array value is NOT spread over N leaves
+      # (nothing sensible to spread), and an explicitly-supplied scalar wins over
+      # the grouped array it is also spelled inside.
+      #
+      # @param state        [Hash]
+      # @param state_fields [Array<StateField>]
+      # @return [Hash]
+      def flatten_fixed_array_state(state, state_fields)
+        out = state.dup
+        Array(state_fields).each do |field|
+          next unless field.respond_to?(:fixed_array) && field.fixed_array
+
+          value = state[field.name]
+          next unless value.is_a?(Array)
+
+          flat = State.flatten_nested_value(value, State.parse_fixed_array_dims(field.type))
+          field.fixed_array[:synthetic_names].each_with_index do |synth, i|
+            out[synth] = flat[i] unless out.key?(synth)
+          end
+        end
+        out
+      end
+
+      # Rebuild each grouped FixedArray entry of a state record from the
+      # synthetic scalar leaves the ANF interpreter writes, so +get_state+ and
+      # +State.serialize_state+ — which reads a FixedArray field from its GROUPED
+      # entry only — both see the post-call value rather than the pre-call one.
+      # Synthetic entries are left in place; non-FixedArray fields pass through.
+      #
+      # A field whose leaves are entirely absent from the map is left alone: the
+      # method did not touch that array, so there is nothing to reconstruct. A
+      # leaf the method did not write falls back to its pre-call value from the
+      # grouped entry, so a partial write keeps the untouched slots instead of
+      # zeroing them.
+      #
+      # Mirrors +regroupFixedArrayState+ / +_regroup_fixed_array_state+ in the
+      # TS, Python and Go SDKs.
+      #
+      # @param state        [Hash]
+      # @param state_fields [Array<StateField>]
+      # @return [Hash]
+      def regroup_fixed_array_state(state, state_fields)
+        out = state.dup
+        Array(state_fields).each do |field|
+          next unless field.respond_to?(:fixed_array) && field.fixed_array
+
+          names = field.fixed_array[:synthetic_names]
+          written = names.map { |synth| out.key?(synth) }
+          next unless written.any?
+
+          flat = names.each_with_index.map { |synth, i| written[i] ? out[synth] : nil }
+          dims = State.parse_fixed_array_dims(field.type)
+          prior = state[field.name]
+          if prior.is_a?(Array)
+            prior_flat = State.flatten_nested_value(prior, dims)
+            flat.each_index { |i| flat[i] = prior_flat[i] unless written[i] }
+          end
+          out[field.name] = State.regroup_flat_value(flat, dims)
+        end
+        out
+      end
 
       # Map positional resolved_args to a Hash keyed by parameter name.
       #
