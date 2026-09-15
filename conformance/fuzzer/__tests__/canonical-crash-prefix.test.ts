@@ -51,6 +51,25 @@ function have(cmd: string, args: string[]): boolean {
 const havePython = have('python3', ['--version']);
 const haveRuby = have('ruby', ['--version']);
 
+/**
+ * In CI a missing toolchain must FAIL, not skip: a green tick on a run that
+ * never drove the shim is the same disease this whole file is about. Locally
+ * the arm is skipped with a warning so a developer without ruby can still work.
+ */
+const TOOLCHAINS_REQUIRED =
+  process.env.RUNAR_REQUIRE_TOOLCHAINS === '1' || process.env.CI === 'true';
+
+function requireTool(present: boolean, name: string): boolean {
+  if (present) return true;
+  if (TOOLCHAINS_REQUIRED) {
+    throw new Error(
+      `${name} is not installed. This arm drives the real shim; in CI it must not be skipped.`,
+    );
+  }
+  console.warn(`[canonical-crash-prefix] ${name} not installed — arm skipped (local run only).`);
+  return false;
+}
+
 describe('canonical fuzzer: a crashed tier is not a rejecting tier', () => {
   it('normaliseOutcome keeps a crash out of the <REJECT> equivalence class', () => {
     const crash = normaliseOutcome(`${CRASH_PREFIX}StackOverflowError`);
@@ -73,9 +92,10 @@ describe('canonical fuzzer: a crashed tier is not a rejecting tier', () => {
     expect(normaliseOutcome('[[1]]')).toBe('[[1]]');
   });
 
-  it.skipIf(!havePython)(
+  it(
     'python shim: native RecursionError emits the CRASH prefix, not the REJECT prefix',
     () => {
+      if (!requireTool(havePython, 'python3')) return;
       // Force canonical_json's own recursion to exhaust the interpreter stack
       // while its depth guard (MAX_WIRE_NESTING = 100) is untouched: nest 99
       // containers under a recursion limit of 60. `runar.sdk` is imported
@@ -104,9 +124,10 @@ describe('canonical fuzzer: a crashed tier is not a rejecting tier', () => {
     60_000,
   );
 
-  it.skipIf(!havePython)(
+  it(
     'CONTROL: python shim still emits the REJECT prefix for a real guard rejection',
     () => {
+      if (!requireTool(havePython, 'python3')) return;
       const r = spawnSync('python3', [PY_SHIM], {
         input: '{"mode":"deep","depth":4096,"shape":"array"}',
         encoding: 'utf-8',
@@ -120,9 +141,10 @@ describe('canonical fuzzer: a crashed tier is not a rejecting tier', () => {
     60_000,
   );
 
-  it.skipIf(!haveRuby)(
+  it(
     'ruby shim: native SystemStackError emits the CRASH prefix, not the REJECT prefix',
     () => {
+      if (!requireTool(haveRuby, 'ruby')) return;
       // A 16 KiB VM stack overflows inside canonical_json well before the
       // depth guard (MAX_WIRE_NESTING = 100) can reject 99 containers.
       const r = spawnSync('ruby', [RB_SHIM], {
@@ -140,9 +162,10 @@ describe('canonical fuzzer: a crashed tier is not a rejecting tier', () => {
     60_000,
   );
 
-  it.skipIf(!haveRuby)(
+  it(
     'CONTROL: ruby shim still emits the REJECT prefix for a real guard rejection',
     () => {
+      if (!requireTool(haveRuby, 'ruby')) return;
       const r = spawnSync('ruby', [RB_SHIM], {
         input: '{"mode":"deep","depth":4096,"shape":"array"}',
         encoding: 'utf-8',
