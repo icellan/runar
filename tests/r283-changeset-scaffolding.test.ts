@@ -27,18 +27,23 @@ function invokesChangesetCli(): boolean {
   };
   if (Object.values(pkg.scripts ?? {}).some((s) => /\bchangeset\b/.test(s))) return true;
 
-  const wfDir = join(ROOT, '.github', 'workflows');
-  if (existsSync(wfDir)) {
-    for (const f of readdirSync(wfDir)) {
-      if (/\bchangeset (version|publish)\b/.test(readFileSync(join(wfDir, f), 'utf8'))) return true;
+  // Files only. `readdirSync` yields directories too, and `readFileSync` on one
+  // throws EISDIR — which made this test's result depend on whether anyone had
+  // run a Python script in `scripts/` on this machine, since that leaves a
+  // `scripts/__pycache__/` behind. Green in a fresh checkout, red afterwards.
+  const scanDir = (dir: string): boolean => {
+    if (!existsSync(dir)) return false;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      if (/\bchangeset (version|publish)\b/.test(readFileSync(join(dir, entry.name), 'utf8'))) {
+        return true;
+      }
     }
-  }
-  const scriptsDir = join(ROOT, 'scripts');
-  if (existsSync(scriptsDir)) {
-    for (const f of readdirSync(scriptsDir)) {
-      if (/\bchangeset (version|publish)\b/.test(readFileSync(join(scriptsDir, f), 'utf8'))) return true;
-    }
-  }
+    return false;
+  };
+
+  if (scanDir(join(ROOT, '.github', 'workflows'))) return true;
+  if (scanDir(join(ROOT, 'scripts'))) return true;
   return false;
 }
 
