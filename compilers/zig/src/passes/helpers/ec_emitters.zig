@@ -368,6 +368,11 @@ fn emitBoolAndOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_BOOLAND");
 }
 
+fn emitBoolAndVerifySequence(t: *ECTracker) !void {
+    try t.emitOpcode("OP_BOOLAND");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 fn emitSubNotSequence(t: *ECTracker) !void {
     try t.emitOpcode("OP_SUB");
     try t.emitOpcode("OP_NOT");
@@ -1170,9 +1175,50 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
     return inner.takeBundle();
 }
 
+/// R-117 — a Point's two coordinates must be FIELD ELEMENTS, aborting form.
+///
+/// decomposePoint BIN2NUMs each half of the blob as an unsigned integer, so any
+/// value that fits in the coordinate width is accepted — x + p included,
+/// whenever x + p < 2^256 (on secp256k1 that is every x < 2^32 + 977).
+/// Downstream field arithmetic reduces mod p, so (x+p)‖y behaves as the point
+/// (x, y); affineAdd's two case selectors do NOT reduce, and they are bare
+/// OP_NUMEQUAL on exactly these raw values:
+///
+///     cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+///     notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+///
+/// so for P and its alias both read 0, the chord path runs on two equal points,
+/// den_chord = qx - px ≡ 0 (mod p), and fieldInv is Fermat with inv(0) = 0.
+/// Measured before this gate landed, x = 1: ecAdd(P, P) gave the correct 2P and
+/// ecAdd(P, P') gave x = p-2 — a script that SUCCEEDED and returned a blob that
+/// is not a point. Both the doubling case and the P + (-P) case are driven by
+/// these selectors, so both are defeated by the same trick.
+///
+/// REJECT rather than reduce: emitEcOnCurve already answers "no" to a
+/// non-canonical encoding, so reducing here would leave the predicate and the
+/// value builtins disagreeing about whether the blob is a point at all. This is
+/// also the policy CL-BUG-095 set for the WIDTH — predicates clamp and flag,
+/// value producers OP_VERIFY.
+///
+/// Callers are the user-facing value builtins only; deliberately NOT folded
+/// into decomposePoint, which also runs inside emitEcOnCurve and must stay
+/// total.
+fn emitCoordCanonVerify(t: *ECTracker, x_name: []const u8, y_name: []const u8) !void {
+    try t.copyToTop(x_name, "_cc_x");
+    try pushFieldPNum(t, "_cc_px");
+    try t.rawBlock(2, "_cc_xok", emitLessThanOpcode);
+    try t.copyToTop(y_name, "_cc_y");
+    try pushFieldPNum(t, "_cc_py");
+    try t.rawBlock(2, "_cc_yok", emitLessThanOpcode);
+    try t.rawBlock(2, null, emitBoolAndVerifySequence);
+}
+
 fn emitEcAdd(t: *ECTracker) !void {
     try decomposePoint(t, "_pa", "px", "py");
     try decomposePoint(t, "_pb", "qx", "qy");
+    // R-117: affineAdd's selectors compare these four values RAW.
+    try emitCoordCanonVerify(t, "px", "py");
+    try emitCoordCanonVerify(t, "qx", "qy");
     try affineAdd(t);
     try composePoint(t, "rx", "ry", "_result");
 }
@@ -1197,6 +1243,7 @@ fn emitScalarReduce(t: *ECTracker, k_name: []const u8, result_name: []const u8) 
 
 fn emitEcMul(t: *ECTracker, point_name: []const u8, scalar_name: []const u8) !void {
     try decomposePoint(t, point_name, "ax", "ay");
+    try emitCoordCanonVerify(t, "ax", "ay");
 
     // "k in [1, n-1]" is a PRECONDITION the caller cannot enforce — the scalar is
     // usually an unlock argument — so reduce it first. See emitScalarReduce.
@@ -1268,6 +1315,7 @@ fn emitEcMulGen(t: *ECTracker) !void {
 
 fn emitEcNegate(t: *ECTracker) !void {
     try decomposePoint(t, "_pt", "_nx", "_ny");
+    try emitCoordCanonVerify(t, "_nx", "_ny");
     try pushFieldPNum(t, "_fp");
     try fieldSub(t, "_fp", "_ny", "_neg_y");
     try composePoint(t, "_nx", "_neg_y", "_result");
@@ -1420,10 +1468,10 @@ test "ec helper op-count goldens" {
     // weighted count goes 8229 -> 8279, exactly +50. Nothing else moves —
     // ecMul / ecMulGen / ecNegate / ecOnCurve are untouched.
     const cases = .{
-        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8239) },
-        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 119674) },
-        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 119676) },
-        .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 948) },
+        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8255) },
+        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 119682) },
+        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 119684) },
+        .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 956) },
         .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 545) },
     };
     inline for (cases) |c| {

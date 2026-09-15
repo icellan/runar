@@ -120,10 +120,26 @@ class TestEcCodegen < Minitest::Test
   # adds 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
   # replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence with 3.
   EC_OP_COUNT_GOLDENS = {
-    "ecAdd"              =>  8279,
-    "ecMul"              => 130518,
-    "ecMulGen"           => 130520,
-    "ecNegate"           =>   948,
+    # R-117, the COORDINATE-CANONICITY gate. ecAdd 8279 -> 8297 (+18), ecMul
+    # 130518 -> 130526 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
+    # is 8 ops per gated point -- copy x (pick), push p, OP_LESSTHAN, copy y (pick),
+    # push p, OP_LESSTHAN, OP_BOOLAND, OP_VERIFY -- and ecAdd gates TWO points, so
+    # +18 there rather than +16. The extra two are pick DEPTH, not extra work: this
+    # tracker emits OP_DUP / OP_OVER for depth 0 / 1 and `push <n>, OP_PICK` for
+    # anything deeper, and in ecAdd's FIRST gate the stack is [px, py, qx, qy], so
+    # both of that gate's picks reach depth 3 and cost two ops each. Its second gate
+    # sees [px, py, qx, qy] with qx / qy at depth 1, so both are a one-op OP_OVER.
+    # 10 + 8 = 18, and ecMul / ecNegate gate a single point off a two-deep stack for
+    # a flat 8. ecOnCurve / ecModReduce /
+    # ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY are all +0. The
+    # predicates must stay TOTAL (they clamp and flag, they do not abort), and the
+    # byte accessors have no selector to fool -- each returns a value derived
+    # injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT
+    # number rather than a colliding one.
+    "ecAdd"              =>  8297,
+    "ecMul"              => 130526,
+    "ecMulGen"           => 130528,
+    "ecNegate"           =>   956,
     "ecOnCurve"          =>   548,
     "ecModReduce"        =>     8,
     "ecEncodeCompressed" =>     16,

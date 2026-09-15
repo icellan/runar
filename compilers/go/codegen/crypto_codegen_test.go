@@ -58,13 +58,38 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// emitAffineInfinitySelect, which replaces the old cleanup + notinf-only
 		// mask tail of affineAdd / cAffineAdd. Same +50 on P256Add, P384Add, and
 		// VerifyECDSA_P256 below (VerifyECDSA_P384 has no golden entry here).
-		{"EcAdd", EmitEcAdd, 8279},
-		{"EcMul", EmitEcMul, 130518},
-		{"EcMulGen", EmitEcMulGen, 130520},
-		{"EcNegate", EmitEcNegate, 948},
+		// R-117, the COORDINATE-CANONICITY gate. ecAdd 8279 -> 8297 (+18), ecMul
+		// 130518 -> 130526 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
+		// is 8 ops per gated point -- copy x (pick), push p, OP_LESSTHAN, copy y (pick),
+		// push p, OP_LESSTHAN, OP_BOOLAND, OP_VERIFY -- and ecAdd gates TWO points, so
+		// +18 there rather than +16. The extra two are pick DEPTH, not extra work: this
+		// tracker emits OP_DUP / OP_OVER for depth 0 / 1 and `push <n>, OP_PICK` for
+		// anything deeper, and in ecAdd's FIRST gate the stack is [px, py, qx, qy], so
+		// both of that gate's picks reach depth 3 and cost two ops each. Its second gate
+		// sees [px, py, qx, qy] with qx / qy at depth 1, so both are a one-op OP_OVER.
+		// 10 + 8 = 18, and ecMul / ecNegate gate a single point off a two-deep stack for
+		// a flat 8. ecOnCurve / ecModReduce /
+		// ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY are all +0. The
+		// predicates must stay TOTAL (they clamp and flag, they do not abort), and the
+		// byte accessors have no selector to fool -- each returns a value derived
+		// injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT
+		// number rather than a colliding one.
+		// R-117, the COORDINATE-CANONICITY gate. pNNNAdd +18, pNNNMul +8, pNNNMulGen +8,
+		// pNNNNegate +8 -- the same shape as secp256k1's, because cEmitCoordCanonVerify
+		// is the same 8 ops (two picks, two pushes of p, two OP_LESSTHANs, OP_BOOLAND,
+		// OP_VERIFY) and the Add gates two points. pNNNOnCurve and
+		// pNNNEncodeCompressed are +0: the predicate must stay TOTAL. verifyECDSA_*
+		// is +0 TOO, and that is the load-bearing part -- cEmitMul takes a
+		// verifyCanonical flag that is FALSE on the ECDSA path, because
+		// decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
+		// bytes must return false from a total boolean builtin rather than abort.
+		{"EcAdd", EmitEcAdd, 8297},
+		{"EcMul", EmitEcMul, 130526},
+		{"EcMulGen", EmitEcMulGen, 130528},
+		{"EcNegate", EmitEcNegate, 956},
 		{"EcOnCurve", EmitEcOnCurve, 548},
-		{"P256Add", EmitP256Add, 6719},
-		{"P256Mul", EmitP256Mul, 140039},
+		{"P256Add", EmitP256Add, 6737},
+		{"P256Mul", EmitP256Mul, 140047},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
 		// (cEmitLengthGate), signature range gate 1<=r,s<=n-1
@@ -73,8 +98,8 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// has no golden entry in this table.
 		// +12 more from CL-BUG-095 (Point-length validation, see above).
 		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
-		{"P384Add", EmitP384Add, 11525},
-		{"P384Mul", EmitP384Mul, 211181},
+		{"P384Add", EmitP384Add, 11543},
+		{"P384Mul", EmitP384Mul, 211189},
 		// R-135: +3 ops for the exact-signature-length gate
 		// (OP_SIZE, push 2144, OP_EQUALVERIFY). 15488 -> 15491.
 		{"VerifyWOTS", EmitVerifyWOTS, 15491},

@@ -1016,9 +1016,49 @@ fn c_build_jacobian_add_or_double_inline(
 // Scalar multiplication (generic for both P-256 and P-384)
 // ===========================================================================
 
-fn c_emit_mul(emit: &mut dyn FnMut(StackOp), c: &NistCurveParams, g: &NistGroupParams) {
+/// R-117 — coordinate canonicity for the VALUE builtins, aborting form.
+///
+/// The a = -3 twin of `emit_coord_canon_verify` in ec.rs; see that doc comment
+/// for the defect. `c_affine_add`'s `cond` / `notinf` selectors are the same
+/// bare OP_NUMEQUAL over the raw decomposed coordinates, and
+/// `c_decompose_point` accepts any width-fitting unsigned value, so `x + p` is
+/// a second spelling of the same point that both selectors read as "different".
+///
+/// `c_emit_canonicity_guard` above is the FLAG form, for the on-curve
+/// predicates. This is the abort form, called only from `emit_pNNN_add` /
+/// `emit_pNNN_mul` / `emit_pNNN_negate` — never from `c_emit_verify_ecdsa`'s
+/// path, where `decompress_pub_key` and `c_emit_sig_range_gate` have already
+/// decided that attacker-chosen bytes must make a total boolean builtin return
+/// false rather than abort the script.
+fn c_emit_coord_canon_verify(t: &mut ECTracker, x_name: &str, y_name: &str, c: &NistCurveParams) {
+    t.copy_to_top(x_name, "_cc_x");
+    c_push_field_p(t, "_cc_px", c);
+    t.raw_block(&["_cc_x", "_cc_px"], Some("_cc_xok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top(y_name, "_cc_y");
+    c_push_field_p(t, "_cc_py", c);
+    t.raw_block(&["_cc_y", "_cc_py"], Some("_cc_yok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.raw_block(&["_cc_xok", "_cc_yok"], None, |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
+    });
+}
+
+fn c_emit_mul(
+    emit: &mut dyn FnMut(StackOp),
+    c: &NistCurveParams,
+    g: &NistGroupParams,
+    verify_canonical: bool,
+) {
     let mut t = ECTracker::new(&["_pt", "_k"], emit);
     c_decompose_point(&mut t, "_pt", "ax", "ay", c);
+    // R-117. False on the ECDSA path: see c_emit_coord_canon_verify.
+    if verify_canonical {
+        c_emit_coord_canon_verify(&mut t, "ax", "ay", c);
+    }
 
     // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
     //
@@ -1531,7 +1571,7 @@ fn c_emit_verify_ecdsa(
     t.nm.pop(); // _u1
     t.nm.pop(); // _G
 
-    c_emit_mul(t.e, c, g);
+    c_emit_mul(t.e, c, g, false);
 
     // After mul, one result point is on the stack
     t.nm.push("_R1_point".to_string());
@@ -1553,7 +1593,7 @@ fn c_emit_verify_ecdsa(
     // Remove from tracker, emit mul, push result
     t.nm.pop(); // _u2
     t.nm.pop(); // _Q_point
-    c_emit_mul(t.e, c, g);
+    c_emit_mul(t.e, c, g, false);
     t.nm.push("_R2_point".to_string());
 
     // Restore R1 point
@@ -1610,13 +1650,16 @@ pub fn emit_p256_add(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pa", "_pb"], emit);
     c_decompose_point(&mut t, "_pa", "px", "py", &P256_CURVE);
     c_decompose_point(&mut t, "_pb", "qx", "qy", &P256_CURVE);
+    // R-117: c_affine_add's selectors compare these four values RAW.
+    c_emit_coord_canon_verify(&mut t, "px", "py", &P256_CURVE);
+    c_emit_coord_canon_verify(&mut t, "qx", "qy", &P256_CURVE);
     c_affine_add(&mut t, &P256_CURVE);
     c_compose_point(&mut t, "rx", "ry", "_result", &P256_CURVE);
 }
 
 /// p256Mul: P-256 scalar multiplication.
 pub fn emit_p256_mul(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_mul(emit, &P256_CURVE, &P256_GROUP);
+    c_emit_mul(emit, &P256_CURVE, &P256_GROUP, true);
 }
 
 /// p256MulGen: P-256 generator multiplication.
@@ -1633,6 +1676,7 @@ pub fn emit_p256_mul_gen(emit: &mut dyn FnMut(StackOp)) {
 pub fn emit_p256_negate(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
     c_decompose_point(&mut t, "_pt", "_nx", "_ny", &P256_CURVE);
+    c_emit_coord_canon_verify(&mut t, "_nx", "_ny", &P256_CURVE);
     c_push_field_p(&mut t, "_fp", &P256_CURVE);
     c_field_sub(&mut t, "_fp", "_ny", "_neg_y", &P256_CURVE);
     c_compose_point(&mut t, "_nx", "_neg_y", "_result", &P256_CURVE);
@@ -1723,13 +1767,16 @@ pub fn emit_p384_add(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pa", "_pb"], emit);
     c_decompose_point(&mut t, "_pa", "px", "py", &P384_CURVE);
     c_decompose_point(&mut t, "_pb", "qx", "qy", &P384_CURVE);
+    // R-117: c_affine_add's selectors compare these four values RAW.
+    c_emit_coord_canon_verify(&mut t, "px", "py", &P384_CURVE);
+    c_emit_coord_canon_verify(&mut t, "qx", "qy", &P384_CURVE);
     c_affine_add(&mut t, &P384_CURVE);
     c_compose_point(&mut t, "rx", "ry", "_result", &P384_CURVE);
 }
 
 /// p384Mul: P-384 scalar multiplication.
 pub fn emit_p384_mul(emit: &mut dyn FnMut(StackOp)) {
-    c_emit_mul(emit, &P384_CURVE, &P384_GROUP);
+    c_emit_mul(emit, &P384_CURVE, &P384_GROUP, true);
 }
 
 /// p384MulGen: P-384 generator multiplication.
@@ -1746,6 +1793,7 @@ pub fn emit_p384_mul_gen(emit: &mut dyn FnMut(StackOp)) {
 pub fn emit_p384_negate(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
     c_decompose_point(&mut t, "_pt", "_nx", "_ny", &P384_CURVE);
+    c_emit_coord_canon_verify(&mut t, "_nx", "_ny", &P384_CURVE);
     c_push_field_p(&mut t, "_fp", &P384_CURVE);
     c_field_sub(&mut t, "_fp", "_ny", "_neg_y", &P384_CURVE);
     c_compose_point(&mut t, "_nx", "_neg_y", "_result", &P384_CURVE);

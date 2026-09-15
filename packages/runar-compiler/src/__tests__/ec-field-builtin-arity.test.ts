@@ -132,12 +132,23 @@ export class Probe extends SmartContract {
     // families and did not leak into bn254 / BabyBear / KoalaBear codegen.
     const BASELINE: Record<string, string> = {
       // R-053 / CL-BUG-096 re-stamped ONLY the two adder digests. ecPointX and
-      // p384Negate below are unchanged, which is the control: the infinity
-      // select lives inside affineAdd and must not reach any other emitter.
-      ecAdd: '07126934f9be1ab99385e0372ca4f0bc790a02dddd844059fca1e21d5c8ff3de',
+      // p384Negate below were unchanged then, which was the control: the
+      // infinity select lives inside affineAdd and must not reach any other
+      // emitter.
+      //
+      // R-117 (the coordinate-canonicity gate) re-stamps THREE: ecAdd, p256Add
+      // and p384Negate. p384Negate moves this time BECAUSE the gate is on every
+      // value-producing consumer of a Point, negation included — it is only the
+      // infinity select that was confined to the adders. ecPointX is the
+      // control that still must NOT move: byte accessors are deliberately
+      // ungated, because each returns a value derived injectively from the
+      // bytes it was handed and so has no selector for a non-canonical
+      // coordinate to fool. The five non-EC digests below stay the CONTROL that
+      // nothing leaked into bn254 / BabyBear / KoalaBear codegen.
+      ecAdd: '98a71715a649bbb34b70882213d7588ef1d44b44279bbffe3d72263d99e1ba2a',
       ecPointX: '4579847d2e40a84e69f14ae1f87da077e6937a0aa405d93a0e309cd2edd8c191',
-      p256Add: '5867a9276b3da34e0b23f2218fbc0f65dd04de89bb2bbee24eb885e9c9707177',
-      p384Negate: '4eaadee61ca624f2e3eee766e30d3872f27e9e07eddbe1c5693e512a0030b1a8',
+      p256Add: '6fd2d8ea132fedaa3ab9ce31bcb0c80a91b5053849f5e15a5dabd8a2ed6c1399',
+      p384Negate: 'd776c22a2e492f48539119a6543c2421633807c2d953c961ce9c30364f1cb8a3',
       bn254FieldAdd: 'fe9e984bb631a254e07b304b081a5cc3b0ebe6394302ef48c52e27340c75ca97',
       bn254FieldNeg: '354ac5ea0ab4cb6d88ec17b91b1ae01cc58428414b1f32994e803e93d4457d4e',
       bbFieldAdd: '5b5df5087f008f98f854e17fa41afef1444c6dc41dc97f2ab2740754bcb56f63',

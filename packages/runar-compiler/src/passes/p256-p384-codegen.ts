@@ -420,6 +420,39 @@ function cEmitCanonicityGuard(t: ECTracker, xName: string, yName: string, c: Cur
   });
 }
 
+/**
+ * R-117 — coordinate canonicity for the VALUE builtins, aborting form.
+ *
+ * The a = -3 twin of `emitCoordCanonVerify` in ec-codegen.ts; see that
+ * docstring for the defect. `cAffineAdd`'s `cond` / `notinf` selectors are the
+ * same bare OP_NUMEQUAL over the raw decomposed coordinates, and
+ * `cDecomposePoint` accepts any width-fitting unsigned value, so `x + p` is a
+ * second spelling of the same point that both selectors read as "different".
+ *
+ * `cEmitCanonicityGuard` above is the FLAG form, for the on-curve predicates.
+ * This is the abort form, and it is called only from `pNNNAdd` / `pNNNMul` /
+ * `pNNNNegate` — never from `cEmitVerifyECDSA`'s path, where `decompressPubKey`
+ * and `cEmitSigRangeGate` have already decided, for reasons recorded in their
+ * own docstrings, that attacker-chosen bytes must make a total boolean builtin
+ * return false rather than abort the script.
+ */
+function cEmitCoordCanonVerify(t: ECTracker, xName: string, yName: string, c: CurveParams): void {
+  t.copyToTop(xName, '_cc_x');
+  pushFieldP(t, '_cc_px', c);
+  t.rawBlock(['_cc_x', '_cc_px'], '_cc_xok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.copyToTop(yName, '_cc_y');
+  pushFieldP(t, '_cc_py', c);
+  t.rawBlock(['_cc_y', '_cc_py'], '_cc_yok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.rawBlock(['_cc_xok', '_cc_yok'], null, (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+    e({ op: 'opcode', code: 'OP_VERIFY' });
+  });
+}
+
 // ===========================================================================
 // Affine point addition (for ecAdd — same formulas, different field)
 // ===========================================================================
@@ -855,9 +888,12 @@ function cEmitMul(
   emit: (op: StackOp) => void,
   c: CurveParams,
   g: GroupParams,
+  verifyCanonical: boolean,
 ): void {
   const t = new ECTracker(['_pt', '_k'], emit);
   cDecomposePoint(t, '_pt', 'ax', 'ay', c);
+  // R-117. False on the ECDSA path: see cEmitCoordCanonVerify.
+  if (verifyCanonical) cEmitCoordCanonVerify(t, 'ax', 'ay', c);
 
   // k' = k + 3n: guarantees a fixed high bit for MSB-first double-and-add.
   // For P-256: k ∈ [1, n-1], k+3n ∈ [3n+1, 4n-1], 3n > 2^257, so bit 257 is set.
@@ -1403,7 +1439,7 @@ function cEmitVerifyECDSA(
   t.nm.pop(); // _G
 
   // Emit the mul (it manages its own tracker internally)
-  cEmitMul(emit, c, g);
+  cEmitMul(emit, c, g, false);
 
   // After mul, one result point is on the stack
   t.nm.push('_R1_point');
@@ -1426,7 +1462,7 @@ function cEmitVerifyECDSA(
   // Pop from tracker, emit mul, push result
   t.nm.pop(); // _u2
   t.nm.pop(); // _Q_point
-  cEmitMul(emit, c, g);
+  cEmitMul(emit, c, g, false);
   t.nm.push('_R2_point');
 
   // Restore R1 point
@@ -1495,6 +1531,9 @@ export function emitP256Add(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pa', '_pb'], emit);
   cDecomposePoint(t, '_pa', 'px', 'py', P256_PARAMS);
   cDecomposePoint(t, '_pb', 'qx', 'qy', P256_PARAMS);
+  // R-117: cAffineAdd's selectors compare these four values RAW.
+  cEmitCoordCanonVerify(t, 'px', 'py', P256_PARAMS);
+  cEmitCoordCanonVerify(t, 'qx', 'qy', P256_PARAMS);
   cAffineAdd(t, P256_PARAMS);
   cComposePoint(t, 'rx', 'ry', '_result', P256_PARAMS);
 }
@@ -1505,7 +1544,7 @@ export function emitP256Add(emit: (op: StackOp) => void): void {
  * Stack out: [P256Point]
  */
 export function emitP256Mul(emit: (op: StackOp) => void): void {
-  cEmitMul(emit, P256_PARAMS, P256_GROUP);
+  cEmitMul(emit, P256_PARAMS, P256_GROUP, true);
 }
 
 /**
@@ -1530,6 +1569,7 @@ export function emitP256MulGen(emit: (op: StackOp) => void): void {
 export function emitP256Negate(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
   cDecomposePoint(t, '_pt', '_nx', '_ny', P256_PARAMS);
+  cEmitCoordCanonVerify(t, '_nx', '_ny', P256_PARAMS);
   pushFieldP(t, '_fp', P256_PARAMS);
   cFieldSub(t, '_fp', '_ny', '_neg_y', P256_PARAMS);
   cComposePoint(t, '_nx', '_neg_y', '_result', P256_PARAMS);
@@ -1636,6 +1676,9 @@ export function emitP384Add(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pa', '_pb'], emit);
   cDecomposePoint(t, '_pa', 'px', 'py', P384_PARAMS);
   cDecomposePoint(t, '_pb', 'qx', 'qy', P384_PARAMS);
+  // R-117: cAffineAdd's selectors compare these four values RAW.
+  cEmitCoordCanonVerify(t, 'px', 'py', P384_PARAMS);
+  cEmitCoordCanonVerify(t, 'qx', 'qy', P384_PARAMS);
   cAffineAdd(t, P384_PARAMS);
   cComposePoint(t, 'rx', 'ry', '_result', P384_PARAMS);
 }
@@ -1646,7 +1689,7 @@ export function emitP384Add(emit: (op: StackOp) => void): void {
  * Stack out: [P384Point]
  */
 export function emitP384Mul(emit: (op: StackOp) => void): void {
-  cEmitMul(emit, P384_PARAMS, P384_GROUP);
+  cEmitMul(emit, P384_PARAMS, P384_GROUP, true);
 }
 
 /**
@@ -1671,6 +1714,7 @@ export function emitP384MulGen(emit: (op: StackOp) => void): void {
 export function emitP384Negate(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
   cDecomposePoint(t, '_pt', '_nx', '_ny', P384_PARAMS);
+  cEmitCoordCanonVerify(t, '_nx', '_ny', P384_PARAMS);
   pushFieldP(t, '_fp', P384_PARAMS);
   cFieldSub(t, '_fp', '_ny', '_neg_y', P384_PARAMS);
   cComposePoint(t, '_nx', '_neg_y', '_result', P384_PARAMS);

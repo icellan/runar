@@ -826,11 +826,47 @@ public final class P256P384 {
     // Scalar multiplication (generic for both P-256 and P-384)
     // ===================================================================
 
+    /**
+     * R-117 — coordinate canonicity for the VALUE builtins, aborting form.
+     *
+     * <p>The a = -3 twin of {@code Ec.emitCoordCanonVerify}; see that javadoc
+     * for the defect. {@code cAffineAdd}'s {@code cond} / {@code notinf}
+     * selectors are the same bare OP_NUMEQUAL over the raw decomposed
+     * coordinates, and {@code cDecomposePoint} accepts any width-fitting
+     * unsigned value, so {@code x + p} is a second spelling of the same point
+     * that both selectors read as "different".
+     *
+     * <p>{@code cEmitCanonicityGuard} above is the FLAG form, for the on-curve
+     * predicates. This is the abort form, called only from
+     * {@code emitPNNNAdd} / {@code emitPNNNMul} / {@code emitPNNNNegate} —
+     * never from {@code cEmitVerifyECDSA}'s path, where
+     * {@code cDecompressPubKey} and {@code cEmitSigRangeGate} have already
+     * decided that attacker-chosen bytes must make a total boolean builtin
+     * return false rather than abort the script.
+     */
+    private static void cEmitCoordCanonVerify(ECTracker t, String xName, String yName, BigInteger fieldP) {
+        t.copyToTop(xName, "_cc_x");
+        cPushFieldP(t, "_cc_px", fieldP);
+        t.rawBlock(List.of("_cc_x", "_cc_px"), "_cc_xok",
+            e -> e.accept(new OpcodeOp("OP_LESSTHAN")));
+        t.copyToTop(yName, "_cc_y");
+        cPushFieldP(t, "_cc_py", fieldP);
+        t.rawBlock(List.of("_cc_y", "_cc_py"), "_cc_yok",
+            e -> e.accept(new OpcodeOp("OP_LESSTHAN")));
+        t.rawBlock(List.of("_cc_xok", "_cc_yok"), "", e -> {
+            e.accept(new OpcodeOp("OP_BOOLAND"));
+            e.accept(new OpcodeOp("OP_VERIFY"));
+        });
+    }
+
     private static void cEmitMul(Consumer<StackOp> emit, int coordBytes,
                                   ReverseBytesFn revFn, BigInteger fieldP,
-                                  BigInteger pMinus2, BigInteger curveN, BigInteger nMinus2) {
+                                  BigInteger pMinus2, BigInteger curveN, BigInteger nMinus2,
+                                  boolean verifyCanonical) {
         ECTracker t = new ECTracker(List.of("_pt", "_k"), emit);
         cDecomposePoint(t, "_pt", "ax", "ay", coordBytes, revFn);
+        // R-117. False on the ECDSA path: see cEmitCoordCanonVerify.
+        if (verifyCanonical) cEmitCoordCanonVerify(t, "ax", "ay", fieldP);
 
         // k' = k + 3n (three separate adds, matches Go reference)
         //
@@ -1330,7 +1366,7 @@ public final class P256P384 {
         t.nm.remove(t.nm.size() - 1); // _u1
         t.nm.remove(t.nm.size() - 1); // _G
 
-        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2);
+        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2, false);
 
         // After mul, one result point is on the stack
         t.nm.add("_R1_point");
@@ -1351,7 +1387,7 @@ public final class P256P384 {
         // Remove from tracker, emit mul, push result
         t.nm.remove(t.nm.size() - 1); // _u2
         t.nm.remove(t.nm.size() - 1); // _Q_point
-        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2);
+        cEmitMul(emit, coordBytes, revFn, fieldP, pMinus2, curveN, nMinus2, false);
         t.nm.add("_R2_point");
 
         // Restore R1 point
@@ -1412,12 +1448,15 @@ public final class P256P384 {
         ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit);
         cDecomposePoint(t, "_pa", "px", "py", 32, REV32);
         cDecomposePoint(t, "_pb", "qx", "qy", 32, REV32);
+        // R-117: cAffineAdd's selectors compare these four values RAW.
+        cEmitCoordCanonVerify(t, "px", "py", P256_P);
+        cEmitCoordCanonVerify(t, "qx", "qy", P256_P);
         cAffineAdd(t, P256_P, P256_P_MINUS_2);
         cComposePoint(t, "rx", "ry", "_result", 32, REV32);
     }
 
     public static void emitP256Mul(Consumer<StackOp> emit) {
-        cEmitMul(emit, 32, REV32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2);
+        cEmitMul(emit, 32, REV32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2, true);
     }
 
     public static void emitP256MulGen(Consumer<StackOp> emit) {
@@ -1432,6 +1471,7 @@ public final class P256P384 {
     public static void emitP256Negate(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
         cDecomposePoint(t, "_pt", "_nx", "_ny", 32, REV32);
+        cEmitCoordCanonVerify(t, "_nx", "_ny", P256_P);
         cPushFieldP(t, "_fp", P256_P);
         cFieldSub(t, "_fp", "_ny", "_neg_y", P256_P);
         cComposePoint(t, "_nx", "_neg_y", "_result", 32, REV32);
@@ -1515,12 +1555,15 @@ public final class P256P384 {
         ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit);
         cDecomposePoint(t, "_pa", "px", "py", 48, REV48);
         cDecomposePoint(t, "_pb", "qx", "qy", 48, REV48);
+        // R-117: cAffineAdd's selectors compare these four values RAW.
+        cEmitCoordCanonVerify(t, "px", "py", P384_P);
+        cEmitCoordCanonVerify(t, "qx", "qy", P384_P);
         cAffineAdd(t, P384_P, P384_P_MINUS_2);
         cComposePoint(t, "rx", "ry", "_result", 48, REV48);
     }
 
     public static void emitP384Mul(Consumer<StackOp> emit) {
-        cEmitMul(emit, 48, REV48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2);
+        cEmitMul(emit, 48, REV48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2, true);
     }
 
     public static void emitP384MulGen(Consumer<StackOp> emit) {
@@ -1535,6 +1578,7 @@ public final class P256P384 {
     public static void emitP384Negate(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
         cDecomposePoint(t, "_pt", "_nx", "_ny", 48, REV48);
+        cEmitCoordCanonVerify(t, "_nx", "_ny", P384_P);
         cPushFieldP(t, "_fp", P384_P);
         cFieldSub(t, "_fp", "_ny", "_neg_y", P384_P);
         cComposePoint(t, "_nx", "_neg_y", "_result", 48, REV48);

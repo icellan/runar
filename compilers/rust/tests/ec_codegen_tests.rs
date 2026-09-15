@@ -190,7 +190,7 @@ fn test_ec_add_op_count_golden() {
     // OP_MULs with the pinf/qinf/usep/useq/user mask chain plus the six OP_MUL
     // and four OP_ADD selects and the picks/rolls feeding them. Measured on
     // this tier's own baseline, not copied from TypeScript.
-    assert_eq!(count_op_tree(&ops), 8279, "ecAdd op count drift");
+    assert_eq!(count_op_tree(&ops), 8297, "ecAdd op count drift");
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn test_ec_mul_op_count_golden() {
     let ops = collect(|s| emit_ec_mul(s));
     // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
     // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130514, "ecMul op count drift");
+    assert_eq!(count_op_tree(&ops), 130522, "ecMul op count drift");
 }
 
 #[test]
@@ -206,13 +206,13 @@ fn test_ec_mul_gen_op_count_golden() {
     let ops = collect(|s| emit_ec_mul_gen(s));
     // Rust emits 4 fewer raw StackOps than the Python/TS/Java peer; see the
     // module-level comment above. Final hex is byte-identical.
-    assert_eq!(count_op_tree(&ops), 130516, "ecMulGen op count drift");
+    assert_eq!(count_op_tree(&ops), 130524, "ecMulGen op count drift");
 }
 
 #[test]
 fn test_ec_negate_op_count_golden() {
     let ops = collect(|s| emit_ec_negate(s));
-    assert_eq!(count_op_tree(&ops), 948, "ecNegate op count drift");
+    assert_eq!(count_op_tree(&ops), 956, "ecNegate op count drift");
 }
 
 #[test]

@@ -820,9 +820,38 @@ module RunarCompiler
       # Scalar multiplication (generic for both P-256 and P-384)
       # =================================================================
 
-      def self.c_emit_mul(emit, c, g)
+      # R-117: coordinate canonicity for the VALUE builtins, aborting form.
+      #
+      # The a = -3 twin of ec_emit_coord_canon_verify in ec.rb; see that comment
+      # for the defect. c_affine_add's cond / notinf selectors are the same bare
+      # OP_NUMEQUAL over the raw decomposed coordinates, and c_decompose_point
+      # accepts any width-fitting unsigned value, so x + p is a second spelling
+      # of the same point that both selectors read as "different".
+      #
+      # c_emit_canonicity_guard above is the FLAG form, for the on-curve
+      # predicates. This is the abort form, called only from emit_pNNN_add /
+      # emit_pNNN_mul / emit_pNNN_negate -- never from c_emit_verify_ecdsa's
+      # path, where c_decompress_pub_key and c_emit_sig_range_gate have already
+      # decided that attacker-chosen bytes must make a total boolean builtin
+      # return false rather than abort the script.
+      def self.c_emit_coord_canon_verify(t, x_name, y_name, c)
+        t.copy_to_top(x_name, "_cc_x")
+        c_push_field_p(t, "_cc_px", c)
+        t.raw_block(["_cc_x", "_cc_px"], "_cc_xok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.copy_to_top(y_name, "_cc_y")
+        c_push_field_p(t, "_cc_py", c)
+        t.raw_block(["_cc_y", "_cc_py"], "_cc_yok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.raw_block(["_cc_xok", "_cc_yok"], "", lambda { |e|
+          e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+          e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+        })
+      end
+
+      def self.c_emit_mul(emit, c, g, verify_canonical)
         t = EC::ECTracker.new(["_pt", "_k"], emit)
         c_decompose_point(t, "_pt", "ax", "ay", c)
+        # R-117. False on the ECDSA path: see c_emit_coord_canon_verify.
+        c_emit_coord_canon_verify(t, "ax", "ay", c) if verify_canonical
 
         # k' = k + 3n
         #
@@ -1317,7 +1346,7 @@ module RunarCompiler
         t.nm.pop # _u1
         t.nm.pop # _G
 
-        c_emit_mul(emit, c, g)
+        c_emit_mul(emit, c, g, false)
 
         # After mul, one result point is on the stack
         t.nm.push("_R1_point")
@@ -1339,7 +1368,7 @@ module RunarCompiler
         # Remove from tracker, emit mul, push result
         t.nm.pop # _u2
         t.nm.pop # _Q_point
-        c_emit_mul(emit, c, g)
+        c_emit_mul(emit, c, g, false)
         t.nm.push("_R2_point")
 
         # Restore R1 point
@@ -1395,12 +1424,15 @@ module RunarCompiler
         t = EC::ECTracker.new(["_pa", "_pb"], emit)
         c_decompose_point(t, "_pa", "px", "py", P256_CURVE)
         c_decompose_point(t, "_pb", "qx", "qy", P256_CURVE)
+        # R-117: c_affine_add's selectors compare these four values RAW.
+        c_emit_coord_canon_verify(t, "px", "py", P256_CURVE)
+        c_emit_coord_canon_verify(t, "qx", "qy", P256_CURVE)
         c_affine_add(t, P256_CURVE)
         c_compose_point(t, "rx", "ry", "_result", P256_CURVE)
       end
 
       def self.emit_p256_mul(emit)
-        c_emit_mul(emit, P256_CURVE, P256_GROUP)
+        c_emit_mul(emit, P256_CURVE, P256_GROUP, true)
       end
 
       def self.emit_p256_mul_gen(emit)
@@ -1413,6 +1445,7 @@ module RunarCompiler
       def self.emit_p256_negate(emit)
         t = EC::ECTracker.new(["_pt"], emit)
         c_decompose_point(t, "_pt", "_nx", "_ny", P256_CURVE)
+        c_emit_coord_canon_verify(t, "_nx", "_ny", P256_CURVE)
         c_push_field_p(t, "_fp", P256_CURVE)
         c_field_sub(t, "_fp", "_ny", "_neg_y", P256_CURVE)
         c_compose_point(t, "_nx", "_neg_y", "_result", P256_CURVE)
@@ -1487,12 +1520,15 @@ module RunarCompiler
         t = EC::ECTracker.new(["_pa", "_pb"], emit)
         c_decompose_point(t, "_pa", "px", "py", P384_CURVE)
         c_decompose_point(t, "_pb", "qx", "qy", P384_CURVE)
+        # R-117: c_affine_add's selectors compare these four values RAW.
+        c_emit_coord_canon_verify(t, "px", "py", P384_CURVE)
+        c_emit_coord_canon_verify(t, "qx", "qy", P384_CURVE)
         c_affine_add(t, P384_CURVE)
         c_compose_point(t, "rx", "ry", "_result", P384_CURVE)
       end
 
       def self.emit_p384_mul(emit)
-        c_emit_mul(emit, P384_CURVE, P384_GROUP)
+        c_emit_mul(emit, P384_CURVE, P384_GROUP, true)
       end
 
       def self.emit_p384_mul_gen(emit)
@@ -1505,6 +1541,7 @@ module RunarCompiler
       def self.emit_p384_negate(emit)
         t = EC::ECTracker.new(["_pt"], emit)
         c_decompose_point(t, "_pt", "_nx", "_ny", P384_CURVE)
+        c_emit_coord_canon_verify(t, "_nx", "_ny", P384_CURVE)
         c_push_field_p(t, "_fp", P384_CURVE)
         c_field_sub(t, "_fp", "_ny", "_neg_y", P384_CURVE)
         c_compose_point(t, "_nx", "_neg_y", "_result", P384_CURVE)

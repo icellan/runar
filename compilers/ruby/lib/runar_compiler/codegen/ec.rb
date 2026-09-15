@@ -647,6 +647,49 @@ module RunarCompiler
       # Expects px, py, qx, qy on tracker. Produces rx, ry. Consumes all four inputs.
       #
       # @param t [ECTracker]
+      # R-117: a Point's two coordinates must be FIELD ELEMENTS, aborting form.
+      #
+      # ec_decompose_point BIN2NUMs each half of the blob as an unsigned
+      # integer, so any value that fits in the coordinate width is accepted --
+      # x + p included, whenever x + p < 2**256 (on secp256k1 that is every
+      # x < 2**32 + 977). Downstream field arithmetic reduces mod p, so
+      # (x+p)||y behaves as the point (x, y); ec_affine_add's two case selectors
+      # do NOT reduce, and they are bare OP_NUMEQUAL on exactly these raw
+      # values:
+      #
+      #   cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+      #   notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+      #
+      # so for P and its alias both read 0, the chord path runs on two equal
+      # points, den_chord = qx - px == 0 (mod p), and ec_field_inv is Fermat
+      # with inv(0) = 0. Measured before this gate landed, x = 1: ecAdd(P, P)
+      # gave the correct 2P and ecAdd(P, P') gave x = p-2 -- a script that
+      # SUCCEEDED and returned a blob that is not a point. Both the doubling
+      # case and the P + (-P) case are driven by these selectors, so both are
+      # defeated by the same trick.
+      #
+      # REJECT rather than reduce: emit_ec_on_curve already answers "no" to a
+      # non-canonical encoding, so reducing here would leave the predicate and
+      # the value builtins disagreeing about whether the blob is a point at all.
+      # This is also the policy CL-BUG-095 set for the WIDTH -- predicates clamp
+      # and flag, value producers OP_VERIFY.
+      #
+      # Callers are the user-facing value builtins only; deliberately NOT folded
+      # into ec_decompose_point, which also runs inside emit_ec_on_curve and
+      # must stay total.
+      def self.ec_emit_coord_canon_verify(t, x_name, y_name)
+        t.copy_to_top(x_name, "_cc_x")
+        ec_push_field_p(t, "_cc_px")
+        t.raw_block(["_cc_x", "_cc_px"], "_cc_xok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.copy_to_top(y_name, "_cc_y")
+        ec_push_field_p(t, "_cc_py")
+        t.raw_block(["_cc_y", "_cc_py"], "_cc_yok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.raw_block(["_cc_xok", "_cc_yok"], "", lambda { |e|
+          e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+          e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+        })
+      end
+
       def self.ec_affine_add(t)
         # The chord slope s = (qy - py) / (qx - px) is undefined when P == Q:
         # the denominator is zero and the correct slope is the TANGENT,
@@ -1222,6 +1265,9 @@ module RunarCompiler
         t = ECTracker.new(["_pa", "_pb"], emit)
         ec_decompose_point(t, "_pa", "px", "py")
         ec_decompose_point(t, "_pb", "qx", "qy")
+        # R-117: ec_affine_add's selectors compare these four values RAW.
+        ec_emit_coord_canon_verify(t, "px", "py")
+        ec_emit_coord_canon_verify(t, "qx", "qy")
         ec_affine_add(t)
         ec_compose_point(t, "rx", "ry", "_result")
       end
@@ -1264,6 +1310,7 @@ module RunarCompiler
         t = ECTracker.new(["_pt", "_k"], emit)
         # Decompose to affine base point
         ec_decompose_point(t, "_pt", "ax", "ay")
+        ec_emit_coord_canon_verify(t, "ax", "ay")
 
         # k' = k + 3n: guarantees bit 257 is set.
         # k in [1, n-1], so k+3n in [3n+1, 4n-1]. Since 3n > 2^257, bit 257
@@ -1362,6 +1409,7 @@ module RunarCompiler
       def self.emit_ec_negate(emit)
         t = ECTracker.new(["_pt"], emit)
         ec_decompose_point(t, "_pt", "_nx", "_ny")
+        ec_emit_coord_canon_verify(t, "_nx", "_ny")
         ec_push_field_p(t, "_fp")
         ec_field_sub(t, "_fp", "_ny", "_neg_y")
         ec_compose_point(t, "_nx", "_neg_y", "_result")

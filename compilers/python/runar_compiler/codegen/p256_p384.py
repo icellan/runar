@@ -384,6 +384,37 @@ def _c_emit_canonicity_guard(t: ECTracker, x_name: str, y_name: str, field_p: in
     t.raw_block(["_x_canon", "_y_canon"], "_canon", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
 
 
+def _c_emit_coord_canon_verify(t: ECTracker, x_name: str, y_name: str, field_p: int) -> None:
+    """R-117: coordinate canonicity for the VALUE builtins, aborting form.
+
+    The a = -3 twin of ``_ec_emit_coord_canon_verify`` in ec.py; see that
+    docstring for the defect. ``_c_affine_add``'s ``cond`` / ``notinf``
+    selectors are the same bare OP_NUMEQUAL over the raw decomposed
+    coordinates, and ``_c_decompose_point`` accepts any width-fitting unsigned
+    value, so ``x + p`` is a second spelling of the same point that both
+    selectors read as "different".
+
+    ``_c_emit_canonicity_guard`` above is the FLAG form, for the on-curve
+    predicates. This is the abort form, called only from ``emit_pNNN_add`` /
+    ``emit_pNNN_mul`` / ``emit_pNNN_negate`` -- never from
+    ``_c_emit_verify_ecdsa``'s path, where ``_c_decompress_pub_key`` and
+    ``_c_emit_sig_range_gate`` have already decided that attacker-chosen bytes
+    must make a total boolean builtin return false rather than abort the script.
+    """
+    t.copy_to_top(x_name, "_cc_x")
+    _c_push_field_p(t, "_cc_px", field_p)
+    t.raw_block(["_cc_x", "_cc_px"], "_cc_xok", lambda e: e(_make_stack_op(op="opcode", code="OP_LESSTHAN")))
+    t.copy_to_top(y_name, "_cc_y")
+    _c_push_field_p(t, "_cc_py", field_p)
+    t.raw_block(["_cc_y", "_cc_py"], "_cc_yok", lambda e: e(_make_stack_op(op="opcode", code="OP_LESSTHAN")))
+
+    def _and_verify(e):
+        e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+        e(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+    t.raw_block(["_cc_xok", "_cc_yok"], "", _and_verify)
+
+
 def _c_affine_add(t: ECTracker, field_p: int, p_minus_2: int) -> None:
     """Perform affine point addition.
 
@@ -826,10 +857,14 @@ def _c_emit_mul(
     p_minus_2: int,
     curve_n: int,
     n_minus_2: int,
+    verify_canonical: bool,
 ) -> None:
     """Generic scalar multiplication for NIST curves."""
     t = ECTracker(["_pt", "_k"], emit)
     _c_decompose_point(t, "_pt", "ax", "ay", coord_bytes, reverse_bytes_fn)
+    # R-117. False on the ECDSA path: see _c_emit_coord_canon_verify.
+    if verify_canonical:
+        _c_emit_coord_canon_verify(t, "ax", "ay", field_p)
 
     # k' = k + 3n
     #
@@ -1339,7 +1374,7 @@ def _c_emit_verify_ecdsa(
     t.nm.pop()  # _u1
     t.nm.pop()  # _G
 
-    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2)
+    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2, False)
 
     t.nm.append("_R1_point")
 
@@ -1357,7 +1392,7 @@ def _c_emit_verify_ecdsa(
     t.nm.pop()  # _u2
     t.nm.pop()  # _Q_point
 
-    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2)
+    _c_emit_mul(emit, coord_bytes, reverse_bytes_fn, field_p, p_minus_2, curve_n, n_minus_2, False)
     t.nm.append("_R2_point")
 
     t.from_alt("_R1_point")
@@ -1426,13 +1461,16 @@ def emit_p256_add(emit: Callable) -> None:
     t = ECTracker(["_pa", "_pb"], emit)
     _c_decompose_point(t, "_pa", "px", "py", 32, _emit_reverse32)
     _c_decompose_point(t, "_pb", "qx", "qy", 32, _emit_reverse32)
+    # R-117: _c_affine_add's selectors compare these four values RAW.
+    _c_emit_coord_canon_verify(t, "px", "py", P256_P)
+    _c_emit_coord_canon_verify(t, "qx", "qy", P256_P)
     _c_affine_add(t, P256_P, P256_P_MINUS_2)
     _c_compose_point(t, "rx", "ry", "_result", 32, _emit_reverse32)
 
 
 def emit_p256_mul(emit: Callable) -> None:
     """P-256 scalar multiplication. Stack in: [point, scalar], out: [result]."""
-    _c_emit_mul(emit, 32, _emit_reverse32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2)
+    _c_emit_mul(emit, 32, _emit_reverse32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2, True)
 
 
 def emit_p256_mul_gen(emit: Callable) -> None:
@@ -1447,6 +1485,7 @@ def emit_p256_negate(emit: Callable) -> None:
     """Negate a P-256 point. Stack in: [point], out: [negated_point]."""
     t = ECTracker(["_pt"], emit)
     _c_decompose_point(t, "_pt", "_nx", "_ny", 32, _emit_reverse32)
+    _c_emit_coord_canon_verify(t, "_nx", "_ny", P256_P)
     _c_push_field_p(t, "_fp", P256_P)
     _c_field_sub(t, "_fp", "_ny", "_neg_y", P256_P)
     _c_compose_point(t, "_nx", "_neg_y", "_result", 32, _emit_reverse32)
@@ -1544,13 +1583,16 @@ def emit_p384_add(emit: Callable) -> None:
     t = ECTracker(["_pa", "_pb"], emit)
     _c_decompose_point(t, "_pa", "px", "py", 48, _emit_reverse48)
     _c_decompose_point(t, "_pb", "qx", "qy", 48, _emit_reverse48)
+    # R-117: _c_affine_add's selectors compare these four values RAW.
+    _c_emit_coord_canon_verify(t, "px", "py", P384_P)
+    _c_emit_coord_canon_verify(t, "qx", "qy", P384_P)
     _c_affine_add(t, P384_P, P384_P_MINUS_2)
     _c_compose_point(t, "rx", "ry", "_result", 48, _emit_reverse48)
 
 
 def emit_p384_mul(emit: Callable) -> None:
     """P-384 scalar multiplication. Stack in: [point, scalar], out: [result]."""
-    _c_emit_mul(emit, 48, _emit_reverse48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2)
+    _c_emit_mul(emit, 48, _emit_reverse48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2, True)
 
 
 def emit_p384_mul_gen(emit: Callable) -> None:
@@ -1565,6 +1607,7 @@ def emit_p384_negate(emit: Callable) -> None:
     """Negate a P-384 point. Stack in: [point], out: [negated_point]."""
     t = ECTracker(["_pt"], emit)
     _c_decompose_point(t, "_pt", "_nx", "_ny", 48, _emit_reverse48)
+    _c_emit_coord_canon_verify(t, "_nx", "_ny", P384_P)
     _c_push_field_p(t, "_fp", P384_P)
     _c_field_sub(t, "_fp", "_ny", "_neg_y", P384_P)
     _c_compose_point(t, "_nx", "_neg_y", "_result", 48, _emit_reverse48)

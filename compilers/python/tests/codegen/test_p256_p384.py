@@ -76,10 +76,19 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     #
     # pNNNMul / pNNNMulGen / pNNNOnCurve / pNNNNegate move by 0: the ladders run
     # in Jacobian coordinates and never reach the affine adder.
-    ("p256Add",              emit_p256_add,               6719),
-    ("p256Mul",              emit_p256_mul,             140039),
-    ("p256MulGen",           emit_p256_mul_gen,         140041),
-    ("p256Negate",           emit_p256_negate,             948),
+    # R-117, the COORDINATE-CANONICITY gate. pNNNAdd +18, pNNNMul +8, pNNNMulGen +8,
+    # pNNNNegate +8 -- the same shape as secp256k1's, because cEmitCoordCanonVerify
+    # is the same 8 ops (two picks, two pushes of p, two OP_LESSTHANs, OP_BOOLAND,
+    # OP_VERIFY) and the Add gates two points. pNNNOnCurve and
+    # pNNNEncodeCompressed are +0: the predicate must stay TOTAL. verifyECDSA_*
+    # is +0 TOO, and that is the load-bearing part -- cEmitMul takes a
+    # verifyCanonical flag that is FALSE on the ECDSA path, because
+    # decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
+    # bytes must return false from a total boolean builtin rather than abort.
+    ("p256Add",              emit_p256_add,               6737),
+    ("p256Mul",              emit_p256_mul,             140047),
+    ("p256MulGen",           emit_p256_mul_gen,         140049),
+    ("p256Negate",           emit_p256_negate,             956),
     ("p256OnCurve",          emit_p256_on_curve,           574),
     ("p256EncodeCompressed", emit_p256_encode_compressed,   16),
     # 297273 -> 297331 (+58): the ECDSA verifier gained its argument-validation
@@ -100,10 +109,10 @@ def test_p256_op_count(name, fn, expected):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,fn,expected", [
-    ("p384Add",              emit_p384_add,              11525),
-    ("p384Mul",              emit_p384_mul,             211181),
-    ("p384MulGen",           emit_p384_mul_gen,         211183),
-    ("p384Negate",           emit_p384_negate,            1396),
+    ("p384Add",              emit_p384_add,              11543),
+    ("p384Mul",              emit_p384_mul,             211189),
+    ("p384MulGen",           emit_p384_mul_gen,         211191),
+    ("p384Negate",           emit_p384_negate,            1404),
     # p384OnCurve / p384EncodeCompressed / verifyECDSA_P384 were missing from
     # this list while their P-256 peers were pinned, so the P-384 half of the
     # R-052 width gate had no golden at all. Same numbers the TS tier pins.

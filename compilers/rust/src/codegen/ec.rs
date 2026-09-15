@@ -546,6 +546,55 @@ pub fn emit_reverse_32(e: &mut dyn FnMut(StackOp)) {
 
 /// Affine point addition: expects px, py, qx, qy on tracker.
 /// Produces rx, ry. Consumes all four inputs.
+/// R-117 — a Point's two coordinates must be FIELD ELEMENTS, aborting form.
+///
+/// `decompose_point` BIN2NUMs each half of the blob as an unsigned integer, so
+/// any value that fits in the coordinate width is accepted — `x + p` included,
+/// whenever `x + p < 2^256` (on secp256k1 that is every `x < 2^32 + 977`).
+/// Downstream field arithmetic reduces mod p, so `(x+p)||y` behaves as the
+/// point `(x, y)`; `affine_add`'s two case selectors do NOT reduce, and they
+/// are bare OP_NUMEQUAL on exactly these raw values:
+///
+/// ```text
+/// cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+/// notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+/// ```
+///
+/// so for P and its alias both read 0, the chord path runs on two equal points,
+/// `den_chord = qx - px ≡ 0 (mod p)`, and `field_inv` is Fermat with inv(0) = 0.
+/// Measured before this gate landed, x = 1: `ecAdd(P, P)` gave the correct 2P
+/// and `ecAdd(P, P')` gave x = p-2 — a script that SUCCEEDED and returned a
+/// blob that is not a point. Both the doubling case and the P + (-P) case are
+/// driven by these selectors, so both are defeated by the same trick.
+///
+/// REJECT rather than reduce: `emit_ec_on_curve` already answers "no" to a
+/// non-canonical encoding, so reducing here would leave the predicate and the
+/// value builtins disagreeing about whether the blob is a point at all. This is
+/// also the policy CL-BUG-095 set for the WIDTH — predicates clamp and flag,
+/// value producers OP_VERIFY.
+///
+/// Callers are the user-facing value builtins only; deliberately NOT folded
+/// into `decompose_point`, which also runs inside `emit_ec_on_curve` and must
+/// stay total.
+///
+/// `x` and `y` are unsigned by construction, so `< p` is the whole check.
+fn emit_coord_canon_verify(t: &mut ECTracker, x_name: &str, y_name: &str) {
+    t.copy_to_top(x_name, "_cc_x");
+    push_field_p(t, "_cc_px");
+    t.raw_block(&["_cc_x", "_cc_px"], Some("_cc_xok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top(y_name, "_cc_y");
+    push_field_p(t, "_cc_py");
+    t.raw_block(&["_cc_y", "_cc_py"], Some("_cc_yok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.raw_block(&["_cc_xok", "_cc_yok"], None, |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
+    });
+}
+
 fn affine_add(t: &mut ECTracker) {
     // The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
     // denominator is zero and the correct slope is the TANGENT, 3px^2 / (2py).
@@ -1107,6 +1156,9 @@ pub fn emit_ec_add(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pa", "_pb"], emit);
     decompose_point(&mut t, "_pa", "px", "py");
     decompose_point(&mut t, "_pb", "qx", "qy");
+    // R-117: affine_add's selectors compare these four values RAW.
+    emit_coord_canon_verify(&mut t, "px", "py");
+    emit_coord_canon_verify(&mut t, "qx", "qy");
     affine_add(&mut t);
     compose_point(&mut t, "rx", "ry", "_result");
 }
@@ -1146,6 +1198,7 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt", "_k"], emit);
     // Decompose to affine base point
     decompose_point(&mut t, "_pt", "ax", "ay");
+    emit_coord_canon_verify(&mut t, "ax", "ay");
 
     // k' = k + 3n: guarantees bit 257 is set.
     // k ∈ [1, n-1], so k+3n ∈ [3n+1, 4n-1]. Since 3n > 2^257, bit 257
@@ -1244,6 +1297,7 @@ pub fn emit_ec_mul_gen(emit: &mut dyn FnMut(StackOp)) {
 pub fn emit_ec_negate(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
     decompose_point(&mut t, "_pt", "_nx", "_ny");
+    emit_coord_canon_verify(&mut t, "_nx", "_ny");
     push_field_p(&mut t, "_fp");
     field_sub(&mut t, "_fp", "_ny", "_neg_y");
     compose_point(&mut t, "_nx", "_neg_y", "_result");

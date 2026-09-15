@@ -395,6 +395,57 @@ export function emitPointLengthGate(t: ECTracker, name: string, want: number, fl
 }
 
 /**
+ * R-117 — a Point's two coordinates must be FIELD ELEMENTS, aborting form.
+ *
+ * `decomposePoint` BIN2NUMs each half of the blob as an unsigned integer, so
+ * any value that fits in the coordinate width is accepted — `x + p` included,
+ * whenever `x + p < 2^256` (on secp256k1 that is every `x < 2^32 + 977`).
+ * Downstream field arithmetic reduces mod p, so `(x+p) ‖ y` behaves as the
+ * point `(x, y)`; `affineAdd`'s two case selectors do NOT reduce, and they are
+ * bare OP_NUMEQUAL on exactly these raw values:
+ *
+ *     cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+ *     notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+ *
+ * so for P and its alias both read 0, the chord path runs on two equal points,
+ * `den_chord = qx - px ≡ 0 (mod p)`, and `fieldInv` is Fermat with inv(0) = 0.
+ * Measured before this gate landed, x = 1: `ecAdd(P, P)` gave the correct 2P
+ * and `ecAdd(P, P')` gave x = p-2 — a script that SUCCEEDED and returned a
+ * blob that is not a point. Both the doubling case and the P + (-P) case are
+ * driven by these selectors, so both are defeated by the same trick.
+ *
+ * REJECT rather than reduce. `ecOnCurve` already answers "no" to a
+ * non-canonical encoding (GAP-301, and its P-256/P-384 twin), so reducing here
+ * would leave the predicate and the value builtins disagreeing about whether
+ * the blob is a point at all. Rejecting keeps them aligned, and it is the
+ * policy CL-BUG-095 already set for the WIDTH: predicates clamp and flag,
+ * value producers OP_VERIFY.
+ *
+ * Callers are the user-facing value builtins only. It is deliberately NOT
+ * folded into `decomposePoint`: that helper also runs inside `ecOnCurve`,
+ * which must stay total.
+ *
+ * `x` and `y` are unsigned by construction (BIN2NUM of a sign-extended
+ * big-endian blob), so `< p` is the whole check; no lower bound is needed.
+ */
+function emitCoordCanonVerify(t: ECTracker, xName: string, yName: string): void {
+  t.copyToTop(xName, '_cc_x');
+  pushFieldP(t, '_cc_px');
+  t.rawBlock(['_cc_x', '_cc_px'], '_cc_xok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.copyToTop(yName, '_cc_y');
+  pushFieldP(t, '_cc_py');
+  t.rawBlock(['_cc_y', '_cc_py'], '_cc_yok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.rawBlock(['_cc_xok', '_cc_yok'], null, (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+    e({ op: 'opcode', code: 'OP_VERIFY' });
+  });
+}
+
+/**
  * Decompose 64-byte Point → (x_num, y_num) on stack.
  * Consumes pointName, produces xName and yName.
  */
@@ -1082,6 +1133,9 @@ export function emitEcAdd(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pa', '_pb'], emit);
   decomposePoint(t, '_pa', 'px', 'py');
   decomposePoint(t, '_pb', 'qx', 'qy');
+  // R-117: affineAdd's selectors compare these four values RAW.
+  emitCoordCanonVerify(t, 'px', 'py');
+  emitCoordCanonVerify(t, 'qx', 'qy');
   affineAdd(t);
   composePoint(t, 'rx', 'ry', '_result');
 }
@@ -1100,6 +1154,7 @@ export function emitEcAdd(emit: (op: StackOp) => void): void {
 export function emitEcMul(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt', '_k'], emit);
   decomposePoint(t, '_pt', 'ax', 'ay');
+  emitCoordCanonVerify(t, 'ax', 'ay');
 
   // k' = k + 3n: guarantees bit 257 is set for MSB-first double-and-add.
   // k ∈ [1, n-1], so k+3n ∈ [3n+1, 4n-1]. Since 3n > 2^257, bit 257
@@ -1199,6 +1254,7 @@ export function emitEcMulGen(emit: (op: StackOp) => void): void {
 export function emitEcNegate(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
   decomposePoint(t, '_pt', '_nx', '_ny');
+  emitCoordCanonVerify(t, '_nx', '_ny');
   pushFieldP(t, '_fp');
   fieldSub(t, '_fp', '_ny', '_neg_y');
   composePoint(t, '_nx', '_neg_y', '_result');

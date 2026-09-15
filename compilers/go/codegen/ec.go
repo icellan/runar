@@ -1083,6 +1083,53 @@ func ecBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker) {
 // Public entry points (called from stack lowerer)
 // ===========================================================================
 
+// ecEmitCoordCanonVerify -- R-117: a Point's two coordinates must be FIELD
+// ELEMENTS, aborting form.
+//
+// ecDecomposePoint BIN2NUMs each half of the blob as an unsigned integer, so
+// any value that fits in the coordinate width is accepted -- x + p included,
+// whenever x + p < 2^256 (on secp256k1 that is every x < 2^32 + 977).
+// Downstream field arithmetic reduces mod p, so (x+p)||y behaves as the point
+// (x, y); ecAffineAdd's two case selectors do NOT reduce, and they are bare
+// OP_NUMEQUAL on exactly these raw values:
+//
+//	cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+//	notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+//
+// so for P and its alias both read 0, the chord path runs on two equal points,
+// den_chord = qx - px == 0 (mod p), and ecFieldInv is Fermat with inv(0) = 0.
+// Measured before this gate landed, x = 1: ecAdd(P, P) gave the correct 2P and
+// ecAdd(P, P') gave x = p-2 -- a script that SUCCEEDED and returned a blob that
+// is not a point. Both the doubling case and the P + (-P) case are driven by
+// these selectors, so both are defeated by the same trick.
+//
+// REJECT rather than reduce: EmitEcOnCurve already answers "no" to a
+// non-canonical encoding, so reducing here would leave the predicate and the
+// value builtins disagreeing about whether the blob is a point at all. This is
+// also the policy CL-BUG-095 set for the WIDTH -- predicates clamp and flag,
+// value producers OP_VERIFY.
+//
+// Callers are the user-facing value builtins only; deliberately NOT folded into
+// ecDecomposePoint, which also runs inside EmitEcOnCurve and must stay total.
+//
+// x and y are unsigned by construction, so "< p" is the whole check.
+func ecEmitCoordCanonVerify(t *ECTracker, xName, yName string) {
+	t.copyToTop(xName, "_cc_x")
+	ecPushFieldP(t, "_cc_px")
+	t.rawBlock([]string{"_cc_x", "_cc_px"}, "_cc_xok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.copyToTop(yName, "_cc_y")
+	ecPushFieldP(t, "_cc_py")
+	t.rawBlock([]string{"_cc_y", "_cc_py"}, "_cc_yok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.rawBlock([]string{"_cc_xok", "_cc_yok"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+}
+
 // EmitEcAdd adds two points.
 // Stack in: [point_a, point_b] (b on top)
 // Stack out: [result_point]
@@ -1090,6 +1137,9 @@ func EmitEcAdd(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pa", "_pb"}, emit)
 	ecDecomposePoint(t, "_pa", "px", "py")
 	ecDecomposePoint(t, "_pb", "qx", "qy")
+	// R-117: ecAffineAdd's selectors compare these four values RAW.
+	ecEmitCoordCanonVerify(t, "px", "py")
+	ecEmitCoordCanonVerify(t, "qx", "qy")
 	ecAffineAdd(t)
 	ecComposePoint(t, "rx", "ry", "_result")
 }
@@ -1129,6 +1179,7 @@ func EmitEcMul(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt", "_k"}, emit)
 	// Decompose to affine base point
 	ecDecomposePoint(t, "_pt", "ax", "ay")
+	ecEmitCoordCanonVerify(t, "ax", "ay")
 
 	// k' = k + 3n: guarantees bit 257 is set.
 	// k ∈ [1, n-1], so k+3n ∈ [3n+1, 4n-1]. Since 3n > 2^257, bit 257
@@ -1234,6 +1285,7 @@ func EmitEcMulGen(emit func(StackOp)) {
 func EmitEcNegate(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
 	ecDecomposePoint(t, "_pt", "_nx", "_ny")
+	ecEmitCoordCanonVerify(t, "_nx", "_ny")
 	ecPushFieldP(t, "_fp")
 	ecFieldSub(t, "_fp", "_ny", "_neg_y")
 	ecComposePoint(t, "_nx", "_neg_y", "_result")

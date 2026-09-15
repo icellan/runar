@@ -171,10 +171,19 @@ class TestP256P384Codegen < Minitest::Test
   # call sites), and +-0 for `*EncodeCompressed`, where the 3-op gate is paid
   # for by the fixed-offset parity read replacing a 6-op sequence with 3.
   P256_GOLDENS = {
-    "p256Add"              =>   6719,
-    "p256Mul"              => 140039,
-    "p256MulGen"           => 140041,
-    "p256Negate"           =>    948,
+    # R-117, the COORDINATE-CANONICITY gate. pNNNAdd +18, pNNNMul +8, pNNNMulGen +8,
+    # pNNNNegate +8 -- the same shape as secp256k1's, because cEmitCoordCanonVerify
+    # is the same 8 ops (two picks, two pushes of p, two OP_LESSTHANs, OP_BOOLAND,
+    # OP_VERIFY) and the Add gates two points. pNNNOnCurve and
+    # pNNNEncodeCompressed are +0: the predicate must stay TOTAL. verifyECDSA_*
+    # is +0 TOO, and that is the load-bearing part -- cEmitMul takes a
+    # verifyCanonical flag that is FALSE on the ECDSA path, because
+    # decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
+    # bytes must return false from a total boolean builtin rather than abort.
+    "p256Add"              =>   6737,
+    "p256Mul"              => 140047,
+    "p256MulGen"           => 140049,
+    "p256Negate"           =>    956,
     "p256OnCurve"          =>    574,
     "p256EncodeCompressed" =>     16,
     "verifyECDSA_P256"     => 297393,
@@ -191,10 +200,10 @@ class TestP256P384Codegen < Minitest::Test
   }.freeze
 
   P384_GOLDENS = {
-    "p384Add"    =>  11525,
-    "p384Mul"    => 211181,
-    "p384MulGen" => 211183,
-    "p384Negate" =>   1396,
+    "p384Add"    =>  11543,
+    "p384Mul"    => 211189,
+    "p384MulGen" => 211191,
+    "p384Negate" =>   1404,
   }.freeze
 
   P384_EMITTERS = {

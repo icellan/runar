@@ -53,8 +53,8 @@ class TestN028ECFreshConstBinding < Minitest::Test
   # TYPESCRIPT tier and cross-checked against Ruby's own output, not copied
   # from this tier — the whole point of the pin is that it is another tier's
   # opinion of these bytes.
-  EC_LINEAR_REFERENCE_SHA256 = "9206c8cb6cdf5bc1f19b1b0c219800ccd3d988991823fd4a848aea6f10507179"
-  EC_LINEAR_REFERENCE_HEX_LEN = 2_549_040
+  EC_LINEAR_REFERENCE_SHA256 = "922a8ff7be63f46cd49761bc8c398a3020d0cd8880c1739f5314864d5979cb4e"
+  EC_LINEAR_REFERENCE_HEX_LEN = 2_549_484
 
   # Control: no EC calls at all, so +optimize_ec+ returns early. Pinned so the
   # fix above cannot be "achieved" by disabling the optimizer.

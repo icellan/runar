@@ -750,6 +750,35 @@ fn emitCanonicityGuard(t: *NistTracker, x_name: []const u8, y_name: []const u8, 
     try t.names.append(t.allocator, "_canon");
 }
 
+/// R-117 — coordinate canonicity for the VALUE builtins, aborting form.
+///
+/// The a = -3 twin of emitCoordCanonVerify in ec_emitters.zig; see that comment
+/// for the defect. affineAdd's cond / notinf selectors are the same bare
+/// OP_NUMEQUAL over the raw decomposed coordinates, and decomposePoint accepts
+/// any width-fitting unsigned value, so x + p is a second spelling of the same
+/// point that both selectors read as "different".
+///
+/// emitCanonicityGuard above is the FLAG form, for the on-curve predicates.
+/// This is the abort form, used only by pNNNAdd / pNNNMul / pNNNNegate — never
+/// on emitVerifyECDSA's path, where decompressPubKey and emitSigRangeGate have
+/// already decided that attacker-chosen bytes must make a total boolean builtin
+/// return false rather than abort the script.
+fn emitCoordCanonVerify(t: *NistTracker, x_name: []const u8, y_name: []const u8, p_be: []const u8) !void {
+    try t.copyToTop(x_name, "_cc_x");
+    try t.pushBigIntBE("_cc_px", p_be);
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_cc_xok");
+    try t.copyToTop(y_name, "_cc_y");
+    try t.pushBigIntBE("_cc_py", p_be);
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_cc_yok");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 /// Affine point addition.
 ///
 /// The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
@@ -1186,20 +1215,22 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
 /// buildScalarMulBundle creates a standalone bundle for scalar multiplication.
 /// Expects exactly two items on the stack: [point, scalar] (scalar on top).
 /// Produces exactly one result item: the result point.
-fn buildScalarMulBundle(allocator: Allocator, params: *const NistCurveParams) !EcOpBundle {
+fn buildScalarMulBundle(allocator: Allocator, params: *const NistCurveParams, verify_canonical: bool) !EcOpBundle {
     var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, params);
     errdefer t.deinit();
-    try emitScalarMulOnTracker(&t);
+    try emitScalarMulOnTracker(&t, verify_canonical);
     return t.takeBundle();
 }
 
 /// emitScalarMulOnTracker performs scalar mul using the tracker's current names.
 /// The tracker must have "_pt" and "_k" as named items (in any position).
-fn emitScalarMulOnTracker(t: *NistTracker) !void {
+fn emitScalarMulOnTracker(t: *NistTracker, verify_canonical: bool) !void {
     const c = t.params;
     const p_be = c.field_p_be;
 
     try decomposePoint(t, "_pt", "ax", "ay");
+    // R-117. False on the ECDSA path: see emitCoordCanonVerify.
+    if (verify_canonical) try emitCoordCanonVerify(t, "ax", "ay", p_be);
 
     // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
     //
@@ -1283,7 +1314,7 @@ fn emitScalarMulOnTracker(t: *NistTracker) !void {
 /// (point then scalar, scalar on top) and removed their names via popNames(2).
 /// After the call, one result name is appended to the outer tracker.
 fn emitScalarMulInline(outer: *NistTracker, result_name: []const u8) !void {
-    var bundle = try buildScalarMulBundle(outer.allocator, outer.params);
+    var bundle = try buildScalarMulBundle(outer.allocator, outer.params, false);
     errdefer bundle.deinit();
 
     // Transfer owned_bytes pointers to outer tracker, then free the outer slice.
@@ -1844,6 +1875,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             errdefer t.deinit();
             try decomposePoint(&t, "_pa", "px", "py");
             try decomposePoint(&t, "_pb", "qx", "qy");
+            // R-117: affineAdd's selectors compare these four values RAW.
+            try emitCoordCanonVerify(&t, "px", "py", p256_field_p_be[0..]);
+            try emitCoordCanonVerify(&t, "qx", "qy", p256_field_p_be[0..]);
             try affineAdd(&t, p256_field_p_be[0..]);
             try composePoint(&t, "rx", "ry", "_result");
             return t.takeBundle();
@@ -1851,7 +1885,7 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p256_mul => {
             var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, &p256_params);
             errdefer t.deinit();
-            try emitScalarMulOnTracker(&t);
+            try emitScalarMulOnTracker(&t, true);
             return t.takeBundle();
         },
         .p256_mul_gen => {
@@ -1862,13 +1896,14 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             @memcpy(g_point[32..64], p256_gy_be[0..]);
             try t.pushOwnedBytes("_pt", g_point);
             try t.swap();
-            try emitScalarMulOnTracker(&t);
+            try emitScalarMulOnTracker(&t, true);
             return t.takeBundle();
         },
         .p256_negate => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p256_params);
             errdefer t.deinit();
             try decomposePoint(&t, "_pt", "_nx", "_ny");
+            try emitCoordCanonVerify(&t, "_nx", "_ny", p256_field_p_be[0..]);
             try t.pushBigIntBE("_fp", p256_field_p_be[0..]);
             try fieldSub(&t, "_fp", "_ny", p256_field_p_be[0..], "_neg_y");
             try composePoint(&t, "_nx", "_neg_y", "_result");
@@ -1965,6 +2000,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             errdefer t.deinit();
             try decomposePoint(&t, "_pa", "px", "py");
             try decomposePoint(&t, "_pb", "qx", "qy");
+            // R-117: affineAdd's selectors compare these four values RAW.
+            try emitCoordCanonVerify(&t, "px", "py", p384_field_p_be[0..]);
+            try emitCoordCanonVerify(&t, "qx", "qy", p384_field_p_be[0..]);
             try affineAdd(&t, p384_field_p_be[0..]);
             try composePoint(&t, "rx", "ry", "_result");
             return t.takeBundle();
@@ -1972,7 +2010,7 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
         .p384_mul => {
             var t = try NistTracker.init(allocator, &.{ "_pt", "_k" }, &p384_params);
             errdefer t.deinit();
-            try emitScalarMulOnTracker(&t);
+            try emitScalarMulOnTracker(&t, true);
             return t.takeBundle();
         },
         .p384_mul_gen => {
@@ -1983,13 +2021,14 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: registry.CryptoBuiltin) !E
             @memcpy(g_point[48..96], p384_gy_be[0..]);
             try t.pushOwnedBytes("_pt", g_point);
             try t.swap();
-            try emitScalarMulOnTracker(&t);
+            try emitScalarMulOnTracker(&t, true);
             return t.takeBundle();
         },
         .p384_negate => {
             var t = try NistTracker.init(allocator, &.{"_pt"}, &p384_params);
             errdefer t.deinit();
             try decomposePoint(&t, "_pt", "_nx", "_ny");
+            try emitCoordCanonVerify(&t, "_nx", "_ny", p384_field_p_be[0..]);
             try t.pushBigIntBE("_fp", p384_field_p_be[0..]);
             try fieldSub(&t, "_fp", "_ny", p384_field_p_be[0..], "_neg_y");
             try composePoint(&t, "_nx", "_neg_y", "_result");
@@ -2142,16 +2181,16 @@ test "nist_ec helper op-count goldens" {
     // exactly +50 each. p256Mul / p384Mul / *MulGen / *Negate / p256OnCurve do
     // not move.
     const cases = .{
-        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6679) },
-        .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129195) },
-        .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129197) },
-        .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 948) },
+        .{ registry.CryptoBuiltin.p256_add, "p256Add", @as(usize, 6695) },
+        .{ registry.CryptoBuiltin.p256_mul, "p256Mul", @as(usize, 129203) },
+        .{ registry.CryptoBuiltin.p256_mul_gen, "p256MulGen", @as(usize, 129205) },
+        .{ registry.CryptoBuiltin.p256_negate, "p256Negate", @as(usize, 956) },
         .{ registry.CryptoBuiltin.p256_on_curve, "p256OnCurve", @as(usize, 570) },
         .{ registry.CryptoBuiltin.p256_encode_compressed, "p256EncodeCompressed", @as(usize, 16) },
-        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11485) },
-        .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 194961) },
-        .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 194963) },
-        .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1396) },
+        .{ registry.CryptoBuiltin.p384_add, "p384Add", @as(usize, 11501) },
+        .{ registry.CryptoBuiltin.p384_mul, "p384Mul", @as(usize, 194969) },
+        .{ registry.CryptoBuiltin.p384_mul_gen, "p384MulGen", @as(usize, 194971) },
+        .{ registry.CryptoBuiltin.p384_negate, "p384Negate", @as(usize, 1404) },
     };
     inline for (cases) |c| {
         var bundle = try buildBuiltinOps(std.testing.allocator, c[0]);

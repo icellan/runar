@@ -77,10 +77,26 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     # minus the four drops and two notinf OP_MULs it replaced). Nothing else
     # moves: the Jacobian ladders behind ecMul/ecMulGen never call the affine
     # adder, and ecOnCurve still rejects the all-zero point.
-    ("ecAdd",              emit_ec_add,               8279),
-    ("ecMul",              emit_ec_mul,             130518),
-    ("ecMulGen",           emit_ec_mul_gen,         130520),
-    ("ecNegate",           emit_ec_negate,             948),
+    # R-117, the COORDINATE-CANONICITY gate. ecAdd 8279 -> 8297 (+18), ecMul
+    # 130518 -> 130526 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
+    # is 8 ops per gated point -- copy x (pick), push p, OP_LESSTHAN, copy y (pick),
+    # push p, OP_LESSTHAN, OP_BOOLAND, OP_VERIFY -- and ecAdd gates TWO points, so
+    # +18 there rather than +16. The extra two are pick DEPTH, not extra work: this
+    # tracker emits OP_DUP / OP_OVER for depth 0 / 1 and `push <n>, OP_PICK` for
+    # anything deeper, and in ecAdd's FIRST gate the stack is [px, py, qx, qy], so
+    # both of that gate's picks reach depth 3 and cost two ops each. Its second gate
+    # sees [px, py, qx, qy] with qx / qy at depth 1, so both are a one-op OP_OVER.
+    # 10 + 8 = 18, and ecMul / ecNegate gate a single point off a two-deep stack for
+    # a flat 8. ecOnCurve / ecModReduce /
+    # ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY are all +0. The
+    # predicates must stay TOTAL (they clamp and flag, they do not abort), and the
+    # byte accessors have no selector to fool -- each returns a value derived
+    # injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT
+    # number rather than a colliding one.
+    ("ecAdd",              emit_ec_add,               8297),
+    ("ecMul",              emit_ec_mul,             130526),
+    ("ecMulGen",           emit_ec_mul_gen,         130528),
+    ("ecNegate",           emit_ec_negate,             956),
     ("ecOnCurve",          emit_ec_on_curve,           548),
     ("ecModReduce",        emit_ec_mod_reduce,           8),
     ("ecEncodeCompressed", emit_ec_encode_compressed,   16),

@@ -434,6 +434,37 @@ func cEmitCanonicityGuard(t *ECTracker, xName, yName string, c *nistCurveParams)
 	})
 }
 
+// cEmitCoordCanonVerify -- R-117: coordinate canonicity for the VALUE builtins,
+// aborting form.
+//
+// The a = -3 twin of ecEmitCoordCanonVerify in ec.go; see that comment for the
+// defect. cAffineAdd's cond / notinf selectors are the same bare OP_NUMEQUAL
+// over the raw decomposed coordinates, and cDecomposePoint accepts any
+// width-fitting unsigned value, so x + p is a second spelling of the same point
+// that both selectors read as "different".
+//
+// cEmitCanonicityGuard above is the FLAG form, for the on-curve predicates.
+// This is the abort form, called only from EmitPNNNAdd / EmitPNNNMul /
+// EmitPNNNNegate -- never from cEmitVerifyECDSA's path, where decompressPubKey
+// and cEmitSigRangeGate have already decided that attacker-chosen bytes must
+// make a total boolean builtin return false rather than abort the script.
+func cEmitCoordCanonVerify(t *ECTracker, xName, yName string, c *nistCurveParams) {
+	t.copyToTop(xName, "_cc_x")
+	cPushFieldP(t, "_cc_px", c)
+	t.rawBlock([]string{"_cc_x", "_cc_px"}, "_cc_xok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.copyToTop(yName, "_cc_y")
+	cPushFieldP(t, "_cc_py", c)
+	t.rawBlock([]string{"_cc_y", "_cc_py"}, "_cc_yok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.rawBlock([]string{"_cc_xok", "_cc_yok"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+}
+
 func cAffineAdd(t *ECTracker, c *nistCurveParams) {
 	// The chord slope s = (qy - py) / (qx - px) is undefined when P == Q: the
 	// denominator is zero and the correct slope is the TANGENT, (3px^2 + a)/(2py)
@@ -858,9 +889,13 @@ func cBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker, c *nistCurve
 // Scalar multiplication (generic for both P-256 and P-384)
 // ===========================================================================
 
-func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams) {
+func cEmitMul(emit func(StackOp), c *nistCurveParams, g *nistGroupParams, verifyCanonical bool) {
 	t := NewECTracker([]string{"_pt", "_k"}, emit)
 	cDecomposePoint(t, "_pt", "ax", "ay", c)
+	// R-117. False on the ECDSA path: see cEmitCoordCanonVerify.
+	if verifyCanonical {
+		cEmitCoordCanonVerify(t, "ax", "ay", c)
+	}
 
 	// k' = k + 3n
 	//
@@ -1404,7 +1439,7 @@ func cEmitVerifyECDSA(
 	t.nm = t.nm[:len(t.nm)-1] // _u1
 	t.nm = t.nm[:len(t.nm)-1] // _G
 
-	cEmitMul(emit, c, g)
+	cEmitMul(emit, c, g, false)
 
 	// After mul, one result point is on the stack
 	t.nm = append(t.nm, "_R1_point")
@@ -1426,7 +1461,7 @@ func cEmitVerifyECDSA(
 	// Remove from tracker, emit mul, push result
 	t.nm = t.nm[:len(t.nm)-1] // _u2
 	t.nm = t.nm[:len(t.nm)-1] // _Q_point
-	cEmitMul(emit, c, g)
+	cEmitMul(emit, c, g, false)
 	t.nm = append(t.nm, "_R2_point")
 
 	// Restore R1 point
@@ -1503,13 +1538,16 @@ func EmitP256Add(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pa", "_pb"}, emit)
 	cDecomposePoint(t, "_pa", "px", "py", p256CurveParams)
 	cDecomposePoint(t, "_pb", "qx", "qy", p256CurveParams)
+	// R-117: cAffineAdd's selectors compare these four values RAW.
+	cEmitCoordCanonVerify(t, "px", "py", p256CurveParams)
+	cEmitCoordCanonVerify(t, "qx", "qy", p256CurveParams)
 	cAffineAdd(t, p256CurveParams)
 	cComposePoint(t, "rx", "ry", "_result", p256CurveParams)
 }
 
 // EmitP256Mul performs P-256 scalar multiplication.
 func EmitP256Mul(emit func(StackOp)) {
-	cEmitMul(emit, p256CurveParams, p256GroupParams)
+	cEmitMul(emit, p256CurveParams, p256GroupParams, true)
 }
 
 // EmitP256MulGen performs P-256 generator multiplication.
@@ -1526,6 +1564,7 @@ func EmitP256MulGen(emit func(StackOp)) {
 func EmitP256Negate(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
 	cDecomposePoint(t, "_pt", "_nx", "_ny", p256CurveParams)
+	cEmitCoordCanonVerify(t, "_nx", "_ny", p256CurveParams)
 	cPushFieldP(t, "_fp", p256CurveParams)
 	cFieldSub(t, "_fp", "_ny", "_neg_y", p256CurveParams)
 	cComposePoint(t, "_nx", "_neg_y", "_result", p256CurveParams)
@@ -1615,13 +1654,16 @@ func EmitP384Add(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pa", "_pb"}, emit)
 	cDecomposePoint(t, "_pa", "px", "py", p384CurveParams)
 	cDecomposePoint(t, "_pb", "qx", "qy", p384CurveParams)
+	// R-117: cAffineAdd's selectors compare these four values RAW.
+	cEmitCoordCanonVerify(t, "px", "py", p384CurveParams)
+	cEmitCoordCanonVerify(t, "qx", "qy", p384CurveParams)
 	cAffineAdd(t, p384CurveParams)
 	cComposePoint(t, "rx", "ry", "_result", p384CurveParams)
 }
 
 // EmitP384Mul performs P-384 scalar multiplication.
 func EmitP384Mul(emit func(StackOp)) {
-	cEmitMul(emit, p384CurveParams, p384GroupParams)
+	cEmitMul(emit, p384CurveParams, p384GroupParams, true)
 }
 
 // EmitP384MulGen performs P-384 generator multiplication.
@@ -1638,6 +1680,7 @@ func EmitP384MulGen(emit func(StackOp)) {
 func EmitP384Negate(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
 	cDecomposePoint(t, "_pt", "_nx", "_ny", p384CurveParams)
+	cEmitCoordCanonVerify(t, "_nx", "_ny", p384CurveParams)
 	cPushFieldP(t, "_fp", p384CurveParams)
 	cFieldSub(t, "_fp", "_ny", "_neg_y", p384CurveParams)
 	cComposePoint(t, "_nx", "_neg_y", "_result", p384CurveParams)

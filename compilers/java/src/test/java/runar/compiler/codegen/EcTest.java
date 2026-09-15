@@ -75,34 +75,34 @@ class EcTest {
         // CL-BUG-096 then added a further +50 / +50: emitAffineInfinitySelect
         // replaces the four toTop/drop cleanups and the two `notinf` OP_MULs
         // with the pinf/qinf/usep/useq/user select. Again all 1-byte ops.
-        assertEquals(8279, countOpTree(ops), "ecAdd op count drift");
+        assertEquals(8297, countOpTree(ops), "ecAdd op count drift");
 
         String hex = emitHex(ops);
-        assertEquals(25484, hex.length() / 2, "ecAdd hex byte count drift");
+        assertEquals(25634, hex.length() / 2, "ecAdd hex byte count drift");
     }
 
     @Test
     void ecMulShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcMul(ops::add);
-        assertEquals(130518, countOpTree(ops), "ecMul op count drift");
-        assertEquals(428680, emitHex(ops).length() / 2);
+        assertEquals(130526, countOpTree(ops), "ecMul op count drift");
+        assertEquals(428754, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecMulGenShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcMulGen(ops::add);
-        assertEquals(130520, countOpTree(ops), "ecMulGen op count drift");
-        assertEquals(428746, emitHex(ops).length() / 2);
+        assertEquals(130528, countOpTree(ops), "ecMulGen op count drift");
+        assertEquals(428820, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecNegateShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcNegate(ops::add);
-        assertEquals(948, countOpTree(ops));
-        assertEquals(1022, emitHex(ops).length() / 2);
+        assertEquals(956, countOpTree(ops));
+        assertEquals(1096, emitHex(ops).length() / 2);
     }
 
     @Test

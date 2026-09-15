@@ -136,17 +136,26 @@ describe('NIST P-256 / P-384 codegen — op-count goldens (T-006)', () => {
   // replaces. Curve-INDEPENDENT again, for the same reason as the width gate:
   // it is a fixed-shape select, not a per-bit loop.
   const goldens: Array<[name: string, fn: (emit: (op: StackOp) => void) => void, expected: number]> = [
-    ['p256Add',               emitP256Add,                6719],
-    ['p256Mul',               emitP256Mul,              140039],
-    ['p256MulGen',            emitP256MulGen,           140041],
-    ['p256Negate',            emitP256Negate,              948],
+    // R-117, the COORDINATE-CANONICITY gate. pNNNAdd +18, pNNNMul +8, pNNNMulGen +8,
+    // pNNNNegate +8 -- the same shape as secp256k1's, because cEmitCoordCanonVerify
+    // is the same 8 ops (two picks, two pushes of p, two OP_LESSTHANs, OP_BOOLAND,
+    // OP_VERIFY) and the Add gates two points. pNNNOnCurve and
+    // pNNNEncodeCompressed are +0: the predicate must stay TOTAL. verifyECDSA_*
+    // is +0 TOO, and that is the load-bearing part -- cEmitMul takes a
+    // verifyCanonical flag that is FALSE on the ECDSA path, because
+    // decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
+    // bytes must return false from a total boolean builtin rather than abort.
+    ['p256Add',               emitP256Add,                6737],
+    ['p256Mul',               emitP256Mul,              140047],
+    ['p256MulGen',            emitP256MulGen,           140049],
+    ['p256Negate',            emitP256Negate,              956],
     ['p256OnCurve',           emitP256OnCurve,             574],
     ['p256EncodeCompressed',  emitP256EncodeCompressed,     16],
     ['verifyECDSA_P256',      emitVerifyECDSA_P256,     297393],
-    ['p384Add',               emitP384Add,               11525],
-    ['p384Mul',               emitP384Mul,              211181],
-    ['p384MulGen',            emitP384MulGen,           211183],
-    ['p384Negate',            emitP384Negate,             1396],
+    ['p384Add',               emitP384Add,               11543],
+    ['p384Mul',               emitP384Mul,              211189],
+    ['p384MulGen',            emitP384MulGen,           211191],
+    ['p384Negate',            emitP384Negate,             1404],
     ['p384OnCurve',           emitP384OnCurve,             798],
     ['p384EncodeCompressed',  emitP384EncodeCompressed,     16],
     ['verifyECDSA_P384',      emitVerifyECDSA_P384,     453369],
