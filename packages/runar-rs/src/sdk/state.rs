@@ -33,6 +33,28 @@ pub fn serialize_state(
 
     let mut hex = String::new();
     for field in sorted {
+        // A MISSING value for a raw fixed-width type is refused rather than
+        // quietly omitted. Rust wrote NOTHING — zero bytes for a field the
+        // artifact declares N bytes wide — where Python/Ruby wrote "", Go
+        // "<nil>", Java "null" and TS "undefined": different corruptions of the
+        // same state section, a silent byte divergence on a path whose bytes
+        // are committed on chain. Refusing is the only answer that is the same
+        // in every tier. Panics rather than returning an error, matching the
+        // contract `state_field_i64` already documents for this function.
+        if field.fixed_array.is_none()
+            && !values.contains_key(&field.name)
+            && matches!(
+                field.field_type.as_str(),
+                "PubKey" | "Addr" | "Ripemd160" | "Sha256" | "Point" | "P256Point" | "P384Point"
+            )
+        {
+            panic!(
+                "runar: serialize_state: state field {:?} ({}) has no value. Writing a \
+                 placeholder would deploy a state section the contract's own on-chain reader \
+                 cannot parse, leaving the output unspendable",
+                field.name, field.field_type,
+            );
+        }
         if let Some(value) = values.get(&field.name) {
             if let Some(fa) = &field.fixed_array {
                 // Flatten the (possibly nested) SdkValue::Array to a flat
@@ -62,10 +84,33 @@ pub fn serialize_state(
 /// The caller must strip the code prefix and OP_RETURN byte before passing
 /// the data section. FixedArray state fields are rebuilt into a
 /// (possibly nested) `SdkValue::Array` matching the declared shape.
+/// FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out of a
+/// locking script any third party can construct, so it is untrusted input, and
+/// the caller then builds and SIGNS a continuation output committing to the
+/// restored state. A state section that does not describe EXACTLY the
+/// artifact's `state_fields` is rejected:
+///
+/// - truncation — a field running past the end of the blob is an error instead
+///   of a plausible-but-wrong value. Every arm used to bounds-check, return a
+///   DEFAULT and then advance the NOMINAL width anyway, desynchronising every
+///   later field; `decode_push_data`'s `OP_PUSHDATA{1,2,4}` length-prefix
+///   slices were unchecked and PANICKED.
+/// - overlong tails — bytes left over after the last declared field are an
+///   error instead of being silently dropped.
+///
+/// Restoring wrong-but-plausible state from a corrupted continuation is worse
+/// than not restoring it at all.
 pub fn deserialize_state(
     fields: &[StateField],
     script_hex: &str,
-) -> HashMap<String, SdkValue> {
+) -> Result<HashMap<String, SdkValue>, String> {
+    if script_hex.len() % 2 != 0 {
+        return Err(format!(
+            "deserialize_state: state blob is {} hex chars — not a whole number of bytes",
+            script_hex.len(),
+        ));
+    }
+
     let mut sorted: Vec<&StateField> = fields.iter().collect();
     sorted.sort_by_key(|f| f.index);
 
@@ -77,8 +122,10 @@ pub fn deserialize_state(
             let dims = parse_fixed_array_dims(&field.field_type);
             let leaf_type = innermost_element_type(&field.field_type, &fa.element_type);
             let mut flat: Vec<SdkValue> = Vec::with_capacity(fa.synthetic_names.len());
-            for _ in 0..fa.synthetic_names.len() {
-                let (value, bytes_read) = decode_state_value(script_hex, offset, &leaf_type);
+            for i in 0..fa.synthetic_names.len() {
+                let label = format!("{}[{}]", field.name, i);
+                let (value, bytes_read) =
+                    decode_state_value(script_hex, offset, &leaf_type, &label)?;
                 flat.push(value);
                 offset += bytes_read;
             }
@@ -86,12 +133,24 @@ pub fn deserialize_state(
             result.insert(field.name.clone(), rebuilt);
             continue;
         }
-        let (value, bytes_read) = decode_state_value(script_hex, offset, &field.field_type);
+        let (value, bytes_read) =
+            decode_state_value(script_hex, offset, &field.field_type, &field.name)?;
         result.insert(field.name.clone(), value);
         offset += bytes_read;
     }
 
-    result
+    if offset != script_hex.len() {
+        return Err(format!(
+            "deserialize_state: {} unexpected trailing byte(s) after the last state field \
+             (consumed {} of {} bytes) — the state section does not match the artifact's \
+             state_fields",
+            (script_hex.len() - offset) / 2,
+            offset / 2,
+            script_hex.len() / 2,
+        ));
+    }
+
+    Ok(result)
 }
 
 /// Parse a type string like `FixedArray<FixedArray<bigint, 3>, 2>` into the
@@ -324,17 +383,21 @@ fn regroup_nested(flat: &[SdkValue], dims: &[usize]) -> SdkValue {
 pub fn extract_state_from_script(
     artifact: &RunarArtifact,
     script_hex: &str,
-) -> Option<HashMap<String, SdkValue>> {
-    let state_fields = artifact.state_fields.as_ref()?;
+) -> Result<Option<HashMap<String, SdkValue>>, String> {
+    let Some(state_fields) = artifact.state_fields.as_ref() else {
+        return Ok(None);
+    };
     if state_fields.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    let last_op_return = find_last_op_return(script_hex)?;
+    let Some(last_op_return) = find_last_op_return(script_hex) else {
+        return Ok(None);
+    };
 
     // State data starts after the OP_RETURN byte (2 hex chars)
     let state_hex = &script_hex[last_op_return + 2..];
-    Some(deserialize_state(state_fields, state_hex))
+    deserialize_state(state_fields, state_hex).map(Some)
 }
 
 /// Walk the script hex as Bitcoin Script opcodes to find the last OP_RETURN
@@ -623,62 +686,55 @@ fn to_little_endian_32(n: u32) -> String {
 // Decoding helpers
 // ---------------------------------------------------------------------------
 
+/// Fixed on-wire width of a state field type in bytes, or `None` if the type is
+/// variable-width. The single table `encode_state_value`'s raw branch and
+/// `decode_state_value`'s bounds check both read, so the writer and the reader
+/// cannot drift.
+pub(crate) fn state_field_byte_width(field_type: &str) -> Option<usize> {
+    match field_type {
+        "bool" | "boolean" => Some(1),
+        "int" | "bigint" => Some(8),
+        "PubKey" => Some(33),
+        "Addr" | "Ripemd160" => Some(20),
+        "Sha256" => Some(32),
+        "Point" | "P256Point" => Some(64),
+        "P384Point" => Some(96),
+        _ => None,
+    }
+}
+
 fn decode_state_value(
     hex: &str,
     offset: usize,
     field_type: &str,
-) -> (SdkValue, usize) {
+    label: &str,
+) -> Result<(SdkValue, usize), String> {
+    let Some(width) = state_field_byte_width(field_type) else {
+        // Variable-length / unknown types: push-data decoding.
+        let (data, bytes_read) = decode_push_data(hex, offset)
+            .map_err(|e| format!("deserialize_state: field {label:?} — {e}"))?;
+        return Ok((SdkValue::Bytes(data), bytes_read));
+    };
+
+    let hex_width = width * 2;
+    if offset + hex_width > hex.len() {
+        return Err(format!(
+            "deserialize_state: truncated state — field {label:?} ({field_type}) needs {width} \
+             byte(s) at offset {} but only {} byte(s) remain",
+            offset / 2,
+            hex.len().saturating_sub(offset) / 2,
+        ));
+    }
+    let data = &hex[offset..offset + hex_width];
     match field_type {
-        "bool" | "boolean" => {
-            // 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
-            // `encode_state_value` — a reader that knows only `"bool"` walks a
-            // real boolean field as push data and desynchronises every field
-            // after it.
-            if offset + 2 > hex.len() {
-                return (SdkValue::Bool(false), 2);
-            }
-            let byte = &hex[offset..offset + 2];
-            (SdkValue::Bool(byte != "00"), 2)
-        }
-        "int" | "bigint" => {
-            // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
-            let hex_width = 16; // 8 bytes * 2
-            if offset + hex_width > hex.len() {
-                return (SdkValue::Int(0), hex_width);
-            }
-            let data = &hex[offset..offset + hex_width];
-            (SdkValue::Int(decode_num2bin(data)), hex_width)
-        }
-        "PubKey" => {
-            let w = 66; // 33 bytes
-            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
-            (SdkValue::Bytes(data.to_string()), w)
-        }
-        "Addr" | "Ripemd160" => {
-            let w = 40; // 20 bytes
-            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
-            (SdkValue::Bytes(data.to_string()), w)
-        }
-        "Sha256" => {
-            let w = 64; // 32 bytes
-            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
-            (SdkValue::Bytes(data.to_string()), w)
-        }
-        "Point" | "P256Point" => {
-            let w = 128; // 64 bytes
-            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
-            (SdkValue::Bytes(data.to_string()), w)
-        }
-        "P384Point" => {
-            let w = 192; // 96 bytes
-            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
-            (SdkValue::Bytes(data.to_string()), w)
-        }
-        _ => {
-            // Unknown type: fall back to push-data decoding
-            let (data, bytes_read) = decode_push_data(hex, offset);
-            (SdkValue::Bytes(data), bytes_read)
-        }
+        // 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+        // `encode_state_value` — a reader that knows only `"bool"` walks a real
+        // boolean field as push data and desynchronises every field after it.
+        "bool" | "boolean" => Ok((SdkValue::Bool(data != "00"), hex_width)),
+        // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
+        "int" | "bigint" => Ok((SdkValue::Int(decode_num2bin(data)), hex_width)),
+        // Raw fixed-size byte types.
+        _ => Ok((SdkValue::Bytes(data.to_string()), hex_width)),
     }
 }
 
@@ -718,60 +774,62 @@ fn decode_num2bin(hex: &str) -> i64 {
 /// state section the contract's own script cannot parse. `OP_0` (0x00) falls
 /// through to the `opcode <= 75` branch below and correctly decodes as the
 /// empty byte array (0-length push).
-pub(crate) fn decode_push_data(hex: &str, offset: usize) -> (String, usize) {
-    if offset + 2 > hex.len() {
-        return (String::new(), 2);
-    }
+pub(crate) fn decode_push_data(hex: &str, offset: usize) -> Result<(String, usize), String> {
+    // Assert `chars` hex chars are available from `offset`, else fail closed.
+    let need = |chars: usize, what: &str| -> Result<(), String> {
+        if offset + chars > hex.len() {
+            return Err(format!(
+                "truncated state — {what} runs past the end of the state section (needs {} \
+                 byte(s) at offset {}, only {} remain)",
+                chars / 2,
+                offset / 2,
+                hex.len().saturating_sub(offset) / 2,
+            ));
+        }
+        Ok(())
+    };
 
-    let opcode = u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap_or(0);
+    need(2, "push opcode")?;
+    let opcode = u8::from_str_radix(&hex[offset..offset + 2], 16)
+        .map_err(|_| format!("non-hex byte at offset {} in the state section", offset / 2))?;
 
     if opcode <= 75 {
         let data_len = opcode as usize * 2;
-        let data = if offset + 2 + data_len <= hex.len() {
-            hex[offset + 2..offset + 2 + data_len].to_string()
-        } else {
-            String::new()
-        };
-        (data, 2 + data_len)
+        need(2 + data_len, "push payload")?;
+        Ok((hex[offset + 2..offset + 2 + data_len].to_string(), 2 + data_len))
     } else if opcode == 0x4c {
         // OP_PUSHDATA1
+        need(4, "OP_PUSHDATA1 length prefix")?;
         let len = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let data_len = len * 2;
-        let data = if offset + 4 + data_len <= hex.len() {
-            hex[offset + 4..offset + 4 + data_len].to_string()
-        } else {
-            String::new()
-        };
-        (data, 4 + data_len)
+        need(4 + data_len, "OP_PUSHDATA1 payload")?;
+        Ok((hex[offset + 4..offset + 4 + data_len].to_string(), 4 + data_len))
     } else if opcode == 0x4d {
         // OP_PUSHDATA2
+        need(6, "OP_PUSHDATA2 length prefix")?;
         let lo = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let hi = u8::from_str_radix(&hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
-        let len = lo | (hi << 8);
-        let data_len = len * 2;
-        let data = if offset + 6 + data_len <= hex.len() {
-            hex[offset + 6..offset + 6 + data_len].to_string()
-        } else {
-            String::new()
-        };
-        (data, 6 + data_len)
+        let data_len = (lo | (hi << 8)) * 2;
+        need(6 + data_len, "OP_PUSHDATA2 payload")?;
+        Ok((hex[offset + 6..offset + 6 + data_len].to_string(), 6 + data_len))
     } else if opcode == 0x4e {
         // OP_PUSHDATA4
+        need(10, "OP_PUSHDATA4 length prefix")?;
         let b0 = u8::from_str_radix(&hex[offset + 2..offset + 4], 16).unwrap_or(0) as usize;
         let b1 = u8::from_str_radix(&hex[offset + 4..offset + 6], 16).unwrap_or(0) as usize;
         let b2 = u8::from_str_radix(&hex[offset + 6..offset + 8], 16).unwrap_or(0) as usize;
         let b3 = u8::from_str_radix(&hex[offset + 8..offset + 10], 16).unwrap_or(0) as usize;
-        let len = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-        let data_len = len * 2;
-        let data = if offset + 10 + data_len <= hex.len() {
-            hex[offset + 10..offset + 10 + data_len].to_string()
-        } else {
-            String::new()
-        };
-        (data, 10 + data_len)
+        let data_len = (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) * 2;
+        need(10 + data_len, "OP_PUSHDATA4 payload")?;
+        Ok((hex[offset + 10..offset + 10 + data_len].to_string(), 10 + data_len))
     } else {
-        // Unknown opcode -- treat as zero-length
-        (String::new(), 2)
+        // Not a push opcode at all — `encode_push_data_state` can never emit
+        // one, so the state section is malformed. This used to consume one byte
+        // and return an empty value, desynchronising every subsequent field.
+        Err(format!(
+            "byte 0x{opcode:02x} at offset {} is not a push opcode; the state section is malformed",
+            offset / 2,
+        ))
     }
 }
 
@@ -782,6 +840,14 @@ pub(crate) fn decode_push_data(hex: &str, offset: usize) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fail-the-test wrapper. Every existing round-trip test below is also a
+    /// control on C2's strictness: a guard that rejected legitimate state would
+    /// redden all of them.
+    fn must_deserialize(fields: &[StateField], hex: &str) -> HashMap<String, SdkValue> {
+        deserialize_state(fields, hex)
+            .unwrap_or_else(|e| panic!("deserialize_state refused a well-formed blob {hex:?}: {e}"))
+    }
 
     fn make_fields(defs: &[(&str, &str, usize)]) -> Vec<StateField> {
         defs.iter()
@@ -843,7 +909,7 @@ mod tests {
             ]),
         )]);
         let hex = serialize_state(&fields, &values);
-        let round = deserialize_state(&fields, &hex);
+        let round = must_deserialize(&fields, &hex);
         assert_eq!(
             round["board"],
             SdkValue::Array(vec![
@@ -872,7 +938,7 @@ mod tests {
             ]),
         )]);
         let hex = serialize_state(&fields, &values);
-        let round = deserialize_state(&fields, &hex);
+        let round = must_deserialize(&fields, &hex);
         assert_eq!(
             round["grid"],
             SdkValue::Array(vec![
@@ -929,7 +995,7 @@ mod tests {
         let fields = make_fields(&[("count", "bigint", 0)]);
         let values = make_values(&[("count", SdkValue::Int(42))]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["count"], SdkValue::Int(42));
     }
 
@@ -938,7 +1004,7 @@ mod tests {
         let fields = make_fields(&[("count", "bigint", 0)]);
         let values = make_values(&[("count", SdkValue::Int(0))]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["count"], SdkValue::Int(0));
     }
 
@@ -947,7 +1013,7 @@ mod tests {
         let fields = make_fields(&[("count", "bigint", 0)]);
         let values = make_values(&[("count", SdkValue::Int(-42))]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["count"], SdkValue::Int(-42));
     }
 
@@ -956,7 +1022,7 @@ mod tests {
         let fields = make_fields(&[("count", "bigint", 0)]);
         let values = make_values(&[("count", SdkValue::Int(1_000_000_000_000))]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["count"], SdkValue::Int(1_000_000_000_000));
     }
 
@@ -969,7 +1035,7 @@ mod tests {
             ("c", SdkValue::Int(3)),
         ]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["a"], SdkValue::Int(1));
         assert_eq!(result["b"], SdkValue::Int(2));
         assert_eq!(result["c"], SdkValue::Int(3));
@@ -1030,7 +1096,7 @@ mod tests {
         let fields = make_fields(&[("flag", "bool", 0)]);
         let values = make_values(&[("flag", SdkValue::Bool(true))]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["flag"], SdkValue::Bool(true));
     }
 
@@ -1039,7 +1105,7 @@ mod tests {
         let fields = make_fields(&[("flag", "bool", 0)]);
         let values = make_values(&[("flag", SdkValue::Bool(false))]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["flag"], SdkValue::Bool(false));
     }
 
@@ -1075,7 +1141,7 @@ mod tests {
             ("active", SdkValue::Bool(true)),
         ]);
         let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
+        let result = must_deserialize(&fields, &hex);
         assert_eq!(result["count"], SdkValue::Int(100));
         assert_eq!(result["active"], SdkValue::Bool(true));
     }
@@ -1103,7 +1169,7 @@ mod tests {
             let fields = make_fields(&[("v", "bigint", 0)]);
             let values = make_values(&[("v", SdkValue::Int(*value))]);
             let hex = serialize_state(&fields, &values);
-            let result = deserialize_state(&fields, &hex);
+            let result = must_deserialize(&fields, &hex);
             assert_eq!(result["v"], SdkValue::Int(*value), "failed for value {}", value);
         }
     }
@@ -1132,7 +1198,7 @@ mod tests {
             anf: None,
             unsound_primitives: None,
         };
-        let result = extract_state_from_script(&artifact, "76a988ac");
+        let result = extract_state_from_script(&artifact, "76a988ac").expect("refused a well-formed script");
         assert!(result.is_none());
     }
 
@@ -1156,7 +1222,7 @@ mod tests {
             anf: None,
             unsound_primitives: None,
         };
-        let result = extract_state_from_script(&artifact, "51");
+        let result = extract_state_from_script(&artifact, "51").expect("refused a well-formed script");
         assert!(result.is_none());
     }
 
@@ -1182,7 +1248,7 @@ mod tests {
             unsound_primitives: None,
         };
         // Script with no 0x6a anywhere
-        let result = extract_state_from_script(&artifact, "5193885187");
+        let result = extract_state_from_script(&artifact, "5193885187").expect("refused a well-formed script");
         assert!(result.is_none());
     }
 
@@ -1216,7 +1282,7 @@ mod tests {
             unsound_primitives: None,
         };
 
-        let result = extract_state_from_script(&artifact, &full_script);
+        let result = extract_state_from_script(&artifact, &full_script).expect("refused a well-formed script");
         assert!(result.is_some());
         assert_eq!(result.unwrap()["count"], SdkValue::Int(42));
     }
@@ -1256,7 +1322,7 @@ mod tests {
             unsound_primitives: None,
         };
 
-        let result = extract_state_from_script(&artifact, &full_script).unwrap();
+        let result = extract_state_from_script(&artifact, &full_script).expect("refused a well-formed continuation").unwrap();
         assert_eq!(result["count"], SdkValue::Int(7));
         assert_eq!(result["owner"], SdkValue::Bytes(pubkey));
         assert_eq!(result["active"], SdkValue::Bool(true));
@@ -1289,7 +1355,7 @@ mod tests {
             unsound_primitives: None,
         };
 
-        let result = extract_state_from_script(&artifact, &full_script).unwrap();
+        let result = extract_state_from_script(&artifact, &full_script).expect("refused a well-formed continuation").unwrap();
         assert_eq!(result["a"], SdkValue::Int(10));
         assert_eq!(result["b"], SdkValue::Int(20));
     }

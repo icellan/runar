@@ -110,7 +110,8 @@ fn boolean_spelling_opposite_polarity() {
 
 #[test]
 fn boolean_spelling_cross_sdk_golden_deserialize() {
-    let back = deserialize_state(&boolean_spelling_fields(), &cross_sdk_golden());
+    let back = deserialize_state(&boolean_spelling_fields(), &cross_sdk_golden())
+        .expect("refused the cross-SDK golden");
     assert_eq!(int_of(&back["count"]), 7);
     assert!(bool_of(&back["flag"]));
     assert!(!bool_of(&back["alias"]));
@@ -119,7 +120,8 @@ fn boolean_spelling_cross_sdk_golden_deserialize() {
 
 #[test]
 fn boolean_spelling_flipped_deserialize() {
-    let back = deserialize_state(&boolean_spelling_fields(), &flipped_golden());
+    let back = deserialize_state(&boolean_spelling_fields(), &flipped_golden())
+        .expect("refused the flipped golden");
     assert!(!bool_of(&back["flag"]));
     assert!(bool_of(&back["alias"]));
 }
@@ -131,6 +133,7 @@ fn boolean_spelling_lone_field_is_one_byte() {
         let mut v: HashMap<String, SdkValue> = HashMap::new();
         v.insert("v".into(), SdkValue::Bool(value));
         assert_eq!(serialize_state(&fields, &v), want);
-        assert_eq!(bool_of(&deserialize_state(&fields, want)["v"]), value);
+        let back = deserialize_state(&fields, want).expect("refused a well-formed blob");
+        assert_eq!(bool_of(&back["v"]), value);
     }
 }

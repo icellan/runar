@@ -2250,11 +2250,22 @@ impl RunarContract {
         // Set the current UTXO
         contract.current_utxo = Some(utxo.clone());
 
-        // Extract state if this is a stateful contract
+        // Extract state if this is a stateful contract.
+        //
+        // FAILS CLOSED (C2). `utxo.script` is a locking script any third party
+        // can construct, and the state decoded from it is what the next `call`
+        // commits to in the continuation output. Rust has no null to return and
+        // `from_utxo` has no error channel, so a blob that does not decode
+        // EXACTLY as the artifact's `state_fields` describe panics here rather
+        // than leaving the contract carrying constructor-initial values dressed
+        // up as live on-chain state — the same "every result would be wrong"
+        // contract `state_field_i64` documents on the serialize side.
         if let Some(ref state_fields) = contract.artifact.state_fields {
             if !state_fields.is_empty() {
-                if let Some(state) = extract_state_from_script(&contract.artifact, &utxo.script) {
-                    contract.state = state;
+                match extract_state_from_script(&contract.artifact, &utxo.script) {
+                    Ok(Some(state)) => contract.state = state,
+                    Ok(None) => {}
+                    Err(e) => panic!("RunarContract::from_utxo: {e}"),
                 }
             }
         }

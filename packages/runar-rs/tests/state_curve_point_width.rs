@@ -100,7 +100,8 @@ fn curve_point_cross_sdk_golden_serialize() {
 
 #[test]
 fn curve_point_cross_sdk_golden_deserialize() {
-    let back = deserialize_state(&curve_point_fields(), &cross_sdk_golden());
+    let back = deserialize_state(&curve_point_fields(), &cross_sdk_golden())
+        .expect("refused the cross-SDK golden");
     assert!(matches!(back["n"], SdkValue::Int(1)), "n: {:?}", back["n"]);
     assert!(matches!(back["flag"], SdkValue::Bool(true)), "flag: {:?}", back["flag"]);
     let input = curve_point_values();
@@ -119,7 +120,8 @@ fn curve_point_lone_field_round_trip() {
         let hex = serialize_state(&fields, &values);
         assert_eq!(hex, v, "{field_type} must serialize raw");
         assert_eq!(hex.len() / 2, size, "{field_type} width");
-        assert_eq!(bytes_of(&deserialize_state(&fields, &hex)["v"]), v);
+        let back = deserialize_state(&fields, &hex).expect("refused a well-formed blob");
+        assert_eq!(bytes_of(&back["v"]), v);
     }
 }
 
