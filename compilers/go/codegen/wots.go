@@ -11,6 +11,9 @@
 // Exit stack:  [..., bool] (1 = valid, 0 = invalid).
 package codegen
 
+// wotsSigLen is the total WOTS+ signature length in bytes: len (67 chains) * n (32).
+const wotsSigLen = 67 * 32
+
 // emitWOTSOneChainOp emits one WOTS+ chain verification.
 // Entry stack: pubSeed(bottom) sig csum endpt digit(top)
 // Exit stack:  pubSeed(bottom) sigRest newCsum newEndpt
@@ -102,7 +105,16 @@ func EmitVerifyWOTS(emit func(StackOp)) {
 	emit(StackOp{Op: "opcode", Code: "OP_SHA256"}) // pubSeed sig msgHash
 
 	// Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
-	emit(StackOp{Op: "swap"})
+	emit(StackOp{Op: "swap"}) // pubSeed msgHash sig
+
+	// R-135: enforce the exact signature length on-chain. The chain loop consumes
+	// wotsSigLen bytes via OP_SPLIT and then drops whatever is left, so without this
+	// gate `sig || junk` verified identically to `sig`. Short signatures already abort
+	// inside OP_SPLIT; this closes the over-long direction. Net stack effect 0.
+	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	emit(StackOp{Op: "push", Value: bigIntPush(wotsSigLen)})
+	emit(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+
 	emit(StackOp{Op: "push", Value: bigIntPush(0)})
 	emit(StackOp{Op: "opcode", Code: "OP_0"})
 	emit(StackOp{Op: "push", Value: bigIntPush(3)})

@@ -75,7 +75,9 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
 		{"P384Add", EmitP384Add, 11525},
 		{"P384Mul", EmitP384Mul, 211181},
-		{"VerifyWOTS", EmitVerifyWOTS, 15488},
+		// R-135: +3 ops for the exact-signature-length gate
+		// (OP_SIZE, push 2144, OP_EQUALVERIFY). 15488 -> 15491.
+		{"VerifyWOTS", EmitVerifyWOTS, 15491},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -16,6 +16,9 @@ import type { StackOp } from '../ir/index.js';
 
 type Emit = (op: StackOp) => void;
 
+/** Total WOTS+ signature length in bytes: LEN (67 chains) * N (32). */
+const WOTS_SIG_LEN = 67 * 32;
+
 /**
  * Emit one WOTS+ chain with RFC 8391 tweakable hashing.
  * Input:  pubSeed(bottom) sig(1) csum(2) endpt(3) digit(top)
@@ -115,6 +118,17 @@ export function emitVerifyWOTS(emit: Emit): void {
 
   // Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
   emit({ op: 'swap' });                // pubSeed msgHash sig
+
+  // R-135: enforce the exact signature length on-chain. The chain loop consumes
+  // LEN * N bytes via OP_SPLIT and then drops whatever is left, so without this
+  // gate `sig || junk` verified identically to `sig` — unbounded third-party
+  // malleability of the unlocking script. Short signatures already abort inside
+  // OP_SPLIT; this closes the over-long direction.
+  emit({ op: 'opcode', code: 'OP_SIZE' });
+  emit({ op: 'push', value: BigInt(WOTS_SIG_LEN) });
+  emit({ op: 'opcode', code: 'OP_EQUALVERIFY' });
+  // Net stack effect 0: OP_SIZE +1, push +1, OP_EQUALVERIFY -2. sig stays on top.
+
   emit({ op: 'push', value: 0n });     // pubSeed msgHash sig 0
   emit({ op: 'opcode', code: 'OP_0' }); // pubSeed msgHash sig 0 empty
   emit({ op: 'push', value: 3n });

@@ -13,6 +13,9 @@
 use num_bigint::BigInt;
 use super::stack::{PushValue, StackOp};
 
+/// Total WOTS+ signature length in bytes: len (67 chains) * n (32).
+const WOTS_SIG_LEN: usize = 67 * 32;
+
 /// Emit one WOTS+ chain verification.
 ///
 /// Entry stack: `pubSeed(bottom) sig csum endpt digit(top)`
@@ -107,7 +110,16 @@ pub fn emit_verify_wots(emit: &mut dyn FnMut(StackOp)) {
     emit(StackOp::Opcode("OP_SHA256".into()));         // pubSeed sig msgHash
 
     // Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
-    emit(StackOp::Swap);
+    emit(StackOp::Swap); // pubSeed msgHash sig
+
+    // R-135: enforce the exact signature length on-chain. The chain loop consumes
+    // WOTS_SIG_LEN bytes via OP_SPLIT and then drops whatever is left, so without this
+    // gate `sig || junk` verified identically to `sig`. Short signatures already abort
+    // inside OP_SPLIT; this closes the over-long direction. Net stack effect 0.
+    emit(StackOp::Opcode("OP_SIZE".into()));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(WOTS_SIG_LEN))));
+    emit(StackOp::Opcode("OP_EQUALVERIFY".into()));
+
     emit(StackOp::Push(PushValue::Int(BigInt::from(0))));
     emit(StackOp::Opcode("OP_0".into()));
     emit(StackOp::Push(PushValue::Int(BigInt::from(3))));

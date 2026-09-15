@@ -17,8 +17,10 @@ class TestWotsCodegen < Minitest::Test
   # were extracted into `RunarCompiler::Codegen::WOTS`. Any drift in the
   # post-extraction `WOTS.emit_verify_wots` opcode stream will trip both the
   # length and the Marshal.dump SHA-256 fingerprint.
-  WOTS_VERIFY_OPS_LENGTH       = 5438
-  WOTS_VERIFY_OPS_FINGERPRINT  = 'b5799f1077059f19b8aea3bc39aa6b9d4a0a82c6603d1b38506ef7c7fdcf51dc'
+  # R-135: +3 ops for the exact-signature-length gate (OP_SIZE, push 2144,
+  # OP_EQUALVERIFY). 5438 -> 5441, and the Marshal fingerprint moves with it.
+  WOTS_VERIFY_OPS_LENGTH       = 5441
+  WOTS_VERIFY_OPS_FINGERPRINT  = '4f1afcab5c69790caf1f938d7f6d11f8d5872bd4105a3e41928d3e6290167cbc'
 
   def test_verify_wots_emits_unrolled_chain
     source = <<~TS

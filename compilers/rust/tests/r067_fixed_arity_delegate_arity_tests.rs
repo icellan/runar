@@ -298,7 +298,9 @@ fn undersupplied_delegates_are_still_refused() {
 const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     // (func, arity, op count, FNV-1a of the op vector)
     ("verifyRabinSig", 4, 34, 0x32f3933061e6c9b4),
-    ("verifyWOTS", 3, 5444, 0xd42b9ee2ee74510f),
+    // R-135: +3 top-level ops for the exact-signature-length gate (OP_SIZE,
+    // push 2144, OP_EQUALVERIFY). 5444 -> 5447, and the fingerprint moves with it.
+    ("verifyWOTS", 3, 5447, 0xeb5c21ad8b9fcfb4),
     ("verifySLHDSA_SHA2_128s", 3, 29583, 0xc1296427c5d591c0),
     ("sha256Compress", 2, 21296, 0x73b8dfa330f7de6f),
     ("sha256Finalize", 3, 63947, 0xfa3a224e6ba404f0),

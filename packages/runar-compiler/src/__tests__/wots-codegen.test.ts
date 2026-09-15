@@ -16,11 +16,14 @@ import { optimizeStackIR } from '../optimizer/peephole.js';
 // PostQuantumWOTSNaiveInsecure.runar.sol fixture, captured before
 // 05-stack-lower.ts had its inline WOTS+ helpers extracted into
 // passes/wots-codegen.ts. Any change to emitted bytes breaks this.
+// R-135 re-stamp: the WOTS+ verifier gained a 5-byte exact-signature-length
+// gate (OP_SIZE <2144> OP_EQUALVERIFY), so these three pins moved together:
+// 39164 -> 39174 hex chars (+10 = +5 script bytes) and a new digest/head.
 const PREFIX_FROZEN_SCRIPT_SHA256 =
-  'd0abd9bf9d6775d0b5dfe40972d066f18ff00f46b5c9a7f2dcef47dd5e9f4895';
-const PREFIX_FROZEN_SCRIPT_LEN = 39164;
+  '92c400e316bd7a53a79e5e4dc2335f24f1dc46e089caf222012a323a510351ee';
+const PREFIX_FROZEN_SCRIPT_LEN = 39174;
 const PREFIX_FROZEN_SCRIPT_HEAD =
-  '007b7b7b01207f6b7b7b7ca87c0000537a517f7c0051807e817660967c60976b7c6b765f7c946b7c6b7c6b7c01207f6b7c7692638c677c52790200007e7c7ea87c687692638c677c52790200017e7c7ea87c687692638c677c52790200027e7c7ea87c68';
+  '007b7b7b01207f6b7b7b7ca87c82026008880000537a517f7c0051807e817660967c60976b7c6b765f7c946b7c6b7c6b7c01207f6b7c7692638c677c';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WOTS_FIXTURE = join(
