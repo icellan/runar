@@ -4477,6 +4477,44 @@ class _LoweringContext:
 
     def _lower_sqrt(self, binding_name: str, args: list[str],
                     binding_index: int, last_uses: dict[str, int]) -> None:
+        """sqrt(n) — integer square root via Newton's method, 256 rounds.
+
+        Algorithm, identical to the constant folder and the reference interpreter so
+        that all three agree at every input (R-169):
+
+            guess = n
+            repeat 256 times:
+              next  = (guess + n / guess) / 2
+              guess = min(guess, next)        # the convergence break
+
+        OP_MIN IS the break. Bitcoin Script has no loops, so the rounds are unrolled
+        and unconditional; what stops them changing the answer is that the Newton
+        sequence seeded at guess = n is strictly DECREASING while guess > isqrt(n)
+        and non-decreasing once guess == isqrt(n). Clamping each round to the running
+        minimum makes isqrt(n) a fixed point and every post-convergence round a
+        no-op. Without the clamp the iteration reaches isqrt(n) and then OSCILLATES
+        between it and isqrt(n)+1, so a fixed round count returns whichever side the
+        parity lands on — sqrt(8) = 3, sqrt(63) = 8.
+
+        256 matches the folder's bound, because seeded at guess = n the iterate only
+        halves per round until it nears sqrt(n): a correct answer needs ~log2(n)/2
+        rounds (20 for 32-bit, 37 for 64-bit, 135 for 256-bit). The previous 16 was
+        short by an unbounded margin, not a tuning margin — sqrt(10^12) came out as
+        15280627.
+
+        DOMAIN: exact for every 0 <= n < 2^497, and both ends are ENFORCED, because
+        outside them the iteration returns a wrong number rather than failing:
+
+            OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+            OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n fits in 62 bytes
+
+        A minimally-encoded script number of at most 62 bytes is at most 2^495 - 1,
+        so the enforced domain is 0 <= n < 2^495. The upper guard is not theoretical:
+        a 500-byte n ran to completion on the real ScriptVM and returned a wrong root
+        with no error. A negative n is a fixed point of the min-clamped recurrence
+        and would come back as n itself, so it is refused too — the folder declines
+        and the interpreter throws on the same bound, leaving all three in agreement.
+        """
         if not args:
             raise RuntimeError("sqrt requires 1 argument")
         n = args[0]
@@ -4485,20 +4523,32 @@ class _LoweringContext:
         self.bring_to_top(n, n_is_last)
         self.sm.pop()
 
+        # Domain guards; both leave n on the stack.
+        self.emit_op(StackOp(op="opcode", code="OP_DUP"))
+        self.emit_op(StackOp(op="push", value=big_int_push(0)))
+        self.emit_op(StackOp(op="opcode", code="OP_GREATERTHANOREQUAL"))
+        self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.emit_op(StackOp(op="push", value=big_int_push(63)))
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
+
         self.emit_op(StackOp(op="opcode", code="OP_DUP"))
 
         # Build Newton iteration ops for the then-branch
         newton_ops: list[StackOp] = []
         newton_ops.append(StackOp(op="opcode", code="OP_DUP"))  # n guess(=n)
 
-        SQRT_ITERATIONS = 16
+        SQRT_ITERATIONS = 256
         for _ in range(SQRT_ITERATIONS):
             newton_ops.append(StackOp(op="over"))
             newton_ops.append(StackOp(op="over"))
             newton_ops.append(StackOp(op="opcode", code="OP_DIV"))
+            newton_ops.append(StackOp(op="over"))
             newton_ops.append(StackOp(op="opcode", code="OP_ADD"))
             newton_ops.append(StackOp(op="push", value=big_int_push(2)))
             newton_ops.append(StackOp(op="opcode", code="OP_DIV"))
+            newton_ops.append(StackOp(op="opcode", code="OP_MIN"))
 
         newton_ops.append(StackOp(op="nip"))  # result (drop n)
 

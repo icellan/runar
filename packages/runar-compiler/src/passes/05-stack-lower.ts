@@ -5099,13 +5099,59 @@ class LoweringContext {
 
   /**
    * Lower sqrt(n) — integer square root via Newton's method.
-   * Emits a bounded iteration (16 rounds suffice for 256-bit numbers).
-   * Algorithm: guess = n, then repeatedly guess = (guess + n/guess) / 2
    *
-   * Guards against division by zero when n=0 by wrapping the Newton
-   * iteration in OP_DUP OP_IF ... OP_ENDIF. When n=0, the initial
-   * guess is also 0, and we skip the iteration entirely — 0 remains
-   * on the stack as the result.
+   * Algorithm, identical to `optimizer/constant-fold.ts` and to the reference
+   * interpreter so that all three agree at every input:
+   *
+   *     guess = n
+   *     repeat SQRT_ITERATIONS times:
+   *       next  = (guess + n / guess) / 2
+   *       guess = min(guess, next)        // the convergence break
+   *
+   * `OP_MIN` IS the break. Bitcoin Script has no loops, so the rounds are
+   * unrolled and unconditional; what stops them changing the answer is that
+   * the Newton sequence seeded at `guess = n` is strictly DECREASING while
+   * `guess > isqrt(n)` and non-decreasing once `guess == isqrt(n)`. Clamping
+   * each round to the running minimum therefore makes `isqrt(n)` a fixed
+   * point, and every round after convergence a no-op. Without the clamp the
+   * iteration reaches `isqrt(n)` and then OSCILLATES between it and
+   * `isqrt(n)+1`, so a fixed round count returns whichever side the parity
+   * lands on — `sqrt(8)` = 3, `sqrt(63)` = 8 (R-169).
+   *
+   * SQRT_ITERATIONS is 256, matching the folder's bound, because seeded at
+   * `guess = n` the iterate only halves per round until it nears sqrt(n):
+   * a correct answer needs ~log2(n)/2 rounds (20 for 32-bit, 37 for 64-bit,
+   * 135 for 256-bit). The previous 16 was not merely short, it was short by
+   * an unbounded margin — `sqrt(10^12)` came out as 15280627.
+   *
+   * DOMAIN: exact for every 0 <= n < 2^497 (measured against `s*s <= n <
+   * (s+1)*(s+1)`, not against a peer implementation; the narrowest input the
+   * 256 rounds get wrong is 498 bits). Both ends of that range are ENFORCED,
+   * because outside it the iteration returns a wrong number rather than
+   * failing, and a silently wrong number is the whole defect:
+   *
+   *   OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+   *   OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n encodes in <= 62 bytes
+   *
+   * Nine bytes, and the second guard is a size test rather than a comparison
+   * against a 63-byte constant so that no tier has to agree on the encoding of
+   * a bignum push. A minimally-encoded script number of at most 62 bytes is at
+   * most 2^495 - 1 (the top bit of the top byte is the sign), so the enforced
+   * domain is 0 <= n < 2^495, comfortably inside the proven-exact 2^497.
+   *
+   * The upper guard is not theoretical. A 500-byte n executes to completion on
+   * the real ScriptVM and returns a wrong root with no error — reachability
+   * confirmed by execution, not assumed away.
+   *
+   * n = 0 skips the iteration via OP_DUP OP_IF ... OP_ENDIF (guess would be 0
+   * and OP_DIV would fault); 0 is already on the stack as the result.
+   *
+   * n < 0 in particular is a fixed point of the min-clamped recurrence, so
+   * without the first guard the iteration would return n itself. Before this
+   * change the three implementations of one builtin disagreed three ways on a
+   * negative input: the script returned n, the interpreter threw, the folder
+   * declined to fold. Refusing is the only one of the three that is not a
+   * wrong answer, so all three now refuse.
    */
   private lowerSqrt(
     bindingName: string,
@@ -5121,6 +5167,17 @@ class LoweringContext {
     this.stackMap.pop();
 
     // Stack: <n>
+    // Guard: refuse anything outside the exact domain (see the header note).
+    // Both leave n on the stack.
+    this.emitOp({ op: 'opcode', code: 'OP_DUP' });                    // n n
+    this.emitOp({ op: 'push', value: 0n });                           // n n 0
+    this.emitOp({ op: 'opcode', code: 'OP_GREATERTHANOREQUAL' });     // n (n>=0)
+    this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });                 // n
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });                   // n size(n)
+    this.emitOp({ op: 'push', value: 63n });                          // n size(n) 63
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' });               // n (size<63)
+    this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });                 // n
+
     // Guard: if n == 0, skip Newton iteration (avoid div-by-zero)
     this.emitOp({ op: 'opcode', code: 'OP_DUP' }); // n n
 
@@ -5130,16 +5187,18 @@ class LoweringContext {
     // DUP to get initial guess = n
     newtonOps.push({ op: 'opcode', code: 'OP_DUP' }); // n guess(=n)
 
-    // 16 Newton iterations: guess = (guess + n/guess) / 2
-    const SQRT_ITERATIONS = 16;
+    // guess = min(guess, (guess + n/guess) / 2), SQRT_ITERATIONS times.
+    const SQRT_ITERATIONS = 256;
     for (let i = 0; i < SQRT_ITERATIONS; i++) {
       // Stack: n guess
       newtonOps.push({ op: 'over' });                      // n guess n
       newtonOps.push({ op: 'over' });                      // n guess n guess
       newtonOps.push({ op: 'opcode', code: 'OP_DIV' });    // n guess (n/guess)
-      newtonOps.push({ op: 'opcode', code: 'OP_ADD' });    // n (guess + n/guess)
-      newtonOps.push({ op: 'push', value: 2n });            // n (guess + n/guess) 2
-      newtonOps.push({ op: 'opcode', code: 'OP_DIV' });    // n new_guess
+      newtonOps.push({ op: 'over' });                      // n guess (n/guess) guess
+      newtonOps.push({ op: 'opcode', code: 'OP_ADD' });    // n guess (guess + n/guess)
+      newtonOps.push({ op: 'push', value: 2n });            // n guess (guess + n/guess) 2
+      newtonOps.push({ op: 'opcode', code: 'OP_DIV' });    // n guess next
+      newtonOps.push({ op: 'opcode', code: 'OP_MIN' });    // n min(guess, next)
     }
     // Stack: n result
     newtonOps.push({ op: 'nip' }); // result (drop n)

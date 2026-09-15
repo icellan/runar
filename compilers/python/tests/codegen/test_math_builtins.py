@@ -133,7 +133,7 @@ _OP_COUNTS = [
     ("pow",        2,  168),
     ("mulDiv",     3,    8),
     ("percentOf",  2,    7),
-    ("sqrt",       1,    2),
+    ("sqrt",       1,   10),  # R-169: 2 -> 10 top-level ops (two domain guards ahead of the unchanged OP_DUP + if)
     ("gcd",        2,  777),
     ("divmod",     2,   10),
     ("log2",       1,  386),
@@ -296,26 +296,53 @@ def test_percent_of_divides_by_10000_basis_points():
 
 # -- sqrt ------------------------------------------------------------------
 
-def test_sqrt_runs_16_newton_iterations_under_if_guard():
-    ops = _unlock_ops("sqrt", 1)
-    assert _is_opcode(ops[0], "OP_DUP")
-    assert ops[1].op == "if"
+def test_sqrt_runs_256_min_clamped_newton_rounds_under_if_guard():
+    """R-169. Two things this pins that the previous version could not.
 
-    then_ops = ops[1].then
-    # 1 (DUP guess) + 16 × 6 (Newton step) + 1 (NIP) = 98.
-    assert len(then_ops) == 98
+    1. The CONVERGENCE BREAK. The final OP_MIN of each round clamps the new
+       iterate against the previous one. Integer Newton reaches floor(sqrt(n))
+       and then oscillates between it and floor+1, so without the clamp a fixed
+       round count returns whichever side the parity lands on -- sqrt(8) = 3.
+    2. The ROUND COUNT. Seeded at guess = n the iterate only halves per round
+       until it nears sqrt(n), so ~log2(n)/2 rounds are needed: 20 for a 32-bit
+       n, 37 for 64-bit, 135 for 256-bit. 16 was not short by a tuning margin.
+
+    Executed-script coverage for both lives in the TS tier's ScriptVM battery;
+    this test pins the shape the Python tier emits so the two cannot drift.
+    """
+    ops = _unlock_ops("sqrt", 1)
+    # Domain guards: n >= 0, and n encodable in <= 62 script bytes (n < 2^495).
+    # Outside that range the iteration returns a wrong number rather than
+    # failing, which is the defect, so both ends refuse.
+    assert _is_opcode(ops[0], "OP_DUP")
+    assert _is_push_int(ops[1], 0)
+    assert _is_opcode(ops[2], "OP_GREATERTHANOREQUAL")
+    assert _is_opcode(ops[3], "OP_VERIFY")
+    assert _is_opcode(ops[4], "OP_SIZE")
+    assert _is_push_int(ops[5], 63)
+    assert _is_opcode(ops[6], "OP_LESSTHAN")
+    assert _is_opcode(ops[7], "OP_VERIFY")
+    # Unchanged n == 0 guard.
+    assert _is_opcode(ops[8], "OP_DUP")
+    assert ops[9].op == "if"
+
+    then_ops = ops[9].then
+    # 1 (DUP guess) + 256 × 8 (Newton step) + 1 (NIP) = 2050.
+    assert len(then_ops) == 2050
     assert _is_opcode(then_ops[0], "OP_DUP")
     assert then_ops[-1].op == "nip"
 
-    # Each Newton step: over, over, DIV, ADD, push(2), DIV.
-    for i in range(16):
-        base = 1 + i * 6
+    # Each Newton step: over, over, DIV, over, ADD, push(2), DIV, MIN.
+    for i in range(256):
+        base = 1 + i * 8
         assert then_ops[base + 0].op == "over"
         assert then_ops[base + 1].op == "over"
         assert _is_opcode(then_ops[base + 2], "OP_DIV")
-        assert _is_opcode(then_ops[base + 3], "OP_ADD")
-        assert _is_push_int(then_ops[base + 4], 2)
-        assert _is_opcode(then_ops[base + 5], "OP_DIV")
+        assert then_ops[base + 3].op == "over"
+        assert _is_opcode(then_ops[base + 4], "OP_ADD")
+        assert _is_push_int(then_ops[base + 5], 2)
+        assert _is_opcode(then_ops[base + 6], "OP_DIV")
+        assert _is_opcode(then_ops[base + 7], "OP_MIN")
 
 
 # -- gcd -------------------------------------------------------------------

@@ -1190,6 +1190,12 @@ export class RunarInterpreter {
       case 'sqrt': {
         const n = this.toBigInt(args[0]!);
         if (n < 0n) throw new Error('sqrt: negative input');
+        // Refuse outside the domain the compiled script enforces
+        // (`05-stack-lower.ts#lowerSqrt`: n >= 0 and n encodable in <= 62
+        // script bytes, i.e. n < 2^495). The script ABORTS out here rather
+        // than returning a wrong root, so computing one would put this
+        // interpreter and the deployed script back into disagreement.
+        if (n >= 1n << 495n) throw new Error('sqrt: input outside the supported domain (n >= 2^495)');
         if (n === 0n) return { kind: 'bigint', value: 0n };
         let guess = n;
         for (let i = 0; i < 256; i++) {

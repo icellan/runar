@@ -21,6 +21,14 @@ import { UnknownANFKindError } from 'runar-ir-schema';
 
 type ConstValue = string | bigint | boolean;
 
+/**
+ * Upper end of the domain `sqrt` is exact on, shared with the emitted script
+ * and the reference interpreter. The script enforces it with
+ * `OP_SIZE <63> OP_LESSTHAN OP_VERIFY`, and a minimally-encoded script number
+ * of at most 62 bytes is at most 2^495 - 1.
+ */
+const SQRT_DOMAIN_LIMIT = 1n << 495n;
+
 // ---------------------------------------------------------------------------
 // Binary operation evaluation
 // ---------------------------------------------------------------------------
@@ -174,7 +182,12 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
     case 'sqrt': {
       if (bigintArgs.length !== 1) return null;
       const n = bigintArgs[0]!;
-      if (n < 0n) return null;
+      // Decline outside the domain the emitted script GUARANTEES and ENFORCES
+      // (`passes/05-stack-lower.ts#lowerSqrt`): n >= 0 and n encodable in <= 62
+      // script bytes. Outside it the compiled script aborts, so folding to a
+      // value here would make `sqrt(k)` mean one thing folded and another
+      // executed — R-169 exactly. Declining leaves the guarded script in place.
+      if (n < 0n || n >= SQRT_DOMAIN_LIMIT) return null;
       if (n === 0n) return 0n;
       let guess = n;
       for (let i = 0; i < 256; i++) {

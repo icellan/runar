@@ -318,7 +318,7 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     ("extractVersion", 1, 4, 0x64a454494e990a9f),
     ("reverseBytes", 1, 2083, 0xaa355cbc2102a10c),
     ("sign", 1, 2, 0x00a1c571bf6296bf),
-    ("sqrt", 1, 2, 0x49c14953897e166d),
+    ("sqrt", 1, 10, 0xbfe239cb7a0312f2), // R-169: 2 -> 10 top-level ops (2 domain guards, 8 ops, ahead of the unchanged OP_DUP + OP_IF pair); the 256-round min-clamped Newton body lives inside the If and does not add top-level ops
     ("log2", 1, 386, 0x391ad77ad05d6a00),
 ];
 

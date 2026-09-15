@@ -453,6 +453,13 @@ public final class ConstantFold {
                 if (ints.size() != 1) return null;
                 BigInteger n = ints.get(0);
                 if (n.signum() < 0) return null;
+                // Decline outside the domain the emitted script GUARANTEES and
+                // ENFORCES (StackLower#lowerSqrt): n >= 0 and n encodable in
+                // <= 62 script bytes, i.e. n < 2^495. Outside it the compiled
+                // script aborts, so folding to a value here would make sqrt(k)
+                // mean one thing folded and another executed — R-169 at the
+                // other end of the domain.
+                if (n.bitLength() > 495) return null;
                 if (n.signum() == 0) return ConstSlot.ofInt(BigInteger.ZERO);
                 return ConstSlot.ofInt(n.sqrt());
             }

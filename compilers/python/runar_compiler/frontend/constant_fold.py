@@ -279,6 +279,13 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         n = int_args[0]
         if n < 0:
             return None
+        # Decline outside the domain the emitted script GUARANTEES and ENFORCES
+        # (codegen/stack.py _lower_sqrt): n >= 0 and n encodable in <= 62 script
+        # bytes, i.e. n < 2**495. Outside it the compiled script aborts, so
+        # folding to a value here would make sqrt(k) mean one thing folded and
+        # another executed - R-169 at the other end of the domain.
+        if n.bit_length() > 495:
+            return None
         if n == 0:
             return ("int", 0)
         # Integer square root via Newton's method

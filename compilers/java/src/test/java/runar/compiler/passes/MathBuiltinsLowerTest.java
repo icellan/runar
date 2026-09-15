@@ -207,22 +207,26 @@ class MathBuiltinsLowerTest {
     /* ================================================================== */
 
     @Test
-    void sqrtEmits16NewtonIterations() {
+    void sqrtEmits256MinClampedNewtonRounds() {
         List<StackOp> ops = compileSingleCall(
             "Bigint r = sqrt(this.a); assertThat(r >= Bigint.ZERO);"
         );
-        // Each Newton iteration emits: OVER OVER OP_DIV OP_ADD push2 OP_DIV.
-        // The 0-guard is wrapped in an IF; the iterations live INSIDE that IF.
-        // At 16 iterations: 32 OP_DIV (2 per iter), 16 OP_ADD.
-        assertEquals(32, countOpcode(ops, "OP_DIV"),
-            "sqrt must emit 32 OP_DIV (2 per Newton iteration × 16)");
-        assertEquals(16, countOpcode(ops, "OP_ADD"),
-            "sqrt must emit 16 OP_ADD (1 per Newton iteration)");
-        // OVER appears 32 times (2 per iter).
-        long overCount = ops.stream().filter(op -> op instanceof OverOp).count();
-        // At top level: 0 OVERs (they're inside the IF). Recurse.
+        // R-169. Each round emits: OVER OVER OP_DIV OVER OP_ADD push2 OP_DIV OP_MIN.
+        // The 0-guard is wrapped in an IF; the rounds live INSIDE that IF.
+        // At 256 rounds: 512 OP_DIV (2 per round), 256 OP_ADD, 768 OVER (3 per
+        // round), 256 OP_MIN.
+        assertEquals(512, countOpcode(ops, "OP_DIV"),
+            "sqrt must emit 512 OP_DIV (2 per Newton round × 256)");
+        assertEquals(256, countOpcode(ops, "OP_ADD"),
+            "sqrt must emit 256 OP_ADD (1 per Newton round)");
+        // The third OVER per round is what preserves the previous iterate so
+        // OP_MIN can clamp against it — it IS the convergence break. Without it
+        // integer Newton oscillates between floor(sqrt(n)) and floor+1 and a
+        // fixed round count returns whichever side the parity lands on.
         long deepOver = deepCountOver(ops);
-        assertEquals(32, deepOver, "sqrt must emit 32 OVER ops (2 per iteration × 16)");
+        assertEquals(768, deepOver, "sqrt must emit 768 OVER ops (3 per round × 256)");
+        assertEquals(256, countOpcode(ops, "OP_MIN"),
+            "sqrt must emit 256 OP_MIN — one per round, the convergence break");
     }
 
     private static long deepCountOver(List<StackOp> ops) {
@@ -466,14 +470,19 @@ class MathBuiltinsLowerTest {
     }
 
     @Test
-    void sqrtIterationsMatchGoReference16() {
-        // Go's lowerSqrt at stack.go:3576 uses const sqrtIterations = 16.
+    void sqrtIterationsMatchGoReference256() {
+        // Go's lowerSqrt uses const sqrtIterations = 256 (R-169). 16 was not
+        // short by a tuning margin: seeded at guess = n the iterate only halves
+        // per round until it nears sqrt(n), so ~log2(n)/2 rounds are needed —
+        // 20 for a 32-bit n, 37 for 64-bit, 135 for 256-bit. 256 also matches
+        // the constant folder's bound, which is what makes the emitted script
+        // the same function as the folder rather than merely close to it.
         List<StackOp> ops = compileSingleCall(
             "Bigint r = sqrt(this.a); assertThat(r >= Bigint.ZERO);"
         );
-        // 16 iterations × OP_ADD = 16
-        assertEquals(16, countOpcode(ops, "OP_ADD"),
-            "Java sqrt must emit exactly 16 OP_ADDs (Go reference: 16 iterations)");
+        // 256 rounds × OP_ADD = 256
+        assertEquals(256, countOpcode(ops, "OP_ADD"),
+            "Java sqrt must emit exactly 256 OP_ADDs (Go reference: 256 rounds)");
     }
 
     @Test

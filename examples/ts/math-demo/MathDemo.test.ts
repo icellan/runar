@@ -126,7 +126,29 @@ describe('MathDemo', () => {
   });
 
   // --- sqrt ---
+  //
+  // READ THIS BEFORE ADDING A CASE HERE. `TestContract` runs the INTERPRETER,
+  // not the compiled script. For most of this file that distinction does not
+  // matter; for `sqrt` it hid a real defect for the life of the builtin (R-169).
+  // The emitted script ran 16 unconditional Newton rounds with no convergence
+  // break and returned 3 for sqrt(8), 8 for sqrt(63) and 15280627 for
+  // sqrt(10^12), while the interpreter -- which every assertion below drives --
+  // was correct the whole time. Note that the four values this block originally
+  // pinned (100, 0, 10, 1000000) are ALL values where the broken script happened
+  // to agree, which is exactly why a green suite proved nothing.
+  //
+  // Coverage of the EMITTED SCRIPT lives in
+  // `packages/runar-compiler/src/__tests__/r169-sqrt-newton-convergence.test.ts`
+  // (executed on ScriptVM against `s*s <= n < (s+1)^2`) and in
+  // `conformance/witnesses/real-crypto/math-demo.json` (real secp256k1 spends
+  // with pinned expectedState). A case added here does NOT cover the script.
   describe('squareRoot (sqrt)', () => {
+    it('computes sqrt(99) = 9 — a value the emitted script got wrong (R-169)', () => {
+      const c = TestContract.fromSource(source, { value: 99n });
+      c.call('squareRoot');
+      expect(c.state.value).toBe(9n);
+    });
+
     it('computes sqrt(100) = 10', () => {
       const c = TestContract.fromSource(source, { value: 100n });
       c.call('squareRoot');

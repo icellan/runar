@@ -308,6 +308,14 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 		if n.Sign() < 0 {
 			return nil
 		}
+		// Decline outside the domain the emitted script GUARANTEES and ENFORCES
+		// (codegen/stack.go lowerSqrt): n >= 0 and n encodable in <= 62 script
+		// bytes, i.e. n < 2^495. Outside it the compiled script aborts, so
+		// folding to a value here would make sqrt(k) mean one thing folded and
+		// another executed — R-169 at the other end of the domain.
+		if n.BitLen() > 495 {
+			return nil
+		}
 		if n.Sign() == 0 {
 			return &constValue{kind: constBigInt, bigint: big.NewInt(0)}
 		}

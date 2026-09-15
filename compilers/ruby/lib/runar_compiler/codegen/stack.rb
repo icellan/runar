@@ -3496,6 +3496,43 @@ module RunarCompiler::Codegen
       _track_depth
     end
 
+    # sqrt(n) — integer square root via Newton's method, 256 rounds.
+    #
+    # Algorithm, identical to the constant folder and the reference interpreter so
+    # that all three agree at every input (R-169):
+    #
+    #     guess = n
+    #     repeat 256 times:
+    #       next  = (guess + n / guess) / 2
+    #       guess = min(guess, next)        # the convergence break
+    #
+    # OP_MIN IS the break. Bitcoin Script has no loops, so the rounds are unrolled
+    # and unconditional; what stops them changing the answer is that the Newton
+    # sequence seeded at guess = n is strictly DECREASING while guess > isqrt(n)
+    # and non-decreasing once guess == isqrt(n). Clamping each round to the running
+    # minimum makes isqrt(n) a fixed point and every post-convergence round a
+    # no-op. Without the clamp the iteration reaches isqrt(n) and then OSCILLATES
+    # between it and isqrt(n)+1, so a fixed round count returns whichever side the
+    # parity lands on — sqrt(8) = 3, sqrt(63) = 8.
+    #
+    # 256 matches the folder's bound, because seeded at guess = n the iterate only
+    # halves per round until it nears sqrt(n): a correct answer needs ~log2(n)/2
+    # rounds (20 for 32-bit, 37 for 64-bit, 135 for 256-bit). The previous 16 was
+    # short by an unbounded margin, not a tuning margin — sqrt(10^12) came out as
+    # 15280627.
+    #
+    # DOMAIN: exact for every 0 <= n < 2^497, and both ends are ENFORCED, because
+    # outside them the iteration returns a wrong number rather than failing:
+    #
+    #     OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+    #     OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n fits in 62 bytes
+    #
+    # A minimally-encoded script number of at most 62 bytes is at most 2^495 - 1,
+    # so the enforced domain is 0 <= n < 2^495. The upper guard is not theoretical:
+    # a 500-byte n ran to completion on the real ScriptVM and returned a wrong root
+    # with no error. A negative n is a fixed point of the min-clamped recurrence
+    # and would come back as n itself, so it is refused too — the folder declines
+    # and the interpreter throws on the same bound, leaving all three in agreement.
     def _lower_sqrt(binding_name, args, binding_index, last_uses)
       raise "sqrt requires 1 argument" if args.empty?
 
@@ -3503,20 +3540,32 @@ module RunarCompiler::Codegen
       bring_to_top(args[0], is_last)
       @sm.pop
 
+      # Domain guards; both leave n on the stack.
+      emit_opcode("OP_DUP")
+      emit_op({ op: "push", value: { kind: "bigint", big_int: 0 } })
+      emit_opcode("OP_GREATERTHANOREQUAL")
+      emit_opcode("OP_VERIFY")
+      emit_opcode("OP_SIZE")
+      emit_op({ op: "push", value: { kind: "bigint", big_int: 63 } })
+      emit_opcode("OP_LESSTHAN")
+      emit_opcode("OP_VERIFY")
+
       emit_opcode("OP_DUP")
 
       # Build Newton iteration ops for the then-branch
       newton_ops = []
       newton_ops << { op: "opcode", code: "OP_DUP" }  # n guess(=n)
 
-      sqrt_iterations = 16
+      sqrt_iterations = 256
       sqrt_iterations.times do
         newton_ops << { op: "over" }
         newton_ops << { op: "over" }
         newton_ops << { op: "opcode", code: "OP_DIV" }
+        newton_ops << { op: "over" }
         newton_ops << { op: "opcode", code: "OP_ADD" }
         newton_ops << { op: "push", value: { kind: "bigint", big_int: 2 } }
         newton_ops << { op: "opcode", code: "OP_DIV" }
+        newton_ops << { op: "opcode", code: "OP_MIN" }
       end
 
       newton_ops << { op: "nip" }  # result (drop n)

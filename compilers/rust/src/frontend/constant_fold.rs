@@ -227,6 +227,15 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
             if n.is_negative() {
                 return None;
             }
+            // Decline outside the domain the emitted script GUARANTEES and
+            // ENFORCES (`codegen/stack.rs` `lower_sqrt`): n >= 0 and n
+            // encodable in <= 62 script bytes, i.e. n < 2^495. Outside it the
+            // compiled script aborts, so folding to a value here would make
+            // `sqrt(k)` mean one thing folded and another executed — R-169 at
+            // the other end of the domain.
+            if n.bits() > 495 {
+                return None;
+            }
             if n.is_zero() {
                 return Some(ConstValue::Int(BigInt::from(0)));
             }

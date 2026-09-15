@@ -1707,9 +1707,9 @@ Several observations emerge from these measurements:
     Bitcoin SV's standard transaction limits.
   \item \textbf{Loop unrolling dominates size.} \texttt{MathDemo}
     exercises math builtins that expand into multi-opcode sequences
-    (\texttt{sqrt}: 16 Newton iterations, \texttt{pow}: 32 conditional
+    (\texttt{sqrt}: 256 Newton rounds, \texttt{pow}: 32 conditional
     multiplies, \texttt{gcd}: 256 Euclidean iterations), resulting in
-    2.5~KB of script. This illustrates the size--generality tradeoff
+    14.8~KB of script. This illustrates the size--generality tradeoff
     inherent in full loop unrolling.
   \item \textbf{Post-quantum scripts are large but feasible.}
     \texttt{PostQuantumWallet} at 10.5~KB is 2--3 orders of magnitude

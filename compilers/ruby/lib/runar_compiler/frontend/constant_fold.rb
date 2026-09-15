@@ -217,6 +217,12 @@ module RunarCompiler
           return nil unless int_args.size == 1
           n = int_args[0]
           return nil if n < 0
+          # Decline outside the domain the emitted script GUARANTEES and
+          # ENFORCES (codegen/stack.rb _lower_sqrt): n >= 0 and n encodable in
+          # <= 62 script bytes, i.e. n < 2**495. Outside it the compiled script
+          # aborts, so folding to a value here would make sqrt(k) mean one thing
+          # folded and another executed - R-169 at the other end of the domain.
+          return nil if n.bit_length > 495
           return ["int", 0] if n == 0
           # Integer square root via Newton's method
           x = n

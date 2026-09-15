@@ -362,6 +362,13 @@ fn evalBuiltinCall(
             if (count != 1) return null;
             const n = big_args[0];
             if (const_arith.isNegative(n)) return null;
+            // Decline outside the domain the emitted script GUARANTEES and
+            // ENFORCES (passes/stack_lower.zig lowerSqrt): n >= 0 and n encodable in
+            // <= 62 script bytes, i.e. n < 2^495. Outside it the compiled
+            // script aborts, so folding to a value here would make sqrt(k) mean
+            // one thing folded and another executed — R-169 at the other end of
+            // the domain.
+            if (n.toConst().bitCountAbs() > 495) return null;
             if (const_arith.isZero(n)) return .{ .integer = 0 };
 
             // Newton's method, capped at 256 iterations and terminating when

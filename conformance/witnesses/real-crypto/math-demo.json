@@ -30,6 +30,42 @@
       }
     },
     {
+      "method": "squareRoot",
+      "args": [],
+      "constructorArgs": [
+        "99n"
+      ],
+      "expect": "accept",
+      "note": "R-169: sqrt(99) = 9. The emitted script returned 10 until the Newton rounds got a convergence break — integer Newton reaches floor(sqrt(n)) and then oscillates, so a fixed round count landed on the wrong side of the bounce. 99 is chosen because the two spends above and the fixture's own 100n constructor are all values where the BUGGY script happened to agree.",
+      "expectedState": {
+        "value": "9n"
+      }
+    },
+    {
+      "method": "squareRoot",
+      "args": [],
+      "constructorArgs": [
+        "1000000000000n"
+      ],
+      "expect": "accept",
+      "note": "R-169: sqrt(10^12) = 1000000. The emitted script returned 15280627 — three orders of magnitude out, because 16 rounds seeded at guess = n only halve per round and never reach sqrt(n) for a large n. Pins the round count, not just the break: restore 16 rounds WITH the break and this row still reddens.",
+      "expectedState": {
+        "value": "1000000n"
+      }
+    },
+    {
+      "method": "squareRoot",
+      "args": [],
+      "constructorArgs": [
+        "0n"
+      ],
+      "expect": "accept",
+      "note": "Control: the n == 0 guard still skips the iteration rather than dividing by zero.",
+      "expectedState": {
+        "value": "0n"
+      }
+    },
+    {
       "method": "divideBy",
       "args": [
         "2n"
@@ -39,5 +75,8 @@
       "expect": "reject",
       "note": "tampered continuation output"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "4553e5a0d108db9a0b5a2947b7d1313f1e35070524c7e33862d3d6f0ad4221a1"
+  }
 }

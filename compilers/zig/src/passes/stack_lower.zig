@@ -2886,21 +2886,72 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// sqrt(n) — integer square root via Newton's method, 256 rounds.
+    ///
+    /// Algorithm, identical to the constant folder and the reference
+    /// interpreter so that all three agree at every input (R-169):
+    ///
+    ///     guess = n
+    ///     repeat 256 times:
+    ///       next  = (guess + n / guess) / 2
+    ///       guess = min(guess, next)        // the convergence break
+    ///
+    /// OP_MIN IS the break. Bitcoin Script has no loops, so the rounds are
+    /// unrolled and unconditional; what stops them changing the answer is that
+    /// the Newton sequence seeded at guess = n is strictly DECREASING while
+    /// guess > isqrt(n) and non-decreasing once guess == isqrt(n). Clamping
+    /// each round to the running minimum makes isqrt(n) a fixed point and every
+    /// post-convergence round a no-op. Without the clamp the iteration reaches
+    /// isqrt(n) and then OSCILLATES between it and isqrt(n)+1, so a fixed round
+    /// count returns whichever side the parity lands on — sqrt(8) = 3.
+    ///
+    /// 256 matches the folder's bound, because seeded at guess = n the iterate
+    /// only halves per round until it nears sqrt(n): a correct answer needs
+    /// ~log2(n)/2 rounds (20 for 32-bit, 37 for 64-bit, 135 for 256-bit). The
+    /// previous 16 was short by an unbounded margin, not a tuning margin —
+    /// sqrt(10^12) came out as 15280627.
+    ///
+    /// DOMAIN: exact for every 0 <= n < 2^497, and both ends are ENFORCED,
+    /// because outside them the iteration returns a wrong number rather than
+    /// failing:
+    ///
+    ///     OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+    ///     OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n fits in 62 bytes
+    ///
+    /// A minimally-encoded script number of at most 62 bytes is at most
+    /// 2^495 - 1, so the enforced domain is 0 <= n < 2^495. The upper guard is
+    /// not theoretical: a 500-byte n ran to completion on the real ScriptVM and
+    /// returned a wrong root with no error. A negative n is a fixed point of
+    /// the min-clamped recurrence and would come back as n itself, so it is
+    /// refused too — the folder declines and the interpreter throws on the same
+    /// bound, leaving all three in agreement.
     fn lowerSqrt(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         try self.bringToTopAuto(args[0]);
         _ = self.stack.pop();
+        // Domain guards; both leave n on the stack.
+        try self.emitOp(.op_dup);
+        try self.emitPushInt(0);
+        try self.emitOp(.op_greaterthanorequal);
+        try self.emitOp(.op_verify);
+        try self.emitOp(.op_size);
+        try self.emitPushInt(63);
+        try self.emitOp(.op_lessthan);
+        try self.emitOp(.op_verify);
+
         try self.emitOp(.op_dup);
         try self.emitOp(.op_if);
         try self.emitOp(.op_dup);
         var iter: u32 = 0;
-        while (iter < 16) : (iter += 1) {
+        while (iter < 256) : (iter += 1) {
             try self.emitOp(.op_over);
             try self.emitOp(.op_over);
             try self.emitOp(.op_div);
+            try self.emitOp(.op_over);
             try self.emitOp(.op_add);
             try self.emitPushInt(2);
             try self.emitOp(.op_div);
+            try self.emitOp(.op_min);
         }
         try self.emitOp(.op_nip);
         try self.emitOp(.op_endif);

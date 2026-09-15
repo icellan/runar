@@ -164,16 +164,30 @@ class TestMathBuiltinsCodegen < Minitest::Test
     assert_includes asm, '1027', 'percentOf must push 10000 (little-endian 0x2710 = "1027")'
   end
 
-  # -- sqrt: 16-iter Newton's method under IF guard -------------------------
+  # -- sqrt: 256-round min-clamped Newton under IF guard ---------------------
 
-  def test_sqrt_emits_16_newton_iterations
+  def test_sqrt_emits_256_min_clamped_newton_rounds
+    # R-169. The previous version of this test asserted `>= 32 OP_DIV` for
+    # "16 Newton steps". A lower bound cannot detect a round-count change in
+    # either direction, so it stayed green while the emitted sqrt was wrong --
+    # and would have stayed green at 512 too. Exact counts here.
     artifact = compile_call_artifact('sqrt', 1)
     asm = artifact.asm
-    # 16 iter × (OVER OVER DIV ADD push(2) DIV) inside IF block.
+    # 256 rounds × (OVER OVER DIV OVER ADD push(2) DIV MIN) inside the IF block.
     op_div_count = asm.scan('OP_DIV').length
-    assert_operator op_div_count, :>=, 32,
-                    "sqrt must unroll ≥ 32 DIVs for 16 Newton steps, got #{op_div_count}"
+    assert_equal 512, op_div_count,
+                 "sqrt must unroll exactly 512 OP_DIV (2 per round × 256), got #{op_div_count}"
+    # OP_MIN IS the convergence break: it clamps each new iterate against the
+    # previous one. Without it integer Newton reaches floor(sqrt(n)) and then
+    # oscillates between it and floor+1, so a fixed round count returns
+    # whichever side the parity lands on -- sqrt(8) came out as 3.
+    op_min_count = asm.scan('OP_MIN').length
+    assert_equal 256, op_min_count,
+                 "sqrt must emit one OP_MIN per round (the convergence break), got #{op_min_count}"
     assert_includes asm, 'OP_IF', 'sqrt must guard zero input with OP_IF'
+    # Domain guards: n >= 0 and n encodable in <= 62 script bytes (n < 2^495).
+    assert_includes asm, 'OP_SIZE', 'sqrt must guard the upper end of its domain'
+    assert_includes asm, 'OP_GREATERTHANOREQUAL', 'sqrt must refuse a negative n'
   end
 
   # -- gcd: 256-iter unrolled Euclidean loop --------------------------------

@@ -5689,9 +5689,60 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// sqrt(n): integer square root via Newton's method, 16 iterations.
-    /// Uses: guess = n, then 16x: guess = (guess + n/guess) / 2
-    /// Guards against n == 0 to avoid division by zero.
+    /// sqrt(n): integer square root via Newton's method, 256 iterations.
+    ///
+    /// Algorithm, identical to the constant folder and the reference
+    /// interpreter so that all three agree at every input (R-169):
+    ///
+    /// ```text
+    /// guess = n
+    /// repeat 256 times:
+    ///   next  = (guess + n / guess) / 2
+    ///   guess = min(guess, next)        // the convergence break
+    /// ```
+    ///
+    /// `OP_MIN` IS the break. Bitcoin Script has no loops, so the rounds are
+    /// unrolled and unconditional; what stops them changing the answer is that
+    /// the Newton sequence seeded at `guess = n` is strictly DECREASING while
+    /// `guess > isqrt(n)` and non-decreasing once `guess == isqrt(n)`. Clamping
+    /// each round to the running minimum makes `isqrt(n)` a fixed point and
+    /// every post-convergence round a no-op. Without the clamp the iteration
+    /// reaches `isqrt(n)` and then OSCILLATES between it and `isqrt(n)+1`, so a
+    /// fixed round count returns whichever side the parity lands on —
+    /// `sqrt(8)` = 3, `sqrt(63)` = 8.
+    ///
+    /// 256 matches the folder's bound, because seeded at `guess = n` the
+    /// iterate only halves per round until it nears sqrt(n): a correct answer
+    /// needs ~log2(n)/2 rounds (20 for 32-bit, 37 for 64-bit, 135 for 256-bit).
+    /// The previous 16 was not short by a tuning margin, it was short by an
+    /// unbounded one — `sqrt(10^12)` came out as 15280627.
+    ///
+    /// DOMAIN: exact for every `0 <= n < 2^497` (measured against
+    /// `s*s <= n < (s+1)^2`, not against a peer implementation; the narrowest
+    /// input the 256 rounds get wrong is 498 bits). Both ends are ENFORCED,
+    /// because outside them the iteration returns a wrong number rather than
+    /// failing, and a silently wrong number is the whole defect:
+    ///
+    /// ```text
+    /// OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+    /// OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n encodes in <= 62 bytes
+    /// ```
+    ///
+    /// Nine bytes, and the second is a size test rather than a comparison
+    /// against a 63-byte constant so that no tier has to agree on the encoding
+    /// of a bignum push. A minimally-encoded script number of at most 62 bytes
+    /// is at most `2^495 - 1`, so the enforced domain is `0 <= n < 2^495`,
+    /// inside the proven-exact `2^497`. The upper guard is not theoretical: a
+    /// 500-byte `n` ran to completion on the real ScriptVM and returned a wrong
+    /// root with no error.
+    ///
+    /// Guards against `n == 0` to avoid division by zero. A negative `n` in
+    /// particular is a fixed point of the min-clamped recurrence, so without
+    /// the first guard the iteration would return `n` itself. Before this the
+    /// three implementations of one builtin disagreed three ways on a negative
+    /// input: script returned `n`, interpreter threw, folder declined to fold.
+    /// Refusing is the only one of the three that is not a wrong answer, so all
+    /// three now refuse.
     fn lower_sqrt(
         &mut self,
         binding_name: &str,
@@ -5711,6 +5762,17 @@ impl LoweringContext {
         self.sm.pop();
 
         // Stack: n
+        // Guard: refuse anything outside the exact domain (see the doc
+        // comment). Both leave n on the stack.
+        self.emit_op(StackOp::Opcode("OP_DUP".to_string())); // n n
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0)))); // n n 0
+        self.emit_op(StackOp::Opcode("OP_GREATERTHANOREQUAL".to_string())); // n (n>=0)
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string())); // n
+        self.emit_op(StackOp::Opcode("OP_SIZE".to_string())); // n size(n)
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(63)))); // n size(n) 63
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".to_string())); // n (size<63)
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string())); // n
+
         // Guard: if n == 0, skip Newton iteration entirely (result is 0).
         self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
         // Stack: n n
@@ -5722,15 +5784,17 @@ impl LoweringContext {
         newton_ops.push(StackOp::Opcode("OP_DUP".to_string()));
         // Stack: n guess
 
-        // 16 iterations of Newton's method: guess = (guess + n/guess) / 2
-        for _ in 0..16 {
+        // guess = min(guess, (guess + n/guess) / 2), 256 times.
+        for _ in 0..256 {
             // Stack: n guess
             newton_ops.push(StackOp::Over);                               // n guess n
             newton_ops.push(StackOp::Over);                               // n guess n guess
             newton_ops.push(StackOp::Opcode("OP_DIV".to_string()));      // n guess (n/guess)
-            newton_ops.push(StackOp::Opcode("OP_ADD".to_string()));      // n (guess + n/guess)
-            newton_ops.push(StackOp::Push(PushValue::Int(BigInt::from(2))));            // n (guess + n/guess) 2
-            newton_ops.push(StackOp::Opcode("OP_DIV".to_string()));      // n new_guess
+            newton_ops.push(StackOp::Over);                               // n guess (n/guess) guess
+            newton_ops.push(StackOp::Opcode("OP_ADD".to_string()));      // n guess (guess + n/guess)
+            newton_ops.push(StackOp::Push(PushValue::Int(BigInt::from(2))));            // n guess (guess + n/guess) 2
+            newton_ops.push(StackOp::Opcode("OP_DIV".to_string()));      // n guess next
+            newton_ops.push(StackOp::Opcode("OP_MIN".to_string()));      // n min(guess, next)
         }
 
         // Stack: n guess
