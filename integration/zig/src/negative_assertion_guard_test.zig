@@ -114,3 +114,37 @@ test "NegativeAssertion_NoAbsoluteBroadcastAssertionsRemain" {
     // converted, this reddens too.
     try std.testing.expectEqual(@as(usize, 24), delta_sites);
 }
+
+// ---------------------------------------------------------------------------
+// Guard: a test must not report PASS when its fixture never got built.
+//
+// `var ctx = deployStateCovenant(allocator) catch return;` reads like a
+// node-down skip, but `requireNodeAvailable` already ran one line earlier and
+// panics when there is no node — so this is never the node-down path. What it
+// actually swallows is a compile / fund / deploy failure, after which the test
+// function returns normally and the Zig runner reports PASS with not one
+// assertion executed. Measured: with the node check stubbed out, six of the
+// seven StateCovenant tests passed against no node at all.
+//
+// Let the error propagate (`try`) — the shape `StateCovenant_Deploy` in the
+// same file already used.
+// ---------------------------------------------------------------------------
+test "NegativeAssertion_NoSetupSwallowingCatchReturn" {
+    var sites: usize = 0;
+
+    for (negative_test_sources) |f| {
+        var it = std.mem.splitScalar(u8, f.src, '\n');
+        var line_no: usize = 0;
+        while (it.next()) |line| {
+            line_no += 1;
+            if (std.mem.indexOf(u8, line, "catch return;") == null) continue;
+            sites += 1;
+            std.log.err(
+                "{s}:{d}: setup error swallowed — the test returns normally and reports PASS with zero assertions executed. Use `try`.",
+                .{ f.name, line_no },
+            );
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), sites);
+}

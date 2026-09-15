@@ -283,7 +283,7 @@ test "StateCovenant_AdvanceState" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -322,7 +322,7 @@ test "StateCovenant_ChainAdvances" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -369,7 +369,7 @@ test "StateCovenant_WrongPreStateRootRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -425,7 +425,7 @@ test "StateCovenant_InvalidBlockNumberRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -497,7 +497,7 @@ test "StateCovenant_InvalidBabyBearProofRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -549,7 +549,7 @@ test "StateCovenant_InvalidMerkleProofRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
