@@ -19,8 +19,15 @@
  * PRECONDITION / SKIP: a source transform must yield still-valid Rúnar. When a
  * transform cannot apply cleanly (it leaves the source unchanged) or produces
  * code the compiler rejects, that PAIR is skipped and counted — it is not a
- * failure. Only "both compile, verdicts differ" is a failure; on any such
+ * failure. A pair that compiles and then throws in the executor is likewise
+ * skipped and counted, on both ends (`executor errors (transformed)` /
+ * `(original)`); an uncounted skip is indistinguishable from a comparison that
+ * passed. Only "both compile, verdicts differ" is a failure; on any such
  * divergence the driver saves a finding and exits non-zero.
+ *
+ * VACUITY: a run that executed no transform pair, or made no witness
+ * comparison, exits non-zero rather than printing OK. "No divergences" over
+ * zero comparisons proves nothing.
  *
  * Determinism: `--seed` seeds both the fast-check contract sampler and a
  * Mulberry32 PRNG for constructor args + witnesses, so a run is exactly
@@ -250,6 +257,12 @@ function main(): number {
   let skippedNoMeta = 0;
   let skippedTransform = 0;
   let divergences = 0;
+  // Executor throws. Both ends were `continue` with no counter, which makes
+  // them invisible: "the transformed program produces a script the engine
+  // cannot run" is the regression this fuzzer exists to find, and a witness the
+  // ORIGINAL could not run silently shrinks the comparison set.
+  let execErrorsTransformed = 0;
+  let execErrorsOriginal = 0;
 
   for (let i = 0; i < sources.length; i++) {
     const source = sources[i]!;
@@ -278,7 +291,9 @@ function main(): number {
           constructorArgs: meta.constructorArgs,
         }).vmAccepted;
       } catch {
-        return null; // original itself failed to run — skip this witness
+        // Original itself failed to run — this witness is skipped, and the
+        // skip is counted below rather than vanishing.
+        return null;
       }
     });
 
@@ -309,7 +324,10 @@ function main(): number {
       pairsTested++;
       for (let w = 0; w < witnessSets.length; w++) {
         const origAccepted = origVerdicts[w];
-        if (origAccepted === null) continue;
+        if (origAccepted === null) {
+          execErrorsOriginal++;
+          continue;
+        }
         const args = witnessSets[w]!;
 
         let transformedAccepted: boolean;
@@ -323,7 +341,10 @@ function main(): number {
           }).vmAccepted;
         } catch {
           // Transformed compiled but failed to execute — treat as a skip, not a
-          // divergence (executor error, not a semantics change).
+          // divergence (executor error, not a semantics change). COUNTED: the
+          // file header promises skipped pairs are counted, and a transform
+          // that reliably produces unrunnable script is itself a finding.
+          execErrorsTransformed++;
           continue;
         }
         witnessChecks++;
@@ -361,7 +382,24 @@ function main(): number {
   console.log(`transform pairs tested:   ${pairsTested}`);
   console.log(`transform pairs skipped:  ${skippedTransform}`);
   console.log(`witness comparisons:      ${witnessChecks}`);
+  console.log(`executor errors (transformed): ${execErrorsTransformed}`);
+  console.log(`executor errors (original):    ${execErrorsOriginal}`);
   console.log(`divergences:              ${divergences}`);
+
+  // A run in which NOTHING was compared is not a pass. Every contract is
+  // filtered by `extractMeta` (a public method whose params are all bigint,
+  // properties all bigint); a generator that drifts away from that shape sends
+  // every contract to `skippedNoMeta` and this driver would print OK having
+  // executed no pair at all. Same rule as the `--spend-oracle` lane's
+  // `vacuousRun` in index.ts.
+  if (pairsTested === 0 || witnessChecks === 0) {
+    console.error(
+      `\nVACUOUS RUN: ${pairsTested} transform pair(s) executed and ${witnessChecks} witness ` +
+        'comparison(s) made — the metamorphic oracle never ran, so "no divergences" proves ' +
+        `nothing. ${sources.length} contract(s) sampled, ${skippedNoMeta} skipped by extractMeta.`,
+    );
+    return 1;
+  }
 
   if (divergences > 0) {
     console.error(
