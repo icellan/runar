@@ -66,7 +66,7 @@
     "integration:teranode:start": "cd integration && ./teranode.sh start",
     "integration:teranode:stop": "cd integration && ./teranode.sh stop",
     "integration:teranode:clean": "cd integration && ./teranode.sh clean",
-    "integration:teranode:run": "cd integration && ./teranode.sh clean && ./teranode.sh start && cd go && NODE_TYPE=teranode go test -tags integration -v -timeout 600s; cd .. && ./teranode.sh stop",
+    "integration:teranode:run": "cd integration && ./teranode.sh clean && ./teranode.sh start && cd go && NODE_TYPE=teranode go test -tags integration -v -timeout 600s; rc=$?; cd .. && ./teranode.sh stop; exit $rc",
     "integration:go": "cd integration/go && go test -tags integration -v -timeout 600s",
     "integration:ts": "cd integration/ts && npx vitest run",
     "integration:rust": "cd integration/rust && cargo test --release -- --ignored",

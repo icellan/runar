@@ -24,6 +24,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -121,5 +122,69 @@ describe('R-216: Teranode is exercised without a human ticking a box', () => {
         `${file} stops Teranode without \`if: always()\`, so a failed suite leaves it running`,
       ).toMatch(/if:\s*always\(\)/);
     }
+  });
+});
+
+/**
+ * The suite's verdict must actually reach the job.
+ *
+ * `integration:teranode:run` chained the teardown after the test command with
+ * `;` rather than `&&`, so the script's exit status was `./teranode.sh stop`'s.
+ * Every Go integration test could fail against Teranode and the script still
+ * exited 0 — and both consumers (`.github/workflows/ci.yml` and
+ * `teranode-nightly.yml`) use it as their ONLY gating step, so both jobs went
+ * green on a fully red suite.
+ *
+ * `;` is not simply a mistake here: replacing it with `&&` would skip the
+ * teardown whenever the suite fails, leaving a Teranode stack running. The
+ * requirement is both — always tear down, and still report the failure.
+ *
+ * This asserts the SEMANTICS rather than the punctuation: it takes the real
+ * script string out of package.json, stubs the node lifecycle to succeed and
+ * the test command to fail, runs it through a shell, and requires a non-zero
+ * exit. A future rewrite that keeps the property passes regardless of how it
+ * is spelled; one that loses it fails however tidy it looks.
+ */
+describe('R-216: the Teranode suite verdict reaches its caller', () => {
+  const pkg = JSON.parse(
+    readFileSync(join(ROOT, 'package.json'), 'utf8'),
+  ) as { scripts: Record<string, string> };
+  const script = pkg.scripts['integration:teranode:run'];
+
+  /** Stub the lifecycle + directory moves; make only the test command fail. */
+  function simulate(withFailingTests: boolean): number {
+    const stubbed = script
+      .replace(/\.\/teranode\.sh \w+/g, 'true')
+      .replace(/cd [^\s&;|]+/g, 'cd .')
+      .replace(/NODE_TYPE=teranode go test[^;&|]*/g, withFailingTests ? 'false ' : 'true ');
+    const res = spawnSync('bash', ['-c', stubbed], { encoding: 'utf8' });
+    return res.status ?? -1;
+  }
+
+  it('is defined and runs the Go integration suite against Teranode', () => {
+    expect(script, 'integration:teranode:run is missing').toBeTruthy();
+    expect(script).toMatch(/NODE_TYPE=teranode go test/);
+  });
+
+  it('exits non-zero when the integration tests fail', () => {
+    expect(
+      simulate(true),
+      'the Teranode suite can fail in full while this script exits 0, and both ' +
+        'CI jobs use it as their only gating step — the failure never reaches them',
+    ).not.toBe(0);
+  });
+
+  it('still exits zero when the integration tests pass', () => {
+    expect(simulate(false), 'the script must not fail a passing run').toBe(0);
+  });
+
+  it('tears the stack down on the failing path too', () => {
+    // Trace execution: `stop` must run even when the test command fails.
+    const traced = script
+      .replace(/\.\/teranode\.sh (\w+)/g, 'echo RAN_$1')
+      .replace(/cd [^\s&;|]+/g, 'cd .')
+      .replace(/NODE_TYPE=teranode go test[^;&|]*/g, 'false ');
+    const res = spawnSync('bash', ['-c', traced], { encoding: 'utf8' });
+    expect(res.stdout, 'teardown is skipped when the suite fails').toMatch(/RAN_stop/);
   });
 });
