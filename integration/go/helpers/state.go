@@ -41,7 +41,10 @@ func ReadOnChainState(artifact *runar.RunarArtifact, txid string, outputIndex in
 		return nil, fmt.Errorf("ReadOnChainState: tx %s output %d: no scriptPubKey hex", txid, outputIndex)
 	}
 
-	state := runar.ExtractStateFromScript(artifact, scriptHex)
+	state, err := runar.ExtractStateFromScript(artifact, scriptHex)
+	if err != nil {
+		return nil, fmt.Errorf("ReadOnChainState: tx %s output %d: decoding state section: %w", txid, outputIndex, err)
+	}
 	if state == nil {
 		return nil, fmt.Errorf("ReadOnChainState: tx %s output %d: script has no decodable state section", txid, outputIndex)
 	}
