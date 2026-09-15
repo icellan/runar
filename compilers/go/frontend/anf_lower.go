@@ -2761,19 +2761,39 @@ func maxTempIndex(bindings []ir.ANFBinding) int {
 	return max
 }
 
-// isSideEffectFree checks if an ANF value kind is side-effect-free.
-// Both sides of the discriminant are enumerated explicitly so an
-// unknown kind cannot silently default to "has side effect" (which
-// would conservatively preserve the binding but mask a missing
-// dispatch wire-up in the rest of the pipeline).
+// isSideEffectFree reports whether a binding may sit in the value-prefix of an
+// arm that `liftBranchUpdateProps` hoists. Its only caller is
+// `allBindingsSideEffectFree`, and that is called only at the two lift gates
+// (`extractBranchUpdate`, `collectUpdateBranches`) — dead-code elimination
+// asks `HasSideEffect` in dce.go instead, which is recursive over `if` / `loop`
+// and is not affected by this list.
+//
+// R-293: the list used to ALSO return true for "if", "loop",
+// "get_state_script" and "array_literal". The lift hoists an admitted prefix
+// under FRESH names and rewrites its refs with `remapValueRefs`, which
+// rewrites an `if`'s `cond` and nothing else — it never descends into `Then` /
+// `Else`, rewrites nothing at all for a `loop`, and has no case for
+// "array_literal" at all, so that kind reaches its exhaustiveness panic. The
+// four extra kinds were therefore exactly the ones the remapper cannot handle.
+//
+// The six peer tiers gate on the five pure kinds below, so an arm carrying
+// nested control flow is simply not lifted there. Before this narrowing, a
+// contract with a nested `if` in an arm's value prefix compiled in every peer
+// tier and died HERE, in pass 5, with `value "t" not found on stack` — the
+// hoisted body still naming a temp the hoist had renamed. Matching the peers
+// closes a seven-tier parity break; it cannot move a golden, because any
+// fixture reaching the wider list would already have diverged from them.
+//
+// Both sides of the discriminant stay enumerated explicitly so an unknown kind
+// cannot silently default to "pure".
 func isSideEffectFree(v *ir.ANFValue) bool {
 	switch v.Kind {
-	case "load_prop", "load_param", "load_const", "bin_op", "unary_op",
-		"get_state_script", "if", "loop", "array_literal":
+	case "load_prop", "load_param", "load_const", "bin_op", "unary_op":
 		return true
 	case "assert", "update_prop", "check_preimage", "deserialize_state",
 		"add_output", "add_raw_output", "add_data_output",
-		"call", "method_call", "raw_script":
+		"call", "method_call", "raw_script",
+		"get_state_script", "if", "loop", "array_literal":
 		return false
 	default:
 		// Exhaustiveness guard. A silent default here would either
