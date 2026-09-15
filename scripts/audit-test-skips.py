@@ -627,18 +627,112 @@ def snippet_matches_row(snippet: str, row: InventoryRow) -> bool:
     return sum(1 for t in toks if t in cell_tokens) >= 2
 
 
-def reconcile(
-    sites: list[SkipSite], located_rows: list[InventoryRow]
-) -> tuple[list[SkipSite], list[tuple[InventoryRow, str, int]]]:
-    """Pair live skip sites against documented sites, per file.
+# Every site whose scope matches no row in an ALREADY-DOCUMENTED file. These
+# are rows whose anchor has rotted: 38 name a test that no longer exists in
+# that file (`TestCLI_SP1FriIRGuard` was renamed to
+# `TestCLI_IRPath_RefusesUnsoundSP1FriVerifier`, `TestIntegrationCompiler` to
+# `TestTStoGoIntegration`), 12 are bulk rows citing N lines under one named
+# `describe`, and the rest are scope-kind mismatches.
+#
+# EXACT, not `<=`. A soft advisory that exits 0 is how you get a third guard
+# that does not guard. Repairing an anchor must DECREMENT this deliberately,
+# and any new un-anchorable skip pushes it up and fails the build.
+UNANCHORED_PIN = 58
 
-    Returns (orphans, stales). Extracted from `main` so `self_test` can drive
-    it directly: this reconciliation is the part of the audit CI actually
-    depends on, and it previously had no test of any kind.
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
 
-    Exact-line matches are taken first. The remainder is paired by snippet
-    WITH CONSUMPTION, so a skip that merely MOVED is forgiven, while a
-    genuinely ADDED skip is an orphan and a genuinely REMOVED one is stale.
+
+def _row_name_patterns(row: InventoryRow) -> list[str]:
+    """Names a row claims, as written — backtick-quoted spans of its first cell."""
+    return [p.strip() for p in _BACKTICK_RE.findall(row.test_cell)]
+
+
+def _java_method_names(path: str) -> set[str]:
+    """Methods declared in a Java file.
+
+    A class-scoped `@EnabledIfEnvironmentVariable` disables every test in the
+    class, so a row naming one of those tests is a correct anchor for it.
+    """
+    full = REPO_ROOT / path
+    if not full.exists():
+        return set()
+    return set(
+        re.findall(r"\bvoid\s+(\w+)\s*\(", full.read_text(encoding="utf-8", errors="replace"))
+    )
+
+
+def scope_matches_row(path: str, scope: ScopeRef, row: InventoryRow) -> bool:
+    """Does `row` name the scope this skip lives in?
+
+    Honours the shorthands the inventory already uses, because a row written as
+    ``TestCLI_Debug_TrivialScript` / `_RequiresInput`` genuinely does name four
+    sibling tests:
+
+      * exact name
+      * `TestFoo_Bar` (+ `_Baz`)  -> TestFoo_Bar_Baz
+      * `TestFoo_Bar` / `_Baz`    -> TestFoo_Baz
+      * `TestSourceCompile_*`     -> prefix glob
+      * `e2e FixedArray: X ...`   -> prefix ellipsis (also template literals)
+      * every token of a multi-word `describe` title present in the cell
+
+    Matching is WHOLE-TOKEN or explicit prefix throughout. It is never a bare
+    substring test — that is the defect this gate was built to stop repeating.
+    """
+    candidates = [scope.name]
+    if scope.kind == "class":
+        candidates.extend(sorted(_java_method_names(path)))
+
+    patterns = _row_name_patterns(row)
+    cell_tokens = set(_tokens(row.test_cell + " " + row.rationale_cell))
+    suffixes = [p for p in patterns if p.startswith("_")] + [
+        t for t in cell_tokens if t.startswith("_")
+    ]
+
+    for cand in candidates:
+        if not cand:
+            continue
+        for pat in patterns:
+            if pat == cand:
+                return True
+            for mark in ("...", "*"):
+                if pat.endswith(mark):
+                    base = pat[: -len(mark)].rstrip()
+                    if base and cand.startswith(base):
+                        return True
+            for suf in suffixes:
+                if cand == pat + suf:
+                    return True
+                if "_" in pat and cand == pat.rsplit("_", 1)[0] + suf:
+                    return True
+        if cand in cell_tokens:
+            return True
+        words = _tokens(cand, 2)
+        if words and all(w in cell_tokens for w in words):
+            return True
+    return False
+
+
+class Reconciliation(NamedTuple):
+    orphans: list[SkipSite]                       # live skip in a file no row mentions
+    stales: list[tuple[InventoryRow, str, int]]   # row citing a file with no live skips
+    unanchored: list[tuple[SkipSite, ScopeRef | None]]  # documented file, rotted anchor
+    unmatched_rows: list[tuple[InventoryRow, str, int]]  # the other side of the same rot
+    advisories: list[tuple[str, int, int]]        # (file, documented_line, actual_line)
+
+
+def reconcile(sites: list[SkipSite], located_rows: list[InventoryRow]) -> Reconciliation:
+    """Pair live skip sites against documented sites, per file, by SCOPE.
+
+    The anchor is `(file, enclosing scope name)`. The recorded `file:line` is
+    ADVISORY: reported when it disagrees, never load-bearing. That inversion is
+    what makes the gate drift-tolerant — an insertion that shifts every line in
+    a file changes nothing here, because the scope moved with its code.
+
+    Line numbers were load-bearing before, and the snippet fallback that
+    softened them paired on prose: measured, it matched a mean of 38.2 of 87
+    rows per snippet and let 164 of 164 sites be swapped for an undocumented
+    skip. Scope-primary matching cuts that to 2, both of which are stated in
+    docs/test-skips.md.
     """
     live_by_file: dict[str, list[SkipSite]] = {}
     for s in sites:
@@ -650,29 +744,45 @@ def reconcile(
 
     orphans: list[SkipSite] = []
     stales: list[tuple[InventoryRow, str, int]] = []
+    unanchored: list[tuple[SkipSite, ScopeRef | None]] = []
+    unmatched_rows: list[tuple[InventoryRow, str, int]] = []
+    advisories: list[tuple[str, int, int]] = []
+
     for f in sorted(set(live_by_file) | set(doc_by_file)):
         live = live_by_file.get(f, [])
         docs = doc_by_file.get(f, [])
-        live_lines = {s.line for s in live}
-        doc_lines = {line for _, line in docs}
-        rem_live = [s for s in live if s.line not in doc_lines]  # drifted or added
-        rem_docs = [(row, line) for row, line in docs if line not in live_lines]  # drifted or removed
-        used = [False] * len(rem_docs)
-        for s in rem_live:
-            paired = False
-            for i, (row, _line) in enumerate(rem_docs):
-                if used[i] or not s.snippet:
-                    continue
-                if snippet_matches_row(s.snippet, row):
-                    used[i] = True
-                    paired = True
-                    break
-            if not paired:
-                orphans.append(s)  # a live skip nothing documents = ADDED
-        for i, (row, line) in enumerate(rem_docs):
+
+        # A file nothing documents, or a row for a file with no skips left, is
+        # the hard failure this audit exists for and is NOT ratcheted.
+        if not docs:
+            orphans.extend(live)
+            continue
+        if not live:
+            stales.extend((row, f, line) for row, line in docs)
+            continue
+
+        used = [False] * len(docs)
+        for s in live:
+            scope = enclosing_scope(s.path, s.line)
+            hit = -1
+            if scope is not None:
+                for i, (row, _line) in enumerate(docs):
+                    if used[i]:
+                        continue
+                    if scope_matches_row(s.path, scope, row):
+                        hit = i
+                        break
+            if hit < 0:
+                unanchored.append((s, scope))
+            else:
+                used[hit] = True
+                if docs[hit][1] != s.line:
+                    advisories.append((f, docs[hit][1], s.line))
+        for i, (row, line) in enumerate(docs):
             if not used[i]:
-                stales.append((row, f, line))  # a doc site with no live skip = REMOVED
-    return orphans, stales
+                unmatched_rows.append((row, f, line))
+
+    return Reconciliation(orphans, stales, unanchored, unmatched_rows, advisories)
 
 
 def main() -> int:
@@ -685,10 +795,10 @@ def main() -> int:
     # parsed rows" claim above checkable rather than assumed.
     located_rows = [r for r in rows if r.sites]
 
-    orphans, stales = reconcile(sites, located_rows)
-
-    orphans.sort(key=lambda s: (s.path, s.line))
-    stales.sort(key=lambda t: (t[0].line_in_md, t[2]))
+    rec = reconcile(sites, located_rows)
+    orphans = sorted(rec.orphans, key=lambda s: (s.path, s.line))
+    stales = sorted(rec.stales, key=lambda t: (t[0].line_in_md, t[2]))
+    unanchored = sorted(rec.unanchored, key=lambda t: (t[0].path, t[0].line))
 
     rc = 0
     if orphans:
@@ -698,7 +808,7 @@ def main() -> int:
         rc |= 1
 
     if stales:
-        print("STALE inventory rows (file:line no longer carries a skip):", file=sys.stderr)
+        print("STALE inventory rows (file has no skip markers at all):", file=sys.stderr)
         for row, path, line in stales:
             print(
                 f"  docs/test-skips.md:{row.line_in_md} cites {path}:{line} (no longer a skip site)",
@@ -712,11 +822,53 @@ def main() -> int:
             print(f"  {p}", file=sys.stderr)
         rc |= 4
 
+    # ---------------------------------------------------------------- ratchet
+    # Every un-anchorable site is listed, always — a count with no identities
+    # is a number nobody can act on, and the repair work is exactly this list.
+    if unanchored:
+        print(
+            f"UN-ANCHORED skips ({len(unanchored)}) — the file IS documented, but no "
+            f"row names the scope the skip lives in:",
+            file=sys.stderr,
+        )
+        for site, scope in unanchored:
+            where = f"{scope.kind}:{scope.name}" if scope else "<no scope resolved>"
+            print(f"  {site.path}:{site.line}  scope {where}", file=sys.stderr)
+
+    if len(unanchored) != UNANCHORED_PIN:
+        direction = "rose above" if len(unanchored) > UNANCHORED_PIN else "fell below"
+        print(
+            f"UN-ANCHORED count {direction} the pin: {len(unanchored)} != "
+            f"{UNANCHORED_PIN} (UNANCHORED_PIN in {__file__}).",
+            file=sys.stderr,
+        )
+        if len(unanchored) > UNANCHORED_PIN:
+            print(
+                "  A skip was added whose scope no row names, or an anchor rotted "
+                "further. Name the scope in docs/test-skips.md — do NOT raise the pin.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "  Anchors were repaired. Lower UNANCHORED_PIN to the new count in "
+                "the same commit: the pin only ever ratchets DOWN.",
+                file=sys.stderr,
+            )
+        rc |= 8
+
     if rc == 0:
+        extra = ""
+        if unanchored:
+            extra = (
+                f"; {len(unanchored)} un-anchored row(s) at the pin (see list above "
+                f"— these are anchor repairs still owed)"
+            )
+        if rec.advisories:
+            extra += f"; {len(rec.advisories)} advisory line disagreement(s)"
         print(
             f"OK — {len(sites)} skip sites; {len(rows)} inventory rows "
             f"({len(located_rows)} located); every site documented, every row live, "
-            f"table and footers agree."
+            f"table and footers agree{extra}."
         )
     return rc
 
@@ -797,70 +949,98 @@ def self_test() -> int:
         failures.append(f"clean inventory reported problems: {clean}")
 
     # ------------------------------------------------------------------
-    # Reconciliation path — orphan / stale / drift.
+    # Reconciliation path — scope anchoring, drift, and the two floors.
     #
-    # This is the half of the audit CI actually gates on, and until now it
-    # had NO test at all: `self_test` exercised only the doc-internal
-    # integrity checks. The pairing predicate was a SUBSTRING test over
-    # len>=2 tokens, which matched a mean of 38.2 of 87 rows per snippet
-    # and let every one of the 164 live skip sites be swapped for an
-    # undocumented one without the audit noticing.
+    # This is the half of the audit CI gates on, and it had NO test of any
+    # kind until the predicate was found to be near-vacuous. Cases run against
+    # a REAL file so `enclosing_scope` does real work: a synthetic path would
+    # resolve to no scope and prove nothing.
     # ------------------------------------------------------------------
-    F = "a/b_test.go"
-    doc_row = _row(
-        test_cell="`TestWOTS_ScriptExecution` (+ `_TamperedSig`, `_WrongMessage`)",
-        file_line_cell=f"`{F}:10`",
-        rationale_cell=(
-            "WOTS+ script execution is several seconds per test. Run with "
-            "`go test -count=1 ./...` (no `-short`) to enable."
-        ),
-        sites=((F, 10),),
-    )
-    documented = 't.Skip("WOTS+ script execution is slow, skipping in short mode")'
+    F = "compilers/go/groth16_wa_cli_test.go"   # `func TestCLI_Groth16WA_SP1`
+    SKIP_LINE = 22                               # the t.Skip inside it
+    IN_SCOPE = 23                                # still inside the same func
+    documented = 't.Skip("skipping CLI smoke test on -short")'
     # A wholly unrelated skip, lifted verbatim from a TypeScript conformance
-    # test. The old substring predicate PAIRED it with the WOTS+ row above for
-    # one reason: the two-character token `it` occurs inside the word "wi(th)"
-    # of the rationale, and the snippet contains `it` twice, which cleared the
-    # `hits >= 2` bar. Whole-token comparison scores it 0.
+    # test. The old substring predicate PAIRED it with a WOTS+ row for one
+    # reason: the two-character token `it` occurs inside the word "wi(th)" of
+    # the rationale, and the snippet contains `it` twice, clearing `hits >= 2`.
     undocumented = "const run = tier.cmd === null ? it.skip : it;"
 
-    recon_cases: list[tuple[str, list[SkipSite], int, int]] = [
-        # name, live sites, expected orphans, expected stales
-        ("exact file:line reconciles", [SkipSite(F, 10, documented)], 0, 0),
-        ("pure line drift is forgiven", [SkipSite(F, 42, documented)], 0, 0),
-        ("an ADDED skip is an orphan",
-         [SkipSite(F, 10, documented), SkipSite(F, 99, undocumented)], 1, 0),
-        ("a REMOVED skip leaves a stale row", [], 0, 1),
-        # THE REGRESSION CASE. Delete the documented skip, add a different
-        # undocumented one in the same file. Under the old substring
-        # predicate the new skip paired to the orphaned row: not an orphan,
-        # not stale, audit exits 0, and an undocumented skip is invisible.
-        # If the predicate is ever loosened back, this case goes red.
+    good_row = _row(
+        test_cell="`TestCLI_Groth16WA_SP1`",
+        file_line_cell=f"`{F}:{SKIP_LINE}`",
+        rationale_cell="Builds the compiler binary and runs the SP1 fixture end to end.",
+        sites=((F, SKIP_LINE),),
+    )
+    # Same file, but names a test that is not the one the skip lives in.
+    wrong_row = _row(
+        test_cell="`TestCLI_SomethingElseEntirely`",
+        file_line_cell=f"`{F}:{SKIP_LINE}`",
+        rationale_cell="Builds the compiler binary and runs the SP1 fixture end to end.",
+        sites=((F, SKIP_LINE),),
+    )
+
+    recon_cases: list[tuple[str, list[SkipSite], list[InventoryRow], int, int, int]] = [
+        # name, live sites, rows, expected (unanchored, orphans, advisories)
+        ("exact file:line anchors cleanly",
+         [SkipSite(F, SKIP_LINE, documented)], [good_row], 0, 0, 0),
+        # THE DRIFT CASE. The line moved; the scope did not. Line is advisory,
+        # so this must anchor — and report the disagreement rather than fail.
+        ("line drift is forgiven and reported as an advisory",
+         [SkipSite(F, IN_SCOPE, documented)], [good_row], 0, 0, 1),
+        # THE SUBSTRING REGRESSION. Delete the documented skip, add a different
+        # undocumented one. Under the old predicate the new skip paired to the
+        # orphaned row and the audit exited 0. It must now be un-anchored.
         ("delete-one/add-one must NOT cancel out",
-         [SkipSite(F, 99, undocumented)], 1, 1),
+         [SkipSite(F, IN_SCOPE, undocumented)], [wrong_row], 1, 0, 0),
+        # THE NAME-ANCHOR-OPTIONAL GUARD. A row that names the wrong scope must
+        # not pair just because it is the only row for the file. If the anchor
+        # is ever made optional (fall back to "any row in this file"), this
+        # case goes green and the gate is decorative again.
+        ("a row naming the wrong scope does not pair",
+         [SkipSite(F, SKIP_LINE, documented)], [wrong_row], 1, 0, 0),
+        ("a skip in a file no row mentions is a hard orphan",
+         [SkipSite("compilers/go/cli_debug_test.go", 21, documented)], [good_row], 0, 1, 0),
     ]
-    for name, live, want_o, want_s in recon_cases:
-        got_o, got_s = reconcile(live, [doc_row])
-        if len(got_o) != want_o or len(got_s) != want_s:
+    for name, live, rws, want_u, want_o, want_a in recon_cases:
+        got = reconcile(live, rws)
+        if (len(got.unanchored), len(got.orphans), len(got.advisories)) != (
+            want_u, want_o, want_a
+        ):
             failures.append(
-                f"reconcile/{name}: expected {want_o} orphan(s) + {want_s} stale(s), "
-                f"got {len(got_o)} + {len(got_s)}"
+                f"reconcile/{name}: expected unanchored={want_u} orphans={want_o} "
+                f"advisories={want_a}, got unanchored={len(got.unanchored)} "
+                f"orphans={len(got.orphans)} advisories={len(got.advisories)}"
             )
 
-    # Predicate floor, asserted directly so the reason a loosened predicate
-    # fails is legible rather than buried in a reconciliation count.
-    if snippet_matches_row(undocumented, doc_row):
+    # Predicate floors, asserted directly so a loosened matcher fails legibly
+    # rather than as an arithmetic surprise in a reconciliation count.
+    real_scope = enclosing_scope(F, SKIP_LINE)
+    if real_scope is None or real_scope.name != "TestCLI_Groth16WA_SP1":
         failures.append(
-            "snippet_matches_row pairs an unrelated skip message to a row it does "
-            "not describe — the predicate has been loosened back toward substring "
-            "matching"
+            f"enclosing_scope({F}:{SKIP_LINE}) resolved {real_scope!r}, expected "
+            f"test:TestCLI_Groth16WA_SP1"
         )
-    if not snippet_matches_row(documented, doc_row):
-        failures.append(
-            "snippet_matches_row no longer pairs a drifted skip with its OWN row — "
-            "the predicate is now too strict and every line shift will read as an "
-            "orphan plus a stale row"
-        )
+    else:
+        if not scope_matches_row(F, real_scope, good_row):
+            failures.append(
+                "scope_matches_row no longer pairs a skip with the row that names "
+                "its own scope — the matcher is too strict and every documented "
+                "skip will read as un-anchored"
+            )
+        if scope_matches_row(F, real_scope, wrong_row):
+            failures.append(
+                "scope_matches_row pairs a skip with a row naming a different "
+                "scope — the anchor has been made optional"
+            )
+        # Whole-token, never substring: `Groth16WA` sits INSIDE the token
+        # `TestCLI_Groth16WA_SP1`, so a substring matcher says yes and a
+        # token matcher says no. This is the `it`-in-"with" class, pinned.
+        if scope_matches_row(F, ScopeRef("test", "Groth16WA"), good_row):
+            failures.append(
+                "scope_matches_row matched a scope name that is only a SUBSTRING "
+                "of a row token — substring matching has been reinstated"
+            )
 
     # ------------------------------------------------------------------
     # Scope extraction — every live skip must resolve to a NAMED SCOPE.

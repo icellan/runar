@@ -47,11 +47,57 @@ so a row whose line number is stale is a real defect even while the audit is gre
 it means the audit is pairing on prose instead of on the anchor. Keep the line numbers
 current in the same PR that moves them.
 
-The predicate this fallback uses previously compared tokens as **substrings** of the
-row's concatenated prose, which made it near-vacuous — a two-character token such as
-`it` matches inside the word "with". It now compares whole tokens of length >= 3, and
-`scripts/audit-test-skips.py --self-test` pins both floors: an unrelated snippet must
-not pair, and a drifted skip must still pair with its own row.
+The predicate this fallback used compared tokens as **substrings** of the row's
+concatenated prose, which made it near-vacuous — a two-character token such as `it`
+matches inside the word "with". Measured, it paired a mean of 38.2 of 87 rows per
+snippet and let 164 of 164 sites be swapped for an undocumented skip.
+
+### Anchoring is by SCOPE; `file:line` is advisory
+
+The audit now anchors each skip to the **named scope it lives in** — the test,
+helper, class or module that `enclosing_scope` resolves from the source — and
+matches that against the names a row states in its first column. The recorded
+`file:line` is **advisory**: reported when it disagrees, never load-bearing. A
+commit that shifts every line in a test file therefore changes nothing, because
+the scope moves with its code.
+
+Write the row's first column so it NAMES the scope. These shorthands are
+understood, because the table already used them:
+
+| written in the row | also matches |
+| --- | --- |
+| `` `TestFoo_Bar` `` | exactly that scope |
+| `` `TestFoo_Bar` `` (+ `` `_Baz` ``) | `TestFoo_Bar_Baz` |
+| `` `TestFoo_Bar` `` / `` `_Baz` `` | `TestFoo_Baz` |
+| `` `TestSourceCompile_*` `` | any scope with that prefix |
+| `` `e2e FixedArray: X ...` `` | any scope with that prefix |
+| a multi-word `describe` title | a scope whose every word appears in the cell |
+
+A class-scoped skip (a JUnit `@EnabledIfEnvironmentVariable` on the class) is
+anchored by naming the class **or** any test method declared in it.
+
+### The un-anchored ratchet
+
+`UNANCHORED_PIN` in `scripts/audit-test-skips.py` is the **exact** number of
+skips whose file is documented but whose scope no row names. It is exact, not a
+maximum:
+
+* Adding a skip whose scope no row names pushes the count up and **fails**.
+  Name the scope in this file — do not raise the pin.
+* Repairing an anchor pushes the count down and also **fails**, so the
+  decrement is a deliberate, reviewed line in the same commit. The pin only
+  ever ratchets down.
+
+The current backlog is anchor rot in two independent dimensions at once: rows
+naming tests that were renamed away (`TestCLI_SP1FriIRGuard` is now
+`TestCLI_IRPath_RefusesUnsoundSP1FriVerifier`; `TestIntegrationCompiler` is now
+`TestTStoGoIntegration`), and bulk rows citing many lines under a single named
+`describe`. Both were invisible while the predicate matched on prose.
+
+`scripts/audit-test-skips.py --self-test` pins the floors: an unrelated snippet
+must not pair, a row naming the wrong scope must not pair, a scope name that is
+only a substring of a row token must not pair, and a drifted skip must still
+pair with its own row.
 
 ## Categories
 
