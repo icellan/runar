@@ -1447,6 +1447,50 @@ mistake this section exists to prevent: object key order, number formatting and
 string escaping all differ between stdlib encoders, and any of them changes the
 hash.
 
+##### Integers beyond 2^53: pass a `bigint`, not a `number`
+
+`canonicalJson` serializes values it is *given*. How large an integer survives
+to reach it is a property of the calling tier's number type, not of
+canonicalJson — and the seven tiers do not agree. Measured, same JSON input,
+same primitive:
+
+| input integer | TypeScript | Go · Rust · Zig | Python · Ruby · Java |
+| --- | --- | --- | --- |
+| `9007199254740993` (2^53+1) | `9007199254740992` | `9007199254740993` | `9007199254740993` |
+| `123456789012345678901234567890` | `1.2345678901234568e+29` | `1.2345678901234568e+29` | `123456789012345678901234567890` |
+
+Three behaviours, not two. A JS `number` is always a double, so **TypeScript is
+the only tier that cannot represent 2^53+1 at all** — it rounds before
+canonicalJson ever sees it. Go, Rust and Zig are exact through the int64 range
+(~9.22e18) and fall back to a double beyond it. Python, Ruby and Java use
+arbitrary-precision integer types and are exact at any magnitude.
+
+The cause is a structural difference between the tiers' number types, which is
+why the cross-tier differential fuzzer deliberately confines generated integers
+to ±2^53 (`conformance/fuzzer/canonical-json-differential.ts`). The
+*consequence* is not confined to anything: two services handing their
+respective SDKs what their authors consider the same 64-bit identifier produce
+different canonical payloads, therefore different SHA-256 digests, therefore
+signatures that fail to verify across the tier boundary — at runtime, in
+someone else's process, with a `bad-sig` that points nowhere near the actual
+problem.
+
+**In TypeScript, pass a `bigint`.** It is serialized as a bare JSON integer at
+any magnitude and matches the arbitrary-precision tiers exactly:
+
+```ts
+canonicalJson({ id: 9007199254740993n });  // {"id":9007199254740993}
+canonicalJson({ id: 9007199254740993 });   // {"id":9007199254740992}  <- rounded
+```
+
+For a value that must round-trip identically through all seven tiers, the
+durable options are a `bigint` (or the tier's arbitrary-precision integer) or a
+decimal **string**. A plain JSON number above 2^53 is not portable, and nothing
+in the protocol will tell you so at signing time.
+
+This is documented rather than enforced on purpose: rejecting or re-encoding
+out-of-range integers would change the bytes existing callers already sign.
+
 **The signed envelope** is the wire shape used by overlay apps (the
 `runar-overlay-express` server, the `runar-react` hooks, and any non-TS overlay
 backend). Every SDK must accept the same envelope, produce signatures every other
