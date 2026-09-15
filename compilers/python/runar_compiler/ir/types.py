@@ -355,6 +355,48 @@ def _decode_const_value(
 # JSON deserialization helpers
 # ---------------------------------------------------------------------------
 
+def _decode_loop_start(raw: Any) -> int:
+    """Decode a ``loop.start`` (N-133).
+
+    A JSON integer, or the sanctioned ``"<decimal>n"`` string for a start too
+    wide for a tier's native integer (issue #121). Anything else is REFUSED.
+
+    This used to be ``int(raw[:-1]) if raw.endswith("n") else int(raw)``, which
+    read two shapes it should not have::
+
+        "5"    -> 5      while rust read the same input as 0
+        True   -> 1      ``isinstance(True, int)`` is True, so a boolean walks
+                         straight through an integer check that looks correct
+
+    Both exit 0 and compile a loop the IR does not describe. The `n` suffix is
+    what makes the string arm unambiguous -- the same discriminator
+    ``load_const.value`` and ``ANFProperty.initialValue`` use -- no producer
+    writes the bare form, and Java already required it. Stripping exactly one
+    ``n`` and then requiring a plain decimal also keeps ``"5nn"``, ``"n"`` and
+    the float-shaped ``"1.5n"`` refused.
+
+    An ABSENT ``start`` still means a zero-start counting-up loop, and is not
+    routed here; an explicit ``null`` is not the same thing and is refused,
+    which is what go and java already did.
+    """
+    # bool first: isinstance(True, int) is True.
+    if isinstance(raw, bool):
+        raise ValueError(
+            f"loop start: expected an integer or a `<decimal>n` string, got {raw!r}"
+        )
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        if _is_decimal_bigint_literal(raw):
+            return int(raw[:-1])
+        raise ValueError(
+            f"loop start: a string start must be the `<decimal>n` form, got {raw!r}"
+        )
+    raise ValueError(
+        f"loop start: expected an integer or a `<decimal>n` string, got {raw!r}"
+    )
+
+
 def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
     """Build an ``ANFValue`` from a raw JSON dict."""
     v = ANFValue(kind=d.get("kind", ""))
@@ -373,14 +415,11 @@ def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
     v.cond = d.get("cond")
     v.count = d.get("count")
     v.iter_var = d.get("iterVar")
-    # Loop start/step (issue #121). Accept both the JS-style bigint literal
-    # string ("0n") and a plain JSON integer for ``start``; ``step`` is always
-    # a small integer (1 or -1).
-    _start = d.get("start")
-    if isinstance(_start, str) and _start.endswith("n"):
-        v.start = int(_start[:-1])
-    elif _start is not None:
-        v.start = int(_start)
+    # Loop start/step (issue #121). ``start`` is a JSON integer or the
+    # sanctioned ``"<decimal>n"`` string; ``step`` is always a small integer
+    # (1 or -1).
+    if "start" in d:
+        v.start = _decode_loop_start(d["start"])
     if d.get("step") is not None:
         v.step = int(d.get("step"))
     v.preimage = d.get("preimage")

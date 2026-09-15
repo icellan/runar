@@ -390,17 +390,38 @@ module RunarCompiler
     end
     private_class_method :_anf_value_from_hash
 
-    # Decode a loop `start` field (#121). Accepts a JS-style "Nn" bigint
-    # string (the canonical serialization), a plain JSON integer, or nil
-    # (older payloads with no start → zero-start counting-up loop).
+    # Decode a loop +start+ field (#121): a JSON integer, or the sanctioned
+    # +"<decimal>n"+ string for a start too wide for a tier's native integer.
+    # Anything else is REFUSED.
+    #
+    # N-133: this used to end in a bare +0+. Every shape it could not read —
+    # "abc", "", "5nn", a boolean, an explicit null — became a zero-start loop
+    # that compiled and exited 0, and it also read an unsuffixed "5" as 5 while
+    # Rust read the same input as 0.
+    #
+    # 0 is what made that invisible: it is a perfectly plausible loop start,
+    # and the commonest one, so the wrong program compiled and nothing looked
+    # wrong. The +n+ suffix is what makes the string arm unambiguous — the same
+    # discriminator +load_const.value+ and +ANFProperty.initialValue+ use — no
+    # producer writes the bare form, and Java already required it. Stripping
+    # exactly one +n+ and then requiring a plain decimal keeps "5nn", "n" and
+    # the float-shaped "1.5n" refused.
+    #
+    # An ABSENT +start+ still means a zero-start counting-up loop; the caller
+    # gates on +d.key?("start")+, so an explicit +null+ reaches here and is
+    # refused, which is what go and java already did.
     def self._decode_loop_start(raw)
-      return 0 if raw.nil?
       return raw if raw.is_a?(Integer)
+
       if raw.is_a?(String)
         return raw[0..-2].to_i if decimal_bigint_literal?(raw)
-        return raw.to_i if raw.match?(/\A-?\d+\z/)
+
+        raise ArgumentError,
+              "loop start: a string start must be the `<decimal>n` form, got #{raw.inspect}"
       end
-      0
+
+      raise ArgumentError,
+            "loop start: expected an integer or a `<decimal>n` string, got #{raw.inspect}"
     end
     private_class_method :_decode_loop_start
 

@@ -51,6 +51,12 @@ const ParseError = error{
     // are two of the shapes this tier used to accept) and Zig's IR loader
     // carries no message payload, so the error name is the whole diagnostic.
     FloatNotAllowedInIR,
+    // N-133: a `loop.start` this tier cannot read, or cannot represent. Both
+    // arms of the old decode answered 0 instead — a perfectly plausible loop
+    // start, so the wrong program compiled silently. Distinct error name
+    // because Zig's IR loader carries no message payload, so the name is the
+    // whole diagnostic.
+    InvalidLoopStart,
 };
 
 const max_parse_depth: u32 = 256;
@@ -841,14 +847,46 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
     // N-115 second half: this site had NO bounds check of any kind, so moving
     // the loop-count guard above its own cast would have left it open.
     // `{"start":1e30}` aborted here.
+    // N-133: an unreadable start is an ERROR, never 0.
+    //
+    // Both arms used to answer 0 -- `parseInt(...) catch 0` for a string, and
+    // a bare `else => 0` for everything that was not a number or a string.
+    // 0 is the worst possible substitution: it is a perfectly plausible loop
+    // start, the commonest one, and the one `bounded-loop`'s own golden
+    // carries, so the wrong program compiled, emitted a well-formed locking
+    // script, and nothing looked wrong. Measured against the five peers, this
+    // tier silently produced the start-0 script for
+    // `"999999999999999999999999999999n"`, `"abc"`, `""`, `"5nn"` and `true`.
+    //
+    // The over-int64 case is a REAL SPLIT, not a bug in the peers: `start` is
+    // an `i64` here and an arbitrary-precision integer in go/rust/python/
+    // ruby/java, so 10^30 is a value this tier genuinely cannot carry.
+    // Refusing it is this tier's half of that split; widening `start` is
+    // separate work (it is an i64 through the whole codegen path). A bare
+    // JSON number past i64 arrives as `.number_string`, which the old
+    // `else => 0` swallowed as well -- and python, ruby and java all WRITE
+    // an over-int64 start in exactly that shape.
     const start: i64 = if (obj.get("start")) |v| switch (v) {
         .integer => |i| i,
         .float => |f| try floatToInt(i64, f),
+        // A JSON integer too wide for i64. std.json hands it over as text
+        // rather than rounding it, so this is the representable-check arm.
+        .number_string => |s| std.fmt.parseInt(i64, s, 10) catch
+            return ParseError.InvalidLoopStart,
         .string => |s| blk: {
-            const text = if (s.len > 0 and s[s.len - 1] == 'n') s[0 .. s.len - 1] else s;
-            break :blk std.fmt.parseInt(i64, text, 10) catch 0;
+            // The `n` suffix is REQUIRED: it is the same discriminator
+            // `load_const.value` and `ANFProperty.initialValue` use, no
+            // producer writes the bare form, and Java already required it.
+            // Stripping exactly one `n` and then demanding a plain decimal
+            // keeps "5nn", "n" and the float-shaped "1.5n" refused.
+            if (!isDecimalBigIntLiteral(s)) return ParseError.InvalidLoopStart;
+            break :blk std.fmt.parseInt(i64, s[0 .. s.len - 1], 10) catch
+                return ParseError.InvalidLoopStart;
         },
-        else => 0,
+        // A boolean, a null, an object, an array. An ABSENT `start` is a
+        // different thing and still means a zero-start counting-up loop --
+        // that is the `else 0` on the `if (obj.get(...))` below, not here.
+        else => return ParseError.InvalidLoopStart,
     } else 0;
     const step: i8 = if (obj.get("step")) |v| switch (v) {
         .integer => |i| if (i < 0) @as(i8, -1) else 1,

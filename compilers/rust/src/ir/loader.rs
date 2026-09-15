@@ -375,7 +375,64 @@ fn validate_bindings(
                 validate_bindings(then, method_name, mutable_count)?;
                 validate_bindings(else_branch, method_name, mutable_count)?;
             }
-            ANFValue::Loop { count, body, .. } => {
+            ANFValue::Loop { count, body, start, .. } => {
+                // N-133: `start` is `integer | "<decimal>n"`, and anything
+                // else is refused HERE rather than substituted downstream.
+                //
+                // `lower_loop` read it as
+                //
+                //     match parse_const_value(start) {
+                //         Some(ConstValue::Int(n)) => n,
+                //         _ => BigInt::from(0),
+                //     }
+                //
+                // and `parse_const_value` returns `ConstValue::Str` for any
+                // string without the `n` suffix, so that arm swallowed `"5"`,
+                // `"abc"`, `""`, `"5nn"`, a boolean and an explicit null alike
+                // — every one of them becoming a zero-start loop that compiles
+                // and exits 0.
+                //
+                // 0 is what made it invisible: a perfectly plausible loop
+                // start, and the commonest one. `"5"` shows how bad the
+                // substitution is — go, python, zig and ruby all read it as 5
+                // while this tier read it as 0, and both sides exited 0 with a
+                // well-formed script.
+                //
+                // The check sits at the loader, with the loop-count cap, so a
+                // start that cannot be read never reaches codegen; the
+                // `_ =>` arm in lower_loop is now unreachable rather than
+                // load-bearing.
+                match start {
+                    serde_json::Value::Number(n) if n.is_i64() || n.is_u64() => {}
+                    serde_json::Value::Number(_) => {
+                        // A float is already refused at the door by N-131's
+                        // lexical scan; a non-integral number reaching here
+                        // would be an arbitrary-precision literal, which
+                        // `parse_const_value` handles. Keep it accepted only
+                        // when it really parses as an integer.
+                        if crate::ir::parse_const_value(start).is_none() {
+                            return Err(format!(
+                                "IR validation: method {} binding {} has a loop start that is not an integer: {}",
+                                method_name, binding.name, start
+                            ));
+                        }
+                    }
+                    serde_json::Value::String(s) => {
+                        if !crate::ir::is_decimal_bigint_literal(s) {
+                            return Err(format!(
+                                "IR validation: method {} binding {} loop start: a string start must be the `<decimal>n` form, got {:?}",
+                                method_name, binding.name, s
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "IR validation: method {} binding {} loop start: expected an integer or a `<decimal>n` string, got {}",
+                            method_name, binding.name, other
+                        ));
+                    }
+                }
+
                 // N-115: the unroll ceiling, at the external-input trust
                 // boundary.
                 //

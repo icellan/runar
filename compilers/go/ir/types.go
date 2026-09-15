@@ -4,6 +4,7 @@
 package ir
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -622,23 +623,47 @@ func BigIntToRawJSON(val *big.Int) json.RawMessage {
 }
 
 // decodeBigIntFromRaw decodes a loop iterator start value from its raw JSON
-// form — a bare number or a decimal `Nn` string (issue #121).
+// form — a bare number, or the sanctioned decimal `Nn` string for a start too
+// wide for a tier's native integer (issue #121).
+//
+// N-133: the string arm REQUIRES the `n` suffix, and the two arms are now
+// dispatched on the JSON token rather than tried in turn. Both halves of that
+// mattered:
+//
+//   - `encoding/json` unmarshals a JSON STRING into a `json.Number` (it is a
+//     string type), so `"5"` never reached the string branch at all — it was
+//     read as the number 5 by the number branch, while Rust read the same
+//     input as 0. Two tiers, two different loops, both exit 0.
+//   - the string branch then stripped a trailing `n` only IF one was there and
+//     parsed the rest as decimal either way, so the suffix carried no meaning.
+//
+// The suffix is what makes the string arm unambiguous — it is the same
+// discriminator `load_const.value` and `ANFProperty.initialValue` use — no
+// producer writes the bare form, and Java already required it. Stripping
+// exactly one `n` and then demanding a plain decimal keeps `"5nn"`, `"n"` and
+// the float-shaped `"1.5n"` refused.
 func decodeBigIntFromRaw(raw json.RawMessage) (*big.Int, error) {
-	var num json.Number
-	if err := json.Unmarshal(raw, &num); err == nil {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var str string
+		if err := json.Unmarshal(trimmed, &str); err != nil {
+			return nil, fmt.Errorf("unable to decode loop start value: %s", string(raw))
+		}
+		if !isDecimalBigIntLiteral(str) {
+			return nil, fmt.Errorf(
+				"a string start must be the `<decimal>n` form, got %q", str)
+		}
 		bi := new(big.Int)
-		if _, ok := bi.SetString(num.String(), 10); ok {
+		if _, ok := bi.SetString(str[:len(str)-1], 10); ok {
 			return bi, nil
 		}
+		return nil, fmt.Errorf(
+			"expected a decimal integer before the `n` suffix, got %q", str)
 	}
-	var str string
-	if err := json.Unmarshal(raw, &str); err == nil {
-		text := str
-		if len(text) > 0 && text[len(text)-1] == 'n' {
-			text = text[:len(text)-1]
-		}
+	var num json.Number
+	if err := json.Unmarshal(trimmed, &num); err == nil {
 		bi := new(big.Int)
-		if _, ok := bi.SetString(text, 10); ok {
+		if _, ok := bi.SetString(num.String(), 10); ok {
 			return bi, nil
 		}
 	}

@@ -1,0 +1,156 @@
+{
+  "contractName": "BoundedLoop",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedSum"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedSum"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "expectedSum",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "expectedSum",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "sum",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t0"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "body": [
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_param",
+                  "name": "start"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "sum",
+                  "op": "+",
+                  "right": "t1"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_param",
+                  "name": "i"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t2",
+                  "op": "+",
+                  "right": "t3"
+                }
+              },
+              {
+                "name": "sum",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t4"
+                }
+              }
+            ],
+            "count": 5,
+            "iterVar": "i",
+            "kind": "loop",
+            "start": "-3n",
+            "step": 1
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedSum"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "bin_op",
+            "left": "sum",
+            "op": "===",
+            "right": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "verify",
+      "params": [
+        {
+          "name": "start",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "expectedSum",
+      "readonly": true,
+      "type": "bigint"
+    }
+  ]
+}
