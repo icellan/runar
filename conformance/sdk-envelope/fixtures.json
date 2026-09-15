@@ -241,6 +241,37 @@
     }
   ],
   "note_on_pubkey_not_allowed": "pubkey-not-allowed cannot be expressed in a tier-agnostic fixture: it depends on caller-supplied expected_keys. Each tier verifies this reason in its own unit tests by passing a non-matching allowlist; the wire bytes are independent.",
+  "payload_depth_limit": 100,
+  "depth_vectors_notes": "R-260. verifyEnvelope parses the payload with each tier's stock JSON library and used to inherit that library's recursion cap, which differs per tier. Measured on ONE envelope (priv=1, live clock, payload {\"deep\":<N-deep array>,...}): ts/go/python/zig accepted every depth probed (zig to 100001), ruby flipped to bad-json at total depth 101 (JSON.parse default max_nesting: 100), rust at total depth 128 (serde_json RECURSION_LIMIT), and JAVA THREW StackOverflowError OUT OF verify (Json.java readValue/readObject/readArray are mutually recursive with no cap and Envelope.verify catches Exception, not Error) -- at ~5000 deep on a default JVM stack and ~1000 deep under -Xss512k, i.e. the threshold was a JVM launch flag, not a protocol property. Every tier now enforces MAX_ENVELOPE_PAYLOAD_DEPTH = 100 (this file's payload_depth_limit) on the payload TEXT, with a NON-RECURSIVE bracket scan run immediately before the stock parser, so the answer is the same everywhere and the guard itself cannot overflow. depth = the number of containers enclosing a value, 1-based, outermost = 1; 100 accepted, 101 rejected. 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127, so no tier has to hand-roll or reconfigure its parser to stay inside it, and it is far above what the wire needs (deepest checked-in conformance artifact: depth 15; this file: 6). It is deliberately the SAME number as canonicalJson's emit-side bound -- if parse were the smaller of the two, a tier could emit a legal, correctly-signed envelope another tier is physically unable to parse. Over-limit rejects as bad-json, the reason two tiers already returned natively and the reason the R-115 lone-surrogate text guard uses.",
+  "depth_vectors": [
+    {
+      "_vector_id": "dv1-depth-100-at-limit-accepted",
+      "_notes": "Exactly at MAX_ENVELOPE_PAYLOAD_DEPTH (1 outer object + 99 nested arrays = 100). Validly signed by alice (priv=1). This is the control with teeth: an over-strict depth guard, or one that counts off by one, reddens HERE.",
+      "max_depth": 100,
+      "expect_ok": true,
+      "envelope": {
+        "payload": "{\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "304502210096b97d876e293e9437ca335b3f1bf7f42e2c1cd5acf67aefedec68bf027c380402205c52c1cc13a5fcde106af4c11602a34975d0053bfd1614c360b988c3db85d9a1",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "dv2-depth-101-over-limit-bad-json",
+      "_notes": "One level past the limit (1 outer object + 100 nested arrays = 101). Its signature is VALID for its payload, so a tier that fails to enforce the depth bound returns ok:true rather than a different rejection reason — the assertion cannot pass by accident on a bad-sig fallthrough.",
+      "max_depth": 101,
+      "expect_ok": false,
+      "reason": "bad-json",
+      "envelope": {
+        "payload": "{\"deep\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"expiresAt\":1700000030000,\"nonce\":1700000000000}",
+        "sig": "304402200c6d482ccbde8de38d62a51978cbe142aed828769d450b5881450cfa8d27279502206abfea427ccf2d492a006f4646303cb013d800f5eea021613e6fd5faddb79987",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    }
+  ],
   "signing_vectors_notes": "GAP-064 cross-tier signing reproduction. Each tier, signing the SAME payload with the SAME key (alice priv=1) via RFC 6979 deterministic ECDSA whose nonce HMAC uses PLAIN SHA-256, MUST produce the BYTE-IDENTICAL low-S DER signature listed in expected_sig. expected_payload = canonicalJson({...data, nonce, expiresAt}); expected_sig = low-S DER of deterministic ECDSA over sha256(expected_payload) signed directly (the digest is the message representative — do NOT re-hash). Generated via the TS reference (runar-ir-schema canonicalJsonStringify + @bsv/sdk primitives/ECDSA sign with forceLowS=true).",
   "signing_vectors": [
     {

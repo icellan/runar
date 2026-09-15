@@ -14,6 +14,7 @@ import {
   buildP2PKHScript,
 } from '../index.js';
 import type { SignedEnvelope, EnvelopeSigner } from '../envelope.js';
+import { MAX_ENVELOPE_PAYLOAD_DEPTH } from '../envelope.js';
 import type { RunarArtifact } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -316,5 +317,118 @@ describe('verifyEnvelope reason parity with the six non-TS tiers (C16)', () => {
     });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('bad-sig');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-260 — shared payload nesting bound.
+//
+// `verifyEnvelope` parses the payload with each tier's stock JSON library and
+// used to inherit that library's recursion cap. Measured on ONE envelope
+// (priv=1, live clock, payload `{"deep":<N-deep array>,…}`):
+//
+//   ts / go / python / zig   accepted every depth probed (zig to 100001)
+//   ruby                     bad-json from total depth 101 (JSON.parse
+//                            max_nesting: 100)
+//   rust                     bad-json from total depth 128 (serde_json
+//                            RECURSION_LIMIT)
+//   java                     StackOverflowError thrown OUT of verify at ~5000
+//                            deep on a default JVM stack and ~1000 under
+//                            -Xss512k — i.e. a contract escape on
+//                            unauthenticated input, at a threshold set by a
+//                            JVM launch flag rather than by the protocol
+//
+// Every tier now enforces MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT with
+// a NON-RECURSIVE bracket scan run before the stock parser, so the answer is
+// the same everywhere and the guard itself cannot overflow. TS's verify reads
+// `Date.now()` directly rather than taking an injectable clock, so — as with
+// the R-115 lone-surrogate vector — it replays the fixture's SHAPE around a
+// live clock instead of the fixture's frozen envelope.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope payload depth bound (R-260)', () => {
+  const signer = new TestSigner(ALICE);
+
+  /** An N-deep array: nest(3) === [[[0]]]. */
+  function nest(n: number): unknown {
+    let v: unknown = 0;
+    for (let i = 0; i < n; i++) v = [v];
+    return v;
+  }
+
+  async function signAtArrayDepth(arrays: number): Promise<SignedEnvelope> {
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    // canonicalJson's own nesting cap is 512, well clear of these depths.
+    const payload = canonicalJson({ deep: nest(arrays), nonce, expiresAt });
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    return {
+      payload,
+      sig: await signer.signHash(digest),
+      pubkey: await signer.getPublicKey(),
+      nonce,
+      expiresAt,
+    };
+  }
+
+  it('accepts a payload exactly at the limit', async () => {
+    // 1 outer object + 63 arrays = MAX_ENVELOPE_PAYLOAD_DEPTH. This is the
+    // control with teeth: an over-strict or off-by-one guard reddens here.
+    const env = await signAtArrayDepth(MAX_ENVELOPE_PAYLOAD_DEPTH - 1);
+    const r = verifyEnvelope({ envelope: env });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it('rejects a payload one level past the limit with bad-json', async () => {
+    // Signed VALIDLY, so a tier that fails to enforce the bound returns
+    // ok:true rather than some other rejection — this cannot pass by accident
+    // on a bad-sig fallthrough.
+    const env = await signAtArrayDepth(MAX_ENVELOPE_PAYLOAD_DEPTH);
+    const r = verifyEnvelope({ envelope: env });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad-json');
+  });
+
+  it('rejects a payload deep enough to overflow a recursive parser', () => {
+    // ~10 KB of brackets — the shape that threw StackOverflowError out of the
+    // Java tier's verify. The guard is a flat scan, so no tier recurses here.
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    const payload = `{"deep":${'['.repeat(5000)}0${']'.repeat(5000)},"expiresAt":${expiresAt},"nonce":${nonce}}`;
+    const r = verifyEnvelope({
+      envelope: { payload, sig: '30'.repeat(36), pubkey: `02${'ab'.repeat(32)}`, nonce, expiresAt },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad-json');
+  });
+
+  it('still accepts a brace or bracket that only appears inside a string', async () => {
+    // The scan must skip string contents, or an ordinary message value like
+    // "{{{{…" would be counted as nesting and rejected.
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    const payload = canonicalJson({ msg: '['.repeat(200) + '{'.repeat(200), nonce, expiresAt });
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    const r = verifyEnvelope({
+      envelope: {
+        payload,
+        sig: await signer.signHash(digest),
+        pubkey: await signer.getPublicKey(),
+        nonce,
+        expiresAt,
+      },
+    });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it('pins MAX_ENVELOPE_PAYLOAD_DEPTH to the cross-tier fixture', () => {
+    const fixturePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../conformance/sdk-envelope/fixtures.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as { payload_depth_limit: number };
+    expect(fixture.payload_depth_limit).toBe(MAX_ENVELOPE_PAYLOAD_DEPTH);
   });
 });

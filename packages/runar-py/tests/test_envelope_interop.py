@@ -88,3 +88,34 @@ def test_canonical_json_rejection_vectors(fixture: dict) -> None:
         input_obj = {v["input_object_key"]: bad_str}
         with pytest.raises(Exception):  # noqa: B017 — any error is acceptable
             canonical_json(input_obj)
+
+
+def test_payload_depth_vectors(fixture: dict) -> None:
+    """R-260. verify_envelope must bound payload nesting ITSELF rather than
+    inherit whatever cap the stock JSON library happens to impose, because
+    that cap differs per tier (ruby 100, rust 127, ts/go/python/zig none,
+    java a StackOverflowError whose threshold is the JVM's -Xss flag). All
+    seven tiers enforce MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT, so the
+    same bytes get the same VerifyEnvelopeReason everywhere.
+    """
+    vectors = fixture["depth_vectors"]
+    assert vectors, "depth_vectors missing or empty"
+    for v in vectors:
+        vid = v.get("_vector_id", "?")
+        env = SignedEnvelope.from_dict(v["envelope"])
+        r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
+        if v["expect_ok"]:
+            assert r.ok, f"{vid}: expected ok=True, got reason={r.reason}"
+        else:
+            assert not r.ok, f"{vid}: expected ok=False"
+            assert r.reason == VerifyEnvelopeReason(v["reason"]), (
+                f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )
+
+
+def test_payload_depth_limit_matches_fixture(fixture: dict) -> None:
+    """The bound is part of the wire contract, so the fixture pins it and
+    every tier asserts its own constant against the fixture's number."""
+    from runar.sdk.envelope import MAX_ENVELOPE_PAYLOAD_DEPTH
+
+    assert fixture["payload_depth_limit"] == MAX_ENVELOPE_PAYLOAD_DEPTH

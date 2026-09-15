@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use runar_lang::sdk::{
     canonical_json, verify_envelope, SignedEnvelope, VerifyEnvelopeOpts, VerifyEnvelopeReason,
+    MAX_ENVELOPE_PAYLOAD_DEPTH,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -174,4 +175,51 @@ fn canonical_json_rejection_vectors() {
              canonical_json itself must now reject lone surrogates explicitly"
         );
     }
+}
+
+/// R-260. `verify_envelope` must bound payload nesting ITSELF rather than
+/// inherit whatever cap serde_json happens to impose, because that cap differs
+/// per tier (ruby 100, THIS tier 127, ts/go/python/zig none, java a
+/// `StackOverflowError` whose threshold is the JVM's `-Xss` flag). All seven
+/// tiers enforce `MAX_ENVELOPE_PAYLOAD_DEPTH` on the payload TEXT, so the same
+/// bytes get the same `VerifyEnvelopeReason` everywhere.
+#[test]
+fn payload_depth_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["depth_vectors"]
+        .as_array()
+        .expect("depth_vectors missing");
+    assert!(!vectors.is_empty(), "depth_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let env = envelope_from_value(&v["envelope"]);
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "bad-json" => VerifyEnvelopeReason::BadJson,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
+    }
+}
+
+/// The bound is part of the wire contract, so the fixture pins it and every
+/// tier asserts its own constant against the fixture's number.
+#[test]
+fn payload_depth_limit_matches_fixture() {
+    let fixture = load_fixture();
+    assert_eq!(
+        fixture["payload_depth_limit"].as_u64().unwrap() as usize,
+        MAX_ENVELOPE_PAYLOAD_DEPTH
+    );
 }

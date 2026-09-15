@@ -502,6 +502,79 @@ const (
 	MaxEnvelopeFieldBytes   = MaxScriptBytes     // 4 MiB — matches MAX_STRING_BYTES
 )
 
+// Maximum payload nesting VerifyEnvelope will parse: the number of containers
+// enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+// R-260.
+//
+// Without an explicit bound the limit was whatever each tier's stock JSON library
+// imposed, and those differ. Measured on ONE envelope, payload
+// {"deep":<N-deep array>,...}: ruby flipped to bad-json at total depth 101
+// (JSON.parse default max_nesting: 100) and rust at 128 (serde_json
+// RECURSION_LIMIT); ts, go, python and zig accepted every depth probed (zig's
+// iterative scanner took 100001 without complaint); and java threw
+// StackOverflowError straight OUT of verify -- its hand-written parser is
+// recursive with no cap and verify catches Exception, not Error -- at ~5000 deep
+// on a default JVM stack and ~1000 deep under -Xss512k, i.e. a contract escape on
+// unauthenticated input whose threshold was a JVM launch flag rather than a
+// protocol property.
+//
+// 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
+// so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
+// also far above what the wire needs: the deepest of the 157 checked-in
+// conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
+// tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
+// bound: if parse were the smaller of the two, a tier could emit a legal,
+// correctly-signed envelope that another tier is physically unable to parse.
+//
+// The guard runs on the payload TEXT, immediately before the stock parser, and is
+// a flat non-recursive bracket scan so the guard itself cannot overflow.
+const MaxEnvelopePayloadDepth = 100
+
+// Does the payload text nest deeper than MaxEnvelopePayloadDepth?
+//
+// Counts the maximum number of simultaneously-open {/[ containers, skipping
+// anything inside a JSON string (so a value of "[[[[..." is not nesting). The
+// scan is FLAT -- no recursion -- which is the point: a guard that recursed
+// would overflow on exactly the input it exists to reject. It bails out the
+// instant the bound is passed, so a 200 KB bracket bomb costs a few hundred
+// bytes of scanning.
+//
+// This does not validate JSON; malformed input still falls through to the real
+// parser and its own bad-json rejection.
+func payloadExceedsMaxDepth(payload string) bool {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(payload); i++ {
+		c := payload[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > MaxEnvelopePayloadDepth {
+				return true
+			}
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
+}
+
 // VerifyEnvelopeOpts captures the input to VerifyEnvelope.
 type VerifyEnvelopeOpts struct {
 	Envelope     SignedEnvelope
@@ -564,6 +637,12 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	// post-parse check in this tier can never see it. See
 	// sdk_envelope_lone_surrogate.go.
 	if payloadHasLoneSurrogate(env.Payload) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
+	// R-260: bound nesting on the TEXT, before the stock parser, so the answer
+	// does not depend on encoding/json's recursion behaviour. Same bound and
+	// same reason in all seven tiers.
+	if payloadExceedsMaxDepth(env.Payload) {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
 	}
 	var parsed map[string]any

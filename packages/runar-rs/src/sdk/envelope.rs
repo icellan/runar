@@ -298,6 +298,77 @@ impl VerifyEnvelopeReason {
 pub const MAX_ENVELOPE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ENVELOPE_FIELD_BYTES: usize = 4 * 1024 * 1024;
 
+/// Maximum payload nesting `verify_envelope` will parse: the number of containers
+/// enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+/// R-260.
+///
+/// Without an explicit bound the limit was whatever each tier's stock JSON library
+/// imposed, and those differ. Measured on ONE envelope, payload
+/// {"deep":<N-deep array>,...}: ruby flipped to bad-json at total depth 101
+/// (JSON.parse default max_nesting: 100) and rust at 128 (serde_json
+/// RECURSION_LIMIT); ts, go, python and zig accepted every depth probed (zig's
+/// iterative scanner took 100001 without complaint); and java threw
+/// StackOverflowError straight OUT of verify -- its hand-written parser is
+/// recursive with no cap and verify catches Exception, not Error -- at ~5000 deep
+/// on a default JVM stack and ~1000 deep under -Xss512k, i.e. a contract escape on
+/// unauthenticated input whose threshold was a JVM launch flag rather than a
+/// protocol property.
+///
+/// 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
+/// so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
+/// also far above what the wire needs: the deepest of the 157 checked-in
+/// conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
+/// tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
+/// bound: if parse were the smaller of the two, a tier could emit a legal,
+/// correctly-signed envelope that another tier is physically unable to parse.
+///
+/// The guard runs on the payload TEXT, immediately before the stock parser, and is
+/// a flat non-recursive bracket scan so the guard itself cannot overflow.
+pub const MAX_ENVELOPE_PAYLOAD_DEPTH: usize = 100;
+
+/// Does the payload text nest deeper than MAX_ENVELOPE_PAYLOAD_DEPTH?
+///
+/// Counts the maximum number of simultaneously-open {/[ containers, skipping
+/// anything inside a JSON string (so a value of "[[[[..." is not nesting). The
+/// scan is FLAT -- no recursion -- which is the point: a guard that recursed
+/// would overflow on exactly the input it exists to reject. It bails out the
+/// instant the bound is passed, so a 200 KB bracket bomb costs a few hundred
+/// bytes of scanning.
+///
+/// This does not validate JSON; malformed input still falls through to the real
+/// parser and its own bad-json rejection.
+fn payload_exceeds_max_depth(payload: &str) -> bool {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &b in payload.as_bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_ENVELOPE_PAYLOAD_DEPTH {
+                    return true;
+                }
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub struct VerifyEnvelopeOpts<'a> {
     pub envelope: &'a SignedEnvelope,
     pub expected_keys: Option<&'a [String]>,
@@ -345,6 +416,13 @@ pub fn verify_envelope(opts: VerifyEnvelopeOpts<'_>) -> VerifyEnvelopeResult {
     }
 
     // 3. Parse payload.
+    //
+    // R-260: bound nesting on the TEXT, before serde_json, so the answer does
+    // not depend on its RECURSION_LIMIT (127 here, but 100 in ruby and absent
+    // in four other tiers). Same bound and same reason in all seven tiers.
+    if payload_exceeds_max_depth(&env.payload) {
+        return reject(VerifyEnvelopeReason::BadJson, None);
+    }
     let parsed: Map<String, Value> = match serde_json::from_str::<Value>(&env.payload) {
         Ok(Value::Object(m)) => m,
         _ => return reject(VerifyEnvelopeReason::BadJson, None),

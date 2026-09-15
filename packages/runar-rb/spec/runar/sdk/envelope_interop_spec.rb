@@ -74,4 +74,48 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
       )
     end
   end
+  # R-260. verify_envelope must bound payload nesting ITSELF rather than
+  # inherit whatever cap JSON.parse happens to impose, because that cap differs
+  # per tier (THIS tier 100, rust 127, ts/go/python/zig none, java a
+  # StackOverflowError whose threshold is the JVM's -Xss flag). All seven tiers
+  # enforce MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT, so the same bytes
+  # get the same VerifyEnvelopeReason everywhere.
+  it 'applies the shared payload depth bound to every depth vector' do
+    vectors = fixture['depth_vectors']
+    expect(vectors).not_to be_empty
+    vectors.each do |v|
+      vid = v['_vector_id']
+      env = Runar::SDK::Envelope::SignedEnvelope.from_h(v['envelope'])
+      r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
+      if v['expect_ok']
+        expect(r[:ok]).to be(true), "#{vid}: expected ok=true, got reason=#{r[:reason]}"
+      else
+        expect(r[:ok]).to be(false), "#{vid}: expected ok=false"
+        expect(r[:reason]).to eq(v['reason']), "#{vid}: got reason=#{r[:reason]}"
+      end
+    end
+  end
+
+  # This tier needs an assertion the end-to-end vectors cannot give it. Ruby's
+  # JSON.parse default (max_nesting: 100) already rejects the over-limit vector
+  # on its own, so weakening payload_exceeds_max_depth? does NOT redden the
+  # depth_vectors example here — the library masks it. Assert the guard
+  # directly so it has a test that fails when the guard stops working, rather
+  # than one that passes because the stdlib happens to agree today.
+  it 'payload_exceeds_max_depth? fires at exactly one past the bound' do
+    limit = Runar::SDK::Envelope::MAX_ENVELOPE_PAYLOAD_DEPTH
+    at_limit = ('[' * limit) + '0' + (']' * limit)
+    over_limit = ('[' * (limit + 1)) + '0' + (']' * (limit + 1))
+    expect(Runar::SDK::Envelope.payload_exceeds_max_depth?(at_limit)).to be(false)
+    expect(Runar::SDK::Envelope.payload_exceeds_max_depth?(over_limit)).to be(true)
+    # Brackets inside a string are text, not nesting.
+    expect(Runar::SDK::Envelope.payload_exceeds_max_depth?(%({"m":"#{'[' * (limit + 50)}"}))).to be(false)
+  end
+
+  # The bound is part of the wire contract, so the fixture pins it and every
+  # tier asserts its own constant against the fixture's number.
+  it 'pins MAX_ENVELOPE_PAYLOAD_DEPTH to the fixture' do
+    expect(fixture['payload_depth_limit']).to eq(Runar::SDK::Envelope::MAX_ENVELOPE_PAYLOAD_DEPTH)
+  end
+
 end

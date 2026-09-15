@@ -31,6 +31,14 @@ type fixtureRejection struct {
 	Envelope SignedEnvelope `json:"envelope"`
 }
 
+type fixtureDepthVector struct {
+	VectorID string         `json:"_vector_id"`
+	MaxDepth int            `json:"max_depth"`
+	ExpectOK bool           `json:"expect_ok"`
+	Reason   string         `json:"reason"`
+	Envelope SignedEnvelope `json:"envelope"`
+}
+
 type fixture struct {
 	FixtureVersion       int                      `json:"fixture_version"`
 	AlicePubHex          string                   `json:"alice_pub_hex"`
@@ -40,6 +48,8 @@ type fixture struct {
 	CanonicalJSONVectors []fixtureCanonicalVector `json:"canonical_json_vectors"`
 	ValidEnvelope        SignedEnvelope           `json:"valid_envelope"`
 	RejectionVectors     []fixtureRejection       `json:"rejection_vectors"`
+	PayloadDepthLimit    int                      `json:"payload_depth_limit"`
+	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
 }
 
 func loadFixture(t *testing.T) fixture {
@@ -263,5 +273,43 @@ func TestEnvelopeInterop_SigningVectors(t *testing.T) {
 		if got != expectedSig {
 			t.Errorf("vector %s: signature divergence\n  got:  %s\n want:  %s", id, got, expectedSig)
 		}
+	}
+}
+
+// TestEnvelopeInterop_DepthVectors — R-260. VerifyEnvelope must bound payload
+// nesting ITSELF rather than inherit whatever cap encoding/json happens to
+// impose, because that cap differs per tier (ruby 100, rust 127, ts/go/python/
+// zig none, java a StackOverflowError whose threshold is the JVM's -Xss flag).
+// All seven tiers enforce MaxEnvelopePayloadDepth on the payload TEXT, so the
+// same bytes get the same VerifyEnvelopeReason everywhere.
+func TestEnvelopeInterop_DepthVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.DepthVectors) == 0 {
+		t.Fatal("depth_vectors missing or empty")
+	}
+	for _, dv := range f.DepthVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: dv.Envelope, NowMs: f.VerifyNowMs})
+		if dv.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", dv.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", dv.VectorID)
+			continue
+		}
+		if string(r.Reason) != dv.Reason {
+			t.Errorf("%s: got reason=%s want=%s", dv.VectorID, r.Reason, dv.Reason)
+		}
+	}
+}
+
+// The bound is part of the wire contract, so the fixture pins it and every
+// tier asserts its own constant against the fixture's number.
+func TestEnvelopeInterop_PayloadDepthLimitMatchesFixture(t *testing.T) {
+	f := loadFixture(t)
+	if f.PayloadDepthLimit != MaxEnvelopePayloadDepth {
+		t.Fatalf("fixture payload_depth_limit=%d, MaxEnvelopePayloadDepth=%d", f.PayloadDepthLimit, MaxEnvelopePayloadDepth)
 	}
 }

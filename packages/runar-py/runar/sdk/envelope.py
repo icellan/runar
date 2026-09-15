@@ -274,6 +274,71 @@ class VerifyEnvelopeReason(str, Enum):
 MAX_ENVELOPE_PAYLOAD_BYTES = 16 * 1024 * 1024  # 16 MiB — matches MAX_IR_BYTES
 MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024     # 4 MiB — matches MAX_STRING_BYTES
 
+#: Maximum payload nesting ``verify_envelope`` will parse: the number of containers
+#: enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+#: R-260.
+#:
+#: Without an explicit bound the limit was whatever each tier's stock JSON library
+#: imposed, and those differ. Measured on ONE envelope, payload
+#: {"deep":<N-deep array>,...}: ruby flipped to bad-json at total depth 101
+#: (JSON.parse default max_nesting: 100) and rust at 128 (serde_json
+#: RECURSION_LIMIT); ts, go, python and zig accepted every depth probed (zig's
+#: iterative scanner took 100001 without complaint); and java threw
+#: StackOverflowError straight OUT of verify -- its hand-written parser is
+#: recursive with no cap and verify catches Exception, not Error -- at ~5000 deep
+#: on a default JVM stack and ~1000 deep under -Xss512k, i.e. a contract escape on
+#: unauthenticated input whose threshold was a JVM launch flag rather than a
+#: protocol property.
+#:
+#: 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
+#: so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
+#: also far above what the wire needs: the deepest of the 157 checked-in
+#: conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
+#: tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
+#: bound: if parse were the smaller of the two, a tier could emit a legal,
+#: correctly-signed envelope that another tier is physically unable to parse.
+#:
+#: The guard runs on the payload TEXT, immediately before the stock parser, and is
+#: a flat non-recursive bracket scan so the guard itself cannot overflow.
+MAX_ENVELOPE_PAYLOAD_DEPTH = 100
+
+
+def _payload_exceeds_max_depth(payload: str) -> bool:
+    """Does the payload text nest deeper than MAX_ENVELOPE_PAYLOAD_DEPTH?
+
+Counts the maximum number of simultaneously-open {/[ containers, skipping
+anything inside a JSON string (so a value of "[[[[..." is not nesting). The
+scan is FLAT -- no recursion -- which is the point: a guard that recursed
+would overflow on exactly the input it exists to reject. It bails out the
+instant the bound is passed, so a 200 KB bracket bomb costs a few hundred
+bytes of scanning.
+
+This does not validate JSON; malformed input still falls through to the real
+parser and its own bad-json rejection.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for c in payload:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_string = False
+            continue
+        if c == '"':
+            in_string = True
+        elif c in "{[":
+            depth += 1
+            if depth > MAX_ENVELOPE_PAYLOAD_DEPTH:
+                return True
+        elif c in "}]" and depth > 0:
+            depth -= 1
+    return False
+
+
 
 @dataclass
 class VerifyEnvelopeResult:
@@ -387,6 +452,11 @@ def verify_envelope(
     # the seven tiers' JSON parsers disagree about it. Decide it here, on the
     # text, so every tier returns the same reason.
     if _payload_has_lone_surrogate(envelope.payload):
+        return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
+    # R-260: bound nesting on the TEXT, before json.loads, so the answer does
+    # not depend on the C scanner's recursion behaviour. Same bound and same
+    # reason in all seven tiers.
+    if _payload_exceeds_max_depth(envelope.payload):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_JSON, None)
     try:
         parsed = json.loads(envelope.payload)

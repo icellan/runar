@@ -207,4 +207,52 @@ class EnvelopeInteropTest {
             }
         }
     }
+    // -------------------------------------------------------------------
+    // R-260 — shared payload depth bound
+    // -------------------------------------------------------------------
+
+    /**
+     * verify must bound payload nesting ITSELF rather than inherit whatever cap
+     * its JSON parser happens to impose, because that cap differs per tier
+     * (ruby 100, rust 127, ts/go/python/zig none) and THIS tier had no cap at
+     * all: {@link Json}'s readValue/readObject/readArray are mutually recursive
+     * and {@code verify} catches {@code Exception}, not {@code Error}, so a
+     * ~10 KB deep payload threw {@link StackOverflowError} straight out of
+     * {@code verify} — a contract escape on unauthenticated input, at a depth
+     * set by the JVM's {@code -Xss} flag rather than by the protocol.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void payloadDepthVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("depth_vectors");
+        assertFalse(vectors.isEmpty(), "depth_vectors missing or empty");
+        for (Map<String, Object> dv : vectors) {
+            String vid = (String) dv.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap((Map<String, Object>) dv.get("envelope"));
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(dv.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(dv.get("reason"), r.reason.wire, vid);
+            }
+        }
+    }
+
+    /**
+     * The bound is part of the wire contract, so the fixture pins it and every
+     * tier asserts its own constant against the fixture's number.
+     */
+    @Test
+    void payloadDepthLimitMatchesFixture() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        assertEquals(
+            ((Number) fixture.get("payload_depth_limit")).intValue(),
+            Envelope.MAX_ENVELOPE_PAYLOAD_DEPTH);
+    }
+
 }

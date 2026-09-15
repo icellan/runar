@@ -285,3 +285,51 @@ test "interop: canonical_json rejects malformed Unicode (D6)" {
         }
     }
 }
+
+// R-260. verifyEnvelope must bound payload nesting ITSELF rather than inherit
+// whatever cap std.json happens to impose, because that cap differs per tier
+// (ruby 100, rust 127, ts/go/python/zig none — THIS tier's scanner is
+// iterative and took 100001 without complaint, java a StackOverflowError whose
+// threshold is the JVM's -Xss flag). All seven tiers enforce
+// MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT, so the same bytes get the
+// same VerifyEnvelopeReason everywhere.
+test "interop: shared payload depth bound" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const limit = parsed.value.object.get("payload_depth_limit").?.integer;
+    try std.testing.expectEqual(@as(i64, @intCast(envelope.MAX_ENVELOPE_PAYLOAD_DEPTH)), limit);
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const dvs = parsed.value.object.get("depth_vectors").?.array;
+    try std.testing.expect(dvs.items.len > 0);
+    for (dvs.items) |dv| {
+        const obj = dv.object;
+        const vid = obj.get("_vector_id").?.string;
+        const e = obj.get("envelope").?.object;
+        const env = envelope.SignedEnvelope{
+            .payload = e.get("payload").?.string,
+            .sig = e.get("sig").?.string,
+            .pubkey = e.get("pubkey").?.string,
+            .nonce = e.get("nonce").?.integer,
+            .expiresAt = e.get("expiresAt").?.integer,
+        };
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        if (obj.get("expect_ok").?.bool) {
+            if (!r.ok) {
+                std.debug.print("{s}: expected ok=true, got reason={s}\n", .{ vid, if (r.reason) |x| x.wire() else "-" });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
+    }
+}
