@@ -35,17 +35,37 @@ pub const Value = union(enum) {
 // canonicalJson
 // ---------------------------------------------------------------------------
 
-pub const CanonicalError = error{ NonFiniteNumber, OutOfMemory, LoneSurrogate, InvalidUtf8, DuplicateObjectKey };
+pub const CanonicalError = error{ NonFiniteNumber, OutOfMemory, LoneSurrogate, InvalidUtf8, DuplicateObjectKey, NestingTooDeep, StringTooLarge, OutputTooLarge };
+
+/// Bounds the nesting `canonicalJson` will EMIT: the number of containers
+/// enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+///
+/// Deliberately the same number `verifyEnvelope` enforces on the parse side
+/// (`MAX_ENVELOPE_PAYLOAD_DEPTH`) — if emit allowed more than parse, this tier
+/// could produce a legal, correctly-signed envelope another tier is physically
+/// unable to read. It is NOT the compiler's IR nesting bound (512): that
+/// serves the `--ir` loader, which reads a trusted local file rather than
+/// unauthenticated wire input. R-260.
+///
+/// `canonicalJson`'s byte guards reuse the envelope caps rather than restating
+/// the numbers, so emit and parse cannot drift apart: a single string field is
+/// bounded by `MAX_ENVELOPE_FIELD_BYTES` (4 MiB) and the finished document by
+/// `MAX_ENVELOPE_PAYLOAD_BYTES` (16 MiB).
+pub const MAX_WIRE_NESTING: usize = 100;
 
 /// Serialize `value` to RFC 8785 / JCS canonical JSON. Caller owns result.
 pub fn canonicalJson(allocator: std.mem.Allocator, value: Value) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try canonicalAppend(allocator, &buf, value);
+    try canonicalAppend(allocator, &buf, value, 1);
+    // G3: total output guard, on the finished buffer.
+    if (buf.items.len > MAX_ENVELOPE_PAYLOAD_BYTES) return error.OutputTooLarge;
     return buf.toOwnedSlice(allocator);
 }
 
-fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), value: Value) !void {
+/// `depth` is the 1-based nesting level of the container being written
+/// (outermost = 1); scalars ignore it.
+fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), value: Value, depth: usize) !void {
     switch (value) {
         .Null => try out.appendSlice(allocator, "null"),
         .Bool => |b| try out.appendSlice(allocator, if (b) "true" else "false"),
@@ -60,14 +80,18 @@ fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
         },
         .String => |s| try appendJsonString(allocator, out, s),
         .Array => |arr| {
+            // G1: depth guard on entry to the container, before children.
+            if (depth > MAX_WIRE_NESTING) return error.NestingTooDeep;
             try out.append(allocator, '[');
             for (arr, 0..) |e, i| {
                 if (i > 0) try out.append(allocator, ',');
-                try canonicalAppend(allocator, out, e);
+                try canonicalAppend(allocator, out, e, depth + 1);
             }
             try out.append(allocator, ']');
         },
         .Object => |kvs| {
+            // G1: depth guard on entry to the container, before children.
+            if (depth > MAX_WIRE_NESTING) return error.NestingTooDeep;
             // Sort keys by UTF-16 code-unit order (RFC 8785 / ES spec). Zig
             // strings are UTF-8, so we transcode each key to UTF-16LE once,
             // then compare those buffers by code unit. Byte-compare on the
@@ -108,7 +132,7 @@ fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
                 if (i > 0) try out.append(allocator, ',');
                 try appendJsonString(allocator, out, kvs[idx].key);
                 try out.append(allocator, ':');
-                try canonicalAppend(allocator, out, kvs[idx].value);
+                try canonicalAppend(allocator, out, kvs[idx].value, depth + 1);
             }
             try out.append(allocator, '}');
         },
@@ -116,6 +140,11 @@ fn canonicalAppend(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
 }
 
 fn appendJsonString(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    // G2: string-byte guard on the RAW input, before escaping, so the bound is
+    // about the caller's data rather than about how much the escaper inflated
+    // it. Object KEYS route through here too, so an oversized key is rejected
+    // the same way an oversized value is.
+    if (s.len > MAX_ENVELOPE_FIELD_BYTES) return error.StringTooLarge;
     try out.append(allocator, '"');
     var i: usize = 0;
     while (i < s.len) {

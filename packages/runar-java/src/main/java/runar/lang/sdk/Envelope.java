@@ -42,15 +42,56 @@ public final class Envelope {
     // canonicalJson
     // -------------------------------------------------------------------
 
-    /** Serialize {@code value} to RFC 8785 / JCS canonical JSON. */
+    /**
+     * Bounds the nesting {@link #canonicalJson} will EMIT: the number of
+     * containers enclosing a value, 1-based, outermost = 1. 100 is accepted,
+     * 101 is rejected.
+     *
+     * <p>Deliberately the same number {@link #verify} enforces on the parse
+     * side ({@link #MAX_ENVELOPE_PAYLOAD_DEPTH}) — if emit allowed more than
+     * parse, this tier could produce a legal, correctly-signed envelope another
+     * tier is physically unable to read. It is NOT the compiler's IR nesting
+     * bound (512): that serves the {@code --ir} loader, which reads a trusted
+     * local file rather than unauthenticated wire input. R-260.
+     *
+     * <p>100 also keeps this tier far from the stack limit that made the JVM
+     * crash outright on a 513-deep object, so the guard throws a typed
+     * exception instead.
+     *
+     * <p>canonicalJson's byte guards reuse the envelope caps rather than
+     * restating the numbers, so emit and parse cannot drift apart: a single
+     * string field is bounded by {@link #MAX_ENVELOPE_FIELD_BYTES} (4 MiB) and
+     * the finished document by {@link #MAX_ENVELOPE_PAYLOAD_BYTES} (16 MiB).
+     */
+    public static final int MAX_WIRE_NESTING = 100;
+
+    /**
+     * Serialize {@code value} to RFC 8785 / JCS canonical JSON.
+     *
+     * @throws IllegalArgumentException if nesting exceeds
+     *     {@link #MAX_WIRE_NESTING}, a single string exceeds
+     *     {@link #MAX_ENVELOPE_FIELD_BYTES}, or the finished document exceeds
+     *     {@link #MAX_ENVELOPE_PAYLOAD_BYTES}.
+     */
     public static String canonicalJson(Object value) {
         StringBuilder sb = new StringBuilder();
-        canonicalAppend(sb, value);
-        return sb.toString();
+        canonicalAppend(sb, value, 1);
+        String out = sb.toString();
+        // G3: total output guard, on the finished document's UTF-8 byte length.
+        int n = out.getBytes(StandardCharsets.UTF_8).length;
+        if (n > MAX_ENVELOPE_PAYLOAD_BYTES) {
+            throw new IllegalArgumentException(
+                "canonical JSON: output exceeds " + MAX_ENVELOPE_PAYLOAD_BYTES + " bytes (actual " + n + ")");
+        }
+        return out;
     }
 
+    /**
+     * {@code depth} is the 1-based nesting level of the container being written
+     * (outermost = 1); scalars ignore it.
+     */
     @SuppressWarnings("unchecked")
-    private static void canonicalAppend(StringBuilder out, Object value) {
+    private static void canonicalAppend(StringBuilder out, Object value, int depth) {
         if (value == null) {
             out.append("null");
             return;
@@ -85,16 +126,24 @@ public final class Envelope {
             return;
         }
         if (value instanceof List) {
+            // G1: depth guard on entry to the container, before children.
+            if (depth > MAX_WIRE_NESTING) {
+                throw new IllegalArgumentException("canonical JSON: nesting exceeds " + MAX_WIRE_NESTING);
+            }
             List<?> list = (List<?>) value;
             out.append('[');
             for (int i = 0; i < list.size(); i++) {
                 if (i > 0) out.append(',');
-                canonicalAppend(out, list.get(i));
+                canonicalAppend(out, list.get(i), depth + 1);
             }
             out.append(']');
             return;
         }
         if (value instanceof Map) {
+            // G1: depth guard on entry to the container, before children.
+            if (depth > MAX_WIRE_NESTING) {
+                throw new IllegalArgumentException("canonical JSON: nesting exceeds " + MAX_WIRE_NESTING);
+            }
             Map<String, Object> map = (Map<String, Object>) value;
             // Sort keys by UTF-16 code-unit order (Java strings ARE UTF-16,
             // so the default String compareTo is exactly the right thing).
@@ -108,7 +157,7 @@ public final class Envelope {
                 first = false;
                 appendJsonString(out, k);
                 out.append(':');
-                canonicalAppend(out, v);
+                canonicalAppend(out, v, depth + 1);
             }
             out.append('}');
             return;
@@ -117,6 +166,17 @@ public final class Envelope {
     }
 
     private static void appendJsonString(StringBuilder out, String s) {
+        // G2: string-byte guard on the RAW input, before escaping, so the bound
+        // is about the caller's data rather than about how much the escaper
+        // inflated it. Object KEYS route through here too, so an oversized key
+        // is rejected the same way an oversized value is. Measured in UTF-8
+        // bytes, not chars, so the bound means the same thing as in the six
+        // peer tiers.
+        int n = utf8Length(s);
+        if (n > MAX_ENVELOPE_FIELD_BYTES) {
+            throw new IllegalArgumentException(
+                "canonical JSON: string exceeds " + MAX_ENVELOPE_FIELD_BYTES + " bytes (actual " + n + ")");
+        }
         out.append('"');
         // Java strings are UTF-16, so c is a code unit. We must reject any
         // lone surrogate (high without low partner, or low without high
@@ -613,6 +673,31 @@ public final class Envelope {
     // -------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------
+
+    /**
+     * UTF-8 byte length of {@code s}, counted from code units directly rather
+     * than via {@code getBytes(UTF_8)} — that call substitutes '?' for an
+     * unpaired surrogate, which would report the wrong length for exactly the
+     * strings the lone-surrogate guard below is there to reject.
+     */
+    private static int utf8Length(String s) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) {
+                n += 1;
+            } else if (c < 0x800) {
+                n += 2;
+            } else if (Character.isHighSurrogate(c) && i + 1 < s.length()
+                    && Character.isLowSurrogate(s.charAt(i + 1))) {
+                n += 4;
+                i++;
+            } else {
+                n += 3;
+            }
+        }
+        return n;
+    }
 
     private static Long readLong(Object o) {
         if (o instanceof Long) return (Long) o;

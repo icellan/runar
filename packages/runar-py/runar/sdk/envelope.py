@@ -27,14 +27,46 @@ from typing import Any, Callable, List, Optional
 # ---------------------------------------------------------------------------
 
 
+#: Bounds the nesting ``canonical_json`` will EMIT: the number of containers
+#: enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 rejected.
+#:
+#: Deliberately the same number ``verify_envelope`` enforces on the parse side
+#: (``MAX_ENVELOPE_PAYLOAD_DEPTH``) -- if emit allowed more than parse, this
+#: tier could produce a legal, correctly-signed envelope another tier is
+#: physically unable to read. It is NOT the compiler's IR nesting bound (512):
+#: that serves the ``--ir`` loader, which reads a trusted local file rather
+#: than unauthenticated wire input. R-260.
+#:
+#: 100 also sits far inside CPython's default recursion limit of 1000, so the
+#: guard raises a typed ValueError rather than letting the interpreter die of
+#: native stack exhaustion (measured at depth 1024). Do NOT raise
+#: sys.setrecursionlimit to accommodate a deeper bound -- that trades the
+#: typed rejection for a hard crash.
+MAX_WIRE_NESTING = 100
+
+
 def canonical_json(value: Any) -> str:
-    """Serialize ``value`` to RFC 8785 / JCS canonical JSON."""
+    """Serialize ``value`` to RFC 8785 / JCS canonical JSON.
+
+    :raises ValueError: if nesting exceeds :data:`MAX_WIRE_NESTING`, a single
+        string exceeds ``MAX_ENVELOPE_FIELD_BYTES``, or the finished document
+        exceeds ``MAX_ENVELOPE_PAYLOAD_BYTES``.
+    """
     parts: List[str] = []
-    _canonical_append(parts, value)
-    return "".join(parts)
+    _canonical_append(parts, value, 1)
+    out = "".join(parts)
+    # G3: total output guard, on the finished document's UTF-8 byte length.
+    n = len(out.encode("utf-8"))
+    if n > MAX_ENVELOPE_PAYLOAD_BYTES:
+        raise ValueError(
+            f"canonical JSON: output exceeds {MAX_ENVELOPE_PAYLOAD_BYTES} bytes (actual {n})"
+        )
+    return out
 
 
-def _canonical_append(out: List[str], value: Any) -> None:
+def _canonical_append(out: List[str], value: Any, depth: int) -> None:
+    """``depth`` is the 1-based nesting level of the container being written
+    (outermost = 1); scalars ignore it."""
     if value is None:
         out.append("null")
         return
@@ -65,14 +97,20 @@ def _canonical_append(out: List[str], value: Any) -> None:
         _append_json_string(out, value)
         return
     if isinstance(value, list):
+        # G1: depth guard on entry to the container, before children.
+        if depth > MAX_WIRE_NESTING:
+            raise ValueError(f"canonical JSON: nesting exceeds {MAX_WIRE_NESTING}")
         out.append("[")
         for i, e in enumerate(value):
             if i > 0:
                 out.append(",")
-            _canonical_append(out, e)
+            _canonical_append(out, e, depth + 1)
         out.append("]")
         return
     if isinstance(value, dict):
+        # G1: depth guard on entry to the container, before children.
+        if depth > MAX_WIRE_NESTING:
+            raise ValueError(f"canonical JSON: nesting exceeds {MAX_WIRE_NESTING}")
         # Sort keys by UTF-16 code-unit order to match JS default sort().
         # `.encode('utf-16-be')` raises UnicodeEncodeError on lone surrogates;
         # surface that as the typed canonical-JSON ValueError so callers can
@@ -95,7 +133,7 @@ def _canonical_append(out: List[str], value: Any) -> None:
             first = False
             _append_json_string(out, k)
             out.append(":")
-            _canonical_append(out, v)
+            _canonical_append(out, v, depth + 1)
         out.append("}")
         return
     raise TypeError(f"canonical JSON: unsupported type {type(value).__name__}")
@@ -152,6 +190,15 @@ def _format_ecma262_double(x: float) -> str:
 
 
 def _append_json_string(out: List[str], s: str) -> None:
+    # G2: string-byte guard on the RAW input, before escaping, so the bound is
+    # about the caller's data rather than about how much the escaper inflated
+    # it. Object KEYS route through here too, so an oversized key is rejected
+    # the same way an oversized value is.
+    n = len(s.encode("utf-8", "surrogatepass"))
+    if n > MAX_ENVELOPE_FIELD_BYTES:
+        raise ValueError(
+            f"canonical JSON: string exceeds {MAX_ENVELOPE_FIELD_BYTES} bytes (actual {n})"
+        )
     out.append('"')
     for ch in s:
         cp = ord(ch)

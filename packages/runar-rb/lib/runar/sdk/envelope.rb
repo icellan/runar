@@ -97,13 +97,39 @@ module Runar
 
       # Serialise +value+ to RFC 8785 / JCS canonical JSON. Sorted object keys
       # (UTF-16 code-unit order), no whitespace, ES-style number formatting.
+      # Bounds the nesting +canonical_json+ will EMIT: the number of containers
+      # enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 rejected.
+      #
+      # Deliberately the same number +verify_envelope+ enforces on the parse
+      # side (MAX_ENVELOPE_PAYLOAD_DEPTH) -- if emit allowed more than parse,
+      # this tier could produce a legal, correctly-signed envelope another tier
+      # is physically unable to read. It is NOT the compiler's IR nesting bound
+      # (512): that serves the --ir loader, which reads a trusted local file
+      # rather than unauthenticated wire input. R-260.
+      #
+      # canonical_json's byte guards reuse the envelope caps rather than
+      # restating the numbers, so emit and parse cannot drift apart: a single
+      # string field is bounded by MAX_ENVELOPE_FIELD_BYTES (4 MiB) and the
+      # finished document by MAX_ENVELOPE_PAYLOAD_BYTES (16 MiB).
+      MAX_WIRE_NESTING = 100
+
+      # Raises ArgumentError if nesting exceeds MAX_WIRE_NESTING, a single
+      # string exceeds MAX_ENVELOPE_FIELD_BYTES, or the finished document
+      # exceeds MAX_ENVELOPE_PAYLOAD_BYTES.
       def self.canonical_json(value)
         out = String.new
-        canonical_append(out, value)
+        canonical_append(out, value, 1)
+        # G3: total output guard, on the finished document's byte length.
+        if out.bytesize > MAX_ENVELOPE_PAYLOAD_BYTES
+          raise ArgumentError,
+                "canonical JSON: output exceeds #{MAX_ENVELOPE_PAYLOAD_BYTES} bytes (actual #{out.bytesize})"
+        end
         out
       end
 
-      def self.canonical_append(out, value)
+      # +depth+ is the 1-based nesting level of the container being written
+      # (outermost = 1); scalars ignore it.
+      def self.canonical_append(out, value, depth)
         case value
         when nil
           out << 'null'
@@ -126,13 +152,19 @@ module Runar
         when String
           append_json_string(out, value)
         when Array
+          # G1: depth guard on entry to the container, before children.
+          raise ArgumentError, "canonical JSON: nesting exceeds #{MAX_WIRE_NESTING}" if depth > MAX_WIRE_NESTING
+
           out << '['
           value.each_with_index do |e, i|
             out << ',' unless i.zero?
-            canonical_append(out, e)
+            canonical_append(out, e, depth + 1)
           end
           out << ']'
         when Hash
+          # G1: depth guard on entry to the container, before children.
+          raise ArgumentError, "canonical JSON: nesting exceeds #{MAX_WIRE_NESTING}" if depth > MAX_WIRE_NESTING
+
           # Sort keys (must be strings) by UTF-16 code-unit order.
           # Dedup the stringified-key list — a Hash with both "k" and :k
           # collapses to one entry; the string-key form takes precedence.
@@ -154,7 +186,7 @@ module Runar
             first = false
             append_json_string(out, k)
             out << ':'
-            canonical_append(out, v)
+            canonical_append(out, v, depth + 1)
           end
           out << '}'
         else
@@ -163,6 +195,15 @@ module Runar
       end
 
       def self.append_json_string(out, str)
+        # G2: string-byte guard on the RAW input, before escaping, so the bound
+        # is about the caller's data rather than about how much the escaper
+        # inflated it. Object KEYS route through here too, so an oversized key
+        # is rejected the same way an oversized value is.
+        if str.bytesize > MAX_ENVELOPE_FIELD_BYTES
+          raise ArgumentError,
+                "canonical JSON: string exceeds #{MAX_ENVELOPE_FIELD_BYTES} bytes (actual #{str.bytesize})"
+        end
+
         out << '"'
         # Normalise to UTF-8 so each_char yields scalar values. UTF-16BE /
         # ASCII-8BIT inputs are valid Ruby strings but each_char on them

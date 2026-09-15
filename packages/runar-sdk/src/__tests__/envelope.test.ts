@@ -381,13 +381,43 @@ describe('verifyEnvelope payload depth bound (R-260)', () => {
   });
 
   it('rejects a payload one level past the limit with bad-json', async () => {
-    // Signed VALIDLY, so a tier that fails to enforce the bound returns
-    // ok:true rather than some other rejection — this cannot pass by accident
-    // on a bad-sig fallthrough.
-    const env = await signAtArrayDepth(MAX_ENVELOPE_PAYLOAD_DEPTH);
+    // Built as TEXT rather than through canonicalJson, because canonicalJson
+    // enforces the SAME bound on the emit side and refuses to produce this —
+    // which is the round-trip property working: no tier can sign a payload no
+    // tier can verify. An over-limit envelope can therefore only come from an
+    // attacker, so the test constructs one directly. It is still signed
+    // VALIDLY, so a tier that fails to enforce the bound returns ok:true
+    // rather than falling through to bad-sig.
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    const arrays = MAX_ENVELOPE_PAYLOAD_DEPTH; // + 1 outer object = limit + 1
+    const payload =
+      `{"deep":${'['.repeat(arrays)}0${']'.repeat(arrays)},` +
+      `"expiresAt":${expiresAt},"nonce":${nonce}}`;
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    const env: SignedEnvelope = {
+      payload,
+      sig: await signer.signHash(digest),
+      pubkey: await signer.getPublicKey(),
+      nonce,
+      expiresAt,
+    };
     const r = verifyEnvelope({ envelope: env });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('bad-json');
+  });
+
+  it('canonicalJson refuses to EMIT a payload verify would refuse to parse', async () => {
+    // The round-trip property stated directly: the emit bound and the parse
+    // bound are the same number, so a correctly-signed envelope that one tier
+    // can produce is always one every tier can read.
+    const nonce = Date.now();
+    expect(() =>
+      canonicalJson({ deep: nest(MAX_ENVELOPE_PAYLOAD_DEPTH), nonce, expiresAt: nonce + 60_000 }),
+    ).toThrow();
+    expect(() =>
+      canonicalJson({ deep: nest(MAX_ENVELOPE_PAYLOAD_DEPTH - 1), nonce, expiresAt: nonce + 60_000 }),
+    ).not.toThrow();
   });
 
   it('rejects a payload deep enough to overflow a recursive parser', () => {

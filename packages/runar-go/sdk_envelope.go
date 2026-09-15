@@ -33,16 +33,40 @@ import (
 // object keys (UTF-16 code-unit order), no whitespace, ES-style number
 // formatting. Returns an error for unsupported inputs (NaN, +Inf, -Inf,
 // channels, functions, circular references).
+// MaxWireNesting bounds the nesting CanonicalJSON will EMIT: the number of
+// containers enclosing a value, 1-based, outermost = 1. 100 is accepted, 101
+// is rejected.
+//
+// It is deliberately the same number VerifyEnvelope enforces on the parse side
+// (MaxEnvelopePayloadDepth) — if emit allowed more than parse, this tier could
+// produce a legal, correctly-signed envelope another tier is physically unable
+// to read, which is the cross-tier signature break from the other direction.
+// It is NOT the compilers' MaxIRNesting (512): that bound serves the --ir
+// loader, which reads a trusted local file rather than unauthenticated wire
+// input. R-260.
+const MaxWireNesting = 100
+
+// CanonicalJSON's byte guards reuse the envelope caps rather than restating
+// the numbers, so emit and parse cannot drift apart: a single string field is
+// bounded by MaxEnvelopeFieldBytes (4 MiB) and the finished document by
+// MaxEnvelopePayloadBytes (16 MiB).
+
 func CanonicalJSON(value any) (string, error) {
 	var out []byte
-	out, err := canonicalAppend(out, value, make(map[uintptr]bool))
+	out, err := canonicalAppend(out, value, make(map[uintptr]bool), 1)
 	if err != nil {
 		return "", err
+	}
+	// G3: total output guard, on the finished buffer.
+	if len(out) > MaxEnvelopePayloadBytes {
+		return "", fmt.Errorf("canonical JSON: output exceeds %d bytes (actual %d)", MaxEnvelopePayloadBytes, len(out))
 	}
 	return string(out), nil
 }
 
-func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, error) {
+// canonicalAppend serialises value. depth is the 1-based nesting level of the
+// container being written (outermost = 1); scalars ignore it.
+func canonicalAppend(out []byte, value any, seen map[uintptr]bool, depth int) ([]byte, error) {
 	if value == nil {
 		return append(out, "null"...), nil
 	}
@@ -81,19 +105,27 @@ func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, erro
 	case json.Number:
 		return append(out, v.String()...), nil
 	case []any:
+		// G1: depth guard on entry to the container, before iterating children.
+		if depth > MaxWireNesting {
+			return nil, fmt.Errorf("canonical JSON: nesting exceeds %d", MaxWireNesting)
+		}
 		out = append(out, '[')
 		for i, e := range v {
 			if i > 0 {
 				out = append(out, ',')
 			}
 			var err error
-			out, err = canonicalAppend(out, e, seen)
+			out, err = canonicalAppend(out, e, seen, depth+1)
 			if err != nil {
 				return nil, err
 			}
 		}
 		return append(out, ']'), nil
 	case map[string]any:
+		// G1: depth guard on entry to the container, before iterating children.
+		if depth > MaxWireNesting {
+			return nil, fmt.Errorf("canonical JSON: nesting exceeds %d", MaxWireNesting)
+		}
 		keys := make([]string, 0, len(v))
 		for k := range v {
 			keys = append(keys, k)
@@ -120,7 +152,7 @@ func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, erro
 				return nil, err
 			}
 			out = append(out, ':')
-			out, err = canonicalAppend(out, elem, seen)
+			out, err = canonicalAppend(out, elem, seen, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -284,6 +316,13 @@ func utf16Less(a, b string) bool {
 // walk the bytes manually to detect the surrogate pattern verbatim
 // regardless of how the caller constructed the string.
 func appendJSONString(out []byte, s string) ([]byte, error) {
+	// G2: string-byte guard on the RAW input, before escaping, so the bound is
+	// about the caller's data rather than about how much the escaper inflated
+	// it. Object KEYS route through here too, so an oversized key is rejected
+	// the same way an oversized value is.
+	if len(s) > MaxEnvelopeFieldBytes {
+		return nil, fmt.Errorf("canonical JSON: string exceeds %d bytes (actual %d)", MaxEnvelopeFieldBytes, len(s))
+	}
 	out = append(out, '"')
 	i := 0
 	for i < len(s) {

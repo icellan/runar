@@ -57,4 +57,5 @@ pub use envelope::{
     SignedEnvelope, SignEnvelopeOpts, SignFn,
     VerifyEnvelopeOpts, VerifyEnvelopeResult, VerifyEnvelopeReason,
     MAX_ENVELOPE_PAYLOAD_BYTES, MAX_ENVELOPE_FIELD_BYTES, MAX_ENVELOPE_PAYLOAD_DEPTH,
+    MAX_WIRE_NESTING,
 };

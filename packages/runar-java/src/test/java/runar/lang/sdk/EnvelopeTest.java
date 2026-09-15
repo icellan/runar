@@ -297,4 +297,97 @@ class EnvelopeTest {
         Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
         assertTrue(r.ok);
     }
+    // -------------------------------------------------------------------
+    // R-260 — canonicalJson DoS guards (G1 depth, G2 string bytes, G3 output)
+    //
+    // The cross-tier differential fuzzer drives these boundaries through each
+    // tier's --canonicalise shim, but its Java gate (canonical-java-gate.ts)
+    // uses a fixed shallow corpus and does NOT include the guard cases, so
+    // without these the Java guards would ship untested. Bounds match the six
+    // peer tiers exactly: nesting 100, string 4 MiB, output 16 MiB, all
+    // strict-`>` on a 1-based container count.
+    // -------------------------------------------------------------------
+
+    /** `depth` containers nested around the integer 1, built iteratively. */
+    private static Object nest(int depth, boolean asObject) {
+        Object v = 1L;
+        for (int i = 0; i < depth; i++) {
+            if (asObject) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("k", v);
+                v = m;
+            } else {
+                v = List.of(v);
+            }
+        }
+        return v;
+    }
+
+    @Test
+    void canonicalJsonAcceptsNestingAtTheBound() {
+        // CONTROL: exactly MAX_WIRE_NESTING containers must serialise.
+        assertNotNull(Envelope.canonicalJson(nest(Envelope.MAX_WIRE_NESTING, true)));
+        assertNotNull(Envelope.canonicalJson(nest(Envelope.MAX_WIRE_NESTING, false)));
+    }
+
+    @Test
+    void canonicalJsonRejectsNestingOnePastTheBound() {
+        for (boolean asObject : new boolean[] { true, false }) {
+            IllegalArgumentException e = assertThrows(
+                IllegalArgumentException.class,
+                () -> Envelope.canonicalJson(nest(Envelope.MAX_WIRE_NESTING + 1, asObject)));
+            assertTrue(e.getMessage().contains("nesting"), e.getMessage());
+        }
+    }
+
+    @Test
+    void canonicalJsonBoundsStringBytesForValuesAndKeys() {
+        String atLimit = "x".repeat(Envelope.MAX_ENVELOPE_FIELD_BYTES);
+        String overLimit = "x".repeat(Envelope.MAX_ENVELOPE_FIELD_BYTES + 1);
+
+        // CONTROL: a string exactly at the bound serialises, as value and key.
+        assertNotNull(Envelope.canonicalJson(Map.of("k", atLimit)));
+        assertNotNull(Envelope.canonicalJson(Map.of(atLimit, 1L)));
+
+        // A KEY must be bounded too, not just a value — keys route through the
+        // same serialiser in every tier.
+        for (Object input : new Object[] { Map.of("k", overLimit), Map.of(overLimit, 1L) }) {
+            IllegalArgumentException e = assertThrows(
+                IllegalArgumentException.class, () -> Envelope.canonicalJson(input));
+            assertTrue(e.getMessage().contains("string exceeds"), e.getMessage());
+        }
+    }
+
+    @Test
+    void canonicalJsonMeasuresStringBoundInUtf8BytesNotChars() {
+        // A 3-byte-per-char BMP string: 2 M chars is 6 MB of UTF-8, past the
+        // 4 MiB bound even though the char count is well under it. A guard
+        // written against String.length() would wave this through and diverge
+        // from the six peer tiers, all of which count bytes.
+        String multibyte = "\u4f60".repeat(2_000_000);
+        IllegalArgumentException e = assertThrows(
+            IllegalArgumentException.class, () -> Envelope.canonicalJson(Map.of("k", multibyte)));
+        assertTrue(e.getMessage().contains("string exceeds"), e.getMessage());
+    }
+
+    @Test
+    void canonicalJsonBoundsTotalOutputBytes() {
+        // G3, the total-output guard. No gate reaches it: the cross-tier
+        // differential's largest probe is a single 4 MiB string, whose whole
+        // document is nowhere near the 16 MiB output bound, so without this the
+        // guard would ship never having executed. Five 4 MiB strings in one
+        // array is ~20 MiB of output — every individual string is legal, so
+        // only the total-output guard can reject it.
+        String chunk = "x".repeat(Envelope.MAX_ENVELOPE_FIELD_BYTES);
+        List<Object> big = List.of(chunk, chunk, chunk, chunk, chunk);
+        IllegalArgumentException e = assertThrows(
+            IllegalArgumentException.class, () -> Envelope.canonicalJson(big));
+        assertTrue(e.getMessage().contains("output exceeds"), e.getMessage());
+
+        // CONTROL: three of the same chunks is ~12 MiB, under the bound, and
+        // must still serialise — so the guard is not simply rejecting anything
+        // large.
+        assertNotNull(Envelope.canonicalJson(List.of(chunk, chunk, chunk)));
+    }
+
 }
