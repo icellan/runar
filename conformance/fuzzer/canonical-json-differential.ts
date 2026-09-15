@@ -87,6 +87,29 @@ export const REJECT_PREFIX = 'RUNAR_CANON_ERR:';
  */
 export const CRASH_PREFIX = 'RUNAR_CANON_CRASH:';
 
+/**
+ * Collapse one tier's raw stdout to the token the cross-tier compare uses.
+ *
+ * Every REJECT_PREFIX string maps to a single `<REJECT>` token, so two tiers
+ * that both reject with their own wording still count as agreeing — the
+ * comparison is about accept-vs-reject, not about the message.
+ *
+ * A CRASH_PREFIX string is deliberately NOT collapsed. A tier whose process
+ * died, or whose canonicalJson blew the native stack, has said nothing about
+ * what it would have decided; folding it into `<REJECT>` would score it as
+ * agreeing with a tier that rejected cleanly. Since the in-process TS reference
+ * is always in the comparison and can never carry this prefix, a crashed tier
+ * always diverges and always reddens the run.
+ *
+ * This lives here, exported, because `canonical-java-gate.ts` compares the same
+ * way: a second, private copy of the rule is a second place for the two gates
+ * to disagree about what "agreed" means.
+ */
+export function normaliseOutcome(s: string): string {
+  if (s.startsWith(CRASH_PREFIX)) return s;
+  return s.startsWith(REJECT_PREFIX) ? '<REJECT>' : s;
+}
+
 // ---------------------------------------------------------------------------
 // Generated value model.
 //
@@ -607,6 +630,11 @@ function runShim(runner: TierRunner, request: string, timeoutMs: number): string
   // unreliable through wrappers like gradle, which remaps process exit 3 to
   // its own build-failure exit 1).
   if (stdout.startsWith(REJECT_PREFIX)) return stdout;
+  // A shim that caught its own native stack exhaustion reports it with the
+  // CRASH prefix. Pass it through for the same reason: the exit code is
+  // unreliable through wrappers like gradle, and `normaliseOutcome` needs the
+  // prefix, not the status, to keep the crash out of `<REJECT>`.
+  if (stdout.startsWith(CRASH_PREFIX)) return stdout;
   // Non-zero exit WITHOUT the prefix = the tier genuinely failed to run.
   if (r.status !== 0 && stdout.length === 0) return null;
   return stdout;
@@ -799,11 +827,10 @@ export async function runCanonicalDifferential(
     // differential proves tiers agree on accept-vs-reject; only a per-tier
     // TYPED assertion proves they agree on why.
     const keys = Object.keys(outputs) as CompilerName[];
-    const norm = (s: string): string => (s.startsWith(REJECT_PREFIX) ? '<REJECT>' : s);
-    const ref = norm(outputs[keys[0]!]!);
+    const ref = normaliseOutcome(outputs[keys[0]!]!);
     const divergent: CompilerName[] = [];
     for (let j = 1; j < keys.length; j++) {
-      if (norm(outputs[keys[j]!]!) !== ref) divergent.push(keys[j]!);
+      if (normaliseOutcome(outputs[keys[j]!]!) !== ref) divergent.push(keys[j]!);
     }
 
     if (divergent.length > 0) {
@@ -826,7 +853,7 @@ export async function runCanonicalDifferential(
       console.log(`        request = ${request}`);
       console.log(`        saved   = ${dir}`);
     } else if (opts.verbose) {
-      console.log(`  [${i}] OK (${keys.join(',')})  ${norm(ref) === '<REJECT>' ? 'rejected' : JSON.stringify(ref).slice(0, 60)}`);
+      console.log(`  [${i}] OK (${keys.join(',')})  ${ref === '<REJECT>' ? 'rejected' : JSON.stringify(ref).slice(0, 60)}`);
     }
   }
 

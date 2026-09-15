@@ -30,7 +30,8 @@ Protocol (single-shot, stdin -> stdout), mirrors the Go / Rust shims:
   detecting a single divergent byte.
 
   On a typed rejection the shim prints "RUNAR_CANON_ERR:<message>" to stdout
-  and exits 3; any other failure exits 1.
+  and exits 3; on native stack exhaustion (which is NOT a rejection) it prints
+  "RUNAR_CANON_CRASH:<message>" and exits 3; any other failure exits 1.
 
 Run via:  PYTHONPATH=packages/runar-py python3 packages/runar-py/canonicalise_shim.py
 """
@@ -105,9 +106,12 @@ def main():
         sys.exit(3)
     except RecursionError:
         # A native stack exhaustion is NOT the typed rejection the guard is
-        # supposed to produce. Report it distinctly so it cannot be mistaken
-        # for agreement with a tier that rejected properly.
-        sys.stdout.write("RUNAR_CANON_ERR:RecursionError (native stack, not a guard)")
+        # supposed to produce. It carries the CRASH prefix, not the REJECT
+        # prefix: the driver normalises every REJECT to one token, so emitting
+        # RUNAR_CANON_ERR here would score a tier that DIED as agreeing with a
+        # tier that rejected cleanly -- exactly what the guard probes at
+        # MAX_WIRE_NESTING+1 exist to catch.
+        sys.stdout.write("RUNAR_CANON_CRASH:RecursionError (native stack, not a guard)")
         sys.exit(3)
     if mode == "bigstring":
         digest = hashlib.sha256(out.encode("utf-8")).hexdigest()

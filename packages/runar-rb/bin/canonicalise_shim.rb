@@ -27,7 +27,9 @@
 #   under test.
 #
 #   On a typed rejection the shim prints "RUNAR_CANON_ERR:<message>" to
-#   stdout and exits 3; any other failure exits 1.
+#   stdout and exits 3; on native stack exhaustion (which is NOT a rejection)
+#   it prints "RUNAR_CANON_CRASH:<message>" and exits 3; any other failure
+#   exits 1.
 
 $LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
 
@@ -116,9 +118,11 @@ rescue ArgumentError, TypeError, KeyError => e
   $stdout.write("RUNAR_CANON_ERR:#{e.message}")
   exit 3
 rescue SystemStackError
-  # Native stack exhaustion is not the typed rejection a guard produces; keep
-  # it distinguishable so it cannot be scored as agreement.
-  $stdout.write('RUNAR_CANON_ERR:SystemStackError (native stack, not a guard)')
+  # Native stack exhaustion is not the typed rejection a guard produces, so it
+  # carries the CRASH prefix, not the REJECT prefix: the driver normalises
+  # every REJECT to one token, and RUNAR_CANON_ERR here would score a tier that
+  # DIED as agreeing with a tier that rejected cleanly.
+  $stdout.write('RUNAR_CANON_CRASH:SystemStackError (native stack, not a guard)')
   exit 3
 end
 if req['mode'] == 'bigstring'

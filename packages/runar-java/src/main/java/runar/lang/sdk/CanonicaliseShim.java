@@ -42,8 +42,9 @@ import java.util.Map;
  * line-based framing intact.
  *
  * <p>On a typed canonicalJson rejection the shim prints
- * {@code "RUNAR_CANON_ERR:<message>"} to stdout and exits 3; any other failure
- * exits 1.
+ * {@code "RUNAR_CANON_ERR:<message>"} to stdout and exits 3; on native stack
+ * exhaustion (which is NOT a rejection) it prints
+ * {@code "RUNAR_CANON_CRASH:<message>"} and exits 3; any other failure exits 1.
  *
  * <p>Run via: {@code gradle -q runCanonicalise} (stdin piped in). A batched
  * peer, {@link CanonicaliseBatchShim} ({@code gradle -q runCanonicaliseBatch}),
@@ -55,6 +56,14 @@ public final class CanonicaliseShim {
     /** Prefix stdout carries on a typed canonicalJson rejection. Mirrors the
      *  {@code REJECT_PREFIX} the TS differential driver keys on. */
     static final String REJECT_PREFIX = "RUNAR_CANON_ERR:";
+
+    /** Prefix stdout carries when canonicalJson did not reject but DIED — the
+     *  native stack was exhausted. Deliberately distinct from
+     *  {@link #REJECT_PREFIX}: the differential driver normalises every
+     *  REJECT_PREFIX output to one token, so reporting a crash as a rejection
+     *  would score a tier that died as agreeing with a tier that rejected
+     *  cleanly. Mirrors the driver's {@code CRASH_PREFIX}. */
+    static final String CRASH_PREFIX = "RUNAR_CANON_CRASH:";
 
     private CanonicaliseShim() {
     }
@@ -80,7 +89,7 @@ public final class CanonicaliseShim {
 
         System.out.print(out);
         System.out.flush();
-        if (out.startsWith(REJECT_PREFIX)) {
+        if (out.startsWith(REJECT_PREFIX) || out.startsWith(CRASH_PREFIX)) {
             System.exit(3);
         }
     }
@@ -132,9 +141,11 @@ public final class CanonicaliseShim {
             out = Envelope.canonicalJson(input);
         } catch (StackOverflowError e) {
             // Native stack exhaustion is not the typed rejection a guard
-            // produces; keep it distinguishable so it cannot be scored as
-            // agreement with a tier that rejected properly.
-            return REJECT_PREFIX + "StackOverflowError (native stack, not a guard)";
+            // produces, so it carries the CRASH prefix: the driver folds every
+            // REJECT_PREFIX output into one token, and tagging a crash as a
+            // rejection would score this tier as agreeing with one that
+            // rejected cleanly.
+            return CRASH_PREFIX + "StackOverflowError (native stack, not a guard)";
         } catch (RuntimeException e) {
             return REJECT_PREFIX + e.getMessage();
         }

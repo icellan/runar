@@ -46,7 +46,7 @@ import {
   runTs,
   loadCanonical,
   mulberry32,
-  REJECT_PREFIX,
+  normaliseOutcome,
   type GenCase,
 } from './canonical-json-differential.js';
 
@@ -82,8 +82,6 @@ function parseArgs(argv: string[]): Options {
   }
   return opts;
 }
-
-const norm = (s: string): string => (s.startsWith(REJECT_PREFIX) ? '<REJECT>' : s);
 
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
@@ -147,7 +145,7 @@ async function main(): Promise<void> {
   for (let i = 0; i < opts.num; i++) {
     const ref = references[i]!;
     const java = outLines[i]!;
-    if (norm(ref) !== norm(java)) {
+    if (normaliseOutcome(ref) !== normaliseOutcome(java)) {
       mismatches += 1;
       console.log(`  [${i}] MISMATCH  seed=${opts.seed + i}`);
       console.log(`        request   = ${requests[i]}`);
