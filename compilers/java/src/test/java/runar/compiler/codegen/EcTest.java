@@ -143,10 +143,16 @@ class EcTest {
 
     @Test
     void ecMakePointShape() {
+        // R-156, the ecMakePoint FIELD-ELEMENT gate: 467 -> 477 ops (+10) and
+        // 471 -> 547 bytes (+76). Five ops per coordinate -- OP_DUP, OP_0, push p,
+        // OP_WITHIN, OP_VERIFY -- and ecMakePoint has two; the 33-byte push of p is what
+        // makes the byte delta 38 per gate rather than 5. Nothing else moves: this gate
+        // is on the two BIGINT arguments of the point CONSTRUCTOR, a different surface
+        // from R-117's gate on the coordinates of an existing Point.
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcMakePoint(ops::add);
-        assertEquals(467, countOpTree(ops));
-        assertEquals(471, emitHex(ops).length() / 2);
+        assertEquals(477, countOpTree(ops));
+        assertEquals(547, emitHex(ops).length() / 2);
     }
 
     @Test

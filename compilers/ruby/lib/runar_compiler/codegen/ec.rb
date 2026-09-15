@@ -1538,7 +1538,46 @@ module RunarCompiler
       # Stack out: [point_bytes (64 bytes)]
       #
       # @param emit [Proc] callback receiving a StackOp hash
+      # R-156 -- verify that the script number on TOS is a FIELD ELEMENT, 0 <= v < p.
+      # Leaves the value in place (OP_DUP feeds the check, OP_VERIFY consumes the
+      # flag), so the caller's stack shape is unchanged.
+      #
+      # ecMakePoint converts each coordinate with `push 33, OP_NUM2BIN, push 32,
+      # OP_SPLIT, OP_DROP`. NUM2BIN(33) writes a 33-byte little-endian SIGN-MAGNITUDE
+      # script number, so byte 32 is exactly where the sign bit lives AND where any
+      # bits >= 2^256 land -- and the split drops precisely that byte. The result was
+      # an ecMakePoint that is NOT INJECTIVE:
+      #
+      #     ecMakePoint( 1n, y) == ecMakePoint(-1n, y)            sign discarded
+      #     ecMakePoint( 1n, y) == ecMakePoint(1n + 2^256, y)     magnitude truncated
+      #     ecMakePoint( x,  y) == ecMakePoint(x, -y)             and on the y half
+      #
+      # all three measured on @bsv/sdk's Spend. The y-half collision is the sharpest:
+      # `ecMakePoint(x, 0n - y)` is how an author spells negation by hand, and it
+      # silently produced (x, +y) -- the point being negated -- rather than (x, p-y).
+      #
+      # R-117's coordinate-canonicity gate does not cover this and cannot: the bytes
+      # emitted for -1n are the perfectly canonical encoding of 1, so no downstream
+      # consumer can tell. The aliasing happens before any Point exists.
+      #
+      # REJECT rather than reduce, for the reason R-117 gives: ecOnCurve answers "no"
+      # to a coordinate outside [0, p), so reducing here would leave the constructor
+      # and the predicate disagreeing about what a point is. Rejecting also restores
+      # injectivity, which is the property the defect broke.
+      #
+      # OP_WITHIN(v, 0, p) is `0 <= v < p` in one opcode -- the same half-open bound
+      # the `within` builtin exposes to contract authors.
+      def self.ec_emit_field_element_verify(emit)
+        emit.call(make_stack_op(op: "dup"))
+        emit.call(make_stack_op(op: "push", value: big_int_push(0)))
+        emit.call(make_stack_op(op: "push", value: big_int_push(EC_FIELD_P)))
+        emit.call(make_stack_op(op: "opcode", code: "OP_WITHIN"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+      end
+
       def self.emit_ec_make_point(emit)
+        # R-156: y must be a field element before its sign byte is dropped.
+        ec_emit_field_element_verify(emit)
         # Convert y to 32 bytes big-endian
         emit.call(make_stack_op(op: "push", value: big_int_push(33)))
         emit.call(make_stack_op(op: "opcode", code: "OP_NUM2BIN"))
@@ -1549,6 +1588,8 @@ module RunarCompiler
         # Stack: [x_num, y_be]
         emit.call(make_stack_op(op: "swap"))
         # Stack: [y_be, x_num]
+        # R-156: and so must x.
+        ec_emit_field_element_verify(emit)
         emit.call(make_stack_op(op: "push", value: big_int_push(33)))
         emit.call(make_stack_op(op: "opcode", code: "OP_NUM2BIN"))
         emit.call(make_stack_op(op: "push", value: big_int_push(32)))

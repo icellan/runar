@@ -100,7 +100,13 @@ def _count_op_tree(ops: list[StackOp]) -> int:
     ("ecOnCurve",          emit_ec_on_curve,           548),
     ("ecModReduce",        emit_ec_mod_reduce,           8),
     ("ecEncodeCompressed", emit_ec_encode_compressed,   16),
-    ("ecMakePoint",        emit_ec_make_point,         467),
+    # R-156, the ecMakePoint FIELD-ELEMENT gate: 467 -> 477 (+10). Five ops per
+    # coordinate -- OP_DUP, OP_0, push p, OP_WITHIN, OP_VERIFY -- and ecMakePoint has
+    # two. Nothing else moves: this gate is on the two BIGINT arguments of the point
+    # CONSTRUCTOR, which is a different surface from R-117's gate on the coordinates
+    # of an existing Point. ecMakePoint is secp256k1-only; there is no p256MakePoint
+    # or p384MakePoint to move.
+    ("ecMakePoint",        emit_ec_make_point,         477),
     ("ecPointX",           emit_ec_point_x,            236),
     ("ecPointY",           emit_ec_point_y,            237),
 ])

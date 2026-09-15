@@ -307,7 +307,13 @@ describe('EC builtins — op-count goldens (T-11)', () => {
     ['ecOnCurve',          emitEcOnCurve,             548],
     ['ecModReduce',        emitEcModReduce,             8],
     ['ecEncodeCompressed', emitEcEncodeCompressed,     16],
-    ['ecMakePoint',        emitEcMakePoint,           467],
+    // R-156, the ecMakePoint FIELD-ELEMENT gate: 467 -> 477 (+10). Five ops per
+    // coordinate -- OP_DUP, OP_0, push p, OP_WITHIN, OP_VERIFY -- and ecMakePoint has
+    // two. Nothing else moves: this gate is on the two BIGINT arguments of the point
+    // CONSTRUCTOR, which is a different surface from R-117's gate on the coordinates
+    // of an existing Point. ecMakePoint is secp256k1-only; there is no p256MakePoint
+    // or p384MakePoint to move.
+    ['ecMakePoint',        emitEcMakePoint,           477],
     ['ecPointX',           emitEcPointX,              236],
     ['ecPointY',           emitEcPointY,              237],
   ];

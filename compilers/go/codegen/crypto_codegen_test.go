@@ -69,7 +69,10 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		// sees [px, py, qx, qy] with qx / qy at depth 1, so both are a one-op OP_OVER.
 		// 10 + 8 = 18, and ecMul / ecNegate gate a single point off a two-deep stack for
 		// a flat 8. ecOnCurve / ecModReduce /
-		// ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY are all +0. The
+		// ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY are all +0 under
+		// R-117. (ecMakePoint DOES move under R-156, which gates its two bigint
+		// ARGUMENTS rather than an existing Point's coordinates; this tier pins no
+		// ecMakePoint op count, so no row here changes for it.) The
 		// predicates must stay TOTAL (they clamp and flag, they do not abort), and the
 		// byte accessors have no selector to fool -- each returns a value derived
 		// injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT

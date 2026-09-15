@@ -233,10 +233,16 @@ fn test_ec_encode_compressed_op_count_golden() {
     assert_eq!(count_op_tree(&ops), 16, "ecEncodeCompressed op count drift");
 }
 
+/// R-156, the ecMakePoint FIELD-ELEMENT gate: 467 -> 477 ops (+10) and
+/// 471 -> 547 bytes (+76). Five ops per coordinate -- OP_DUP, OP_0, push p,
+/// OP_WITHIN, OP_VERIFY -- and ecMakePoint has two; the 33-byte push of p is what
+/// makes the byte delta 38 per gate rather than 5. Nothing else moves: this gate
+/// is on the two BIGINT arguments of the point CONSTRUCTOR, a different surface
+/// from R-117's gate on the coordinates of an existing Point.
 #[test]
 fn test_ec_make_point_op_count_golden() {
     let ops = collect(|s| emit_ec_make_point(s));
-    assert_eq!(count_op_tree(&ops), 467, "ecMakePoint op count drift");
+    assert_eq!(count_op_tree(&ops), 477, "ecMakePoint op count drift");
 }
 
 #[test]

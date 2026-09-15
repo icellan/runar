@@ -1383,11 +1383,52 @@ export function emitEcEncodeCompressed(emit: (op: StackOp) => void): void {
 }
 
 /**
+ * R-156 — verify that the script number on TOS is a FIELD ELEMENT, 0 <= v < p.
+ * Leaves the value in place (OP_DUP feeds the check, OP_VERIFY consumes the
+ * flag), so the caller's stack shape is unchanged.
+ *
+ * `ecMakePoint` converts each coordinate with `push 33, OP_NUM2BIN, push 32,
+ * OP_SPLIT, OP_DROP`. NUM2BIN(33) writes a 33-byte little-endian SIGN-MAGNITUDE
+ * script number, so byte 32 is exactly where the sign bit lives AND where any
+ * bits >= 2^256 land — and the split drops precisely that byte. The result was
+ * an ecMakePoint that is NOT INJECTIVE:
+ *
+ *     ecMakePoint( 1n, y) == ecMakePoint(-1n, y)            sign discarded
+ *     ecMakePoint( 1n, y) == ecMakePoint(1n + 2^256, y)     magnitude truncated
+ *     ecMakePoint( x,  y) == ecMakePoint(x, -y)             and on the y half
+ *
+ * all three measured on @bsv/sdk's Spend. The y-half collision is the sharpest:
+ * `ecMakePoint(x, 0n - y)` is how an author spells negation by hand, and it
+ * silently produced (x, +y) — the point being negated — rather than (x, p-y).
+ *
+ * R-117's coordinate-canonicity gate does not cover this and cannot: the bytes
+ * emitted for `-1n` are the perfectly canonical encoding of 1, so no downstream
+ * consumer can tell. The aliasing happens before any Point exists.
+ *
+ * REJECT rather than reduce, for the reason R-117 gives: `ecOnCurve` answers
+ * "no" to a coordinate outside [0, p), so reducing here would leave the
+ * constructor and the predicate disagreeing about what a point is. Rejecting
+ * also restores injectivity, which is the property the defect broke.
+ *
+ * OP_WITHIN(v, 0, p) is `0 <= v < p` in one opcode — the same half-open bound
+ * the `within` builtin exposes to contract authors.
+ */
+function emitFieldElementVerify(emit: (op: StackOp) => void): void {
+  emit({ op: 'dup' });
+  emit({ op: 'push', value: 0n });
+  emit({ op: 'push', value: FIELD_P });
+  emit({ op: 'opcode', code: 'OP_WITHIN' });
+  emit({ op: 'opcode', code: 'OP_VERIFY' });
+}
+
+/**
  * ecMakePoint: (x: bigint, y: bigint) → Point.
  * Stack in: [x_num, y_num] (y on top)
  * Stack out: [point_bytes (64 bytes)]
  */
 export function emitEcMakePoint(emit: (op: StackOp) => void): void {
+  // R-156: y must be a field element before its sign byte is dropped.
+  emitFieldElementVerify(emit);
   // Convert y to 32 bytes big-endian (NUM2BIN(33) to handle sign byte, then take first 32)
   emit({ op: 'push', value: 33n });
   emit({ op: 'opcode', code: 'OP_NUM2BIN' });
@@ -1398,6 +1439,8 @@ export function emitEcMakePoint(emit: (op: StackOp) => void): void {
   // Stack: [x_num, y_be]
   emit({ op: 'swap' });
   // Stack: [y_be, x_num]
+  // R-156: and so must x.
+  emitFieldElementVerify(emit);
   emit({ op: 'push', value: 33n });
   emit({ op: 'opcode', code: 'OP_NUM2BIN' });
   emit({ op: 'push', value: 32n });
