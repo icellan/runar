@@ -320,8 +320,21 @@ pub const RPCProvider = struct {
     /// is ambiguous: the SDK's own `ContractError.CallFailed` covers a
     /// UTXO-fetch failure and a build-time refusal just as much as a node
     /// rejection, so a negative test can pass while the transaction under
-    /// attack was never even constructed. Asserting `broadcast_attempts >= 1`
-    /// pins the rejection to consensus rather than to the SDK.
+    /// attack was never even constructed.
+    ///
+    /// Assert on it as a DELTA around the attacking call, never as an absolute
+    /// `>= 1`. The counter is cumulative and is never reset, and every negative
+    /// test deploys its fixture through this same provider instance first — so
+    /// `>= 1` is already satisfied before the call under test is made, and
+    /// holds whether or not the attack transaction ever reached the node. The
+    /// shape that measures what the comment claims is:
+    ///
+    ///     const broadcasts_before = rpc_provider.broadcast_attempts;
+    ///     ... the attacking call ...
+    ///     try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
+    ///
+    /// `negative_assertion_guard_test.zig` proves the difference and ratchets
+    /// the suite against the absolute form.
     broadcast_attempts: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) RPCProvider {

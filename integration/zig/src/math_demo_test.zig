@@ -449,6 +449,7 @@ test "MathDemo_RejectDivideByZero" {
     defer allocator.free(deploy_txid);
 
     // Call divideBy(0) — should be rejected on-chain (safediv fails on zero divisor)
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "divideBy",
         &[_]runar.StateValue{.{ .int = 0 }},
@@ -466,7 +467,7 @@ test "MathDemo_RejectDivideByZero" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("MathDemo correctly rejected divide by zero", .{});
     }
 }

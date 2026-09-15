@@ -228,6 +228,7 @@ test "CovenantVault_RejectWrongSigner" {
     var wrong_signer = try wrong_signer_wallet.localSigner();
 
     // spend(sig, txPreimage) with wrong signer -- checkSig should fail on-chain
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "spend",
         &[_]runar.StateValue{
@@ -249,7 +250,7 @@ test "CovenantVault_RejectWrongSigner" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         // Expected: call was rejected on-chain due to wrong signer
         std.log.info("CovenantVault correctly rejected wrong signer", .{});
     }

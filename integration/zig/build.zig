@@ -66,4 +66,23 @@ pub fn build(b: *std.Build) void {
     const run_phase_a = b.addRunArtifact(phase_a_tests);
     const phase_a_step = b.step("test-phase-a", "Run Phase A residual Zig integration tests only");
     phase_a_step.dependOn(&run_phase_a.step);
+
+    // Negative-assertion guard suite. Needs no node: it proves the
+    // broadcast-attempt counter discriminates a node rejection from an
+    // SDK-side failure, and ratchets the test sources against the absolute
+    // (vacuous) form of the assertion.
+    const guard_module = b.createModule(.{
+        .root_source_file = b.path("src/negative_assertion_guard_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    guard_module.addImport("bsvz", bsvz_module);
+    guard_module.addImport("runar", runar_module);
+    guard_module.addImport("runar_frontend", frontend_module);
+    const guard_tests = b.addTest(.{
+        .root_module = guard_module,
+    });
+    const run_guard = b.addRunArtifact(guard_tests);
+    const guard_step = b.step("test-guard", "Run the node-free negative-assertion guard suite");
+    guard_step.dependOn(&run_guard.step);
 }

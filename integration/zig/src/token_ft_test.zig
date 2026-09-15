@@ -277,6 +277,7 @@ test "FungibleToken_WrongOwnerRejected" {
     var wrong_signer = try wrong_signer_wallet.localSigner();
 
     // Call send with wrong signer -- checkSig should fail on-chain
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "send",
         &[_]runar.StateValue{
@@ -301,7 +302,7 @@ test "FungibleToken_WrongOwnerRejected" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected wrong owner", .{});
     }
 }
@@ -496,6 +497,7 @@ test "FungibleToken_TransferDeflatedBalance" {
 
     // Attacker deflates output balances: claims recipient gets 300, sender keeps 200 = 500 (from 1000)
     // hashOutputs mismatch should reject this on-chain
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -521,7 +523,7 @@ test "FungibleToken_TransferDeflatedBalance" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer with deflated balance", .{});
     }
 }
@@ -570,6 +572,7 @@ test "FungibleToken_TransferInflatedBalance" {
 
     // Attacker inflates output balances: claims recipient gets 800, sender keeps 500 = 1300 (from 1000)
     // hashOutputs mismatch should reject this on-chain
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -595,7 +598,7 @@ test "FungibleToken_TransferInflatedBalance" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer with inflated balance", .{});
     }
 }
@@ -643,6 +646,7 @@ test "FungibleToken_TransferExceedsBalanceRejected" {
     std.log.info("FungibleToken deployed for exceeds-balance test: {s}", .{deploy_txid});
 
     // Transfer 2000 when balance is only 1000 -- should fail assert(amount <= totalBalance)
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -668,7 +672,7 @@ test "FungibleToken_TransferExceedsBalanceRejected" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer exceeding balance", .{});
     }
 }
@@ -725,6 +729,7 @@ test "FungibleToken_TransferWrongSigner" {
     var wrong_signer = try wrong_signer_wallet.localSigner();
 
     // Wrong signer tries to transfer -- checkSig should fail
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -750,7 +755,7 @@ test "FungibleToken_TransferWrongSigner" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer with wrong signer", .{});
     }
 }
@@ -798,6 +803,7 @@ test "FungibleToken_TransferZeroAmountRejected" {
     std.log.info("FungibleToken deployed for zero-amount transfer test: {s}", .{deploy_txid});
 
     // Transfer of zero amount -- should fail assert(amount > 0)
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -823,7 +829,7 @@ test "FungibleToken_TransferZeroAmountRejected" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer of zero amount", .{});
     }
 }
@@ -989,6 +995,7 @@ test "FungibleToken_MergeDeflated" {
     // a reason unrelated to the attack. Fixing that SDK bug removed the
     // accidental failure and exposed the test as vacuous.
     const utxo2 = contract2.getCurrentUtxo() orelse return error.TestUnexpectedResult;
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract1.call(
         "merge",
         &[_]runar.StateValue{
@@ -1032,7 +1039,7 @@ test "FungibleToken_MergeDeflated" {
         try std.testing.expectEqual(error.CallFailed, err);
         // The SDK must have reached the node, so the rejection is consensus's
         // and not a build-time refusal.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         // And nothing was spent: the contract UTXO must survive the rejection.
         const still = contract1.getCurrentUtxo() orelse return error.TestUnexpectedResult;
         try std.testing.expect(still.satoshis == deploy_sats);
@@ -1104,6 +1111,7 @@ test "FungibleToken_MergeInflatedTotal" {
     // (400, 1600) is self-consistent and the covenant rightly accepts it. The
     // test only "passed" because of an unrelated continuation-satoshis bug.
     const utxo2 = contract2.getCurrentUtxo() orelse return error.TestUnexpectedResult;
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract1.call(
         "merge",
         &[_]runar.StateValue{
@@ -1142,7 +1150,7 @@ test "FungibleToken_MergeInflatedTotal" {
         // only meaningful because FungibleToken_Merge is the honest-balance
         // control over the same setup and it succeeds.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         const still = contract1.getCurrentUtxo() orelse return error.TestUnexpectedResult;
         try std.testing.expect(still.satoshis == deploy_sats);
         std.log.info("FungibleToken correctly rejected merge with inflated total", .{});
@@ -1208,6 +1216,7 @@ test "FungibleToken_MergeWrongSigner" {
     var wrong_signer = try wrong_signer_wallet.localSigner();
 
     // Wrong signer tries to merge -- checkSig should fail
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract1.call(
         "merge",
         &[_]runar.StateValue{
@@ -1233,7 +1242,7 @@ test "FungibleToken_MergeWrongSigner" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected merge with wrong signer", .{});
     }
 }

@@ -217,6 +217,7 @@ test "OraclePriceFeed_BelowThresholdRejected" {
     const low_sig_hex = "01f02badb5dd3fd4a63e0a8c121d2dbc4b843cc3f7195e6cd6bc62b77dcb0adb09";
 
     // Call settle with below-threshold price -- should be rejected
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "settle",
         &[_]runar.StateValue{
@@ -239,7 +240,7 @@ test "OraclePriceFeed_BelowThresholdRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.warn("OraclePriceFeed correctly rejected below-threshold price", .{});
     }
 }
