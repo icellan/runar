@@ -261,6 +261,9 @@ pub const MockPreimageError = error{
 /// method signatures compile to Bitcoin Script and have no error channel).
 pub fn mockPreimageChecked(allocator: std.mem.Allocator, parts: MockPreimageParts) MockPreimageError!base.SigHashPreimage {
     var encoded = allocator.alloc(u8, 4 + 32 + 32 + 36 + 1 + 8 + 4 + 32 + 4 + 4) catch return MockPreimageError.OutOfMemory;
+    // The locktime cast below can still refuse after this buffer exists; a
+    // refusal must not keep it.
+    errdefer allocator.free(encoded);
     std.mem.writeInt(i32, encoded[0..4], 2, .little);
     copyFixed(encoded[4..36], parts.hashPrevouts);
     @memset(encoded[36..68], 0);

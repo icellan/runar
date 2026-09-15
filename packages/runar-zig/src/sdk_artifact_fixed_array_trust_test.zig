@@ -129,9 +129,11 @@ test "artifact trust boundary: refusing a field frees everything parsed before i
     // the fields already built — they need their own errdefer.
     //
     // This uses a LOCAL leak-checking allocator rather than
-    // `std.testing.allocator`, because this package's custom test runner
-    // (src/test_runner.zig) never calls `std.testing.allocator_instance
-    // .deinit()`: a leak through the shared testing allocator is silent here.
+    // `std.testing.allocator` because the success branch leaks ON PURPOSE (see
+    // `expectRefused`), which the runner's per-test leak check would now fail
+    // the test for. Originally it was a workaround: the runner never called
+    // `std.testing.allocator_instance.deinit()`, so a leak through the shared
+    // testing allocator was silent. It no longer is.
     const src =
         \\{"contractName":"X","script":"00","stateFields":[
         \\ {"name":"count","type":"bigint","index":0,"initialValue":"7n"},
