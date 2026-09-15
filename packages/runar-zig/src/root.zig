@@ -252,6 +252,7 @@ test {
     _ = @import("sdk_state_boolean_spelling_test.zig");
     _ = @import("sdk_state_fixed_array_test.zig");
     _ = @import("sdk_fixed_array_call_continuation_test.zig");
+    _ = @import("sdk_artifact_fixed_array_trust_test.zig");
     _ = @import("sdk_anf_interpreter.zig");
     _ = @import("sdk_anf_interpreter_intent_test.zig");
     _ = @import("sdk_anf_parse_failclosed_test.zig");

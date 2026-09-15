@@ -316,8 +316,17 @@ pub const RunarArtifact = struct {
             if (sf_val == .array) {
                 const items = sf_val.array.items;
                 var fields = try allocator.alloc(StateField, items.len);
-                for (items, 0..) |item, i| {
-                    fields[i] = try StateField.fromJsonValue(allocator, item.object);
+                var parsed_fields: usize = 0;
+                // A refused field (see StateField.fromJsonValue) aborts the
+                // loop before `artifact.state_fields` is assigned, so the
+                // artifact-level errdefer cannot reach what we built here.
+                errdefer {
+                    for (fields[0..parsed_fields]) |*sf| sf.deinit(allocator);
+                    allocator.free(fields);
+                }
+                for (items) |item| {
+                    fields[parsed_fields] = try StateField.fromJsonValue(allocator, item.object);
+                    parsed_fields += 1;
                 }
                 artifact.state_fields = fields;
             }
@@ -641,23 +650,37 @@ pub const StateField = struct {
                 if (v.object.get("length")) |ln| {
                     if (ln == .integer) fa.length = @intCast(ln.integer);
                 }
-                if (v.object.get("syntheticNames")) |sn| {
-                    if (sn == .array) {
-                        var names = try allocator.alloc([]const u8, sn.array.items.len);
-                        var filled: usize = 0;
-                        errdefer {
-                            for (0..filled) |i| allocator.free(names[i]);
-                            allocator.free(names);
-                        }
-                        for (sn.array.items) |it| {
-                            if (it == .string) {
-                                names[filled] = try allocator.dupe(u8, it.string);
-                                filled += 1;
-                            }
-                        }
-                        fa.synthetic_names = names;
-                    }
+                // `syntheticNames` is REQUIRED, and must be an array of
+                // strings — `packages/runar-ir-schema/src/artifact.ts` types it
+                // `syntheticNames: string[]`. Refuse anything else outright
+                // (the posture `8c989dda` took for a JSON float on the `--ir`
+                // boundary) rather than parse what we can:
+                //
+                //  - skipping a non-string entry used to publish the
+                //    full-length slice with UNINITIALISED members, which
+                //    `FixedArrayInfo.deinit` then handed to `allocator.free`;
+                //  - truncating to the entries that did parse is no better.
+                //    These names are positional — entry k names state slot k
+                //    and `serializeState` writes one word per entry — so a
+                //    short list writes a short state section, the unspendable
+                //    case.
+                //
+                // A hand-written artifact is the only way to get here; a
+                // compiler-produced one always carries the full list.
+                const sn = v.object.get("syntheticNames") orelse return error.MalformedSyntheticNames;
+                if (sn != .array) return error.MalformedSyntheticNames;
+                var names = try allocator.alloc([]const u8, sn.array.items.len);
+                var filled: usize = 0;
+                errdefer {
+                    for (names[0..filled]) |n| allocator.free(n);
+                    allocator.free(names);
                 }
+                for (sn.array.items) |it| {
+                    if (it != .string) return error.MalformedSyntheticNames;
+                    names[filled] = try allocator.dupe(u8, it.string);
+                    filled += 1;
+                }
+                fa.synthetic_names = names;
                 field.fixed_array = fa;
             }
         }
