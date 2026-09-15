@@ -504,8 +504,9 @@ _DECL_FORWARD: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^\s*(?:public|private|protected|static|final|abstract|default|\s)*void\s+(\w+)\s*\("), "test"),
     (re.compile(r"^\s*(?:public|private|protected|static|final|abstract|\s)*(?:@interface|interface|class|record|enum)\s+(\w+)"), "class"),
     (re.compile(r"^\s*def\s+(\w+)\s*\("), "test"),
-    (re.compile(r"\b(?:describe|it|test)(?:\.\w+\s*\([^)]*\))?\s*\(\s*['\"]([^'\"]+)['\"]"), "test"),
-    (re.compile(r"\b(?:describe|it|test)(?:\.\w+\s*\([^)]*\))?\s*\(\s*`([^`$]*)"), "test"),
+    (re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\("), "test"),
+    (re.compile(r"\b(?:describe|it|test)(?:\.\w+\s*\((?:[^()]|\([^()]*\))*\))?\s*\(\s*['\"]([^'\"]+)['\"]"), "test"),
+    (re.compile(r"\b(?:describe|it|test)(?:\.\w+\s*\((?:[^()]|\([^()]*\))*\))?\s*\(\s*`([^`$]*)"), "test"),
 ]
 
 # Declarations searched BACKWARD from an ordinary in-body skip call.
@@ -520,9 +521,9 @@ _DECL_BACKWARD: list[tuple[re.Pattern[str], str]] = [
     # `describe.skipIf(cond)('name'` — the condition argument sits between the
     # callee and the title, so a pattern anchored straight to the quote missed
     # every gated suite in the corpus.
-    (re.compile(r"\b(?:describe|it)(?:\.skipIf\s*\([^)]*\))?\s*\(\s*['\"]([^'\"]+)['\"]"), "test"),
+    (re.compile(r"\b(?:describe|it)(?:\.skipIf\s*\((?:[^()]|\([^()]*\))*\))?\s*\(\s*['\"]([^'\"]+)['\"]"), "test"),
     # Template-literal titles: keep the STATIC prefix before the first `${`.
-    (re.compile(r"\b(?:describe|it)(?:\.skipIf\s*\([^)]*\))?\s*\(\s*`([^`$]*)"), "test"),
+    (re.compile(r"\b(?:describe|it)(?:\.skipIf\s*\((?:[^()]|\([^()]*\))*\))?\s*\(\s*`([^`$]*)"), "test"),
     (re.compile(r"^\s*(?:public|private|protected|static|final|abstract|default|\s)*void\s+(\w+)\s*\("), "test"),
     (re.compile(r"^\s*test\s+\"([^\"]+)\""), "test"),
     (re.compile(r"^\s*(?:def\s+(test_\w+)|(?:it|test|describe)\s+['\"]([^'\"]+)['\"])"), "test"),
@@ -534,7 +535,13 @@ _DECL_BACKWARD: list[tuple[re.Pattern[str], str]] = [
 _SCOPE_LOOKBACK = 400
 _SCOPE_LOOKAHEAD = 25
 
-_ANNOTATION_RE = re.compile(r"^\s*@")
+# `@Disabled` (Java), `@pytest.mark.skipif` (Python) and `#[ignore]`
+# (Rust) all govern the declaration that FOLLOWS them.
+_ANNOTATION_RE = re.compile(r"^\s*(?:@|#\[)")
+# `const maybe = available.includes(tier) ? it : it.skip` — the alias is
+# governed by the suite it sits in, not by the `it(...)` above it.
+_IT_ALIAS_RE = re.compile(r"\?\s*it\s*:\s*it\.skip|\?\s*it\.skip\s*:\s*it")
+_DESCRIBE_RE = re.compile(r"\bdescribe(?:\.\w+\s*\((?:[^()]|\([^()]*\))*\))?\s*\(\s*['\"`]([^'\"`$]+)")
 
 
 def _match_decl(
@@ -567,6 +574,12 @@ def enclosing_scope(path: str, skip_line: int) -> ScopeRef | None:
     text = full.read_text(encoding="utf-8", errors="replace").splitlines()
     if skip_line < 1 or skip_line - 1 >= len(text):
         return None
+
+    if _IT_ALIAS_RE.search(text[skip_line - 1]):
+        for i in range(skip_line - 1, max(skip_line - _SCOPE_LOOKBACK, -1), -1):
+            hit = _match_decl([(_DESCRIBE_RE, "test")], text[i])
+            if hit:
+                return hit
 
     if _ANNOTATION_RE.match(text[skip_line - 1]):
         for i in range(skip_line - 1, min(skip_line + _SCOPE_LOOKAHEAD, len(text))):
@@ -637,7 +650,7 @@ def snippet_matches_row(snippet: str, row: InventoryRow) -> bool:
 # EXACT, not `<=`. A soft advisory that exits 0 is how you get a third guard
 # that does not guard. Repairing an anchor must DECREMENT this deliberately,
 # and any new un-anchorable skip pushes it up and fails the build.
-UNANCHORED_PIN = 58
+UNANCHORED_PIN = 0
 
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
 
