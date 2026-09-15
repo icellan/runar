@@ -2894,6 +2894,39 @@ pub const RunarContract = struct {
     // ANF auto-state computation
     // ---------------------------------------------------------------------------
 
+    /// Populate the ANF interpreter's `property name -> ANFValue` map from
+    /// `self.state`.
+    ///
+    /// A `FixedArray` state field is keyed by its SYNTHETIC LEAF names, never
+    /// by its grouped one. Pass `03b-expand-fixed-arrays` runs before ANF
+    /// lowering, so the ANF program has no property called `table` at all — it
+    /// has `table__0`..`table__3`, and every `load_prop` / `update_prop` in the
+    /// method body names one of those. Keying the map by `field.name` left the
+    /// interpreter evaluating `this.table[i]++` against an ABSENT property.
+    ///
+    /// Mirrors `flattenFixedArrayState` in `packages/runar-sdk/src/contract.ts`
+    /// and `_flatten_fixed_array_state` in `packages/runar-py/runar/sdk/
+    /// contract.py`. Those two also copy the grouped entry through; this tier
+    /// does not, because nothing reads it and `stateValueToAnf` on an
+    /// `.array_value` allocates a slice the interpreter would never look at.
+    fn putCurrentState(
+        self: *RunarContract,
+        map: *std.StringHashMap(anf_interp.ANFValue),
+    ) void {
+        for (self.artifact.state_fields, 0..) |field, i| {
+            if (i >= self.state.len) continue;
+            if (field.fixed_array) |fa| {
+                // A non-array value cannot be spread over N leaves; leave the
+                // leaves absent rather than guess, as the TS/Python tiers do.
+                if (self.state[i] != .array_value) continue;
+                var next: usize = 0;
+                putSyntheticLeaves(map, fa.synthetic_names, self.state[i], &next);
+            } else {
+                map.put(field.name, stateValueToAnf(self.state[i])) catch continue;
+            }
+        }
+    }
+
     /// Auto-compute state transitions from the ANF IR embedded in the artifact.
     /// Also returns any data outputs declared via `this.addDataOutput(...)` in
     /// the method body, allocated from `self.allocator`. Caller owns both the
@@ -2930,13 +2963,11 @@ pub const RunarContract = struct {
         // peer tier swallows this.
         const anf_program = try anf_interp.parseANFFromJson(work, anf_json);
 
-        // Build current state map: property name -> ANFValue
+        // Build current state map: property name -> ANFValue. A FixedArray
+        // field is keyed by its SYNTHETIC leaf names, not its grouped one —
+        // see `putCurrentState`.
         var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
-        for (self.artifact.state_fields, 0..) |field, i| {
-            if (i < self.state.len) {
-                current_state.put(field.name, stateValueToAnf(self.state[i])) catch continue;
-            }
-        }
+        self.putCurrentState(&current_state);
 
         // Build named args map: param name -> ANFValue
         var named_args = std.StringHashMap(anf_interp.ANFValue).init(work);
@@ -2957,11 +2988,12 @@ pub const RunarContract = struct {
         // entries (current_state passthrough). State_delta updates were
         // duped into self.allocator and DO need freeing. We use this
         // snapshot to distinguish the two in the cleanup pass below.
+        // A FixedArray field passes its LEAVES through, so the walk has to
+        // descend into `.array_value` or those pointers look unborrowed and
+        // the cleanup frees memory `self.state` still owns.
         var borrowed_ptrs: std.ArrayListUnmanaged([*]const u8) = .empty;
         defer borrowed_ptrs.deinit(self.allocator);
-        for (self.state) |sv| {
-            if (sv == .bytes) borrowed_ptrs.append(self.allocator, sv.bytes.ptr) catch {};
-        }
+        for (self.state) |sv| collectBorrowedPtrs(&borrowed_ptrs, self.allocator, sv);
 
         // Compute new state AND data outputs.
         //
@@ -3000,7 +3032,23 @@ pub const RunarContract = struct {
         // pointer into the old self.state slot.
         for (self.artifact.state_fields, 0..) |field, i| {
             if (i < self.state.len) {
-                if (state_map.get(field.name)) |anf_val| {
+                // A FixedArray field's post-state lives under its synthetic
+                // leaf names; `field.name` is never a key of the result map.
+                if (field.fixed_array) |fa| {
+                    // Fail closed on an allocation failure here, same as the
+                    // interpreter call above: silently keeping the pre-call
+                    // array is exactly the defect this branch exists to fix.
+                    if (try regroupFromStateMap(
+                        self.allocator,
+                        field.type_name,
+                        fa.synthetic_names,
+                        state_map,
+                        self.state[i],
+                    )) |regrouped| {
+                        self.state[i].deinit(self.allocator);
+                        self.state[i] = regrouped;
+                    }
+                } else if (state_map.get(field.name)) |anf_val| {
                     const new_val = anfToStateValue(self.allocator, anf_val) catch types.StateValue{ .int = 0 };
                     self.state[i].deinit(self.allocator);
                     self.state[i] = new_val;
@@ -3053,11 +3101,7 @@ pub const RunarContract = struct {
         const anf_program = try anf_interp.parseANFFromJson(work, anf_json);
 
         var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
-        for (self.artifact.state_fields, 0..) |field, i| {
-            if (i < self.state.len) {
-                current_state.put(field.name, stateValueToAnf(self.state[i])) catch continue;
-            }
-        }
+        self.putCurrentState(&current_state);
 
         var named_args = std.StringHashMap(anf_interp.ANFValue).init(work);
         for (user_params, 0..) |param, i| {
@@ -3077,7 +3121,7 @@ pub const RunarContract = struct {
         var borrowed_ptrs: std.ArrayListUnmanaged([*]const u8) = .empty;
         defer borrowed_ptrs.deinit(self.allocator);
         for (self.state) |sv| {
-            if (sv == .bytes) borrowed_ptrs.append(self.allocator, sv.bytes.ptr) catch {};
+            collectBorrowedPtrs(&borrowed_ptrs, self.allocator, sv);
         }
 
         // FAIL CLOSED (NEW-006) — see the matching note in autoComputeState.
@@ -3379,6 +3423,133 @@ pub const RunarContract = struct {
 // ---------------------------------------------------------------------------
 // ANFValue <-> StateValue conversion helpers
 // ---------------------------------------------------------------------------
+
+/// Walk a (possibly nested) FixedArray state value depth-first and bind each
+/// LEAF to the correspondingly-positioned synthetic property name. `next` is
+/// the running leaf index, shared across the recursion.
+///
+/// An existing entry is never overwritten — mirrors the TS tier's
+/// `if (!(synth in out))` guard, which keeps an explicitly-supplied scalar
+/// winning over the grouped array it was also spelled inside.
+fn putSyntheticLeaves(
+    map: *std.StringHashMap(anf_interp.ANFValue),
+    names: []const []const u8,
+    value: types.StateValue,
+    next: *usize,
+) void {
+    switch (value) {
+        .array_value => |items| {
+            for (items) |it| putSyntheticLeaves(map, names, it, next);
+        },
+        else => {
+            if (next.* >= names.len) return;
+            const name = names[next.*];
+            next.* += 1;
+            if (map.contains(name)) return;
+            map.put(name, stateValueToAnf(value)) catch {};
+        },
+    }
+}
+
+/// Collect the `.bytes` pointers a state value lends to the interpreter,
+/// descending into `.array_value` leaves. The cleanup pass after
+/// `computeNewStateAndDataOutputs` frees any `.bytes` in the result map whose
+/// pointer is NOT in this set, so a leaf that is missed here gets freed while
+/// `self.state` still owns it.
+fn collectBorrowedPtrs(
+    out: *std.ArrayListUnmanaged([*]const u8),
+    allocator: std.mem.Allocator,
+    sv: types.StateValue,
+) void {
+    switch (sv) {
+        .bytes => |b| out.append(allocator, b.ptr) catch {},
+        .array_value => |items| {
+            for (items) |it| collectBorrowedPtrs(out, allocator, it);
+        },
+        else => {},
+    }
+}
+
+/// Rebuild a FixedArray state field's grouped value from the interpreter's
+/// result map, which keys the post-call state by the synthetic leaf names.
+///
+/// Returns `null` when the map carries none of this field's leaves — the
+/// method did not touch the array, so the caller must leave `self.state` alone
+/// rather than overwrite it with a reconstruction. A leaf the method did not
+/// write falls back to its pre-call value in `prior`, so a partial write keeps
+/// the untouched slots instead of zeroing them.
+///
+/// Mirrors `regroupFixedArrayState` in `packages/runar-sdk/src/contract.ts` and
+/// `_regroup_fixed_array_state` in `packages/runar-py/runar/sdk/contract.py`.
+fn regroupFromStateMap(
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    names: []const []const u8,
+    state_map: std.StringHashMap(anf_interp.ANFValue),
+    prior: types.StateValue,
+) !?types.StateValue {
+    var saw_any = false;
+    for (names) |n| {
+        if (state_map.contains(n)) {
+            saw_any = true;
+            break;
+        }
+    }
+    if (!saw_any) return null;
+
+    const flat = try allocator.alloc(types.StateValue, names.len);
+    var filled: usize = 0;
+    defer {
+        for (flat[0..filled]) |v| v.deinit(allocator);
+        allocator.free(flat);
+    }
+    for (names, 0..) |name, i| {
+        if (state_map.get(name)) |anf_val| {
+            // anfToStateValue dupes `.bytes`, so `flat` never aliases the
+            // result map (which is freed by the caller's cleanup pass).
+            flat[filled] = try anfToStateValue(allocator, anf_val);
+        } else {
+            flat[filled] = try clonePriorLeaf(allocator, prior, i);
+        }
+        filled += 1;
+    }
+
+    var dims_buf: [state_mod.MAX_FIXED_ARRAY_DIMS]u32 = undefined;
+    const dims = state_mod.parseFixedArrayDims(type_name, &dims_buf);
+    // Same fallback as `buildInitialArrayValue`: a declared shape that does not
+    // multiply out to the leaf count means `type` and `fixedArray` disagree —
+    // keep the leaves flat rather than drop the whole update.
+    return state_mod.regroupStateValues(allocator, flat[0..filled], dims) catch
+        try state_mod.regroupStateValues(allocator, flat[0..filled], &[_]u32{@intCast(filled)});
+}
+
+/// The `index`-th depth-first leaf of `prior`, cloned; `.int = 0` when `prior`
+/// has no such leaf (a shorter or non-array pre-call value).
+fn clonePriorLeaf(
+    allocator: std.mem.Allocator,
+    prior: types.StateValue,
+    index: usize,
+) !types.StateValue {
+    var cursor: usize = 0;
+    if (findLeaf(prior, index, &cursor)) |leaf| return try leaf.clone(allocator);
+    return types.StateValue{ .int = 0 };
+}
+
+fn findLeaf(value: types.StateValue, index: usize, cursor: *usize) ?types.StateValue {
+    switch (value) {
+        .array_value => |items| {
+            for (items) |it| {
+                if (findLeaf(it, index, cursor)) |found| return found;
+            }
+            return null;
+        },
+        else => {
+            if (cursor.* == index) return value;
+            cursor.* += 1;
+            return null;
+        },
+    }
+}
 
 fn stateValueToAnf(sv: types.StateValue) anf_interp.ANFValue {
     return switch (sv) {
