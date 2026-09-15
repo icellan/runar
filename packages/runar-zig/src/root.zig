@@ -232,6 +232,7 @@ test {
     _ = @import("testing_helpers.zig");
     _ = @import("sdk_types.zig");
     _ = @import("sdk_state.zig");
+    _ = @import("sdk_c2_state_strict_test.zig");
     _ = @import("sdk_provider.zig");
     _ = @import("sdk_signer.zig");
     _ = @import("sdk_deploy.zig");

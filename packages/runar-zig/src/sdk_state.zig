@@ -51,11 +51,33 @@ pub fn serializeState(
 
 /// DeserializeState decodes state values from a hex-encoded Bitcoin Script
 /// data section. Caller must strip the code prefix and OP_RETURN byte first.
+///
+/// FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out of a
+/// locking script any third party can construct, so it is untrusted input, and
+/// the caller then builds and SIGNS a continuation output committing to the
+/// restored state. A state section that does not describe EXACTLY `fields` is
+/// rejected:
+///
+///   - truncation — a field running past the end of the blob returns
+///     error.TruncatedStateSection instead of a plausible-but-wrong value.
+///     Every arm used to bounds-check, return a DEFAULT and then advance the
+///     NOMINAL width anyway, desynchronising every later field.
+///   - a byte that is not a push opcode returns error.MalformedStateSection
+///     rather than consuming one byte and yielding an empty value.
+///   - overlong tails — bytes left over after the last declared field return
+///     error.TrailingStateBytes instead of being silently dropped.
+///   - a blob that is not a whole number of bytes returns
+///     error.OddLengthStateBlob.
+///
+/// Restoring wrong-but-plausible state from a corrupted continuation is worse
+/// than not restoring it at all.
 pub fn deserializeState(
     allocator: std.mem.Allocator,
     fields: []const types.StateField,
     script_hex: []const u8,
 ) ![]types.StateValue {
+    if (script_hex.len % 2 != 0) return error.OddLengthStateBlob;
+
     const sorted = try allocator.alloc(usize, fields.len);
     defer allocator.free(sorted);
     for (0..fields.len) |i| sorted[i] = i;
@@ -85,6 +107,8 @@ pub fn deserializeState(
         result[field_idx] = decoded.value;
         offset += decoded.hex_chars_read;
     }
+
+    if (offset != script_hex.len) return error.TrailingStateBytes;
 
     return result;
 }
@@ -204,9 +228,16 @@ fn encodeStateValue(
         // cast constructors hard-assert those widths and all seven compilers
         // emit them as fixed raw slices; framing them instead deploys a state
         // section 1-2 bytes long and the first spend fails.
+        //
+        // A value the encoder cannot render as raw hex is REFUSED rather than
+        // written as "". Zig wrote zero bytes for a field the artifact declares
+        // N bytes wide; Python/Ruby wrote "" too, Go wrote "<nil>", Java "null"
+        // and TS "undefined" — four different non-hex placeholders for the same
+        // mistake, a silent byte divergence on a path whose bytes are committed
+        // on chain. Refusing is the only answer that is the same in every tier.
         return switch (value) {
             .bytes => |b| allocator.dupe(u8, b),
-            else => allocator.dupe(u8, ""),
+            else => error.MissingStateValue,
         };
     } else {
         // Variable-length types: use push-data encoding
@@ -501,56 +532,52 @@ const DecodedValue = struct {
     hex_chars_read: usize,
 };
 
+/// Fixed on-wire width of a state field type in bytes, or null if the type is
+/// variable-width. The single table `encodeStateValue`'s raw branch and
+/// `decodeStateValue`'s bounds check both read, so the writer and the reader
+/// cannot drift.
+pub fn stateFieldByteWidth(field_type: []const u8) ?usize {
+    if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) return 1;
+    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) return 8;
+    if (std.mem.eql(u8, field_type, "PubKey")) return 33;
+    if (std.mem.eql(u8, field_type, "Addr") or std.mem.eql(u8, field_type, "Ripemd160")) return 20;
+    if (std.mem.eql(u8, field_type, "Sha256")) return 32;
+    if (std.mem.eql(u8, field_type, "Point") or std.mem.eql(u8, field_type, "P256Point")) return 64;
+    if (std.mem.eql(u8, field_type, "P384Point")) return 96;
+    return null;
+}
+
 fn decodeStateValue(
     allocator: std.mem.Allocator,
     hex: []const u8,
     offset: usize,
     field_type: []const u8,
 ) !DecodedValue {
-    if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) {
-        // 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
-        // encodeStateValue — a reader that knows only "bool" walks a real
-        // boolean field as push data and desynchronises every field after it.
-        if (offset + 2 > hex.len) {
-            return .{ .value = .{ .boolean = false }, .hex_chars_read = 2 };
-        }
-        const is_true = !std.mem.eql(u8, hex[offset .. offset + 2], "00");
-        return .{ .value = .{ .boolean = is_true }, .hex_chars_read = 2 };
-    } else if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
-        const byte_width: usize = 8;
-        const hex_width = byte_width * 2;
-        if (offset + hex_width > hex.len) {
-            return .{ .value = .{ .int = 0 }, .hex_chars_read = hex_width };
-        }
-        return .{ .value = .{ .int = decodeNum2Bin(hex[offset .. offset + hex_width]) }, .hex_chars_read = hex_width };
-    } else if (std.mem.eql(u8, field_type, "PubKey")) {
-        const w: usize = 66;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "Addr") or std.mem.eql(u8, field_type, "Ripemd160")) {
-        const w: usize = 40;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "Sha256")) {
-        const w: usize = 64;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "Point") or std.mem.eql(u8, field_type, "P256Point")) {
-        const w: usize = 128;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "P384Point")) {
-        const w: usize = 192;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else {
-        // Push-data decode
-        const result = decodePushData(hex, offset);
+    const width = stateFieldByteWidth(field_type) orelse {
+        // Variable-length / unknown types: push-data decoding.
+        const result = try decodePushData(hex, offset);
         return .{
             .value = .{ .bytes = try allocator.dupe(u8, result.data) },
             .hex_chars_read = result.bytes_consumed,
         };
+    };
+
+    const hex_width = width * 2;
+    if (offset + hex_width > hex.len) return error.TruncatedStateSection;
+    const data = hex[offset .. offset + hex_width];
+
+    if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) {
+        // 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+        // encodeStateValue — a reader that knows only "bool" walks a real
+        // boolean field as push data and desynchronises every field after it.
+        return .{ .value = .{ .boolean = !std.mem.eql(u8, data, "00") }, .hex_chars_read = hex_width };
     }
+    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
+        // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
+        return .{ .value = .{ .int = decodeNum2Bin(data) }, .hex_chars_read = hex_width };
+    }
+    // Raw fixed-size byte types.
+    return .{ .value = .{ .bytes = try allocator.dupe(u8, data) }, .hex_chars_read = hex_width };
 }
 
 /// decodeNum2Bin decodes a fixed-width LE sign-magnitude number.
@@ -587,48 +614,57 @@ const PushDataResult = struct {
 /// single-byte values — accepting them would let the SDK read a state section
 /// the contract's own script cannot parse. OP_0 (0x00) falls through to the
 /// `opcode <= 75` branch and correctly decodes as the empty byte array.
-pub fn decodePushData(hex: []const u8, offset: usize) PushDataResult {
-    if (offset >= hex.len) {
-        return .{ .data = "", .bytes_consumed = 0 };
-    }
+pub fn decodePushData(hex: []const u8, offset: usize) !PushDataResult {
+    // Assert `chars` hex chars are available from `offset`, else fail closed.
+    const need = struct {
+        fn f(h: []const u8, off: usize, chars: usize) !void {
+            if (off + chars > h.len) return error.TruncatedStateSection;
+        }
+    }.f;
 
-    const opcode = hexByteAt(hex, offset) orelse return .{ .data = "", .bytes_consumed = 2 };
+    try need(hex, offset, 2);
+    const opcode = hexByteAt(hex, offset) orelse return error.MalformedStateSection;
 
     if (opcode <= 75) {
         const data_len = @as(usize, opcode) * 2;
+        try need(hex, offset, 2 + data_len);
         const start = offset + 2;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 2 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 2 + data_len };
     } else if (opcode == 0x4c) {
         // OP_PUSHDATA1
-        const length = hexByteAt(hex, offset + 2) orelse return .{ .data = "", .bytes_consumed = 4 };
+        try need(hex, offset, 4);
+        const length = hexByteAt(hex, offset + 2) orelse return error.MalformedStateSection;
         const data_len = @as(usize, length) * 2;
+        try need(hex, offset, 4 + data_len);
         const start = offset + 4;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 4 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 4 + data_len };
     } else if (opcode == 0x4d) {
         // OP_PUSHDATA2
-        const lo = hexByteAt(hex, offset + 2) orelse return .{ .data = "", .bytes_consumed = 6 };
-        const hi = hexByteAt(hex, offset + 4) orelse return .{ .data = "", .bytes_consumed = 6 };
-        const length = @as(usize, lo) | (@as(usize, hi) << 8);
-        const data_len = length * 2;
+        try need(hex, offset, 6);
+        const lo = hexByteAt(hex, offset + 2) orelse return error.MalformedStateSection;
+        const hi = hexByteAt(hex, offset + 4) orelse return error.MalformedStateSection;
+        const data_len = (@as(usize, lo) | (@as(usize, hi) << 8)) * 2;
+        try need(hex, offset, 6 + data_len);
         const start = offset + 6;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 6 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 6 + data_len };
     } else if (opcode == 0x4e) {
         // OP_PUSHDATA4
-        const b0 = hexByteAt(hex, offset + 2) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const b1 = hexByteAt(hex, offset + 4) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const b2 = hexByteAt(hex, offset + 6) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const b3 = hexByteAt(hex, offset + 8) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const length = @as(usize, b0) | (@as(usize, b1) << 8) | (@as(usize, b2) << 16) | (@as(usize, b3) << 24);
-        const data_len = length * 2;
+        try need(hex, offset, 10);
+        const b0 = hexByteAt(hex, offset + 2) orelse return error.MalformedStateSection;
+        const b1 = hexByteAt(hex, offset + 4) orelse return error.MalformedStateSection;
+        const b2 = hexByteAt(hex, offset + 6) orelse return error.MalformedStateSection;
+        const b3 = hexByteAt(hex, offset + 8) orelse return error.MalformedStateSection;
+        const data_len = (@as(usize, b0) | (@as(usize, b1) << 8) |
+            (@as(usize, b2) << 16) | (@as(usize, b3) << 24)) * 2;
+        try need(hex, offset, 10 + data_len);
         const start = offset + 10;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 10 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 10 + data_len };
     }
 
-    return .{ .data = "", .bytes_consumed = 2 };
+    // Not a push opcode at all — encodePushDataState can never emit one, so the
+    // state section is malformed. This used to consume one byte and return an
+    // empty value, desynchronising every subsequent field.
+    return error.MalformedStateSection;
 }
 
 // ---------------------------------------------------------------------------

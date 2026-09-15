@@ -4726,7 +4726,14 @@ test "fromUtxo recovers real constructor args from the deployed script (#119)" {
 
     // Deployed script: OP_5 (owner=5, baked at byte 0), OP_EQUAL, then an
     // OP_RETURN state section.
-    const script = "5587" ++ "6a" ++ "0101";
+    //
+    // The state section is the NUM2BIN-8 word for count=1. It used to be the
+    // two bytes "0101", which is not a state section any contract declaring one
+    // `int` field can produce — an `int` is 8 raw bytes. The old decoder read it
+    // as int(0), advanced the nominal 8 bytes anyway and returned; this test
+    // only asserted the constructor args, so it passed on a blob the contract
+    // could never have written. C2's fail-closed decoder rejects it, correctly.
+    const script = "5587" ++ "6a" ++ "0100000000000000";
     const utxo = types.UTXO{ .txid = "bb" ** 32, .output_index = 0, .satoshis = 1000, .script = script };
 
     var contract = try RunarContract.fromUtxo(allocator, &artifact, utxo);
