@@ -16,14 +16,38 @@
 #       Build {key => <string from UTF-16 units>} where lone surrogates are
 #       emitted as their 3-byte WTF-8 form, so canonical_json's UTF-8 /
 #       lone-surrogate guard rejects them.
+#   {"mode":"deep","depth":<int>,"shape":"array"|"object"}
+#       Build `depth` nested containers around the integer leaf 1, NATIVELY.
+#   {"mode":"bigstring","bytes":<int>,"where":"value"|"key"}
+#       Build a one-entry Hash whose value (or key) is `bytes` ASCII 'a',
+#       NATIVELY, and respond with the SHA-256 of the canonical bytes.
+#
+#   Why `deep` / `bigstring` describe the value instead of carrying it: see the
+#   max_nesting note below. The transport must not impose a limit on the thing
+#   under test.
 #
 #   On a typed rejection the shim prints "RUNAR_CANON_ERR:<message>" to
 #   stdout and exits 3; any other failure exits 1.
 
 $LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
 
+require 'digest'
 require 'json'
 require 'runar/sdk'
+
+DIGEST_PREFIX = 'RUNAR_CANON_SHA256:'
+
+# Build `depth` nested containers around the integer leaf 1, iteratively.
+def build_deep(depth, shape)
+  v = 1
+  depth.times { v = shape == 'array' ? [v] : { 'k' => v } }
+  v
+end
+
+def build_big_string(nbytes, where)
+  s = 'a' * nbytes
+  where == 'value' ? { 's' => s } : { s => 1 }
+end
 
 def utf16_units_to_string(units)
   bytes = []
@@ -58,7 +82,15 @@ end
 
 raw = $stdin.read
 begin
-  req = JSON.parse(raw)
+  # max_nesting: false — the REQUEST parser must not be the thing that limits
+  # how deep a case can be. Ruby's JSON.parse defaults to max_nesting: 100, and
+  # with that default this shim reported "parse request: nesting of 101 is too
+  # deep" on stderr with exit 1 for any deep case, never calling canonical_json
+  # at all. Read as a rejection, that made Ruby look like it AGREED with the TS
+  # reference's depth guard; Ruby's canonical_json in fact has no depth guard —
+  # handed a natively-built depth-600 array it returns 1201 bytes. The harness
+  # was manufacturing the very agreement it existed to test for.
+  req = JSON.parse(raw, max_nesting: false)
 rescue StandardError => e
   warn "parse request: #{e}"
   exit 1
@@ -69,6 +101,10 @@ when 'json'
   value = req['value']
 when 'utf16'
   value = { req['key'].to_s => utf16_units_to_string(req['units'] || []) }
+when 'deep'
+  value = build_deep(req['depth'].to_i, req['shape'] || 'array')
+when 'bigstring'
+  value = build_big_string(req['bytes'].to_i, req['where'] || 'value')
 else
   warn "unknown mode #{req['mode'].inspect}"
   exit 1
@@ -79,5 +115,14 @@ begin
 rescue ArgumentError, TypeError, KeyError => e
   $stdout.write("RUNAR_CANON_ERR:#{e.message}")
   exit 3
+rescue SystemStackError
+  # Native stack exhaustion is not the typed rejection a guard produces; keep
+  # it distinguishable so it cannot be scored as agreement.
+  $stdout.write('RUNAR_CANON_ERR:SystemStackError (native stack, not a guard)')
+  exit 3
+end
+if req['mode'] == 'bigstring'
+  $stdout.write("#{DIGEST_PREFIX}#{Digest::SHA256.hexdigest(out)}")
+  exit 0
 end
 $stdout.write(out)

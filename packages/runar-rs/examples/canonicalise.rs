@@ -15,6 +15,21 @@
 //!       which is the documented Rust behaviour in fixtures.json. The shim
 //!       reports that as a typed rejection (exit 3) so it lines up with the
 //!       other tiers' runtime lone-surrogate rejection.
+//!   {"mode":"deep","depth":<int>,"shape":"array"|"object"}
+//!       Build `depth` nested containers around the integer leaf 1, NATIVELY.
+//!   {"mode":"bigstring","bytes":<int>,"where":"value"|"key"}
+//!       Build a one-entry object whose value (or key) is `bytes` ASCII 'a',
+//!       NATIVELY, and respond with the SHA-256 of the canonical bytes.
+//!
+//!   Why `deep` / `bigstring` describe the value instead of carrying it, and
+//!   why it matters MOST in this tier: serde_json caps deserialization at 128
+//!   nested containers and that cap is NOT configurable at the default feature
+//!   set. Sent as a JSON request, any case deeper than ~126 died here with
+//!   "parse request: recursion limit exceeded" on stderr, exit 1, never
+//!   reaching canonical_json — so the transport was enforcing a limit an order
+//!   of magnitude below the one under test, and the resulting failure was easy
+//!   to misread as this tier's guard firing. It has no depth guard.
+//!   Building the value natively sidesteps the request parser entirely.
 //!
 //!   On a typed rejection the shim prints "RUNAR_CANON_ERR:<message>" to
 //!   stdout and exits 3; any other failure exits 1.
@@ -25,6 +40,36 @@ use std::io::Read;
 
 use runar_lang::sdk::canonical_json;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+const DIGEST_PREFIX: &str = "RUNAR_CANON_SHA256:";
+
+/// Nest `depth` containers around the integer leaf 1, iteratively.
+fn build_deep(depth: u64, shape: &str) -> Value {
+    let mut v = Value::from(1i64);
+    for _ in 0..depth {
+        v = if shape == "array" {
+            Value::Array(vec![v])
+        } else {
+            let mut m = serde_json::Map::new();
+            m.insert("k".to_string(), v);
+            Value::Object(m)
+        };
+    }
+    v
+}
+
+/// One-entry object whose value (or key) is `n` ASCII 'a'.
+fn build_big_string(n: usize, where_: &str) -> Value {
+    let s = "a".repeat(n);
+    let mut m = serde_json::Map::new();
+    if where_ == "value" {
+        m.insert("s".to_string(), Value::String(s));
+    } else {
+        m.insert(s, Value::from(1i64));
+    }
+    Value::Object(m)
+}
 
 fn main() {
     let mut raw = String::new();
@@ -69,6 +114,14 @@ fn main() {
                 }
             }
         }
+        "deep" => build_deep(
+            req.get("depth").and_then(|d| d.as_u64()).unwrap_or(0),
+            req.get("shape").and_then(|s| s.as_str()).unwrap_or("array"),
+        ),
+        "bigstring" => build_big_string(
+            req.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0) as usize,
+            req.get("where").and_then(|w| w.as_str()).unwrap_or("value"),
+        ),
         _ => {
             eprintln!("unknown mode {mode:?}");
             std::process::exit(1);
@@ -76,7 +129,13 @@ fn main() {
     };
 
     match canonical_json(&input) {
-        Ok(s) => print!("{s}"),
+        Ok(s) => {
+            if mode == "bigstring" {
+                print!("{DIGEST_PREFIX}{:x}", Sha256::digest(s.as_bytes()));
+            } else {
+                print!("{s}");
+            }
+        }
         Err(e) => {
             print!("RUNAR_CANON_ERR:{e}");
             std::process::exit(3);

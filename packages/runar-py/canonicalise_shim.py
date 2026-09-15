@@ -14,6 +14,20 @@ Protocol (single-shot, stdin -> stdout), mirrors the Go / Rust shims:
       Python `str` can hold a lone surrogate, so the lone-surrogate REJECTION
       happens inside canonical_json (mirrors test_envelope_interop's
       test_canonical_json_rejection_vectors).
+  {"mode":"deep","depth":<int>,"shape":"array"|"object"}
+      Build `depth` nested containers around the integer leaf 1, NATIVELY.
+  {"mode":"bigstring","bytes":<int>,"where":"value"|"key"}
+      Build a one-entry object whose value (or key) is `bytes` ASCII 'a',
+      NATIVELY, and respond with the SHA-256 of the canonical bytes rather
+      than the bytes themselves.
+
+  Why `deep` / `bigstring` describe the value instead of carrying it: a deep or
+  huge value sent as JSON would have to survive THIS shim's json.loads before
+  ever reaching canonical_json, so the transport would be imposing a limit on
+  the very thing under test. Building natively keeps the request ~50 bytes and
+  takes the request parser out of the measurement. Hashing the bigstring
+  response keeps a ~4 MiB canonical output from crossing the pipe while still
+  detecting a single divergent byte.
 
   On a typed rejection the shim prints "RUNAR_CANON_ERR:<message>" to stdout
   and exits 3; any other failure exits 1.
@@ -21,10 +35,28 @@ Protocol (single-shot, stdin -> stdout), mirrors the Go / Rust shims:
 Run via:  PYTHONPATH=packages/runar-py python3 packages/runar-py/canonicalise_shim.py
 """
 
+import hashlib
 import json
 import sys
 
 from runar.sdk import canonical_json
+
+DIGEST_PREFIX = "RUNAR_CANON_SHA256:"
+
+
+def build_deep(depth, shape):
+    """Build `depth` nested containers around the integer leaf 1, iteratively
+    (a recursive builder would hit Python's own recursion limit long before
+    canonical_json's depth guard, which is the thing under test)."""
+    v = 1
+    for _ in range(depth):
+        v = [v] if shape == "array" else {"k": v}
+    return v
+
+
+def build_big_string(nbytes, where):
+    s = "a" * nbytes
+    return {"s": s} if where == "value" else {s: 1}
 
 
 def utf16_units_to_string(units):
@@ -58,6 +90,10 @@ def main():
         value = req.get("value")
     elif mode == "utf16":
         value = {req.get("key", ""): utf16_units_to_string(req.get("units", []))}
+    elif mode == "deep":
+        value = build_deep(int(req["depth"]), req.get("shape", "array"))
+    elif mode == "bigstring":
+        value = build_big_string(int(req["bytes"]), req.get("where", "value"))
     else:
         sys.stderr.write(f"unknown mode {mode!r}\n")
         sys.exit(1)
@@ -67,6 +103,16 @@ def main():
     except (ValueError, TypeError) as e:
         sys.stdout.write(f"RUNAR_CANON_ERR:{e}")
         sys.exit(3)
+    except RecursionError:
+        # A native stack exhaustion is NOT the typed rejection the guard is
+        # supposed to produce. Report it distinctly so it cannot be mistaken
+        # for agreement with a tier that rejected properly.
+        sys.stdout.write("RUNAR_CANON_ERR:RecursionError (native stack, not a guard)")
+        sys.exit(3)
+    if mode == "bigstring":
+        digest = hashlib.sha256(out.encode("utf-8")).hexdigest()
+        sys.stdout.write(f"{DIGEST_PREFIX}{digest}")
+        return
     sys.stdout.write(out)
 
 
