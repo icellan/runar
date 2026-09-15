@@ -924,6 +924,35 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --parser-only
+      - name: Conformance vitest suites not reached by any other step
+        # `conformance/` is NOT a pnpm workspace member (pnpm-workspace.yaml
+        # lists packages/* and integration/ts), so `turbo run test` never
+        # descends into it, and conformance/'s own `npm test` runs the
+        # conformance RUNNER rather than vitest. A .test.ts file there is
+        # executed only if a workflow names its path.
+        #
+        # These eight were named by nothing — 376 passing assertions that no
+        # pipeline ran. Two of them (codepart-pin, dce) were added during this
+        # remediation pass itself, which is the sharp version of the problem:
+        # a guard is only as real as the thing that runs it.
+        #
+        # sdk-vertical is listed because its CI step invokes the runner via
+        # `tsx sdk-vertical/runner/vertical-runner.ts` — that does not execute
+        # the directory's vitest files.
+        #
+        # tests/conformance-tests-reachable-from-ci.test.ts fails if a future
+        # conformance test file is added without being named here.
+        run: >
+          npx vitest run
+          conformance/anf-scope.test.ts
+          conformance/fixture-count-doc.test.ts
+          conformance/codepart-pin
+          conformance/dce
+          conformance/source-map
+          conformance/subtype-parity
+          conformance/sdk-vertical
+          conformance/runner/__tests__
+          conformance/anf-interpreter/num2bin-engine-parity.test.ts
       - name: Cross-tier rejection parity (programs that must NOT compile)
         # The parser-only step above proves every tier ACCEPTS what it should.
         # Nothing proved they agree on what to REFUSE, and that gap let a Go
