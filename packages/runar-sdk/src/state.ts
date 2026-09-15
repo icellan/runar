@@ -345,7 +345,25 @@ function encodeStateValue(value: unknown, type: string, label = '?'): string {
       // but the list omitted deployed a framed state section the on-chain
       // reader could not parse — the #115 `boolean` drift above, and then
       // P256Point / P384Point, which locked funds on the first spend.
-      if (STATE_FIELD_WIDTHS[type]?.encoding === 'raw') {
+      const rawWidth = STATE_FIELD_WIDTHS[type];
+      if (rawWidth?.encoding === 'raw') {
+        // Refuse a missing value rather than stringifying it. `String(undefined)`
+        // writes the nine characters `undefined` where the artifact declares
+        // `rawWidth.size` bytes — not hex, wrong width, and silent. The six peer
+        // SDKs refuse this (C-2); TypeScript writing garbage would make the
+        // reference implementation the only tier that does.
+        //
+        // Deliberately NOT applied to the variable-length branch below: an empty
+        // ByteString is a legitimate state value that encodes as OP_0, whereas a
+        // missing PubKey is not a value at all.
+        if (value === undefined || value === null) {
+          throw new Error(
+            `serializeState: state field "${label}" (${type}) has no value. ` +
+              `A raw fixed-width field must carry exactly ${rawWidth.size} bytes; ` +
+              `writing a placeholder here would put a state section on chain that ` +
+              `the contract's own on-chain reader cannot parse.`,
+          );
+        }
         return String(value);
       }
       // Variable-length types (bytes, ByteString, etc.): use push-data
