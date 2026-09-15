@@ -61,6 +61,115 @@ export interface IRFuzzerOptions {
   renderStrategy?: RenderStrategy;
   /** Directory to save failing cases. */
   findingsDir?: string;
+  /**
+   * Tiers that MUST have compiled at least one program. A tier that produced
+   * nothing for the whole run is a FAILURE, not a smaller run.
+   *
+   * Without this the harness degrades silently. `everProduced` exists to tell
+   * "this compiler is not installed" from "this compiler rejected THIS
+   * program", so a tier whose binary is present but which rejects or crashes
+   * on ALL N generated programs never enters the set, is filtered out of every
+   * divergence report, leaves `match` true, and the run prints
+   * "N programs, 0 mismatches" and exits 0 — a seven-tier gate reporting
+   * success having compared six. Same rule, same wording, as
+   * `canonical-json-differential.ts`'s `requireTiers`.
+   *
+   * Defaults (in the CLI) to the requested `compilers`. Pass an empty array to
+   * opt out for an exploratory local run.
+   */
+  requireTiers?: readonly CompilerName[];
+}
+
+/** What one program's run told us about tier PRESENCE (not about bytes). */
+export interface IRProgramOutcome {
+  /** Tiers that emitted output for this program. */
+  received: readonly CompilerName[];
+  /** Tiers that emitted nothing — rejected it, crashed, or are not installed. */
+  failed: readonly CompilerName[];
+}
+
+export interface IRRunClassification {
+  perProgram: { match: boolean; details?: string }[];
+  /** Tiers that produced output for at least one program in the WHOLE run. */
+  everProduced: CompilerName[];
+  requiredTiers: CompilerName[];
+  /** Required tiers that were never requested, or produced nothing all run. */
+  missingRequiredTiers: CompilerName[];
+  /** Programs every tier rejected — tiers agree, reported not failed. */
+  allRejectedCount: number;
+  /** Programs where a multi-tier run left a single survivor: no comparison. */
+  noComparisonCount: number;
+}
+
+/**
+ * Decide, ONCE and at the END of a run, what each program's tier presence
+ * means. Doing this inside the program loop is what made `everProduced` a
+ * prefix set: a tier that rejected program 0 and accepted program 1 was not
+ * flagged on program 0, because at that instant nothing had yet proved the
+ * tier was installed.
+ */
+export function classifyIRRun(args: {
+  programs: readonly IRProgramOutcome[];
+  compilers: readonly CompilerName[];
+  requireTiers: readonly CompilerName[];
+}): IRRunClassification {
+  const { programs, compilers, requireTiers } = args;
+
+  const everProducedSet = new Set<CompilerName>();
+  for (const p of programs) for (const c of p.received) everProducedSet.add(c);
+
+  // "Not compared" has two causes and both must fail: the tier was never
+  // requested, or it was requested and never produced anything.
+  const missingRequiredTiers = requireTiers.filter(
+    (t) => !compilers.includes(t) || !everProducedSet.has(t),
+  );
+
+  let allRejectedCount = 0;
+  let noComparisonCount = 0;
+  const perProgram = programs.map((p) => {
+    if (p.received.length === 0) {
+      allRejectedCount++;
+      return { match: true };
+    }
+
+    const reasons: string[] = [];
+    const rejected = p.failed.filter((c) => everProducedSet.has(c));
+    if (rejected.length > 0) {
+      reasons.push(
+        `rejected by ${rejected.join(', ')} but accepted by ${p.received.join(', ')}`,
+      );
+    }
+    // A multi-tier run that left one survivor compared nothing.
+    if (compilers.length >= 2 && p.received.length === 1) {
+      noComparisonCount++;
+      reasons.push(`only ${p.received[0]} compiled it — no cross-tier comparison was made`);
+    }
+    return reasons.length > 0 ? { match: false, details: reasons.join('; ') } : { match: true };
+  });
+
+  return {
+    perProgram,
+    everProduced: [...everProducedSet],
+    requiredTiers: [...requireTiers],
+    missingRequiredTiers: [...missingRequiredTiers],
+    allRejectedCount,
+    noComparisonCount,
+  };
+}
+
+export interface IRDifferentialReport {
+  results: IRDifferentialResult[];
+  mismatchCount: number;
+  allRejectedCount: number;
+  noComparisonCount: number;
+  everProduced: CompilerName[];
+  requiredTiers: CompilerName[];
+  /**
+   * Required tiers that were never requested, or produced output on ZERO
+   * programs. Non-empty means the run PROVED NOTHING about those tiers and the
+   * caller must fail.
+   */
+  missingRequiredTiers: CompilerName[];
 }
 
 export interface IRDifferentialResult {
@@ -426,7 +535,7 @@ function saveFinding(
 export async function runIRDifferentialFuzzing(
   numPrograms: number,
   options: IRFuzzerOptions = {},
-): Promise<IRDifferentialResult[]> {
+): Promise<IRDifferentialReport> {
   const compilers = options.compilers ?? ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'];
   const strategy: RenderStrategy = options.renderStrategy ?? 'ts';
   const compareHex = options.compareHex ?? true;
@@ -445,22 +554,11 @@ export async function runIRDifferentialFuzzing(
 
   const contracts = fc.sample(arb, { numRuns: numPrograms, seed: options.seed });
   const compilerMap = dispatch();
+  const requireTiers = options.requireTiers ?? compilers;
   const results: IRDifferentialResult[] = [];
-  let mismatchCount = 0;
-  // Programs EVERY tier rejected. Tier agreement holds — that is why this is
-  // reported rather than failed — but the condition is otherwise invisible:
-  // an all-reject program takes the same "OK" path as one all seven compiled
-  // identically, so a generator that started emitting programs the compiler
-  // cannot build would look exactly like a clean run. Surfacing the count
-  // makes that distinguishable at a glance.
-  let allRejectedCount = 0;
-
-  // Track which compilers have produced output at least once, so we can
-  // separate "this compiler is not installed" from "this compiler rejected
-  // *this* program". A compiler we've never seen produce output is assumed
-  // uninstalled and silently skipped; one that has produced output before
-  // but fails now is flagged as a rejection-divergence.
-  const everProduced = new Set<CompilerName>();
+  // Tier PRESENCE per program. It is classified after the loop, against the
+  // complete `everProduced` set — see `classifyIRRun`.
+  const outcomes: IRProgramOutcome[] = [];
 
   for (let i = 0; i < contracts.length; i++) {
     const contract = contracts[i]!;
@@ -483,13 +581,11 @@ export async function runIRDifferentialFuzzing(
         failed.push(compiler);
         continue;
       }
-      everProduced.add(compiler);
       outputs[compiler] = normalizeOutput(raw, compareHex);
       if (verbose) console.log(`    ${compiler}: ${outputs[compiler]!.slice(0, 60)}${outputs[compiler]!.length > 60 ? '...' : ''}`);
     }
 
     const received = Object.entries(outputs) as Array<[CompilerName, string]>;
-    let match = true;
     let mismatchDetails: string | undefined;
 
     if (received.length >= 2) {
@@ -504,52 +600,65 @@ export async function runIRDifferentialFuzzing(
         }
       }
       if (mismatches.length > 0) {
-        match = false;
         mismatchDetails = `Output mismatch: ${mismatches.join(', ')}`;
       }
     }
 
-    // Separately surface "one compiler rejected the input while the rest
-    // accepted it". This catches Java-specific failures that would otherwise
-    // be silently dropped by the null check above, and is the primary signal
-    // the task description calls out ("when Java rejects a contract that
-    // others accept (or vice versa), surface that too").
-    if (failed.length > 0 && failed.length < compilers.length) {
-      const rejected = failed.filter((c) => everProduced.has(c));
-      if (rejected.length > 0) {
-        const already = mismatchDetails ? mismatchDetails + '; ' : '';
-        mismatchDetails = already + `rejected by ${rejected.join(', ')} but accepted by ${received.map(([n]) => n).join(', ')}`;
-        match = false;
-      }
-    } else if (failed.length === compilers.length && failed.every((c) => everProduced.has(c))) {
-      allRejectedCount++;
-      if (verbose) console.log(`  (rejected by every tier — tiers agree, program not compiled)`);
-    }
-
-    const result: IRDifferentialResult = {
+    outcomes.push({ received: received.map(([n]) => n), failed: [...failed] });
+    results.push({
       contractName: contract.name,
       sources,
       outputs,
-      match,
+      // Filled in after the loop, once tier presence can be judged against the
+      // whole run rather than a prefix of it.
+      match: true,
       mismatchDetails,
-    };
+    });
+  }
 
-    if (!match) {
+  // Tier presence is judged ONCE, here, against the complete run. A tier that
+  // produced nothing at all is a missing tier, not an absent toolchain we get
+  // to ignore.
+  const classification = classifyIRRun({ programs: outcomes, compilers, requireTiers });
+
+  let mismatchCount = 0;
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i]!;
+    const verdict = classification.perProgram[i]!;
+    const parts = [result.mismatchDetails, verdict.details].filter(Boolean);
+    result.match = verdict.match && !result.mismatchDetails;
+    result.mismatchDetails = parts.length > 0 ? parts.join('; ') : undefined;
+
+    if (!result.match) {
       mismatchCount++;
-      if (verbose) console.log(`  MISMATCH: ${mismatchDetails}`);
+      if (verbose) console.log(`  MISMATCH (${result.contractName}): ${result.mismatchDetails}`);
       saveFinding(findingsDir, result);
-    } else if (verbose) {
-      console.log(`  OK (${received.map(([n]) => n).join(', ')})`);
     }
-
-    results.push(result);
   }
 
   console.log('');
   console.log(
     `IR differential fuzzing complete: ${contracts.length} programs, ${mismatchCount} mismatches` +
-      (allRejectedCount > 0 ? `, ${allRejectedCount} rejected by every tier` : ''),
+      (classification.allRejectedCount > 0
+        ? `, ${classification.allRejectedCount} rejected by every tier`
+        : ''),
   );
+  console.log(
+    `  Tiers that compiled at least one program: ${classification.everProduced.join(', ') || '(none)'}`,
+  );
+  if (classification.noComparisonCount > 0) {
+    console.log(
+      `  Programs with a single surviving tier (no comparison made): ${classification.noComparisonCount}`,
+    );
+  }
 
-  return results;
+  return {
+    results,
+    mismatchCount,
+    allRejectedCount: classification.allRejectedCount,
+    noComparisonCount: classification.noComparisonCount,
+    everProduced: classification.everProduced,
+    requiredTiers: classification.requiredTiers,
+    missingRequiredTiers: classification.missingRequiredTiers,
+  };
 }
