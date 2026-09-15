@@ -214,6 +214,104 @@ func flattenFixedArrayCtorArgs(args []interface{}, abiParams []ABIParam) []inter
 	return out
 }
 
+// flattenFixedArrayState spreads every grouped FixedArray entry of a state
+// record (`table` holding a possibly-nested slice of length N) over the
+// SYNTHETIC scalar names the leaves are really called (`table__0`..`table__3`,
+// `grid__0__0`..`grid__1__1`, ...). The grouped entries are kept as well, for
+// callers that read them afterwards.
+//
+// This is the ANF-interpreter boundary. Pass `03b-expand-fixed-arrays` runs
+// BEFORE ANF lowering, so the ANF program has no property called `table` at
+// all -- every `load_prop` / `update_prop` in the method body names one of the
+// synthetic leaves. Handing the interpreter the grouped map left it evaluating
+// `this.table[i]++` against an ABSENT property, falling back to the property's
+// initialValue (or its constructor arg), and a runtime-index write rewrites
+// every leaf -- so a call on a contract restored from chain silently rewound
+// the whole array to its deploy-time contents and committed that to the
+// continuation output.
+//
+// Mirrors `flattenFixedArrayState` in packages/runar-sdk/src/contract.ts and
+// `_flatten_fixed_array_state` in packages/runar-py/runar/sdk/contract.py,
+// including their two rules: a non-slice value is NOT spread over N leaves
+// (nothing sensible to spread), and an explicitly-supplied scalar wins over the
+// grouped slice it is also spelled inside.
+func flattenFixedArrayState(state map[string]interface{}, fields []StateField) map[string]interface{} {
+	out := make(map[string]interface{}, len(state))
+	for k, v := range state {
+		out[k] = v
+	}
+	for _, field := range fields {
+		if field.FixedArray == nil {
+			continue
+		}
+		value, ok := state[field.Name]
+		if !ok || asInterfaceSlice(value) == nil {
+			continue
+		}
+		flat := flattenNestedValue(value, parseFixedArrayDims(field.Type))
+		for i, name := range field.FixedArray.SyntheticNames {
+			if _, exists := out[name]; exists {
+				continue
+			}
+			if i < len(flat) {
+				out[name] = flat[i]
+			}
+		}
+	}
+	return out
+}
+
+// regroupFixedArrayState rebuilds each grouped FixedArray entry of a state
+// record from the synthetic scalar leaves the ANF interpreter writes, so the
+// user-facing `GetState()["table"]` and the serializer's grouped fallback both
+// see the post-call value rather than the pre-call one. Synthetic entries are
+// left in place; non-FixedArray fields pass through untouched.
+//
+// A field whose leaves are entirely absent from the map is left alone: the
+// method did not touch that array, so there is nothing to reconstruct. A leaf
+// the method did not write falls back to its pre-call value from `state`'s
+// grouped entry, so a partial write keeps the untouched slots instead of
+// zeroing them.
+//
+// Mirrors `regroupFixedArrayState` in packages/runar-sdk/src/contract.ts and
+// `_regroup_fixed_array_state` in packages/runar-py/runar/sdk/contract.py.
+func regroupFixedArrayState(state map[string]interface{}, fields []StateField) map[string]interface{} {
+	out := make(map[string]interface{}, len(state))
+	for k, v := range state {
+		out[k] = v
+	}
+	for _, field := range fields {
+		if field.FixedArray == nil {
+			continue
+		}
+		names := field.FixedArray.SyntheticNames
+		flat := make([]interface{}, len(names))
+		written := make([]bool, len(names))
+		sawAny := false
+		for i, name := range names {
+			if v, ok := out[name]; ok {
+				flat[i] = v
+				written[i] = true
+				sawAny = true
+			}
+		}
+		if !sawAny {
+			continue
+		}
+		dims := parseFixedArrayDims(field.Type)
+		if prior, ok := state[field.Name]; ok && asInterfaceSlice(prior) != nil {
+			priorFlat := flattenNestedValue(prior, dims)
+			for i := range flat {
+				if !written[i] && i < len(priorFlat) {
+					flat[i] = priorFlat[i]
+				}
+			}
+		}
+		out[field.Name] = regroupNestedValue(flat, dims)
+	}
+	return out
+}
+
 // Connect stores a provider and signer on this contract so they don't need
 // to be passed to every Deploy() and Call() invocation.
 func (c *RunarContract) Connect(provider Provider, signer Signer) {
@@ -874,8 +972,13 @@ func (c *RunarContract) PrepareCall(
 	var anfOrderedOutputs []OrderedOutput
 	if isStateful && c.Artifact.ANF != nil {
 		namedArgs := buildNamedArgs(userParams, resolvedArgs)
+		// The interpreter knows only the EXPANDED scalar property names, so a
+		// grouped FixedArray entry has to be spread over its synthetic leaves
+		// first -- see flattenFixedArrayState. c.constructorArgs is already
+		// flat (NewRunarContract runs flattenFixedArrayCtorArgs).
+		flatState := flattenFixedArrayState(c.state, c.Artifact.StateFields)
 		state, dataOuts, _, ordered, err := ComputeNewStateAndDataOutputs(
-			c.Artifact.ANF, methodName, c.state, namedArgs, c.constructorArgs,
+			c.Artifact.ANF, methodName, flatState, namedArgs, c.constructorArgs,
 		)
 		if err != nil {
 			// FAIL CLOSED (NEW-006). Swallowing this built the stateful
@@ -890,7 +993,18 @@ func (c *RunarContract) PrepareCall(
 					"commit cannot be derived. Refusing to build a transaction from the "+
 					"pre-call state: %w", methodName, err)
 		}
-		autoComputedState = state
+		// ...and the post-state comes back under those same synthetic names, so
+		// regroup before it reaches c.state. Without this the grouped entry
+		// keeps its pre-call value and only SerializeState's synthetic-key
+		// preference kept the continuation bytes honest.
+		merged := make(map[string]interface{}, len(flatState)+len(state))
+		for k, v := range flatState {
+			merged[k] = v
+		}
+		for k, v := range state {
+			merged[k] = v
+		}
+		autoComputedState = regroupFixedArrayState(merged, c.Artifact.StateFields)
 		resolvedDataOutputs = dataOuts
 		anfOrderedOutputs = ordered
 	}
