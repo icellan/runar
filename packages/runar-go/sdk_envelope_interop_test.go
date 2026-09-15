@@ -39,6 +39,17 @@ type fixtureDepthVector struct {
 	Envelope SignedEnvelope `json:"envelope"`
 }
 
+type fixtureClockVector struct {
+	VectorID string `json:"_vector_id"`
+	// Pointers so a JSON null ("the caller supplies nothing") is
+	// distinguishable from an explicit 0 — which is the whole point of the
+	// vector set.
+	ClockSkewMs *int64 `json:"clock_skew_ms"`
+	NowMs       *int64 `json:"now_ms"`
+	ExpectOK    bool   `json:"expect_ok"`
+	Reason      string `json:"reason"`
+}
+
 type fixture struct {
 	FixtureVersion       int                      `json:"fixture_version"`
 	AlicePubHex          string                   `json:"alice_pub_hex"`
@@ -49,6 +60,7 @@ type fixture struct {
 	ValidEnvelope        SignedEnvelope           `json:"valid_envelope"`
 	RejectionVectors     []fixtureRejection       `json:"rejection_vectors"`
 	PayloadDepthLimit    int                      `json:"payload_depth_limit"`
+	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
 }
 
@@ -132,7 +144,7 @@ func TestEnvelopeInterop_VerifyValid(t *testing.T) {
 	f := loadFixture(t)
 	r := VerifyEnvelope(VerifyEnvelopeOpts{
 		Envelope: f.ValidEnvelope,
-		NowMs:    f.VerifyNowMs,
+		NowMs:    Int64Ptr(f.VerifyNowMs),
 	})
 	if !r.OK {
 		t.Fatalf("expected ok=true for valid_envelope; reason=%s", r.Reason)
@@ -146,7 +158,7 @@ func TestEnvelopeInterop_RejectionVectors(t *testing.T) {
 		// against verify_now_ms.
 		r := VerifyEnvelope(VerifyEnvelopeOpts{
 			Envelope: rv.Envelope,
-			NowMs:    f.VerifyNowMs,
+			NowMs:    Int64Ptr(f.VerifyNowMs),
 		})
 		if r.OK {
 			t.Errorf("rejection %q: expected ok=false", rv.Reason)
@@ -288,7 +300,7 @@ func TestEnvelopeInterop_DepthVectors(t *testing.T) {
 		t.Fatal("depth_vectors missing or empty")
 	}
 	for _, dv := range f.DepthVectors {
-		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: dv.Envelope, NowMs: f.VerifyNowMs})
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: dv.Envelope, NowMs: Int64Ptr(f.VerifyNowMs)})
 		if dv.ExpectOK {
 			if !r.OK {
 				t.Errorf("%s: expected ok=true, got reason=%s", dv.VectorID, r.Reason)
@@ -311,5 +323,41 @@ func TestEnvelopeInterop_PayloadDepthLimitMatchesFixture(t *testing.T) {
 	f := loadFixture(t)
 	if f.PayloadDepthLimit != MaxEnvelopePayloadDepth {
 		t.Fatalf("fixture payload_depth_limit=%d, MaxEnvelopePayloadDepth=%d", f.PayloadDepthLimit, MaxEnvelopePayloadDepth)
+	}
+}
+
+// TestEnvelopeInterop_ClockSkewVectors — R-261. An EXPLICIT clock skew of 0
+// must mean 0, not "not supplied". Six tiers already distinguished the two;
+// THIS tier conflated them (`ClockSkewMs int64 // defaults to 5_000 when
+// zero`), so a caller asking for strict expiry silently got a five-second
+// replay window — measured ok:true on the valid envelope 2000 ms past expiry
+// where rust, python, ruby, zig and java all said expired. The same
+// zero-value sentinel sat on NowMs. A nil in the vector means the caller
+// supplies nothing and the tier default applies; cs2 and cs3 are the controls
+// that redden if a fix made explicit zero strict by dropping the default.
+func TestEnvelopeInterop_ClockSkewVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.ClockSkewVectors) == 0 {
+		t.Fatal("clock_skew_vectors missing or empty")
+	}
+	for _, cv := range f.ClockSkewVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{
+			Envelope:    f.ValidEnvelope,
+			ClockSkewMs: cv.ClockSkewMs,
+			NowMs:       cv.NowMs,
+		})
+		if cv.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", cv.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", cv.VectorID)
+			continue
+		}
+		if string(r.Reason) != cv.Reason {
+			t.Errorf("%s: got reason=%s want=%s", cv.VectorID, r.Reason, cv.Reason)
+		}
 	}
 }

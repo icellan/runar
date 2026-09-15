@@ -223,3 +223,39 @@ fn payload_depth_limit_matches_fixture() {
         MAX_ENVELOPE_PAYLOAD_DEPTH
     );
 }
+
+/// R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six
+/// tiers already distinguished the two (this one via `Option::unwrap_or`); Go
+/// conflated them and silently gave a caller asking for strict expiry a
+/// five-second replay window, and both Go and Java did the same with the
+/// now-override. A `null` in the vector means the caller supplies no value and
+/// the tier default applies — that is the control: an over-strict fix reddens
+/// on cs2/cs3, not cs1.
+#[test]
+fn clock_skew_vectors() {
+    let fixture = load_fixture();
+    let env = envelope_from_value(&fixture["valid_envelope"]);
+    let vectors = fixture["clock_skew_vectors"]
+        .as_array()
+        .expect("clock_skew_vectors missing");
+    assert!(!vectors.is_empty(), "clock_skew_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: v["clock_skew_ms"].as_i64(),
+            now_ms: Some(v["now_ms"].as_i64().unwrap()),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "expired" => VerifyEnvelopeReason::Expired,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
+    }
+}

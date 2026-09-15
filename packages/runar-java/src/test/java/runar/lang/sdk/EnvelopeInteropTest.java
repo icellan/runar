@@ -255,4 +255,47 @@ class EnvelopeInteropTest {
             Envelope.MAX_ENVELOPE_PAYLOAD_DEPTH);
     }
 
+    // -------------------------------------------------------------------
+    // R-261 — explicit clock options
+    // -------------------------------------------------------------------
+
+    /**
+     * An EXPLICIT clock override of 0 must mean the epoch, not "not supplied".
+     * This tier read {@code nowMs != 0 ? nowMs : System.currentTimeMillis()},
+     * so an explicit 0 fell back to the wall clock and returned {@code expired}
+     * on an envelope that python, ruby, rust and zig all accepted. (Its
+     * clockSkewMs was already correct — a field default of 5_000 that an
+     * explicit 0 overrides — and cs1 is the control proving that.) A null in
+     * the vector means the caller supplies nothing and the default applies, so
+     * cs2 and cs3 redden if a fix drops the default instead of honouring zero.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void clockSkewVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        Envelope.SignedEnvelope env = envelopeFromMap((Map<String, Object>) fixture.get("valid_envelope"));
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("clock_skew_vectors");
+        assertFalse(vectors.isEmpty(), "clock_skew_vectors missing or empty");
+        for (Map<String, Object> cv : vectors) {
+            String vid = (String) cv.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = env;
+            Number skew = (Number) cv.get("clock_skew_ms");
+            if (skew != null) {
+                vo.clockSkewMs = skew.longValue();
+            }
+            Number now = (Number) cv.get("now_ms");
+            if (now != null) {
+                vo.nowMs = now.longValue();
+            }
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(cv.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(cv.get("reason"), r.reason.wire, vid);
+            }
+        }
+    }
+
 }

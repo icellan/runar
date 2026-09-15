@@ -241,6 +241,38 @@
     }
   ],
   "note_on_pubkey_not_allowed": "pubkey-not-allowed cannot be expressed in a tier-agnostic fixture: it depends on caller-supplied expected_keys. Each tier verifies this reason in its own unit tests by passing a non-matching allowlist; the wire bytes are independent.",
+  "clock_skew_vectors_notes": "R-261. Every tier's verifyEnvelope takes an optional clock skew and an optional \"now\" override, and six of the seven distinguish an EXPLICIT ZERO from NOT SUPPLIED: TS `?? 5_000`, Rust `Option::unwrap_or`, Python default arg, Ruby kwarg (0 is truthy in Ruby), Zig struct default, Java's clockSkewMs field default. Go conflated the two -- `ClockSkewMs int64 // defaults to 5_000 when zero` -- so a caller asking for STRICT expiry silently got a five-second replay window. Measured on the valid envelope, 2000 ms past expiry with clockSkewMs explicitly 0: go ok:true, while rust/python/ruby/zig/java all said expired. The same zero-value-sentinel sat on Go's NowMs AND on Java's nowMs: with now explicitly 0 (the epoch, i.e. nothing can have expired yet) python and ruby returned ok:true while java returned expired, because 0 was read as \"not supplied\" and replaced with the wall clock. Both are now genuinely optional in both tiers. Each vector below names the OPTIONS a caller supplies: a null means the caller does NOT supply that option and the tier's own default applies -- that is the control with teeth, because a fix that made 0 strict by dropping the default would redden cs2. TS's verify reads Date.now() directly rather than taking an injectable clock, so it covers the skew half in its own unit tests against a live clock.",
+  "clock_skew_vectors": [
+    {
+      "_vector_id": "cs1-explicit-zero-skew-is-strict",
+      "_notes": "2000 ms past expiry, caller explicitly asks for zero tolerance. Expired on every tier. This is the row Go failed.",
+      "clock_skew_ms": 0,
+      "now_ms": 1700000032000,
+      "expect_ok": false,
+      "reason": "expired"
+    },
+    {
+      "_vector_id": "cs2-omitted-skew-keeps-the-5000ms-default",
+      "_notes": "CONTROL. Same envelope, same clock, but the caller supplies NO skew, so the tier default of 5000 ms applies and 2000 ms of lateness is tolerated. An over-strict fix -- one that made explicit zero strict by removing the default -- reddens here.",
+      "clock_skew_ms": null,
+      "now_ms": 1700000032000,
+      "expect_ok": true
+    },
+    {
+      "_vector_id": "cs3-explicit-nondefault-skew-is-honoured",
+      "_notes": "CONTROL. 8000 ms past expiry with an explicit 10000 ms tolerance: accepted. Proves the caller's value is used rather than the default, in the direction the default alone would reject.",
+      "clock_skew_ms": 10000,
+      "now_ms": 1700000038000,
+      "expect_ok": true
+    },
+    {
+      "_vector_id": "cs4-explicit-zero-now-is-the-epoch",
+      "_notes": "The now-override half of the same defect. now = 0 is the epoch, so an envelope expiring in 2023 has NOT expired yet. Go and Java read 0 as \"not supplied\" and substituted the wall clock, returning expired where python, ruby, rust and zig returned ok:true.",
+      "clock_skew_ms": null,
+      "now_ms": 0,
+      "expect_ok": true
+    }
+  ],
   "payload_depth_limit": 100,
   "depth_vectors_notes": "R-260. verifyEnvelope parses the payload with each tier's stock JSON library and used to inherit that library's recursion cap, which differs per tier. Measured on ONE envelope (priv=1, live clock, payload {\"deep\":<N-deep array>,...}): ts/go/python/zig accepted every depth probed (zig to 100001), ruby flipped to bad-json at total depth 101 (JSON.parse default max_nesting: 100), rust at total depth 128 (serde_json RECURSION_LIMIT), and JAVA THREW StackOverflowError OUT OF verify (Json.java readValue/readObject/readArray are mutually recursive with no cap and Envelope.verify catches Exception, not Error) -- at ~5000 deep on a default JVM stack and ~1000 deep under -Xss512k, i.e. the threshold was a JVM launch flag, not a protocol property. Every tier now enforces MAX_ENVELOPE_PAYLOAD_DEPTH = 100 (this file's payload_depth_limit) on the payload TEXT, with a NON-RECURSIVE bracket scan run immediately before the stock parser, so the answer is the same everywhere and the guard itself cannot overflow. depth = the number of containers enclosing a value, 1-based, outermost = 1; 100 accepted, 101 rejected. 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127, so no tier has to hand-roll or reconfigure its parser to stay inside it, and it is far above what the wire needs (deepest checked-in conformance artifact: depth 15; this file: 6). It is deliberately the SAME number as canonicalJson's emit-side bound -- if parse were the smaller of the two, a tier could emit a legal, correctly-signed envelope another tier is physically unable to parse. Over-limit rejects as bad-json, the reason two tiers already returned natively and the reason the R-115 lone-surrogate text guard uses.",
   "depth_vectors": [

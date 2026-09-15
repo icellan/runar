@@ -119,3 +119,30 @@ def test_payload_depth_limit_matches_fixture(fixture: dict) -> None:
     from runar.sdk.envelope import MAX_ENVELOPE_PAYLOAD_DEPTH
 
     assert fixture["payload_depth_limit"] == MAX_ENVELOPE_PAYLOAD_DEPTH
+
+
+def test_clock_skew_vectors(fixture: dict) -> None:
+    """R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied".
+
+    Six tiers already distinguished the two; Go conflated them and silently
+    gave a caller asking for strict expiry a five-second replay window, and
+    both Go and Java did the same with the now-override. A ``None`` in the
+    vector means the caller supplies no value and the tier default applies --
+    that is the control: an over-strict fix reddens on cs2/cs3, not cs1.
+    """
+    env = SignedEnvelope.from_dict(fixture["valid_envelope"])
+    vectors = fixture["clock_skew_vectors"]
+    assert vectors, "clock_skew_vectors missing or empty"
+    for v in vectors:
+        vid = v.get("_vector_id", "?")
+        kwargs = {"now_ms": v["now_ms"]}
+        if v["clock_skew_ms"] is not None:
+            kwargs["clock_skew_ms"] = v["clock_skew_ms"]
+        r = verify_envelope(env, **kwargs)
+        if v["expect_ok"]:
+            assert r.ok, f"{vid}: expected ok=True, got reason={r.reason}"
+        else:
+            assert not r.ok, f"{vid}: expected ok=False"
+            assert r.reason == VerifyEnvelopeReason(v["reason"]), (
+                f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )

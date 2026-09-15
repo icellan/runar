@@ -333,3 +333,58 @@ test "interop: shared payload depth bound" {
         try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
     }
 }
+
+// R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six
+// tiers already distinguished the two (this one via a struct default); Go
+// conflated them and silently gave a caller asking for strict expiry a
+// five-second replay window, and both Go and Java did the same with the
+// now-override. A null in the vector means the caller supplies nothing and the
+// tier default applies -- cs2 and cs3 are the controls that redden if a fix
+// made explicit zero strict by dropping the default.
+test "interop: explicit clock skew and now overrides" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const ve = parsed.value.object.get("valid_envelope").?.object;
+    const env = envelope.SignedEnvelope{
+        .payload = ve.get("payload").?.string,
+        .sig = ve.get("sig").?.string,
+        .pubkey = ve.get("pubkey").?.string,
+        .nonce = ve.get("nonce").?.integer,
+        .expiresAt = ve.get("expiresAt").?.integer,
+    };
+
+    const cvs = parsed.value.object.get("clock_skew_vectors").?.array;
+    try std.testing.expect(cvs.items.len > 0);
+    for (cvs.items) |cv| {
+        const obj = cv.object;
+        const vid = obj.get("_vector_id").?.string;
+        var opts = envelope.VerifyEnvelopeOpts{
+            .envelope = &env,
+            .now_ms = obj.get("now_ms").?.integer,
+        };
+        // A JSON null means the caller supplies nothing, so the struct default
+        // (5_000) stands; a number is used as given, zero included.
+        switch (obj.get("clock_skew_ms").?) {
+            .integer => |i| opts.clock_skew_ms = i,
+            else => {},
+        }
+        var r = try envelope.verifyEnvelope(allocator, opts);
+        defer r.deinit();
+        if (obj.get("expect_ok").?.bool) {
+            if (!r.ok) {
+                std.debug.print("{s}: expected ok=true, got reason={s}\n", .{ vid, if (r.reason) |x| x.wire() else "-" });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
+    }
+}

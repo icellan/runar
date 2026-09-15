@@ -395,10 +395,25 @@ public final class Envelope {
         public SignedEnvelope envelope;
         /** Optional pubkey allowlist (66-char hex). */
         public List<String> expectedKeys;
-        /** Defaults to 5_000. */
+        /**
+         * Allowed wall-clock skew in ms when checking expiresAt. Defaults to
+         * 5_000; an explicit 0 means zero tolerance and IS honoured.
+         */
         public long clockSkewMs = 5_000;
-        /** Override Now() for deterministic tests; 0 = wall clock. */
-        public long nowMs = 0;
+        /**
+         * Overrides the wall clock used to check expiry. NULL means the caller
+         * supplied nothing and {@code System.currentTimeMillis()} is used; a
+         * non-null value is used AS GIVEN, so an explicit 0 means the Unix
+         * epoch — under which nothing has expired yet — rather than "fall back
+         * to the wall clock".
+         *
+         * <p>R-261: this was a {@code long} defaulting to 0 and read as
+         * {@code nowMs != 0 ? nowMs : System.currentTimeMillis()}, which made
+         * an explicit 0 indistinguishable from "not supplied". Python, Ruby,
+         * Rust and Zig all treat an explicit 0 as the epoch and returned
+         * ok:true on an envelope this tier called expired.
+         */
+        public Long nowMs = null;
     }
 
     public static final class VerifyEnvelopeResult {
@@ -522,7 +537,7 @@ public final class Envelope {
             return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.MISSING_FIELDS, null);
         }
 
-        long now = opts.nowMs != 0 ? opts.nowMs : System.currentTimeMillis();
+        long now = opts.nowMs != null ? opts.nowMs : System.currentTimeMillis();
 
         // 2. Expiry.
         if (env.expiresAt < now - opts.clockSkewMs) {

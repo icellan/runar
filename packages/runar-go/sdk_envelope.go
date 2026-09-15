@@ -579,9 +579,28 @@ func payloadExceedsMaxDepth(payload string) bool {
 type VerifyEnvelopeOpts struct {
 	Envelope     SignedEnvelope
 	ExpectedKeys []string // optional pubkey allowlist (66-char hex)
-	ClockSkewMs  int64    // defaults to 5_000 when zero
-	NowMs        int64    // override Now() for deterministic tests; zero = wall clock
+	// ClockSkewMs is the allowed wall-clock skew in ms when checking
+	// expiresAt. NIL means the caller supplied nothing and the 5_000 ms
+	// default applies; a non-nil pointer is used AS GIVEN, so an explicit
+	// 0 means zero tolerance.
+	//
+	// R-261: this was an int64 documented as "defaults to 5_000 when zero",
+	// which made Go the only tier unable to express strict expiry — a caller
+	// asking for 0 silently got a five-second replay window, while the other
+	// six tiers honoured the explicit 0. Use Int64Ptr to supply a value.
+	ClockSkewMs *int64
+	// NowMs overrides the wall clock used to check expiry. NIL means the
+	// caller supplied nothing and time.Now() is used; a non-nil pointer is
+	// used AS GIVEN, so an explicit 0 means the Unix epoch — under which
+	// nothing has expired yet — rather than "fall back to the wall clock".
+	// Same R-261 zero-value-sentinel defect as ClockSkewMs.
+	NowMs *int64
 }
+
+// Int64Ptr returns a pointer to v. VerifyEnvelopeOpts.ClockSkewMs and .NowMs
+// are pointers so that an explicit zero is distinguishable from "not
+// supplied"; Go has no literal address-of for constants, so callers need this.
+func Int64Ptr(v int64) *int64 { return &v }
 
 // VerifyEnvelopeResult mirrors the TypeScript shape. Data is populated
 // when JSON parsing succeeded, so callers can apply app-specific checks
@@ -595,13 +614,13 @@ type VerifyEnvelopeResult struct {
 // VerifyEnvelope mirrors the six-reason rejection ladder of the TS impl.
 func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	env := opts.Envelope
-	clockSkew := opts.ClockSkewMs
-	if clockSkew == 0 {
-		clockSkew = 5_000
+	clockSkew := int64(5_000)
+	if opts.ClockSkewMs != nil {
+		clockSkew = *opts.ClockSkewMs
 	}
-	now := opts.NowMs
-	if now == 0 {
-		now = time.Now().UnixMilli()
+	now := time.Now().UnixMilli()
+	if opts.NowMs != nil {
+		now = *opts.NowMs
 	}
 
 	// 0. DoS-bound size guard. Reject envelopes whose string fields exceed

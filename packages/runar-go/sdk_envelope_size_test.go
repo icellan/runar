@@ -17,7 +17,7 @@ func TestVerifyEnvelope_RejectsOversizedPayload(t *testing.T) {
 		ExpiresAt: 9_999_999_999_999,
 	}
 
-	res := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1})
+	res := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1)})
 	if res.OK {
 		t.Fatal("expected verify to fail")
 	}
@@ -35,7 +35,7 @@ func TestVerifyEnvelope_RejectsOversizedSig(t *testing.T) {
 		ExpiresAt: 9_999_999_999_999,
 	}
 
-	res := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1})
+	res := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1)})
 	if res.OK {
 		t.Fatal("expected verify to fail")
 	}
@@ -56,7 +56,7 @@ func TestVerifyEnvelope_NormalSizedEnvelopeStillRunsThrough(t *testing.T) {
 		ExpiresAt: 9_999_999_999_999,
 	}
 
-	res := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1})
+	res := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1)})
 	if res.Reason == ReasonTooLarge {
 		t.Fatalf("size guard incorrectly tripped on normal-sized envelope: %v", res.Reason)
 	}

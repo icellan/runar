@@ -132,7 +132,7 @@ func TestSignVerify_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1_000_000_000_500})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1_000_000_000_500)})
 	if !got.OK {
 		t.Fatalf("verify failed: reason=%s", got.Reason)
 	}
@@ -145,7 +145,7 @@ func TestVerify_MissingFields(t *testing.T) {
 	signer := newAliceSigner(t)
 	env, _ := SignEnvelope(SignEnvelopeOpts{Data: map[string]any{"ok": int64(1)}, Signer: signer, NowMs: 1_000_000_000_000})
 	env.Sig = ""
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1_000_000_000_500})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1_000_000_000_500)})
 	if got.OK || got.Reason != ReasonMissingFields {
 		t.Errorf("want missing-fields, got OK=%v reason=%s", got.OK, got.Reason)
 	}
@@ -155,7 +155,7 @@ func TestVerify_Expired(t *testing.T) {
 	signer := newAliceSigner(t)
 	env, _ := SignEnvelope(SignEnvelopeOpts{Data: map[string]any{"ok": int64(1)}, Signer: signer, NowMs: 1_000_000_000_000})
 	// Verify with a "now" far past the envelope's expiry.
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1_000_000_000_000 + 1_000_000})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1_000_000_000_000 + 1_000_000)})
 	if got.OK || got.Reason != ReasonExpired {
 		t.Errorf("want expired, got OK=%v reason=%s", got.OK, got.Reason)
 	}
@@ -165,7 +165,7 @@ func TestVerify_BadJSON(t *testing.T) {
 	signer := newAliceSigner(t)
 	env, _ := SignEnvelope(SignEnvelopeOpts{Data: map[string]any{"ok": int64(1)}, Signer: signer, NowMs: 1_000_000_000_000})
 	env.Payload = "not json{"
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1_000_000_000_500})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1_000_000_000_500)})
 	if got.OK || got.Reason != ReasonBadJSON {
 		t.Errorf("want bad-json, got OK=%v reason=%s", got.OK, got.Reason)
 	}
@@ -175,7 +175,7 @@ func TestVerify_EnvelopeMismatch(t *testing.T) {
 	signer := newAliceSigner(t)
 	env, _ := SignEnvelope(SignEnvelopeOpts{Data: map[string]any{"ok": int64(1)}, Signer: signer, NowMs: 1_000_000_000_000})
 	env.Nonce = env.Nonce + 1
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1_000_000_000_500})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1_000_000_000_500)})
 	if got.OK || got.Reason != ReasonEnvelopeMismatch {
 		t.Errorf("want envelope-mismatch, got OK=%v reason=%s", got.OK, got.Reason)
 	}
@@ -194,7 +194,7 @@ func TestVerify_BadSig(t *testing.T) {
 		swap = '2'
 	}
 	env.Sig = env.Sig[:mid] + string(swap) + env.Sig[mid+1:]
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: 1_000_000_000_500})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, NowMs: Int64Ptr(1_000_000_000_500)})
 	if got.OK || got.Reason != ReasonBadSig {
 		t.Errorf("want bad-sig, got OK=%v reason=%s", got.OK, got.Reason)
 	}
@@ -205,7 +205,7 @@ func TestVerify_PubkeyNotAllowed(t *testing.T) {
 	bob := newBobSigner(t)
 	env, _ := SignEnvelope(SignEnvelopeOpts{Data: map[string]any{"ok": int64(1)}, Signer: alice, NowMs: 1_000_000_000_000})
 	bobPub, _ := bob.PublicKey()
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, ExpectedKeys: []string{bobPub}, NowMs: 1_000_000_000_500})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, ExpectedKeys: []string{bobPub}, NowMs: Int64Ptr(1_000_000_000_500)})
 	if got.OK || got.Reason != ReasonPubkeyNotAllowed {
 		t.Errorf("want pubkey-not-allowed, got OK=%v reason=%s", got.OK, got.Reason)
 	}
@@ -214,7 +214,7 @@ func TestVerify_PubkeyNotAllowed(t *testing.T) {
 func TestVerify_PubkeyAllowed(t *testing.T) {
 	signer := newAliceSigner(t)
 	env, _ := SignEnvelope(SignEnvelopeOpts{Data: map[string]any{"ok": int64(1)}, Signer: signer, NowMs: 1_000_000_000_000})
-	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, ExpectedKeys: []string{env.Pubkey}, NowMs: 1_000_000_000_500})
+	got := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: env, ExpectedKeys: []string{env.Pubkey}, NowMs: Int64Ptr(1_000_000_000_500)})
 	if !got.OK {
 		t.Errorf("expected OK with pubkey in allowlist; got reason=%s", got.Reason)
 	}

@@ -432,3 +432,65 @@ describe('verifyEnvelope payload depth bound (R-260)', () => {
     expect(fixture.payload_depth_limit).toBe(MAX_ENVELOPE_PAYLOAD_DEPTH);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R-261 — an explicit clockSkewMs of 0 must mean 0, not "not supplied".
+//
+// Six of the seven tiers distinguish the two: TS `?? 5_000` (this file's
+// subject), Rust `Option::unwrap_or`, Python default arg, Ruby kwarg (0 is
+// truthy in Ruby), Zig struct default, Java field default. Go conflated them —
+// `ClockSkewMs int64 // defaults to 5_000 when zero` — so a caller asking for
+// strict expiry silently got a five-second replay window. Measured on the
+// cross-tier valid envelope, 2000 ms past expiry with clockSkewMs explicitly
+// 0: go ok:true, rust/python/ruby/zig/java all expired.
+//
+// TS's verify reads Date.now() directly rather than taking an injectable
+// clock, so it cannot replay the fixture's frozen clock_skew_vectors the way
+// the six other tiers do; it covers the same shape against a live clock. TS
+// was already correct here, so these are REGRESSION guards, not a fix.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope clockSkewMs (R-261)', () => {
+  const signer = new TestSigner(ALICE);
+
+  /** A validly signed envelope that expired `lateMs` ago. */
+  async function signExpired(lateMs: number): Promise<SignedEnvelope> {
+    const expiresAt = Date.now() - lateMs;
+    const nonce = expiresAt - 30_000;
+    const payload = canonicalJson({ ok: 1, nonce, expiresAt });
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    return {
+      payload,
+      sig: await signer.signHash(digest),
+      pubkey: await signer.getPublicKey(),
+      nonce,
+      expiresAt,
+    };
+  }
+
+  it('treats an explicit 0 as zero tolerance', async () => {
+    const env = await signExpired(2_000);
+    const r = verifyEnvelope({ envelope: env, clockSkewMs: 0 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('expired');
+  });
+
+  it('still applies the 5000 ms default when no skew is supplied', async () => {
+    // CONTROL. Same envelope, same lateness — a fix that made explicit zero
+    // strict by dropping the default would redden here.
+    const env = await signExpired(2_000);
+    const r = verifyEnvelope({ envelope: env });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it('uses an explicit non-default skew rather than the default', async () => {
+    // CONTROL in the other direction: 8 s late is past the 5000 ms default, so
+    // this can only pass if the caller's 10_000 is the value actually used.
+    const env = await signExpired(8_000);
+    expect(verifyEnvelope({ envelope: env }).reason).toBe('expired');
+    const r = verifyEnvelope({ envelope: env, clockSkewMs: 10_000 });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+});

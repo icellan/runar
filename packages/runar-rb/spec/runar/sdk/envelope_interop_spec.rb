@@ -118,4 +118,28 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
     expect(fixture['payload_depth_limit']).to eq(Runar::SDK::Envelope::MAX_ENVELOPE_PAYLOAD_DEPTH)
   end
 
+  # R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six
+  # tiers already distinguished the two; Go conflated them and silently gave a
+  # caller asking for strict expiry a five-second replay window, and both Go
+  # and Java did the same with the now-override. A nil in the vector means the
+  # caller supplies no value and the tier default applies -- that is the
+  # control: an over-strict fix reddens on cs2/cs3, not cs1.
+  it 'honours an explicit clock skew and an explicit now, and defaults when neither is given' do
+    env = Runar::SDK::Envelope::SignedEnvelope.from_h(fixture['valid_envelope'])
+    vectors = fixture['clock_skew_vectors']
+    expect(vectors).not_to be_empty
+    vectors.each do |v|
+      vid = v['_vector_id']
+      kwargs = { envelope: env, now_ms: v['now_ms'] }
+      kwargs[:clock_skew_ms] = v['clock_skew_ms'] unless v['clock_skew_ms'].nil?
+      r = Runar::SDK::Envelope.verify_envelope(**kwargs)
+      if v['expect_ok']
+        expect(r[:ok]).to be(true), "#{vid}: expected ok=true, got reason=#{r[:reason]}"
+      else
+        expect(r[:ok]).to be(false), "#{vid}: expected ok=false"
+        expect(r[:reason]).to eq(v['reason']), "#{vid}: got reason=#{r[:reason]}"
+      end
+    end
+  end
+
 end
