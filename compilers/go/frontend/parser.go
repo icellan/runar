@@ -820,6 +820,34 @@ func (p *parseContext) parseVariableDecl(node *sitter.Node) Statement {
 		}
 	}
 
+	// W5: a declaration list declares exactly one variable.
+	//
+	// `findChildByType` returns the FIRST `variable_declarator` and ignores
+	// every later one. This tier did not even warn about it -- the reference
+	// tier at least emitted a warning in statement position, which `compile()`
+	// does not stop on, while a for-initializer emitted nothing anywhere.
+	//
+	// What is lost is not always a value. Measured on the reference tier, a
+	// private helper carrying the contract's guard, called from a
+	// for-initializer's second declarator, compiled to nothing:
+	//
+	//	for (let i = 0n, k = this.guard(x); i < 2n; i++)   hex 008b519c77
+	//	for (let i = 0n;                    i < 2n; i++)   hex 008b519c77
+	//
+	// Byte-identical. `guard` asserts `x > 100n` and @bsv/sdk
+	// Spend.validate() ACCEPTED verify(5n). `k` is never named again, so no
+	// later pass can catch this as an undeclared variable; only the effect is
+	// lost. Both this tier's sites route through here, since
+	// parseVariableDeclFromForInit calls parseVariableDecl.
+	//
+	// The subset is one declarator per statement (spec/grammar.md's
+	// VariableDeclaration production), and python/zig/ruby/java already refuse
+	// the shape at the comma. The diagnostic text is shared verbatim with the
+	// other tiers that can see a declaration list.
+	if n := p.countChildrenByType(node, "variable_declarator"); n > 1 {
+		p.addError(extraDeclaratorError(n))
+	}
+
 	// Find variable_declarator
 	declarator := p.findChildByType(node, "variable_declarator")
 	if declarator == nil {
@@ -1901,6 +1929,35 @@ func (p *parseContext) parseParenExpression(node *sitter.Node) Expression {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// countChildrenByType counts direct children of the given tree-sitter type.
+//
+// The declaration-list rule (W5) needs to know that a SECOND declarator exists,
+// which findChildByType cannot express: it stops at the first match, which is
+// exactly how every later declarator used to disappear without a diagnostic.
+func (p *parseContext) countChildrenByType(node *sitter.Node, typeName string) int {
+	n := 0
+	for i := 0; i < int(node.ChildCount()); i++ {
+		if node.Child(i).Type() == typeName {
+			n++
+		}
+	}
+	return n
+}
+
+// extraDeclaratorError is the W5 diagnostic, shared verbatim with the other
+// tiers that drive a full TypeScript parser and can therefore SEE a declaration
+// list at all (ts-morph in the reference tier, swc in rust).
+func extraDeclaratorError(count int) string {
+	return fmt.Sprintf(
+		"Multiple variable declarations in a single statement are not supported "+
+			"(%d declared). Declare one variable per statement: every declarator after "+
+			"the first is discarded before the AST is built, so anything it calls -- a guard, "+
+			"an assert reached through a private helper -- is silently absent from the "+
+			"emitted script.",
+		count,
+	)
+}
 
 func (p *parseContext) findChildByType(node *sitter.Node, typeName string) *sitter.Node {
 	for i := 0; i < int(node.ChildCount()); i++ {

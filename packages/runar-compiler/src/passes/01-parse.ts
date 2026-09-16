@@ -722,6 +722,44 @@ function parseStatement(
   }
 }
 
+/**
+ * The diagnostic for a declaration list that declares more than one variable
+ * (W5 / LoopYoink). Shared verbatim by both sites that can see one.
+ *
+ * Both sites used to take `decls[0]` and discard the rest. In statement
+ * position that came with a WARNING, which `compile()` does not stop on; in a
+ * for-initializer it came with NO diagnostic at all, which makes the loop
+ * header the strictly worse of the two.
+ *
+ * What is lost is not always a value. Measured on the reference tier, a private
+ * helper carrying the contract's guard, called from a for-initializer's second
+ * declarator, compiled to nothing:
+ *
+ *   for (let i = 0n, k = this.guard(x); i < 2n; i++)   hex 008b519c77
+ *   for (let i = 0n;                    i < 2n; i++)   hex 008b519c77
+ *
+ * Byte-identical. `guard` asserts `x > 100n`, and `@bsv/sdk` `Spend.validate()`
+ * ACCEPTED `verify(5n)`; written as its own statement the same guard compiles
+ * to 23 bytes and `Spend.validate()` REJECTS it. `k` is never named again, so
+ * no pass downstream can catch this as an undeclared variable -- only the
+ * effect is lost.
+ *
+ * Failing closed rather than lowering every declarator: the subset is one
+ * declarator per statement, which is what `spec/grammar.md`'s
+ * VariableDeclaration production already says. Four of the seven tiers
+ * (python, zig, ruby, java) already refuse the shape at the comma, because
+ * their hand-written parsers have no production for it; only the three tiers
+ * driving a full TypeScript parser (ts-morph here, tree-sitter in go, swc in
+ * rust) could SEE the extra declarators, and all three dropped them.
+ */
+function extraDeclaratorError(count: number): string {
+  return `Multiple variable declarations in a single statement are not supported `
+    + `(${count} declared). Declare one variable per statement: every declarator after `
+    + `the first is discarded before the AST is built, so anything it calls -- a guard, `
+    + `an assert reached through a private helper -- is silently absent from the `
+    + `emitted script.`;
+}
+
 function parseVariableStatement(
   node: Node,
   file: string,
@@ -735,11 +773,17 @@ function parseVariableStatement(
     return null;
   }
 
-  // Warn about multiple declarations in a single statement
+  // W5: a declaration list declares exactly one variable, and extra
+  // declarators are an ERROR rather than a warning.
+  //
+  // This used to be a warning, and `compile()` stops only on
+  // `severity === 'error'` -- so the warning stopped nothing. The contract
+  // compiled, every declarator after the first was gone, and the caller got
+  // `success === true`. See `extraDeclaratorError` for the measurement.
   if (decls.length > 1) {
     errors.push(makeDiagnostic(
-      'Multiple variable declarations in a single statement are not supported. Declare one variable per statement.',
-      'warning',
+      extraDeclaratorError(decls.length),
+      'error',
       locFromNode(node, file),
     ));
   }
@@ -881,6 +925,15 @@ function parseForStatement(
   if (initNode && initNode.isKind(SyntaxKind.VariableDeclarationList)) {
     const declList = initNode.asKindOrThrow(SyntaxKind.VariableDeclarationList);
     const decls = declList.getDeclarations();
+    // W5: same rule as statement position, and this site used to emit nothing
+    // at all -- see `extraDeclaratorError`.
+    if (decls.length > 1) {
+      errors.push(makeDiagnostic(
+        extraDeclaratorError(decls.length),
+        'error',
+        locFromNode(initNode, file),
+      ));
+    }
     if (decls.length > 0) {
       const decl = decls[0]!;
       const name = decl.getName();

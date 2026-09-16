@@ -409,6 +409,22 @@ let y = hash160(pubKey);  // mutable, type inferred
 
 Type annotations can be omitted when an initializer is present (the type is inferred).
 
+**One variable per statement.** A comma-separated declaration list is a
+compile-time error, both on its own line and in a `for` initializer:
+
+```typescript
+let a: bigint = 1n, b: bigint = 2n;              // error
+for (let i: bigint = 0n, k: bigint = f(); ; ) {} // error
+```
+
+This is a spending-condition rule, not a style preference. Every declarator
+after the first used to be discarded before the AST was built, and what is lost
+is not always a value -- a private helper carrying the contract's guard, called
+from a for-initializer's second declarator, compiled to byte-identical output to
+the same loop with the declarator deleted, and the guard was simply absent from
+the locking script. The dropped name is never referenced again, so nothing
+downstream catches it as an undeclared variable. Split the declarations.
+
 ### Assignment
 
 ```typescript
