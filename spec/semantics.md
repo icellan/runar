@@ -322,17 +322,18 @@ If there is no `else` clause and the condition is false, the environment and sto
 
 ### 4.4 For Loop (Bounded, Unrolled)
 
-For loops are unrolled at compile time. The ANF IR `loop` node stores only a `count` (number of iterations) and an `iterVar` name -- it does not store the original start value. The stack lowerer always assigns iteration variable values starting from `0`:
+For loops are unrolled at compile time. The ANF IR `loop` node stores a `count` (number of iterations), an `iterVar` name, a `start` value and a `step` direction. On iteration `i` (0-based) the iteration variable holds `start + i * step`:
 
 ```
+    start = evaluate_const(e_init)
     bound = evaluate_const(e_bound)
-    init = evaluate_const(e_init)
-    count = bound - init                        /* for i < bound, ++ */
+    step  = +1 for i++ / i < bound,  -1 for i-- / i > bound
+    count = |bound - start|
 
-    <S_body[i := 0], env, sigma> ==> <env_1, sigma_1>
-    <S_body[i := 1], env_1, sigma_1> ==> <env_2, sigma_2>
+    <S_body[i := start + 0*step], env, sigma> ==> <env_1, sigma_1>
+    <S_body[i := start + 1*step], env_1, sigma_1> ==> <env_2, sigma_2>
     ...
-    <S_body[i := count-1], env_{k}, sigma_{k}> ==> <env_final, sigma_final>
+    <S_body[i := start + (count-1)*step], env_{k}, sigma_{k}> ==> <env_final, sigma_final>
     ──────────────────────────────────────────────────────────────────────────────
     <for (let i = e_init; i < e_bound; i++) S_body, env, sigma>
         ==>  <env_final, sigma_final>
@@ -340,7 +341,13 @@ For loops are unrolled at compile time. The ANF IR `loop` node stores only a `co
 
 The loop variable `i` is substituted with the concrete iteration value in each unrolled copy of the body. This means the loop variable is effectively a compile-time constant within each iteration.
 
-> **Limitation:** Although the compiler correctly computes the iteration *count* for non-zero start values (e.g., `for (let i = 3n; i < 8n; i++)` produces `count = 5`), the iteration variable is always assigned values `[0, 1, ..., count-1]` rather than `[init, init+1, ..., bound-1]`. If the loop body depends on the iteration variable's absolute value (not just the iteration index), developers must use a 0-based loop and add the start offset manually (e.g., `const j = i + 3n`).
+**Counting up.** `for (let i = 3n; i < 6n; i++)` unrolls to three copies with `i` bound to `3`, `4`, `5` — the emitted script pushes `OP_3 OP_4 OP_5`. A zero-start loop carries `start = 0`, `step = 1`, which is the historical lowering, byte for byte.
+
+**Counting down.** `i--` with a `>` bound carries `step = -1`. `for (let i = 5n; i > 2n; i--)` unrolls to `i` bound to `5`, `4`, `3`, in that order.
+
+> **Do not add the start offset yourself.** An earlier revision of this section claimed the iteration variable was always `[0 .. count-1]` regardless of the initializer, and told authors to write a 0-based loop and add the offset by hand (`const j = i + 3n`). That is now double counting: the lowerer already substitutes the absolute value, so the workaround produces `2*start` and a script that is silently wrong rather than one that fails to compile. If you are carrying that idiom forward from older code, remove it.
+
+> **Implementers:** `start` and `step` are on-the-wire fields of the `loop` node, not optional decorations — see `ir-format.md` §4.9. Both are always serialized, including `start: 0` and `step: 1`.
 
 ### 4.5 Expression Statement
 

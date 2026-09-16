@@ -1,6 +1,6 @@
 # Rúnar ANF IR Specification
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the Administrative Normal Form (ANF) Intermediate Representation used by Rúnar. The ANF IR is the **canonical conformance boundary**: all Rúnar compilers MUST produce byte-identical ANF IR for the same input program. This enables interoperability, testing, and verification across implementations.
@@ -290,7 +290,7 @@ Branch temporary names continue the global sequence. If the `if` node is at posi
 
 ### 4.9 `loop`
 
-Bounded loop with a count and body. The loop body is a sequence of bindings executed `count` times with an iteration variable.
+Bounded loop with a count and body. The loop body is a sequence of bindings executed `count` times with an iteration variable. On iteration `i` (0-based) that variable holds `start + i * step`.
 
 ```json
 {
@@ -299,7 +299,9 @@ Bounded loop with a count and body. The loop body is a sequence of bindings exec
     "body": [
         { "name": "t10", "value": { "kind": "load_const", "value": "0" } }
     ],
-    "iterVar": "i"
+    "iterVar": "i",
+    "start": 3,
+    "step": 1
 }
 ```
 
@@ -309,6 +311,10 @@ Bounded loop with a count and body. The loop body is a sequence of bindings exec
 | `count` | `number` | Number of iterations |
 | `body` | `ANFBinding[]` | Bindings executed each iteration |
 | `iterVar` | `string` | Name of the iteration variable |
+| `start` | `integer \| "<decimal>n"` | Value the iteration variable takes on iteration 0. Serialized as a bare integer when it fits, or as the `"<decimal>n"` bigint form otherwise |
+| `step` | `1 \| -1` | `1` for `i++` with a `<` bound, `-1` for `i--` with a `>` bound |
+
+> **`start` and `step` are REQUIRED.** Both are always serialized, including the `start: 0`, `step: 1` case. An earlier revision of this section omitted them, and the consequence is worse than an incomplete document: the Go and Rust loaders default a missing `start` to `0` and a missing `step` to `1` (`compilers/go/ir/types.go`, `compilers/rust/src/ir/loader.rs`), so an IR produced from the shorter spec loads WITHOUT a schema error and unrolls a `for (let i = 3n; ...)` loop as if it began at zero. Under §1's requirement that two conforming compilers produce identical output, that is a silent cross-tier divergence in emitted script bytes.
 
 ### 4.10 `assert`
 
