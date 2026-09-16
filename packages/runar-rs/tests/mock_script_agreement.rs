@@ -220,7 +220,7 @@ enum Spend {
     /// the only outcome that carries information about the value.
     Rejected,
     /// The interpreter refused to execute the program at all. Says nothing
-    /// whatever about the value; see `unrunnable_rows_are_exactly_the_declared_set`.
+    /// whatever about the value; see `UNRUNNABLE` and `reconcile_unrunnable`.
     Refused(String),
 }
 
@@ -377,10 +377,27 @@ fn run_group(name: &str, cases: Vec<AgreementCase>) -> Vec<String> {
 /// observed. The Go tier's interpreter takes `WithAfterGenesis()` and runs
 /// them; that is where these three builtins are actually covered.
 ///
-/// This list is a ratchet in both directions. A row that becomes unrunnable
-/// without being listed is a regression; a listed row that starts running has
-/// to be taken OFF the list, or the next opcode the interpreter quietly refuses
-/// hides behind a stale entry.
+/// Both directions are covered, but by two different mechanisms, and the
+/// distinction matters to anyone changing this.
+///
+/// FORWARD — a row that becomes unrunnable without being listed is caught by
+/// `reconcile_unrunnable` below, which is called per group and fails on any
+/// refusal it does not expect.
+///
+/// REVERSE — a listed row that starts running is NOT caught there. That check
+/// is called with one group's observations at a time, so it cannot tell an entry
+/// belonging to another group from a stale one, and computing
+/// `UNRUNNABLE \ observed` per call would fire on every group but its own.
+/// The reverse guarantee comes instead from
+/// `the_interpreter_refuses_op_2mul_which_is_why_three_ec_rows_are_excused`,
+/// which pins the single reason all three entries exist: bsv-sdk refusing
+/// OP_2MUL unconditionally. If that stops being true, that test fails and says
+/// to re-run these three and delete the ones that now execute. One root cause,
+/// one pin — rather than three entries each asserting their own excuse.
+///
+/// This comment previously claimed the list was "a ratchet in both directions"
+/// and pointed at `unrunnable_rows_are_exactly_the_declared_set`, which does not
+/// exist and never did. The guarantee was real; the mechanism described was not.
 const UNRUNNABLE: &[&str] = &[
     "ecAdd (ec_add)",
     "ecMulGen (ec_mul_gen)",
