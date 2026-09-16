@@ -1623,15 +1623,7 @@ export async function runAllParserOnlyChecks(
   // missing while CI=true. Mirrors runConformanceTest above.
   assertAllCompilersAvailableInCi();
 
-  const entries = readdirSync(testsDir, { withFileTypes: true });
-  let testDirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => join(testsDir, e.name))
-    .sort();
-  if (options?.filter) {
-    const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
-  }
+  const testDirs = discoverFixtureDirs(testsDir, options);
 
   const limit = makeLimiter(defaultConcurrency());
   const allTasks: Promise<ParserCoverageEntry>[] = [];
@@ -1864,16 +1856,8 @@ export async function runAllIrParityChecks(
   // CI safety net: a missing binary must not silently shrink the tier set.
   assertAllCompilersAvailableInCi();
 
-  const entries = readdirSync(testsDir, { withFileTypes: true });
-  let testDirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => join(testsDir, e.name))
-    .sort();
-  if (options?.filter) {
-    const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
-  }
-  testDirs = testDirs.filter((d) => existsSync(join(d, 'expected-ir.json')));
+  const testDirs = discoverFixtureDirs(testsDir, options)
+    .filter((d) => existsSync(join(d, 'expected-ir.json')));
 
   const limit = makeLimiter(defaultConcurrency());
   const results = await Promise.all(testDirs.map((testDir) => limit(async (): Promise<IrParityFixtureResult> => {
@@ -2709,15 +2693,25 @@ export function assertCorpusComplete(discovered: string[], declared: string[]): 
 }
 
 /**
- * Discover and run all conformance tests in the given directory.
+ * The ONE place fixtures are discovered.
  *
- * Each subdirectory of `testsDir` is treated as a separate test case.
- * Returns results for all tests, sorted by test name.
+ * There used to be four copies of this block, and `assertCorpusComplete` was
+ * wired into exactly one of them — `runAllConformanceTests`. Every CI
+ * invocation of the runner passes a mode flag (`--parser-only`, `--ir-parity`,
+ * `--multi-format`), and all three of those routed to an UNGUARDED copy, so the
+ * two gates that enforce the CLAUDE.md invariants still had a discovered
+ * denominator. Hiding one fixture and running `--ir-parity` printed
+ * `81 ok, 0 failed, 0 skipped` and exited 0.
+ *
+ * Patching the other three copies would have left the same shape: a guard that
+ * has to be remembered four times. Collapsing them means there is one place to
+ * get it wrong, and `runner-discovery-is-single-sourced.test.ts` fails if a
+ * fifth copy appears.
  */
-export async function runAllConformanceTests(
+export function discoverFixtureDirs(
   testsDir: string,
   options?: { filter?: string },
-): Promise<ConformanceResult[]> {
+): string[] {
   const entries = readdirSync(testsDir, { withFileTypes: true });
   let testDirs = entries
     .filter((e) => e.isDirectory())
@@ -2733,13 +2727,24 @@ export async function runAllConformanceTests(
     assertCorpusComplete(testDirs.map((d) => basename(d)), declaredCorpus(conformanceDir));
   }
 
-  // Optional filter: only run tests whose name includes the filter string
   if (options?.filter) {
     const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) =>
-      basename(d).toLowerCase().includes(filterLower),
-    );
+    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
   }
+  return testDirs;
+}
+
+/**
+ * Discover and run all conformance tests in the given directory.
+ *
+ * Each subdirectory of `testsDir` is treated as a separate test case.
+ * Returns results for all tests, sorted by test name.
+ */
+export async function runAllConformanceTests(
+  testsDir: string,
+  options?: { filter?: string },
+): Promise<ConformanceResult[]> {
+  const testDirs = discoverFixtureDirs(testsDir, options);
 
   // Bounded-concurrency parallelism: each test fires 7 compilers simultaneously,
   // so we cap outer parallelism conservatively. See `defaultConcurrency`.
@@ -3171,16 +3176,7 @@ export async function runAllMultiFormatConformanceTests(
   testsDir: string,
   options?: { filter?: string; format?: string },
 ): Promise<ConformanceResult[]> {
-  const entries = readdirSync(testsDir, { withFileTypes: true });
-  let testDirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => join(testsDir, e.name))
-    .sort();
-
-  if (options?.filter) {
-    const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
-  }
+  const testDirs = discoverFixtureDirs(testsDir, options);
 
   const limit = makeLimiter(defaultConcurrency());
 

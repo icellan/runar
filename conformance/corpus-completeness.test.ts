@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertCorpusComplete, declaredCorpus } from './runner/runner.js';
@@ -90,6 +90,41 @@ describe('the conformance corpus is complete, and the runner refuses a partial o
     // and a guard that quietly depended on sort order would be brittle rather
     // than strict.
     expect(() => assertCorpusComplete([...declared].reverse(), declared)).not.toThrow();
+  });
+
+  it('discovers fixtures in exactly one place, so the guard cannot be bypassed', () => {
+    // The first version of this guard was wired into ONE of four identical
+    // discovery blocks — `runAllConformanceTests`. The other three back
+    // `--parser-only`, `--ir-parity` and `--multi-format`, and every CI
+    // invocation of the runner passes one of those flags, so the two gates that
+    // enforce the CLAUDE.md invariants still had a discovered denominator.
+    // Hiding one fixture and running `--ir-parity` printed `81 ok, 0 failed,
+    // 0 skipped` at exit 0 — the exact fail-open the guard was added to close,
+    // surviving in the paths that mattered most.
+    //
+    // Patching the other three would have left a guard that has to be
+    // remembered four times. They are collapsed into `discoverFixtureDirs`, and
+    // this asserts it stays that way: one raw enumeration, inside the helper.
+    // A fifth copy is how the bypass comes back.
+    const src = readFileSync(join(HERE, 'runner', 'runner.ts'), 'utf8');
+    const raw = src.split('\n').filter((l) => l.includes('readdirSync(testsDir'));
+    expect(
+      raw.length,
+      'conformance/runner/runner.ts enumerates the fixture directory in more ' +
+        'than one place. Route it through discoverFixtureDirs() instead — that ' +
+        'is where assertCorpusComplete runs, and a second enumeration silently ' +
+        'skips it:\n  ' + raw.map((l) => l.trim()).join('\n  '),
+    ).toBe(1);
+
+    const helperAt = src.indexOf('export function discoverFixtureDirs(');
+    const rawAt = src.indexOf('readdirSync(testsDir');
+    expect(helperAt, 'discoverFixtureDirs has been renamed or removed').toBeGreaterThan(-1);
+    // The one remaining enumeration must be the helper's own, not some other
+    // function that happens to be the sole survivor.
+    expect(
+      rawAt > helperAt && rawAt - helperAt < 2000,
+      'the remaining readdirSync(testsDir) is not inside discoverFixtureDirs',
+    ).toBe(true);
   });
 
   it('ignores extra discovered fixtures, which the other test already covers', () => {
