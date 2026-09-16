@@ -834,6 +834,10 @@ func mapGoBuiltin(name string) string {
 		"VerifyECDSAP384":         "verifyECDSA_P384",
 		"Num2Bin":           "num2bin",
 		"Bin2Num":           "bin2num",
+		// `Int2Str` is the spelling docs/formats/go.md documents. Without it the
+		// default rule camel-cases the leading character to `int2Str`, which is
+		// registered nowhere — the call is rejected as an unknown function.
+		"Int2Str":           "int2str",
 		"Bin2NumBig":        "bin2num",
 		"Num2BinBig":        "num2bin",
 		"Cat":               "cat",

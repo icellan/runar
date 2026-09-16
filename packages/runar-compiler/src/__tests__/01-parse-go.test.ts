@@ -944,3 +944,74 @@ func (c *HashSpelling) Unlock(data runar.ByteString) {
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// F5 — the Go surface resolves a builtin in two steps: consult GO_BUILTIN_MAP,
+// else lower-case the leading character. Every alias whose Rúnar name is NOT
+// the default-rule form of its Go name must therefore be in the table of all
+// SEVEN tiers, or it falls through to a name registered nowhere and the call is
+// rejected as unknown. `Int2Str` was in three tables (ts, zig, ruby) and
+// missing from go / rust / python / java, which camel-cased it to `int2Str`.
+//
+// This test enumerates the at-risk class rather than the one entry that was
+// missing, so adding a new alias to the reference tier surfaces the
+// cross-tier obligation here. `conformance/subtype-parity/GoBuiltinAliasSpelling.runar.go`
+// is the cross-tier half for the five of them a small fixture can reach.
+// ---------------------------------------------------------------------------
+
+describe('Go surface: builtin aliases the default rule cannot produce', () => {
+  /** Aliases whose mapping is NOT "lower-case the leading character". */
+  const atRisk = Object.entries(GO_BUILTIN_MAP)
+    .filter(([go, runar]) => go.charAt(0).toLowerCase() + go.slice(1) !== runar)
+    .map(([go]) => go)
+    .sort();
+
+  it('is exactly the known set (a new alias must be added to all seven tiers)', () => {
+    expect(
+      atRisk,
+      `the set of Go-surface aliases that the default naming rule cannot ` +
+        `produce has changed. Each one must appear in the builtin table of ` +
+        `ALL SEVEN tiers — compilers/go/frontend/parser_gocontract.go, ` +
+        `compilers/rust/src/frontend/parser_gocontract.rs, ` +
+        `compilers/python/runar_compiler/frontend/parser_go.py, ` +
+        `compilers/zig/src/passes/parse_go.zig, ` +
+        `compilers/ruby/lib/runar_compiler/frontend/parser_go.rb and ` +
+        `compilers/java/src/main/java/runar/compiler/frontend/GoParser.java — ` +
+        `or the tiers that lack it reject the spelling as an unknown function.`,
+    ).toEqual([
+      'Bin2Num',
+      'Int2Str',
+      'Num2Bin',
+      'Sha256Hash',
+      'ToBool',
+      'VerifyECDSAP256',
+      'VerifyECDSAP384',
+    ]);
+  });
+
+  it.each(['Int2Str', 'Int2str', 'int2str'])(
+    'runar.%s(n, width) resolves to int2str',
+    (spelling) => {
+      const go = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type AliasSpelling struct {
+	runar.SmartContract
+	Expected runar.ByteString \`runar:"readonly"\`
+}
+
+func (c *AliasSpelling) Unlock(value runar.Int, width runar.Int) {
+	s := runar.${spelling}(value, width)
+	runar.Assert(s == c.Expected)
+}
+`;
+      const result = parseGoSource(go, 'AliasSpelling.runar.go');
+      expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      expect(decl.init.kind).toBe('call_expr');
+      const callee = (decl.init as CallExpr).callee as Identifier;
+      expect(callee.name).toBe('int2str');
+    },
+  );
+});

@@ -148,6 +148,10 @@ _GO_BUILTIN_MAP: dict[str, str] = {
     "VerifySLHDSA_SHA2_256f": "verifySLHDSA_SHA2_256f",
     "Num2Bin": "num2bin",
     "Bin2Num": "bin2num",
+    # `Int2Str` is the spelling docs/formats/go.md documents. Without it the
+    # default rule camel-cases the leading character to `int2Str`, which is
+    # registered nowhere -- the call is rejected as an unknown function.
+    "Int2Str": "int2str",
     "ExtractLocktime": "extractLocktime",
     "ExtractOutputHash": "extractOutputHash",
     "ExtractSequence": "extractSequence",

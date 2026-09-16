@@ -128,6 +128,10 @@ fn map_go_builtin(name: &str) -> String {
         "VerifySLHDSA_SHA2_256f" => "verifySLHDSA_SHA2_256f".to_string(),
         "Num2Bin" => "num2bin".to_string(),
         "Bin2Num" => "bin2num".to_string(),
+        // `Int2Str` is the spelling docs/formats/go.md documents. Without it the
+        // default rule camel-cases the leading character to `int2Str`, which is
+        // registered nowhere — the call is rejected as an unknown function.
+        "Int2Str" => "int2str".to_string(),
         "Cat" => "cat".to_string(),
         "Substr" => "substr".to_string(),
         "Len" => "len".to_string(),

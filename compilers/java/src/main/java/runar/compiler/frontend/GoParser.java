@@ -182,6 +182,10 @@ public final class GoParser {
         GO_BUILTIN_MAP.put("VerifySLHDSA_SHA2_256f", "verifySLHDSA_SHA2_256f");
         GO_BUILTIN_MAP.put("Num2Bin", "num2bin");
         GO_BUILTIN_MAP.put("Bin2Num", "bin2num");
+        // `Int2Str` is the spelling docs/formats/go.md documents. Without it the
+        // default rule camel-cases the leading character to `int2Str`, which is
+        // registered nowhere — the call is rejected as an unknown function.
+        GO_BUILTIN_MAP.put("Int2Str", "int2str");
         GO_BUILTIN_MAP.put("ExtractLocktime", "extractLocktime");
         GO_BUILTIN_MAP.put("ExtractOutputHash", "extractOutputHash");
         // Intent sub-covenant intrinsics (BSVM Phase 13).

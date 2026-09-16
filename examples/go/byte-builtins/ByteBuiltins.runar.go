@@ -40,11 +40,11 @@ func (c *ByteBuiltins) CheckSplit(data runar.ByteString, idx runar.Int, expected
 
 // CheckInt2Str exercises OP_NUM2BIN: fixed-width little-endian sign-magnitude.
 func (c *ByteBuiltins) CheckInt2Str(value runar.Int, width runar.Int, expected runar.ByteString) {
-	// Int2str, not Int2Str. `Int2Str` is the spelling in the TypeScript
-	// parser's GO_BUILTIN_MAP, and go/rust/python/java all REJECT it: those four
-	// camel-case the leading character (Int2Str -> int2Str) instead of consulting
-	// the alias map, and the builtin is registered as `int2str`. `Int2str` and
-	// `int2str` both resolve in all seven tiers.
+	// `Int2Str`, `Int2str` and `int2str` all resolve, in all seven tiers.
+	// `Int2Str` — the spelling docs/formats/go.md documents — used to be in
+	// three builtin tables only; go/rust/python/java camel-cased the leading
+	// character to `int2Str` and rejected the call. Fixed, and gated by
+	// conformance/subtype-parity/GoBuiltinAliasSpelling.runar.go.
 	s := runar.Int2str(value, width)
 	runar.Assert(s == expected)
 }
