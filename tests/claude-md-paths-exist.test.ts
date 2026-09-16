@@ -38,6 +38,16 @@ function documentedPaths(markdown: string): string[] {
     if (!ROOTS.some(r => raw.startsWith(r))) continue;
     // A shape, not a file.
     if (/[{}<>*]/.test(raw)) continue;
+    // A trailing slash is an unambiguous directory reference. The extension
+    // rule below skipped these, which is how `packages/runar-zig/src/sdk/`
+    // survived in a guard written to catch dangling paths in this very file —
+    // the Zig SDK is 46 flat `src/sdk_*.zig` files and has never had that
+    // directory. A path checker that cannot check directories has a hole
+    // shaped like the thing it missed.
+    if (raw.endsWith('/')) {
+      found.add(raw);
+      continue;
+    }
     // Must look like a file (has an extension in its last segment).
     const last = raw.split('/').pop()!;
     if (!/\.[a-z0-9]+$/i.test(last)) continue;

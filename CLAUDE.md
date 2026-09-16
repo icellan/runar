@@ -189,7 +189,7 @@ Any language feature change must be implemented in TypeScript, Go, Rust, Python,
 ### Seven SDKs Must Stay in Sync (wire-protocol primitives)
 The deployment SDKs in `packages/runar-{ts,go,rs,py,zig,rb,java}` are seven independent implementations of the same on-chain surface (deploy / call / state-serialize / sign / verify). **Wire-protocol primitives — anything whose bytes cross a tier boundary — must be byte-identical across all seven SDKs.** Today that covers:
 - **`canonicalJson`** — RFC 8785 / JCS-compliant serializer. Used to hash payloads before signing. Two implementations producing different bytes for the same JSON value silently break every cross-tier signature.
-- **`SignedEnvelope` + `signEnvelope` + `verifyEnvelope`** — the signed-broadcast wire protocol used by overlay apps (`runar-overlay-express` server, `runar-react` browser hooks, plus any non-TS overlay backend). All seven SDKs must accept the same envelope shape, produce signatures verifiable by every other tier, and return the same `VerifyEnvelopeReason` for the same rejection case.
+- **`SignedEnvelope` + `signEnvelope` + `verifyEnvelope`** — the signed-broadcast wire protocol. Any two tiers that sign and verify each other's envelopes must agree on the bytes; a divergence is a silent cross-tier signature failure, not a visible error. All seven SDKs must accept the same envelope shape, produce signatures verifiable by every other tier, and return the same `VerifyEnvelopeReason` for the same rejection case.
 
 Convenience wrappers around tier-local primitives (`pubkeyToPKH`, `estimateFeeForArtifact`, `LocalSigner`, provider classes) do NOT need cross-tier parity — they're per-tier ergonomic surface. Sync the **wire bytes**, not the API shape.
 
@@ -311,7 +311,7 @@ All seven languages have equivalent deployment SDKs for interacting with compile
 
 **Python** (`packages/runar-py/runar/sdk/`): `RunarContract`, `MockProvider`, `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization. Zero required dependencies (hashlib is stdlib). `LocalSigner` uses bsv-sdk if installed for speed; otherwise falls back to the bundled pure-Python ECDSA implementation. Python contracts use snake_case names which the parser converts to camelCase in the AST.
 
-**Zig** (`packages/runar-zig/src/sdk/`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`, `LocalSigner`/`MockSigner`/`ExternalSigner`, BSV-20/BSV-21 ordinals, `deployWithWallet`, ANF interpreter.
+**Zig** (`packages/runar-zig/src/sdk_*.zig`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`, `LocalSigner`/`MockSigner`/`ExternalSigner`, BSV-20/BSV-21 ordinals, `deployWithWallet`, ANF interpreter.
 
 **Ruby** (`packages/runar-rb/lib/runar/sdk/`): `RunarContract`, `MockProvider`, `LocalSigner`, `MockSigner`/`ExternalSigner`, deploy/call transaction builders, state serialization.
 
