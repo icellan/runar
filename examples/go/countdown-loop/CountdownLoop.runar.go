@@ -1,8 +1,6 @@
-//go:build ignore
-
 package contract
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 // CountdownLoop — Go port. `step = -1` (R-102).
 // See CountdownLoop.runar.ts for what the missing descending fixture hid.

@@ -1,8 +1,6 @@
-//go:build ignore
-
 package contract
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 // LoopShapes — Go port. A NON-ZERO loop start, ascending (R-102).
 type LoopShapes struct {

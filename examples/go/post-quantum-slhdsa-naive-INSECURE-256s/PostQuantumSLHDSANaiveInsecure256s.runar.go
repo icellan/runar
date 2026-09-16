@@ -1,5 +1,3 @@
-//go:build ignore
-
 // =============================================================================
 // INSECURE -- DO NOT USE IN PRODUCTION
 // =============================================================================
@@ -37,7 +35,7 @@
 
 package contract
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type PostQuantumSLHDSANaiveInsecure256s struct {
 	runar.SmartContract

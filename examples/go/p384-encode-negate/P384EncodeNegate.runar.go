@@ -1,8 +1,6 @@
-//go:build ignore
-
 package contract
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 // P384EncodeNegate -- Go port. Executed coverage for P384Negate and
 // P384EncodeCompressed, neither of which appeared in any fixture.

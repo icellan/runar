@@ -1,8 +1,6 @@
-//go:build ignore
-
 package contract
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 // ArrayIndex is the Go port of
 // examples/ts/fixed-array-index/ArrayIndex.runar.ts.
