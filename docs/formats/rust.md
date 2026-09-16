@@ -332,13 +332,38 @@ Built-in functions use snake_case and take references for byte-type arguments:
 | `len(&data)` | `len(data)` |
 | `cat(&a, &b)` | `cat(a, b)` |
 | `substr(&data, start, len)` | `substr(data, start, len)` |
+| `split(&data, index)` | `split(data, index)` |
 | `left(&data, n)` | `left(data, n)` |
 | `right(&data, n)` | `right(data, n)` |
 | `reverse_bytes(&data)` | `reverseBytes(data)` |
 | `num2bin(&n, size)` / `num2bin_big(&n, size)` | `num2bin(n, size)` |
 | `bin2num(&data)` / `bin_2_num(&data)` / `bin2num_big(&data)` | `bin2num(data)` |
-| `int2str(n, radix)` / `int_2_str(n, radix)` | `int2str(n, radix)` |
-| `to_byte_string(&data)` | `toByteString(data)` |
+| `int2str(n, byte_len)` / `int_2_str(n, byte_len)` | `int2str(n, byteLen)` |
+| `to_byte_string("hex")` | `toByteString('hex')` |
+
+Four of these need a word beyond the mapping, because the obvious reading of
+the name is wrong:
+
+- **`split` is single-valued.** It returns the bytes from `index` onwards — the
+  RIGHT half of the cut — because that is what `spec/grammar.md` declares and
+  what every tier emits (`OP_SPLIT OP_NIP`). `left(&data, index)` is the other
+  side. There is no pair and no tuple: Rúnar has no tuple type and no surface
+  parser accepts destructuring, so a pair return would be unnameable.
+- **`int2str` has no radix.** Despite the name it is `OP_NUM2BIN`: `byte_len` is
+  a WIDTH in bytes and the result is fixed-width little-endian sign-magnitude,
+  identical to `num2bin`. There is no decimal string anywhere in it.
+- **`split`, `left`, `right`, `num2bin` and `int2str` REFUSE rather than clamp.**
+  `OP_SPLIT` fails on a position past the end of the element and `OP_NUM2BIN`
+  fails on a width too small for the value; neither wraps. The mocks panic in
+  exactly those cases, because a value the emitted script can never produce is
+  worse than an error.
+- **`reverse_bytes` stops at 520 bytes.** Every tier lowers `reverseBytes` to a
+  loop unrolled exactly 520 times and then drops the remainder, so past that
+  length the script reverses only the first 520 bytes. The mock panics there
+  rather than returning an answer the script disagrees with.
+
+Each of these is spent on a consensus interpreter, per builtin and at its
+boundaries, by `packages/runar-rs/tests/mock_script_agreement.rs`.
 
 ### Preimage Extract Functions
 
