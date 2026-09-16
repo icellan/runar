@@ -334,6 +334,49 @@ deployed contract whose arguments land in the wrong place. What covers that toda
 is `conformance/sdk-output/` (all seven SDKs must produce identical DEPLOYED
 locking scripts, which is splicing applied) and `sdk-vertical/`, not this suite.
 
+## Editing a fixture source: "byte-neutral" is a seven-tier claim
+
+Fixture sources are shared. `conformance/tests/*/source.json` points at the
+files in `examples/<format>/`, so editing `examples/go/ec-primitives/
+ECPrimitives.runar.go` changes what **all seven compilers** parse. A source edit
+meant to be cosmetic — renaming a parameter's TYPE, re-spelling an expression —
+is a claim about seven frontends, and the way to check it is `--multi-format`.
+
+**Diffing `--emit-ir` from one tier before and after does NOT establish it.**
+This has now cost two separate agents in one day, in the same shape both times:
+
+* One re-spelled an expression, diffed the Go tier's ANF before and after, found
+  it identical, and generalised to seven. `--multi-format` came back 735/736.
+* One did the same for `runar.BigintBigEqual(a, b)`, again against the Go tier,
+  again identical. `--multi-format` came back 733/736: the rewrite that makes
+  that spelling equal to `a === b` existed in `compilers/go` and in no other
+  tier, so six tiers rejected the program outright.
+
+The lesson is not "be careful". A single tier's IR is evidence about that tier
+only, and the divergences that matter are exactly the ones where tiers differ.
+Two independent instances in one day is evidence about the method.
+
+What actually settles it, cheapest first:
+
+1. `npx tsx runner/index.ts --multi-format --filter <fixture>` — the whole
+   claim, all nine formats against all seven tiers, in about a minute for one
+   fixture. Do this even when the edit "obviously" cannot matter.
+2. `--parser-only` is NOT a substitute. It stops after parse + validate, so an
+   unknown-builtin — a TYPECHECK diagnostic — is invisible to it. That is
+   precisely why the `BigintBig` spellings survived the all-tier parser matrix.
+3. If the edit introduces a SPELLING that is supposed to mean something else
+   (`runar.BigintBigAdd(a, b)` for `a + b`), the cross-tier check is still not
+   enough on its own: seven tiers can agree on a wrong rewrite. Add the pair to
+   `subtype-parity/` so the spelling is compared against the thing it claims to
+   equal. See `GoBigintBigOperators.runar.go` and its `*Ref.runar.ts` peer.
+
+Note also that `sourceLoc` is stripped by the runner before comparison, so a
+line-number shift from adding or removing a comment is genuinely neutral **for
+the fixture goldens** — but not for `source-map/`, which validates absolute
+lines for the five fixtures it covers.
+
+---
+
 ## How to Add New Test Cases
 
 1. Create a new directory under `tests/` with a descriptive name:
