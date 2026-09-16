@@ -88,6 +88,17 @@ def emit_poseidon2_merkle_root(emit: Callable[["StackOp"], None], depth: int) ->
             f"emit_poseidon2_merkle_root: depth must be in [1, 32], got {depth}"
         )
 
+    # R-120: bound the index BEFORE walking the tree. Identical hole to the SHA-256
+    # Merkle emitter, identical gate -- bit i is read at level i, nothing above bit
+    # depth-1 is ever consulted, and the index is then dropped, so index and
+    # index + 2^depth authenticate the same path. There is no proof-remainder twin
+    # here because the siblings are separate stack items, not one splittable blob.
+    emit(_make_stack_op(op="opcode", code="OP_DUP"))
+    emit(_make_stack_op(op="push", value=_big_int_push(0)))
+    emit(_make_stack_op(op="push", value=_big_int_push(1 << depth)))
+    emit(_make_stack_op(op="opcode", code="OP_WITHIN"))
+    emit(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
     for i in range(depth):
         # Stack: [..., current(8), sib_i(8), future_sibs(F*8), index]
         # where F = depth - i - 1 (number of future sibling groups).

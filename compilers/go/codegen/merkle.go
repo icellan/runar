@@ -60,6 +60,31 @@ func EmitMerkleRootHash256(emit func(StackOp), depth int) {
 func emitMerkleRoot(emit func(StackOp), depth int, hashOp string) {
 	// Stack: [leaf, proof, index]
 
+	// R-120: bound the index BEFORE walking the tree.
+	//
+	// The loop below reads bit i of the index at level i and never looks
+	// above bit depth-1, then drops the index unexamined. So `index`,
+	// `index + 2^depth`, `index + 2^40` and any NEGATIVE index walk the same
+	// path and produce the same root: measured at depth 2 on the go-sdk
+	// interpreter, indices 1, 5, 9, 1025 and -1 all returned
+	// 5306f72f...6ee0f336. A contract asserting "leaf L sits at position i of
+	// the tree rooted at R" therefore constrained nothing about i beyond its
+	// low `depth` bits -- one accepted proof is a proof for every index in the
+	// same residue class mod 2^depth.
+	//
+	// ABORT rather than clamp: `merkleRootSha256` / `merkleRootHash256` are
+	// VALUE builtins, and CL-BUG-095 set the policy that predicates clamp and
+	// flag while value producers OP_VERIFY. Reducing the index mod 2^depth
+	// would keep today's silent aliasing under a different name.
+	//
+	// OP_WITHIN is half-open, so this is exactly 0 <= index < 2^depth; the
+	// lower bound is what rejects a negative index.
+	emit(StackOp{Op: "opcode", Code: "OP_DUP"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Lsh(big.NewInt(1), uint(depth))}})
+	emit(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+
 	for i := 0; i < depth; i++ {
 		// Stack: [current, proof, index]
 
@@ -148,8 +173,24 @@ func emitMerkleRoot(emit func(StackOp), depth int, hashOp string) {
 	}
 
 	// Final stack: [root, empty_proof, index]
-	// Clean up: drop index and empty proof
 	emit(StackOp{Op: "drop"}) // drop index
-	emit(StackOp{Op: "drop"}) // drop empty proof
+	// Stack: [root, rest_proof]
+
+	// R-120: the proof remainder must be EMPTY.
+	//
+	// Each level OP_SPLITs 32 bytes off the front of the blob; what is left
+	// after the last level used to be dropped without ever being looked at, so
+	// a proof of 32*depth + k bytes verified for every k >= 0 and produced the
+	// same root as the correctly-sized one (measured at depth 2: blobs of 64,
+	// 65, 96 and 128 bytes all returned 5306f72f...6ee0f336). That makes the
+	// proof blob non-canonical -- an accepted witness has infinitely many
+	// accepted spellings, which is the same class of defect as the index.
+	//
+	// The SHORT direction was already closed: OP_SPLIT aborts with "n is
+	// larger than length of array" when the blob runs out.
+	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+	emit(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+	emit(StackOp{Op: "drop"}) // drop the (now proved empty) proof
 	// Stack: [root]
 }

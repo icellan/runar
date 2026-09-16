@@ -62,6 +62,14 @@ export {
 export {
   emitBn254G1Add, emitBn254G1ScalarMul, emitBn254G1Negate, emitBn254G1OnCurve,
 } from './passes/bn254-codegen.js';
+// Merkle emitters, exported for the same reason as the EC and BN254 ones: the
+// `merkleRootSha256` / `merkleRootHash256` builtins ship in six tiers and
+// NOTHING outside the Go tier had ever executed their emitted script — which is
+// how an index that is never bounded and a proof remainder that is never read
+// survived (R-120).
+export {
+  emitMerkleRootSha256, emitMerkleRootHash256,
+} from './passes/merkle-codegen.js';
 // BabyBear / KoalaBear field emitters, exported for the same reason: six tiers
 // ship them, the TS unit tests only ever checked opcode SHAPES, and nothing
 // outside the Go tier had ever EXECUTED the emitted script — which is how a

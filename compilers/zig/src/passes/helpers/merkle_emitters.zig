@@ -36,6 +36,22 @@ pub const MerkleBuiltin = enum {
 
 /// Build StackOps for Merkle root computation.
 /// `depth` must be a compile-time constant between 1 and 64.
+/// R-120: the `2^depth` operand of the index-domain gate.
+///
+/// `depth` runs to 64 for the SHA-256 Merkle builtins, and 2^63 / 2^64 do not
+/// fit the `integer: i64` push variant, so those two land on
+/// `big_int_decimal` — which `emitScriptNumberFromDecimal` encodes to the same
+/// minimal script number the other six tiers produce from their bignums.
+/// Everything at or below 2^62 stays on the integer variant, so the fixtures
+/// that exist today are byte-identical by the ordinary path.
+fn indexBoundPush(depth: u32) StackOp {
+    return switch (depth) {
+        63 => .{ .push = .{ .big_int_decimal = "9223372036854775808" } },
+        64 => .{ .push = .{ .big_int_decimal = "18446744073709551616" } },
+        else => .{ .push = .{ .integer = @as(i64, 1) << @as(u6, @intCast(depth)) } },
+    };
+}
+
 pub fn buildBuiltinOps(allocator: Allocator, builtin: MerkleBuiltin, depth: u32) !EcOpBundle {
     if (depth < 1 or depth > 64) return error.InvalidDepth;
 
@@ -51,6 +67,18 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: MerkleBuiltin, depth: u32)
     }
 
     // Stack at entry: [leaf, proof, index]
+    // R-120: bound the index BEFORE walking the tree. Bit i is read at level i,
+    // nothing above bit depth-1 is ever consulted, and the index is then
+    // dropped, so index, index + 2^depth and any NEGATIVE index walk the same
+    // path and produce the same root (measured at depth 2: 1, 5, 9, 1025 and
+    // -1 all returned 5306f72f...6ee0f336). ABORT, not clamp: these are VALUE
+    // builtins. OP_WITHIN is half-open, so this is exactly 0 <= index < 2^depth.
+    try ops.append(allocator, .{ .opcode = "OP_DUP" });
+    try ops.append(allocator, .{ .push = .{ .integer = 0 } });
+    try ops.append(allocator, indexBoundPush(depth));
+    try ops.append(allocator, .{ .opcode = "OP_WITHIN" });
+    try ops.append(allocator, .{ .opcode = "OP_VERIFY" });
+
     // Unroll the loop for each level
     for (0..depth) |i| {
         // Stack: [current, proof, index]
@@ -136,9 +164,17 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: MerkleBuiltin, depth: u32)
     }
 
     // Final stack: [root, empty_proof, index]
-    // Clean up: drop index and empty proof
     try ops.append(allocator, .{ .drop = {} }); // drop index
-    try ops.append(allocator, .{ .drop = {} }); // drop empty proof
+
+    // R-120: the proof remainder must be EMPTY. Each level OP_SPLITs 32 bytes
+    // off the front; what was left after the last level used to be dropped
+    // unexamined, so a blob of 32*depth + k bytes verified for every k >= 0
+    // and yielded the same root. The SHORT direction already aborted inside
+    // OP_SPLIT.
+    try ops.append(allocator, .{ .opcode = "OP_SIZE" });
+    try ops.append(allocator, .{ .push = .{ .integer = 0 } });
+    try ops.append(allocator, .{ .opcode = "OP_NUMEQUALVERIFY" });
+    try ops.append(allocator, .{ .drop = {} }); // drop the (now empty) proof
     // Stack: [root]
 
     const result_ops = try ops.toOwnedSlice(allocator);
@@ -209,10 +245,27 @@ test "merkle depth=1 has expected structure" {
     const allocator = std.testing.allocator;
     var bundle = try buildBuiltinOps(allocator, .merkle_root_sha256, 1);
     defer bundle.deinit();
-    // depth=1: one iteration + 2 drops at end
-    // Verify we end with two drops
+    // R-120 changed the epilogue. It used to be two bare drops (index, then the
+    // proof remainder, unexamined); the remainder is now PROVED empty first, so
+    // the tail is:
+    //
+    //     drop                 -- index
+    //     OP_SIZE <0> OP_NUMEQUALVERIFY
+    //     drop                 -- the (now proved empty) proof
+    //
+    // and the prologue gained OP_DUP <0> <2^depth> OP_WITHIN OP_VERIFY.
     const len = bundle.ops.len;
-    try std.testing.expect(len >= 2);
+    try std.testing.expect(len >= 6);
     try std.testing.expect(std.meta.activeTag(bundle.ops[len - 1]) == .drop);
-    try std.testing.expect(std.meta.activeTag(bundle.ops[len - 2]) == .drop);
+    try std.testing.expect(std.mem.eql(u8, bundle.ops[len - 2].opcode, "OP_NUMEQUALVERIFY"));
+    try std.testing.expect(std.meta.activeTag(bundle.ops[len - 3]) == .push);
+    try std.testing.expect(std.mem.eql(u8, bundle.ops[len - 4].opcode, "OP_SIZE"));
+    try std.testing.expect(std.meta.activeTag(bundle.ops[len - 5]) == .drop);
+
+    // The index-domain gate is the first thing emitted.
+    try std.testing.expect(std.mem.eql(u8, bundle.ops[0].opcode, "OP_DUP"));
+    try std.testing.expect(std.meta.activeTag(bundle.ops[1]) == .push);
+    try std.testing.expect(std.meta.activeTag(bundle.ops[2]) == .push);
+    try std.testing.expect(std.mem.eql(u8, bundle.ops[3].opcode, "OP_WITHIN"));
+    try std.testing.expect(std.mem.eql(u8, bundle.ops[4].opcode, "OP_VERIFY"));
 }

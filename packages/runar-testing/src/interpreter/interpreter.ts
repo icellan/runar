@@ -1651,6 +1651,33 @@ export class RunarInterpreter {
         const depth = Number(this.toBigInt(args[3]!));
         const useSha256 = funcName === 'merkleRootSha256';
 
+        // R-120: refuse exactly what the emitted script refuses.
+        //
+        // The script reads bit i of the index at level i and never looks
+        // above bit depth-1, then drops the index; and it OP_SPLITs the proof
+        // 32 bytes at a time and used to drop the remainder unread. Both are
+        // now OP_VERIFY gates in stack lowering, so the reference interpreter
+        // has to refuse on the SAME bound — otherwise the source-vs-script
+        // differential oracle disagrees on every out-of-domain witness, and
+        // `TestContract` would keep telling an author that a spend works
+        // which the chain rejects. (Same three-places rule as `pow`, R-169:
+        // guard, folder and interpreter refuse together. The folder does not
+        // fold these builtins, so there are two places here, not three.)
+        if (index < 0n || index >= 1n << BigInt(depth)) {
+          throw new Error(
+            `${funcName}: index ${index} is outside [0, 2^${depth}) — ` +
+            `the emitted script bounds it, because bits at or above ${depth} ` +
+            `are never consulted and would silently alias another leaf`,
+          );
+        }
+        if (proof.length !== 32 * depth) {
+          throw new Error(
+            `${funcName}: proof is ${proof.length} bytes, expected exactly ` +
+            `${32 * depth} (32 * depth) — the emitted script requires the ` +
+            `blob to be fully consumed`,
+          );
+        }
+
         let current = leaf;
         for (let i = 0; i < depth; i++) {
           const sibling = proof.subarray(i * 32, (i + 1) * 32);

@@ -61,6 +61,17 @@ module RunarCompiler
           raise "emit_poseidon2_merkle_root: depth must be in [1, 32], got #{depth}"
         end
 
+        # R-120: bound the index BEFORE walking the tree. Identical hole to the SHA-256
+        # Merkle emitter, identical gate -- bit i is read at level i, nothing above bit
+        # depth-1 is ever consulted, and the index is then dropped, so index and
+        # index + 2^depth authenticate the same path. There is no proof-remainder twin
+        # here because the siblings are separate stack items, not one splittable blob.
+        emit.call(make_stack_op(op: "opcode", code: "OP_DUP"))
+        emit.call(make_stack_op(op: "push", value: big_int_push(0)))
+        emit.call(make_stack_op(op: "push", value: big_int_push(1 << depth)))
+        emit.call(make_stack_op(op: "opcode", code: "OP_WITHIN"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+
         # Strategy overview:
         #
         # At each level i, the stack is:

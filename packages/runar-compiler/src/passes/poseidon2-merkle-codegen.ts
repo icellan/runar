@@ -72,6 +72,18 @@ export function emitPoseidon2MerkleRoot(emit: (op: StackOp) => void, depth: numb
     throw new Error(`emitPoseidon2MerkleRoot: depth must be in [1, 32], got ${depth}`);
   }
 
+  // R-120: bound the index BEFORE walking the tree. Identical hole to
+  // emitMerkleRoot in merkle-codegen.ts, identical gate -- bit i is read at
+  // level i, nothing above bit depth-1 is ever consulted, and the index is
+  // then dropped, so index and index + 2**depth authenticate the same path.
+  // There is no proof-remainder twin here because the siblings are separate
+  // stack items rather than one splittable blob.
+  emit({ op: 'opcode', code: 'OP_DUP' });
+  emit({ op: 'push', value: 0n });
+  emit({ op: 'push', value: 1n << BigInt(depth) });
+  emit({ op: 'opcode', code: 'OP_WITHIN' });
+  emit({ op: 'opcode', code: 'OP_VERIFY' });
+
   for (let i = 0; i < depth; i++) {
     // Stack: [..., current(8), sib_i(8), future_sibs(F*8), index]
     // F = depth - i - 1 (number of future sibling groups remaining)

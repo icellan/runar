@@ -59,6 +59,22 @@ pub fn emit_merkle_root_hash256(emit: &mut dyn FnMut(StackOp), depth: usize) {
 fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) {
     // Stack: [leaf, proof, index]
 
+    // R-120: bound the index BEFORE walking the tree.
+    //
+    // The loop below reads bit i of the index at level i and never looks above bit
+    // depth-1, then drops the index unexamined. So index, index + 2^depth,
+    // index + 2^40 and any NEGATIVE index walk the same path and produce the same
+    // root: measured at depth 2, indices 1, 5, 9, 1025 and -1 all returned
+    // 5306f72f...6ee0f336. ABORT rather than clamp -- these are VALUE builtins, and
+    // CL-BUG-095 set the policy that predicates clamp and flag while value producers
+    // OP_VERIFY. OP_WITHIN is half-open: exactly 0 <= index < 2^depth, and the lower
+    // bound is what rejects a negative index.
+    emit(StackOp::Opcode("OP_DUP".into()));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(0))));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(1) << depth)));
+    emit(StackOp::Opcode("OP_WITHIN".into()));
+    emit(StackOp::Opcode("OP_VERIFY".into()));
+
     for i in 0..depth {
         // Stack: [current, proof, index]
 
@@ -142,8 +158,20 @@ fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) 
     }
 
     // Final stack: [root, empty_proof, index]
-    // Clean up: drop index and empty proof
     emit(StackOp::Drop); // drop index
-    emit(StackOp::Drop); // drop empty proof
+    // Stack: [root, rest_proof]
+
+    // R-120: the proof remainder must be EMPTY.
+    //
+    // Each level OP_SPLITs 32 bytes off the front of the blob; what was left after
+    // the last level used to be dropped without ever being looked at, so a proof of
+    // 32*depth + k bytes verified for every k >= 0 and produced the same root as the
+    // correctly-sized one (measured at depth 2: 64, 65, 96 and 128 bytes all returned
+    // 5306f72f...6ee0f336). The SHORT direction was already closed -- OP_SPLIT aborts
+    // when the blob runs out.
+    emit(StackOp::Opcode("OP_SIZE".into()));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(0))));
+    emit(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+    emit(StackOp::Drop); // drop the (now proved empty) proof
     // Stack: [root]
 }

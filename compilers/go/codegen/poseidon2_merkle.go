@@ -81,6 +81,19 @@ func EmitPoseidon2MerkleRoot(emit func(StackOp), depth int) {
 	//
 	// At the end, drop index and leave root(8) on the stack.
 
+	// R-120: bound the index BEFORE walking the tree. Identical hole to
+	// emitMerkleRoot in merkle.go, identical gate — bit i is read at level i,
+	// nothing above bit depth-1 is ever consulted, and the index is then
+	// dropped, so index and index + 2^depth authenticate the same path. There
+	// is no proof-remainder twin here because the siblings are separate stack
+	// items rather than one splittable blob: a wrong count corrupts the stack
+	// rather than being silently discarded.
+	emit(StackOp{Op: "opcode", Code: "OP_DUP"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Lsh(big.NewInt(1), uint(depth))}})
+	emit(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+
 	for i := 0; i < depth; i++ {
 		// Stack: [..., current(8), sib_i(8), future_sibs(F*8), index]
 		// where F = depth - i - 1 (number of future sibling groups).
