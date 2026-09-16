@@ -565,26 +565,34 @@ fn byte_string_builtins_agree_with_the_emitter() {
 fn bin2num_past_2_63_agrees_with_the_emitter() {
     let wide = wide_value();
     let data = wide_push(&wide, 16);
-    let want = bin2num(&data);
+    let want = bin2num_big(&data);
+    assert_eq!(want, wide, "bin2num_big did not decode the value the test encoded");
     reconcile_unrunnable(&run_group(
         "bin2num past 2^63",
         vec![AgreementCase {
             builtin: "bin2num",
-            mock: "bin2num",
+            mock: "bin2num_big",
             arg_tys: vec!["ByteString"],
-            args: vec![data],
+            args: vec![data.clone()],
             ret_ty: "bigint",
-            want: num_i(want),
-            tamper: num_i(want.wrapping_add(1)),
+            want: num_b(&want),
+            tamper: num_b(&(&want + 1)),
             call_extra: vec![],
-            known_divergent: "prelude::bin2num returns Bigint (= i64) and shifts the decoded \
-                bytes into a u64, so a push wider than 8 bytes silently loses everything above \
-                bit 63: 123456789012345678901234567890 comes back as -4362896299872285998 \
-                while OP_BIN2NUM leaves the whole value on the stack. There is no wide path \
-                to call — the prelude has no bin2num_big, no BigintBig and no num_bigint \
-                re-export.",
+            known_divergent: "",
         }],
     ));
+
+    // The narrow mock must REFUSE this push rather than answer it. Without
+    // this, `bin2num` could go on returning -4362896299872285998 and the row
+    // above — which calls the wide form — would stay green.
+    let narrow = std::panic::catch_unwind(|| bin2num(&data));
+    assert!(
+        narrow.is_err(),
+        "prelude::bin2num returned {:?} for a value that does not fit i64. OP_BIN2NUM has no \
+         such limit, so that number is not the one the script produces, and a mock that \
+         answers instead of refusing hands the caller a wrong value silently.",
+        narrow.ok()
+    );
 }
 
 /// The boundary is the VALUE, not the push width.
@@ -682,24 +690,13 @@ fn num2bin_refuses_a_width_too_small_for_the_value() {
         "expected OP_NUM2BIN to fail on the size, got: {err}"
     );
 
-    // INVERTED, like `known_divergent` in the table above: the mock does NOT
-    // refuse today, and this asserts that it still does not, so the divergence
-    // stays a recorded fact instead of a silently tolerated one. When
-    // prelude::num2bin learns to refuse, this assertion FAILS and has to be
-    // turned around — which is the point. A test that merely skipped the case
-    // would go stale the moment the mock was fixed.
     let mock = std::panic::catch_unwind(|| num2bin(&1000, 1));
     assert!(
-        mock.is_ok(),
-        "prelude::num2bin now REFUSES num2bin(1000, 1), which is what the emitted script \
-         does. Turn this assertion around to `mock.is_err()` — a stale admission is how \
-         the next divergence hides."
-    );
-    eprintln!(
-        "KNOWN DIVERGENCE: the emitted num2bin FAILS on num2bin(1000, 1) ({err}), but \
-         prelude::num2bin returned {:?}. It fills `length` bytes low-first and drops the \
-         rest; OP_NUM2BIN has no wrap-around, so those bytes are a value the script can \
-         never produce and nothing tells the caller.",
+        mock.is_err(),
+        "MOCK/EMITTER DISAGREE — the emitted num2bin FAILS on num2bin(1000, 1) ({err}), but \
+         prelude::num2bin returned {:?}. It used to fill `length` bytes low-first and drop \
+         the rest; OP_NUM2BIN has no wrap-around, so those bytes are a value the script can \
+         never produce and nothing told the caller.",
         mock.map(|v| hex_of(&v))
     );
 }
@@ -724,22 +721,25 @@ fn num2bin_refuses_min_i64_in_eight_bytes_and_accepts_it_in_nine() {
         .expect("the emitted num2bin REFUSED -2^63 in nine bytes, which is the width it needs");
     assert_eq!(nine.len(), 9);
 
-    // INVERTED — see `num2bin_refuses_a_width_too_small_for_the_value`.
     let mock = std::panic::catch_unwind(|| num2bin(&i64::MIN, 8));
     assert!(
-        mock.is_ok(),
-        "prelude::num2bin now REFUSES num2bin(-2^63, 8). Turn this assertion around to \
-         `mock.is_err()`."
+        mock.is_err(),
+        "MOCK/EMITTER DISAGREE — the emitted num2bin FAILS on num2bin(-2^63, 8) ({err}), but \
+         prelude::num2bin returned {:?}. That byte string decodes as 0: the mock set the \
+         sign bit on a byte whose top magnitude bit was already set.",
+        mock.map(|v| hex_of(&v))
     );
-    let bytes = mock.map(|v| hex_of(&v)).unwrap_or_default();
+
+    // And nine bytes must be a width the MOCK accepts, not merely one the
+    // script accepts — otherwise `num2bin` could refuse everything and the
+    // assertion above would pass for the wrong reason. The bytes it produces
+    // must be the ones the SPEND above accepted, which is the agreement claim;
+    // a hex literal here would only be a second reading of the encoding rule.
     assert_eq!(
-        bytes, "0000000000000080",
-        "the recorded divergence changed shape; re-derive it before editing this test"
-    );
-    eprintln!(
-        "KNOWN DIVERGENCE: the emitted num2bin FAILS on num2bin(-2^63, 8) ({err}), but \
-         prelude::num2bin returned {bytes:?}. That byte string decodes as 0: the mock sets \
-         the sign bit on a byte whose top magnitude bit is already set."
+        hex_of(&num2bin(&i64::MIN, 9)),
+        hex_of(&nine),
+        "prelude::num2bin encodes -2^63 in nine bytes differently from the emitted num2bin, \
+         whose output the interpreter accepted above"
     );
 }
 

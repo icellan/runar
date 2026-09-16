@@ -17,7 +17,38 @@ pub use runar_lang_macros::{contract, stateful_contract, unsafe_contract};
 pub type Int = i64;
 
 /// Alias for Int.
+///
+/// A Bitcoin Script number is an arbitrary-width byte string and Rúnar's own
+/// `bigint` is arbitrary precision by specification, so this alias is NARROWER
+/// than the type it stands for. It stays `i64` deliberately: `Bigint` and `Int`
+/// are the same type here, every `.runar.rs` parser maps `Bigint`, `Int`,
+/// `i64`, `u64`, `i128`, `u128` and `BigintBig` to the same `bigint` primitive,
+/// and which one a contract spells is therefore a matter of taste. The values
+/// contracts actually declare `Bigint` are satoshi counts, loop indices and
+/// board cells; making all of them heap-allocated arbitrary precision to serve
+/// the handful of places that genuinely need 256 bits would cost every one of
+/// them `Copy` — `self.count + 1` on a borrowed field stops compiling — for no
+/// gain.
+///
+/// Use [`BigintBig`] where the width is real. The functions that cannot
+/// represent a value in an `i64` now REFUSE it rather than truncate, so the
+/// narrowness is loud instead of silent; see [`bin2num`] and [`num2bin`].
 pub type Bigint = i64;
+
+/// Arbitrary-precision Rúnar integer — the honest width of a Script number.
+///
+/// Reach for this wherever a value can exceed `i64`: a secp256k1 coordinate
+/// (256 bits), the output of `bin2num` on a wide push, the input to `num2bin`
+/// at a width past eight bytes. Every `.runar.rs` parser maps the spelling
+/// `BigintBig` to the same `bigint` primitive as `Bigint`, so reaching for it
+/// changes the emitted Script by not one byte.
+///
+/// Unlike the Go tier's `BigintBig` (`*big.Int`, where `==` silently degrades
+/// to pointer identity and every operator needs a helper function),
+/// `num_bigint::BigInt` implements `Add`/`Sub`/`Mul`/`PartialEq`/`PartialOrd`,
+/// so `a == b` and `a + b` keep working and keep meaning what they say. The Go
+/// tier needs `BigintBigEqual`; this tier does not.
+pub type BigintBig = num_bigint::BigInt;
 
 // ---------------------------------------------------------------------------
 // Byte-string types
@@ -645,21 +676,47 @@ pub fn substr(data: &[u8], start: i64, length: i64) -> ByteString {
 /// Converts an integer to a byte string of the specified length
 /// using Bitcoin Script's little-endian signed magnitude encoding.
 /// Accepts a reference to match Rúnar contract calling convention.
+///
+/// `length` must be wide enough for the value INCLUDING its sign bit, or this
+/// panics, exactly as `OP_NUM2BIN` fails. It used to fill `length` bytes
+/// low-first and drop the rest, which is not what the opcode does: OP_NUM2BIN
+/// has no wrap-around, it FAILS when the number does not fit the size. The
+/// truncated bytes were a value the emitted script could never produce and
+/// nothing told the caller — `num2bin(1000, 1)` returned `e8`.
+///
+/// The sign occupies a bit, so 255 needs two bytes and 127 needs one. In
+/// particular `i64::MIN` needs NINE bytes, not eight: in eight the sign bit and
+/// the top magnitude bit are the same bit, so clearing the sign to read the
+/// magnitude leaves zero and the push decodes as 0 rather than as -2^63.
+///
+/// See [`num2bin_big`] for values past `i64`.
 pub fn num2bin(v: &Bigint, length: usize) -> ByteString {
+    num2bin_big(&BigintBig::from(*v), length)
+}
+
+/// The arbitrary-precision form of [`num2bin`].
+///
+/// The `.runar.rs` parsers lower `num2bin_big` to the same `num2bin` builtin as
+/// `num2bin`, so reaching for it costs no script bytes.
+pub fn num2bin_big(v: &BigintBig, length: usize) -> ByteString {
     let mut buf = vec![0u8; length];
-    if *v == 0 || length == 0 {
+    if v.sign() == num_bigint::Sign::NoSign {
         return buf;
     }
-    let abs = v.unsigned_abs();
-    let mut val = abs;
-    for byte in buf.iter_mut() {
-        if val == 0 {
-            break;
-        }
-        *byte = (val & 0xff) as u8;
-        val >>= 8;
+    let (_, mag) = v.clone().into_parts();
+    let be = mag.to_bytes_be();
+    // Minimal sign-magnitude width: the magnitude bytes, plus one more when the
+    // top magnitude byte already uses the bit the sign needs.
+    let need = be.len() + usize::from(be[0] & 0x80 != 0);
+    assert!(
+        need <= length,
+        "runar: num2bin cannot encode {v} in {length} byte(s) — it needs {need}; \
+         OP_NUM2BIN fails on a size too small for the number, it does not wrap"
+    );
+    for (i, b) in be.iter().enumerate() {
+        buf[be.len() - 1 - i] = *b;
     }
-    if *v < 0 {
+    if v.sign() == num_bigint::Sign::Minus {
         buf[length - 1] |= 0x80;
     }
     buf
@@ -667,20 +724,49 @@ pub fn num2bin(v: &Bigint, length: usize) -> ByteString {
 
 /// Converts a byte string (Bitcoin Script LE signed-magnitude) back to an integer.
 /// Inverse of `num2bin`.
+///
+/// A decoded value outside `i64` PANICS. It used to shift the decoded bytes
+/// into a `u64` and cast, so a push wider than eight bytes silently lost
+/// everything above bit 63: `bin2num` of 123456789012345678901234567890 in
+/// sixteen bytes returned -4362896299872285998 while `OP_BIN2NUM` left the
+/// whole value on the stack. The caller got a number, it was the wrong number,
+/// and the doc comment said only "Inverse of num2bin".
+///
+/// The boundary is the VALUE, not the push width: Script numbers are not
+/// required to be minimally encoded, a sixteen-byte push of 1000 is 1000, and
+/// the emitted opcodes accept it — so this decodes it and returns 1000.
+///
+/// Use [`bin2num_big`] for the wide answer.
 pub fn bin2num(data: &[u8]) -> Bigint {
+    let r = bin2num_big(data);
+    i64::try_from(&r).unwrap_or_else(|_| {
+        panic!(
+            "runar: bin2num decoded {r}, which does not fit i64 — OP_BIN2NUM has no such \
+             limit; use bin2num_big, which the .runar.rs parsers lower to the same bin2num \
+             builtin"
+        )
+    })
+}
+
+/// The arbitrary-precision form of [`bin2num`].
+///
+/// The `.runar.rs` parsers lower `bin2num_big` to the same `bin2num` builtin as
+/// `bin2num`, so reaching for it costs no script bytes.
+pub fn bin2num_big(data: &[u8]) -> BigintBig {
     if data.is_empty() {
-        return 0;
+        return BigintBig::from(0);
     }
     let last = data[data.len() - 1];
     let negative = (last & 0x80) != 0;
-    let mut result: u64 = (last & 0x7f) as u64;
-    for i in (0..data.len() - 1).rev() {
-        result = (result << 8) | data[i] as u64;
-    }
+    let mut le = data.to_vec();
+    let n = le.len() - 1;
+    le[n] = last & 0x7f;
+    le.reverse();
+    let magnitude = BigintBig::from_bytes_be(num_bigint::Sign::Plus, &le);
     if negative {
-        -(result as i64)
+        -magnitude
     } else {
-        result as i64
+        magnitude
     }
 }
 
