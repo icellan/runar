@@ -2351,6 +2351,30 @@ fn lower_call_expr(
     args: &[Expression],
     ctx: &mut LoweringContext,
 ) -> String {
+    // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+    // spec/grammar.md section 11:
+    //
+    //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+    //
+    // so it must reach the IR as a literal, indistinguishable from the bare
+    // `'<hex>'` spelling the other surfaces use. Lowering it to a `toByteString`
+    // call node instead made the `.runar.rs` surface -- where a bare literal is
+    // not valid Rust and this wrapper is the ONLY spelling that is both valid
+    // Rust and valid Rúnar -- unable to match the one `expected-ir.json` every
+    // format is compared against.
+    //
+    // Literal argument only. `toByteString(x)` for a non-literal `x` is not this
+    // production; it stays an identity-cast call node (the typechecker types it
+    // ByteString -> ByteString and stack lowering already treats it as a no-op),
+    // so its behaviour is unchanged.
+    if let Expression::Identifier { name } = callee {
+        if name == "toByteString" && args.len() == 1 {
+            if let Expression::ByteStringLiteral { .. } = &args[0] {
+                return lower_expr_to_ref(&args[0], ctx);
+            }
+        }
+    }
+
     // super(...) call
     if let Expression::Identifier { name } = callee {
         if name == "super" {

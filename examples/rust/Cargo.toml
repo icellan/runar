@@ -245,5 +245,9 @@ name = "terminal_varlen_read"
 path = "terminal-varlen-read/TerminalVarlenRead_test.rs"
 
 [[test]]
+name = "r1_k1_wallet"
+path = "r1-k1-wallet/R1K1Wallet_test.rs"
+
+[[test]]
 name = "native_exclusions"
 path = "native-exclusions/exclusions_test.rs"

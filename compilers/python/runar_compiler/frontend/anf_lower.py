@@ -1510,6 +1510,28 @@ class _LowerCtx:
     def _lower_call_expr(self, e: CallExpr) -> str:
         callee = e.callee
 
+        # `toByteString('<hex>')` IS the ByteStringLiteral production — see
+        # spec/grammar.md section 11:
+        #
+        #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        #
+        # so it must reach the IR as a literal, indistinguishable from the bare
+        # `'<hex>'` spelling the other surfaces use. Lowering it to a
+        # `toByteString` call node instead made the `.runar.rs` surface — where a
+        # bare literal is not valid Rust and this wrapper is the ONLY spelling
+        # that is both valid Rust and valid Rúnar — unable to match the one
+        # `expected-ir.json` every format is compared against.
+        #
+        # Literal argument only. `toByteString(x)` for a non-literal `x` is not
+        # this production; it stays an identity-cast call node (the typechecker
+        # types it ByteString -> ByteString and stack lowering already treats it
+        # as a no-op), so its behaviour is unchanged.
+        if (
+            isinstance(callee, Identifier) and callee.name == "toByteString"
+            and len(e.args) == 1 and isinstance(e.args[0], ByteStringLiteral)
+        ):
+            return self.lower_expr_to_ref(e.args[0])
+
         # super(...) call — accepts both Identifier("super") and MemberExpr(super, "")
         is_super = (isinstance(callee, Identifier) and callee.name == "super") or (
             isinstance(callee, MemberExpr) and isinstance(callee.object, Identifier)

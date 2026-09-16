@@ -13,14 +13,14 @@
 //! `split`, `left`, `right`, `int2str`, `int_2_str`, `reverse_bytes`,
 //! `to_byte_string` — had NO mock in `packages/runar-rs`. Seven of the 84
 //! `.runar.rs` example contracts call one, and every one of the seven was
-//! therefore uncompilable as Rust. Five of them are wired up now. Two are not,
-//! and this file pins which two.
+//! therefore uncompilable as Rust. Six of them are wired up now. One is not,
+//! and this file pins which one.
 //!
 //! # Why a set and not a count
 //!
-//! `excluded.len() <= 2` is a guard that stops being read: a bound that only
+//! `excluded.len() <= 1` is a guard that stops being read: a bound that only
 //! has to be "not worse" absorbs the next exclusion without argument. This
-//! asserts the SET, so a third exclusion fails here and has to justify itself
+//! asserts the SET, so a second exclusion fails here and has to justify itself
 //! in the same commit — and removing one fails here too, which is correct: it
 //! should be deliberate and it should say so.
 //!
@@ -50,33 +50,21 @@ use std::path::{Path, PathBuf};
 /// `examples/rust`. Each is justified at the top of the named file; see
 /// `every_exclusion_carries_a_written_reason`.
 ///
-/// Both are blocked by the same thing and neither is blocked by a missing
-/// mock: the Rust DSL spells a Rúnar **ByteString literal** in forms that are
-/// not Rust values of type `Vec<u8>`.
+/// The one remaining blocker is NOT a missing mock and no longer a ByteString
+/// literal either: `self.add_output(...)` is a method the `#[runar::contract]`
+/// proc macro in `packages/runar-rs-macros` does not generate. The output
+/// intrinsics (`add_output`, `add_data_output`, `add_raw_output`) need an
+/// output-recording surface on the mock contract rather than a mock function;
+/// that blocks nine `.runar.rs` contracts in total and is orthogonal to the
+/// byte builtins.
 ///
-///   `"41000000"`, a bare hex string  → `Vec<u8> == &str` does not compile,
-///                                      and no `PartialEq` can be added for it
-///                                      from this crate (orphan rule)
-///     r1-k1-wallet
-///
-///   `0x3030`, a bare integer          → `self.tag: ByteString = 0x3030`
-///     branched-readonly-len
-///
-/// `to_byte_string("41000000")` IS valid Rust and emits byte-identical script
-/// hex, but it is NOT ANF-neutral: every `.runar.rs` parser lowers it to a
-/// `toByteString` call node while the other eight surfaces carry a plain
-/// ByteString literal, and the runner compares each format's ANF against the
-/// ONE `expected-ir.json`. `spec/grammar.md` makes `toByteString '(' 
-/// StringLiteral ')'` the ByteStringLiteral production, so folding it is the
-/// spec-conformant fix — and a seven-parser change. Measured, not assumed.
-///
-/// `branched-readonly-len` is additionally blocked by `self.add_output(...)`,
-/// which the `#[runar::contract]` proc macro does not generate. That blocks
-/// nine contracts in total and is orthogonal to the byte builtins.
-const EXCLUDED: &[&str] = &[
-    "branched-readonly-len/BranchedReadonlyLen.runar.rs",
-    "r1-k1-wallet/R1K1Wallet.runar.rs",
-];
+/// The ByteString-literal blocker that used to hold `r1-k1-wallet` here is
+/// gone. `spec/grammar.md` section 11 makes `toByteString '(' StringLiteral
+/// ')'` the ByteStringLiteral production, and all seven tiers now fold it to a
+/// literal in ANF lowering, so `to_byte_string("41000000")` — the only
+/// spelling that is both valid Rust and valid Rúnar — reaches the IR
+/// indistinguishable from the bare literal the other eight surfaces carry.
+const EXCLUDED: &[&str] = &["branched-readonly-len/BranchedReadonlyLen.runar.rs"];
 
 /// The header every excluded contract must carry. A fixed marker, rather than
 /// "some comment", is what stops a future exclusion from being justified by

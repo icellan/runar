@@ -341,8 +341,21 @@ Built-in functions use snake_case and take references for byte-type arguments:
 | `int2str(n, byte_len)` / `int_2_str(n, byte_len)` | `int2str(n, byteLen)` |
 | `to_byte_string("hex")` | `toByteString('hex')` |
 
-Four of these need a word beyond the mapping, because the obvious reading of
+Five of these need a word beyond the mapping, because the obvious reading of
 the name is wrong:
+
+- **`to_byte_string` is not a function call — it is how you WRITE a ByteString
+  literal here.** `spec/grammar.md` section 11 defines the literal as
+  `ByteStringLiteral = 'toByteString' '(' StringLiteral ')'`, and all seven
+  compilers fold it to a literal during ANF lowering, so it reaches the IR
+  indistinguishable from the bare `'00ff'` the other eight surfaces use. In
+  `.runar.rs` it is also the ONLY spelling available: `ByteString` is `Vec<u8>`
+  in this tier, so a bare `"00ff"` is a `&str` that will not compare or assign
+  to it, and no `PartialEq` between the two can be added from
+  `packages/runar-rs` (orphan rule). Write `to_byte_string("00ff")` and the
+  file is valid Rust, valid Rúnar, and byte-identical to every other surface.
+  A NON-literal argument — `to_byte_string(x)` — is not the literal production
+  and stays an identity cast, as it always was.
 
 - **`split` is single-valued.** It returns the bytes from `index` onwards — the
   RIGHT half of the cut — because that is what `spec/grammar.md` declares and

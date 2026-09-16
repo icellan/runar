@@ -1755,6 +1755,29 @@ public final class AnfLower {
         private String lowerCallExpr(CallExpr e) {
             Expression callee = e.callee();
 
+            // `toByteString('<hex>')` IS the ByteStringLiteral production — see
+            // spec/grammar.md section 11:
+            //
+            //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+            //
+            // so it must reach the IR as a literal, indistinguishable from the
+            // bare `'<hex>'` spelling the other surfaces use. Lowering it to a
+            // `toByteString` call node instead made the `.runar.rs` surface —
+            // where a bare literal is not valid Rust and this wrapper is the
+            // ONLY spelling that is both valid Rust and valid Rúnar — unable to
+            // match the one `expected-ir.json` every format is compared against.
+            //
+            // Literal argument only. `toByteString(x)` for a non-literal `x` is
+            // not this production; it stays an identity-cast call node (the
+            // typechecker types it ByteString -> ByteString and stack lowering
+            // already treats it as a no-op), so its behaviour is unchanged.
+            if (callee instanceof Identifier tbsId
+                && "toByteString".equals(tbsId.name())
+                && e.args().size() == 1
+                && e.args().get(0) instanceof ByteStringLiteral) {
+                return lowerExprToRef(e.args().get(0));
+            }
+
             // asm({...}) compiler intrinsic — the parser has already
             // normalised the object-literal argument into three positional
             // args (body, in_arity, out_arity). Lower to a single opaque

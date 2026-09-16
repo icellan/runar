@@ -2112,6 +2112,29 @@ fn isStatefulContextParam(ctx: *const LowerCtx, name: []const u8) bool {
 }
 
 fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8 {
+    // `toByteString('<hex>')` IS the ByteStringLiteral production — see
+    // spec/grammar.md section 11:
+    //
+    //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+    //
+    // so it must reach the IR as a literal, indistinguishable from the bare
+    // `'<hex>'` spelling the other surfaces use. Lowering it to a `toByteString`
+    // call node instead made the `.runar.rs` surface — where a bare literal is
+    // not valid Rust and this wrapper is the ONLY spelling that is both valid
+    // Rust and valid Rúnar — unable to match the one `expected-ir.json` every
+    // format is compared against.
+    //
+    // Literal argument only. `toByteString(x)` for a non-literal `x` is not this
+    // production; it stays an identity-cast call node (the typechecker types it
+    // ByteString -> ByteString and stack lowering already treats it as a no-op),
+    // so its behaviour is unchanged.
+    if (std.mem.eql(u8, c.callee, "toByteString") and c.args.len == 1) {
+        switch (c.args[0]) {
+            .literal_bytes => return try lowerExprToRef(ctx, c.args[0]),
+            else => {},
+        }
+    }
+
     // super() call
     if (std.mem.eql(u8, c.callee, "super")) {
         const arg_refs = try lowerArgs(ctx, c.args);
