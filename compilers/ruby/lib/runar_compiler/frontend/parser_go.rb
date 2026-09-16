@@ -111,6 +111,9 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     GO_BUILTIN_MAP = {
+      # the *Big peers of num2bin / bin2num. They lower to the SAME builtins as Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate), not a different Script operation. Six tiers fell through to the default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has (R-Bigint)
+      "Num2BinBig" => "num2bin",
+      "Bin2NumBig" => "bin2num",
       # Assertions
       "Assert" => "assert",
       # Hashing
@@ -193,6 +196,31 @@ module RunarCompiler
       Int Bigint BigintBig Bool ByteString PubKey Sig
       Addr SigHashPreimage RabinSig RabinPubKey Point
     ].to_set.freeze
+
+    # The Rúnar binary operator each `BigintBig` helper stands for.
+    #
+    # runar.BigintBig is *big.Int in packages/runar-go and Go has no operator
+    # overloading, so a .runar.go contract carrying arbitrary-precision values
+    # spells `a === b` as `runar.BigintBigEqual(a, b)` -- and it has to emit the
+    # script the operator emits. Mirrors bigintBigOpFor in
+    # compilers/go/frontend/parser_gocontract.go and its peers in the TS, Rust,
+    # Python, Zig and Java tiers, plus the eleven helpers in
+    # packages/runar-go/runar.go. The rewrite lived only in compilers/go until
+    # R-Bigint, although all seven tiers parse .runar.go -- a frontend-parity
+    # break no fixture exercised.
+    GO_BIGINTBIG_OPS = {
+      "BigintBigLess"       => "<",
+      "BigintBigLessEq"     => "<=",
+      "BigintBigGreater"    => ">",
+      "BigintBigGreaterEq"  => ">=",
+      "BigintBigEqual"      => "===",
+      "BigintBigNotEqual"   => "!==",
+      "BigintBigAdd"        => "+",
+      "BigintBigSub"        => "-",
+      "BigintBigMul"        => "*",
+      "BigintBigMod"        => "%",
+      "BigintBigDiv"        => "/"
+    }.freeze
 
     def self.go_map_builtin(name)
       return GO_BUILTIN_MAP[name] if GO_BUILTIN_MAP.key?(name)
@@ -1413,6 +1441,17 @@ module RunarCompiler
               inner = parse_expression
               expect(TOK_RPAREN)
               return inner # unwrap type cast
+            end
+
+            # BigintBig operator helper: runar.BigintBigEqual(a, b) is `a === b`.
+            big_op = GO_BIGINTBIG_OPS[member_name]
+            if big_op && check(TOK_LPAREN)
+              advance # '('
+              left = parse_expression
+              expect(TOK_COMMA)
+              right = parse_expression
+              expect(TOK_RPAREN)
+              return BinaryExpr.new(op: big_op, left: left, right: right)
             end
 
             # Map to builtin name

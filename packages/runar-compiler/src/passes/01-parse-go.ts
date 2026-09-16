@@ -294,6 +294,10 @@ function makePrimitiveOrCustom(name: string): TypeNode {
 // ---------------------------------------------------------------------------
 
 export const GO_BUILTIN_MAP: Record<string, string> = {
+  // the *Big peers of num2bin / bin2num. They lower to the SAME builtins as Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate), not a different Script operation. Six tiers fell through to the default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has (R-Bigint)
+  Num2BinBig: 'num2bin',
+  Bin2NumBig: 'bin2num',
+
   // Assertions
   Assert: 'assert',
   // Hashing
@@ -387,6 +391,37 @@ export const GO_CAST_TYPES = new Set([
   'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
   'Point', 'P256Point', 'P384Point',
 ]);
+
+/**
+ * BigintBig operator helpers → the Rúnar binary operator each one stands for.
+ *
+ * `runar.BigintBig` is `*big.Int` in packages/runar-go, and Go has no operator
+ * overloading: `a < b` does not compile on two of them and `a == b` compiles
+ * into POINTER IDENTITY, which is worse. So a `.runar.go` contract carrying
+ * arbitrary-precision values spells its arithmetic as `runar.BigintBigLess(a, b)`
+ * and the parser rewrites the call back into the operator. The emitted script is
+ * identical to the one the operator itself produces — that is the point.
+ *
+ * This table has to agree with `bigintBigOpFor` in
+ * compilers/go/frontend/parser_gocontract.go and with the eleven helpers in
+ * packages/runar-go/runar.go. It lived ONLY in the Go compiler until R-Bigint:
+ * the other six tiers parse `.runar.go` as well (frontend parity, no
+ * exceptions) and rejected `bigintBigEqual` as an unknown function, which no
+ * fixture had ever exercised.
+ */
+export const GO_BIGINTBIG_OPS: Record<string, string> = {
+  BigintBigLess: '<',
+  BigintBigLessEq: '<=',
+  BigintBigGreater: '>',
+  BigintBigGreaterEq: '>=',
+  BigintBigEqual: '===',
+  BigintBigNotEqual: '!==',
+  BigintBigAdd: '+',
+  BigintBigSub: '-',
+  BigintBigMul: '*',
+  BigintBigMod: '%',
+  BigintBigDiv: '/',
+};
 
 function mapGoBuiltin(name: string): string {
   if (GO_BUILTIN_MAP[name]) return GO_BUILTIN_MAP[name]!;
@@ -1227,6 +1262,18 @@ class GoParser extends ParserCore<GoToken> {
           const inner = this.parseExpression();
           this.expect(')');
           return inner; // unwrap type cast
+        }
+
+        // BigintBig operator helper: runar.BigintBigEqual(a, b) === a === b.
+        // See GO_BIGINTBIG_OPS for why contract source needs the spelling.
+        const bigOp = GO_BIGINTBIG_OPS[memberName];
+        if (bigOp !== undefined && this.current().type === '(') {
+          this.advance(); // '('
+          const left = this.parseExpression();
+          this.expect(',');
+          const right = this.parseExpression();
+          this.expect(')');
+          return { kind: 'binary_expr', op: bigOp, left, right } as Expression;
         }
 
         // Map to builtin name

@@ -339,6 +339,66 @@ describe('cross-tier acceptance parity', () => {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // SPELLING PAIRS — two sources that must compile to the SAME bytes.
+  //
+  // The per-fixture block above asks whether the tiers agree with EACH OTHER.
+  // That cannot catch seven tiers agreeing on a wrong rewrite: if every copy of
+  // the `BigintBig` helper table lowered `BigintBigLessEq` to `<`, all seven
+  // would emit the same hex and the corpus would pass. A spelling that claims
+  // to mean an operator has to be checked against THAT OPERATOR.
+  //
+  // Each entry names two sources in this directory which differ only in how
+  // they spell the same program. Every available tier compiles both and the two
+  // hexes must be equal — per tier, so a tier is never compared against another
+  // tier's idea of the answer.
+  // ---------------------------------------------------------------------
+  const spellingPairs: Array<{ what: string; a: string; b: string; why: string }> = [
+    {
+      what: 'BigintBig operator helpers vs the operators',
+      a: 'GoBigintBigOperators.runar.go',
+      b: 'GoBigintBigOperatorsRef.runar.ts',
+      why:
+        'runar.BigintBigAdd(a, b) must emit what `a + b` emits, and the same ' +
+        'for the other ten helpers. The rewrite lived in compilers/go and ' +
+        'nowhere else until R-Bigint, so the other six tiers rejected every ' +
+        'one of these spellings while the Go SDK shipped them.',
+    },
+  ];
+
+  for (const pair of spellingPairs) {
+    describe(`${pair.what}`, () => {
+      // Non-vacuity: a pair whose files are missing would make the loop below
+      // compare nothing and pass.
+      it('both sources are in the corpus', () => {
+        expect(fixtures, pair.why).toContain(pair.a);
+        expect(fixtures, pair.why).toContain(pair.b);
+      });
+
+      for (const tier of available) {
+        it(`${tier.id} emits the same bytes for both spellings`, () => {
+          const va = verdict(tier, join(DIR, pair.a));
+          const vb = verdict(tier, join(DIR, pair.b));
+          expect(
+            va.ok,
+            va.ok ? '' : `${tier.id} REJECTED ${pair.a}:\n${(va.diag ?? '').slice(0, 800)}`,
+          ).toBe(true);
+          expect(
+            vb.ok,
+            vb.ok ? '' : `${tier.id} REJECTED ${pair.b}:\n${(vb.diag ?? '').slice(0, 800)}`,
+          ).toBe(true);
+          expect(va.hex.length, `${tier.id} produced no hex for ${pair.a}`).toBeGreaterThan(0);
+          expect(
+            va.hex,
+            `${tier.id} compiles ${pair.a} and ${pair.b} to DIFFERENT bytes.\n` +
+              `${pair.why}\n` +
+              `  ${pair.a}: ${va.hex}\n  ${pair.b}: ${vb.hex}`,
+          ).toBe(vb.hex);
+        });
+      }
+    });
+  }
+
   // The verdict function's own contract — without these, nothing stops a
   // future edit collapsing it back to a bare try/catch.
   describe('verdict() distinguishes a compile result from a broken run', () => {

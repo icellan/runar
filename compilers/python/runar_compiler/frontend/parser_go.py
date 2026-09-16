@@ -105,6 +105,27 @@ _GO_TYPE_MAP: dict[str, str] = {
     "P384Point": "P384Point",
 }
 
+# The Rúnar binary operator each `BigintBig` helper stands for.
+#
+# Mirrors bigintBigOpFor in compilers/go/frontend/parser_gocontract.go,
+# GO_BIGINTBIG_OPS in packages/runar-compiler/src/passes/01-parse-go.ts,
+# go_bigintbig_op in compilers/rust/src/frontend/parser_gocontract.rs, and the
+# eleven helpers in packages/runar-go/runar.go. A tier that knows a spelling the
+# others do not is a frontend-parity break -- which is the state this table ends.
+_GO_BIGINTBIG_OPS = {
+    "BigintBigLess": "<",
+    "BigintBigLessEq": "<=",
+    "BigintBigGreater": ">",
+    "BigintBigGreaterEq": ">=",
+    "BigintBigEqual": "===",
+    "BigintBigNotEqual": "!==",
+    "BigintBigAdd": "+",
+    "BigintBigSub": "-",
+    "BigintBigMul": "*",
+    "BigintBigMod": "%",
+    "BigintBigDiv": "/",
+}
+
 # Native Go types that map to Runar types
 _GO_NATIVE_TYPE_MAP: dict[str, str] = {
     "int64": "bigint",
@@ -129,6 +150,9 @@ def _map_go_type(name: str) -> TypeNode:
 # ---------------------------------------------------------------------------
 
 _GO_BUILTIN_MAP: dict[str, str] = {
+    # the *Big peers of num2bin / bin2num. They lower to the SAME builtins as Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate), not a different Script operation. Six tiers fell through to the default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has (R-Bigint)
+    "Num2BinBig": "num2bin",
+    "Bin2NumBig": "bin2num",
     "Assert": "assert",
     "Hash160": "hash160",
     "Hash256": "hash256",
@@ -1594,6 +1618,22 @@ class _GoParser:
                     if len(args) == 1:
                         return args[0]
                     return BigIntLiteral(value=0)
+
+                # BigintBig operator helper: runar.BigintBigEqual(a, b) is
+                # `a === b`. runar.BigintBig is *big.Int in packages/runar-go
+                # and Go has no operator overloading, so a .runar.go contract
+                # carrying arbitrary-precision values spells its arithmetic as
+                # a call -- and it has to emit the script the operator emits.
+                # This rewrite lived only in compilers/go until R-Bigint even
+                # though all seven tiers parse .runar.go.
+                if sel_name in _GO_BIGINTBIG_OPS and self.check(TOK_LPAREN):
+                    args = self._parse_call_args()
+                    if len(args) == 2:
+                        return BinaryExpr(
+                            op=_GO_BIGINTBIG_OPS[sel_name],
+                            left=args[0],
+                            right=args[1],
+                        )
 
                 # runar.ByteString("literal") -> ByteStringLiteral (hex-encoded bytes);
                 # runar.ByteString(variable) -> unwrap (type conversion no-op).

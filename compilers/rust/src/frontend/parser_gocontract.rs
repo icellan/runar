@@ -107,8 +107,35 @@ fn map_go_type(name: &str) -> TypeNode {
 }
 
 /// Map a runar.* builtin name (the part after "runar.") to the Rúnar AST callee name.
+/// The Rúnar binary operator each `BigintBig` helper stands for.
+///
+/// Mirrors `bigintBigOpFor` in compilers/go/frontend/parser_gocontract.go,
+/// `GO_BIGINTBIG_OPS` in packages/runar-compiler/src/passes/01-parse-go.ts, and
+/// the eleven helpers in packages/runar-go/runar.go. All four have to agree:
+/// a tier that knows a spelling the others do not is a frontend-parity break,
+/// which is exactly the state this table was added to end.
+fn go_bigintbig_op(name: &str) -> Option<BinaryOp> {
+    match name {
+        "BigintBigLess" => Some(BinaryOp::Lt),
+        "BigintBigLessEq" => Some(BinaryOp::Le),
+        "BigintBigGreater" => Some(BinaryOp::Gt),
+        "BigintBigGreaterEq" => Some(BinaryOp::Ge),
+        "BigintBigEqual" => Some(BinaryOp::StrictEq),
+        "BigintBigNotEqual" => Some(BinaryOp::StrictNe),
+        "BigintBigAdd" => Some(BinaryOp::Add),
+        "BigintBigSub" => Some(BinaryOp::Sub),
+        "BigintBigMul" => Some(BinaryOp::Mul),
+        "BigintBigMod" => Some(BinaryOp::Mod),
+        "BigintBigDiv" => Some(BinaryOp::Div),
+        _ => None,
+    }
+}
+
 fn map_go_builtin(name: &str) -> String {
     match name {
+        // the *Big peers of num2bin / bin2num. They lower to the SAME builtins as Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate), not a different Script operation. Six tiers fell through to the default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has (R-Bigint)
+        "Num2BinBig" => "num2bin".to_string(),
+        "Bin2NumBig" => "bin2num".to_string(),
         "Assert" => "assert".to_string(),
         "Hash160" => "hash160".to_string(),
         "Hash256" => "hash256".to_string(),
@@ -1891,6 +1918,30 @@ impl<'a> GoParser<'a> {
                             // Unwrap: runar.Int(x) -> x
                             if args.len() == 1 {
                                 return Some(args.into_iter().next().unwrap());
+                            }
+                        }
+                    }
+
+                    // BigintBig operator helper: runar.BigintBigEqual(a, b) is
+                    // `a === b`. `runar.BigintBig` is *big.Int in
+                    // packages/runar-go and Go has no operator overloading, so
+                    // contract source carrying arbitrary-precision values has to
+                    // spell its arithmetic as a call; the emitted script must be
+                    // the one the operator itself produces.
+                    //
+                    // This lived only in compilers/go until R-Bigint even though
+                    // all seven tiers parse `.runar.go`. See go_bigintbig_op.
+                    if let Some(op) = go_bigintbig_op(&member_raw) {
+                        if matches!(self.current().typ, TokenType::LParen) {
+                            let mut args = self.parse_call_args();
+                            if args.len() == 2 {
+                                let right = args.pop().unwrap();
+                                let left = args.pop().unwrap();
+                                return Some(Expression::BinaryExpr {
+                                    op,
+                                    left: Box::new(left),
+                                    right: Box::new(right),
+                                });
                             }
                         }
                     }

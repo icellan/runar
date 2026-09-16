@@ -413,6 +413,14 @@ fn mapGoType(name: []const u8) RunarType {
 /// Map a Go builtin name (PascalCase from runar.FuncName) to the Runar camelCase equivalent.
 fn mapGoBuiltin(name: []const u8) []const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{
+        // the *Big peers of num2bin / bin2num. They lower to the SAME builtins as
+        // Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix
+        // names a different Go RUNTIME type (*big.Int, so the Go-side mock does not
+        // truncate), not a different Script operation. Six tiers fell through to the
+        // default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin
+        // registry has (R-Bigint).
+        .{ "Num2BinBig", "num2bin" },
+        .{ "Bin2NumBig", "bin2num" },
         .{ "Assert", "assert" },
         .{ "Hash160", "hash160" },
         .{ "Hash256", "hash256" },
@@ -581,6 +589,35 @@ fn decodeGoEscapesAndHex(allocator: Allocator, raw: []const u8) ![]const u8 {
         hex[idx * 2 + 1] = digits[b & 0xf];
     }
     return hex;
+}
+
+/// The Rúnar binary operator each `BigintBig` helper stands for.
+///
+/// `runar.BigintBig` is *big.Int in packages/runar-go and Go has no operator
+/// overloading, so a .runar.go contract carrying arbitrary-precision values
+/// spells `a === b` as `runar.BigintBigEqual(a, b)` -- and it has to emit the
+/// script the operator emits. Mirrors bigintBigOpFor in
+/// compilers/go/frontend/parser_gocontract.go, GO_BIGINTBIG_OPS in
+/// packages/runar-compiler/src/passes/01-parse-go.ts, go_bigintbig_op in
+/// compilers/rust/src/frontend/parser_gocontract.rs, _GO_BIGINTBIG_OPS in
+/// compilers/python, and the eleven helpers in packages/runar-go/runar.go.
+/// The rewrite lived only in compilers/go until R-Bigint, although all seven
+/// tiers parse .runar.go.
+fn bigintBigOp(name: []const u8) ?BinOperator {
+    const map = std.StaticStringMap(BinOperator).initComptime(.{
+        .{ "BigintBigLess", .lt },
+        .{ "BigintBigLessEq", .lte },
+        .{ "BigintBigGreater", .gt },
+        .{ "BigintBigGreaterEq", .gte },
+        .{ "BigintBigEqual", .eq },
+        .{ "BigintBigNotEqual", .neq },
+        .{ "BigintBigAdd", .add },
+        .{ "BigintBigSub", .sub },
+        .{ "BigintBigMul", .mul },
+        .{ "BigintBigMod", .mod },
+        .{ "BigintBigDiv", .div },
+    });
+    return map.get(name);
 }
 
 /// Check if a Go type name is a type conversion (not a function call).
@@ -1855,6 +1892,9 @@ const Parser = struct {
                                 // Check for type conversions: runar.Int(0), runar.Bigint(x), runar.BigintBig(x), runar.Bool(true)
                                 if (isTypeConversion(member) and args.len == 1) {
                                     expr = args[0];
+                                } else if (args.len == 2 and bigintBigOp(member) != null) {
+                                    // runar.BigintBigEqual(a, b) -> a === b.
+                                    expr = self.makeBinaryExpr(bigintBigOp(member).?, args[0], args[1]) orelse return null;
                                 } else if (std.mem.eql(u8, member, "ByteString") and args.len == 1) {
                                     // runar.ByteString("literal") -> literal_bytes (hex-encoded);
                                     // runar.ByteString(variable) -> unwrap.

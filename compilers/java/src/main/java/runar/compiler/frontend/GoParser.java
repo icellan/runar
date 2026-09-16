@@ -140,6 +140,34 @@ public final class GoParser {
     private static final Map<String, String> GO_NATIVE_TYPE_MAP = new HashMap<>();
     private static final Map<String, String> GO_BUILTIN_MAP = new HashMap<>();
 
+    /**
+     * The Rúnar binary operator each {@code BigintBig} helper stands for.
+     *
+     * <p>{@code runar.BigintBig} is {@code *big.Int} in packages/runar-go and Go has no
+     * operator overloading, so a {@code .runar.go} contract carrying arbitrary-precision
+     * values spells {@code a === b} as {@code runar.BigintBigEqual(a, b)} -- and it has to
+     * emit the script the operator emits. Mirrors {@code bigintBigOpFor} in
+     * compilers/go/frontend/parser_gocontract.go and its peers in the TS, Rust, Python, Zig
+     * and Ruby tiers, plus the eleven helpers in packages/runar-go/runar.go. The rewrite
+     * lived only in compilers/go until R-Bigint, although all seven tiers parse
+     * {@code .runar.go} -- a frontend-parity break no fixture exercised.
+     */
+    private static final Map<String, Expression.BinaryOp> GO_BIGINTBIG_OPS = new HashMap<>();
+
+    static {
+        GO_BIGINTBIG_OPS.put("BigintBigLess", Expression.BinaryOp.LT);
+        GO_BIGINTBIG_OPS.put("BigintBigLessEq", Expression.BinaryOp.LE);
+        GO_BIGINTBIG_OPS.put("BigintBigGreater", Expression.BinaryOp.GT);
+        GO_BIGINTBIG_OPS.put("BigintBigGreaterEq", Expression.BinaryOp.GE);
+        GO_BIGINTBIG_OPS.put("BigintBigEqual", Expression.BinaryOp.EQ);
+        GO_BIGINTBIG_OPS.put("BigintBigNotEqual", Expression.BinaryOp.NEQ);
+        GO_BIGINTBIG_OPS.put("BigintBigAdd", Expression.BinaryOp.ADD);
+        GO_BIGINTBIG_OPS.put("BigintBigSub", Expression.BinaryOp.SUB);
+        GO_BIGINTBIG_OPS.put("BigintBigMul", Expression.BinaryOp.MUL);
+        GO_BIGINTBIG_OPS.put("BigintBigMod", Expression.BinaryOp.MOD);
+        GO_BIGINTBIG_OPS.put("BigintBigDiv", Expression.BinaryOp.DIV);
+    }
+
     static {
         GO_TYPE_MAP.put("Int", "bigint");
         GO_TYPE_MAP.put("Bigint", "bigint");
@@ -182,6 +210,14 @@ public final class GoParser {
         GO_BUILTIN_MAP.put("VerifySLHDSA_SHA2_256f", "verifySLHDSA_SHA2_256f");
         GO_BUILTIN_MAP.put("Num2Bin", "num2bin");
         GO_BUILTIN_MAP.put("Bin2Num", "bin2num");
+        // the *Big peers of num2bin / bin2num. They lower to the SAME builtins as
+        // Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names
+        // a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate),
+        // not a different Script operation. Six tiers fell through to the default rule
+        // and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has
+        // (R-Bigint).
+        GO_BUILTIN_MAP.put("Num2BinBig", "num2bin");
+        GO_BUILTIN_MAP.put("Bin2NumBig", "bin2num");
         // `Int2Str` is the spelling docs/formats/go.md documents. Without it the
         // default rule camel-cases the leading character to `int2Str`, which is
         // registered nowhere — the call is rejected as an unknown function.
@@ -1550,6 +1586,14 @@ public final class GoParser {
                         List<Expression> args = parseCallArgs();
                         if (args.size() == 1) return args.get(0);
                         return new BigIntLiteral(BigInteger.ZERO);
+                    }
+
+                    Expression.BinaryOp bigOp = GO_BIGINTBIG_OPS.get(selName);
+                    if (bigOp != null && check(Tok.LPAREN)) {
+                        List<Expression> args = parseCallArgs();
+                        if (args.size() == 2) {
+                            return new BinaryExpr(bigOp, args.get(0), args.get(1));
+                        }
                     }
 
                     if ("ByteString".equals(selName) && check(Tok.LPAREN)) {
