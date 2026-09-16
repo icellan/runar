@@ -31,7 +31,12 @@
  *   json 2.18.0, 100-deep parses for both arrays and objects, a 101-deep
  *   OBJECT raises JSON::NestingError, and a 101-deep ARRAY still parses; the
  *   gem counts the two shapes one level apart, so an earlier flat "100
- *   accepted, 101 rejected" is true of objects and false of arrays. 100 is
+ *   accepted, 101 rejected" is true of objects and false of arrays. That
+ *   asymmetry is the whole reason the bound is 100 rather than 101: raising
+ *   it to the depth Ruby accepts for ARRAYS would keep working on every
+ *   array payload and start rejecting 101-deep OBJECTS at the Ruby tier
+ *   only — a shape-dependent, one-tier failure, which is the worst kind to
+ *   debug on a signed wire. 100 is
  *   also 27 below rust serde_json's hard ceiling of 127, so every tier stays
  *   inside its own library's default without hand-rolling or reconfiguring a
  *   parser, and no tier is anywhere near its stack — at 1024 Python's

@@ -178,6 +178,24 @@ const CLAIMS: Claim[] = [
   },
 
   // --- analyzer conformance ----------------------------------------------
+  // The same sdk-output count, duplicated into three SDK READMEs. All three
+  // said 27 against a real 70 — a count is not safer for being repeated.
+  {
+    file: 'packages/runar-go/README.md',
+    measure: 'sdk-output fixtures',
+    pattern: /test case is one of (\d+) fixtures/,
+  },
+  {
+    file: 'packages/runar-rs/README.md',
+    measure: 'sdk-output fixtures',
+    pattern: /contract is one of the (\d+) fixtures/,
+  },
+  {
+    file: 'packages/runar-sdk/README.md',
+    measure: 'sdk-output fixtures',
+    pattern: /(\d+) fixtures pass on all seven SDKs/,
+  },
+
   {
     file: 'conformance/analyzer/README.md',
     measure: 'analyzer fixtures',
