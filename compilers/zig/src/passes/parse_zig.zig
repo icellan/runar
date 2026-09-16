@@ -891,6 +891,19 @@ const Parser = struct {
         //   literal >= ident  → var_name=ident, bound=literal (reversed)
         var var_name: []const u8 = "_loop_var";
         var bound: i64 = 0;
+        // R-102: `descending` was never set here, so `while (i > 1) : (i -= 1)`
+        // — the shape the doc comment above has always claimed to support —
+        // lowered as an ASCENDING loop from `start` to `bound`, i.e. a count of
+        // `bound - start`, clamped to 0. The body, and every assertion in it,
+        // was dropped from the locking script with no diagnostic. Every other
+        // tier lowered the same `.runar.zig` source to a real countdown, so
+        // this was a one-tier hex divergence as well as a dropped guard.
+        //
+        // The range-style spellings below keep folding their inclusive
+        // endpoint into `bound` and stay ascending; only the raw comparison
+        // directions set `descending` / `inclusive`, exactly as parse_ts does.
+        var descending = false;
+        var inclusive = false;
         switch (cond) {
             .binary_op => |bop| {
                 if (bop.op == .lt or bop.op == .lte) {
@@ -905,6 +918,8 @@ const Parser = struct {
                         // ident > N or ident >= N (countdown)
                         var_name = bop.left.identifier;
                         bound = bop.right.literal_int;
+                        descending = true;
+                        inclusive = bop.op == .gte;
                     } else if (bop.left == .literal_int and bop.right == .identifier) {
                         // N > ident or N >= ident (reversed operands → ident < N)
                         var_name = bop.right.identifier;
@@ -912,7 +927,9 @@ const Parser = struct {
                         if (bop.op == .gte) bound += 1;
                     }
                 } else if (bop.op == .neq) {
-                    // ident != N (loop until value reached)
+                    // ident != N (loop until value reached). The direction is
+                    // not recoverable from `!=`, so it is taken from the step
+                    // once the continue expression has been parsed.
                     if (bop.left == .identifier) var_name = bop.left.identifier;
                     if (bop.right == .literal_int) bound = bop.right.literal_int;
                 }
@@ -921,6 +938,12 @@ const Parser = struct {
                 self.addError("while loop condition must be a comparison (e.g. 'i < N', 'i > 0', 'i != 0')");
             },
         }
+        // `i != N` carries no direction of its own — `while (i != 0) : (i -= 1)`
+        // and `while (i != 5) : (i += 1)` are both legal and both bounded. The
+        // direction comes from the STEP, once the continue expression below has
+        // been parsed. This too used to default to ascending, so an
+        // until-zero countdown unrolled `bound - start` times, i.e. zero.
+        const cond_is_neq = cond == .binary_op and cond.binary_op.op == .neq;
 
         // Continue expression: : (i += 1)
         //
@@ -961,6 +984,16 @@ const Parser = struct {
             if (self.current.kind == .rparen) _ = self.bump();
         }
 
+        if (cond_is_neq) {
+            if (update) |u| {
+                if (u.* == .assign and u.assign.value == .binary_op and
+                    u.assign.value.binary_op.op == .sub)
+                {
+                    descending = true;
+                }
+            }
+        }
+
         if (self.expect(.lbrace) == null) return null;
         const body = self.parseBlock();
 
@@ -968,6 +1001,8 @@ const Parser = struct {
             .var_name = var_name,
             .init_value = 0, // will be patched by parseBlock if preceding let_decl matches
             .bound = bound,
+            .descending = descending,
+            .inclusive = inclusive,
             .update = update,
             .body = body,
             .source_loc = loc,
