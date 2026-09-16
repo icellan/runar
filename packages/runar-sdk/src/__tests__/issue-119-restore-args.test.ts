@@ -111,6 +111,13 @@ async function deployRestorable() {
     satoshis: out.satoshis!,
     script: out.lockingScript.toHex(),
   };
+  // M-1: `utxo.txid` is the deploy tx's REAL txid, whereas `broadcast()`
+  // registered the deploy tx's outputs under MockProvider's deterministic
+  // FAKE txid — so the outpoint the restored contract spends was unknown to
+  // the provider, and the call broadcast below skipped both value
+  // conservation and the fee floor. Register it explicitly so the broadcast
+  // is actually validated, not merely acked.
+  provider.addUtxo('restored-contract', utxo);
   return { artifact, provider, signer, deployTx, utxo };
 }
 
