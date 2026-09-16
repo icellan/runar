@@ -22,6 +22,12 @@ from runar_compiler.ir.types import (
 )
 from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
 
+# Upper end of the domain pow is exact on, shared with the emitted script
+# (codegen/stack.py#_lower_pow unrolls exactly this many conditional multiplies
+# and enforces the bound with OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the
+# reference interpreter.
+POW_FOLD_EXPONENT_LIMIT = 32
+
 
 # Kinds that fall through ``_fold_value`` unchanged. Listing them explicitly
 # lets us raise UnknownANFKindError on any kind that isn't a known fold case,
@@ -248,7 +254,13 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 2:
             return None
         base, exp = int_args[0], int_args[1]
-        if exp < 0 or exp > 256:
+        # Decline outside the domain the emitted script GUARANTEES and ENFORCES
+        # (codegen/stack.py#_lower_pow: 0 <= exp <= 32, the number of unrolled
+        # conditional multiplies). The old bound was 256, which folded
+        # exponents the script CLAMPED to 32 — so for 33 <= exp <= 256 the
+        # fold-ON and fold-OFF scripts accepted mutually exclusive inputs
+        # (R-169, the pow half).
+        if exp < 0 or exp > POW_FOLD_EXPONENT_LIMIT:
             return None
         result = 1
         for _ in range(exp):

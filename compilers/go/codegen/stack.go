@@ -19,6 +19,14 @@ import (
 
 const maxStackDepth = 800
 
+// powExponentLimit is the largest exponent pow(base, exp) computes, and
+// therefore the largest one the emitted script ACCEPTS — lowerPow unrolls
+// exactly this many conditional multiplies and refuses anything outside
+// 0 <= exp <= powExponentLimit. The same number lives in
+// frontend/constant_fold.go (which must decline to fold outside it); they have
+// to move together or pow means different things folded and executed (R-169).
+const powExponentLimit = 32
+
 // ---------------------------------------------------------------------------
 // Stack IR types
 // ---------------------------------------------------------------------------
@@ -4894,6 +4902,20 @@ func (ctx *loweringContext) lowerClamp(bindingName string, args []string, bindin
 //	2 OP_PICK (get exp), push(i+1), OP_GREATERTHAN, OP_IF, OP_OVER, OP_MUL, OP_ENDIF
 //
 // After iterations: OP_NIP OP_NIP to get result.
+//
+// THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the pow half). 32 rounds
+// compute base^min(exp, 32). Before the guard, an exponent outside 0..32
+// returned that CLAMPED value with no error, while the constant folder
+// computed the true power for exp <= 256 — so for 33 <= exp <= 256 the fold-ON
+// and fold-OFF scripts accepted mutually exclusive inputs. A negative exponent
+// was a third disagreement: the script returned 1, the interpreter threw, the
+// folder declined. Six bytes per callsite now refuse the whole outside:
+//
+//	OP_DUP <0> <33> OP_WITHIN OP_VERIFY
+//
+// See packages/runar-compiler/src/passes/05-stack-lower.ts#lowerPow for why the
+// bound stays 32 rather than rising to 256. The same number lives in
+// frontend/constant_fold.go and must move with it.
 func (ctx *loweringContext) lowerPow(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
 	if len(args) < 2 {
 		panic("pow requires 2 arguments")
@@ -4911,11 +4933,17 @@ func (ctx *loweringContext) lowerPow(bindingName string, args []string, bindingI
 	ctx.sm.pop() // base
 
 	// Stack: base exp
+	// Guard: refuse any exponent the 32 rounds below cannot compute.
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})                               // base exp exp
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})                           // base exp exp 0
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(powExponentLimit + 1))}) // ... 33
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_WITHIN"})                            // base exp (0<=exp<33)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})                            // base exp
+
 	ctx.emitOp(StackOp{Op: "swap"})                       // exp base
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)}) // exp base 1(acc)
 
-	const maxPowIterations = 32
-	for i := 0; i < maxPowIterations; i++ {
+	for i := 0; i < powExponentLimit; i++ {
 		// Stack: exp base acc
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_PICK"}) // exp base acc exp

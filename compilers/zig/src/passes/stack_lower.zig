@@ -31,6 +31,15 @@ const peephole = @import("peephole.zig");
 const Allocator = std.mem.Allocator;
 const Opcode = types.Opcode;
 
+/// The largest exponent `pow(base, exp)` computes, and therefore the largest
+/// one the emitted script ACCEPTS — `lowerPow` unrolls exactly this many
+/// conditional multiplies and refuses anything outside
+/// `0 <= exp <= pow_exponent_limit`. The same number lives in
+/// `passes/constant_fold.zig` (which must decline to fold outside it); they
+/// have to move together or `pow` means different things folded and executed
+/// (R-169).
+const pow_exponent_limit: u32 = 32;
+
 // ============================================================================
 // StackMap — tracks named variables at stack positions
 // ============================================================================
@@ -2834,10 +2843,24 @@ const LowerCtx = struct {
         _ = self.stack.pop();
         _ = self.stack.pop();
 
+        // THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the `pow` half).
+        // The 32 rounds below compute base^min(exp, 32). Before this guard an
+        // exponent outside 0..32 returned that CLAMPED value with no error,
+        // while passes/constant_fold.zig computed the true power for
+        // exp <= 256 — so for 33 <= exp <= 256 the fold-ON and fold-OFF
+        // scripts accepted mutually exclusive inputs. A negative exponent was
+        // a third disagreement: script returned 1, interpreter threw, folder
+        // declined. Six bytes per callsite refuse the whole outside.
+        try self.emitOp(.op_dup); // base exp exp
+        try self.emitPushInt(0); // base exp exp 0
+        try self.emitPushInt(pow_exponent_limit + 1); // ... 33
+        try self.emitOp(.op_within); // base exp (0<=exp<33)
+        try self.emitOp(.op_verify); // base exp
+
         try self.emitOp(.op_swap);
         try self.emitPushInt(1);
         var iter: u32 = 0;
-        while (iter < 32) : (iter += 1) {
+        while (iter < pow_exponent_limit) : (iter += 1) {
             try self.emitPushInt(2);
             try self.emitOp(.op_pick);
             try self.emitPushInt(iter);

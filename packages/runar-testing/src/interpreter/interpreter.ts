@@ -1168,6 +1168,13 @@ export class RunarInterpreter {
         const base = this.toBigInt(args[0]!);
         const exp = this.toBigInt(args[1]!);
         if (exp < 0n) throw new Error('pow: negative exponent');
+        // Refuse outside the domain the compiled script enforces
+        // (`05-stack-lower.ts#lowerPow`: 32 unrolled conditional multiplies,
+        // guarded by `OP_DUP <0> <33> OP_WITHIN OP_VERIFY`). The script ABORTS
+        // out here rather than returning base^32, so computing the true power
+        // would put this interpreter and the deployed script back into
+        // disagreement — R-169, the `pow` half.
+        if (exp > 32n) throw new Error('pow: exponent outside the supported domain (exp > 32)');
         let result = 1n;
         for (let i = 0n; i < exp; i++) result *= base;
         return { kind: 'bigint', value: result };

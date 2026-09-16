@@ -19,6 +19,12 @@ const types = @import("../ir/types.zig");
 const const_arith = @import("const_arith.zig");
 
 const Allocator = std.mem.Allocator;
+
+/// Upper end of the domain `pow` is exact on, shared with the emitted script
+/// (`passes/stack_lower.zig#lowerPow` unrolls exactly this many conditional
+/// multiplies and enforces the bound with `OP_DUP <0> <33> OP_WITHIN
+/// OP_VERIFY`) and with the reference interpreter.
+const pow_fold_exponent_limit: u32 = 32;
 const ConstValue = types.ConstValue;
 const ANFValue = types.ANFValue;
 const ANFBinding = types.ANFBinding;
@@ -329,10 +335,15 @@ fn evalBuiltinCall(
         },
         .builtin_pow => {
             if (count != 2) return null;
-            // Guard identical to the TS reference: a negative or >256
-            // exponent is left unfolded rather than approximated.
+            // Decline outside the domain the emitted script GUARANTEES and
+            // ENFORCES (`passes/stack_lower.zig#lowerPow`: 0 <= exp <= 32, the
+            // number of unrolled conditional multiplies). The old bound was
+            // 256, which folded exponents the script CLAMPED to 32 — so for
+            // 33 <= exp <= 256 the fold-ON and fold-OFF scripts accepted
+            // mutually exclusive inputs (R-169, the `pow` half). A negative
+            // exponent fails `toInt(u32)` and is declined the same way.
             const exp = big_args[1].toConst().toInt(u32) catch return null;
-            if (exp > 256) return null;
+            if (exp > pow_fold_exponent_limit) return null;
             var r = try Big.init(allocator);
             defer r.deinit();
             try r.pow(&big_args[0], exp);

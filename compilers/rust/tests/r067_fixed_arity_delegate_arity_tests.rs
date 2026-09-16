@@ -312,7 +312,12 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     ("safediv", 2, 8, 0xa371c23e3fab5f24),
     ("safemod", 2, 8, 0xc743ce4123866a1f),
     ("clamp", 3, 8, 0x8c2fc27cad9858cc),
-    ("pow", 2, 168, 0x125ffdc8738ca517),
+    // R-169 (pow half): 168 -> 173 top-level ops. The 32 conditional-multiply
+    // rounds are UNCHANGED; the +5 is the exponent-domain guard emitted ahead
+    // of them (OP_DUP, push 0, push 33, OP_WITHIN, OP_VERIFY), without which
+    // pow returned base^min(exp, 32) for any exponent and disagreed with both
+    // the constant folder and the reference interpreter.
+    ("pow", 2, 173, 0x902ca0077020ccea),
     ("mulDiv", 3, 8, 0x005f3b4b6679f2ff),
     ("percentOf", 2, 7, 0x1500fd62d3a9851e),
     ("gcd", 2, 777, 0x5377409bb251c204),

@@ -176,6 +176,58 @@ class MathBuiltinsLowerTest {
     }
 
     @Test
+    void powGuardsTheExponentDomainBeforeUnrolling() {
+        // R-169, the pow half. The 32 rounds compute base^min(exp, 32), so
+        // without a guard an exponent outside 0..32 returned that CLAMPED
+        // value with no error -- measured on the real VM at pow(2,40) = 2^32.
+        // The constant folder computed the TRUE power for exp <= 256 and the
+        // reference interpreter is exact for every exp >= 0, so one builtin
+        // meant three different things. All three now refuse outside 0..32.
+        //
+        // Pinned as an ORDERED window sited BEFORE the first round, not as a
+        // membership test: a guard emitted after the SWAP would be reading the
+        // base rather than the exponent, and one without OP_VERIFY would leave
+        // a boolean on the stack instead of aborting.
+        List<StackOp> ops = compileSingleCall(
+            "Bigint r = pow(this.a, this.b); assertThat(r >= Bigint.ZERO);"
+        );
+        int w = -1;
+        for (int i = 0; i < ops.size(); i++) {
+            if (ops.get(i) instanceof OpcodeOp o && o.code().equals("OP_WITHIN")) {
+                assertEquals(-1, w, "pow must emit exactly one OP_WITHIN");
+                w = i;
+            }
+        }
+        assertTrue(w >= 3, "pow must emit an OP_WITHIN exponent guard");
+        assertTrue(ops.get(w - 3) instanceof OpcodeOp o0 && o0.code().equals("OP_DUP"),
+            "the guard must DUP the exponent");
+        assertEquals(java.math.BigInteger.ZERO, pushInt(ops.get(w - 2)),
+            "guard lower bound must be 0");
+        assertEquals(java.math.BigInteger.valueOf(StackLower.POW_EXPONENT_LIMIT + 1),
+            pushInt(ops.get(w - 1)),
+            "guard upper bound must be POW_EXPONENT_LIMIT + 1 = 33; OP_WITHIN is "
+                + "half-open, so a bound of 32 would reject the largest exponent "
+                + "the unroll can actually compute");
+        assertTrue(ops.get(w + 1) instanceof OpcodeOp o1 && o1.code().equals("OP_VERIFY"),
+            "the domain check must ABORT, not leave a boolean on the stack");
+
+        int firstRound = -1;
+        for (int i = 0; i < ops.size(); i++) {
+            if (ops.get(i) instanceof IfOp) { firstRound = i; break; }
+        }
+        assertTrue(firstRound > w,
+            "the exponent guard must run before the first unrolled round");
+    }
+
+    /** The BigInteger a push op carries, or null if it is not an integer push. */
+    private static java.math.BigInteger pushInt(StackOp op) {
+        if (op instanceof PushOp p && p.value().raw() instanceof java.math.BigInteger b) {
+            return b;
+        }
+        return null;
+    }
+
+    @Test
     void powEmitsFinalDoubleNip() {
         List<StackOp> ops = compileSingleCall(
             "Bigint r = pow(this.a, this.b); assertThat(r >= Bigint.ZERO);"

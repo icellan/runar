@@ -62,6 +62,18 @@ import {
 
 const MAX_STACK_DEPTH = 800;
 
+/**
+ * The largest exponent `pow(base, exp)` computes, and therefore the largest one
+ * the emitted script ACCEPTS — `lowerPow` unrolls exactly this many conditional
+ * multiplies and refuses anything outside `0 <= exp <= POW_EXPONENT_LIMIT`.
+ *
+ * The same number lives in `optimizer/constant-fold.ts` (which must decline to
+ * fold outside it) and in `runar-testing`'s interpreter (which must throw
+ * outside it). All three have to move together or `pow` means different things
+ * folded, executed and interpreted — that was R-169's `pow` half.
+ */
+const POW_EXPONENT_LIMIT = 32;
+
 // ---------------------------------------------------------------------------
 // BIP-143 sighash preimage layout
 // ---------------------------------------------------------------------------
@@ -4946,9 +4958,31 @@ class LoweringContext {
   }
 
   /**
-   * Lower pow(base, exp) — exponentiation.
-   * For constant exponents, unrolls to repeated OP_MUL.
-   * For runtime exponents, emits a bounded loop.
+   * Lower pow(base, exp) — exponentiation by 32 unrolled conditional multiplies.
+   *
+   * THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the `pow` half).
+   * 32 rounds compute base^min(exp, 32). Before the guard below, an exponent
+   * outside 0..32 returned that CLAMPED value with no error: `pow(2, 40)` ran
+   * to completion on the real VM and produced 2^32. The constant folder
+   * (`optimizer/constant-fold.ts`) computed the TRUE power for exp <= 256 and
+   * the reference interpreter is exact for every exp >= 0, so one expression
+   * meant two different things depending on whether the folder had run — for
+   * 33 <= exp <= 256 the fold-ON and fold-OFF scripts accept MUTUALLY
+   * EXCLUSIVE inputs. A negative exponent was a third disagreement: the script
+   * returned 1, the interpreter threw, the folder declined.
+   *
+   * `sqrt` twenty lines down is the model: refuse outside the domain the
+   * unrolled body actually computes, and make the folder decline on exactly
+   * that same bound. Six bytes per callsite:
+   *
+   *     OP_DUP <0> <33> OP_WITHIN OP_VERIFY      ; 0 <= exp < 33
+   *
+   * The bound stays 32 rather than rising to the folder's old 256: each extra
+   * round costs 8-9 script bytes at every callsite (~2 KB to reach 256) and a
+   * raised bound would still need this guard at the new limit, so it buys a
+   * larger domain, not a safer one. Widening it later means moving 33 here,
+   * the folder's bound, and the interpreter's bound together — they are one
+   * number in three places, and R-169 is what happens when they drift.
    */
   private lowerPow(
     bindingName: string,
@@ -4998,14 +5032,22 @@ class LoweringContext {
     // After all iterations: <exp> <base> <result>
     // OP_NIP OP_NIP → <result>
     //
-    // Wait, this multiplies unconditionally for each step where exp > i.
-    // That gives base^min(exp, 32). That's correct!
+    // The loop multiplies once for each i < exp, so it computes
+    // base^min(exp, 32) — NOT base^exp. The guard below is what makes those
+    // two the same function: outside 0 <= exp < 33 the script aborts instead
+    // of returning the clamped value. See the header note.
+
+    // Stack: base exp
+    this.emitOp({ op: 'opcode', code: 'OP_DUP' });            // base exp exp
+    this.emitOp({ op: 'push', value: 0n });                   // base exp exp 0
+    this.emitOp({ op: 'push', value: BigInt(POW_EXPONENT_LIMIT + 1) }); // ... 33
+    this.emitOp({ op: 'opcode', code: 'OP_WITHIN' });         // base exp (0<=exp<33)
+    this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });         // base exp
 
     this.emitOp({ op: 'swap' });     // exp base
     this.emitOp({ op: 'push', value: 1n }); // exp base 1
 
-    const MAX_POW_ITERATIONS = 32;
-    for (let i = 0; i < MAX_POW_ITERATIONS; i++) {
+    for (let i = 0; i < POW_EXPONENT_LIMIT; i++) {
       // Stack: exp base acc
       this.emitOp({ op: 'push', value: 2n });
       this.emitOp({ op: 'opcode', code: 'OP_PICK' }); // exp base acc exp

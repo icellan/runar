@@ -17,6 +17,14 @@ module RunarCompiler::Codegen
 
   MAX_STACK_DEPTH = 800
 
+  # The largest exponent pow(base, exp) computes, and therefore the largest one
+  # the emitted script ACCEPTS — _lower_pow unrolls exactly this many
+  # conditional multiplies and refuses anything outside
+  # 0 <= exp <= POW_EXPONENT_LIMIT. The same number lives in
+  # frontend/constant_fold.rb (which must decline to fold outside it); they have
+  # to move together or pow means different things folded and executed (R-169).
+  POW_EXPONENT_LIMIT = 32
+
   # Builtin function -> opcode mapping
   BUILTIN_OPCODES = {
     "sha256"        => ["OP_SHA256"],
@@ -3427,11 +3435,24 @@ module RunarCompiler::Codegen
 
       @sm.pop; @sm.pop
 
+      # THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the `pow` half).
+      # The 32 rounds below compute base^min(exp, 32). Before this guard an
+      # exponent outside 0..32 returned that CLAMPED value with no error, while
+      # frontend/constant_fold.rb computed the true power for exp <= 256 — so
+      # for 33 <= exp <= 256 the fold-ON and fold-OFF scripts accepted mutually
+      # exclusive inputs. A negative exponent was a third disagreement: script
+      # returned 1, interpreter threw, folder declined. Six bytes per callsite
+      # refuse the whole outside.
+      emit_opcode("OP_DUP")                                                        # base exp exp
+      emit_op({ op: "push", value: { kind: "bigint", big_int: 0 } })               # base exp exp 0
+      emit_op({ op: "push", value: { kind: "bigint", big_int: POW_EXPONENT_LIMIT + 1 } }) # ... 33
+      emit_opcode("OP_WITHIN")                                                     # base exp (0<=exp<33)
+      emit_opcode("OP_VERIFY")                                                     # base exp
+
       emit_op({ op: "swap" })                              # exp base
       emit_op({ op: "push", value: { kind: "bigint", big_int: 1 } })  # exp base 1(acc)
 
-      max_pow_iterations = 32
-      max_pow_iterations.times do |i|
+      POW_EXPONENT_LIMIT.times do |i|
         emit_op({ op: "push", value: { kind: "bigint", big_int: 2 } })
         # R-166/R-191: this was the one depth-less `{ op: "pick" }` in the file.
         # Everywhere else `pick` carries the depth it was picked at (see

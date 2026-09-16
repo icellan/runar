@@ -18,6 +18,12 @@ import (
 // Constant value representation
 // ---------------------------------------------------------------------------
 
+// powFoldExponentLimit is the upper end of the domain pow is exact on, shared
+// with the emitted script (codegen/stack.go#lowerPow unrolls exactly this many
+// conditional multiplies and enforces the bound with
+// OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
+const powFoldExponentLimit = 32
+
 type constKind int
 
 const (
@@ -276,7 +282,13 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 			return nil
 		}
 		base, exp := bigArgs[0], bigArgs[1]
-		if exp.Sign() < 0 || exp.Cmp(big.NewInt(256)) > 0 {
+		// Decline outside the domain the emitted script GUARANTEES and
+		// ENFORCES (codegen/stack.go#lowerPow: 0 <= exp <= 32, the number of
+		// unrolled conditional multiplies). The old bound was 256, which
+		// folded exponents the script CLAMPED to 32 — so for 33 <= exp <= 256
+		// the fold-ON and fold-OFF scripts accepted mutually exclusive inputs
+		// (R-169, the pow half).
+		if exp.Sign() < 0 || exp.Cmp(big.NewInt(powFoldExponentLimit)) > 0 {
 			return nil
 		}
 		result := big.NewInt(1)

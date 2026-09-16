@@ -78,6 +78,17 @@ public final class StackLower {
 
     private static final int MAX_STACK_DEPTH = 800;
 
+    /**
+     * The largest exponent {@code pow(base, exp)} computes, and therefore the
+     * largest one the emitted script ACCEPTS — {@code lowerPow} unrolls exactly
+     * this many conditional multiplies and refuses anything outside
+     * {@code 0 <= exp <= POW_EXPONENT_LIMIT}. The same number lives in
+     * {@code ConstantFold} (which must decline to fold outside it); they have to
+     * move together or {@code pow} means different things folded and executed
+     * (R-169).
+     */
+    static final int POW_EXPONENT_LIMIT = 32;
+
 
     private static int trailingMergedLocalResults(List<AnfBinding> bindings) {
         String prefix = "@ref:" + AnfValue.MERGED_LOCAL_TEMP_PREFIX;
@@ -2345,11 +2356,24 @@ public final class StackLower {
             sm.pop();
             sm.pop();
 
+            // THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the pow half).
+            // The 32 rounds below compute base^min(exp, 32). Before this guard
+            // an exponent outside 0..32 returned that CLAMPED value with no
+            // error, while ConstantFold computed the true power for exp <= 256
+            // — so for 33 <= exp <= 256 the fold-ON and fold-OFF scripts
+            // accepted mutually exclusive inputs. A negative exponent was a
+            // third disagreement: script returned 1, interpreter threw, folder
+            // declined. Six bytes per callsite refuse the whole outside.
+            emitOp(new OpcodeOp("OP_DUP"));                     // base exp exp
+            emitOp(new PushOp(PushValue.of(0)));                // base exp exp 0
+            emitOp(new PushOp(PushValue.of(POW_EXPONENT_LIMIT + 1))); // ... 33
+            emitOp(new OpcodeOp("OP_WITHIN"));                  // base exp (0<=exp<33)
+            emitOp(new OpcodeOp("OP_VERIFY"));                  // base exp
+
             emitOp(new SwapOp());                          // exp base
             emitOp(new PushOp(PushValue.of(1)));           // exp base 1(acc)
 
-            final int maxPowIterations = 32;
-            for (int i = 0; i < maxPowIterations; i++) {
+            for (int i = 0; i < POW_EXPONENT_LIMIT; i++) {
                 emitOp(new PushOp(PushValue.of(2)));
                 emitOp(new OpcodeOp("OP_PICK"));            // exp base acc exp
                 emitOp(new PushOp(PushValue.of(i)));

@@ -329,9 +329,14 @@ export function sign(_value: bigint): bigint {
 }
 
 /**
- * Exponentiation.
- * For constant exponents, the compiler unrolls to repeated `OP_MUL`.
- * For runtime exponents, a bounded iteration is emitted.
+ * Exponentiation, `base ** exp`, for `0 <= exp <= 32`.
+ *
+ * The compiler unrolls 32 conditional `OP_MUL`s, so 32 is the largest exponent
+ * it can compute. That bound is ENFORCED, not documented: an exponent outside
+ * `0 <= exp <= 32` makes the script FAIL (`OP_VERIFY`) rather than silently
+ * return `base ** 32`. A constant exponent outside the range is left unfolded
+ * for the same reason, so it fails identically whether or not the constant
+ * folder ran.
  */
 export function pow(_base: bigint, _exp: bigint): bigint {
   return compilerStub('pow');

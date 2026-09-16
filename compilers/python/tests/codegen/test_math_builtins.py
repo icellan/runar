@@ -130,7 +130,7 @@ _OP_COUNTS = [
     ("safemod",    2,    8),
     ("clamp",      3,    8),
     ("sign",       1,    2),
-    ("pow",        2,  168),
+    ("pow",        2,  173),  # R-169 (pow half): 168 -> 173; the 5-op exponent-domain guard ahead of the unchanged 32-round unroll
     ("mulDiv",     3,    8),
     ("percentOf",  2,    7),
     ("sqrt",       1,   10),  # R-169: 2 -> 10 top-level ops (two domain guards ahead of the unchanged OP_DUP + if)
@@ -249,6 +249,34 @@ def test_sign_dispatches_through_if_branch():
 
 
 # -- pow -------------------------------------------------------------------
+
+def test_pow_guards_the_exponent_domain_before_unrolling():
+    """R-169 (pow half). The 32 rounds compute base^min(exp, 32), so an
+    exponent outside 0..32 used to return that CLAMPED value with no error.
+    The guard is what makes the emitted script the same function as the
+    constant folder and the reference interpreter, both of which refuse
+    outside the same bound. Pinned as an ORDERED window ending in OP_VERIFY
+    and sited BEFORE the first unrolled round, not as a membership test: a
+    guard emitted after the swap would be reading the wrong stack item, and a
+    guard that left a boolean behind would not abort.
+    """
+    ops = _unlock_ops("pow", 2)
+    withins = [i for i, op in enumerate(ops) if _is_opcode(op, "OP_WITHIN")]
+    assert len(withins) == 1, f"expected exactly one OP_WITHIN, got {len(withins)}"
+    w = withins[0]
+    assert _is_opcode(ops[w - 3], "OP_DUP"), "guard must DUP the exponent"
+    assert _is_push_int(ops[w - 2], 0), "guard lower bound must be 0"
+    assert _is_push_int(ops[w - 1], 33), (
+        "guard upper bound must be 33 = POW_EXPONENT_LIMIT + 1 (OP_WITHIN is "
+        "half-open); a bound of 32 here would reject the largest exponent the "
+        "unroll can actually compute"
+    )
+    assert _is_opcode(ops[w + 1], "OP_VERIFY"), (
+        "the domain check must ABORT, not leave a boolean on the stack"
+    )
+    first_if = next(i for i, op in enumerate(ops) if op.op == "if")
+    assert w < first_if, "the guard must run before the first unrolled round"
+
 
 def test_pow_unrolls_32_iterations_with_nip_nip_tail():
     ops = _unlock_ops("pow", 2)

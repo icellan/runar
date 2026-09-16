@@ -15,6 +15,12 @@ require_relative "dce"
 module RunarCompiler
   module Frontend
     module ConstantFold
+      # Upper end of the domain pow is exact on, shared with the emitted script
+      # (codegen/stack.rb#_lower_pow unrolls exactly this many conditional
+      # multiplies and enforces the bound with
+      # OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
+      POW_FOLD_EXPONENT_LIMIT = 32
+
       # -----------------------------------------------------------------
       # Constant environment
       # -----------------------------------------------------------------
@@ -198,7 +204,13 @@ module RunarCompiler
         when "pow"
           return nil unless int_args.size == 2
           base, exp = int_args[0], int_args[1]
-          return nil if exp < 0 || exp > 256
+          # Decline outside the domain the emitted script GUARANTEES and
+          # ENFORCES (codegen/stack.rb#_lower_pow: 0 <= exp <= 32, the number of
+          # unrolled conditional multiplies). The old bound was 256, which
+          # folded exponents the script CLAMPED to 32 — so for 33 <= exp <= 256
+          # the fold-ON and fold-OFF scripts accepted mutually exclusive inputs
+          # (R-169, the pow half).
+          return nil if exp < 0 || exp > POW_FOLD_EXPONENT_LIMIT
           result = 1
           exp.times { result *= base }
           return ["int", result]

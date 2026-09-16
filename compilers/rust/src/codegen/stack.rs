@@ -23,6 +23,15 @@ use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFProperty, ANFValue, ConstV
 
 const MAX_STACK_DEPTH: usize = 800;
 
+/// The largest exponent `pow(base, exp)` computes, and therefore the largest
+/// one the emitted script ACCEPTS — `lower_pow` unrolls exactly this many
+/// conditional multiplies and refuses anything outside
+/// `0 <= exp <= POW_EXPONENT_LIMIT`. The same number lives in
+/// `frontend/constant_fold.rs` (which must decline to fold outside it); they
+/// have to move together or `pow` means different things folded and executed
+/// (R-169).
+const POW_EXPONENT_LIMIT: u32 = 32;
+
 // ---------------------------------------------------------------------------
 // Stack IR types
 // ---------------------------------------------------------------------------
@@ -5595,10 +5604,26 @@ impl LoweringContext {
         self.sm.pop();
 
         // Stack: base exp
+        // THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the `pow` half).
+        // The 32 rounds below compute base^min(exp, 32). Before this guard an
+        // exponent outside 0..32 returned that CLAMPED value with no error,
+        // while `frontend/constant_fold.rs` computed the true power for
+        // exp <= 256 — so for 33 <= exp <= 256 the fold-ON and fold-OFF
+        // scripts accepted mutually exclusive inputs. A negative exponent was
+        // a third disagreement: script returned 1, interpreter threw, folder
+        // declined. Six bytes per callsite refuse the whole outside.
+        self.emit_op(StackOp::Opcode("OP_DUP".to_string()));          // base exp exp
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));  // base exp exp 0
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(
+            POW_EXPONENT_LIMIT + 1,
+        ))));                                                         // ... 33
+        self.emit_op(StackOp::Opcode("OP_WITHIN".to_string()));        // base exp (0<=exp<33)
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));        // base exp
+
         self.emit_op(StackOp::Swap);                                  // exp base
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));               // exp base 1(acc)
 
-        for i in 0..32 {
+        for i in 0..POW_EXPONENT_LIMIT {
             // Stack: exp base acc
             self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(2))));
             self.emit_op(StackOp::Opcode("OP_PICK".to_string()));     // exp base acc exp

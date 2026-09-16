@@ -17,6 +17,12 @@ use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFValue, ConstValue};
 
 type ConstEnv = HashMap<String, ConstValue>;
 
+/// Upper end of the domain `pow` is exact on, shared with the emitted script
+/// (`codegen/stack.rs#lower_pow` unrolls exactly this many conditional
+/// multiplies and enforces the bound with `OP_DUP <0> <33> OP_WITHIN
+/// OP_VERIFY`) and with the reference interpreter.
+const POW_FOLD_EXPONENT_LIMIT: u32 = 32;
+
 fn env_clone(env: &ConstEnv) -> ConstEnv {
     env.clone()
 }
@@ -199,7 +205,13 @@ fn eval_builtin_call(func_name: &str, args: &[&ConstValue]) -> Option<ConstValue
             }
             let (base, exp) = (int_args[0], int_args[1]);
             let exp_u32 = exp.to_u32()?;
-            if exp_u32 > 256 {
+            // Decline outside the domain the emitted script GUARANTEES and
+            // ENFORCES (`codegen/stack.rs#lower_pow`: 0 <= exp <= 32, the
+            // number of unrolled conditional multiplies). The old bound was
+            // 256, which folded exponents the script CLAMPED to 32 — so for
+            // 33 <= exp <= 256 the fold-ON and fold-OFF scripts accepted
+            // mutually exclusive inputs (R-169, the `pow` half).
+            if exp_u32 > POW_FOLD_EXPONENT_LIMIT {
                 return None;
             }
             use num_traits::Pow;

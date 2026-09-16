@@ -136,10 +136,44 @@ class TestMathBuiltinsCodegen < Minitest::Test
   def test_pow_unrolls_into_long_mul_sequence
     artifact = compile_call_artifact('pow', 2)
     asm = artifact.asm
-    # 32-iter unroll => many OP_MUL ops (≥ 32 by the bounded loop count).
+    # EXACTLY 32, not ">= 32". A lower bound cannot detect change in either
+    # direction: it passes on 32 and on 64 alike, so it pins nothing about the
+    # unroll count it claims to pin. The count is load-bearing -- it IS the
+    # exponent domain the guard below enforces -- so it is pinned exactly.
     op_mul_count = asm.scan('OP_MUL').length
-    assert_operator op_mul_count, :>=, 32,
-                    "pow must unroll ≥ 32 OP_MUL ops, got #{op_mul_count}"
+    assert_equal 32, op_mul_count,
+                 "pow must unroll exactly 32 OP_MUL ops, got #{op_mul_count}"
+  end
+
+  # -- pow: the exponent-domain guard (R-169, the pow half) -----------------
+
+  def test_pow_guards_the_exponent_domain_before_unrolling
+    # The 32 rounds compute base^min(exp, 32), so without a guard an exponent
+    # outside 0..32 returned that CLAMPED value with no error -- measured on
+    # the real VM at pow(2,40) = 2^32. The constant folder computed the TRUE
+    # power for exp <= 256 and the interpreter is exact for every exp >= 0, so
+    # one builtin meant three things. All three now refuse outside 0..32.
+    #
+    # Pinned as an ORDERED sequence sited BEFORE the first round, not as a
+    # membership test: a guard emitted after the OP_SWAP would be reading the
+    # base instead of the exponent, and one without OP_VERIFY would leave a
+    # boolean on the stack instead of aborting.
+    artifact = compile_call_artifact('pow', 2)
+    asm = artifact.asm
+    # `asm` renders a data push as its hex bytes, so 33 reads as <21>.
+    assert_match(/OP_DUP\s+OP_0\s+<21>\s+OP_WITHIN\s+OP_VERIFY/, asm,
+                 "pow must emit OP_DUP <0> <33> OP_WITHIN OP_VERIFY before the " \
+                 "unroll; got: #{asm[0, 200]}")
+    guard_at = asm.index(/OP_WITHIN/)
+    first_round_at = asm.index(/OP_SWAP\s+OP_1\s/)
+    refute_nil guard_at, 'no OP_WITHIN in the pow lowering'
+    refute_nil first_round_at, 'no accumulator seed in the pow lowering'
+    assert_operator guard_at, :<, first_round_at,
+                    'the exponent guard must run before the accumulator seed'
+    # 33, not 32: OP_WITHIN is half-open, so a bound of 32 would reject the
+    # largest exponent the unroll can actually compute.
+    refute_match(/OP_DUP\s+OP_0\s+(OP_16|<20>)\s+OP_WITHIN/, asm,
+                 'guard upper bound must be 33 = <21> (OP_WITHIN is half-open), not 32')
   end
 
   # -- mulDiv: MUL then DIV -------------------------------------------------
