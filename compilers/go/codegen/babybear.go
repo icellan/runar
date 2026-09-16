@@ -280,11 +280,67 @@ func bbFieldInv(t *BBTracker, aName, resultName string) {
 // Public emit functions — entry points called from stack.go
 // ===========================================================================
 
+// bbEmitCanonVerify -- R-119: a witness-supplied field element must BE a field
+// element, aborting form.
+//
+// Nothing in babybear.go or koalabear.go ever compared anything: grep the two
+// files for OP_LESSTHAN / OP_WITHIN / OP_GREATERTHANOREQUAL and the count is
+// zero. Every operand of `bbFieldAdd` / `Sub` / `Mul` / `Inv` and of the eight
+// ext4 entry points is an unlock argument, and they went straight into
+// OP_ADD / OP_SUB / OP_MUL / OP_MOD.
+//
+// WHAT THAT ACTUALLY BREAKS. The `v` versus `v + p` half of the finding does
+// NOT reproduce: every one of these emitters reduces its result mod p, so
+// bbFieldAdd(5+p, 0) and bbFieldAdd(5, 0) both return 5, measured on the go-sdk
+// interpreter. The NEGATIVE half does. `bbFieldAdd` and `bbFieldMul` reduce
+// with a bare OP_MOD on the documented assumption that both operands are in
+// [0, p-1] ("Sum of two values in [0, p-1] is always non-negative, so simple
+// OP_MOD suffices"), and OP_MOD takes the sign of the DIVIDEND. Measured,
+// before this gate:
+//
+//	bbFieldAdd(-1, 0)   -> -1            bbFieldAdd(p-1, 0)  -> 2013265920
+//	bbFieldMul(-1, 1)   -> -1            bbFieldMul(p-1, 1)  -> 2013265920
+//	bbFieldInv(-1)      -> -1            bbFieldInv(p-1)     -> 2013265920
+//	kbExt4Mul0((0,-1,0,0),(0,0,0,1)) -> -3   ... canonical spelling -> 2130706430
+//
+// Two DIFFERENT script numbers for the same residue, out of a builtin whose
+// declared codomain is the field. Script equality is on numbers, so the escaped
+// spelling breaks every downstream equality, every OP_NUM2BIN serialisation of
+// a field element, and the closure property the ext4 and Poseidon2 code relies
+// on when it feeds one field builtin's output into the next.
+//
+// REJECT, NOT REDUCE, and gate the INPUT rather than fixing up the output: a
+// reduce would leave `v` and `v + p` as two accepted spellings of one element,
+// which is the aliasing this finding is about. Rejecting makes the builtins
+// canonical-in / canonical-out, so the gate is idempotent under composition --
+// `bbFieldSub(bbFieldAdd(a, b), b)` passes its own gate for free.
+//
+// ABORTING form, because these are VALUE builtins: the same split R-117 drew
+// for the EC value builtins and CL-BUG-095 set for the Point width (predicates
+// clamp and flag, value producers OP_VERIFY).
+//
+// Callers are the PUBLIC entry points only, never the internal helpers. The
+// internal `bbFieldMul` / `bbFieldAdd` run hundreds of times inside `bbFieldInv`
+// and the ext4 components on values that are canonical by construction; gating
+// there would multiply the script size for nothing.
+func bbEmitCanonVerify(t *BBTracker, names ...string) {
+	for _, n := range names {
+		t.copyToTop(n, "_bb_cv")
+		t.rawBlock([]string{"_bb_cv"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(bbFieldP)}})
+			e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
+}
+
 // EmitBBFieldAdd emits Baby Bear field addition.
 // Stack in: [..., a, b] (b on top)
 // Stack out: [..., (a + b) mod p]
 func EmitBBFieldAdd(emit func(StackOp)) {
 	t := NewBBTracker([]string{"a", "b"}, emit)
+	bbEmitCanonVerify(t, "a", "b")
 	bbFieldAdd(t, "a", "b", "result")
 	// Stack should now be: [result]
 }
@@ -294,6 +350,7 @@ func EmitBBFieldAdd(emit func(StackOp)) {
 // Stack out: [..., (a - b) mod p]
 func EmitBBFieldSub(emit func(StackOp)) {
 	t := NewBBTracker([]string{"a", "b"}, emit)
+	bbEmitCanonVerify(t, "a", "b")
 	bbFieldSub(t, "a", "b", "result")
 }
 
@@ -302,6 +359,7 @@ func EmitBBFieldSub(emit func(StackOp)) {
 // Stack out: [..., (a * b) mod p]
 func EmitBBFieldMul(emit func(StackOp)) {
 	t := NewBBTracker([]string{"a", "b"}, emit)
+	bbEmitCanonVerify(t, "a", "b")
 	bbFieldMul(t, "a", "b", "result")
 }
 
@@ -310,6 +368,7 @@ func EmitBBFieldMul(emit func(StackOp)) {
 // Stack out: [..., a^(p-2) mod p]
 func EmitBBFieldInv(emit func(StackOp)) {
 	t := NewBBTracker([]string{"a"}, emit)
+	bbEmitCanonVerify(t, "a")
 	bbFieldInv(t, "a", "result")
 }
 
@@ -361,6 +420,7 @@ func bbFieldMulConst(t *BBTracker, aName string, c int64, resultName string) {
 
 func bbExt4MulComponent(emit func(StackOp), component int) {
 	t := NewBBTracker([]string{"a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"}, emit)
+	bbEmitCanonVerify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
 	switch component {
 	case 0:
@@ -453,6 +513,7 @@ func EmitBBExt4Mul3(emit func(StackOp)) { bbExt4MulComponent(emit, 3) }
 
 func bbExt4InvComponent(emit func(StackOp), component int) {
 	t := NewBBTracker([]string{"a0", "a1", "a2", "a3"}, emit)
+	bbEmitCanonVerify(t, "a0", "a1", "a2", "a3")
 
 	// Step 1: Compute norm_0 = a0² + W*a2² - 2*W*a1*a3
 	t.copyToTop("a0", "_a0c")

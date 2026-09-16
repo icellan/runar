@@ -316,11 +316,28 @@ func kbFieldInv(t *KBTracker, aName, resultName string) {
 // Public emit functions — entry points called from stack.go
 // ===========================================================================
 
+// kbEmitCanonVerify -- R-119, the KoalaBear twin of bbEmitCanonVerify in
+// babybear.go. Same hole, same numbers, same policy; see that comment for the
+// measurement and for why the gate rejects rather than reduces, and why it sits
+// on the public entry points rather than in the internal helpers.
+func kbEmitCanonVerify(t *KBTracker, names ...string) {
+	for _, n := range names {
+		t.copyToTop(n, "_kb_cv")
+		t.rawBlock([]string{"_kb_cv"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(kbFieldP)}})
+			e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
+}
+
 // EmitKBFieldAdd emits KoalaBear field addition.
 // Stack in: [..., a, b] (b on top)
 // Stack out: [..., (a + b) mod p]
 func EmitKBFieldAdd(emit func(StackOp)) {
 	t := NewKBTracker([]string{"a", "b"}, emit)
+	kbEmitCanonVerify(t, "a", "b")
 	kbFieldAdd(t, "a", "b", "result")
 }
 
@@ -329,6 +346,7 @@ func EmitKBFieldAdd(emit func(StackOp)) {
 // Stack out: [..., (a - b) mod p]
 func EmitKBFieldSub(emit func(StackOp)) {
 	t := NewKBTracker([]string{"a", "b"}, emit)
+	kbEmitCanonVerify(t, "a", "b")
 	kbFieldSub(t, "a", "b", "result")
 }
 
@@ -337,6 +355,7 @@ func EmitKBFieldSub(emit func(StackOp)) {
 // Stack out: [..., (a * b) mod p]
 func EmitKBFieldMul(emit func(StackOp)) {
 	t := NewKBTracker([]string{"a", "b"}, emit)
+	kbEmitCanonVerify(t, "a", "b")
 	kbFieldMul(t, "a", "b", "result")
 }
 
@@ -345,6 +364,7 @@ func EmitKBFieldMul(emit func(StackOp)) {
 // Stack out: [..., a^(p-2) mod p]
 func EmitKBFieldInv(emit func(StackOp)) {
 	t := NewKBTracker([]string{"a"}, emit)
+	kbEmitCanonVerify(t, "a")
 	kbFieldInv(t, "a", "result")
 }
 
@@ -415,6 +435,7 @@ func kbFieldMulConst(t *KBTracker, aName string, c int64, resultName string) {
 
 func kbExt4MulComponent(emit func(StackOp), component int) {
 	t := NewKBTracker([]string{"a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"}, emit)
+	kbEmitCanonVerify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
 	switch component {
 	case 0:
@@ -507,6 +528,7 @@ func EmitKBExt4Mul3(emit func(StackOp)) { kbExt4MulComponent(emit, 3) }
 
 func kbExt4InvComponent(emit func(StackOp), component int) {
 	t := NewKBTracker([]string{"a0", "a1", "a2", "a3"}, emit)
+	kbEmitCanonVerify(t, "a0", "a1", "a2", "a3")
 
 	// Step 1: Compute norm_0 = a0² + W*a2² - 2*W*a1*a3
 	t.copyToTop("a0", "_a0c")

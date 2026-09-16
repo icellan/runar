@@ -45,6 +45,9 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: KBBuiltin) !EcOpBundle {
     var tracker = try KBTracker.init(allocator, initialNames(builtin));
     errdefer tracker.deinit();
 
+    // R-119: gate the builtin's own witness operands before any arithmetic.
+    try emitCanonVerify(&tracker, initialNames(builtin));
+
     switch (builtin) {
         .kb_field_add => try emitKBFieldAdd(&tracker),
         .kb_field_sub => try emitKBFieldSub(&tracker),
@@ -72,6 +75,49 @@ fn initialNames(builtin: KBBuiltin) []const ?[]const u8 {
         .kb_ext4_mul0, .kb_ext4_mul1, .kb_ext4_mul2, .kb_ext4_mul3 => &.{ "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3" },
         .kb_ext4_inv0, .kb_ext4_inv1, .kb_ext4_inv2, .kb_ext4_inv3 => &.{ "a0", "a1", "a2", "a3" },
     };
+}
+
+
+/// R-119 -- a witness-supplied field element must BE a field element, aborting
+/// form.
+///
+/// Nothing in this module or its BabyBear twin ever compared anything: the
+/// OP_LESSTHAN / OP_WITHIN / OP_GREATERTHANOREQUAL count in both was zero.
+/// Every operand of the four scalar builtins and the eight ext4 entry points is
+/// an unlock argument and went straight into OP_ADD / OP_SUB / OP_MUL / OP_MOD.
+///
+/// The `v` vs `v + p` half of the finding did NOT reproduce -- every emitter
+/// reduces its result mod p, so bbFieldAdd(5+p, 0) and bbFieldAdd(5, 0) both
+/// returned 5. The NEGATIVE half did: fieldAdd and fieldMul reduce with a BARE
+/// OP_MOD on the documented assumption that both operands are already in
+/// [0, p-1], and OP_MOD takes the sign of the dividend. Measured before this
+/// gate, bbFieldAdd(-1, 0) returned -1 where bbFieldAdd(p-1, 0) returned
+/// 2013265920 -- two different script numbers for one residue, out of a builtin
+/// whose declared codomain is the field. Script equality is numeric, so the
+/// escaped spelling breaks every downstream comparison and every serialisation
+/// of the element.
+///
+/// REJECT, not reduce, and gate the INPUT: a reduce would leave `v` and `v + p`
+/// as two accepted spellings of one element, which is the aliasing this finding
+/// is about. Gating the input makes the builtins canonical-in / canonical-out,
+/// so the gate is idempotent under composition. ABORTING because these are
+/// VALUE builtins -- the split R-117 drew for EC and CL-BUG-095 set for the
+/// Point width.
+///
+/// Driven off `initialNames`, so it gates exactly the builtin's own witness
+/// operands, left to right, in the same order the other five tiers do; the
+/// internal helpers are untouched, and they run hundreds of times inside
+/// fieldInv and the ext4 components on values canonical by construction.
+fn emitCanonVerify(t: *KBTracker, names: []const ?[]const u8) !void {
+    for (names) |maybe_name| {
+        const n = maybe_name orelse continue;
+        try t.copyToTop(n, "_cv");
+        try t.emitPushInt(0);
+        try t.emitPushInt(KB_P);
+        try t.emitOpcode("OP_WITHIN");
+        try t.emitOpcode("OP_VERIFY");
+        t.popNames(1);
+    }
 }
 
 // ===========================================================================

@@ -62,6 +62,18 @@ export {
 export {
   emitBn254G1Add, emitBn254G1ScalarMul, emitBn254G1Negate, emitBn254G1OnCurve,
 } from './passes/bn254-codegen.js';
+// BabyBear / KoalaBear field emitters, exported for the same reason: six tiers
+// ship them, the TS unit tests only ever checked opcode SHAPES, and nothing
+// outside the Go tier had ever EXECUTED the emitted script — which is how a
+// negative witness operand walked out of the field unchallenged (R-119).
+export {
+  emitBBFieldAdd, emitBBFieldSub, emitBBFieldMul, emitBBFieldInv,
+  emitBBExt4Mul0, emitBBExt4Inv0,
+} from './passes/babybear-codegen.js';
+export {
+  emitKBFieldAdd, emitKBFieldSub, emitKBFieldMul, emitKBFieldInv,
+  emitKBExt4Mul0, emitKBExt4Inv0,
+} from './passes/koalabear-codegen.js';
 export {
   emitCheckPreimageBinding,
   emitCheckPreimageBindingRaw,

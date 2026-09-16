@@ -236,12 +236,54 @@ function fieldInv(t: BBTracker, aName: string, resultName: string): void {
 // ===========================================================================
 
 /**
+ * R-119 — a witness-supplied field element must BE a field element, aborting
+ * form.
+ *
+ * Nothing in this module or its KoalaBear twin ever compared anything: the
+ * OP_LESSTHAN / OP_WITHIN / OP_GREATERTHANOREQUAL count in both was zero. Every
+ * operand of the four scalar builtins and the eight ext4 entry points is an
+ * unlock argument and went straight into OP_ADD / OP_SUB / OP_MUL / OP_MOD.
+ *
+ * The `v` vs `v + p` half of the finding did NOT reproduce — every emitter
+ * reduces its result mod p, so `bbFieldAdd(5+p, 0)` and `bbFieldAdd(5, 0)` both
+ * returned 5. The NEGATIVE half did: `fieldAdd` and `fieldMul` reduce with a
+ * BARE OP_MOD on the documented assumption that both operands are already in
+ * [0, p-1], and OP_MOD takes the sign of the dividend. Measured before this
+ * gate: `bbFieldAdd(-1, 0) -> -1` against `bbFieldAdd(p-1, 0) -> 2013265920`,
+ * and the same for mul, inv and the ext4 components. Two different script
+ * numbers for one residue, out of a builtin whose declared codomain is the
+ * field — and script equality is numeric, so the escaped spelling breaks every
+ * downstream `===` and every serialisation of the element.
+ *
+ * REJECT, not reduce, and gate the INPUT: a reduce would leave `v` and `v + p`
+ * as two accepted spellings of one element, which is the aliasing this finding
+ * is about. Gating the input makes the builtins canonical-in / canonical-out, so
+ * the gate is idempotent under composition. ABORTING because these are VALUE
+ * builtins — the split R-117 drew for EC and CL-BUG-095 set for the Point width.
+ *
+ * Public entry points only. The internal helpers run hundreds of times inside
+ * `fieldInv` and the ext4 components on values canonical by construction.
+ */
+function emitCanonVerify(t: BBTracker, p: bigint, ...names: string[]): void {
+  for (const n of names) {
+    t.copyToTop(n, '_cv');
+    t.rawBlock(['_cv'], null, (e) => {
+      e({ op: 'push', value: 0n });
+      e({ op: 'push', value: p });
+      e({ op: 'opcode', code: 'OP_WITHIN' });
+      e({ op: 'opcode', code: 'OP_VERIFY' });
+    });
+  }
+}
+
+/**
  * emitBBFieldAdd: Baby Bear field addition.
  * Stack in: [..., a, b] (b on top)
  * Stack out: [..., (a + b) mod p]
  */
 export function emitBBFieldAdd(emit: (op: StackOp) => void): void {
   const t = new BBTracker(['a', 'b'], emit);
+  emitCanonVerify(t, BB_P, 'a', 'b');
   fieldAdd(t, 'a', 'b', 'result');
   // Stack should now be: [result]
 }
@@ -253,6 +295,7 @@ export function emitBBFieldAdd(emit: (op: StackOp) => void): void {
  */
 export function emitBBFieldSub(emit: (op: StackOp) => void): void {
   const t = new BBTracker(['a', 'b'], emit);
+  emitCanonVerify(t, BB_P, 'a', 'b');
   fieldSub(t, 'a', 'b', 'result');
 }
 
@@ -263,6 +306,7 @@ export function emitBBFieldSub(emit: (op: StackOp) => void): void {
  */
 export function emitBBFieldMul(emit: (op: StackOp) => void): void {
   const t = new BBTracker(['a', 'b'], emit);
+  emitCanonVerify(t, BB_P, 'a', 'b');
   fieldMul(t, 'a', 'b', 'result');
 }
 
@@ -273,6 +317,7 @@ export function emitBBFieldMul(emit: (op: StackOp) => void): void {
  */
 export function emitBBFieldInv(emit: (op: StackOp) => void): void {
   const t = new BBTracker(['a'], emit);
+  emitCanonVerify(t, BB_P, 'a');
   fieldInv(t, 'a', 'result');
 }
 
@@ -310,6 +355,7 @@ function fieldMulConst(t: BBTracker, aName: string, c: bigint, resultName: strin
  */
 function emitExt4MulComponent(emit: (op: StackOp) => void, component: number): void {
   const t = new BBTracker(['a0', 'a1', 'a2', 'a3', 'b0', 'b1', 'b2', 'b3'], emit);
+  emitCanonVerify(t, BB_P, 'a0', 'a1', 'a2', 'a3', 'b0', 'b1', 'b2', 'b3');
 
   // Each component of the ext4 multiplication
   switch (component) {
@@ -416,6 +462,7 @@ function emitExt4MulComponent(emit: (op: StackOp) => void, component: number): v
  */
 function emitExt4InvComponent(emit: (op: StackOp) => void, component: number): void {
   const t = new BBTracker(['a0', 'a1', 'a2', 'a3'], emit);
+  emitCanonVerify(t, BB_P, 'a0', 'a1', 'a2', 'a3');
 
   // Step 1: Compute norm_0 = a0² + W*a2² - 2*W*a1*a3
   t.copyToTop('a0', '_a0c');

@@ -76,6 +76,35 @@ export interface InterpreterResult {
 // Internal exceptions for control flow
 // ---------------------------------------------------------------------------
 
+
+/**
+ * R-119 — the reference interpreter must refuse exactly what the emitted script
+ * refuses.
+ *
+ * `bbEmitCanonVerify` (compilers/go/codegen/babybear.go and its five ports)
+ * gates every witness operand of the BabyBear builtins to [0, p-1] with
+ * `OP_WITHIN OP_VERIFY`. Without the same bound here the source-vs-script
+ * differential oracle disagrees on every non-canonical witness, and
+ * `TestContract` keeps telling an author a spend works that the chain rejects.
+ * Same three-places rule as `pow` (R-169), minus the folder — the constant
+ * folder does not fold these builtins.
+ *
+ * The bound is on the INPUT, not a fix-up of the output, for the reason the
+ * emitter records: reducing would leave `v` and `v + p` as two accepted
+ * spellings of one element, which is the aliasing the finding is about.
+ */
+const BB_FIELD_P = 2013265921n;
+
+function assertBBFieldElement(funcName: string, v: bigint, argIndex: number): bigint {
+  if (v < 0n || v >= BB_FIELD_P) {
+    throw new Error(
+      `${funcName}: argument ${argIndex} is ${v}, which is not a BabyBear field ` +
+      `element — the emitted script requires 0 <= x < ${BB_FIELD_P}`,
+    );
+  }
+  return v;
+}
+
 class AssertionError extends Error {
   constructor(message?: string) {
     super(message ?? 'assert failed');
@@ -1531,22 +1560,22 @@ export class RunarInterpreter {
 
       // Baby Bear field arithmetic (p = 2013265921)
       case 'bbFieldAdd': {
-        const a = this.toBigInt(args[0]!);
-        const b = this.toBigInt(args[1]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
+        const b = assertBBFieldElement(funcName, this.toBigInt(args[1]!), 1);
         return { kind: 'bigint', value: (a + b) % 2013265921n };
       }
       case 'bbFieldSub': {
-        const a = this.toBigInt(args[0]!);
-        const b = this.toBigInt(args[1]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
+        const b = assertBBFieldElement(funcName, this.toBigInt(args[1]!), 1);
         return { kind: 'bigint', value: ((a - b) % 2013265921n + 2013265921n) % 2013265921n };
       }
       case 'bbFieldMul': {
-        const a = this.toBigInt(args[0]!);
-        const b = this.toBigInt(args[1]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
+        const b = assertBBFieldElement(funcName, this.toBigInt(args[1]!), 1);
         return { kind: 'bigint', value: (a * b) % 2013265921n };
       }
       case 'bbFieldInv': {
-        const a = this.toBigInt(args[0]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
         const p = 2013265921n;
         let result = 1n, base = ((a % p) + p) % p, exp = p - 2n;
         while (exp > 0n) {
@@ -1561,10 +1590,9 @@ export class RunarInterpreter {
       case 'bbExt4Mul0': case 'bbExt4Mul1': case 'bbExt4Mul2': case 'bbExt4Mul3': {
         const p = 2013265921n;
         const W = 11n;
-        const a0 = this.toBigInt(args[0]!), a1 = this.toBigInt(args[1]!);
-        const a2 = this.toBigInt(args[2]!), a3 = this.toBigInt(args[3]!);
-        const b0 = this.toBigInt(args[4]!), b1 = this.toBigInt(args[5]!);
-        const b2 = this.toBigInt(args[6]!), b3 = this.toBigInt(args[7]!);
+        const g = (i: number) => assertBBFieldElement(funcName, this.toBigInt(args[i]!), i);
+        const a0 = g(0), a1 = g(1), a2 = g(2), a3 = g(3);
+        const b0 = g(4), b1 = g(5), b2 = g(6), b3 = g(7);
         const fm = (x: bigint, y: bigint) => (x * y) % p;
         const fa = (x: bigint, y: bigint) => (x + y) % p;
         const r0 = fa(fm(a0, b0), fm(W, fa(fa(fm(a1, b3), fm(a2, b2)), fm(a3, b1))));
@@ -1578,8 +1606,8 @@ export class RunarInterpreter {
       case 'bbExt4Inv0': case 'bbExt4Inv1': case 'bbExt4Inv2': case 'bbExt4Inv3': {
         const p = 2013265921n;
         const W = 11n;
-        const a0 = this.toBigInt(args[0]!), a1 = this.toBigInt(args[1]!);
-        const a2 = this.toBigInt(args[2]!), a3 = this.toBigInt(args[3]!);
+        const g = (i: number) => assertBBFieldElement(funcName, this.toBigInt(args[i]!), i);
+        const a0 = g(0), a1 = g(1), a2 = g(2), a3 = g(3);
         const fm = (x: bigint, y: bigint) => (x * y) % p;
         const fa = (x: bigint, y: bigint) => (x + y) % p;
         const fs = (x: bigint, y: bigint) => ((x - y) % p + p) % p;
