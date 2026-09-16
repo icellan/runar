@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseGoSource } from '../passes/01-parse-go.js';
+import { parseGoSource, GO_BUILTIN_MAP, GO_CAST_TYPES } from '../passes/01-parse-go.js';
 import type {
   BinaryExpr,
   CallExpr,
@@ -882,4 +882,65 @@ func (c *VarDemo) Check(data runar.ByteString) {
       expect(sawByteStringCall).toBe(false);
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// F1 — the Go surface spells a type conversion and a builtin call identically,
+// so a name that is in BOTH tables silently becomes whichever branch runs
+// first. `Sha256` and `Ripemd160` were in both, the cast branch ran first, and
+// `runar.Sha256(preimage)` unwrapped to its own argument: the hash opcode was
+// never emitted and `assert(sha256(x) === digest)` shipped as
+// `assert(x === digest)`.
+//
+// Resolution: in CALL position the FUNCTION wins (see the GO_CAST_TYPES
+// docstring). These tests hold the two tables disjoint and pin the resolution
+// for every builtin in the map, so the next name that is both a type and a
+// function fails here instead of on chain.
+// ---------------------------------------------------------------------------
+
+describe('Go surface: builtin names are never type casts', () => {
+  it('GO_CAST_TYPES and GO_BUILTIN_MAP are disjoint', () => {
+    const both = [...GO_CAST_TYPES].filter((n) => n in GO_BUILTIN_MAP).sort();
+    expect(
+      both,
+      `these names are BOTH a Go-surface cast type and a Go-surface builtin: ` +
+        `${both.join(', ')}. The cast branch runs first, so every call to them ` +
+        `compiles to an identity binding and its opcode disappears. Remove them ` +
+        `from GO_CAST_TYPES — a cast to a ByteString subtype is a no-op, a ` +
+        `vanished hash is a fund bug.`,
+    ).toEqual([]);
+  });
+
+  it.each(['Sha256', 'Ripemd160', 'Sha256Hash', 'Hash160', 'Hash256'])(
+    'runar.%s(x) parses as a call, not as its own argument',
+    (spelling) => {
+      const go = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type HashSpelling struct {
+\trunar.SmartContract
+\tExpected runar.ByteString \`runar:"readonly"\`
+}
+
+func (c *HashSpelling) Unlock(data runar.ByteString) {
+\th := runar.${spelling}(data)
+\trunar.Assert(h == c.Expected)
+}
+`;
+      const result = parseGoSource(go, 'HashSpelling.runar.go');
+      expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      expect(decl.kind).toBe('variable_decl');
+      expect(
+        decl.init.kind,
+        `runar.${spelling}(data) parsed as a ${decl.init.kind}, not a ` +
+          `call_expr — the call was unwrapped to its own argument and the ` +
+          `opcode will never be emitted.`,
+      ).toBe('call_expr');
+      const callee = (decl.init as CallExpr).callee as Identifier;
+      expect(callee.name).toBe(GO_BUILTIN_MAP[spelling]);
+    },
+  );
 });

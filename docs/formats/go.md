@@ -253,6 +253,23 @@ Built-in functions are accessed through the `runar` package with PascalCase name
 | `runar.VerifySLHDSA_SHA2_256s(msg, sig, pubkey)` | `verifySLHDSA_SHA2_256s(msg, sig, pubkey)` |
 | `runar.VerifySLHDSA_SHA2_256f(msg, sig, pubkey)` | `verifySLHDSA_SHA2_256f(msg, sig, pubkey)` |
 
+### Names that are both a type and a function
+
+`Sha256` and `Ripemd160` are Rúnar **type** names as well as Rúnar **builtin**
+names, and the Go surface spells a type conversion and a call identically —
+`runar.Sha256(x)`. The rule is positional and has no exceptions:
+
+- In **type** position (`Digest runar.Sha256`, `func (c *C) M(d runar.Sha256)`)
+  the name is the type.
+- In **call** position (`runar.Sha256(preimage)`) the name is the **function**,
+  and the table above applies: it hashes.
+
+There is deliberately no conversion spelling for these two. Both are
+`ByteString` subtypes, so a conversion would have been an identity on the value
+and emitted no bytes; use the value directly, or `runar.ToByteString(...)` if you
+need an explicit widening. `runar.Sha256Hash(...)` is an unambiguous alias for
+the SHA-256 call if you prefer to avoid the overloaded spelling entirely.
+
 EC constants are available as package-level variables:
 
 | Go constant | Rúnar constant |

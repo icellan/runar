@@ -172,9 +172,26 @@ module RunarCompiler
     }.freeze
 
     # Known type names used for type cast detection.
+    #
+    # MUST stay disjoint from GO_BUILTIN_MAP. `Sha256` and `Ripemd160` are both
+    # Rúnar type names and Rúnar builtin names, and the Go surface spells a cast
+    # and a call identically -- `runar.Sha256(x)`. While both names sat here the
+    # cast branch ran first and `runar.Sha256(preimage)` unwrapped to its own
+    # argument: `assert(sha256(x) == digest)` compiled to `assert(x == digest)`,
+    # with the digest in the locking script for anyone to read and push back.
+    #
+    # In call position the FUNCTION wins. docs/formats/go.md has documented
+    # `runar.Sha256(data)` -> `sha256(data)` since the surface shipped, five of
+    # the seven tiers already implemented it, and the cast reading loses nothing:
+    # both names are ByteString subtypes, so the conversion was an identity on
+    # the value and a no-op on the bytes. They still resolve as TYPES -- that is
+    # GO_TYPE_MAP, consulted from type position only.
+    #
+    # test/test_parser_go.rb asserts the disjointness; adding a name to both
+    # tables is what reintroduces the bug.
     GO_CAST_TYPES = %w[
-      Int Bigint BigintBig Bool ByteString PubKey Sig Sha256
-      Ripemd160 Addr SigHashPreimage RabinSig RabinPubKey Point
+      Int Bigint BigintBig Bool ByteString PubKey Sig
+      Addr SigHashPreimage RabinSig RabinPubKey Point
     ].to_set.freeze
 
     def self.go_map_builtin(name)

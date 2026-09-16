@@ -293,7 +293,7 @@ function makePrimitiveOrCustom(name: string): TypeNode {
 // Builtin mapping: Go PascalCase → Rúnar camelCase
 // ---------------------------------------------------------------------------
 
-const GO_BUILTIN_MAP: Record<string, string> = {
+export const GO_BUILTIN_MAP: Record<string, string> = {
   // Assertions
   Assert: 'assert',
   // Hashing
@@ -362,10 +362,29 @@ const GO_BUILTIN_MAP: Record<string, string> = {
   Sha256Compress: 'sha256Compress', Sha256Finalize: 'sha256Finalize',
 };
 
-/** Known type names used for type cast detection. */
-const GO_CAST_TYPES = new Set([
-  'Int', 'Bigint', 'BigintBig', 'Bool', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
+/**
+ * Known type names used for type cast detection.
+ *
+ * MUST stay disjoint from `GO_BUILTIN_MAP`. `Sha256` and `Ripemd160` are both
+ * Rúnar type names and Rúnar builtin names, and the Go surface spells a cast
+ * and a call identically — `runar.Sha256(x)`. While both names sat here the
+ * cast branch ran first and `runar.Sha256(preimage)` unwrapped to an identity
+ * binding: `assert(sha256(x) === digest)` compiled to `assert(x === digest)`,
+ * with the digest in the locking script for anyone to read and push back.
+ *
+ * In call position the FUNCTION wins. `docs/formats/go.md` has documented
+ * `runar.Sha256(data)` -> `sha256(data)` since the surface shipped, five of the
+ * seven tiers already implemented it, and the cast reading loses nothing:
+ * `Sha256` and `Ripemd160` are ByteString subtypes, so the conversion was an
+ * identity on the value and a no-op on the bytes. Both names still resolve as
+ * TYPES — that is `GO_TYPE_MAP`, consulted from type position only.
+ *
+ * The disjointness is asserted in `01-parse-go.test.ts`; adding a name to both
+ * tables is what reintroduces the bug.
+ */
+export const GO_CAST_TYPES = new Set([
+  'Int', 'Bigint', 'BigintBig', 'Bool', 'ByteString', 'PubKey', 'Sig',
+  'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
   'Point', 'P256Point', 'P384Point',
 ]);
 
