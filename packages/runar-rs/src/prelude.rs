@@ -597,7 +597,7 @@ pub fn get_state_script<T>(_contract: &T) -> ByteString {
 /// see other inputs, so this returns an empty ByteString. `input_index` MUST
 /// be an integer literal in source — the Rúnar typechecker rejects non-literal
 /// indices.
-pub fn extract_prev_output_script(_input_index: i64, _expected_script_hash: ByteString) -> ByteString {
+pub fn extract_prev_output_script(_input_index: i64, _expected_script_hash: &[u8]) -> ByteString {
     Vec::new()
 }
 
@@ -671,6 +671,154 @@ pub fn substr(data: &[u8], start: i64, length: i64) -> ByteString {
     let s = start as usize;
     let l = length as usize;
     data[s..s + l].to_vec()
+}
+
+/// The length of a byte string in bytes — `OP_SIZE`.
+///
+/// `OP_SIZE` pushes the size of the top element and cannot fail, so neither can
+/// this.
+pub fn len(data: &[u8]) -> Int {
+    data.len() as Int
+}
+
+/// The bytes of `data` from `index` onwards — the RIGHT half of the cut.
+///
+/// `split` is SINGLE-VALUED. `spec/grammar.md` declares
+/// `split(data: ByteString, index: bigint): ByteString` and every tier emits
+/// `OP_SPLIT OP_NIP`, dropping the left half at the split site; `left(data,
+/// index)` is the other side of the same cut. A Rust mock returning a tuple or
+/// a pair would reintroduce a defect that was closed in `runar-lang` and
+/// `runar-java`, and no `.runar.rs` surface could name the pair anyway —
+/// Rúnar has no tuple type and no surface parser accepts destructuring.
+///
+/// `OP_SPLIT` FAILS when the position is negative or past the end of the
+/// element; it does not clamp. So this panics there rather than returning a
+/// value the emitted script can never produce. `index == len(data)` is legal
+/// and yields the empty byte string.
+pub fn split(data: &[u8], index: Int) -> ByteString {
+    let n = split_position(data, index, "split");
+    data[n..].to_vec()
+}
+
+/// The first `length` bytes of `data` — `OP_SPLIT OP_DROP`.
+///
+/// Fails on the same positions `OP_SPLIT` fails on; see [`split`].
+pub fn left(data: &[u8], length: Int) -> ByteString {
+    let n = split_position(data, length, "left");
+    data[..n].to_vec()
+}
+
+/// The last `length` bytes of `data` — `<size> <length> OP_SUB OP_SPLIT OP_NIP`.
+///
+/// The emitted cut is at `size - length`, so the same bounds apply: a `length`
+/// that is negative or larger than the element makes `OP_SPLIT` fail.
+pub fn right(data: &[u8], length: Int) -> ByteString {
+    let n = split_position(data, length, "right");
+    data[data.len() - n..].to_vec()
+}
+
+/// The cut position shared by `split`, `left` and `right`, with the bound
+/// `OP_SPLIT` itself enforces.
+fn split_position(data: &[u8], index: Int, who: &str) -> usize {
+    assert!(
+        index >= 0 && (index as u128) <= data.len() as u128,
+        "runar: {who} position {index} is outside a {}-byte value — OP_SPLIT fails on a \
+         position below zero or past the end of the element, it does not clamp",
+        data.len()
+    );
+    index as usize
+}
+
+/// The maximum number of bytes `reverseBytes` can reverse.
+///
+/// Every tier lowers `reverseBytes` to a bounded unrolled loop of exactly this
+/// many peel-one-byte iterations (`compilers/rust/src/codegen/stack.rs`
+/// `lower_reverse_bytes` and its six peers), then drops whatever is left. So
+/// past 520 bytes the SCRIPT returns the reverse of the first 520 bytes and
+/// silently discards the rest; it is the classic Bitcoin element-size bound.
+pub const REVERSE_BYTES_MAX: usize = 520;
+
+/// `data` with its bytes in the opposite order — `reverseBytes`.
+///
+/// Panics past [`REVERSE_BYTES_MAX`]. The emitted loop is unrolled a fixed 520
+/// times and drops the unconsumed remainder, so for a longer value the script
+/// produces the reverse of the first 520 bytes — reversing the whole thing here
+/// would hand the caller a value on-chain execution cannot produce, which is
+/// the failure mode `num2bin` had.
+pub fn reverse_bytes(data: &[u8]) -> ByteString {
+    assert!(
+        data.len() <= REVERSE_BYTES_MAX,
+        "runar: reverseBytes cannot reverse {} bytes — every tier unrolls exactly {} \
+         peel-one-byte iterations and drops the remainder, so the script would return the \
+         reverse of only the first {} bytes",
+        data.len(),
+        REVERSE_BYTES_MAX,
+        REVERSE_BYTES_MAX
+    );
+    let mut out = data.to_vec();
+    out.reverse();
+    out
+}
+
+/// A `ByteString` from its hex spelling — `toByteString`.
+///
+/// `spec/grammar.md` makes `toByteString '(' StringLiteral ')'` the
+/// ByteStringLiteral production: the hex is the VALUE, and at script level the
+/// builtin is the identity on bytes already pushed. This mock is therefore the
+/// hex decoder, and it is strict for the same reason the grammar is — an odd
+/// number of digits or a non-hex character has no byte string to denote.
+pub fn to_byte_string(hex: &str) -> ByteString {
+    assert!(
+        hex.len() % 2 == 0,
+        "runar: toByteString('{hex}') has an odd number of hex digits — a ByteString \
+         literal denotes whole bytes"
+    );
+    let bytes = hex.as_bytes();
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in bytes.chunks(2) {
+        let hi = hex_digit(pair[0], hex);
+        let lo = hex_digit(pair[1], hex);
+        out.push(hi << 4 | lo);
+    }
+    out
+}
+
+fn hex_digit(c: u8, whole: &str) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => panic!(
+            "runar: toByteString('{whole}') contains '{}', which is not a hex digit",
+            c as char
+        ),
+    }
+}
+
+/// Fixed-width little-endian sign-magnitude encoding — `int2str`.
+///
+/// `int2str` and `num2bin` are the SAME builtin: every frontend maps both
+/// spellings to `int2str`/`num2bin` and every tier emits `OP_NUM2BIN` for them
+/// (`compilers/rust/src/codegen/stack.rs` `builtin_opcodes`). Despite the name
+/// there is no radix and no decimal string; `byte_len` is a WIDTH in bytes.
+/// It delegates to [`num2bin`] so the two spellings cannot drift apart, and
+/// inherits its refusal when the width is too small for the value.
+pub fn int2str(value: Int, byte_len: Int) -> ByteString {
+    assert!(
+        byte_len >= 0,
+        "runar: int2str width {byte_len} is negative — OP_NUM2BIN fails on a negative size"
+    );
+    num2bin(&value, byte_len as usize)
+}
+
+/// The `int_2_str` spelling of [`int2str`].
+///
+/// `compilers/rust/src/frontend/parser_rustmacro.rs` maps `int_2_str` and
+/// `int2str` to the one `int2str` builtin, so a contract may spell it either
+/// way and both must answer identically. Two spellings, one emitter, and
+/// nothing but `tests/mock_script_agreement.rs` compares them.
+pub fn int_2_str(value: Int, byte_len: Int) -> ByteString {
+    int2str(value, byte_len)
 }
 
 /// Converts an integer to a byte string of the specified length

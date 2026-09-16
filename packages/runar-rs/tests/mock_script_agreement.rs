@@ -553,6 +553,440 @@ fn byte_string_builtins_agree_with_the_emitter() {
 }
 
 // ---------------------------------------------------------------------------
+// The eight byte builtins `packages/runar-rs` had no mock for
+// ---------------------------------------------------------------------------
+//
+// `len`, `split`, `left`, `right`, `int2str`, `int_2_str`, `reverse_bytes` and
+// `to_byte_string` are all documented as callable in `docs/formats/rust.md` and
+// none of them existed in this crate. A mock that does not exist cannot
+// disagree with an emitter, which is exactly how the gap survived: the seven
+// `.runar.rs` contracts calling one of them could not be compiled as Rust at
+// all, so the only thing that ever read them was the Rúnar frontend.
+//
+// Every row below spends the compiled lock. The mock's own answer is the
+// `expected` the script has to accept, and a tampered value has to be rejected
+// first, so "the script accepts anything" cannot pass for agreement.
+
+/// A byte-string argument case whose answer is a byte string.
+fn bs_case(
+    builtin: &'static str,
+    mock: &'static str,
+    arg_tys: Vec<&'static str>,
+    args: Vec<Vec<u8>>,
+    want: Vec<u8>,
+) -> AgreementCase {
+    bytes_case(builtin, mock, arg_tys, args, "ByteString", want)
+}
+
+/// Sixteen distinct bytes: a cut at any position is visible in the result.
+fn sixteen() -> Vec<u8> {
+    (1u8..=16).collect()
+}
+
+/// The largest element the emitted `reverseBytes` loop can reverse in full.
+fn five_twenty() -> Vec<u8> {
+    (0..520).map(|i| (i % 251) as u8).collect()
+}
+
+#[test]
+fn len_agrees_with_the_emitter() {
+    let d = sixteen();
+    let big = five_twenty();
+    reconcile_unrunnable(&run_group(
+        "len",
+        vec![
+            AgreementCase {
+                builtin: "len",
+                mock: "len",
+                arg_tys: vec!["ByteString"],
+                args: vec![d.clone()],
+                ret_ty: "bigint",
+                want: num_i(len(&d)),
+                tamper: num_i(len(&d) + 1),
+                call_extra: vec![],
+                known_divergent: "",
+            },
+            // Empty. `OP_SIZE` of an empty element is 0, not a failure, and the
+            // Script encoding of 0 is the EMPTY push — the one case where
+            // `want` and a wrong answer are most easily confused.
+            AgreementCase {
+                builtin: "len",
+                mock: "len (empty value)",
+                arg_tys: vec!["ByteString"],
+                args: vec![Vec::new()],
+                ret_ty: "bigint",
+                want: num_i(len(&[])),
+                tamper: num_i(1),
+                call_extra: vec![],
+                known_divergent: "",
+            },
+            // 520 bytes: past one byte of Script number, and the element-size
+            // bound every emitter is built around. A `len` that answered from
+            // anything narrower than the whole value still looks right at 16.
+            AgreementCase {
+                builtin: "len",
+                mock: "len (520-byte value)",
+                arg_tys: vec!["ByteString"],
+                args: vec![big.clone()],
+                ret_ty: "bigint",
+                want: num_i(len(&big)),
+                tamper: num_i(len(&big) - 1),
+                call_extra: vec![],
+                known_divergent: "",
+            },
+        ],
+    ));
+    assert_eq!(len(&big), 520, "the 520-byte row is not 520 bytes");
+}
+
+#[test]
+fn split_left_and_right_agree_with_the_emitter() {
+    let d = sixteen();
+    reconcile_unrunnable(&run_group(
+        "split / left / right",
+        vec![
+            // `split` binds the RIGHT half (OP_SPLIT OP_NIP). A mock returning
+            // the left half, or a pair, would be rejected here.
+            bs_case("split", "split", vec!["ByteString", "bigint"], vec![d.clone(), num_i(5)], split(&d, 5)),
+            bs_case(
+                "split",
+                "split (at zero)",
+                vec!["ByteString", "bigint"],
+                vec![d.clone(), num_i(0)],
+                split(&d, 0),
+            ),
+            // At `len` the cut yields the empty byte string, which is also the
+            // Script encoding of 0 and of false — the answer most likely to be
+            // produced for the wrong reason.
+            bs_case(
+                "split",
+                "split (at len)",
+                vec!["ByteString", "bigint"],
+                vec![d.clone(), num_i(16)],
+                split(&d, 16),
+            ),
+            bs_case(
+                "split",
+                "split (empty value at zero)",
+                vec!["ByteString", "bigint"],
+                vec![Vec::new(), num_i(0)],
+                split(&[], 0),
+            ),
+            bs_case("left", "left", vec!["ByteString", "bigint"], vec![d.clone(), num_i(5)], left(&d, 5)),
+            bs_case(
+                "left",
+                "left (whole value)",
+                vec!["ByteString", "bigint"],
+                vec![d.clone(), num_i(16)],
+                left(&d, 16),
+            ),
+            bs_case(
+                "left",
+                "left (nothing)",
+                vec!["ByteString", "bigint"],
+                vec![d.clone(), num_i(0)],
+                left(&d, 0),
+            ),
+            bs_case("right", "right", vec!["ByteString", "bigint"], vec![d.clone(), num_i(5)], right(&d, 5)),
+            bs_case(
+                "right",
+                "right (whole value)",
+                vec!["ByteString", "bigint"],
+                vec![d.clone(), num_i(16)],
+                right(&d, 16),
+            ),
+            bs_case(
+                "right",
+                "right (nothing)",
+                vec!["ByteString", "bigint"],
+                vec![d.clone(), num_i(0)],
+                right(&d, 0),
+            ),
+        ],
+    ));
+
+    // `split` and `left` are the two sides of ONE cut. Each row above pins one
+    // side against the script; without this the two could be wrong in
+    // compensating ways and both rows would still pass.
+    assert_eq!(cat(&left(&d, 5), &split(&d, 5)), d, "left and split do not reassemble the value");
+}
+
+/// Past the end, `OP_SPLIT` FAILS — it does not clamp — so the mock has to
+/// refuse rather than answer. A value-agreement row cannot express this: the
+/// script aborts on the ARGUMENTS and never reaches the comparison, whatever
+/// `expected` is. Same shape as the `num2bin` refusal-parity tests above.
+#[test]
+fn split_refuses_a_position_past_the_end_and_so_must_the_mock() {
+    let d = sixteen();
+    let c = AgreementCase {
+        builtin: "split",
+        mock: "probe",
+        arg_tys: vec!["ByteString", "bigint"],
+        args: vec![d.clone(), num_i(17)],
+        ret_ty: "ByteString",
+        want: Vec::new(),
+        tamper: vec![0x01],
+        call_extra: vec![],
+        known_divergent: "",
+    };
+    let lock = compile_agreement(&c);
+
+    match run_agreement(&lock, &c, &c.want) {
+        Spend::Refused(e) => assert!(
+            e.contains("InvalidSplitRange") || e.contains("Split") || e.contains("split"),
+            "the emitted split failed past the end, but not on the split: {e}"
+        ),
+        other => panic!(
+            "the emitted split ACCEPTED or merely rejected position 17 on a 16-byte value \
+             ({other:?}) — this test's premise is gone, and the mock's refusal below would \
+             then be the divergence"
+        ),
+    }
+
+    let mock = std::panic::catch_unwind(|| split(&sixteen(), 17));
+    assert!(
+        mock.is_err(),
+        "MOCK/EMITTER DISAGREE — the emitted split FAILS at position 17 of a 16-byte value, \
+         but prelude::split returned {:?}. Whatever that is, it is a value on-chain \
+         execution can never produce.",
+        mock.map(|v| hex_of(&v))
+    );
+
+    // And the in-range side, so the refusal above is about the position rather
+    // than about `split` refusing everything.
+    assert_eq!(split(&sixteen(), 16), Vec::<u8>::new());
+}
+
+#[test]
+fn reverse_bytes_agrees_with_the_emitter() {
+    let big = five_twenty();
+    reconcile_unrunnable(&run_group(
+        "reverseBytes",
+        vec![
+            bs_case(
+                "reverseBytes",
+                "reverse_bytes",
+                vec!["ByteString"],
+                vec![vec![0xde, 0xad, 0xbe, 0xef]],
+                reverse_bytes(&[0xde, 0xad, 0xbe, 0xef]),
+            ),
+            // One byte is its own reverse, so this row can only be read
+            // together with the control: the tampered value must be rejected.
+            bs_case(
+                "reverseBytes",
+                "reverse_bytes (one byte)",
+                vec!["ByteString"],
+                vec![vec![0x7f]],
+                reverse_bytes(&[0x7f]),
+            ),
+            // An odd length has a fixed middle byte; an implementation that
+            // pairs bytes off the ends can drop or duplicate it and still pass
+            // every even-length case.
+            bs_case(
+                "reverseBytes",
+                "reverse_bytes (odd length)",
+                vec!["ByteString"],
+                vec![vec![1, 2, 3, 4, 5]],
+                reverse_bytes(&[1, 2, 3, 4, 5]),
+            ),
+            // 520 bytes is the bound the loop is unrolled to — the last length
+            // the script reverses in full, and the one the mock's own refusal
+            // above it is keyed on.
+            bs_case(
+                "reverseBytes",
+                "reverse_bytes (520 bytes, the unroll bound)",
+                vec!["ByteString"],
+                vec![big.clone()],
+                reverse_bytes(&big),
+            ),
+        ],
+    ));
+
+    // The empty value is separate: `reverse_bytes(&[])` is the empty byte
+    // string, which is also what a tampered control would have to differ from,
+    // and `tamper_bs` of empty is `[0x01]` — a real difference, so the row is
+    // not vacuous. Kept out of the group only because it reads better named.
+    reconcile_unrunnable(&run_group(
+        "reverseBytes (empty)",
+        vec![bs_case(
+            "reverseBytes",
+            "reverse_bytes (empty value)",
+            vec!["ByteString"],
+            vec![Vec::new()],
+            reverse_bytes(&[]),
+        )],
+    ));
+}
+
+/// Past 520 bytes the emitted loop runs out of iterations and DROPS the
+/// unconsumed remainder, so the script returns the reverse of the first 520
+/// bytes. A mock that reversed the whole value would hand the caller a value
+/// on-chain execution cannot produce — the `num2bin` failure mode exactly — so
+/// it refuses, and this pins the bound rather than asserting it in a comment.
+#[test]
+fn reverse_bytes_refuses_past_the_unroll_bound() {
+    let mock = std::panic::catch_unwind(|| reverse_bytes(&vec![0u8; REVERSE_BYTES_MAX + 1]));
+    assert!(
+        mock.is_err(),
+        "prelude::reverse_bytes answered for {} bytes. Every tier unrolls exactly {} \
+         peel-one-byte iterations and then drops what is left, so the script's answer is \
+         the reverse of only the first {} bytes and the mock's is not it.",
+        REVERSE_BYTES_MAX + 1,
+        REVERSE_BYTES_MAX,
+        REVERSE_BYTES_MAX
+    );
+    // The bound itself must be ACCEPTED, or the refusal above would pass for a
+    // mock that refuses everything.
+    assert_eq!(reverse_bytes(&vec![0u8; REVERSE_BYTES_MAX]).len(), REVERSE_BYTES_MAX);
+}
+
+#[test]
+fn int2str_agrees_with_the_emitter() {
+    reconcile_unrunnable(&run_group(
+        "int2str",
+        vec![
+            bs_case("int2str", "int2str", vec!["bigint", "bigint"], vec![num_i(1000), num_i(4)], int2str(1000, 4)),
+            // Zero: every byte of the answer is 0x00, and the ARGUMENT is the
+            // empty push. A mock keyed on the argument's length rather than its
+            // value gets this one wrong.
+            bs_case(
+                "int2str",
+                "int2str (zero)",
+                vec!["bigint", "bigint"],
+                vec![num_i(0), num_i(4)],
+                int2str(0, 4),
+            ),
+            // Negative: the sign is the top bit of the LAST byte, not a
+            // separate byte, and not the first byte.
+            bs_case(
+                "int2str",
+                "int2str (negative)",
+                vec!["bigint", "bigint"],
+                vec![num_i(-1000), num_i(4)],
+                int2str(-1000, 4),
+            ),
+            // 255 in two bytes: the sign occupies the bit the magnitude would
+            // otherwise use, so the answer is `ff00` and not `ff`.
+            bs_case(
+                "int2str",
+                "int2str (sign needs its own bit)",
+                vec!["bigint", "bigint"],
+                vec![num_i(255), num_i(2)],
+                int2str(255, 2),
+            ),
+            // The `int_2_str` spelling is a SECOND mock of the same builtin —
+            // both parser spellings lower to `int2str` — so it gets its own row
+            // the way `bool` / `bool_cast` does. Nothing else compares them.
+            bs_case(
+                "int2str",
+                "int_2_str",
+                vec!["bigint", "bigint"],
+                vec![num_i(-1000), num_i(4)],
+                int_2_str(-1000, 4),
+            ),
+        ],
+    ));
+}
+
+/// `int2str` IS `OP_NUM2BIN`, so it inherits the refusal: the opcode fails when
+/// the number does not fit the size and has no wrap-around. The emitted script
+/// is checked here rather than the claim being inherited from the `num2bin`
+/// tests — `int2str` reaches the opcode down a different path in every tier.
+#[test]
+fn int2str_refuses_a_width_too_small_and_so_must_the_mock() {
+    let c = AgreementCase {
+        builtin: "int2str",
+        mock: "probe",
+        arg_tys: vec!["bigint", "bigint"],
+        args: vec![num_i(1000), num_i(1)],
+        ret_ty: "ByteString",
+        want: vec![0x00],
+        tamper: vec![0x01],
+        call_extra: vec![],
+        known_divergent: "",
+    };
+    let lock = compile_agreement(&c);
+    let err = match run_agreement(&lock, &c, &c.want) {
+        Spend::Refused(e) => e,
+        other => panic!(
+            "the emitted int2str ACCEPTED or merely rejected 1000 in one byte ({other:?}) — \
+             this test's premise is gone"
+        ),
+    };
+    assert!(
+        err.contains("too large for target size"),
+        "expected the emitted int2str to fail on the size, got: {err}"
+    );
+
+    let mock = std::panic::catch_unwind(|| int2str(1000, 1));
+    assert!(
+        mock.is_err(),
+        "MOCK/EMITTER DISAGREE — the emitted int2str FAILS on int2str(1000, 1) ({err}), but \
+         prelude::int2str returned {:?}.",
+        mock.map(|v| hex_of(&v))
+    );
+
+    // Two bytes is the width that works, so the refusal is about the width.
+    assert_eq!(hex_of(&int2str(1000, 2)), "e803");
+}
+
+/// `toByteString` is the identity on bytes already pushed — `spec/grammar.md`
+/// makes `toByteString '(' StringLiteral ')'` the ByteStringLiteral production,
+/// so the hex IS the value. The claim this row settles is therefore about the
+/// mock's hex DECODER: the bytes it produces for a spelling must be the bytes
+/// the script sees for that same literal.
+#[test]
+fn to_byte_string_agrees_with_the_emitter() {
+    let cases: &[&str] = &[
+        "deadbeef",
+        // Empty: a decoder that returned a one-byte zero, or refused, would
+        // still pass every non-empty case.
+        "",
+        // Leading zero bytes are load-bearing in a fixed-width value and are
+        // the first thing a "parse as a number then re-encode" decoder loses.
+        "0000ff",
+        // Mixed case, both digits of a byte crossing the a-f boundary.
+        "0aF0",
+        // A byte with the high bit set, which is the sign bit in a Script
+        // number and must NOT be treated as one here.
+        "80",
+    ];
+    reconcile_unrunnable(&run_group(
+        "toByteString",
+        cases
+            .iter()
+            .map(|hex| {
+                let want = to_byte_string(hex);
+                AgreementCase {
+                    builtin: "toByteString",
+                    mock: "to_byte_string",
+                    arg_tys: vec!["ByteString"],
+                    args: vec![want.clone()],
+                    ret_ty: "ByteString",
+                    tamper: tamper_bs(&want),
+                    want,
+                    call_extra: vec![],
+                    known_divergent: "",
+                }
+            })
+            .collect(),
+    ));
+
+    // The argument pushed above IS the mock's own answer, so those rows pin the
+    // SCRIPT's identity, not the decoder. This pins the decoder, against a
+    // spelling written out byte by byte rather than re-derived from it.
+    assert_eq!(to_byte_string("0aF0"), vec![0x0a, 0xf0]);
+    assert_eq!(to_byte_string(""), Vec::<u8>::new());
+
+    for bad in ["abc", "gg", "0x41", " 41"] {
+        assert!(
+            std::panic::catch_unwind(|| to_byte_string(bad)).is_err(),
+            "to_byte_string({bad:?}) returned a value; that spelling denotes no byte string"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Width — the rows that go past 2^63
 // ---------------------------------------------------------------------------
 
