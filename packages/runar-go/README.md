@@ -582,7 +582,7 @@ The reference end-to-end test for `Counter` is [`integration/go/counter_test.go`
 
 The integration suite uses `RPCProvider` (or `NewRegtestRPCProvider` for auto-mining) and the helpers in [`integration/go/helpers/`](../../integration/go/helpers) to fund wallets and sign with the test SDK. The same harness ships in [`integration/`](../../integration) for all seven SDKs.
 
-The cross-SDK conformance suite at [`conformance/sdk-output/`](../../conformance/sdk-output) verifies that all 7 SDKs produce **byte-identical deployed locking scripts** for the same artifact + constructor args. The `stateful-counter` test case is one of 27 fixtures.
+The cross-SDK conformance suite at [`conformance/sdk-output/`](../../conformance/sdk-output) verifies that all 7 SDKs produce **byte-identical deployed locking scripts** for the same artifact + constructor args. The `stateful-counter` test case is one of 70 fixtures.
 
 ---
 

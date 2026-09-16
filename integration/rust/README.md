@@ -8,7 +8,7 @@ deploy/call).
 
 Tests are split into two tiers:
 
-### 1. Default (offline) — 15 tests
+### 1. Default (offline) — 37 tests
 
 Pure compile / script-size checks. They exercise the Rust compiler pipeline and
 assert on artifact shape, script length, etc. No network or regtest node
@@ -33,7 +33,7 @@ Tests that run by default include:
 - `test_sphincs_wallet_compile` / `_script_size`
 - `test_tic_tac_toe_compile`
 
-### 2. Opt-in (on-chain) — 113 tests gated by `regtest` feature
+### 2. Opt-in (on-chain) — 135 tests gated by `regtest` feature
 
 Tests that deploy contracts and spend UTXOs on a local Bitcoin regtest node.
 They require a reachable RPC endpoint (default `http://localhost:18332`) and
