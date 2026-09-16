@@ -26,6 +26,7 @@ import runar.compiler.ir.ast.Identifier;
 import runar.compiler.ir.ast.IfStatement;
 import runar.compiler.ir.ast.IncrementExpr;
 import runar.compiler.ir.ast.IndexAccessExpr;
+import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.MemberExpr;
 import runar.compiler.ir.ast.MethodNode;
 import runar.compiler.ir.ast.ParamNode;
@@ -1123,6 +1124,23 @@ public final class RbParser {
             return new IfStatement(cond, body, new ArrayList<>(), l);
         }
 
+        /**
+         * Destructure {@code <receiver>.downto(<bound>)} — the Ruby countdown
+         * header — into {@code {receiver, bound}}.
+         *
+         * <p>Returns {@code null} for every other expression, including
+         * {@code downto} with the wrong arity, so a malformed header falls
+         * through to the range-operator branch and gets that branch's
+         * diagnostic rather than silently becoming a loop.
+         */
+        private static Expression[] matchDowntoCall(Expression expr) {
+            if (!(expr instanceof CallExpr call)) return null;
+            if (call.args().size() != 1) return null;
+            if (!(call.callee() instanceof MemberExpr member)) return null;
+            if (!"downto".equals(member.property())) return null;
+            return new Expression[] { member.object(), call.args().get(0) };
+        }
+
         Statement parseForStatement(SourceLocation l) {
             advance(); // 'for'
             Token iterTok = advance();
@@ -1130,17 +1148,44 @@ public final class RbParser {
             expect(TK.IN, "in");
             Expression startExpr = parseExpression();
 
+            // Three loop headers, all of them real Ruby that iterates exactly
+            // these values:
+            //
+            //   for i in 0...n       -> 0, 1, … n-1  (exclusive, ascending)
+            //   for i in 0..n        -> 0, 1, … n    (inclusive, ascending)
+            //   for i in n.downto(m) -> n, n-1, … m  (inclusive, DESCENDING)
+            //
+            // `downto` is what lets the Ruby surface spell a countdown.
+            // Ruby's range operators only ever ascend — `(5..2)` is empty —
+            // so `step = -1` was unreachable from this surface, and no fixture
+            // could exercise it across all nine. `Integer#downto` is the
+            // language's own countdown verb, it returns an Enumerator, and
+            // `for x in enum` is valid Ruby over one.
+            //
+            // `5.downto(2)` is a postfix method call, so the start-expression
+            // parser has already consumed the whole header by the time we get
+            // here. Match on the shape it produced rather than on the tokens.
             boolean isExclusive = false;
-            if (peek().kind == TK.DOTDOTDOT) {
-                isExclusive = true;
-                advance();
-            } else if (peek().kind == TK.DOTDOT) {
-                advance();
+            boolean descending = false;
+            Expression endExpr;
+            Expression[] downto = matchDowntoCall(startExpr);
+            if (downto != null) {
+                startExpr = downto[0];
+                endExpr = downto[1];
+                descending = true;
+                isExclusive = false; // downto's bound is inclusive
             } else {
-                errors.add(file + ":" + peek().line
-                    + ": expected range operator '..' or '...' in for loop");
+                if (peek().kind == TK.DOTDOTDOT) {
+                    isExclusive = true;
+                    advance();
+                } else if (peek().kind == TK.DOTDOT) {
+                    advance();
+                } else {
+                    errors.add(file + ":" + peek().line
+                        + ": expected range operator '..' or '...', or '.downto(n)', in for loop");
+                }
+                endExpr = parseExpression();
             }
-            Expression endExpr = parseExpression();
 
             match(TK.DO);
             skipNewlines();
@@ -1154,13 +1199,19 @@ public final class RbParser {
                 startExpr,
                 varLoc
             );
-            Expression cond = new BinaryExpr(
-                isExclusive ? Expression.BinaryOp.LT : Expression.BinaryOp.LE,
-                new Identifier(varName),
-                endExpr
-            );
+            Expression.BinaryOp cmpOp;
+            if (descending) {
+                cmpOp = Expression.BinaryOp.GE;
+            } else if (isExclusive) {
+                cmpOp = Expression.BinaryOp.LT;
+            } else {
+                cmpOp = Expression.BinaryOp.LE;
+            }
+            Expression cond = new BinaryExpr(cmpOp, new Identifier(varName), endExpr);
             Statement update = new ExpressionStatement(
-                new IncrementExpr(new Identifier(varName), false),
+                descending
+                    ? new DecrementExpr(new Identifier(varName), false)
+                    : new IncrementExpr(new Identifier(varName), false),
                 l
             );
             return new ForStatement(init, cond, update, body, l);

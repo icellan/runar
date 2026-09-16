@@ -38,6 +38,7 @@ import runar.compiler.ir.ast.SourceLocation;
 import runar.compiler.ir.ast.Statement;
 import runar.compiler.ir.ast.TernaryExpr;
 import runar.compiler.ir.ast.TypeNode;
+import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
@@ -57,6 +58,16 @@ import runar.compiler.ir.ast.Visibility;
  * downstream IR matches the TypeScript reference.
  */
 public final class PyParser {
+
+    /**
+     * Emitted for a {@code range} step the unrolled loop model cannot
+     * represent. Shared verbatim with the other six tiers.
+     */
+    static final String RANGE_STEP_DIAGNOSTIC =
+        "range() step must be 1 or -1. The unrolled loop carries only a start value "
+        + "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be "
+        + "represented and would be discarded.";
+
 
     private PyParser() {}
 
@@ -1165,6 +1176,23 @@ public final class PyParser {
             return new IfStatement(condition, thenBlock, elseBlock, location);
         }
 
+        /**
+         * The integer value of a literal expression, or {@code null} when it
+         * is not one.
+         *
+         * <p>A negative literal arrives as a unary minus over a positive one,
+         * so both shapes have to be walked — the same walk ANF lowering does,
+         * for the same reason (N-138).
+         */
+        private static BigInteger literalIntValue(Expression expr) {
+            if (expr instanceof BigIntLiteral lit) return lit.value();
+            if (expr instanceof UnaryExpr un && un.op() == Expression.UnaryOp.NEG) {
+                BigInteger inner = literalIntValue(un.operand());
+                return inner == null ? null : inner.negate();
+            }
+            return null;
+        }
+
         Statement parseFor(SourceLocation location) {
             expectIdent("for");
             Token varTok = expect(TokKind.IDENT);
@@ -1174,12 +1202,36 @@ public final class PyParser {
             expectIdent("range");
             expect(TokKind.LPAREN);
 
+            // range(n), range(a, b), or range(a, b, step) with step in {1, -1}.
+            //
+            // The third argument is what lets the Python surface spell a
+            // COUNTDOWN. Until it existed, `range` was the surface's only loop
+            // syntax and it could only ascend, so `step = -1` — a shape the
+            // ANF loop node has carried since issue #121 and every tier lowers
+            // — was unreachable from Python, and no fixture could exercise it
+            // across all nine surfaces.
+            //
+            // Only ±1 is accepted: the ANF loop node synthesizes iteration k
+            // as `start + k*step` with a unit step, so `range(0, 10, 2)` has
+            // no representation. Refusing it is the same rule the for-header
+            // surfaces enforce on `i += 2` (N-061), in Python's spelling.
             Expression first = parseExpression();
             Expression initExpr;
             Expression limitExpr;
+            boolean descending = false;
             if (match(TokKind.COMMA)) {
                 initExpr = first;
                 limitExpr = parseExpression();
+                if (match(TokKind.COMMA)) {
+                    BigInteger step = literalIntValue(parseExpression());
+                    if (BigInteger.ONE.equals(step)) {
+                        descending = false;
+                    } else if (BigInteger.valueOf(-1).equals(step)) {
+                        descending = true;
+                    } else {
+                        errors.add(RANGE_STEP_DIAGNOSTIC);
+                    }
+                }
             } else {
                 initExpr = new BigIntLiteral(BigInteger.ZERO);
                 limitExpr = first;
@@ -1195,13 +1247,18 @@ public final class PyParser {
                 initExpr,
                 location
             );
+            // `range` is half-open at BOTH ends: `range(5, 1, -1)` yields
+            // 5, 4, 3, 2, so the descending guard is `i > stop`, exactly as
+            // `<` is for ascending.
             BinaryExpr condition = new BinaryExpr(
-                Expression.BinaryOp.LT,
+                descending ? Expression.BinaryOp.GT : Expression.BinaryOp.LT,
                 new Identifier(varName),
                 limitExpr
             );
             ExpressionStatement update = new ExpressionStatement(
-                new IncrementExpr(new Identifier(varName), false),
+                descending
+                    ? new DecrementExpr(new Identifier(varName), false)
+                    : new IncrementExpr(new Identifier(varName), false),
                 location
             );
 

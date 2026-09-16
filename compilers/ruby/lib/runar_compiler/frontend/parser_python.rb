@@ -1102,6 +1102,28 @@ module RunarCompiler
         )
       end
 
+      # Emitted for a `range` step the unrolled loop model cannot represent.
+      # Shared verbatim with the other six tiers.
+      RANGE_STEP_DIAGNOSTIC =
+        "range() step must be 1 or -1. The unrolled loop carries only a start value " \
+        "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be " \
+        "represented and would be discarded."
+
+      # The integer value of a literal expression, or nil when it is not one.
+      #
+      # A negative literal arrives as a unary minus over a positive one, so
+      # both shapes have to be walked -- the same walk ANF lowering does, for
+      # the same reason (N-138).
+      def literal_int_value(expr)
+        return expr.value if expr.is_a?(BigIntLiteral)
+
+        if expr.is_a?(UnaryExpr) && expr.op == "-"
+          inner = literal_int_value(expr.operand)
+          return inner.nil? ? nil : -inner
+        end
+        nil
+      end
+
       def parse_for_statement(location)
         expect_ident("for")
 
@@ -1112,10 +1134,34 @@ module RunarCompiler
         expect_ident("range")
         expect(TOK_LPAREN)
 
+        # range(n), range(a, b), or range(a, b, step) with step in {1, -1}.
+        #
+        # The third argument is what lets the Python surface spell a COUNTDOWN.
+        # Until it existed, `range` was the surface's only loop syntax and it
+        # could only ascend, so `step = -1` -- a shape the ANF loop node has
+        # carried since issue #121 and every tier lowers -- was unreachable
+        # from Python, and no fixture could exercise it across all nine
+        # surfaces.
+        #
+        # Only +-1 is accepted: the ANF loop node synthesizes iteration k as
+        # `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+        # representation. Refusing it is the same rule the for-header surfaces
+        # enforce on `i += 2` (N-061), stated in Python's spelling.
         first_arg = parse_expression
+        descending = false
         if match_tok(TOK_COMMA)
           start_expr = first_arg
           end_expr = parse_expression
+          if match_tok(TOK_COMMA)
+            step = literal_int_value(parse_expression)
+            if step == 1
+              descending = false
+            elsif step == -1
+              descending = true
+            else
+              add_error(RANGE_STEP_DIAGNOSTIC)
+            end
+          end
         else
           start_expr = BigIntLiteral.new(value: 0)
           end_expr = first_arg
@@ -1136,19 +1182,22 @@ module RunarCompiler
           source_location: location
         )
 
+        # `range` is half-open at BOTH ends: `range(5, 1, -1)` yields
+        # 5, 4, 3, 2, so the descending guard is `i > stop`, exactly as `<` is
+        # for ascending.
         condition = BinaryExpr.new(
-          op: "<",
+          op: descending ? ">" : "<",
           left: Identifier.new(name: var_name),
           right: end_expr
         )
 
-        update = ExpressionStmt.new(
-          expr: IncrementExpr.new(
-            operand: Identifier.new(name: var_name),
-            prefix: false
-          ),
-          source_location: location
-        )
+        update_expr =
+          if descending
+            DecrementExpr.new(operand: Identifier.new(name: var_name), prefix: false)
+          else
+            IncrementExpr.new(operand: Identifier.new(name: var_name), prefix: false)
+          end
+        update = ExpressionStmt.new(expr: update_expr, source_location: location)
 
         ForStmt.new(
           init: init,

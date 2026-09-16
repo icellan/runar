@@ -130,6 +130,21 @@ _SPECIAL_BUILTINS: dict[str, str] = {
 }
 
 
+def _literal_int_value(expr: Expression | None) -> int | None:
+    """The integer value of a literal expression, or None when it is not one.
+
+    A negative literal arrives either as a unary minus over a positive one or
+    as a directly-negative BigIntLiteral, so both shapes have to be walked --
+    the same walk ANF lowering does, for the same reason (N-138).
+    """
+    if isinstance(expr, BigIntLiteral):
+        return expr.value
+    if isinstance(expr, UnaryExpr) and expr.op == "-":
+        inner = _literal_int_value(expr.operand)
+        return None if inner is None else -inner
+    return None
+
+
 def _snake_to_camel(name: str) -> str:
     """Convert snake_case to camelCase."""
     parts = name.split("_")
@@ -966,12 +981,59 @@ class _RustParser:
                 self.advance()
 
             self.expect(TOK_IN)
-            start_expr = self.parse_expression()
+            # Two loop headers, both of them real Rust that iterates exactly
+            # these values:
+            #
+            #   for i in a..b         -> a, a+1, ... b-1  (ascending)
+            #   for i in (a..b).rev() -> b-1, b-2, ... a  (DESCENDING)
+            #
+            # ``.rev()`` is what lets the Rust surface spell a countdown. A
+            # Rust range only ever ascends -- ``(5..2)`` is empty -- so
+            # ``step = -1`` was unreachable from this surface and no fixture
+            # could exercise it across all nine. ``Iterator::rev`` reverses the
+            # half-open range: the descending loop starts at ``b - 1`` and ends
+            # at ``a`` INCLUSIVE, which is why the guard below is ``>=``.
+            has_paren = self.check(TOK_LPAREN)
+            if has_paren:
+                self.advance()
+
+            range_start = self.parse_expression()
 
             # Expect .. range operator (single DotDot token)
             self.expect(TOK_DOTDOT)
 
-            end_expr = self.parse_expression()
+            range_end = self.parse_expression()
+
+            descending = False
+            if has_paren:
+                self.expect(TOK_RPAREN)
+                self.expect(TOK_DOT)
+                method_tok = self.advance()
+                if method_tok.value != "rev":
+                    self.add_error(
+                        f"unsupported range method '.{method_tok.value}()' in for loop "
+                        "-- only '.rev()' is supported"
+                    )
+                self.expect(TOK_LPAREN)
+                self.expect(TOK_RPAREN)
+                descending = True
+
+            # ``(a..b).rev()`` starts at ``b - 1``. The unrolled loop model
+            # needs that start as a compile-time literal -- it synthesizes
+            # iteration k as ``start + k*step`` -- so fold the subtraction here
+            # when ``b`` is one, and otherwise hand the un-foldable expression
+            # straight through so ANF lowering raises its own "Cannot determine
+            # loop start" diagnostic rather than this parser inventing a second
+            # wording for the same rule.
+            if descending:
+                upper = _literal_int_value(range_end)
+                start_expr = (
+                    range_end if upper is None else BigIntLiteral(value=upper - 1)
+                )
+                end_expr = range_start
+            else:
+                start_expr = range_start
+                end_expr = range_end
 
             self.expect(TOK_LBRACE)
             loop_body: list[Statement] = []
@@ -989,14 +1051,16 @@ class _RustParser:
                 source_location=stmt_loc,
             )
             loop_condition = BinaryExpr(
-                op="<",
+                op=">=" if descending else "<",
                 left=Identifier(name=var_name),
                 right=end_expr,
             )
-            update = ExpressionStmt(
-                expr=IncrementExpr(operand=Identifier(name=var_name), prefix=False),
-                source_location=stmt_loc,
-            )
+            loop_update: Expression
+            if descending:
+                loop_update = DecrementExpr(operand=Identifier(name=var_name), prefix=False)
+            else:
+                loop_update = IncrementExpr(operand=Identifier(name=var_name), prefix=False)
+            update = ExpressionStmt(expr=loop_update, source_location=stmt_loc)
 
             return ForStmt(
                 init=init_stmt,

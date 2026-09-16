@@ -975,9 +975,62 @@ func (p *rustMacroParser) parseStatement() Statement {
 			p.advance()
 		}
 		p.match(rustTokIn)
-		startExpr := p.parseExpression()
+		// Two loop headers, both of them real Rust that iterates exactly these
+		// values:
+		//
+		//   for i in a..b         -> a, a+1, … b-1  (ascending)
+		//   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+		//
+		// `.rev()` is what lets the Rust surface spell a countdown. A Rust
+		// range only ever ascends — `(5..2)` is empty — so `step = -1` was
+		// unreachable from this surface and no fixture could exercise it
+		// across all nine. `Iterator::rev` reverses the half-open range: the
+		// descending loop starts at `b - 1` and ends at `a` INCLUSIVE, which
+		// is why the guard below is `>=` against `a`.
+		hasParen := p.current().kind == rustTokLParen
+		if hasParen {
+			p.advance()
+		}
+		rangeStart := p.parseExpression()
 		p.expect(rustTokDotDot)
-		endExpr := p.parseExpression()
+		rangeEnd := p.parseExpression()
+
+		descending := false
+		if hasParen {
+			p.expect(rustTokRParen)
+			p.expect(rustTokDot)
+			method := p.current()
+			if method.kind == rustTokIdent {
+				p.advance()
+			}
+			if method.value != "rev" {
+				p.errors = append(p.errors, Diagnostic{
+					Message:  fmt.Sprintf("line %d: unsupported range method '.%s()' in for loop — only '.rev()' is supported", method.line, method.value),
+					Severity: SeverityError,
+				})
+			}
+			p.expect(rustTokLParen)
+			p.expect(rustTokRParen)
+			descending = true
+		}
+
+		// `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs that
+		// start as a compile-time literal — it synthesizes iteration k as
+		// `start + k*step` — so fold the subtraction here when `b` is one, and
+		// otherwise hand the un-foldable expression straight through so ANF
+		// lowering raises its own "Cannot determine loop start" diagnostic
+		// rather than this parser inventing a second wording for the same rule.
+		startExpr := rangeStart
+		endExpr := rangeEnd
+		if descending {
+			if upper, ok := literalIntValue(rangeEnd); ok {
+				startExpr = BigIntLiteral{Value: new(big.Int).Sub(upper, big.NewInt(1))}
+			} else {
+				startExpr = rangeEnd
+			}
+			endExpr = rangeStart
+		}
+
 		p.expect(rustTokLBrace)
 		var body []Statement
 		for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
@@ -993,13 +1046,19 @@ func (p *rustMacroParser) parseStatement() Statement {
 			Init:           startExpr,
 			SourceLocation: loc,
 		}
+		condOp := "<"
+		var updateExpr Expression = IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
+		if descending {
+			condOp = ">="
+			updateExpr = DecrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
+		}
 		cond := BinaryExpr{
-			Op:    "<",
+			Op:    condOp,
 			Left:  Identifier{Name: varName},
 			Right: endExpr,
 		}
 		update := ExpressionStmt{
-			Expr:           IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false},
+			Expr:           updateExpr,
 			SourceLocation: loc,
 		}
 		return ForStmt{

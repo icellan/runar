@@ -1136,23 +1136,39 @@ const Parser = struct {
             self.addError("expected 'in' in for loop");
         }
 
-        // Parse range: start..end
+        // Two loop headers, both of them real Rust that iterates exactly these
+        // values:
+        //
+        //   for i in a..b         -> a, a+1, … b-1  (ascending)
+        //   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+        //
+        // `.rev()` is what lets the Rust surface spell a countdown. A Rust
+        // range only ever ascends — `(5..2)` is empty — so `step = -1` was
+        // unreachable from this surface and no fixture could exercise it
+        // across all nine. `Iterator::rev` reverses the half-open range: the
+        // descending loop starts at `b - 1` and ends at `a` INCLUSIVE.
         var init_value: i64 = 0;
         // N-137: a start that is not a compile-time literal cannot be unrolled.
         var init_is_const: bool = true;
         var bound: i64 = 0;
+        var descending = false;
 
-        // Parse start value
+        const has_paren = self.current.kind == .lparen;
+        if (has_paren) _ = self.bump();
+
+        // Parse range start
+        var range_start: i64 = 0;
+        var range_start_is_const = true;
         if (self.current.kind == .number) {
             const start_tok = self.bump();
-            init_value = parseNumberLiteral(start_tok.text);
+            range_start = parseNumberLiteral(start_tok.text);
         } else if (self.parseExpression()) |e| {
             // N-138: keep a negated literal instead of discarding it.
-            if (loopStartLiteral(e)) |v| init_value = v else {
-                init_is_const = false;
+            if (loopStartLiteral(e)) |v| range_start = v else {
+                range_start_is_const = false;
             }
         } else {
-            init_is_const = false;
+            range_start_is_const = false;
         }
 
         // Consume '..'
@@ -1162,26 +1178,53 @@ const Parser = struct {
             self.addError("expected '..' in range expression");
         }
 
-        // Parse end value
+        // Parse range end
+        var range_end: i64 = 0;
+        var range_end_is_const = true;
         if (self.current.kind == .number) {
             const end_tok = self.bump();
-            bound = parseNumberLiteral(end_tok.text);
+            range_end = parseNumberLiteral(end_tok.text);
         } else {
             // Non-literal bound — parse as expression
             const bound_expr = self.parseExpression();
             if (bound_expr) |expr| {
-                switch (expr) {
-                    .literal_int => |v| {
-                        bound = v;
-                    },
-                    else => {},
+                if (loopStartLiteral(expr)) |v| range_end = v else {
+                    range_end_is_const = false;
                 }
+            } else {
+                range_end_is_const = false;
             }
+        }
+
+        if (has_paren) {
+            _ = self.expect(.rparen);
+            _ = self.expect(.dot);
+            const method_tok = self.bump();
+            if (!std.mem.eql(u8, method_tok.text, "rev")) {
+                self.addErrorFmt(
+                    "unsupported range method '.{s}()' in for loop — only '.rev()' is supported",
+                    .{method_tok.text},
+                );
+            }
+            _ = self.expect(.lparen);
+            _ = self.expect(.rparen);
+            descending = true;
+        }
+
+        if (descending) {
+            // `(a..b).rev()` starts at `b - 1` and ends at `a` inclusive.
+            init_value = range_end - 1;
+            init_is_const = range_end_is_const;
+            bound = range_start;
+        } else {
+            init_value = range_start;
+            init_is_const = range_start_is_const;
+            bound = range_end;
         }
 
         // Body
         if (self.expect(.lbrace) == null) {
-            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .body = &.{}, .source_loc = loc } };
+            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = descending, .body = &.{}, .source_loc = loc } };
         }
         var body: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
@@ -1189,7 +1232,7 @@ const Parser = struct {
         }
         _ = self.expect(.rbrace);
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .body = body.items, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = descending, .body = body.items, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

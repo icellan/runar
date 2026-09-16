@@ -78,6 +78,24 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
 // ---------------------------------------------------------------------------
 
 /// Convert snake_case to camelCase. Single words pass through unchanged.
+/// Destructure `<receiver>.downto(<bound>)` — the Ruby countdown header.
+///
+/// Returns `None` for every other expression, including `downto` with the
+/// wrong arity, so a malformed header falls through to the range-operator
+/// branch and gets that branch's diagnostic rather than silently becoming a
+/// loop.
+fn match_downto_call(expr: &Expression) -> Option<(Expression, Expression)> {
+    let Expression::CallExpr { callee, args, .. } = expr else { return None };
+    if args.len() != 1 {
+        return None;
+    }
+    let Expression::MemberExpr { object, property } = callee.as_ref() else { return None };
+    if property != "downto" {
+        return None;
+    }
+    Some((object.as_ref().clone(), args[0].clone()))
+}
+
 fn snake_to_camel(name: &str) -> String {
     // Strip leading underscores so `_require_owner` becomes `requireOwner` not `RequireOwner`.
     let stripped = name.trim_start_matches('_');
@@ -1445,20 +1463,49 @@ impl<'a> RbParser<'a> {
         // Parse start expression
         let start_expr = self.parse_expression();
 
-        // Expect range operator: .. (inclusive) or ... (exclusive)
-        let is_exclusive = if *self.peek() == Token::DotDotDot {
-            self.advance();
-            true
-        } else if *self.peek() == Token::DotDot {
-            self.advance();
-            false
-        } else {
-            self.errors
-                .push("Expected range operator '..' or '...' in for loop".to_string());
-            true // default to exclusive
+        // Three loop headers, all of them real Ruby that iterates exactly
+        // these values:
+        //
+        //   for i in 0...n       -> 0, 1, … n-1  (exclusive, ascending)
+        //   for i in 0..n        -> 0, 1, … n    (inclusive, ascending)
+        //   for i in n.downto(m) -> n, n-1, … m  (inclusive, DESCENDING)
+        //
+        // `downto` is what lets the Ruby surface spell a countdown. Ruby's
+        // range operators only ever ascend — `(5..2)` is empty — so
+        // `step = -1` was unreachable from this surface, and no fixture could
+        // exercise it across all nine. `Integer#downto` is the language's own
+        // countdown verb, it returns an Enumerator, and `for x in enum` is
+        // valid Ruby over one.
+        //
+        // `5.downto(2)` is a postfix method call, so the start-expression
+        // parser has already consumed the whole header by the time we get
+        // here. Match on the shape it produced rather than on the tokens.
+        let mut descending = false;
+        let (start_expr, end_expr, is_exclusive) = match match_downto_call(&start_expr) {
+            Some((receiver, bound)) => {
+                descending = true;
+                // downto's bound is inclusive.
+                (receiver, bound, false)
+            }
+            None => {
+                // Expect range operator: .. (inclusive) or ... (exclusive)
+                let is_exclusive = if *self.peek() == Token::DotDotDot {
+                    self.advance();
+                    true
+                } else if *self.peek() == Token::DotDot {
+                    self.advance();
+                    false
+                } else {
+                    self.errors.push(
+                        "Expected range operator '..' or '...', or '.downto(n)', in for loop"
+                            .to_string(),
+                    );
+                    true // default to exclusive
+                };
+                let end_expr = self.parse_expression();
+                (start_expr, end_expr, is_exclusive)
+            }
         };
-
-        let end_expr = self.parse_expression();
 
         // Optional 'do' keyword
         self.match_tok(&Token::Do);
@@ -1476,7 +1523,9 @@ impl<'a> RbParser<'a> {
             source_location: self.loc(),
         };
 
-        let cmp_op = if is_exclusive {
+        let cmp_op = if descending {
+            BinaryOp::Ge
+        } else if is_exclusive {
             BinaryOp::Lt
         } else {
             BinaryOp::Le
@@ -1490,10 +1539,12 @@ impl<'a> RbParser<'a> {
             right: Box::new(end_expr),
         };
 
+        let update_operand = Box::new(Expression::Identifier { name: var_name });
         let update = Statement::ExpressionStatement {
-            expression: Expression::IncrementExpr {
-                operand: Box::new(Expression::Identifier { name: var_name }),
-                prefix: false,
+            expression: if descending {
+                Expression::DecrementExpr { operand: update_operand, prefix: false }
+            } else {
+                Expression::IncrementExpr { operand: update_operand, prefix: false }
             },
             source_location: self.loc(),
         };

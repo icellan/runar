@@ -1246,25 +1246,53 @@ class RbParser {
     this.expect('in');
 
     // Parse start expression
-    const startExpr = this.parseExpression();
+    let startExpr = this.parseExpression();
 
-    // Expect range operator: .. (inclusive) or ... (exclusive)
+    // Three loop headers, all of them real Ruby that iterates exactly these
+    // values:
+    //
+    //   for i in 0...n   -> 0, 1, … n-1   (exclusive, ascending)
+    //   for i in 0..n    -> 0, 1, … n     (inclusive, ascending)
+    //   for i in n.downto(m) -> n, n-1, … m  (inclusive, DESCENDING)
+    //
+    // `downto` is what lets the Ruby surface spell a countdown. Ruby's range
+    // operators only ever ascend — `(5..2)` is empty, and `(2..5).reverse_each`
+    // is an enumerator over a method chain rather than a loop header — so
+    // `step = -1` was simply unreachable from this surface, and no fixture
+    // could exercise it across all nine. `Integer#downto` is the language's
+    // own countdown verb, it returns an Enumerator, and `for x in enum` is
+    // valid Ruby over one: the spelling means in Ruby exactly what it compiles
+    // to here.
     let isExclusive = false;
-    if (this.peek().type === '...') {
-      isExclusive = true;
-      this.advance();
-    } else if (this.peek().type === '..') {
-      isExclusive = false;
-      this.advance();
-    } else {
-      this.errors.push(makeDiagnostic(
-        `Expected range operator '..' or '...' in for loop`,
-        'error',
-        this.loc(),
-      ));
-    }
+    let descending = false;
+    let endExpr: Expression;
 
-    const endExpr = this.parseExpression();
+    // `5.downto(2)` is a postfix method call, so the start-expression parser
+    // has already consumed the whole header by the time we get here. Match on
+    // the shape it produced rather than on the tokens.
+    const downtoBound = matchDowntoCall(startExpr);
+    if (downtoBound) {
+      startExpr = downtoBound.receiver;
+      endExpr = downtoBound.bound;
+      descending = true;
+      isExclusive = false; // downto's bound is inclusive
+    } else {
+      // Expect range operator: .. (inclusive) or ... (exclusive)
+      if (this.peek().type === '...') {
+        isExclusive = true;
+        this.advance();
+      } else if (this.peek().type === '..') {
+        isExclusive = false;
+        this.advance();
+      } else {
+        this.errors.push(makeDiagnostic(
+          `Expected range operator '..' or '...', or '.downto(n)', in for loop`,
+          'error',
+          this.loc(),
+        ));
+      }
+      endExpr = this.parseExpression();
+    }
 
     // Optional 'do' keyword
     this.match('do');
@@ -1293,14 +1321,16 @@ class RbParser {
 
     const condition: Expression = {
       kind: 'binary_expr',
-      op: (isExclusive ? '<' : '<=') as BinaryOp,
+      op: (descending ? '>=' : isExclusive ? '<' : '<=') as BinaryOp,
       left: { kind: 'identifier', name: varName },
       right: endExpr,
     };
 
     const update: Statement = {
       kind: 'expression_statement',
-      expression: { kind: 'increment_expr', operand: { kind: 'identifier', name: varName }, prefix: false },
+      expression: descending
+        ? { kind: 'decrement_expr', operand: { kind: 'identifier', name: varName }, prefix: false }
+        : { kind: 'increment_expr', operand: { kind: 'identifier', name: varName }, prefix: false },
       sourceLocation: loc,
     };
 
@@ -1833,6 +1863,23 @@ class RbParser {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * Destructure `<receiver>.downto(<bound>)` — the Ruby countdown header.
+ *
+ * Returns null for every other expression, including `downto` with the wrong
+ * arity, so a malformed header falls through to the range-operator branch and
+ * gets that branch's diagnostic rather than silently becoming a loop.
+ */
+function matchDowntoCall(
+  expr: Expression,
+): { receiver: Expression; bound: Expression } | null {
+  if (expr.kind !== 'call_expr') return null;
+  if (expr.callee.kind !== 'member_expr') return null;
+  if (expr.callee.property !== 'downto') return null;
+  if (expr.args.length !== 1) return null;
+  return { receiver: expr.callee.object, bound: expr.args[0]! };
+}
 
 export function parseRubySource(source: string, fileName?: string): ParseResult {
   // R-146: this function is exported from the package index, so the

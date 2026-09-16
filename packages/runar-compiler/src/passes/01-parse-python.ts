@@ -528,6 +528,32 @@ function makePrimitiveOrCustom(name: string): TypeNode {
 // Parser
 // ---------------------------------------------------------------------------
 
+/**
+ * Emitted for a `range` step the unrolled loop model cannot represent.
+ *
+ * Shared verbatim with the Go, Rust, Python, Zig, Ruby and Java tiers.
+ */
+const RANGE_STEP_DIAGNOSTIC =
+  "range() step must be 1 or -1. The unrolled loop carries only a start value " +
+  "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be " +
+  "represented and would be discarded.";
+
+/**
+ * The integer value of a literal expression, or null when it is not one.
+ *
+ * A negative literal arrives as a unary minus over a positive one, so both
+ * shapes have to be walked — the same walk `extractBigIntValue` does in ANF
+ * lowering, for the same reason (N-138).
+ */
+function literalIntValue(expr: Expression): bigint | null {
+  if (expr.kind === 'bigint_literal') return expr.value;
+  if (expr.kind === 'unary_expr' && expr.op === '-') {
+    const inner = literalIntValue(expr.operand);
+    return inner === null ? null : -inner;
+  }
+  return null;
+}
+
 class PyParser {
   private tokens: Token[];
   private pos = 0;
@@ -1084,14 +1110,41 @@ class PyParser {
     this.expect('range');
     this.expect('(');
 
-    // range(n) or range(a, b)
+    // range(n), range(a, b), or range(a, b, step) with step ∈ {1, -1}.
+    //
+    // The third argument is what lets the Python surface spell a COUNTDOWN.
+    // Until it existed, `range` was the surface's only loop syntax and it
+    // could only ascend, so `step = -1` — a shape the ANF loop node has
+    // carried since issue #121 and every tier lowers — was unreachable from
+    // Python, and no fixture could exercise it across all nine surfaces.
+    //
+    // Only ±1 is accepted: the ANF loop node synthesizes iteration k as
+    // `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+    // representation. Refusing it is the same rule the for-header surfaces
+    // enforce on `i += 2` (N-061), stated in Python's spelling.
     const firstArg = this.parseExpression();
     let startExpr: Expression;
     let endExpr: Expression;
+    let descending = false;
 
     if (this.match(',')) {
       startExpr = firstArg;
       endExpr = this.parseExpression();
+      if (this.match(',')) {
+        const stepExpr = this.parseExpression();
+        const step = literalIntValue(stepExpr);
+        if (step === 1n) {
+          descending = false;
+        } else if (step === -1n) {
+          descending = true;
+        } else {
+          this.errors.push(makeDiagnostic(
+            RANGE_STEP_DIAGNOSTIC,
+            'error',
+            loc,
+          ));
+        }
+      }
     } else {
       startExpr = { kind: 'bigint_literal', value: 0n };
       endExpr = firstArg;
@@ -1115,16 +1168,20 @@ class PyParser {
       sourceLocation: loc,
     };
 
+    // `range` is half-open at BOTH ends: `range(5, 1, -1)` yields 5, 4, 3, 2,
+    // so the descending guard is `i > stop`, exactly as `<` is for ascending.
     const condition: Expression = {
       kind: 'binary_expr',
-      op: '<' as BinaryOp,
+      op: (descending ? '>' : '<') as BinaryOp,
       left: { kind: 'identifier', name: varName },
       right: endExpr,
     };
 
     const update: Statement = {
       kind: 'expression_statement',
-      expression: { kind: 'increment_expr', operand: { kind: 'identifier', name: varName }, prefix: false },
+      expression: descending
+        ? { kind: 'decrement_expr', operand: { kind: 'identifier', name: varName }, prefix: false }
+        : { kind: 'increment_expr', operand: { kind: 'identifier', name: varName }, prefix: false },
       sourceLocation: loc,
     };
 

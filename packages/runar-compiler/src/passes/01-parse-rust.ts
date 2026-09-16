@@ -29,6 +29,7 @@ import type {
   Statement,
   Expression,
   SourceLocation,
+  BinaryOp,
 } from '../ir/index.js';
 import type { ParseResult } from './01-parse.js';
 import { snakeToCamelCore } from './snake-to-camel.js';
@@ -980,15 +981,64 @@ class RustParser extends ParserCore<RustToken> {
     const loopVar = snakeToCamel(loopVarRaw);
     this.expect('in');
 
+    // Two loop headers, both of them real Rust that iterates exactly these
+    // values:
+    //
+    //   for i in a..b        -> a, a+1, … b-1   (ascending)
+    //   for i in (a..b).rev()-> b-1, b-2, … a   (DESCENDING)
+    //
+    // `.rev()` is what lets the Rust surface spell a countdown. A Rust range
+    // only ever ascends — `(5..2)` is empty — so `step = -1` was unreachable
+    // from this surface and no fixture could exercise it across all nine.
+    // `Iterator::rev` is the language's own reversal, and it reverses the
+    // half-open range: the descending loop starts at `b - 1` and ends at `a`
+    // INCLUSIVE, which is why the guard below is `>=` against `a` rather than
+    // `>` against something one lower.
+    const hasParen = this.current().type === '(';
+    if (hasParen) this.advance();
+
     // Parse range: start..end
-    const startExpr = this.parseExpression();
+    const rangeStart = this.parseExpression();
 
     // The '..' should have been consumed inside the expression parser if the
     // start is a literal, OR it might be the next token. We already lex '..'
     // as a single token. The expression parser does NOT handle '..', so it
     // will stop before consuming it.
     this.expect('..');
-    const endExpr = this.parseExpression();
+    const rangeEnd = this.parseExpression();
+
+    let descending = false;
+    if (hasParen) {
+      this.expect(')');
+      this.expect('.');
+      const method = this.expect('ident');
+      if (method.value !== 'rev') {
+        this.errors.push(makeDiagnostic(
+          `Unsupported range method '.${method.value}()' in for loop — only '.rev()' is supported`,
+          'error',
+          location,
+        ));
+      }
+      this.expect('(');
+      this.expect(')');
+      descending = true;
+    }
+
+    // `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs that
+    // start as a compile-time literal — it synthesizes iteration k as
+    // `start + k*step` — so fold the subtraction here when `b` is one, and
+    // otherwise hand the un-foldable expression straight through so ANF
+    // lowering raises its own "Cannot determine loop start" diagnostic rather
+    // than this parser inventing a second wording for the same rule.
+    let startExpr: Expression = rangeStart;
+    let endExpr: Expression = rangeEnd;
+    if (descending) {
+      const upper = literalIntValue(rangeEnd);
+      startExpr = upper === null
+        ? rangeEnd
+        : { kind: 'bigint_literal', value: upper - 1n };
+      endExpr = rangeStart;
+    }
 
     this.expect('{');
     const body: Statement[] = [];
@@ -1007,17 +1057,23 @@ class RustParser extends ParserCore<RustToken> {
     };
     const condition = {
       kind: 'binary_expr' as const,
-      op: '<' as const,
+      op: (descending ? '>=' : '<') as BinaryOp,
       left: { kind: 'identifier' as const, name: loopVar },
       right: endExpr,
     };
     const update: Statement = {
       kind: 'expression_statement' as const,
-      expression: {
-        kind: 'increment_expr' as const,
-        operand: { kind: 'identifier' as const, name: loopVar },
-        prefix: false,
-      },
+      expression: descending
+        ? {
+          kind: 'decrement_expr' as const,
+          operand: { kind: 'identifier' as const, name: loopVar },
+          prefix: false,
+        }
+        : {
+          kind: 'increment_expr' as const,
+          operand: { kind: 'identifier' as const, name: loopVar },
+          prefix: false,
+        },
       sourceLocation: location,
     };
 
@@ -1204,6 +1260,22 @@ class RustParser extends ParserCore<RustToken> {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * The integer value of a literal expression, or null when it is not one.
+ *
+ * A negative literal arrives as a unary minus over a positive one, so both
+ * shapes have to be walked — the same walk `extractBigIntValue` does in ANF
+ * lowering, for the same reason (N-138).
+ */
+function literalIntValue(expr: Expression): bigint | null {
+  if (expr.kind === 'bigint_literal') return expr.value;
+  if (expr.kind === 'unary_expr' && expr.op === '-') {
+    const inner = literalIntValue(expr.operand);
+    return inner === null ? null : -inner;
+  }
+  return null;
+}
 
 export function parseRustSource(source: string, fileName?: string): ParseResult {
   // R-146: this function is exported from the package index, so the

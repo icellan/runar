@@ -1355,6 +1355,14 @@ const Parser = struct {
         return .{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Emitted for a `range` step the unrolled loop model cannot represent.
+    ///
+    /// Shared verbatim with the other six tiers.
+    const range_step_diagnostic =
+        "range() step must be 1 or -1. The unrolled loop carries only a start value " ++
+        "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be " ++
+        "represented and would be discarded.";
+
     fn parsePyFor(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1379,12 +1387,25 @@ const Parser = struct {
 
         _ = self.expect(.lparen);
 
-        // range(n) or range(a, b)
+        // range(n), range(a, b), or range(a, b, step) with step in {1, -1}.
+        //
+        // The third argument is what lets the Python surface spell a
+        // COUNTDOWN. Until it existed, `range` was the surface's only loop
+        // syntax and it could only ascend, so `step = -1` — a shape this
+        // tier's ANF lowering has carried since issue #121 — was unreachable
+        // from Python, and no fixture could exercise it across all nine
+        // surfaces.
+        //
+        // Only ±1 is accepted: the unrolled loop synthesizes iteration k as
+        // `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+        // representation. Refusing it is the same rule N-061 enforces on
+        // `i += 2` in the for-header surfaces, in Python's spelling.
         const first = self.parseExpression() orelse return null;
         var init_value: i64 = 0;
         // N-137: a start that is not a compile-time literal cannot be unrolled.
         var init_is_const: bool = true;
         var bound: i64 = 0;
+        var descending = false;
 
         if (self.match(.comma)) {
             // range(a, b)
@@ -1399,6 +1420,17 @@ const Parser = struct {
                     bound = v;
                 },
                 else => {},
+            }
+            if (self.match(.comma)) {
+                const step_expr = self.parseExpression() orelse return null;
+                const step = loopStartLiteral(step_expr);
+                if (step != null and step.? == 1) {
+                    descending = false;
+                } else if (step != null and step.? == -1) {
+                    descending = true;
+                } else {
+                    self.addError(range_step_diagnostic);
+                }
             }
         } else {
             // range(n) — init = 0, limit = n
@@ -1415,11 +1447,15 @@ const Parser = struct {
         _ = self.expect(.colon);
         const body = self.parsePyBlock();
 
+        // `range` is half-open at BOTH ends: `range(5, 1, -1)` yields
+        // 5, 4, 3, 2, so the descending guard is `i > stop`, exactly as `<` is
+        // for ascending — i.e. NOT inclusive.
         return .{ .for_stmt = .{
             .var_name = var_name,
             .init_value = init_value,
             .init_is_const = init_is_const,
             .bound = bound,
+            .descending = descending,
             .body = body,
             .source_loc = loc,
         } };

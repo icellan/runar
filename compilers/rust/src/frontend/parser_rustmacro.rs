@@ -739,9 +739,67 @@ impl RustDslParser {
                 "i".to_string()
             };
             self.expect(&TokenType::In);
-            let start_expr = self.parse_expression();
+            // Two loop headers, both of them real Rust that iterates exactly
+            // these values:
+            //
+            //   for i in a..b         -> a, a+1, … b-1  (ascending)
+            //   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+            //
+            // `.rev()` is what lets the Rust surface spell a countdown. A Rust
+            // range only ever ascends — `(5..2)` is empty — so `step = -1` was
+            // unreachable from this surface and no fixture could exercise it
+            // across all nine. `Iterator::rev` reverses the half-open range:
+            // the descending loop starts at `b - 1` and ends at `a` INCLUSIVE,
+            // which is why the guard below is `>=` against `a`.
+            let has_paren = matches!(self.current().typ, TokenType::LParen);
+            if has_paren {
+                self.advance_clone();
+            }
+            let range_start = self.parse_expression();
             self.expect(&TokenType::DotDot);
-            let end_expr = self.parse_expression();
+            let range_end = self.parse_expression();
+
+            let mut descending = false;
+            if has_paren {
+                self.expect(&TokenType::RParen);
+                self.expect(&TokenType::Dot);
+                let method = match self.current().typ.clone() {
+                    TokenType::Ident(name) => {
+                        self.advance_clone();
+                        name
+                    }
+                    _ => String::new(),
+                };
+                if method != "rev" {
+                    self.errors.push(Diagnostic::error(
+                        format!(
+                            "Unsupported range method '.{}()' in for loop — only '.rev()' is supported",
+                            method
+                        ),
+                        Some(loc.clone()),
+                    ));
+                }
+                self.expect(&TokenType::LParen);
+                self.expect(&TokenType::RParen);
+                descending = true;
+            }
+
+            // `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs
+            // that start as a compile-time literal — it synthesizes iteration
+            // k as `start + k*step` — so fold the subtraction here when `b` is
+            // one, and otherwise hand the un-foldable expression straight
+            // through so ANF lowering raises its own "Cannot determine loop
+            // start" diagnostic rather than this parser inventing a second
+            // wording for the same rule.
+            let (start_expr, end_expr) = if descending {
+                let start = match literal_int_value(&range_end) {
+                    Some(upper) => Expression::BigIntLiteral { value: upper - BigInt::from(1) },
+                    None => range_end,
+                };
+                (start, range_start)
+            } else {
+                (range_start, range_end)
+            };
 
             self.expect(&TokenType::LBrace);
             let mut body = Vec::new();
@@ -758,14 +816,16 @@ impl RustDslParser {
                 source_location: loc.clone(),
             };
             let condition = Expression::BinaryExpr {
-                op: BinaryOp::Lt,
+                op: if descending { BinaryOp::Ge } else { BinaryOp::Lt },
                 left: Box::new(Expression::Identifier { name: var_name.clone() }),
                 right: Box::new(end_expr),
             };
+            let update_operand = Box::new(Expression::Identifier { name: var_name });
             let update = Statement::ExpressionStatement {
-                expression: Expression::IncrementExpr {
-                    operand: Box::new(Expression::Identifier { name: var_name }),
-                    prefix: false,
+                expression: if descending {
+                    Expression::DecrementExpr { operand: update_operand, prefix: false }
+                } else {
+                    Expression::IncrementExpr { operand: update_operand, prefix: false }
                 },
                 source_location: loc.clone(),
             };
@@ -1117,6 +1177,21 @@ impl RustDslParser {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The integer value of a literal expression, or `None` when it is not one.
+///
+/// A negative literal arrives as a unary minus over a positive one, so both
+/// shapes have to be walked — the same walk `extract_big_int_value` does in
+/// ANF lowering, for the same reason (N-138).
+fn literal_int_value(expr: &Expression) -> Option<BigInt> {
+    match expr {
+        Expression::BigIntLiteral { value } => Some(value.clone()),
+        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+            literal_int_value(operand).map(|v| -v)
+        }
+        _ => None,
+    }
+}
 
 fn snake_to_camel(name: &str) -> String {
     let parts: Vec<&str> = name.split('_').collect();

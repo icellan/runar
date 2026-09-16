@@ -1345,19 +1345,44 @@ func (p *rbParser) parseForStatement(loc SourceLocation) Statement {
 	// Parse start expression
 	startExpr := p.parseExpression()
 
-	// Expect range operator: .. (inclusive) or ... (exclusive)
+	// Three loop headers, all of them real Ruby that iterates exactly these
+	// values:
+	//
+	//   for i in 0...n       -> 0, 1, … n-1  (exclusive, ascending)
+	//   for i in 0..n        -> 0, 1, … n    (inclusive, ascending)
+	//   for i in n.downto(m) -> n, n-1, … m  (inclusive, DESCENDING)
+	//
+	// `downto` is what lets the Ruby surface spell a countdown. Ruby's range
+	// operators only ever ascend — `(5..2)` is empty — so `step = -1` was
+	// unreachable from this surface, and no fixture could exercise it across
+	// all nine. `Integer#downto` is the language's own countdown verb, it
+	// returns an Enumerator, and `for x in enum` is valid Ruby over one.
+	//
+	// `5.downto(2)` is a postfix method call, so the start-expression parser
+	// has already consumed the whole header by the time we get here. Match on
+	// the shape it produced rather than on the tokens.
 	isExclusive := false
-	if p.check(rbTokDotDotDot) {
-		isExclusive = true
-		p.advance()
-	} else if p.check(rbTokDotDot) {
-		isExclusive = false
-		p.advance()
-	} else {
-		p.addError(fmt.Sprintf("line %d: expected range operator '..' or '...' in for loop", p.peek().line))
-	}
+	descending := false
+	var endExpr Expression
 
-	endExpr := p.parseExpression()
+	if recv, bound, ok := matchDowntoCall(startExpr); ok {
+		startExpr = recv
+		endExpr = bound
+		descending = true
+		isExclusive = false // downto's bound is inclusive
+	} else {
+		// Expect range operator: .. (inclusive) or ... (exclusive)
+		if p.check(rbTokDotDotDot) {
+			isExclusive = true
+			p.advance()
+		} else if p.check(rbTokDotDot) {
+			isExclusive = false
+			p.advance()
+		} else {
+			p.addError(fmt.Sprintf("line %d: expected range operator '..' or '...', or '.downto(n)', in for loop", p.peek().line))
+		}
+		endExpr = p.parseExpression()
+	}
 
 	// Optional 'do' keyword
 	p.match(rbTokDo)
@@ -1370,6 +1395,11 @@ func (p *rbParser) parseForStatement(loc SourceLocation) Statement {
 	op := "<="
 	if isExclusive {
 		op = "<"
+	}
+	var updateExpr Expression = IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
+	if descending {
+		op = ">="
+		updateExpr = DecrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
 	}
 
 	initStmt := VariableDeclStmt{
@@ -1387,7 +1417,7 @@ func (p *rbParser) parseForStatement(loc SourceLocation) Statement {
 	}
 
 	update := ExpressionStmt{
-		Expr:           IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false},
+		Expr:           updateExpr,
 		SourceLocation: loc,
 	}
 
@@ -1398,6 +1428,24 @@ func (p *rbParser) parseForStatement(loc SourceLocation) Statement {
 		Body:           body,
 		SourceLocation: loc,
 	}
+}
+
+// matchDowntoCall destructures `<receiver>.downto(<bound>)` — the Ruby
+// countdown header.
+//
+// Reports false for every other expression, including `downto` with the wrong
+// arity, so a malformed header falls through to the range-operator branch and
+// gets that branch's diagnostic rather than silently becoming a loop.
+func matchDowntoCall(expr Expression) (Expression, Expression, bool) {
+	call, ok := expr.(CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return nil, nil, false
+	}
+	member, ok := call.Callee.(MemberExpr)
+	if !ok || member.Property != "downto" {
+		return nil, nil, false
+	}
+	return member.Object, call.Args[0], true
 }
 
 func (p *rbParser) parseReturnStatement(loc SourceLocation) Statement {

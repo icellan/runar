@@ -1517,22 +1517,59 @@ const Parser = struct {
 
         _ = self.expect(.kw_in);
 
-        // Parse start value
-        const start_expr = self.parseExpression() orelse return null;
-
-        // Expect range operator: .. (inclusive) or ... (exclusive)
+        // Three loop headers, all of them real Ruby that iterates exactly these
+        // values:
+        //
+        //   for i in 0...n       -> 0, 1, … n-1  (exclusive, ascending)
+        //   for i in 0..n        -> 0, 1, … n    (inclusive, ascending)
+        //   for i in n.downto(m) -> n, n-1, … m  (inclusive, DESCENDING)
+        //
+        // `downto` is what lets the Ruby surface spell a countdown. Ruby's
+        // range operators only ever ascend — `(5..2)` is empty — so
+        // `step = -1` was unreachable from this surface, and no fixture could
+        // exercise it across all nine. `Integer#downto` is the language's own
+        // countdown verb, it returns an Enumerator, and `for x in enum` is
+        // valid Ruby over one.
+        //
+        // The `downto` receiver has to be recognised from the TOKENS, before
+        // the expression parser runs: this tier's `MethodCall.object` is a
+        // `[]const u8`, so a postfix parse of `5.downto(2)` throws the literal
+        // receiver away ("unknown") and the start would be unrecoverable.
         var is_exclusive = false;
-        if (self.check(.dot_dot_dot)) {
-            is_exclusive = true;
-            _ = self.bump();
-        } else if (self.check(.dot_dot)) {
-            is_exclusive = false;
-            _ = self.bump();
-        } else {
-            self.addError("expected range operator '..' or '...' in for loop");
-        }
+        var descending = false;
+        var start_expr: Expression = undefined;
+        var end_expr: Expression = undefined;
 
-        const end_expr = self.parseExpression() orelse return null;
+        if (self.peekAhead(1).kind == .dot and
+            self.peekAhead(2).kind == .ident and
+            std.mem.eql(u8, self.peekAhead(2).text, "downto") and
+            self.peekAhead(3).kind == .lparen)
+        {
+            start_expr = self.parsePrimary() orelse return null;
+            _ = self.expect(.dot);
+            _ = self.bump(); // 'downto'
+            _ = self.expect(.lparen);
+            end_expr = self.parseExpression() orelse return null;
+            _ = self.expect(.rparen);
+            descending = true;
+            is_exclusive = false; // downto's bound is inclusive
+        } else {
+            // Parse start value
+            start_expr = self.parseExpression() orelse return null;
+
+            // Expect range operator: .. (inclusive) or ... (exclusive)
+            if (self.check(.dot_dot_dot)) {
+                is_exclusive = true;
+                _ = self.bump();
+            } else if (self.check(.dot_dot)) {
+                is_exclusive = false;
+                _ = self.bump();
+            } else {
+                self.addError("expected range operator '..' or '...', or '.downto(n)', in for loop");
+            }
+
+            end_expr = self.parseExpression() orelse return null;
+        }
 
         // Optional 'do' keyword
         _ = self.match(.kw_do);
@@ -1554,7 +1591,11 @@ const Parser = struct {
         var bound: i64 = 0;
         switch (end_expr) {
             .literal_int => |v| {
-                if (is_exclusive) {
+                if (descending or is_exclusive) {
+                    // `downto`'s bound is inclusive and this tier records that
+                    // as `inclusive`, so the raw value goes through unchanged
+                    // — the +1 below is the ASCENDING inclusive range's
+                    // exclusive-bound conversion and must not be applied here.
                     bound = v;
                 } else {
                     bound = v + 1; // inclusive range: bound becomes exclusive
@@ -1563,7 +1604,16 @@ const Parser = struct {
             else => {},
         }
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{
+            .var_name = var_name,
+            .init_value = init_value,
+            .init_is_const = init_is_const,
+            .bound = bound,
+            .descending = descending,
+            .inclusive = descending,
+            .body = body,
+            .source_loc = loc,
+        } };
     }
 
     fn parseReturnStatement(self: *Parser) ?Statement {

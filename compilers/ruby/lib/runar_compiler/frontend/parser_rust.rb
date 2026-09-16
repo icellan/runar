@@ -1095,6 +1095,21 @@ module RunarCompiler
         )
       end
 
+      # The integer value of a literal expression, or nil when it is not one.
+      #
+      # A negative literal arrives as a unary minus over a positive one, so
+      # both shapes have to be walked -- the same walk ANF lowering does, for
+      # the same reason (N-138).
+      def literal_int_value(expr)
+        return expr.value if expr.is_a?(BigIntLiteral)
+
+        if expr.is_a?(UnaryExpr) && expr.op == "-"
+          inner = literal_int_value(expr.operand)
+          return inner.nil? ? nil : -inner
+        end
+        nil
+      end
+
       def parse_for_statement(location)
         expect(TOK_FOR)
 
@@ -1103,9 +1118,52 @@ module RunarCompiler
 
         expect(TOK_IN)
 
-        start_expr = parse_expression
+        # Two loop headers, both of them real Rust that iterates exactly these
+        # values:
+        #
+        #   for i in a..b         -> a, a+1, ... b-1  (ascending)
+        #   for i in (a..b).rev() -> b-1, b-2, ... a  (DESCENDING)
+        #
+        # +.rev()+ is what lets the Rust surface spell a countdown. A Rust
+        # range only ever ascends -- +(5..2)+ is empty -- so +step = -1+ was
+        # unreachable from this surface and no fixture could exercise it across
+        # all nine. +Iterator::rev+ reverses the half-open range: the
+        # descending loop starts at +b - 1+ and ends at +a+ INCLUSIVE, which is
+        # why the guard below is +>=+ against +a+.
+        has_paren = check(TOK_LPAREN)
+        advance if has_paren
+
+        range_start = parse_expression
         expect(TOK_DOTDOT)
-        end_expr = parse_expression
+        range_end = parse_expression
+
+        descending = false
+        if has_paren
+          expect(TOK_RPAREN)
+          expect(TOK_DOT)
+          method_tok = advance
+          unless method_tok.value == "rev"
+            add_error("unsupported range method '.#{method_tok.value}()' in for loop -- only '.rev()' is supported")
+          end
+          expect(TOK_LPAREN)
+          expect(TOK_RPAREN)
+          descending = true
+        end
+
+        # +(a..b).rev()+ starts at +b - 1+. The unrolled loop model needs that
+        # start as a compile-time literal -- it synthesizes iteration k as
+        # +start + k*step+ -- so fold the subtraction here when +b+ is one, and
+        # otherwise hand the un-foldable expression straight through so ANF
+        # lowering raises its own "Cannot determine loop start" diagnostic
+        # rather than this parser inventing a second wording for the same rule.
+        if descending
+          upper = literal_int_value(range_end)
+          start_expr = upper.nil? ? range_end : BigIntLiteral.new(value: upper - 1)
+          end_expr = range_start
+        else
+          start_expr = range_start
+          end_expr = range_end
+        end
 
         expect(TOK_LBRACE)
         body = []
@@ -1119,17 +1177,17 @@ module RunarCompiler
           name: loop_var, mutable: true, init: start_expr, source_location: location
         )
         condition = BinaryExpr.new(
-          op: "<",
+          op: descending ? ">=" : "<",
           left: Identifier.new(name: loop_var),
           right: end_expr
         )
-        update = ExpressionStmt.new(
-          expr: IncrementExpr.new(
-            operand: Identifier.new(name: loop_var),
-            prefix: false
-          ),
-          source_location: location
-        )
+        update_expr =
+          if descending
+            DecrementExpr.new(operand: Identifier.new(name: loop_var), prefix: false)
+          else
+            IncrementExpr.new(operand: Identifier.new(name: loop_var), prefix: false)
+          end
+        update = ExpressionStmt.new(expr: update_expr, source_location: location)
 
         ForStmt.new(
           init: init,

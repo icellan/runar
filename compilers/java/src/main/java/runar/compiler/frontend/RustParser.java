@@ -36,6 +36,7 @@ import runar.compiler.ir.ast.ReturnStatement;
 import runar.compiler.ir.ast.SourceLocation;
 import runar.compiler.ir.ast.Statement;
 import runar.compiler.ir.ast.TypeNode;
+import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
@@ -156,6 +157,23 @@ public final class RustParser {
     private static final int TOK_LSHIFT = 67;
     private static final int TOK_RSHIFT = 68;
     private static final int TOK_DOTDOT = 69;
+
+    /**
+     * The integer value of a literal expression, or {@code null} when it is
+     * not one.
+     *
+     * <p>A negative literal arrives as a unary minus over a positive one, so
+     * both shapes have to be walked — the same walk ANF lowering does, for the
+     * same reason (N-138).
+     */
+    private static BigInteger literalIntValue(Expression expr) {
+        if (expr instanceof BigIntLiteral lit) return lit.value();
+        if (expr instanceof UnaryExpr un && un.op() == Expression.UnaryOp.NEG) {
+            BigInteger inner = literalIntValue(un.operand());
+            return inner == null ? null : inner.negate();
+        }
+        return null;
+    }
 
     private static final Map<String, Integer> KEYWORDS = new HashMap<>();
     static {
@@ -1118,9 +1136,58 @@ public final class RustParser {
             }
 
             s.expect(TOK_IN);
-            Expression startExpr = parseExpression(s);
+            // Two loop headers, both of them real Rust that iterates exactly
+            // these values:
+            //
+            //   for i in a..b         -> a, a+1, … b-1  (ascending)
+            //   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+            //
+            // `.rev()` is what lets the Rust surface spell a countdown. A Rust
+            // range only ever ascends — `(5..2)` is empty — so `step = -1` was
+            // unreachable from this surface and no fixture could exercise it
+            // across all nine. `Iterator::rev` reverses the half-open range:
+            // the descending loop starts at `b - 1` and ends at `a` INCLUSIVE,
+            // which is why the guard below is `>=` against `a`.
+            boolean hasParen = s.check(TOK_LPAREN);
+            if (hasParen) s.advance();
+
+            Expression rangeStart = parseExpression(s);
             s.expect(TOK_DOTDOT);
-            Expression endExpr = parseExpression(s);
+            Expression rangeEnd = parseExpression(s);
+
+            boolean descending = false;
+            if (hasParen) {
+                s.expect(TOK_RPAREN);
+                s.expect(TOK_DOT);
+                Token methodTok = s.advance();
+                if (!"rev".equals(methodTok.value)) {
+                    s.errors.add("unsupported range method '." + methodTok.value
+                        + "()' in for loop — only '.rev()' is supported");
+                }
+                s.expect(TOK_LPAREN);
+                s.expect(TOK_RPAREN);
+                descending = true;
+            }
+
+            // `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs
+            // that start as a compile-time literal — it synthesizes iteration
+            // k as `start + k*step` — so fold the subtraction here when `b` is
+            // one, and otherwise hand the un-foldable expression straight
+            // through so ANF lowering raises its own "Cannot determine loop
+            // start" diagnostic rather than this parser inventing a second
+            // wording for the same rule.
+            Expression startExpr;
+            Expression endExpr;
+            if (descending) {
+                BigInteger upper = literalIntValue(rangeEnd);
+                startExpr = upper == null
+                    ? rangeEnd
+                    : new BigIntLiteral(upper.subtract(BigInteger.ONE));
+                endExpr = rangeStart;
+            } else {
+                startExpr = rangeStart;
+                endExpr = rangeEnd;
+            }
 
             s.expect(TOK_LBRACE);
             List<Statement> loopBody = new ArrayList<>();
@@ -1137,12 +1204,14 @@ public final class RustParser {
                 stmtLoc
             );
             Expression loopCondition = new BinaryExpr(
-                Expression.BinaryOp.LT,
+                descending ? Expression.BinaryOp.GE : Expression.BinaryOp.LT,
                 new Identifier(varName),
                 endExpr
             );
             ExpressionStatement update = new ExpressionStatement(
-                new IncrementExpr(new Identifier(varName), false),
+                descending
+                    ? new DecrementExpr(new Identifier(varName), false)
+                    : new IncrementExpr(new Identifier(varName), false),
                 stmtLoc
             );
 
