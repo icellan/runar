@@ -162,12 +162,12 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 
 | Go type | Rúnar type |
 |---------|-----------|
-| `int64` / `runar.BigInt` | `bigint` |
+| `int64` / `runar.Int` / `runar.Bigint` / `runar.BigintBig` | `bigint` |
 | `bool` | `boolean` |
 | `runar.ByteString` | `ByteString` |
 | `runar.PubKey` | `PubKey` |
 | `runar.Sig` | `Sig` |
-| `runar.Sha256` | `Sha256` |
+| `runar.Sha256Digest` | `Sha256` |
 | `runar.Ripemd160` | `Ripemd160` |
 | `runar.Addr` | `Addr` |
 | `runar.SigHashPreimage` | `SigHashPreimage` |
@@ -176,6 +176,53 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 | `runar.Point` | `Point` |
 
 Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats them as `bigint` values (no `n` suffix needed).
+
+### Integers wider than int64
+
+Rúnar's `bigint` is arbitrary precision and so is the Script it compiles to. The
+`.runar.go` **runtime** type `runar.Bigint` is `int64`, because Go has no
+operator overloading and a `*big.Int` alias would take `+`, `<` and friends away
+from contract source — and would silently redefine `==` as pointer identity,
+which compiles and compares the wrong thing.
+
+Nothing narrows silently as a result. Every helper in `packages/runar-go` whose
+result can exceed `int64` — `Pow`, `MulDiv`, `PercentOf`, `Sqrt`, `Bin2Num`,
+`Num2Bin`, `Bn254FieldNegP` — panics rather than returning a truncated answer,
+and names the wide peer to use instead.
+
+For values past 2^63, type the field or parameter `runar.BigintBig` (`*big.Int`)
+and spell the arithmetic with the helper functions. **Both type names lower to
+the same `bigint` primitive, and the helpers lower to the same operator nodes,
+so the emitted Script is byte-identical either way:**
+
+| Contract source | Rúnar node |
+|---|---|
+| `a + b` / `runar.BigintBigAdd(a, b)` | `+` |
+| `a - b` / `runar.BigintBigSub(a, b)` | `-` |
+| `a * b` / `runar.BigintBigMul(a, b)` | `*` |
+| `a / b` / `runar.BigintBigDiv(a, b)` | `/` |
+| `a % b` / `runar.BigintBigMod(a, b)` | `%` |
+| `a == b` / `runar.BigintBigEqual(a, b)` | `===` |
+| `a != b` / `runar.BigintBigNotEqual(a, b)` | `!==` |
+| `a < b` / `runar.BigintBigLess(a, b)` | `<` |
+| `a <= b` / `runar.BigintBigLessEq(a, b)` | `<=` |
+| `a > b` / `runar.BigintBigGreater(a, b)` | `>` |
+| `a >= b` / `runar.BigintBigGreaterEq(a, b)` | `>=` |
+
+`examples/go/ec-primitives` and `examples/go/ec-demo` use this for 256-bit
+secp256k1 coordinates; `examples/go/p256-primitives` and
+`examples/go/p384-primitives` for NIST scalars.
+
+One thing has no Go spelling: a bigint **literal** wider than `int64`. Go
+constants are exact and must fit the type they land in, and no constant
+expression converts to a pointer, so
+`115792089237316195423570985008687907852837564279074904382605163141518161494337`
+cannot appear in a `.runar.go` file at all. A contract needing one is written in
+any of the other eight formats — every compiler accepts all nine and produces
+byte-identical Script. The three ports in `examples/go` that still carry
+`//go:build ignore` for a numeric reason (`integer-boundary`, `schnorr-zkp`,
+`go-dsl-bytestring-literal`) are exactly the ones that need such a literal;
+`examples/go/build-exclusions` is the ratchet that keeps that set honest.
 
 ---
 

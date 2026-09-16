@@ -1,6 +1,7 @@
 package runar
 
 import (
+	"fmt"
 	"math/big"
 )
 
@@ -250,9 +251,20 @@ func Bn254G1OnCurveP(p Point) bool {
 	return Bn254G1OnCurve(bn254PointToBytes(p))
 }
 
-// Bn254FieldNegP returns (p - a) mod p. In the mock, truncates to int64.
+// Bn254FieldNegP returns (p - a) mod p.
+//
+// The BN254 base field prime is 254 bits, so for every nonzero `a` the answer
+// is ~254 bits and this int64 return cannot hold it. It used to return the
+// truncation and say so in a comment; it panics now and points at
+// Bn254FieldNegBigP, which takes and returns *big.Int and maps to the same
+// `bn254FieldNeg` builtin in the .runar.go parser. Zero is the one input whose
+// negation fits, and it still works.
 func Bn254FieldNegP(a Bigint) Bigint {
 	r := Bn254FieldNeg(big.NewInt(a))
+	if !r.IsInt64() {
+		panic(fmt.Sprintf("runar: Bn254FieldNegP(%d) = %s, which does not fit int64 — "+
+			"the BN254 base field is 254 bits wide; use Bn254FieldNegBigP", a, r))
+	}
 	return r.Int64()
 }
 

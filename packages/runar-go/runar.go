@@ -51,9 +51,11 @@ import (
 // Int is a Rúnar integer (maps to Bitcoin Script numbers).
 type Int = int64
 
-// Bigint is an alias for Int. See the package comment above for why this
-// is int64 rather than *big.Int; the compiler pipeline itself uses
-// arbitrary precision regardless of how the runtime types are declared.
+// Bigint is an alias for Int. See the note above for why this is int64 rather
+// than *big.Int — the short version is that Go has no operator overloading, so
+// a wide alias would take `+` away from contract source and quietly turn `==`
+// into pointer identity. Use BigintBig for values that can exceed it; both
+// names lower to the same `bigint` primitive and emit the same Script.
 type Bigint = int64
 
 // BigintBig is an arbitrary-precision integer for cases where Bigint (int64)

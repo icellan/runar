@@ -707,7 +707,7 @@ Build BSV-21 (v2, ID-based) ordinals inscriptions. [sdk_ordinals.go](sdk_ordinal
 type Bigint = int64
 ```
 
-The Rúnar runtime integer type. Backed by `int64` because Go has no operator overloading; the compiler pipeline carries integer values as `*big.Int` internally so any literal of any size compiles correctly. For values >= 2^63 in Go-mock tests, use [`BigintBig`](#bigintbig). [runar.go](runar.go).
+The Rúnar runtime integer type. Backed by `int64` because Go has no operator overloading: a `*big.Int` alias would take `+` and `<` away from contract source, and would silently turn `==` into pointer identity. Rúnar's `bigint` itself is arbitrary precision, as is the emitted Script — so for values that can exceed 2^63, in contract source as well as in Go-mock tests, use [`BigintBig`](#bigintbig) and the [operator helpers](#bigintbigadd--sub--mul--mod--div--less--lesseq--greater--greatereq--equal--notequal). Both type names lower to the same `bigint` primitive and emit the same Script. Nothing in this package narrows into `Bigint` silently: `Pow`, `MulDiv`, `PercentOf`, `Sqrt`, `Bin2Num`, `Num2Bin` and `Bn254FieldNegP` panic rather than truncate. [runar.go](runar.go).
 
 #### `BigintBig`
 
@@ -715,7 +715,7 @@ The Rúnar runtime integer type. Backed by `int64` because Go has no operator ov
 type BigintBig = *big.Int
 ```
 
-Arbitrary-precision integer for Go-mock tests that consume gnark-generated fixtures. Pair with the `*Big`-suffixed BN254 helpers. [runar.go](runar.go).
+Arbitrary-precision integer. Use it for any value that can exceed `int64` — 256-bit secp256k1 coordinates (`EcPointX`, `EcPointY`, `EcMakePoint`), NIST P-256/P-384 scalars, BN254 field elements, gnark-generated Groth16 fixtures. It is a contract-source type, not only a test type: the `.runar.go` parsers map `runar.BigintBig` to the same `bigint` primitive as `runar.Bigint`, so the emitted Script is unchanged. Pair with the operator helpers below and with the `*Big`-suffixed BN254 helpers. [runar.go](runar.go).
 
 #### `BigintBigAdd` / `Sub` / `Mul` / `Mod` / `Div` / `Less` / `LessEq` / `Greater` / `GreaterEq` / `Equal` / `NotEqual`
 
@@ -733,7 +733,7 @@ func Bin2Num(data ByteString) int64
 func Bin2NumBig(data ByteString) *big.Int
 ```
 
-Decode a Bitcoin Script little-endian sign-magnitude byte string into an integer. Inverse of `Num2Bin`. The non-`Big` variant truncates out-of-range values to the low 64 bits. [runar.go](runar.go).
+Decode a Bitcoin Script little-endian sign-magnitude byte string into an integer. Inverse of `Num2Bin`. The non-`Big` variant **panics** on a value outside `int64` rather than returning its low 64 bits; the boundary is the decoded VALUE, not the push width, so a 16-byte push of `1000` decodes fine. [runar.go](runar.go).
 
 #### `Blake3Compress` / `Blake3Hash`
 
