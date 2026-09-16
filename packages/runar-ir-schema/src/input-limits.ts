@@ -42,7 +42,7 @@
  *   parser, and no tier is anywhere near its stack — at 1024 Python's
  *   canonical_json dies of native stack exhaustion and the JVM crashes on a
  *   513-deep object, so a higher bound would trade a clean typed rejection
- *   for a crash. Headroom is ample: the deepest of the 163 checked-in
+ *   for a crash. Headroom is ample: the deepest of the 165 checked-in
  *   conformance artifacts measures depth 15, and
  *   conformance/sdk-envelope/fixtures.json tops out at 6.
  * - MAX_STRING_BYTES = 4 MiB — the binding case is a compiled script carried
