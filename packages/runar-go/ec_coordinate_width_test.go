@@ -46,10 +46,10 @@ const (
 
 func TestEcPointXY_CarryTheWholeCoordinate(t *testing.T) {
 	rows := []struct {
-		name       string
-		k          int64
-		wantX      string
-		wantY      string
+		name  string
+		k     int64
+		wantX string
+		wantY string
 	}{
 		{name: "2G", k: 2, wantX: g2XHex, wantY: g2YHex},
 		{name: "3G", k: 3, wantX: g3XHex, wantY: g3YHex},
