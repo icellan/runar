@@ -157,6 +157,8 @@ export function renderTypeScript(contract: GeneratedContract): string {
   if (usedFns.has('len')) valueImports.push('len');
   if (usedFns.has('cat')) valueImports.push('cat');
   if (usedFns.has('substr')) valueImports.push('substr');
+  if (usedFns.has('split')) valueImports.push('split');
+  if (usedFns.has('reverseBytes')) valueImports.push('reverseBytes');
   if (usedFns.has('abs')) valueImports.push('abs');
   if (usedFns.has('min')) valueImports.push('min');
   if (usedFns.has('max')) valueImports.push('max');
@@ -536,6 +538,9 @@ export function renderPython(contract: GeneratedContract): string {
   if (usedFns.has('within')) imports.push('within');
   if (usedFns.has('len')) imports.push('len');
   if (usedFns.has('cat')) imports.push('cat');
+  if (usedFns.has('substr')) imports.push('substr');
+  if (usedFns.has('split')) imports.push('split');
+  if (usedFns.has('reverseBytes')) imports.push('reverse_bytes');
   imports.push('public');
   if (contract.properties.some((p) => p.readonly)) imports.push('Readonly');
 
@@ -1122,6 +1127,7 @@ export function renderJava(contract: GeneratedContract): string {
     'abs', 'min', 'max', 'within', 'safediv', 'safemod', 'clamp', 'sign',
     'pow', 'mulDiv', 'percentOf', 'sqrt', 'gcd', 'log2',
     'hash160', 'sha256', 'hash256', 'ripemd160', 'checkSig', 'len', 'cat',
+    'substr', 'split', 'reverseBytes',
   ];
   for (const fn of knownBuiltins) {
     if (usedFns.has(fn)) staticImports.add(fn);

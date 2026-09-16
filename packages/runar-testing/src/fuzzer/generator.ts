@@ -1919,9 +1919,58 @@ interface BytesVar {
 }
 
 /**
+ * Whether `arbBytesExpr` may emit `split`.
+ *
+ * OFF, because the FIRST thing the arm did when switched on was find a
+ * compiler defect it cannot work around. `split` pushes TWO stack-map slots
+ * for ONE binding in `05-stack-lower.ts#lowerBuiltinCall`:
+ *
+ *     if (func === 'split') {
+ *       this.stackMap.push(null);        // left part  <- orphan, never dropped
+ *       this.stackMap.push(bindingName); // right part
+ *     }
+ *
+ * The orphaned left half desyncs the model from the runtime stack, so a read
+ * AFTER the split resolves to the wrong slot and lowering aborts. Minimal
+ * repro, pinned by `conformance/split-stack-desync.test.ts`:
+ *
+ *     const b0: ByteString = split(data, 1n);
+ *     assert(len(b0) >= 0n && len(data) >= 0n);
+ *     // Value 't11' not found on stack (stack has 1 items: [])
+ *
+ * Drop the trailing `&& len(data) >= 0n` and it compiles; the same shape with
+ * `substr` compiles, because substr NIPs its left half. So `split` is usable
+ * only when nothing is read after it, which is why it had no fixture: the only
+ * shape that compiles is the trivial one.
+ *
+ * That belongs to whoever owns `packages/runar-compiler/`, not to this file.
+ * Flip this to `true` in the same change that fixes the lowering —
+ * `conformance/split-stack-desync.test.ts` goes red when the defect is gone
+ * and will tell you so.
+ *
+ * `split` is NOT uncovered in the meantime: `conformance/tests/byte-builtins`
+ * compiles it on all seven tiers and
+ * `conformance/byte_builtins_execution_test.go` spends it at index 0, at
+ * index == len, on the empty string and out of range.
+ */
+const SPLIT_ARM_ENABLED = false;
+
+/**
  * A ByteString expression built from the available ByteString vars, tracking a
- * conservative minimum length so `substr` bounds are always in range on both
- * the interpreter and the script engines (OP_SPLIT rejects out-of-range).
+ * conservative minimum length so `substr` and `split` bounds are always in
+ * range on both the interpreter and the script engines (OP_SPLIT rejects
+ * out-of-range).
+ *
+ * `int2str` is deliberately NOT here, and adding it would break the gate. The
+ * Go renderer spells builtins `runar.` + PascalCase, which makes
+ * `runar.Int2Str` — and go, rust, python and java all REJECT that spelling
+ * ("unknown function 'int2Str'"): they camel-case the leading character
+ * instead of consulting the alias map, and the builtin is registered as
+ * `int2str`. Since `fuzz:ir:gate` compiles every case on all seven tiers,
+ * emitting int2str would make four of them permanent outliers. `int2str` is
+ * covered instead by the `byte-builtins` fixture and
+ * `conformance/byte_builtins_execution_test.go`, where the surface spelling is
+ * chosen by hand.
  */
 function arbBytesExpr(
   bytesVars: BytesVar[],
@@ -1955,6 +2004,42 @@ function arbBytesExpr(
         })),
       ),
     ),
+    // split(x, idx) — binds the RIGHT half; `idx` is chosen inside
+    // [0, minLen(x)] so OP_SPLIT is in range on every witness, exactly as the
+    // substr arm above does. Both ends of that interval are reachable, which
+    // is the point: an off-by-one in the OP_SPLIT lowering shows up at idx 0
+    // or at idx == len and nowhere in between.
+    //
+    // NOTE the compiler binds the right half only — `runar-lang` declares
+    // `split(): [ByteString, ByteString]` but no parser accepts array
+    // destructuring, so the left half is unnameable. Do not "fix" this arm to
+    // emit a tuple; nothing can compile one.
+    //
+    // DISABLED — see SPLIT_ARM_ENABLED below.
+    ...(SPLIT_ARM_ENABLED
+      ? [
+        arbBytesExpr(bytesVars, depth - 1).chain((base) =>
+          fc.integer({ min: 0, max: base.minLen }).map((idx) => ({
+            expr: {
+              kind: 'call',
+              fn: 'split',
+              args: [base.expr, { kind: 'bigint_literal', value: BigInt(idx) }],
+            } as Expr,
+            minLen: base.minLen - idx,
+          })),
+        ),
+      ]
+      : []),
+    // reverseBytes(x) — length-preserving, valid on every input including the
+    // empty string, so no bound is needed. The base is a depth-0 atom on
+    // purpose: each call unrolls 520 OP_SPLIT/OP_CAT iterations (~5.5 KB of
+    // script), and a nested `reverseBytes(reverseBytes(x))` would spend the
+    // corpus's whole size budget proving the peephole pass can survive 1 MB of
+    // one opcode rather than exercising the builtin.
+    atom.map((base) => ({
+      expr: { kind: 'call', fn: 'reverseBytes', args: [base.expr] } as Expr,
+      minLen: base.minLen,
+    })),
   );
 }
 
