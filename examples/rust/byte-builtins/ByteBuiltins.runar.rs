@@ -1,13 +1,14 @@
 use runar::prelude::*;
 
-/// ByteBuiltins -- Rust DSL port. Executed coverage for four byte-level
-/// builtins that no conformance fixture called: split, int2str, reverse_bytes
-/// and sha256. See the `.runar.ts` port for the full rationale, and for why
-/// ripemd160 is absent.
+/// ByteBuiltins -- Rust DSL port. Executed coverage for five byte-level
+/// builtins that no conformance fixture called: split, int2str, reverse_bytes,
+/// sha256 and ripemd160. See the `.runar.ts` port for the full rationale.
 #[runar::contract]
 pub struct ByteBuiltins {
     #[readonly]
     pub expectedDigest: Sha256,
+    #[readonly]
+    pub expectedRipemd: Ripemd160,
 }
 
 impl ByteBuiltins {
@@ -33,5 +34,11 @@ impl ByteBuiltins {
     pub fn checkSha256(&self, preimage: &ByteString) {
         let h: Sha256 = sha256(preimage);
         assert!(h == self.expectedDigest);
+    }
+
+    /// OP_RIPEMD160, against the digest baked into the locking script.
+    pub fn checkRipemd(&self, preimage: &ByteString) {
+        let h: Ripemd160 = ripemd160(preimage);
+        assert!(h == self.expectedRipemd);
     }
 }

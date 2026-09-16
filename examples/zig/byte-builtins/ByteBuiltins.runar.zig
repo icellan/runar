@@ -1,16 +1,16 @@
 const runar = @import("runar");
 
-// ByteBuiltins -- Zig port. Executed coverage for four byte-level builtins that
-// no conformance fixture called: split, int2str, reverseBytes and sha256.
-// See the `.runar.ts` port for the full rationale, and for why ripemd160 is
-// absent.
+// ByteBuiltins -- Zig port. Executed coverage for five byte-level builtins that
+// no conformance fixture called: split, int2str, reverseBytes, sha256 and
+// ripemd160. See the `.runar.ts` port for the full rationale.
 pub const ByteBuiltins = struct {
     pub const Contract = runar.SmartContract;
 
     expectedDigest: runar.Sha256,
+    expectedRipemd: runar.Ripemd160,
 
-    pub fn init(expectedDigest: runar.Sha256) ByteBuiltins {
-        return .{ .expectedDigest = expectedDigest };
+    pub fn init(expectedDigest: runar.Sha256, expectedRipemd: runar.Ripemd160) ByteBuiltins {
+        return .{ .expectedDigest = expectedDigest, .expectedRipemd = expectedRipemd };
     }
 
     /// OP_SPLIT. Binds the right half of `data` at `idx`.
@@ -35,5 +35,11 @@ pub const ByteBuiltins = struct {
     pub fn checkSha256(self: *const ByteBuiltins, preimage: runar.ByteString) void {
         const h = runar.sha256(preimage);
         runar.assert(runar.bytesEq(h, self.expectedDigest));
+    }
+
+    /// OP_RIPEMD160, against the digest baked into the locking script.
+    pub fn checkRipemd(self: *const ByteBuiltins, preimage: runar.ByteString) void {
+        const h = runar.ripemd160(preimage);
+        runar.assert(runar.bytesEq(h, self.expectedRipemd));
     }
 };

@@ -13,26 +13,49 @@
         {
           "name": "t1",
           "value": {
+            "kind": "load_prop",
+            "name": "expectedRipemd"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
             "args": [
-              "t0"
+              "t0",
+              "t1"
             ],
             "func": "super",
             "kind": "call"
           }
         },
         {
-          "name": "t2",
+          "name": "t3",
           "value": {
             "kind": "load_prop",
             "name": "expectedDigest"
           }
         },
         {
-          "name": "t3",
+          "name": "t4",
           "value": {
             "kind": "update_prop",
             "name": "expectedDigest",
-            "value": "t2"
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRipemd"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "expectedRipemd",
+            "value": "t5"
           }
         }
       ],
@@ -42,6 +65,10 @@
         {
           "name": "expectedDigest",
           "type": "Sha256"
+        },
+        {
+          "name": "expectedRipemd",
+          "type": "Ripemd160"
         }
       ]
     },
@@ -320,6 +347,66 @@
           "type": "ByteString"
         }
       ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "preimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ripemd160",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "h",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRipemd"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "h",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkRipemd",
+      "params": [
+        {
+          "name": "preimage",
+          "type": "ByteString"
+        }
+      ]
     }
   ],
   "properties": [
@@ -327,6 +414,11 @@
       "name": "expectedDigest",
       "readonly": true,
       "type": "Sha256"
+    },
+    {
+      "name": "expectedRipemd",
+      "readonly": true,
+      "type": "Ripemd160"
     }
   ]
 }

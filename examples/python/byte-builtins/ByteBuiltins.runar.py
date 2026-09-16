@@ -1,7 +1,6 @@
-"""ByteBuiltins -- Python port. Executed coverage for four byte-level builtins
-that no conformance fixture called: split, int_to_str, reverse_bytes and
-sha256. See the `.runar.ts` port for the full rationale, and for why ripemd160
-is absent.
+"""ByteBuiltins -- Python port. Executed coverage for five byte-level builtins
+that no conformance fixture called: split, int_to_str, reverse_bytes, sha256
+and ripemd160. See the `.runar.ts` port for the full rationale.
 """
 
 from runar import (
@@ -9,9 +8,11 @@ from runar import (
     ByteString,
     Bigint,
     Sha256,
+    Ripemd160,
     public,
     assert_,
     sha256,
+    ripemd160,
     split,
     int_to_str,
     reverse_bytes,
@@ -20,10 +21,12 @@ from runar import (
 
 class ByteBuiltins(SmartContract):
     expected_digest: Sha256
+    expected_ripemd: Ripemd160
 
-    def __init__(self, expected_digest: Sha256):
-        super().__init__(expected_digest)
+    def __init__(self, expected_digest: Sha256, expected_ripemd: Ripemd160):
+        super().__init__(expected_digest, expected_ripemd)
         self.expected_digest = expected_digest
+        self.expected_ripemd = expected_ripemd
 
     @public
     def check_split(self, data: ByteString, idx: Bigint, expected_tail: ByteString):
@@ -48,3 +51,9 @@ class ByteBuiltins(SmartContract):
         """OP_SHA256, against the digest baked into the locking script."""
         h: Sha256 = sha256(preimage)
         assert_(h == self.expected_digest)
+
+    @public
+    def check_ripemd(self, preimage: ByteString):
+        """OP_RIPEMD160, against the digest baked into the locking script."""
+        h: Ripemd160 = ripemd160(preimage)
+        assert_(h == self.expected_ripemd)

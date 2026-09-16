@@ -19,7 +19,7 @@
     "bounded-loop": 42,
     "branch-merged-locals": 711,
     "branched-readonly-len": 849,
-    "byte-builtins": 5763,
+    "byte-builtins": 5773,
     "cond-write-multi-field": 705,
     "conditional-data-output-stateful": 762,
     "convergence-proof": 453727,

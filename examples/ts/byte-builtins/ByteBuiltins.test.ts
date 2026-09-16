@@ -18,19 +18,33 @@ import { Hash } from '@bsv/sdk';
  * split at 0 and at len, int2str's sign-magnitude encoding, reverseBytes on
  * empty and odd-length input. Each group carries a negative so a builtin that
  * ignored its arguments could not pass.
+ *
+ * `ripemd160` is here because of what it cost to get it here: the `.runar.go`
+ * surface's only spelling for it, `runar.Ripemd160`, is both a Rúnar type name
+ * and a Rúnar builtin name, and two of the seven tiers resolved the call as a
+ * type cast — dropping OP_RIPEMD160 and making the baked digest the spending
+ * key. Until that was fixed no fixture could call it.
  */
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FILE = 'ByteBuiltins.runar.ts';
 const source = readFileSync(join(__dirname, FILE), 'utf8');
 
 const PREIMAGE = 'runar byte-builtins fixture';
+const PREIMAGE_HEX = Buffer.from(PREIMAGE, 'utf8').toString('hex');
 const DIGEST = Buffer.from(
   Hash.sha256(Array.from(Buffer.from(PREIMAGE, 'utf8'))),
 ).toString('hex');
+const RIPEMD = Buffer.from(
+  Hash.ripemd160(Array.from(Buffer.from(PREIMAGE, 'utf8'))),
+).toString('hex');
 
-/** A contract with the SHA-256 digest of PREIMAGE baked in. */
+/** A contract with both digests of PREIMAGE baked in. */
 function contract() {
-  return TestContract.fromSource(source, { expectedDigest: DIGEST }, FILE);
+  return TestContract.fromSource(
+    source,
+    { expectedDigest: DIGEST, expectedRipemd: RIPEMD },
+    FILE,
+  );
 }
 
 const call = (method: string, args: Record<string, unknown>) =>
@@ -125,7 +139,7 @@ describe('ByteBuiltins — reverseBytes', () => {
 
 describe('ByteBuiltins — sha256', () => {
   it('accepts the preimage of the baked digest', () => {
-    const r = call('checkSha256', { preimage: Buffer.from(PREIMAGE, 'utf8').toString('hex') });
+    const r = call('checkSha256', { preimage: PREIMAGE_HEX });
     expect(r.success, r.error).toBe(true);
   });
 
@@ -138,5 +152,37 @@ describe('ByteBuiltins — sha256', () => {
 
   it('rejects an unrelated preimage', () => {
     expect(call('checkSha256', { preimage: '00' }).success).toBe(false);
+  });
+});
+
+describe('ByteBuiltins — ripemd160', () => {
+  it('accepts the preimage of the baked digest', () => {
+    const r = call('checkRipemd', { preimage: PREIMAGE_HEX });
+    expect(r.success, r.error).toBe(true);
+  });
+
+  it('rejects the DIGEST itself', () => {
+    // The fund-loss shape. `runar.Ripemd160` in the `.runar.go` surface used to
+    // lower to an identity binding in the TypeScript and Ruby tiers, which
+    // degenerates this method to `preimage == storedDigest` — and storedDigest
+    // is in the locking script.
+    expect(call('checkRipemd', { preimage: RIPEMD }).success).toBe(false);
+  });
+
+  it('rejects the SHA-256 digest of the same preimage', () => {
+    // 20 bytes vs 32: the check a length-blind comparison would fail.
+    expect(call('checkRipemd', { preimage: DIGEST }).success).toBe(false);
+  });
+
+  it('rejects an unrelated preimage', () => {
+    expect(call('checkRipemd', { preimage: '00' }).success).toBe(false);
+  });
+
+  it('is not interchangeable with sha256', () => {
+    // Each method has its own baked digest; a lowering that crossed the two
+    // hashes would still pass every row above.
+    expect(call('checkSha256', { preimage: RIPEMD }).success).toBe(false);
+    expect(RIPEMD).toHaveLength(40);
+    expect(DIGEST).toHaveLength(64);
   });
 });

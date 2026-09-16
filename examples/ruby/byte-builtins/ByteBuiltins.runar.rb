@@ -1,15 +1,16 @@
 require 'runar'
 
-# ByteBuiltins -- Ruby port. Executed coverage for four byte-level builtins
-# that no conformance fixture called: split, int2str, reverse_bytes and
-# sha256. See the `.runar.ts` port for the full rationale, and for why
-# ripemd160 is absent.
+# ByteBuiltins -- Ruby port. Executed coverage for five byte-level builtins
+# that no conformance fixture called: split, int2str, reverse_bytes, sha256 and
+# ripemd160. See the `.runar.ts` port for the full rationale.
 class ByteBuiltins < Runar::SmartContract
   prop :expected_digest, Sha256, readonly: true
+  prop :expected_ripemd, Ripemd160, readonly: true
 
-  def initialize(expected_digest)
-    super(expected_digest)
+  def initialize(expected_digest, expected_ripemd)
+    super(expected_digest, expected_ripemd)
     @expected_digest = expected_digest
+    @expected_ripemd = expected_ripemd
   end
 
   # OP_SPLIT. Binds the right half of `data` at `idx`.
@@ -38,5 +39,12 @@ class ByteBuiltins < Runar::SmartContract
   def check_sha256(preimage)
     h = sha256(preimage)
     assert h == @expected_digest
+  end
+
+  # OP_RIPEMD160, against the digest baked into the locking script.
+  runar_public preimage: ByteString
+  def check_ripemd(preimage)
+    h = ripemd160(preimage)
+    assert h == @expected_ripemd
   end
 end

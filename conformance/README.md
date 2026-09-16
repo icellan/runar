@@ -782,7 +782,7 @@ The suite currently contains **81 fixtures** under `tests/` — that directory i
 | `blake3` | BLAKE3 compression + full-hash builtins | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
-| `byte-builtins` | `split`, `int2str`, `reverseBytes` and the `Sha256Hash` alias — four builtins that appeared in no fixture's ANF and that the fuzzer cannot generate. Spent at each builtin's boundaries by `conformance/byte_builtins_execution_test.go` | Yes |
+| `byte-builtins` | `split`, `int2str`, `reverseBytes`, `ripemd160` and the `Sha256Hash` alias — five builtins that appeared in no fixture's ANF and that the fuzzer cannot generate. Spent at each builtin's boundaries by `conformance/byte_builtins_execution_test.go`, including the two hash methods' "the digest itself must not unlock it" rows. `ripemd160` arrived last: its only `.runar.go` spelling, `runar.Ripemd160`, is both a Rúnar type name and a Rúnar builtin name, and two tiers resolved the call as a type cast until that was fixed | Yes |
 | `convergence-proof` | Convergence proof patterns | Yes |
 | `covenant-vault` | Covenant spending constraints | Yes |
 | `cross-covenant` | Cross-contract covenant validation | Yes |

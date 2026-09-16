@@ -1,14 +1,14 @@
-// ByteBuiltins -- Move-style port. Executed coverage for four byte-level
-// builtins that no conformance fixture called: split, int2str, reverseBytes
-// and sha256. See the `.runar.ts` port for the full rationale, and for why
-// ripemd160 is absent.
+// ByteBuiltins -- Move-style port. Executed coverage for five byte-level
+// builtins that no conformance fixture called: split, int2str, reverseBytes,
+// sha256 and ripemd160. See the `.runar.ts` port for the full rationale.
 module ByteBuiltins {
-    use runar::types::{ByteString, Int, Sha256};
-    use runar::crypto::{sha256};
+    use runar::types::{ByteString, Int, Sha256, Ripemd160};
+    use runar::crypto::{sha256, ripemd160};
     use runar::bytes::{split, int2str, reverseBytes};
 
     struct ByteBuiltins {
         expectedDigest: Sha256,
+        expectedRipemd: Ripemd160,
     }
 
     /// OP_SPLIT. Binds the right half of `data` at `idx`.
@@ -33,5 +33,11 @@ module ByteBuiltins {
     public fun checkSha256(contract: &ByteBuiltins, preimage: ByteString) {
         let h: Sha256 = sha256(preimage);
         assert!(h == contract.expectedDigest, 0);
+    }
+
+    /// OP_RIPEMD160, against the digest baked into the locking script.
+    public fun checkRipemd(contract: &ByteBuiltins, preimage: ByteString) {
+        let h: Ripemd160 = ripemd160(preimage);
+        assert!(h == contract.expectedRipemd, 0);
     }
 }

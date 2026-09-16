@@ -1,8 +1,8 @@
-import { SmartContract, assert, sha256, split, int2str, reverseBytes } from 'runar-lang';
-import type { ByteString, Sha256 } from 'runar-lang';
+import { SmartContract, assert, sha256, ripemd160, split, int2str, reverseBytes } from 'runar-lang';
+import type { ByteString, Sha256, Ripemd160 } from 'runar-lang';
 
 /**
- * ByteBuiltins — executed coverage for four byte-level builtins that no
+ * ByteBuiltins — executed coverage for five byte-level builtins that no
  * conformance fixture called.
  *
  * Measured before this file landed: of the 105 `export function`s in
@@ -30,14 +30,14 @@ import type { ByteString, Sha256 } from 'runar-lang';
  *                element, which is the last of the 520 unrolled iterations
  *   sha256       spelled `Sha256Hash` in the `.runar.go` surface, the only
  *                surface whose parser resolves that alias
- *
- * `ripemd160` was the fifth target and is NOT here. The `.runar.go` surface's
- * only spelling for it is `runar.Ripemd160`, which the TypeScript and Ruby
- * compilers lower to an identity binding — the hash opcode is never emitted,
- * while the other five tiers emit OP_RIPEMD160. Adding it would either wedge
- * cross-tier parity or require an allowlist that papers over a fund-loss bug.
- * The method slot is left free for it; once the parser bug is fixed, add
- * `checkRipemd` and re-stamp.
+ *   ripemd160    the `.runar.go` surface's ONLY spelling for it is
+ *                `runar.Ripemd160`, which the TypeScript and Ruby parsers
+ *                lowered to an identity binding — the opcode vanished, and the
+ *                baked digest became the spending key. That is why this builtin
+ *                had zero fixtures: nothing could call it from the Go surface
+ *                without wedging cross-tier parity. The parser bug is fixed;
+ *                `checkRipemd` is the end-to-end proof, and it is the reason
+ *                this contract bakes a SECOND digest.
  *
  * NOTE on `split`: the compiler binds the RIGHT half. `runar-lang` declares
  * `split(): [ByteString, ByteString]`, but no parser accepts array
@@ -47,10 +47,12 @@ import type { ByteString, Sha256 } from 'runar-lang';
  */
 class ByteBuiltins extends SmartContract {
   readonly expectedDigest: Sha256;
+  readonly expectedRipemd: Ripemd160;
 
-  constructor(expectedDigest: Sha256) {
-    super(expectedDigest);
+  constructor(expectedDigest: Sha256, expectedRipemd: Ripemd160) {
+    super(expectedDigest, expectedRipemd);
     this.expectedDigest = expectedDigest;
+    this.expectedRipemd = expectedRipemd;
   }
 
   /** OP_SPLIT. Binds the right half of `data` at `idx`. */
@@ -75,5 +77,11 @@ class ByteBuiltins extends SmartContract {
   public checkSha256(preimage: ByteString): void {
     const h: Sha256 = sha256(preimage);
     assert(h == this.expectedDigest);
+  }
+
+  /** OP_RIPEMD160, against the digest baked into the locking script. */
+  public checkRipemd(preimage: ByteString): void {
+    const h: Ripemd160 = ripemd160(preimage);
+    assert(h == this.expectedRipemd);
   }
 }

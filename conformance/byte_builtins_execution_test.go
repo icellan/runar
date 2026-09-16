@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"math/big"
 	"testing"
+
+	"golang.org/x/crypto/ripemd160" //nolint:staticcheck // RIPEMD-160 is a consensus opcode; this is the reference implementation of it.
 )
 
 // ---------------------------------------------------------------------------
@@ -12,10 +14,19 @@ import (
 // own compiled bytes.
 //
 // WHY THIS FILE EXISTS. Of the 105 `export function`s in
-// packages/runar-lang/src/builtins.ts, `split`, `int2str` and `reverseBytes`
-// appeared in ZERO fixtures' expected-ir.json and the fuzzer could generate
-// none of them. Seven compilers shipped codegen for all three with nothing on
-// either side of it: no cross-tier byte comparison, and no execution.
+// packages/runar-lang/src/builtins.ts, `split`, `int2str`, `reverseBytes` and
+// `ripemd160` appeared in ZERO fixtures' expected-ir.json and the fuzzer could
+// generate none of them. Seven compilers shipped codegen for all four with
+// nothing on either side of it: no cross-tier byte comparison, and no
+// execution.
+//
+// `ripemd160` was the last of them to land, and it is the one that shows why
+// the gap mattered. The `.runar.go` surface's only spelling for it is
+// `runar.Ripemd160`, a name that is BOTH a Rúnar type and a Rúnar builtin; two
+// of the seven tiers resolved the call as a type cast and dropped OP_RIPEMD160
+// altogether. No fixture called it, so nothing noticed. See
+// conformance/go_surface_hash_spelling_execution_test.go for the fund-loss
+// proof and the fix.
 //
 // A fixture alone would not have been enough. `pow` DID have a fixture callsite
 // -- math-demo.exponentiate -- and still returned base^min(exp,32) for every
@@ -36,18 +47,33 @@ const (
 	bbCheckInt2Str = 1
 	bbCheckReverse = 2
 	bbCheckSha256  = 3
+	bbCheckRipemd  = 4
 )
 
-// bbDigest is the SHA-256 digest baked into the locking script as the
-// contract's one constructor arg.
-var bbDigest = sha256.Sum256([]byte("runar byte-builtins fixture"))
+// bbPreimage is the message whose two digests are baked into the locking
+// script as the contract's constructor args.
+var bbPreimage = []byte("runar byte-builtins fixture")
+
+// bbDigest is the SHA-256 digest baked into the locking script.
+var bbDigest = sha256.Sum256(bbPreimage)
+
+// bbRipemd is the RIPEMD-160 digest baked into the locking script. Computed by
+// golang.org/x/crypto, which is not the implementation under test.
+var bbRipemd = ripemd160Of(bbPreimage)
+
+func ripemd160Of(b []byte) []byte {
+	h := ripemd160.New()
+	h.Write(b)
+	return h.Sum(nil)
+}
 
 // spendByteBuiltins compiles the byte-builtins fixture with `expectedDigest`
 // baked in and spends `method` with the given pushes. Returns whether the
 // consensus interpreter ACCEPTED.
 func spendByteBuiltins(t *testing.T, method int, pushes ...string) bool {
 	t.Helper()
-	args := `{"expectedDigest":"` + hex.EncodeToString(bbDigest[:]) + `"}`
+	args := `{"expectedDigest":"` + hex.EncodeToString(bbDigest[:]) +
+		`","expectedRipemd":"` + hex.EncodeToString(bbRipemd) + `"}`
 	lockingHex, err := compileRúnar("byte-builtins", args)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
@@ -228,7 +254,7 @@ func lenName(n int) string {
 
 func TestByteBuiltins_Sha256_AgainstBakedDigest(t *testing.T) {
 	// The honest spend: the preimage whose digest was baked in.
-	if !spendByteBuiltins(t, bbCheckSha256, encodePushBytes([]byte("runar byte-builtins fixture"))) {
+	if !spendByteBuiltins(t, bbCheckSha256, encodePushBytes(bbPreimage)) {
 		t.Fatal("the preimage of the baked digest was rejected")
 	}
 
@@ -245,5 +271,56 @@ func TestByteBuiltins_Sha256_AgainstBakedDigest(t *testing.T) {
 	other := sha256.Sum256([]byte("not the preimage"))
 	if spendByteBuiltins(t, bbCheckSha256, encodePushBytes(other[:])) {
 		t.Fatal("an unrelated preimage unlocked the contract")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ripemd160 -- OP_RIPEMD160. In the `.runar.go` surface this call is spelled
+// `runar.Ripemd160`, which is also a Rúnar TYPE name. That collision is why
+// this builtin had zero fixtures until now: two of the seven tiers lowered the
+// call to an identity binding, so any fixture calling it would have wedged
+// cross-tier parity rather than reported the bug.
+// ---------------------------------------------------------------------------
+
+func TestByteBuiltins_Ripemd160_AgainstBakedDigest(t *testing.T) {
+	// The teeth first. Under the identity-cast miscompile the method
+	// degenerates to `pushed == storedRipemd`, and storedRipemd is IN the
+	// locking script — the contract is spendable by anyone who can read the
+	// chain. This row is the whole reason the method exists.
+	if spendByteBuiltins(t, bbCheckRipemd, encodePushBytes(bbRipemd)) {
+		t.Fatal("the DIGEST unlocked the contract -- OP_RIPEMD160 is not being applied")
+	}
+
+	// The honest spend.
+	if !spendByteBuiltins(t, bbCheckRipemd, encodePushBytes(bbPreimage)) {
+		t.Fatal("the preimage of the baked RIPEMD-160 digest was rejected")
+	}
+
+	// An unrelated preimage stays rejected, so the row above cannot pass on a
+	// script that refuses everything.
+	if spendByteBuiltins(t, bbCheckRipemd, encodePushBytes([]byte("not the preimage"))) {
+		t.Fatal("an unrelated preimage unlocked the contract")
+	}
+
+	// RIPEMD-160 is 20 bytes and SHA-256 is 32. Pushing the SHA-256 digest of
+	// the same preimage must not unlock it — that is the check a length-only
+	// comparison would fail.
+	if spendByteBuiltins(t, bbCheckRipemd, encodePushBytes(bbDigest[:])) {
+		t.Fatal("the SHA-256 digest of the preimage unlocked the RIPEMD-160 method")
+	}
+}
+
+// The two hash methods must not be interchangeable: each has its own baked
+// digest, and a lowering that crossed the wires would still pass every row
+// above if both methods hashed the same way.
+func TestByteBuiltins_HashMethodsAreNotInterchangeable(t *testing.T) {
+	if spendByteBuiltins(t, bbCheckSha256, encodePushBytes(bbRipemd)) {
+		t.Fatal("checkSha256 accepted the RIPEMD-160 digest as its preimage")
+	}
+	if len(bbRipemd) != 20 {
+		t.Fatalf("RIPEMD-160 digest is %d bytes, want 20", len(bbRipemd))
+	}
+	if len(bbDigest) != 32 {
+		t.Fatalf("SHA-256 digest is %d bytes, want 32", len(bbDigest))
 	}
 }

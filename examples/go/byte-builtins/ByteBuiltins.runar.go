@@ -4,9 +4,9 @@ package contract
 
 import runar "github.com/icellan/runar/packages/runar-go"
 
-// ByteBuiltins -- Go port. Executed coverage for four byte-level builtins that
-// no conformance fixture called: Split, Int2Str, ReverseBytes and SHA-256.
-// See the `.runar.ts` port for the full rationale.
+// ByteBuiltins -- Go port. Executed coverage for five byte-level builtins that
+// no conformance fixture called: Split, Int2Str, ReverseBytes, SHA-256 and
+// RIPEMD-160. See the `.runar.ts` port for the full rationale.
 //
 // This port carries one thing none of the other eight can: the SHA-256 call is
 // spelled `Sha256Hash`, not `Sha256`. `Sha256Hash` is a public export of
@@ -17,11 +17,14 @@ import runar "github.com/icellan/runar/packages/runar-go"
 // cross-tier gate: all seven compilers must agree it lowers to OP_SHA256,
 // identically to the `sha256` the other eight surfaces call.
 //
-// Do NOT "simplify" this to `runar.Sha256(preimage)`. That spelling collides
-// with the `Sha256` TYPE name, and the TypeScript and Ruby compilers lower the
-// collision to an identity binding -- the hash opcode is never emitted, while
-// the other five tiers emit OP_SHA256. `runar.Ripemd160` has the same defect,
-// which is why ripemd160 is absent from this fixture entirely.
+// `CheckSha256` keeps the `Sha256Hash` spelling on purpose and `CheckRipemd`
+// below uses `runar.Ripemd160`, so this one fixture covers BOTH sides of the
+// Go surface's name collision. `Sha256` and `Ripemd160` are each a Rúnar type
+// name AND a Rúnar builtin name; in call position the builtin wins (see
+// docs/formats/go.md). Two of the seven tiers used to resolve the collision as
+// a type cast instead, which dropped the hash opcode entirely and made the
+// baked digest the spending key -- see
+// conformance/go_surface_hash_spelling_execution_test.go.
 //
 // `//go:build ignore` because `Split` and `Int2Str` have no counterpart in
 // `packages/runar-go`; this file is a Rúnar frontend input, not a Go one. The
@@ -30,6 +33,8 @@ type ByteBuiltins struct {
 	runar.SmartContract
 	// ExpectedDigest is the SHA-256 digest baked into the locking script.
 	ExpectedDigest runar.Sha256 `runar:"readonly"`
+	// ExpectedRipemd is the RIPEMD-160 digest baked into the locking script.
+	ExpectedRipemd runar.Ripemd160 `runar:"readonly"`
 }
 
 // CheckSplit exercises OP_SPLIT. Binds the right half of data at idx.
@@ -59,4 +64,12 @@ func (c *ByteBuiltins) CheckReverse(data runar.ByteString, expected runar.ByteSt
 func (c *ByteBuiltins) CheckSha256(preimage runar.ByteString) {
 	h := runar.Sha256Hash(preimage)
 	runar.Assert(h == c.ExpectedDigest)
+}
+
+// CheckRipemd exercises OP_RIPEMD160 through `runar.Ripemd160`, the Go
+// surface's only spelling for the hash and the ambiguous half of the collision
+// described above.
+func (c *ByteBuiltins) CheckRipemd(preimage runar.ByteString) {
+	h := runar.Ripemd160(preimage)
+	runar.Assert(h == c.ExpectedRipemd)
 }
