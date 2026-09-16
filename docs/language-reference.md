@@ -552,13 +552,17 @@ private helper(x: bigint): bigint {
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `sign` | `(n: bigint) => bigint` | `OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF` — returns -1, 0, or 1 (guards against div-by-zero when n=0) |
-| `pow` | `(base: bigint, exp: bigint) => bigint` | 32-iteration bounded conditional multiply loop |
+| `pow` | `(base: bigint, exp: bigint) => bigint` | 32-iteration bounded conditional multiply loop. **Domain: `0 <= exp <= 32`, enforced.** An exponent outside it makes the script FAIL (`OP_DUP <0> <33> OP_WITHIN OP_VERIFY`) rather than return `base ** 32`. The constant folder and the reference interpreter refuse on the same bound. |
 | `sqrt` | `(n: bigint) => bigint` | 256-round Newton's method with a convergence break: `next = (guess + n/guess) / 2; guess = min(guess, next)`. `OP_MIN` is the break — integer Newton reaches `floor(sqrt(n))` and then oscillates between it and `floor+1`, so clamping to the running minimum makes `floor(sqrt(n))` a fixed point. **Domain: `0 <= n < 2^495`, enforced.** A negative `n`, or one needing more than 62 script bytes, makes the script FAIL rather than return a wrong root (`OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY` and `OP_SIZE <63> OP_LESSTHAN OP_VERIFY`). The constant folder and the reference interpreter refuse on the same bound. |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | 256-iteration Euclidean algorithm |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — **Warning:** Despite the name, `divmod` only returns the quotient. The remainder is computed internally but discarded. |
 | `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop using `PUSH 2 OP_DIV` for numeric halving — exact floor(log2(n)) |
 
-> **Note on `pow`:** For compile-time constant exponents (e.g. `pow(x, 3n)`), the constant folder evaluates the result at compile time. For runtime exponents, a bounded 32-iteration loop is emitted, supporting exponents up to 32.
+> **Note on `pow`:** The compiler emits 32 unrolled conditional multiplies, so **32 is the largest exponent it can compute**, and that bound is ENFORCED rather than documented: `pow(base, exp)` with `exp < 0` or `exp > 32` makes the script FAIL. It does **not** return `base ** 32`.
+>
+> That distinction is the whole point of the guard. Until it was added, `pow(2n, 40n)` ran to completion and returned `2 ** 32` with no error anywhere, while the constant folder computed the true `2 ** 40` for any `exp <= 256` — so the same expression meant two different things depending on whether the folder had run. For compile-time constant exponents the folder still evaluates `pow` at compile time, but only inside `0 <= exp <= 32`; outside it the folder declines, leaving the guarded script in place, so a constant and a runtime exponent now fail identically.
+>
+> If you need a larger exponent, compose: `pow(pow(x, 32n), 2n)` is `x ** 64`, and each `pow` costs roughly 280 script bytes.
 >
 > **Note on `sqrt`:** Returns the integer (floor) square root. For `sqrt(10n)`, the result is `3n`.
 >
