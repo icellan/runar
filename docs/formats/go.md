@@ -168,7 +168,7 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 | `runar.PubKey` | `PubKey` |
 | `runar.Sig` | `Sig` |
 | `runar.Sha256Digest` | `Sha256` |
-| `runar.Ripemd160` | `Ripemd160` |
+| `runar.Ripemd160Hash` | `Ripemd160` |
 | `runar.Addr` | `Addr` |
 | `runar.SigHashPreimage` | `SigHashPreimage` |
 | `runar.RabinSig` | `RabinSig` |
@@ -229,10 +229,23 @@ expression converts to a pointer, so
 `115792089237316195423570985008687907852837564279074904382605163141518161494337`
 cannot appear in a `.runar.go` file at all. A contract needing one is written in
 any of the other eight formats — every compiler accepts all nine and produces
-byte-identical Script. The three ports in `examples/go` that still carry
-`//go:build ignore` for a numeric reason (`integer-boundary`, `schnorr-zkp`,
-`go-dsl-bytestring-literal`) are exactly the ones that need such a literal;
-`examples/go/build-exclusions` is the ratchet that keeps that set honest.
+byte-identical Script. Three of the five ports in `examples/go` that still carry
+`//go:build ignore` (`integer-boundary`, `schnorr-zkp`,
+`go-dsl-bytestring-literal`) are held out by exactly this — they need such a
+literal. The numeric limit is **not** the whole list, and reading it as such is
+how two of the exclusions stayed unexamined: the other two are
+`all-readonly-cleanstack` (Go's unused-local rule vs a deliberately unused
+binding) and `multisig-2of3` (the `[N]T{...}` composite literal three of the
+seven `.runar.go` parsers require does not convert to the slice the mock's
+`CheckMultiSig` takes). Each of the five says which it is at the top of its own
+file, and `examples/go/build-exclusions` is the ratchet that keeps the set
+honest — it asserts the set exactly, so it has to move in the same commit as an
+exclusion does.
+
+`byte-builtins` and `state-ripemd160` were on that list until the RIPEMD-160
+digest type gained its real name: both needed `runar.Ripemd160Hash` in type
+position, which no tier's `.runar.go` type table mapped. Both build and run
+under `go test` now.
 
 ---
 
@@ -314,18 +327,35 @@ Built-in functions are accessed through the `runar` package with PascalCase name
 
 `Sha256` and `Ripemd160` are Rúnar **type** names as well as Rúnar **builtin**
 names, and the Go surface spells a type conversion and a call identically —
-`runar.Sha256(x)`. The rule is positional and has no exceptions:
+`runar.Sha256(x)`. Go cannot bind one identifier to both, so `packages/runar-go`
+binds the **function** in each case and gives the digest types distinct names:
 
-- In **type** position (`Digest runar.Sha256`, `func (c *C) M(d runar.Sha256)`)
-  the name is the type.
-- In **call** position (`runar.Sha256(preimage)`) the name is the **function**,
-  and the table above applies: it hashes.
+| Purpose | Spelling |
+|---|---|
+| the SHA-256 **hash** | `runar.Sha256(data)` (alias `runar.Sha256Hash`) |
+| the SHA-256 **digest type** | `runar.Sha256Digest` |
+| the RIPEMD-160 **hash** | `runar.Ripemd160(data)` (alias `runar.Ripemd160Func`) |
+| the RIPEMD-160 **digest type** | `runar.Ripemd160Hash` |
 
-There is deliberately no conversion spelling for these two. Both are
-`ByteString` subtypes, so a conversion would have been an identity on the value
-and emitted no bytes; use the value directly, or `runar.ToByteString(...)` if you
-need an explicit widening. `runar.Sha256Hash(...)` is an unambiguous alias for
-the SHA-256 call if you prefer to avoid the overloaded spelling entirely.
+Use the `…Digest` / `…Hash` type names in field and parameter annotations. They
+are what a `.runar.go` file needs to be **both** valid Go and valid Rúnar, which
+is the whole point of this surface: the same file compiles against the mock
+types under `go test` and through the Rúnar frontend. The bare `runar.Sha256` /
+`runar.Ripemd160` spellings in type position are still accepted by the Rúnar
+parser for backwards compatibility, but they do not compile as Go —
+`runar.Ripemd160 (value of type func(...) ...) is not a type` — so a file using
+them gets only half of what the surface is for.
+
+In **call** position the rule is unambiguous: the name is the **function** and
+the table above applies — it hashes. There is deliberately no conversion
+spelling for these two. Both digest types are `ByteString` subtypes, so a
+conversion would have been an identity on the value and emitted no bytes; use
+the value directly, or `runar.ToByteString(...)` if you need an explicit
+widening. Reading `runar.Sha256(preimage)` as a *cast* is not a style
+preference: it drops the hash opcode, and two tiers once shipped that, which
+made the digest baked into the locking script the spending key. See
+`conformance/go_surface_hash_spelling_execution_test.go`, and
+`conformance/subtype-parity/GoDigestTypeSpellings.runar.go` for the type half.
 
 ### EC constants are NOT reachable from this surface (measured)
 

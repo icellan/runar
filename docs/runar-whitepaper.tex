@@ -614,7 +614,7 @@ the \texttt{go/parser} package, then maps the Go AST to the \runar{} AST:
   morekeywords={type,struct,func}]
 type P2PKH struct {
   runar.SmartContract
-  PubKeyHash runar.Ripemd160 `runar:"readonly"`
+  PubKeyHash runar.Ripemd160Hash `runar:"readonly"`
 }
 
 func (c *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
