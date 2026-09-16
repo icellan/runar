@@ -767,7 +767,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **78 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **81 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|
@@ -782,6 +782,7 @@ The suite currently contains **78 fixtures** under `tests/` — that directory i
 | `blake3` | BLAKE3 compression + full-hash builtins | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
+| `byte-builtins` | `split`, `int2str`, `reverseBytes` and the `Sha256Hash` alias — four builtins that appeared in no fixture's ANF and that the fuzzer cannot generate. Spent at each builtin's boundaries by `conformance/byte_builtins_execution_test.go` | Yes |
 | `convergence-proof` | Convergence proof patterns | Yes |
 | `covenant-vault` | Covenant spending constraints | Yes |
 | `cross-covenant` | Cross-contract covenant validation | Yes |
@@ -797,8 +798,10 @@ The suite currently contains **78 fixtures** under `tests/` — that directory i
 | `merkle-proof` | Merkle-root verification | Yes |
 | `multi-method` | Method dispatch table generation | Yes |
 | `oracle-price` | Rabin signature oracle price feed | Yes |
+| `p256-encode-negate` | `p256Negate` and `p256EncodeCompressed` — the two P-256 builtins `p256-primitives` does not reach. Spent by `conformance/p256_p384_encode_negate_execution_test.go`, including the CL-BUG-095 appended-byte parity attack | Yes |
 | `p256-primitives` | NIST P-256 EC primitives | Yes |
 | `p256-wallet` | P-256 wallet contract | Yes |
+| `p384-encode-negate` | `p384Negate` and `p384EncodeCompressed` — the P-384 half of the same gap, run through the identical battery so the 48-byte widths are checked too | Yes |
 | `p384-primitives` | NIST P-384 EC primitives | Yes |
 | `p384-wallet` | P-384 wallet contract | Yes |
 | `post-quantum-slhdsa` | SLH-DSA (SPHINCS+) signature verification | Yes |
