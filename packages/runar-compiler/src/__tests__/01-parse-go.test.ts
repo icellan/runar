@@ -980,8 +980,17 @@ describe('Go surface: builtin aliases the default rule cannot produce', () => {
         `or the tiers that lack it reject the spelling as an unknown function.`,
     ).toEqual([
       'Bin2Num',
+      // Bin2NumBig / Num2BinBig joined the at-risk class in R-Bigint. They are
+      // the *big.Int-typed peers of bin2num / num2bin in packages/runar-go —
+      // the suffix names a different Go RUNTIME type, not a different Script
+      // operation, so both lower to the unsuffixed builtin. compilers/go had
+      // folded them since they were written; the other six fell through to the
+      // default rule, produced `bin2NumBig` / `num2BinBig`, and rejected every
+      // contract that used the documented wide spelling.
+      'Bin2NumBig',
       'Int2Str',
       'Num2Bin',
+      'Num2BinBig',
       'Sha256Hash',
       'ToBool',
       'VerifyECDSAP256',
