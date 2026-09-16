@@ -17,6 +17,7 @@ package runar
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/big"
 
@@ -743,7 +744,9 @@ func ExtractSequence(p SigHashPreimage) int64 { return 0xffffffff }
 // ExtractHashPrevouts returns Hash256(72 zero bytes) in test mode.
 // This is consistent with passing allPrevouts = 72 zero bytes in tests,
 // since ExtractOutpoint also returns 36 zero bytes.
-func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest { return Hash256(ByteString(make([]byte, 72))) }
+func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest {
+	return Hash256(ByteString(make([]byte, 72)))
+}
 
 // ExtractOutpoint returns 36 zero bytes in test mode.
 func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
@@ -780,16 +783,30 @@ func CurrentBlockHeight() int64 { return 0 }
 
 // Num2Bin converts an integer to a byte string of the specified length
 // using Bitcoin Script's little-endian signed magnitude encoding.
-// Uses big.Int internally so that all valid int64 inputs (including
-// math.MinInt64) round-trip correctly through Bin2Num.
+//
+// `length` must be wide enough for the value INCLUDING its sign bit, or this
+// panics, exactly as OP_NUM2BIN fails. math.MinInt64 therefore needs nine
+// bytes, not eight: in eight the sign bit and the top magnitude bit are the
+// same bit, and the result decodes as 0. This comment used to claim the
+// opposite.
 func Num2Bin(v int64, length int64) ByteString {
 	return Num2BinBig(big.NewInt(v), length)
 }
 
 // Num2BinBig is the arbitrary-precision form of Num2Bin. Accepts any
-// *big.Int; the result is the little-endian sign-magnitude encoding
-// padded/truncated to `length` bytes.
+// *big.Int; the result is the little-endian sign-magnitude encoding padded to
+// `length` bytes.
+//
+// A value the requested size cannot hold PANICS. It used to truncate to the
+// low `length` bytes, documented as "matches int64 wrap-around semantics" —
+// OP_NUM2BIN has no wrap-around semantics, it FAILS when the number does not
+// fit the size, so the truncated bytes were a value the emitted script never
+// produces and nothing told the caller. The sign occupies a bit, so 255 needs
+// two bytes and 127 needs one.
 func Num2BinBig(v *big.Int, length int64) ByteString {
+	if length < 0 {
+		panic(fmt.Sprintf("runar: Num2Bin length %d is negative", length))
+	}
 	buf := make([]byte, length)
 	if v == nil || v.Sign() == 0 {
 		return ByteString(buf)
@@ -797,10 +814,16 @@ func Num2BinBig(v *big.Int, length int64) ByteString {
 	abs := new(big.Int).Abs(v)
 	// abs.Bytes() is big-endian; fill buf little-endian.
 	be := abs.Bytes()
-	if int64(len(be)) > length {
-		// Caller requested a narrower field than the value occupies.
-		// Truncate to fit (matches int64 wrap-around semantics).
-		be = be[len(be)-int(length):]
+	// Minimal sign-magnitude width: the magnitude bytes, plus one more when
+	// the top magnitude byte already uses the bit the sign needs.
+	need := int64(len(be))
+	if be[0]&0x80 != 0 {
+		need++
+	}
+	if need > length {
+		panic(fmt.Sprintf("runar: Num2Bin cannot encode %s in %d byte(s) — it needs %d; "+
+			"OP_NUM2BIN fails on a size too small for the number, it does not wrap",
+			v, length, need))
 	}
 	for i, b := range be {
 		j := len(be) - 1 - i
@@ -815,24 +838,29 @@ func Num2BinBig(v *big.Int, length int64) ByteString {
 }
 
 // Bin2Num converts a byte string (Bitcoin Script LE signed-magnitude) back to
-// an integer. Inverse of Num2Bin. If the decoded value does not fit in int64,
-// the result is truncated (use Bin2NumBig for arbitrary precision).
+// an integer. Inverse of Num2Bin.
+//
+// A decoded value outside int64 PANICS. It used to return the low 64 bits —
+// "graceful truncation", which handed the caller a number that was simply the
+// wrong one: Bin2Num of 123456789012345678901234567890 encoded in 16 bytes
+// returned -4362896299872285998 while OP_BIN2NUM left the whole value on the
+// stack. Use Bin2NumBig for the wide answer; the .runar.go parser maps both
+// mocks to the same `bin2num` builtin, so reaching for it costs no script
+// bytes.
+//
+// The boundary is the VALUE, not the push width: a 16-byte push of 1000 is
+// 1000, and the emitted opcodes accept it.
 func Bin2Num(data ByteString) int64 {
 	r := Bin2NumBig(data)
 	if r == nil {
 		return 0
 	}
-	if r.IsInt64() {
-		return r.Int64()
+	if !r.IsInt64() {
+		panic(fmt.Sprintf("runar: Bin2Num decoded %s, which does not fit int64 — "+
+			"OP_BIN2NUM has no such limit; use Bin2NumBig, which the .runar.go "+
+			"parser lowers to the same bin2num builtin", r))
 	}
-	// Graceful truncation for out-of-range values: return the low 64 bits.
-	mask := new(big.Int).Lsh(big.NewInt(1), 64)
-	trunc := new(big.Int).Mod(new(big.Int).Abs(r), mask)
-	out := trunc.Int64()
-	if r.Sign() < 0 {
-		out = -out
-	}
-	return out
+	return r.Int64()
 }
 
 // Bin2NumBig is the arbitrary-precision form of Bin2Num. Decodes a
@@ -1335,7 +1363,7 @@ func BbFieldAdd(a, b int64) int64 {
 
 // BbFieldSub returns (a - b + p) mod p.
 func BbFieldSub(a, b int64) int64 {
-	return ((a - b) % bbP + bbP) % bbP
+	return ((a-b)%bbP + bbP) % bbP
 }
 
 // BbFieldMul returns (a * b) mod p.
@@ -1464,7 +1492,7 @@ func KbFieldAdd(a, b int64) int64 {
 
 // KbFieldSub returns (a - b + p) mod p.
 func KbFieldSub(a, b int64) int64 {
-	return ((a - b) % kbP + kbP) % kbP
+	return ((a-b)%kbP + kbP) % kbP
 }
 
 // KbFieldMul returns (a * b) mod p.
@@ -1613,7 +1641,8 @@ func poseidon2KBExternalMDS4(a, b, c, d int64) (int64, int64, int64, int64) {
 // For internal rounds (4-23), only element [0] is used (rest are zero).
 //
 // From Plonky3 p3-koala-bear 0.5.2:
-//   KOALABEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, _INTERNAL, _EXTERNAL_FINAL
+//
+//	KOALABEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, _INTERNAL, _EXTERNAL_FINAL
 var poseidon2KBRoundConstants = [28][poseidon2KBWidth]int64{
 	// External initial rounds (0-3)
 	{2128964168, 288780357, 316938561, 2126233899, 426817493, 1714118888, 1045008582, 1738510837, 889721787, 8866516, 681576474, 419059826, 1596305521, 1583176088, 1584387047, 1529751136},

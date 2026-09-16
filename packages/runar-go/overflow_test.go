@@ -206,20 +206,31 @@ func TestGcd_SmallValues(t *testing.T) {
 	}
 }
 
-func TestNum2Bin_MinInt64_DoesNotPanic(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Num2Bin(MinInt64, 8) should not panic anymore; got: %v", r)
-		}
+// Num2Bin(MinInt64, 8) used to return 0000000000000080 and this test pinned
+// those bytes, with a comment observing that "the final 0x80 overlaps with the
+// sign bit" and treating the overlap as harmless. It is not harmless: clearing
+// the sign bit to read the magnitude leaves zero, so that push decodes as 0,
+// and the round-trip claim in the Num2Bin doc comment was false. -2^63 needs
+// nine bytes under sign-magnitude, and OP_NUM2BIN refuses eight — which
+// TestNum2Bin_MinInt64_TheScriptRefusesEightBytesAndAcceptsNine proves against
+// the interpreter rather than against a second reading of the rule.
+func TestNum2Bin_MinInt64_NeedsNineBytes(t *testing.T) {
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Num2Bin(MinInt64, 8) returned bytes; 0000000000000080 is 0, not -2^63")
+			}
+		}()
+		_ = Num2Bin(math.MinInt64, 8)
 	}()
-	// The encoding is 8 bytes LE sign-magnitude; |MinInt64| magnitude is 2^63
-	// which is the byte sequence 00 00 00 00 00 00 00 80 in LE — the final
-	// 0x80 overlaps with the sign bit. With length=8 the encoding is
-	// 0000000000000080 and the sign bit happens to be set.
-	got := Num2Bin(math.MinInt64, 8)
-	want := ByteString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80})
+
+	got := Num2Bin(math.MinInt64, 9)
+	want := ByteString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80})
 	if string(got) != string(want) {
-		t.Fatalf("Num2Bin(MinInt64, 8): want %x, got %x", want, got)
+		t.Fatalf("Num2Bin(MinInt64, 9): want %x, got %x", want, got)
+	}
+	if back := Bin2Num(got); back != math.MinInt64 {
+		t.Fatalf("Bin2Num(Num2Bin(MinInt64, 9)) = %d, want %d", back, int64(math.MinInt64))
 	}
 }
 

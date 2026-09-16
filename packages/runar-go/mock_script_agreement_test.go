@@ -97,6 +97,12 @@ type agreementCase struct {
 	// requires the disagreement to still be there, so the mismatch stays
 	// recorded rather than silently tolerated, and the entry has to be deleted
 	// (not quietly kept) the day the mock is fixed.
+	//
+	// NO CASE CARRIES ONE TODAY. The three that did -- bin2num, ecPointX and
+	// ecPointY, all of them "int64 return truncates" -- were fixed and their
+	// entries deleted, which is what the inversion above is for. The field
+	// stays because the next divergence found before it is fixed belongs here
+	// rather than in a comment.
 	knownDivergent string
 	// slow marks cases whose script takes seconds to build or run.
 	slow bool
@@ -282,25 +288,24 @@ func byteStringCases() []agreementCase {
 			args: [][]byte{bs(Num2BinBig(wideVal, 16))}, retTy: "bigint",
 			want: numB(Bin2NumBig(Num2BinBig(wideVal, 16))),
 			tamper: numB(new(big.Int).Add(Bin2NumBig(Num2BinBig(wideVal, 16)), big.NewInt(1)))},
-		// The same builtin through the int64 mock, at a width that does NOT
-		// fit. The row above it tests Bin2Num with "\xe8\x03" (1000), which
-		// does fit, and that choice is what kept this divergence off the list:
-		// Bin2Num documents "graceful truncation ... return the low 64 bits",
-		// so for wideVal it returns -4362896299872285998 while OP_BIN2NUM
-		// leaves all 16 bytes. Identical shape to the ecPointX / ecPointY
-		// entries below -- a ByteString goes in, an int64 comes out, and the
-		// narrowing is silent.
+		// The same builtin through the int64 mock, on a push WIDER than int64
+		// carrying a value that still fits it. This row used to carry a
+		// `knownDivergent` entry because it decoded wideVal: Bin2Num
+		// documented "graceful truncation ... return the low 64 bits", so it
+		// returned -4362896299872285998 while OP_BIN2NUM left all 16 bytes.
+		// Bin2Num panics on that input now, so the divergence is gone and the
+		// entry with it; bin2num_width_test.go holds the refusal.
 		//
-		// This is the `pow` pattern: the callsite existed, nothing exercised
-		// it past the boundary. NOT fixed here for the same reason the EC
-		// accessors are not -- widening the return type is a change to every
-		// tier's notion of the primitive plus its call sites. Recorded so it
-		// cannot go quiet again.
-		{builtin: "bin2num", mock: "Bin2Num (wide)", argTys: []string{"ByteString"},
-			args: [][]byte{bs(Num2BinBig(wideVal, 16))}, retTy: "bigint",
-			want:           numI(Bin2Num(Num2BinBig(wideVal, 16))),
-			tamper:         numI(Bin2Num(Num2BinBig(wideVal, 16)) + 1),
-			knownDivergent: "int64 return truncates a value wider than int64 to its low 8 bytes"},
+		// What is left to check here is that the refusal keyed on the VALUE
+		// and not on the push width. Script numbers need not be minimally
+		// encoded, a 16-byte push of 1000 is 1000, and the emitted opcodes
+		// accept it — so a guard that panicked on anything past 8 bytes would
+		// satisfy the refusal test and fail this row.
+		{builtin: "bin2num", mock: "Bin2Num (16-byte push, in-range value)",
+			argTys: []string{"ByteString"},
+			args:   [][]byte{bs(Num2BinBig(big.NewInt(1000), 16))}, retTy: "bigint",
+			want:   numI(Bin2Num(Num2BinBig(big.NewInt(1000), 16))),
+			tamper: numI(Bin2Num(Num2BinBig(big.NewInt(1000), 16)) + 1)},
 		{builtin: "reverseBytes", mock: "ReverseBytes", argTys: []string{"ByteString"},
 			args: [][]byte{bs(src)}, retTy: "ByteString",
 			want: bs(ReverseBytes(src)), tamper: tamperBS(ReverseBytes(src))},
