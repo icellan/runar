@@ -49,7 +49,7 @@ cd integration/rust
 cargo test --features regtest
 ```
 
-This runs all 128 tests (15 default + 113 gated). To run only the on-chain
+This runs all 172 tests. To run only the on-chain
 (gated) set without the offline tests, leave the feature off and pass
 `-- --ignored`:
 
