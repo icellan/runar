@@ -1,6 +1,6 @@
 # Rúnar Opcode Reference
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document provides a complete reference for Bitcoin SV opcodes used by Rúnar, including their hex values, stack effects, and how they map from Rúnar operations.
@@ -471,20 +471,22 @@ All EC operations are built on secp256k1 field arithmetic over `F_p` where `p = 
 
 | Rúnar Function | Synthesized From | Approximate Script Size |
 |---------------|------------------|------------------------|
-| `ecAdd(a, b)` | Field arithmetic: slope computation, point formula | ~2-5 KB |
-| `ecMul(p, k)` | 256-iteration double-and-add loop (Jacobian coordinates) | ~50-100 KB |
-| `ecMulGen(k)` | Same as `ecMul` but with hardcoded generator G | ~50-100 KB |
-| `ecNegate(p)` | `OP_SPLIT` (extract y), `PUSH p`, `OP_SWAP`, `OP_SUB` | ~100 B |
-| `ecOnCurve(p)` | Range-check `x < p`, `y < p`, then compute `y^2` and `x^3 + 7` and compare mod p | ~730 B |
-| `ecModReduce(v, m)` | `OP_MOD` with negative correction | ~20 B |
-| `ecEncodeCompressed(p)` | Extract x, compute parity of y, prefix with 02/03 | ~200 B |
-| `ecMakePoint(x, y)` | `OP_NUM2BIN` (32 bytes each), `OP_CAT` | ~50 B |
-| `ecPointX(p)` | `PUSH 0`, `PUSH 32`, `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | ~20 B |
-| `ecPointY(p)` | `PUSH 32`, `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | ~20 B |
+| `ecAdd(a, b)` | Field arithmetic: slope computation, point formula | ~24.6 KB |
+| `ecMul(p, k)` | 257-iteration double-and-add loop over `k + 3n` (Jacobian coordinates) | ~425 KB |
+| `ecMulGen(k)` | Same as `ecMul` but with hardcoded generator G | ~425 KB |
+| `ecNegate(p)` | `OP_SPLIT` (extract y), `PUSH p`, `OP_SWAP`, `OP_SUB` | ~1.1 KB |
+| `ecOnCurve(p)` | Range-check `x < p`, `y < p`, then compute `y^2` and `x^3 + 7` and compare mod p | ~800 B |
+| `ecModReduce(v, m)` | `OP_MOD` with negative correction | ~10 B |
+| `ecEncodeCompressed(p)` | Extract x, compute parity of y, prefix with 02/03 | ~20 B |
+| `ecMakePoint(x, y)` | `OP_NUM2BIN` (32 bytes each), `OP_CAT` | ~550 B |
+| `ecPointX(p)` | `PUSH 0`, `PUSH 32`, `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | ~240 B |
+| `ecPointY(p)` | `PUSH 32`, `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | ~240 B |
 
 ### 12.3 Jacobian Coordinate Optimization
 
-`ecMul` and `ecMulGen` use Jacobian projective coordinates internally to avoid expensive modular inversions during the 256-iteration double-and-add loop. A single affine conversion (one modular inverse) is performed at the end. This is a standard optimization for EC scalar multiplication.
+`ecMul` and `ecMulGen` use Jacobian projective coordinates internally to avoid expensive modular inversions during the double-and-add loop. A single affine conversion (one modular inverse) is performed at the end. This is a standard optimization for EC scalar multiplication.
+
+The loop runs **257** iterations, not 256, because the ladder multiplies `k + 3n` rather than `k` — see `semantics.md` §8.5. A 256-iteration ladder over `k + 3n` drops the top set bit and returns the wrong multiple of `P` for roughly half of all scalars; do not implement this from the iteration count alone.
 
 ---
 
@@ -564,8 +566,8 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `left(data, len)` | `OP_SPLIT OP_DROP` | `0x7f 0x75` |
 | `if/else` | `OP_IF OP_ELSE OP_ENDIF` | `0x63 0x67 0x68` |
 | `ecAdd(a, b)` | Synthesized (field arithmetic) | — |
-| `ecMul(p, k)` | Synthesized (256-iter double-and-add) | — |
-| `ecMulGen(k)` | Synthesized (256-iter double-and-add) | — |
+| `ecMul(p, k)` | Synthesized (257-iter double-and-add) | — |
+| `ecMulGen(k)` | Synthesized (257-iter double-and-add) | — |
 | `ecNegate(p)` | `OP_SPLIT`, `OP_SUB` | — |
 | `ecOnCurve(p)` | Synthesized (field arithmetic) | — |
 | `ecModReduce(v, m)` | `OP_MOD`, `OP_ADD`, `OP_MOD` | — |

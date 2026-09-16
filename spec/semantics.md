@@ -1,6 +1,6 @@
 # Rúnar Operational Semantics
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document defines the operational semantics of Rúnar programs. It specifies how Rúnar expressions and statements evaluate, how they relate to Bitcoin Script execution, and the formal rules governing contract behavior.
@@ -605,12 +605,12 @@ All intermediate arithmetic in EC operations uses modular arithmetic over `F_p`:
     <ecAdd(a, a), env, sigma>  -->  VBytes(encode_point(rx, ry))    /* point doubling */
 
     Point(x, y) = decode_point(p)    k = ((VInt(scalar) % n) + n) % n
-    result = double_and_add(x, y, k, 256 iterations)
+    result = double_and_add(x, y, k + 3n, 257 iterations)
     ──────────────────────────────────────────────────────────────
     <ecMul(p, k), env, sigma>  -->  VBytes(encode_point(result))
 
     k = ((VInt(scalar) % n) + n) % n
-    result = double_and_add(Gx, Gy, k, 256 iterations)
+    result = double_and_add(Gx, Gy, k + 3n, 257 iterations)
     ──────────────────────────────────────────────────────────────
     <ecMulGen(k), env, sigma>  -->  VBytes(encode_point(result))
 
@@ -629,11 +629,15 @@ All intermediate arithmetic in EC operations uses modular arithmetic over `F_p`:
     <ecModReduce(v, m), env, sigma>  -->  VInt(((value % mod) + mod) % mod)
 ```
 
-### 8.5 Jacobian Coordinate Optimization
+### 8.5 The ladder: 257 iterations over `k + 3n`
 
-The `ecMul` and `ecMulGen` implementations use Jacobian projective coordinates `(X, Y, Z)` internally, where the affine point `(x, y)` corresponds to `(X/Z^2, Y/Z^3)`. This avoids expensive modular inversions during the 256-iteration double-and-add loop. A single conversion from Jacobian to affine (requiring one modular inverse) is performed at the end.
+The `ecMul` and `ecMulGen` implementations use Jacobian projective coordinates `(X, Y, Z)` internally, where the affine point `(x, y)` corresponds to `(X/Z^2, Y/Z^3)`. This avoids expensive modular inversions during the double-and-add loop. A single conversion from Jacobian to affine (requiring one modular inverse) is performed at the end.
 
-The double-and-add algorithm iterates over the 256 bits of the scalar from most significant to least significant. For each bit: double the accumulator; if the bit is 1, add the base point. This produces a fixed 256-iteration loop regardless of the scalar value.
+The ladder does **not** multiply `k`. After reducing the scalar to `[0, n-1]` (§8.6) it multiplies `k' = k + 3n`, which is congruent to `k` modulo `n` and therefore denotes the same point, but has a high bit that is set for every valid `k`: `k' ∈ [3n, 4n-1]` and `3n > 2^257`, so **bit 257 of `k'` is always 1**. That fixed bit is what lets the accumulator be initialised to `P` instead of to the point at infinity, which the affine `x‖y` encoding cannot represent.
+
+The loop therefore runs **257 iterations**, over bits 256 down to 0, MSB-first: double the accumulator; if the bit is 1, add the base point. The count is fixed regardless of the scalar value.
+
+> **Implementers: 256 is wrong and fails silently.** A 256-iteration loop over `k + 3n` never reaches the top set bit, so it computes a *different* multiple of `P` rather than raising an error — for roughly half of all scalar values. All seven tiers use 257 (`packages/runar-compiler/src/passes/ec-codegen.ts`, `compilers/go/codegen/ec.go` and peers), and an earlier 256-iteration version of this ladder is the historical bug the comment at `ec-codegen.ts` records. The iteration count, the `+3n` offset and the accumulator's initial value are one design: changing any of them in isolation breaks the other two.
 
 ### 8.6 Scalar domain and coordinate canonicity
 
