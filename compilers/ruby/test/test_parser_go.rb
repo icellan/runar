@@ -2,6 +2,16 @@
 
 require_relative 'test_helper'
 
+# The Go surface parser is required LAZILY, by
+# RunarCompiler::Compiler#_parse_source, only once a `.runar.go` source is
+# actually parsed. Tests that read its constants rather than parsing something
+# therefore depend on some earlier test having triggered that require — and
+# Minitest randomises order, so `test_cast_types_and_builtin_map_are_disjoint`
+# errored with `uninitialized constant GO_CAST_TYPES` on some seeds and passed
+# on others. It is the guard for a fund bug (a hash spelling resolving as a
+# cast, so its opcode vanishes), so it has to run every time.
+require 'runar_compiler/frontend/parser_go'
+
 class TestParserGo < Minitest::Test
   def parse(source, file_name = 'Test.runar.go')
     RunarCompiler.send(:_parse_source, source, file_name)
