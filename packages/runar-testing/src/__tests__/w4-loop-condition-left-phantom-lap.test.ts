@@ -28,7 +28,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { PrivateKey } from '@bsv/sdk';
-import { compile } from 'runar-compiler';
+import { compile, parse, lowerToANF } from 'runar-compiler';
 import { ScriptExecutionContract } from '../script-execution.js';
 
 /** A vault whose only signature check sits in the loop's first lap. */
@@ -141,5 +141,47 @@ export class Stray extends SmartContract {
   it('canonical loops still compile: countdown and non-zero start', () => {
     expect(errorsOf(vault('for (let i: bigint = 0n; i <= 0n; i++)'))).toEqual([]);
     expect(errorsOf(vault('for (let i: bigint = 0n; i > -1n; i--)'))).toEqual([]);
+  });
+});
+
+/**
+ * The `lowerToANF` backstop.
+ *
+ * The user-facing refusal lives in `02-validate.ts`, which is where a located
+ * diagnostic belongs. But `lowerToANF` is a PUBLIC export of `runar-compiler`,
+ * so `parse()` -> `lowerToANF()` reaches loop-shape extraction having run no
+ * validator at all -- the R-012 shape, where a rule lives in exactly one pass
+ * and another entry point walks past it. Rust's `extract_loop_shape` doc
+ * comment already called itself "a hard guard for callers that skip
+ * validation"; it simply had no left-hand-side half, which is the third
+ * taxonomy shape: a comment asserting a property the code does not have.
+ *
+ * This test drives that exact path, so the backstop is not a guard nobody runs.
+ */
+describe('W4 — lowerToANF refuses the phantom lap without a validator', () => {
+  const phantom = `
+import { SmartContract, assert } from 'runar-lang';
+
+export class Phantom extends SmartContract {
+  readonly tag: bigint;
+  constructor(tag: bigint) { super(tag); this.tag = tag; }
+  public verify(x: bigint): void {
+    let s: bigint = 0n;
+    for (let i: bigint = 0n; i + 1n < 2n; i++) { s = s + i; }
+    assert(x === s);
+  }
+}
+`;
+
+  it('parse() -> lowerToANF() throws rather than unrolling the extra lap', () => {
+    const parsed = parse(phantom, 'Phantom.runar.ts');
+    expect(parsed.contract).not.toBeNull();
+    expect(() => lowerToANF(parsed.contract!)).toThrow(/must compare the loop variable/i);
+  });
+
+  it('control: the same path lowers a canonical loop without throwing', () => {
+    const ok = phantom.replace('i + 1n < 2n', 'i < 1n');
+    const parsed = parse(ok, 'Phantom.runar.ts');
+    expect(() => lowerToANF(parsed.contract!)).not.toThrow();
   });
 });

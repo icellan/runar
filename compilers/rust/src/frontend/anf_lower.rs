@@ -1950,6 +1950,28 @@ fn extract_loop_shape(
         ),
     };
 
+    // W4 backstop, in the spirit of the doc comment above: the user-facing
+    // refusal lives in the validator, and this is the hard guard for callers
+    // that skip it. Without it the count comes from `bound - start` while the
+    // condition tests something else entirely -- `i + 1n < 2n` runs once in the
+    // source language and twice here.
+    let iter_name = match init {
+        Statement::VariableDecl { name, .. } => name.as_str(),
+        _ => "",
+    };
+    let left_is_iter = matches!(
+        condition,
+        Expression::BinaryExpr { left, .. }
+            if matches!(left.as_ref(), Expression::Identifier { name } if name == iter_name)
+    );
+    if !left_is_iter {
+        panic!(
+            "For loop condition must compare the loop variable '{iter_name}' to a \
+             compile-time constant; the left-hand side is not the iterator, so the unrolled \
+             trip count would not be the one the source asks for."
+        );
+    }
+
     let (op, bound) = match condition {
         Expression::BinaryExpr { op, right, .. } => match extract_bigint_value(right) {
             Some(b) => (op, BigInt::from(b)),

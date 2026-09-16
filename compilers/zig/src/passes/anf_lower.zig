@@ -48,6 +48,13 @@ pub const LowerError = error{
     OutOfMemory,
     UnsupportedExpression,
     UnsupportedStatement,
+    /// A for-loop condition whose left-hand side is not the iterator (W4).
+    /// The unroll takes its trip count from the bound alone, so a computed or
+    /// stray left-hand side runs a different number of laps than the source
+    /// says -- `i + 1n < 2n` is one iteration in the source language and two
+    /// here. `passes/validate.zig` refuses it with a located diagnostic; this
+    /// is the backstop for callers that lower without validating.
+    LoopConditionNotIterator,
     /// A conditional declares outputs AND leaves something else the parent
     /// scope can still observe — two or more merged locals, a binding after the
     /// arm's output, a property write, or a rebound local read after the `if`.
@@ -1846,6 +1853,15 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     // now supported — the C-style parsers record the raw operator direction
     // (`descending`) and inclusivity (`inclusive`); range parsers fold any
     // inclusive endpoint into `bound` and stay ascending.
+    // W4 backstop. The user-facing refusal lives in `passes/validate.zig`,
+    // which is where a located diagnostic belongs -- but ANF lowering is
+    // reachable without it, and then the count below comes from
+    // `bound - start` while the condition tested something else entirely:
+    // `i + 1n < 2n` runs once in the source language and twice here. The
+    // parsers record `cond_tests_iter` because this tier's `ForStmt` keeps no
+    // condition expression to re-examine.
+    if (!for_s.cond_tests_iter) return error.LoopConditionNotIterator;
+
     const start: i64 = for_s.init_value;
     const step: i8 = if (for_s.descending) -1 else 1;
 

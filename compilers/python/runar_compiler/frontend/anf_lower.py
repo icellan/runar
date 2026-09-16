@@ -2501,6 +2501,23 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
             "Cannot determine loop bound at compile time. For-loop bounds must "
             "be integer literals."
         )
+    # W4 backstop. The user-facing refusal lives in the validator, which is
+    # where a located diagnostic belongs -- but ANF lowering is reachable
+    # without it, and then the count comes from ``bound - start`` while the
+    # condition tests something else entirely: ``i + 1n < 2n`` runs once in the
+    # source language and twice here.
+    _iter_name = stmt.init.name if stmt.init is not None else ""
+    if not (
+        isinstance(stmt.condition.left, Identifier)
+        and stmt.condition.left.name == _iter_name
+    ):
+        raise ValueError(
+            f"{_at(stmt.source_location)}"
+            f"For loop condition must compare the loop variable '{_iter_name}' to a "
+            "compile-time constant; the left-hand side is not the iterator, so the "
+            "unrolled trip count would not be the one the source asks for."
+        )
+
     op = stmt.condition.op
     bound = _extract_bigint_value(stmt.condition.right)
     if bound is None:

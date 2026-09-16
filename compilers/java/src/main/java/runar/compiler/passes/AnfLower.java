@@ -2562,6 +2562,18 @@ public final class AnfLower {
                 "Cannot determine loop bound at compile time. For-loop bounds must be integer "
                     + "literals.");
         }
+        // W4 backstop. The user-facing refusal lives in the validator, which is
+        // where a located diagnostic belongs -- but ANF lowering is reachable
+        // without it, and then the count comes from `bound - start` while the
+        // condition tests something else entirely: `i + 1n < 2n` runs once in
+        // the source language and twice here.
+        String iterName = stmt.init() == null ? "" : stmt.init().name();
+        if (!(be.left() instanceof Identifier id) || !id.name().equals(iterName)) {
+            throw new IllegalStateException(
+                "For loop condition must compare the loop variable '" + iterName + "' to a "
+                    + "compile-time constant; the left-hand side is not the iterator, so the "
+                    + "unrolled trip count would not be the one the source asks for.");
+        }
         String op = be.op().canonical();
         BigInteger bound = extractBigintValue(be.right());
         if (bound == null) {

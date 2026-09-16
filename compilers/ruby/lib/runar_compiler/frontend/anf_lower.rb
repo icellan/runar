@@ -2692,6 +2692,19 @@ module RunarCompiler
       unless stmt.condition.is_a?(BinaryExpr)
         raise "Cannot determine loop bound at compile time. For-loop bounds must be integer literals."
       end
+      # W4 backstop. The user-facing refusal lives in the validator, which is
+      # where a located diagnostic belongs -- but ANF lowering is reachable
+      # without it, and then the count comes from `bound - start` while the
+      # condition tests something else entirely: `i + 1n < 2n` runs once in the
+      # source language and twice here.
+      iter_name = stmt.init&.name.to_s
+      left = stmt.condition.left
+      unless left.is_a?(Identifier) && left.name == iter_name
+        raise "For loop condition must compare the loop variable '#{iter_name}' to a " \
+              "compile-time constant; the left-hand side is not the iterator, so the " \
+              "unrolled trip count would not be the one the source asks for."
+      end
+
       op = stmt.condition.op
       bound = _extract_bigint_value(stmt.condition.right)
       if bound.nil?

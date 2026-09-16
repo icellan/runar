@@ -1790,6 +1790,16 @@ func extractLoopShape(stmt ForStmt) (*big.Int, int, int) {
 	if !ok {
 		panic("Cannot determine loop bound at compile time. For-loop bounds must be integer literals.")
 	}
+	// W4 backstop. The user-facing refusal lives in the validator, which is
+	// where a located diagnostic belongs -- but ANF lowering is reachable
+	// without it, and then the count would come from `bound - start` while the
+	// condition tested something else entirely: `i + 1n < 2n` runs once in the
+	// source language and twice here.
+	if id, isIdent := bin.Left.(Identifier); !isIdent || id.Name != stmt.Init.Name {
+		panic("For loop condition must compare the loop variable '" + stmt.Init.Name +
+			"' to a compile-time constant; the left-hand side is not the iterator, so the " +
+			"unrolled trip count would not be the one the source asks for.")
+	}
 	bound := extractBigIntValue(bin.Right)
 	if bound == nil {
 		panic("Cannot determine loop bound at compile time. For-loop bounds must be integer literals.")

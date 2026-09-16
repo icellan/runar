@@ -1720,6 +1720,24 @@ function extractLoopShape(
   if (stmt.condition.kind !== 'binary_expr') {
     throw new Error('Cannot determine loop bound at compile time. For-loop bounds must be integer literals.');
   }
+  // W4 backstop. The user-facing refusal lives in `02-validate.ts`, which is
+  // where a diagnostic with a source location belongs -- but `lowerToANF` is a
+  // public export, so `parse()` -> `lowerToANF()` reaches here having run no
+  // validator at all. Without this the count would come from `bound - start`
+  // while the condition tested something else entirely, and the loop would
+  // unroll more times than the source says: `i + 1n < 2n` runs once in the
+  // source language and twice here. R-012 is this repo's standing lesson about
+  // a check that lives in exactly one pass.
+  if (
+    stmt.condition.left.kind !== 'identifier' ||
+    stmt.condition.left.name !== stmt.init.name
+  ) {
+    throw new Error(
+      `For loop condition must compare the loop variable '${stmt.init.name}' to a ` +
+      'compile-time constant; the left-hand side is not the iterator, so the unrolled ' +
+      'trip count would not be the one the source asks for.',
+    );
+  }
   const op = stmt.condition.op;
   const bound = extractBigIntValue(stmt.condition.right);
   if (bound === null) {
