@@ -227,3 +227,23 @@ path = "post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure_test.r
 [[test]]
 name = "post_quantum_wots_naive_insecure"
 path = "post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure_test.rs"
+
+[[test]]
+name = "byte_builtins"
+path = "byte-builtins/ByteBuiltins_test.rs"
+
+[[test]]
+name = "intent_prev_output_script"
+path = "intent-prev-output-script/IntentPrevOutputScript_test.rs"
+
+[[test]]
+name = "state_covenant_mechanics"
+path = "state-covenant-mechanics/StateCovenantMechanics_test.rs"
+
+[[test]]
+name = "terminal_varlen_read"
+path = "terminal-varlen-read/TerminalVarlenRead_test.rs"
+
+[[test]]
+name = "native_exclusions"
+path = "native-exclusions/exclusions_test.rs"

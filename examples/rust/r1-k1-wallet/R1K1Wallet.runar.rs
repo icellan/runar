@@ -1,3 +1,29 @@
+// EXCLUDED FROM NATIVE RUST COMPILATION
+//
+// `cargo test` cannot compile this file as Rust, and it is not a missing mock:
+// `len` and `substr` both ship in `packages/runar-rs` and both call sites
+// below compile. One expression does not.
+//
+//   `substr(tx_preimage, len(tx_preimage) - 4, 4) == "41000000"` — rustc:
+//   `can't compare `Vec<u8>` with `&str``. `"41000000"` is a Rúnar ByteString
+//   LITERAL; this tier represents ByteString as `Vec<u8>`, and no `PartialEq`
+//   between the two can be added from `packages/runar-rs` because neither type
+//   is local to it (orphan rule). The Go tier does not hit this because
+//   `runar.ByteString` is a `string` there.
+//
+//   `to_byte_string("41000000")` is valid Rust and emits byte-identical script
+//   hex — measured, fold-on and fold-off — but it is NOT ANF-neutral: the
+//   `.runar.rs` parsers lower it to a `toByteString` call node while the other
+//   eight surfaces of this fixture carry a plain ByteString literal, and
+//   canonical ANF is compared across all seven tiers. Making the nine
+//   `.runar.rs` parsers fold `toByteString(<string literal>)` into a
+//   ByteStringLiteral — which is what `spec/grammar.md` says it is — would
+//   unblock this file and every other `.runar.rs` contract carrying a hex
+//   literal, and is a seven-parser change, not a one-line one.
+//
+// Pinned by `examples/rust/native-exclusions/exclusions_test.rs`. Remove this
+// header and the entry there in the same commit that wires the contract up.
+
 use runar::prelude::*;
 
 /// Hardware-backed P-256 primary spending with independent K1 recovery.

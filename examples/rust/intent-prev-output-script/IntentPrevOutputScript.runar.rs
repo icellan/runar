@@ -13,8 +13,8 @@ pub struct IntentPrevOutputScript {
 
 impl IntentPrevOutputScript {
     pub fn bind(&mut self) {
-        let s = extract_prev_output_script(0, self.expected_hash);
-        assert!(len(s) > 0);
+        let s = extract_prev_output_script(0, &self.expected_hash);
+        assert!(len(&s) > 0);
         self.count = self.count + 1;
     }
 }
