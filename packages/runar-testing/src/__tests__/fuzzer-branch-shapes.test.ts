@@ -214,15 +214,20 @@ describe('IR generator branch shapes: reachability', () => {
     ).toEqual([]);
     // Fixed seed => fixed first-hit indices. Recorded so a change to the draw
     // order shows up in the diff rather than silently shifting the corpus.
+    // Re-measured 2026-09-16 when the R-169 `pow` arm was added to
+    // `arbBigintExprIR`: a new arm in the oneof shifts the draw, so every
+    // first-hit index moves even though the reachable SET is unchanged (the
+    // `missing` assertion above is what pins reachability, and it stayed
+    // empty). This map is the change detector working as designed.
     expect(Object.fromEntries(firstIndex)).toEqual({
-      'both-arms-rebind-one': 0,
       'rebind-read-after': 1,
+      'both-arms-rebind-both': 3,
       'assert-only': 4,
       'straight-line-rebind': 6,
-      'both-arms-rebind-both': 8,
+      'multi-rebind-one-arm': 10,
+      'nested-sibling-no-else': 12,
+      'both-arms-rebind-one': 13,
       'asymmetric-rebind': 14,
-      'nested-sibling-no-else': 20,
-      'multi-rebind-one-arm': 36,
     });
     // The stateless contract has only readonly properties, so no arm can
     // contain a property write there — that shape is stateful-only.
@@ -236,22 +241,26 @@ describe('IR generator branch shapes: reachability', () => {
       missing,
       `seed ${SEED} / 120 samples reached: ${JSON.stringify(Object.fromEntries(firstIndex))}`,
     ).toEqual([]);
+    // Re-measured 2026-09-16 with the R-169 `pow` arm — see the stateless
+    // case above. The #149 `nested-sibling-no-else` shape used to land at
+    // index 80, deep in the 120-sample corpus, and the note below warned that
+    // a draw change could push it past the budget. It moved the other way, to
+    // index 1; the warning stands for the next draw change.
     expect(Object.fromEntries(firstIndex)).toEqual({
+      // The #149 shape, and the reason this map is pinned rather than merely
+      // checked for completeness: it is drawn from the same uniform pool as
+      // the rest but needs a stateful method that draws the branch block at
+      // all. A draw change that pushed it past the sample budget would
+      // silently drop the ONLY nested-`if` topology `--execute` can reach.
+      'nested-sibling-no-else': 1,
+      'rebind-read-after': 1,
       'asymmetric-rebind': 2,
-      'prop-write-in-arm': 2,
-      'both-arms-rebind-one': 3,
-      'straight-line-rebind': 4,
-      'rebind-read-after': 8,
-      'both-arms-rebind-both': 13,
-      'assert-only': 18,
-      'multi-rebind-one-arm': 22,
-      // Last to appear, and the reason this map is pinned rather than merely
-      // checked for completeness: the #149 shape is drawn from the same
-      // uniform pool as the rest but needs a stateful method that draws the
-      // branch block at all, so it lands deep in the 120-sample corpus. A draw
-      // change that pushed it past the sample budget would silently drop the
-      // ONLY nested-`if` topology `--execute` can reach.
-      'nested-sibling-no-else': 80,
+      'straight-line-rebind': 2,
+      'both-arms-rebind-both': 10,
+      'both-arms-rebind-one': 15,
+      'multi-rebind-one-arm': 23,
+      'prop-write-in-arm': 23,
+      'assert-only': 29,
     });
   });
 
@@ -261,14 +270,16 @@ describe('IR generator branch shapes: reachability', () => {
     expect(IR_LOOP_SHAPES.filter((s) => !stateless.has(s))).toEqual([]);
     expect(IR_LOOP_SHAPES.filter((s) => !stateful.has(s))).toEqual([]);
     expect(Object.fromEntries(stateless)).toEqual({
-      'single-carrier': 0,
-      'k2-cross-read': 1,
+      // Re-measured 2026-09-16 with the R-169 `pow` arm — see above.
+      'k2-cross-read': 0,
       'nested-cross-read': 1,
+      'single-carrier': 2,
     });
     expect(Object.fromEntries(stateful)).toEqual({
-      'k2-cross-read': 1,
-      'nested-cross-read': 7,
-      'single-carrier': 9,
+      // Re-measured 2026-09-16 with the R-169 `pow` arm — see above.
+      'nested-cross-read': 2,
+      'single-carrier': 4,
+      'k2-cross-read': 29,
     });
   });
 

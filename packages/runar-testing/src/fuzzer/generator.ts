@@ -685,6 +685,28 @@ function arbSmallShiftLiteralIR(): fc.Arbitrary<Expr> {
 }
 
 /**
+ * Exponent literal for `pow`, straddling the ENFORCED domain (R-169).
+ *
+ * `pow` unrolls 32 conditional multiplies, so it computes `base^min(exp, 32)`
+ * and the emitted script refuses anything outside `0 <= exp <= 32` with
+ * `OP_DUP <0> <33> OP_WITHIN OP_VERIFY`. The constant folder declines outside
+ * the same bound and the interpreter throws there, so the oracle sees the
+ * script and the interpreter REFUSE TOGETHER — which is the property worth
+ * fuzzing, and the one that was never checked.
+ *
+ * The range deliberately covers both sides of the guard rather than staying
+ * inside it. Confining a corpus to the easy half is exactly how `pow`'s clamp
+ * survived three review rounds: there was no `pow` in any fixture past its
+ * bound, the fuzzer never generated `pow` AT ALL, and the single `pow` in any
+ * test in the repo sat at `exp = 10n`.
+ */
+function arbPowExponentLiteralIR(): fc.Arbitrary<Expr> {
+  return fc.integer({ min: -2, max: 40 }).map(
+    (n): Expr => ({ kind: 'bigint_literal', value: BigInt(n) }),
+  );
+}
+
+/**
  * Multi-byte-magnitude literal, used ONLY inside the shift/bitwise arms of
  * `arbBigintExprIR` below (C6 / deep-review finding). `arbBigintLiteralIR`'s
  * [-100, 100] range never needs more than one Bitcoin script-number byte, so
@@ -751,6 +773,17 @@ function arbBigintExprIR(
       arbBigintExprIR(bigintVars, depth - 1),
       arbBigintExprIR(bigintVars, depth - 1),
     ).map(([fn, a, b]): Expr => ({ kind: 'call', fn, args: [a, b] })),
+    // pow(base, <literal exponent>) — R-169. The exponent is fixed at
+    // generation time (like the divisor and shift-count arms) so the execution
+    // oracle sees a decided result, and it straddles the 0..32 guard so the
+    // corpus exercises the REFUSAL as well as the computation. The base is a
+    // depth-0 leaf on purpose: a nested `pow(pow(x, 32), 32)` would ask the
+    // script for a 10^3000 script number and the arm would be testing the
+    // bignum encoder rather than pow.
+    fc.tuple(
+      arbBigintExprIR(bigintVars, 0),
+      arbPowExponentLiteralIR(),
+    ).map(([base, exp]): Expr => ({ kind: 'call', fn: 'pow', args: [base, exp] })),
     // Shifts (bounded non-negative literal count) and bitwise ops (C6 —
     // these lower to byte-array Script opcodes OP_LSHIFT/OP_RSHIFT/OP_AND/
     // OP_OR/OP_XOR; the interpreter models the same byte semantics since
