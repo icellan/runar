@@ -328,9 +328,12 @@ func TestUnexcludedPortsWereFixedNotDeleted(t *testing.T) {
 				"Sha256/Ripemd160 name collision in one file: the digest TYPES " +
 				"in the property annotations and the hash FUNCTIONS in call " +
 				"position. That is only expressible now that Ripemd160Hash is " +
-				"mapped; losing either spelling loses the demonstration, and " +
-				"losing the call spellings loses the only executed coverage the " +
-				"Go mock has for Sha256Hash and Ripemd160.",
+				"mapped, and it is the only .runar.go port that carries all " +
+				"four spellings at once -- the pairing is the demonstration, so " +
+				"losing any one of them loses it. The mock's own coverage of " +
+				"the two calls lives elsewhere (packages/runar-go/runar_test.go " +
+				"and mock_script_agreement_test.go); what is unique here is " +
+				"that a CONTRACT uses them.",
 		},
 	} {
 		t.Run(c.rel, func(t *testing.T) {
