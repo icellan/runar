@@ -264,7 +264,7 @@ const GO_TYPE_MAP: Record<string, string> = {
   Bool: 'boolean', bool: 'boolean', int: 'bigint',
   ByteString: 'ByteString',
   PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
-  Ripemd160: 'Ripemd160', Addr: 'Addr',
+  Ripemd160: 'Ripemd160', Ripemd160Hash: 'Ripemd160', Addr: 'Addr',
   SigHashPreimage: 'SigHashPreimage',
   RabinSig: 'RabinSig', RabinPubKey: 'RabinPubKey',
   Point: 'Point',

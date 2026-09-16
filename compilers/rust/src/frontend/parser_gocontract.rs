@@ -94,7 +94,7 @@ fn map_go_type(name: &str) -> TypeNode {
         "PubKey" => TypeNode::Primitive(PrimitiveTypeName::PubKey),
         "Sig" => TypeNode::Primitive(PrimitiveTypeName::Sig),
         "Sha256" | "Sha256Digest" => TypeNode::Primitive(PrimitiveTypeName::Sha256),
-        "Ripemd160" => TypeNode::Primitive(PrimitiveTypeName::Ripemd160),
+        "Ripemd160" | "Ripemd160Hash" => TypeNode::Primitive(PrimitiveTypeName::Ripemd160),
         "Addr" => TypeNode::Primitive(PrimitiveTypeName::Addr),
         "SigHashPreimage" => TypeNode::Primitive(PrimitiveTypeName::SigHashPreimage),
         "RabinSig" => TypeNode::Primitive(PrimitiveTypeName::RabinSig),

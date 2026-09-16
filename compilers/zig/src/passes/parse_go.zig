@@ -398,6 +398,7 @@ fn mapGoType(name: []const u8) RunarType {
         .{ "Sha256", .sha256 },
         .{ "Sha256Digest", .sha256 },
         .{ "Ripemd160", .ripemd160 },
+        .{ "Ripemd160Hash", .ripemd160 },
         .{ "Addr", .addr },
         .{ "SigHashPreimage", .sig_hash_preimage },
         .{ "RabinSig", .rabin_sig },

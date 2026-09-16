@@ -365,6 +365,21 @@ describe('cross-tier acceptance parity', () => {
         'one of these spellings while the Go SDK shipped them.',
     },
     {
+      what: 'Go-surface digest TYPE spellings vs the primitives',
+      a: 'GoDigestTypeSpellings.runar.go',
+      b: 'GoDigestTypeSpellingsRef.runar.ts',
+      why:
+        'runar.Sha256Digest and runar.Ripemd160Hash are the only two names ' +
+        'packages/runar-go declares for the two digest TYPES — the bare ' +
+        '`Sha256` / `Ripemd160` identifiers are bound to the hash FUNCTIONS, ' +
+        'because Go cannot bind one identifier to both. Each must resolve to ' +
+        'the primitive it names. All seven type tables carried Sha256Digest ' +
+        'and none carried Ripemd160Hash, so the surface accepted a spelling ' +
+        'packages/runar-go does not declare and refused the one it does; ' +
+        'unanimity WAS the bug, which is why the claim is checked against the ' +
+        'primitive spelling rather than against the other six tiers.',
+    },
+    {
       what: 'Rust BigintBig / wide encoders vs the unsuffixed spellings',
       a: 'RustBigintBigSpellings.runar.rs',
       b: 'RustBigintBigSpellingsRef.runar.ts',

@@ -96,6 +96,7 @@ _GO_TYPE_MAP: dict[str, str] = {
     "Sha256": "Sha256",
     "Sha256Digest": "Sha256",
     "Ripemd160": "Ripemd160",
+    "Ripemd160Hash": "Ripemd160",
     "Addr": "Addr",
     "SigHashPreimage": "SigHashPreimage",
     "RabinSig": "RabinSig",

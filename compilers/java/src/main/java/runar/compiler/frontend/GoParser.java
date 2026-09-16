@@ -179,6 +179,7 @@ public final class GoParser {
         GO_TYPE_MAP.put("Sha256", "Sha256");
         GO_TYPE_MAP.put("Sha256Digest", "Sha256");
         GO_TYPE_MAP.put("Ripemd160", "Ripemd160");
+        GO_TYPE_MAP.put("Ripemd160Hash", "Ripemd160");
         GO_TYPE_MAP.put("Addr", "Addr");
         GO_TYPE_MAP.put("SigHashPreimage", "SigHashPreimage");
         GO_TYPE_MAP.put("RabinSig", "RabinSig");
