@@ -1351,6 +1351,37 @@ const Parser = struct {
         return .{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Emitted for a `while` that is not a representable bounded counting loop.
+    ///
+    /// Word for word the sentence the other six tiers emit, so a user
+    /// switching tiers reads the same diagnostic.
+    const move_while_shape_diagnostic =
+        "Move `while` must be a bounded counting loop: " ++
+        "`let i = K; while (i < N) { ...; i = i + 1; }`, or the counting-down form " ++
+        "`let i = K; while (i > N) { ...; i = i - 1; }`. The iterator declaration, " ++
+        "the comparison direction and a unit step must all agree.";
+
+    /// Move has no C-style `for`, so a bounded loop is spelled as an induction
+    /// variable declared just before a `while`:
+    ///
+    ///   let i: Int = K;          let i: Int = K;
+    ///   while (i < N) {          while (i > N) {
+    ///     ...                      ...
+    ///     i = i + 1;               i = i - 1;
+    ///   }                        }
+    ///
+    /// `parseMoveBlock` patches `init_value` from the preceding declaration;
+    /// this function supplies everything else the unrolled loop model needs.
+    ///
+    /// The COUNTING-DOWN column used to be missing HERE TOO, and differently
+    /// from the peer tiers: `descending` was never set from the comparison and
+    /// the trailing update was trimmed only for `.add`, so `while (i > 1) {
+    /// ...; i = i - 1; }` produced `start=5 step=+1 bound=1` — count
+    /// `bound - start = -4`, clamped to 0 — against the peers' `start=0
+    /// step=-1 iterVar=_w`. Both were wrong AND they disagreed: a six-vs-one
+    /// hex split (`009c` vs `55007b7c9c77`) on byte-identical source. Deriving
+    /// the direction from the comparison and requiring the step's sign to
+    /// agree fixes the semantics, and the agreement follows from that.
     fn parseMoveWhile(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'while'
@@ -1364,52 +1395,108 @@ const Parser = struct {
         const body = self.parseMoveBlock();
         self.skipSemicolons();
 
-        // Extract var_name and bound from condition if it's a simple comparison: var < N
+        // Extract the iterator, the bound and the DIRECTION from the
+        // condition. `<`/`<=` counts up, `>`/`>=` counts down; `<=`/`>=` are
+        // inclusive. Anything else is not a bound the unrolled model can
+        // represent, and leaves `representable` false.
         var var_name: []const u8 = "_w";
         var bound: i64 = 0;
+        var bound_is_const = false;
+        var descending = false;
+        var inclusive = false;
+        var representable = false;
         if (_cond) |cond| {
             switch (cond) {
                 .binary_op => |bop| {
-                    if (bop.left == .identifier) var_name = bop.left.identifier;
-                    switch (bop.right) {
-                        .literal_int => |v| {
-                            bound = v;
+                    const dir_ok = switch (bop.op) {
+                        .lt, .lte => blk: {
+                            descending = false;
+                            inclusive = bop.op == .lte;
+                            break :blk true;
                         },
-                        else => {},
+                        .gt, .gte => blk: {
+                            descending = true;
+                            inclusive = bop.op == .gte;
+                            break :blk true;
+                        },
+                        else => false,
+                    };
+                    if (dir_ok and bop.left == .identifier) {
+                        var_name = bop.left.identifier;
+                        // N-137's counterpart for the BOUND: a non-literal
+                        // bound is not unrollable, and leaving
+                        // `bound_is_const` at its `true` default silently
+                        // collapsed it to a 0-iteration loop here.
+                        if (loopStartLiteral(bop.right)) |v| {
+                            bound = v;
+                            bound_is_const = true;
+                            representable = true;
+                        }
                     }
                 },
                 else => {},
             }
         }
 
-        // Drop a trailing `var_name = var_name + K` so the for_stmt's implicit
-        // iteration matches TypeScript's native `for (let i = 0n; i < N; i++)`.
+        // Drop the trailing `var_name = var_name ± 1` and carry it as the
+        // loop's update clause for validate.zig to check.
         //
         // N-061: the trimmed statement used to vanish here, so `i = i + 2`
-        // produced bytes identical to `i = i + 1`. It is now carried as the
-        // loop's update clause for validate.zig to check — the trim itself is
-        // unchanged, so a unit step still lowers exactly as before.
+        // produced bytes identical to `i = i + 1`.
         var trimmed_body = body;
         var update: ?*const Statement = null;
-        if (body.len > 0) {
+        var step_ok = false;
+        if (representable and body.len > 0) {
             const last = body[body.len - 1];
             if (last == .assign) {
                 const a = last.assign;
-                if (std.mem.eql(u8, a.target, var_name)) {
-                    if (a.value == .binary_op) {
-                        const bop = a.value.binary_op;
-                        if (bop.op == .add and bop.left == .identifier and
-                            std.mem.eql(u8, bop.left.identifier, var_name))
-                        {
-                            trimmed_body = body[0 .. body.len - 1];
-                            update = &body[body.len - 1];
+                if (std.mem.eql(u8, a.target, var_name) and a.value == .binary_op) {
+                    const bop = a.value.binary_op;
+                    const isIter = struct {
+                        fn f(e: types.Expression, name: []const u8) bool {
+                            return e == .identifier and std.mem.eql(u8, e.identifier, name);
                         }
+                    }.f;
+                    const isOne = struct {
+                        fn f(e: types.Expression) bool {
+                            return e == .literal_int and e.literal_int == 1;
+                        }
+                    }.f;
+                    // Accept `i + 1`, `1 + i` (addition only) and `i - 1`,
+                    // and only when the step's SIGN agrees with the
+                    // comparison direction.
+                    const unit_step = switch (bop.op) {
+                        .add => !descending and
+                            ((isIter(bop.left, var_name) and isOne(bop.right)) or
+                                (isOne(bop.left) and isIter(bop.right, var_name))),
+                        .sub => descending and
+                            isIter(bop.left, var_name) and isOne(bop.right),
+                        else => false,
+                    };
+                    if (unit_step) {
+                        trimmed_body = body[0 .. body.len - 1];
+                        update = &body[body.len - 1];
+                        step_ok = true;
                     }
                 }
             }
         }
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = 0, .bound = bound, .update = update, .body = trimmed_body, .source_loc = loc } };
+        if (!representable or !step_ok) {
+            self.addError(move_while_shape_diagnostic);
+        }
+
+        return .{ .for_stmt = .{
+            .var_name = var_name,
+            .init_value = 0,
+            .bound = bound,
+            .bound_is_const = bound_is_const,
+            .descending = descending,
+            .inclusive = inclusive,
+            .update = update,
+            .body = trimmed_body,
+            .source_loc = loc,
+        } };
     }
 
     fn parseMoveLoop(self: *Parser) ?Statement {

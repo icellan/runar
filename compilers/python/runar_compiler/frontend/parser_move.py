@@ -747,6 +747,13 @@ class _MoveParser:
             has_return_type = True
 
         body = self._parse_move_block()
+        # Every nested block folded itself on the way up, so a stub that
+        # survives to here -- at ANY depth -- is a `while` the bounded-loop
+        # model cannot represent. Refuse it rather than lower a dummy iterator.
+        unfolded: list[Statement] = []
+        _collect_unfolded_move_whiles(body, unfolded)
+        for _ in unfolded:
+            self.add_error(MOVE_WHILE_SHAPE_DIAGNOSTIC)
 
         # Move allows an implicit return of the final expression when the
         # function declares a return type. Convert the trailing expression
@@ -979,7 +986,7 @@ class _MoveParser:
         # Convert while loop to a for loop with no init/update for AST compatibility
         return ForStmt(
             init=VariableDeclStmt(
-                name="_w", mutable=True, init=BigIntLiteral(value=0), source_location=loc,
+                name=MOVE_WHILE_STUB_ITER, mutable=True, init=BigIntLiteral(value=0), source_location=loc,
             ),
             condition=condition,
             update=ExpressionStmt(expr=BigIntLiteral(value=0), source_location=loc),
@@ -1359,62 +1366,164 @@ class _MoveParser:
 
 
 # ---------------------------------------------------------------------------
+# Bounded-loop folding
+# ---------------------------------------------------------------------------
+
+#: Iterator name of the synthetic ForStmt ``_parse_move_while`` emits for a
+#: ``while`` that has not yet been folded into a counting loop. It is a
+#: placeholder, never a real induction variable -- a surviving one is refused.
+MOVE_WHILE_STUB_ITER = "_w"
+
+#: Emitted for a ``while`` that is not a representable bounded counting loop.
+MOVE_WHILE_SHAPE_DIAGNOSTIC = (
+    "Move `while` must be a bounded counting loop: "
+    "`let i = K; while (i < N) { ...; i = i + 1; }`, or the counting-down form "
+    "`let i = K; while (i > N) { ...; i = i - 1; }`. The iterator declaration, "
+    "the comparison direction and a unit step must all agree."
+)
+
+
+# ---------------------------------------------------------------------------
 # Number parsing
 # ---------------------------------------------------------------------------
 
 def _fold_move_while_as_for(stmts: list[Statement]) -> list[Statement]:
-    """Fold ``let i = K; while (i < N) { ...; i = i + S; }`` into a single
-    ForStmt so downstream ANF lowering produces identical bounded-loop IR
-    across all formats.
+    """Fold the canonical Move bounded-loop patterns into a single ForStmt.
+
+    ::
+
+        let i: Int = K;          let i: Int = K;
+        while (i < N) {          while (i > N) {
+          ...                      ...
+          i = i + 1;               i = i - 1;
+        }                        }
+
+    so downstream ANF lowering produces identical bounded-loop IR across all
+    formats.
+
+    The COUNTING-DOWN column used to be missing: the fold matched
+    ``last.value.op == "+"`` only, so ``i = i - 1`` fell through to the
+    unfolded stub -- a ForStmt over the dummy iterator ``_w = 0`` -- and ANF
+    lowering read start 0 off the dummy, inferred step -1 from the ``>``, and
+    computed a trip count of 0. The loop body, and every assertion in it, was
+    dropped with no diagnostic.
+
+    The step must be a literal 1 whose SIGN agrees with the comparison
+    direction. ``i = i + 2`` used to fold to ``i++`` and silently run the
+    wrong iterator values; ``i = i - 1`` under ``i < N`` never terminates.
     """
     out: list[Statement] = []
     i = 0
     while i < len(stmts):
         s = stmts[i]
-        if i + 1 < len(stmts) and isinstance(s, VariableDeclStmt):
-            nxt = stmts[i + 1]
-            if isinstance(nxt, ForStmt) and isinstance(nxt.init, VariableDeclStmt) and nxt.init.name == "_w":
-                iter_name = s.name
-                cond = nxt.condition
-                if (
-                    isinstance(cond, BinaryExpr)
-                    and isinstance(cond.left, Identifier)
-                    and cond.left.name == iter_name
-                    and len(nxt.body) > 0
-                ):
-                    last = nxt.body[-1]
-                    if (
-                        isinstance(last, AssignmentStmt)
-                        and isinstance(last.target, Identifier)
-                        and last.target.name == iter_name
-                        and isinstance(last.value, BinaryExpr)
-                        and last.value.op == "+"
-                        and isinstance(last.value.left, Identifier)
-                        and last.value.left.name == iter_name
-                    ):
-                        trimmed = list(nxt.body[:-1])
-                        new_for = ForStmt(
-                            init=VariableDeclStmt(
-                                name=iter_name,
-                                type=s.type,
-                                mutable=True,
-                                init=s.init,
-                                source_location=s.source_location,
-                            ),
-                            condition=cond,
-                            update=ExpressionStmt(
-                                expr=IncrementExpr(operand=Identifier(name=iter_name), prefix=False),
-                                source_location=nxt.source_location,
-                            ),
-                            body=trimmed,
-                            source_location=nxt.source_location,
-                        )
-                        out.append(new_for)
-                        i += 2
-                        continue
+        if i + 1 < len(stmts) and isinstance(s, VariableDeclStmt) and _is_move_while_stub(stmts[i + 1]):
+            folded = _fold_move_counting_while(s, stmts[i + 1])
+            if folded is not None:
+                out.append(folded)
+                i += 2
+                continue
         out.append(s)
         i += 1
     return out
+
+
+def _is_move_while_stub(stmt: Statement) -> bool:
+    """Whether ``stmt`` is the shape ``_parse_move_while`` emits unfolded."""
+    return (
+        isinstance(stmt, ForStmt)
+        and isinstance(stmt.init, VariableDeclStmt)
+        and stmt.init.name == MOVE_WHILE_STUB_ITER
+    )
+
+
+def _fold_move_counting_while(decl: VariableDeclStmt, stub: ForStmt) -> Statement | None:
+    """Fold ``decl`` + a ``while`` stub into a real counting ForStmt.
+
+    Returns ``None`` when the pair is not a representable counting loop.
+    """
+    iter_name = decl.name
+    cond = stub.condition
+    if not isinstance(cond, BinaryExpr):
+        return None
+    if not (isinstance(cond.left, Identifier) and cond.left.name == iter_name):
+        return None
+
+    # `<`/`<=` counts up, `>`/`>=` counts down. Any other comparison is not a
+    # loop bound the unrolled model can represent.
+    if cond.op in ("<", "<="):
+        ascending = True
+    elif cond.op in (">", ">="):
+        ascending = False
+    else:
+        return None
+
+    # The step is the last statement of the while body.
+    if not stub.body:
+        return None
+    last = stub.body[-1]
+    if not isinstance(last, AssignmentStmt):
+        return None
+    if not (isinstance(last.target, Identifier) and last.target.name == iter_name):
+        return None
+    if not isinstance(last.value, BinaryExpr) or last.value.op not in ("+", "-"):
+        return None
+
+    def is_iter(e: Expression) -> bool:
+        return isinstance(e, Identifier) and e.name == iter_name
+
+    def is_one(e: Expression) -> bool:
+        return isinstance(e, BigIntLiteral) and e.value == 1
+
+    # Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
+    if last.value.op == "+":
+        unit_step = (is_iter(last.value.left) and is_one(last.value.right)) or (
+            is_one(last.value.left) and is_iter(last.value.right)
+        )
+    else:
+        unit_step = is_iter(last.value.left) and is_one(last.value.right)
+    if not unit_step:
+        return None
+    # The step's sign must agree with the comparison direction.
+    if ascending != (last.value.op == "+"):
+        return None
+
+    update_expr: Expression
+    if ascending:
+        update_expr = IncrementExpr(operand=Identifier(name=iter_name), prefix=False)
+    else:
+        update_expr = DecrementExpr(operand=Identifier(name=iter_name), prefix=False)
+
+    return ForStmt(
+        init=VariableDeclStmt(
+            name=iter_name,
+            type=decl.type,
+            mutable=True,
+            init=decl.init,
+            source_location=decl.source_location,
+        ),
+        condition=cond,
+        update=ExpressionStmt(expr=update_expr, source_location=stub.source_location),
+        body=list(stub.body[:-1]),
+        source_location=stub.source_location,
+    )
+
+
+def _collect_unfolded_move_whiles(stmts: list[Statement], out: list[Statement]) -> None:
+    """Collect every ``while`` stub that survived the fold, at any depth.
+
+    A surviving stub is not a loop -- it is a ForStmt over a dummy iterator,
+    and every downstream pass reads a trip count off it as if it were real.
+    Refusing is the only honest outcome.
+    """
+    for stmt in stmts:
+        if isinstance(stmt, ForStmt):
+            if _is_move_while_stub(stmt):
+                out.append(stmt)
+            _collect_unfolded_move_whiles(list(stmt.body), out)
+        elif isinstance(stmt, IfStmt):
+            _collect_unfolded_move_whiles(list(stmt.then), out)
+            if stmt.else_:
+                _collect_unfolded_move_whiles(list(stmt.else_), out)
 
 
 def _parse_move_number(s: str) -> Expression:

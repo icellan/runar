@@ -841,6 +841,15 @@ public final class MoveParser {
             }
 
             List<Statement> body = parseBlock();
+            // Every nested block folded itself on the way up, so a stub that
+            // survives to here — at ANY depth — is a `while` the bounded-loop
+            // model cannot represent. Refuse it rather than lower a dummy
+            // iterator.
+            List<Statement> unfoldedWhiles = new ArrayList<>();
+            collectUnfoldedWhiles(body, unfoldedWhiles);
+            for (int w = 0; w < unfoldedWhiles.size(); w++) {
+                errors.add(MOVE_WHILE_SHAPE_DIAGNOSTIC);
+            }
 
             if (hasReturnType && !body.isEmpty()) {
                 Statement last = body.get(body.size() - 1);
@@ -1037,7 +1046,7 @@ public final class MoveParser {
             List<Statement> body = parseBlock();
 
             VariableDeclStatement init = new VariableDeclStatement(
-                "_w", null, new BigIntLiteral(BigInteger.ZERO), location
+                MOVE_WHILE_STUB_ITER, null, new BigIntLiteral(BigInteger.ZERO), location
             );
             Statement update = new ExpressionStatement(
                 new BigIntLiteral(BigInteger.ZERO), location
@@ -1445,59 +1454,163 @@ public final class MoveParser {
     // Post-pass: fold while-with-counter into a canonical for-loop
     // ---------------------------------------------------------------
 
+    /**
+     * Iterator name of the synthetic {@link ForStatement} {@code parseWhile}
+     * emits for a {@code while} that has not yet been folded into a counting
+     * loop. It is a placeholder, never a real induction variable —
+     * {@code collectUnfoldedWhiles} refuses any that survives the fold.
+     */
+    private static final String MOVE_WHILE_STUB_ITER = "_w";
+
+    /** Emitted for a {@code while} that is not a representable bounded counting loop. */
+    static final String MOVE_WHILE_SHAPE_DIAGNOSTIC =
+        "Move `while` must be a bounded counting loop: "
+        + "`let i = K; while (i < N) { ...; i = i + 1; }`, or the counting-down form "
+        + "`let i = K; while (i > N) { ...; i = i - 1; }`. The iterator declaration, "
+        + "the comparison direction and a unit step must all agree.";
+
+    /**
+     * Fold the canonical Move bounded-loop patterns
+     *
+     * <pre>
+     *   let i: Int = K;          let i: Int = K;
+     *   while (i &lt; N) {          while (i &gt; N) {
+     *     ...                      ...
+     *     i = i + 1;               i = i - 1;
+     *   }                        }
+     * </pre>
+     *
+     * into a single ForStatement whose init/condition/update match what
+     * TypeScript's native for-loop produces, so downstream ANF lowering emits
+     * identical bounded-loop IR across all formats.
+     *
+     * <p>The COUNTING-DOWN column used to be missing: the fold matched
+     * {@code BinaryOp.ADD} only, so {@code i = i - 1} fell through to the
+     * unfolded stub — a ForStatement over the dummy iterator {@code _w = 0} —
+     * and ANF lowering read start 0 off the dummy, inferred step -1 from the
+     * {@code >}, and computed a trip count of 0. The loop body, and every
+     * assertion in it, was dropped with no diagnostic.
+     *
+     * <p>The step must be a literal 1 whose SIGN agrees with the comparison
+     * direction. {@code i = i + 2} used to fold to {@code i++} and silently run
+     * the wrong iterator values; {@code i = i - 1} under {@code i < N} never
+     * terminates.
+     */
     private static List<Statement> foldWhileAsFor(List<Statement> stmts) {
         List<Statement> out = new ArrayList<>(stmts.size());
         int i = 0;
         while (i < stmts.size()) {
             Statement s = stmts.get(i);
-            if (i + 1 < stmts.size() && s instanceof VariableDeclStatement vd) {
-                Statement next = stmts.get(i + 1);
-                if (next instanceof ForStatement fs
-                    && fs.init() != null
-                    && fs.init().name().equals("_w")) {
-                    String iterName = vd.name();
-                    Expression cond = fs.condition();
-                    if (cond instanceof BinaryExpr be
-                        && be.left() instanceof Identifier idLeft
-                        && idLeft.name().equals(iterName)
-                        && !fs.body().isEmpty()) {
-                        Statement last = fs.body().get(fs.body().size() - 1);
-                        if (last instanceof AssignmentStatement asg
-                            && asg.target() instanceof Identifier asgTgt
-                            && asgTgt.name().equals(iterName)
-                            && asg.value() instanceof BinaryExpr asgVal
-                            && asgVal.op() == Expression.BinaryOp.ADD
-                            && asgVal.left() instanceof Identifier asgLeft
-                            && asgLeft.name().equals(iterName)) {
-                            List<Statement> trimmed = new ArrayList<>(
-                                fs.body().subList(0, fs.body().size() - 1)
-                            );
-                            ForStatement folded = new ForStatement(
-                                new VariableDeclStatement(
-                                    iterName,
-                                    vd.type(),
-                                    vd.init(),
-                                    vd.sourceLocation()
-                                ),
-                                cond,
-                                new ExpressionStatement(
-                                    new IncrementExpr(new Identifier(iterName), false),
-                                    fs.sourceLocation()
-                                ),
-                                trimmed,
-                                fs.sourceLocation()
-                            );
-                            out.add(folded);
-                            i += 2;
-                            continue;
-                        }
-                    }
+            if (i + 1 < stmts.size() && s instanceof VariableDeclStatement vd
+                && isMoveWhileStub(stmts.get(i + 1))) {
+                Statement folded = foldCountingWhile(vd, (ForStatement) stmts.get(i + 1));
+                if (folded != null) {
+                    out.add(folded);
+                    i += 2;
+                    continue;
                 }
             }
             out.add(s);
             i++;
         }
         return out;
+    }
+
+    /** Whether {@code stmt} is the shape {@code parseWhile} emits unfolded. */
+    private static boolean isMoveWhileStub(Statement stmt) {
+        return stmt instanceof ForStatement fs
+            && fs.init() != null
+            && MOVE_WHILE_STUB_ITER.equals(fs.init().name());
+    }
+
+    /**
+     * Fold {@code decl} + a {@code while} stub into a real counting
+     * ForStatement, or return {@code null} when the pair is not a
+     * representable counting loop.
+     */
+    private static Statement foldCountingWhile(VariableDeclStatement decl, ForStatement stub) {
+        String iterName = decl.name();
+        if (!(stub.condition() instanceof BinaryExpr cond)) return null;
+        if (!(cond.left() instanceof Identifier condLeft) || !condLeft.name().equals(iterName)) {
+            return null;
+        }
+
+        // `<`/`<=` counts up, `>`/`>=` counts down. Any other comparison is not
+        // a loop bound the unrolled model can represent.
+        boolean ascending;
+        switch (cond.op()) {
+            case LT, LE -> ascending = true;
+            case GT, GE -> ascending = false;
+            default -> {
+                return null;
+            }
+        }
+
+        // The step is the last statement of the while body.
+        if (stub.body().isEmpty()) return null;
+        Statement last = stub.body().get(stub.body().size() - 1);
+        if (!(last instanceof AssignmentStatement asg)) return null;
+        if (!(asg.target() instanceof Identifier asgTgt) || !asgTgt.name().equals(iterName)) {
+            return null;
+        }
+        if (!(asg.value() instanceof BinaryExpr step)) return null;
+        boolean stepIsAdd;
+        if (step.op() == Expression.BinaryOp.ADD) {
+            stepIsAdd = true;
+        } else if (step.op() == Expression.BinaryOp.SUB) {
+            stepIsAdd = false;
+        } else {
+            return null;
+        }
+
+        // Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
+        boolean unitStep = stepIsAdd
+            ? (isLoopIter(step.left(), iterName) && isLiteralOne(step.right()))
+                || (isLiteralOne(step.left()) && isLoopIter(step.right(), iterName))
+            : isLoopIter(step.left(), iterName) && isLiteralOne(step.right());
+        if (!unitStep) return null;
+        // The step's sign must agree with the comparison direction.
+        if (ascending != stepIsAdd) return null;
+
+        Expression update = ascending
+            ? new IncrementExpr(new Identifier(iterName), false)
+            : new DecrementExpr(new Identifier(iterName), false);
+
+        return new ForStatement(
+            new VariableDeclStatement(iterName, decl.type(), decl.init(), decl.sourceLocation()),
+            cond,
+            new ExpressionStatement(update, stub.sourceLocation()),
+            new ArrayList<>(stub.body().subList(0, stub.body().size() - 1)),
+            stub.sourceLocation()
+        );
+    }
+
+    private static boolean isLoopIter(Expression e, String iterName) {
+        return e instanceof Identifier id && id.name().equals(iterName);
+    }
+
+    private static boolean isLiteralOne(Expression e) {
+        return e instanceof BigIntLiteral lit && lit.value().equals(BigInteger.ONE);
+    }
+
+    /**
+     * Collect every {@code while} stub that survived the fold, at any nesting
+     * depth.
+     *
+     * <p>A surviving stub is not a loop — it is a ForStatement over a dummy
+     * iterator, and every downstream pass reads a trip count off it as if it
+     * were real. Refusing is the only honest outcome.
+     */
+    private static void collectUnfoldedWhiles(List<Statement> stmts, List<Statement> out) {
+        for (Statement stmt : stmts) {
+            if (stmt instanceof ForStatement fs) {
+                if (isMoveWhileStub(fs)) out.add(fs);
+                collectUnfoldedWhiles(fs.body(), out);
+            } else if (stmt instanceof IfStatement ifs) {
+                collectUnfoldedWhiles(ifs.thenBody(), out);
+                if (ifs.elseBody() != null) collectUnfoldedWhiles(ifs.elseBody(), out);
+            }
+        }
     }
 
     // ---------------------------------------------------------------

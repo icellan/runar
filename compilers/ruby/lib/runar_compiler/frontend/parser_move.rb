@@ -763,6 +763,10 @@ module RunarCompiler
         expect(TOK_RBRACE)
 
         body = fold_while_as_for(body)
+        # Every nested block folded itself on the way up, so a stub that
+        # survives to here -- at ANY depth -- is a `while` the bounded-loop
+        # model cannot represent. Refuse it rather than lower a dummy iterator.
+        report_unfolded_whiles(body)
 
         # Move allows an implicit return of the final expression when the
         # function declares a return type. Convert the trailing expression
@@ -960,8 +964,8 @@ module RunarCompiler
 
         IfStmt.new(
           condition: condition,
-          then: then_block,
-          else_: else_block,
+          then: fold_while_as_for(then_block),
+          else_: fold_while_as_for(else_block),
           source_location: location
         )
       end
@@ -985,7 +989,7 @@ module RunarCompiler
         expect(TOK_RBRACE)
         ForStmt.new(
           init: VariableDeclStmt.new(
-            name: "_w",
+            name: MOVE_WHILE_STUB_ITER,
             type: nil,
             mutable: true,
             init: BigIntLiteral.new(value: 0),
@@ -996,69 +1000,148 @@ module RunarCompiler
             expr: BigIntLiteral.new(value: 0),
             source_location: location
           ),
-          body: body,
+          body: fold_while_as_for(body),
           source_location: location
         )
       end
 
-      # Fold the canonical Move bounded-loop pattern
+      # Iterator name of the synthetic ForStmt `parse_while_statement` emits
+      # for a `while` that has not yet been folded into a counting loop. It is
+      # a placeholder, never a real induction variable -- a surviving one is
+      # refused by `report_unfolded_whiles`.
+      MOVE_WHILE_STUB_ITER = "_w"
+
+      # Emitted for a `while` that is not a representable bounded counting loop.
+      MOVE_WHILE_SHAPE_DIAGNOSTIC =
+        "Move `while` must be a bounded counting loop: " \
+        "`let i = K; while (i < N) { ...; i = i + 1; }`, or the counting-down form " \
+        "`let i = K; while (i > N) { ...; i = i - 1; }`. The iterator declaration, " \
+        "the comparison direction and a unit step must all agree."
+
+      # Fold the canonical Move bounded-loop patterns
       #
-      #   let i: Int = K;
-      #   while (i < N) { ...; i = i + S; }
+      #   let i: Int = K;          let i: Int = K;
+      #   while (i < N) {          while (i > N) {
+      #     ...                      ...
+      #     i = i + 1;               i = i - 1;
+      #   }                        }
       #
       # into a single ForStmt whose init/condition/update match TypeScript's
       # native `for (let i = 0n; i < N; i++)`, so downstream ANF lowering emits
       # identical bounded-loop IR across all formats.
+      #
+      # The COUNTING-DOWN column used to be missing: the fold matched
+      # `last.value.op == "+"` only, so `i = i - 1` fell through to the
+      # unfolded stub -- a ForStmt over the dummy iterator `_w = 0` -- and ANF
+      # lowering read start 0 off the dummy, inferred step -1 from the `>`, and
+      # computed a trip count of 0. The loop body, and every assertion in it,
+      # was dropped with no diagnostic.
+      #
+      # The step must be a literal 1 whose SIGN agrees with the comparison
+      # direction. `i = i + 2` used to fold to `i++` and silently run the wrong
+      # iterator values; `i = i - 1` under `i < N` never terminates.
       def fold_while_as_for(stmts)
         out = []
         i = 0
         while i < stmts.length
           s = stmts[i]
           nxt = stmts[i + 1]
-          if s.is_a?(VariableDeclStmt) && nxt.is_a?(ForStmt) &&
-             nxt.init.is_a?(VariableDeclStmt) && nxt.init.name == "_w"
-            iter_name = s.name
-            cond = nxt.condition
-            matched = false
-            if cond.is_a?(BinaryExpr) && cond.left.is_a?(Identifier) && cond.left.name == iter_name
-              if !nxt.body.empty?
-                last = nxt.body.last
-                if last.is_a?(AssignmentStmt) &&
-                   last.target.is_a?(Identifier) && last.target.name == iter_name &&
-                   last.value.is_a?(BinaryExpr) && last.value.op == "+" &&
-                   last.value.left.is_a?(Identifier) && last.value.left.name == iter_name
-                  trimmed = nxt.body[0...-1]
-                  new_for = ForStmt.new(
-                    init: VariableDeclStmt.new(
-                      name: iter_name,
-                      type: s.type,
-                      mutable: true,
-                      init: s.init,
-                      source_location: s.source_location
-                    ),
-                    condition: cond,
-                    update: ExpressionStmt.new(
-                      expr: IncrementExpr.new(
-                        operand: Identifier.new(name: iter_name),
-                        prefix: false
-                      ),
-                      source_location: nxt.source_location
-                    ),
-                    body: trimmed,
-                    source_location: nxt.source_location
-                  )
-                  out << new_for
-                  i += 2
-                  matched = true
-                end
-              end
+          if s.is_a?(VariableDeclStmt) && move_while_stub?(nxt)
+            folded = fold_counting_while(s, nxt)
+            if folded
+              out << folded
+              i += 2
+              next
             end
-            next if matched
           end
           out << s
           i += 1
         end
         out
+      end
+
+      # Whether `stmt` is the shape `parse_while_statement` emits unfolded.
+      def move_while_stub?(stmt)
+        stmt.is_a?(ForStmt) && stmt.init.is_a?(VariableDeclStmt) &&
+          stmt.init.name == MOVE_WHILE_STUB_ITER
+      end
+
+      # Fold `decl` + a `while` stub into a real counting ForStmt, or return
+      # nil when the pair is not a representable counting loop.
+      def fold_counting_while(decl, stub)
+        iter_name = decl.name
+        cond = stub.condition
+        return nil unless cond.is_a?(BinaryExpr)
+        return nil unless cond.left.is_a?(Identifier) && cond.left.name == iter_name
+
+        # `<`/`<=` counts up, `>`/`>=` counts down. Any other comparison is not
+        # a loop bound the unrolled model can represent.
+        case cond.op
+        when "<", "<=" then ascending = true
+        when ">", ">=" then ascending = false
+        else return nil
+        end
+
+        # The step is the last statement of the while body.
+        return nil if stub.body.empty?
+
+        last = stub.body.last
+        return nil unless last.is_a?(AssignmentStmt)
+        return nil unless last.target.is_a?(Identifier) && last.target.name == iter_name
+        return nil unless last.value.is_a?(BinaryExpr)
+        return nil unless ["+", "-"].include?(last.value.op)
+
+        is_iter = ->(e) { e.is_a?(Identifier) && e.name == iter_name }
+        is_one = ->(e) { e.is_a?(BigIntLiteral) && e.value == 1 }
+        # Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
+        unit_step =
+          if last.value.op == "+"
+            (is_iter.call(last.value.left) && is_one.call(last.value.right)) ||
+              (is_one.call(last.value.left) && is_iter.call(last.value.right))
+          else
+            is_iter.call(last.value.left) && is_one.call(last.value.right)
+          end
+        return nil unless unit_step
+        # The step's sign must agree with the comparison direction.
+        return nil unless ascending == (last.value.op == "+")
+
+        update_expr =
+          if ascending
+            IncrementExpr.new(operand: Identifier.new(name: iter_name), prefix: false)
+          else
+            DecrementExpr.new(operand: Identifier.new(name: iter_name), prefix: false)
+          end
+
+        ForStmt.new(
+          init: VariableDeclStmt.new(
+            name: iter_name,
+            type: decl.type,
+            mutable: true,
+            init: decl.init,
+            source_location: decl.source_location
+          ),
+          condition: cond,
+          update: ExpressionStmt.new(expr: update_expr, source_location: stub.source_location),
+          body: stub.body[0...-1],
+          source_location: stub.source_location
+        )
+      end
+
+      # Report every `while` stub that survived the fold, at any nesting depth.
+      #
+      # A surviving stub is not a loop -- it is a ForStmt over a dummy
+      # iterator, and every downstream pass reads a trip count off it as if it
+      # were real. Refusing is the only honest outcome.
+      def report_unfolded_whiles(stmts)
+        stmts.each do |stmt|
+          if stmt.is_a?(ForStmt)
+            add_error(MOVE_WHILE_SHAPE_DIAGNOSTIC) if move_while_stub?(stmt)
+            report_unfolded_whiles(stmt.body)
+          elsif stmt.is_a?(IfStmt)
+            report_unfolded_whiles(stmt.then)
+            report_unfolded_whiles(stmt.else_) if stmt.else_
+          end
+        end
       end
 
       def parse_loop_statement(location)
@@ -1086,7 +1169,7 @@ module RunarCompiler
             expr: BigIntLiteral.new(value: 0),
             source_location: location
           ),
-          body: body,
+          body: fold_while_as_for(body),
           source_location: location
         )
       end

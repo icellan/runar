@@ -177,6 +177,25 @@ function snakeToCamel(name: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded-loop folding constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Iterator name of the synthetic for_statement `parseWhileStatement` emits for
+ * a `while` that has not yet been folded into a counting loop. It is a
+ * placeholder, never a real induction variable — `reportUnfoldedWhiles`
+ * refuses any that survives the fold.
+ */
+const WHILE_STUB_ITER = '_w';
+
+/** Emitted for a `while` that is not a representable bounded counting loop. */
+const MOVE_WHILE_SHAPE_DIAGNOSTIC =
+  'Move `while` must be a bounded counting loop: `let i = K; while (i < N) ' +
+  '{ ...; i = i + 1; }`, or the counting-down form `let i = K; while (i > N) ' +
+  '{ ...; i = i - 1; }`. The iterator declaration, the comparison direction ' +
+  'and a unit step must all agree.';
+
+// ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
 
@@ -507,6 +526,10 @@ class MoveParser {
     // into a single for_statement so the ANF lowering produces the same bounded
     // loop IR as TypeScript's native `for (let i = 0n; i < N; i++) { ... }`.
     const body = foldWhileAsFor(rawBody);
+    // Every nested block folded itself on the way up, so a stub that survives
+    // to here — at ANY depth — is a `while` the bounded-loop model cannot
+    // represent. Refuse it rather than lower a dummy iterator.
+    reportUnfoldedWhiles(body, this.errors, this.file);
 
     // Move allows an implicit return of the final expression when the function
     // declares a return type. Convert the trailing expression statement into
@@ -682,7 +705,7 @@ class MoveParser {
       kind: 'for_statement',
       init: {
         kind: 'variable_decl',
-        name: '_w',
+        name: WHILE_STUB_ITER,
         mutable: true,
         init: { kind: 'bigint_literal', value: 0n },
         sourceLocation: location,
@@ -693,7 +716,7 @@ class MoveParser {
         expression: { kind: 'bigint_literal', value: 0n },
         sourceLocation: location,
       },
-      body,
+      body: foldWhileAsFor(body),
       sourceLocation: location,
     };
   }
@@ -723,7 +746,7 @@ class MoveParser {
         expression: { kind: 'bigint_literal', value: 0n },
         sourceLocation: location,
       },
-      body,
+      body: foldWhileAsFor(body),
       sourceLocation: location,
     };
   }
@@ -754,7 +777,13 @@ class MoveParser {
       this.expect('}');
     }
 
-    return { kind: 'if_statement', condition, then: thenBranch, else: elseBranch, sourceLocation: location };
+    return {
+      kind: 'if_statement',
+      condition,
+      then: foldWhileAsFor(thenBranch),
+      else: elseBranch ? foldWhileAsFor(elseBranch) : undefined,
+      sourceLocation: location,
+    };
   }
 
   // Expression parsing (same precedence climbing as Solidity parser)
@@ -1015,83 +1044,169 @@ class MoveParser {
 
 /**
  * Move lacks a native C-style `for` loop, so developers express bounded
- * iteration with:
+ * iteration with an induction variable declared just before a `while`:
  *
- *   let i: Int = 0;
- *   while (i < 5) {
- *     ...
- *     i = i + 1;
- *   }
+ *   let i: Int = 0;          let i: Int = 5;
+ *   while (i < 5) {          while (i > 1) {
+ *     ...                      ...
+ *     i = i + 1;               i = i - 1;
+ *   }                        }
  *
  * This helper walks a statement list and folds that canonical pattern into a
  * single for_statement whose init/condition/update match what TypeScript's
  * native for-loop would produce, so downstream ANF lowering emits the same
  * bounded-loop IR across all formats.
+ *
+ * The COUNTING-DOWN column used to be missing. The fold matched `i = i + …`
+ * only, so `i = i - 1` fell through to the unfolded `while` stub — a
+ * for_statement over the dummy iterator `_w = 0` whose update is the literal
+ * `0`. `extractLoopShape` then read start 0 from the dummy, inferred step -1
+ * from the `>`, and computed count = 0 - bound, clamped to 0: the loop body,
+ * and every assertion in it, was dropped from the locking script with no
+ * diagnostic at all. See conformance/move_countdown_loop_execution_test.go,
+ * which spends the miscompiled script on the consensus interpreter.
+ *
+ * Two rules keep that class from coming back:
+ *
+ *   1. The step must be a literal 1 and its SIGN must agree with the
+ *      comparison direction (`<`/`<=` ascends, `>`/`>=` descends). The ANF
+ *      loop node carries only `start + k*step` with step ±1, so anything else
+ *      — `i = i + 2`, or an `i = i - 1` under `i < N` — is not representable.
+ *      `i = i + 2` used to fold to `i++` and silently run the wrong iterator
+ *      values.
+ *   2. A `while` that does not fold is an ERROR, not a stub. The stub path
+ *      always produced a trip count computed from a dummy iterator, which is
+ *      a wrong number rather than a refusal.
  */
 function foldWhileAsFor(stmts: Statement[]): Statement[] {
   const out: Statement[] = [];
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i]!;
     const next = stmts[i + 1];
-    if (
-      s.kind === 'variable_decl' &&
-      next && next.kind === 'for_statement' &&
-      next.init.kind === 'variable_decl' &&
-      next.init.name === '_w'
-    ) {
-      const iterName = s.name;
-      const cond = next.condition;
-      // Condition must reference the loop variable on the left.
-      const condMatches =
-        cond.kind === 'binary_expr' &&
-        cond.left.kind === 'identifier' &&
-        cond.left.name === iterName;
-      if (!condMatches) { out.push(s); continue; }
-
-      // Find the increment assignment at the end of the while body.
-      const whileBody = next.body;
-      if (whileBody.length === 0) { out.push(s); continue; }
-      const last = whileBody[whileBody.length - 1]!;
-      const incMatches =
-        last.kind === 'assignment' &&
-        last.target.kind === 'identifier' && last.target.name === iterName &&
-        last.value.kind === 'binary_expr' &&
-        last.value.op === '+' &&
-        last.value.left.kind === 'identifier' && last.value.left.name === iterName;
-      if (!incMatches) { out.push(s); continue; }
-
-      // Drop the trailing increment and build a for_statement with real init/update.
-      const trimmedBody = whileBody.slice(0, -1);
-      const forStmt: Statement = {
-        kind: 'for_statement',
-        init: {
-          kind: 'variable_decl',
-          name: iterName,
-          type: s.type,
-          mutable: true,
-          init: s.init,
-          sourceLocation: s.sourceLocation,
-        },
-        condition: cond,
-        update: {
-          kind: 'expression_statement',
-          expression: {
-            kind: 'increment_expr',
-            operand: { kind: 'identifier', name: iterName },
-            prefix: false,
-          },
-          sourceLocation: next.sourceLocation,
-        },
-        body: trimmedBody,
-        sourceLocation: next.sourceLocation,
-      };
-      out.push(forStmt);
-      i++; // skip the consumed while
-      continue;
+    if (s.kind === 'variable_decl' && next && isWhileStub(next)) {
+      const folded = foldCountingWhile(s, next);
+      if (folded) {
+        out.push(folded);
+        i++; // skip the consumed while
+        continue;
+      }
     }
     out.push(s);
   }
   return out;
+}
+
+/** The synthetic shape `parseWhileStatement` emits for an unfolded `while`. */
+function isWhileStub(
+  stmt: Statement,
+): stmt is Extract<Statement, { kind: 'for_statement' }> {
+  return (
+    stmt.kind === 'for_statement' &&
+    stmt.init.kind === 'variable_decl' &&
+    stmt.init.name === WHILE_STUB_ITER
+  );
+}
+
+/**
+ * Fold `decl` + a `while` stub into a real counting for_statement, or return
+ * null when the pair is not a representable counting loop.
+ */
+function foldCountingWhile(
+  decl: Extract<Statement, { kind: 'variable_decl' }>,
+  stub: Extract<Statement, { kind: 'for_statement' }>,
+): Statement | null {
+  const iterName = decl.name;
+  const cond = stub.condition;
+  if (cond.kind !== 'binary_expr') return null;
+  if (cond.left.kind !== 'identifier' || cond.left.name !== iterName) return null;
+
+  // `<`/`<=` counts up, `>`/`>=` counts down. Any other comparison is not a
+  // loop bound the unrolled model can represent.
+  let ascending: boolean;
+  if (cond.op === '<' || cond.op === '<=') ascending = true;
+  else if (cond.op === '>' || cond.op === '>=') ascending = false;
+  else return null;
+
+  // The step is the last statement of the while body.
+  const whileBody = stub.body;
+  if (whileBody.length === 0) return null;
+  const last = whileBody[whileBody.length - 1]!;
+  if (last.kind !== 'assignment') return null;
+  if (last.target.kind !== 'identifier' || last.target.name !== iterName) return null;
+  if (last.value.kind !== 'binary_expr') return null;
+  const stepExpr = last.value;
+  if (stepExpr.op !== '+' && stepExpr.op !== '-') return null;
+
+  // Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
+  const isIter = (e: Expression): boolean => e.kind === 'identifier' && e.name === iterName;
+  const isOne = (e: Expression): boolean => e.kind === 'bigint_literal' && e.value === 1n;
+  const unitStep =
+    stepExpr.op === '+'
+      ? (isIter(stepExpr.left) && isOne(stepExpr.right)) ||
+        (isOne(stepExpr.left) && isIter(stepExpr.right))
+      : isIter(stepExpr.left) && isOne(stepExpr.right);
+  if (!unitStep) return null;
+
+  // The step's sign must agree with the comparison direction; `i = i - 1`
+  // under `i < N` never terminates, and `i = i + 1` under `i > N` is the
+  // shape that used to compile to a zero-trip loop.
+  if (ascending !== (stepExpr.op === '+')) return null;
+
+  return {
+    kind: 'for_statement',
+    init: {
+      kind: 'variable_decl',
+      name: iterName,
+      type: decl.type,
+      mutable: true,
+      init: decl.init,
+      sourceLocation: decl.sourceLocation,
+    },
+    condition: cond,
+    update: {
+      kind: 'expression_statement',
+      expression: ascending
+        ? { kind: 'increment_expr', operand: { kind: 'identifier', name: iterName }, prefix: false }
+        : { kind: 'decrement_expr', operand: { kind: 'identifier', name: iterName }, prefix: false },
+      sourceLocation: stub.sourceLocation,
+    },
+    body: whileBody.slice(0, -1),
+    sourceLocation: stub.sourceLocation,
+  };
+}
+
+/**
+ * Report every `while` stub that survived the fold, at any nesting depth.
+ *
+ * A surviving stub is not a loop — it is a for_statement over a dummy
+ * iterator, and every downstream pass reads a trip count off it as if it
+ * were real. Refusing is the only honest outcome.
+ */
+function reportUnfoldedWhiles(
+  stmts: readonly Statement[],
+  errors: CompilerDiagnostic[],
+  file: string,
+): void {
+  for (const stmt of stmts) {
+    switch (stmt.kind) {
+      case 'for_statement':
+        if (isWhileStub(stmt)) {
+          errors.push(makeDiagnostic(
+            MOVE_WHILE_SHAPE_DIAGNOSTIC,
+            'error',
+            stmt.sourceLocation ?? { file, line: 0, column: 0 },
+          ));
+        }
+        reportUnfoldedWhiles(stmt.body, errors, file);
+        break;
+      case 'if_statement':
+        reportUnfoldedWhiles(stmt.then, errors, file);
+        if (stmt.else) reportUnfoldedWhiles(stmt.else, errors, file);
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

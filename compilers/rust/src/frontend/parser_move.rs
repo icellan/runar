@@ -888,6 +888,18 @@ impl<'a> MoveParser<'a> {
         }
 
         let mut body = self.parse_block();
+        // Every nested block folded itself on the way up, so a stub that
+        // survives to here — at ANY depth — is a `while` the bounded-loop
+        // model cannot represent. Refuse it rather than lower a dummy
+        // iterator.
+        let mut unfolded: Vec<SourceLocation> = Vec::new();
+        collect_unfolded_move_whiles(&body, &mut unfolded);
+        for loc in unfolded {
+            self.errors.push(Diagnostic::error(
+                MOVE_WHILE_SHAPE_DIAGNOSTIC.to_string(),
+                Some(loc),
+            ));
+        }
 
         // Move allows an implicit return of the final expression when the
         // function declares a return type. Convert the trailing expression
@@ -1291,7 +1303,7 @@ impl<'a> MoveParser<'a> {
         // Represent while as: for (let _w = 0; condition; _w = 0)
         Statement::ForStatement {
             init: Box::new(Statement::VariableDecl {
-                name: "_w".to_string(),
+                name: MOVE_WHILE_STUB_ITER.to_string(),
                 var_type: None,
                 mutable: true,
                 init: Expression::BigIntLiteral { value: BigInt::from(0) },
@@ -1830,80 +1842,187 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
 // Pattern folding: `let i = K; while (i < N) { ...; i = i + S; }` → ForStatement
 // ---------------------------------------------------------------------------
 
-/// Fold the canonical Move bounded-loop pattern
+/// Iterator name of the synthetic `ForStatement` `parse_while_as_for` emits
+/// for a `while` that has not yet been folded into a counting loop. It is a
+/// placeholder, never a real induction variable — `report_unfolded_move_whiles`
+/// refuses any that survives the fold.
+const MOVE_WHILE_STUB_ITER: &str = "_w";
+
+/// Emitted for a `while` that is not a representable bounded counting loop.
+const MOVE_WHILE_SHAPE_DIAGNOSTIC: &str = concat!(
+    "Move `while` must be a bounded counting loop: ",
+    "`let i = K; while (i < N) { ...; i = i + 1; }`, or the counting-down form ",
+    "`let i = K; while (i > N) { ...; i = i - 1; }`. The iterator declaration, ",
+    "the comparison direction and a unit step must all agree."
+);
+
+/// Fold the canonical Move bounded-loop patterns
 /// ```ignore
-/// let i: Int = K;
-/// while (i < N) { ...; i = i + S; }
+/// let i: Int = K;          let i: Int = K;
+/// while (i < N) {          while (i > N) {
+///   ...                      ...
+///   i = i + 1;               i = i - 1;
+/// }                        }
 /// ```
 /// into a single ForStatement whose init/condition/update match TypeScript's
 /// native `for (let i = 0n; i < N; i++)`, so downstream ANF lowering produces
 /// identical bounded-loop IR across all formats.
+///
+/// The COUNTING-DOWN column used to be missing: the fold matched
+/// `BinaryOp::Add` only, so `i = i - 1` fell through to the unfolded stub — a
+/// ForStatement over the dummy iterator `_w = 0` — and ANF lowering read start
+/// 0 off the dummy, inferred step -1 from the `>`, and computed a trip count of
+/// 0. The loop body, and every assertion in it, was dropped with no diagnostic.
+///
+/// The step must be a literal 1 whose SIGN agrees with the comparison
+/// direction. `i = i + 2` used to fold to `i++` and silently run the wrong
+/// iterator values; `i = i - 1` under `i < N` never terminates.
 fn fold_move_while_as_for(stmts: Vec<Statement>) -> Vec<Statement> {
     let mut out: Vec<Statement> = Vec::with_capacity(stmts.len());
     let mut i = 0;
     while i < stmts.len() {
-        if i + 1 < stmts.len() {
-            if let (Statement::VariableDecl { name: decl_name, var_type, init: decl_init, source_location: decl_loc, .. },
-                    Statement::ForStatement { init, condition, body, source_location: for_loc, .. }) =
-                (&stmts[i], &stmts[i + 1])
-            {
-                // The while→for stub uses `_w` as init name.
-                let is_while_stub = matches!(
-                    init.as_ref(),
-                    Statement::VariableDecl { name, .. } if name == "_w"
-                );
-                if is_while_stub {
-                    let iter_name = decl_name.clone();
-                    // Condition: iter_name <cmp> bound
-                    if let Expression::BinaryExpr { left, .. } = condition {
-                        if let Expression::Identifier { name: left_name } = left.as_ref() {
-                            if left_name == &iter_name && !body.is_empty() {
-                                // Last body stmt: iter_name = iter_name + K
-                                if let Statement::Assignment { target, value, .. } = &body[body.len() - 1] {
-                                    if let Expression::Identifier { name: tgt_name } = target {
-                                        if let Expression::BinaryExpr { op: BinaryOp::Add, left: bl, .. } = value {
-                                            if let Expression::Identifier { name: bl_name } = bl.as_ref() {
-                                                if tgt_name == &iter_name && bl_name == &iter_name {
-                                                    let trimmed: Vec<Statement> = body[..body.len() - 1].to_vec();
-                                                    let new_for = Statement::ForStatement {
-                                                        init: Box::new(Statement::VariableDecl {
-                                                            name: iter_name.clone(),
-                                                            var_type: var_type.clone(),
-                                                            mutable: true,
-                                                            init: decl_init.clone(),
-                                                            source_location: decl_loc.clone(),
-                                                        }),
-                                                        condition: condition.clone(),
-                                                        update: Box::new(Statement::ExpressionStatement {
-                                                            expression: Expression::IncrementExpr {
-                                                                operand: Box::new(Expression::Identifier {
-                                                                    name: iter_name.clone(),
-                                                                }),
-                                                                prefix: false,
-                                                            },
-                                                            source_location: for_loc.clone(),
-                                                        }),
-                                                        body: trimmed,
-                                                        source_location: for_loc.clone(),
-                                                    };
-                                                    out.push(new_for);
-                                                    i += 2;
-                                                    continue;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        if i + 1 < stmts.len() && is_move_while_stub(&stmts[i + 1]) {
+            if let Some(folded) = fold_move_counting_while(&stmts[i], &stmts[i + 1]) {
+                out.push(folded);
+                i += 2;
+                continue;
             }
         }
         out.push(stmts[i].clone());
         i += 1;
     }
     out
+}
+
+/// Whether `stmt` is the synthetic shape `parse_while_as_for` emits for an
+/// unfolded `while`.
+fn is_move_while_stub(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::ForStatement { init, .. } => matches!(
+            init.as_ref(),
+            Statement::VariableDecl { name, .. } if name == MOVE_WHILE_STUB_ITER
+        ),
+        _ => false,
+    }
+}
+
+/// Fold `decl` + a `while` stub into a real counting ForStatement, or return
+/// `None` when the pair is not a representable counting loop.
+fn fold_move_counting_while(decl: &Statement, stub: &Statement) -> Option<Statement> {
+    let (iter_name, var_type, decl_init, decl_loc) = match decl {
+        Statement::VariableDecl { name, var_type, init, source_location, .. } => {
+            (name, var_type, init, source_location)
+        }
+        _ => return None,
+    };
+    let (condition, body, for_loc) = match stub {
+        Statement::ForStatement { condition, body, source_location, .. } => {
+            (condition, body, source_location)
+        }
+        _ => return None,
+    };
+
+    let (cond_left, cond_op) = match condition {
+        Expression::BinaryExpr { left, op, .. } => (left.as_ref(), op),
+        _ => return None,
+    };
+    match cond_left {
+        Expression::Identifier { name } if name == iter_name => {}
+        _ => return None,
+    }
+
+    // `<`/`<=` counts up, `>`/`>=` counts down. Any other comparison is not a
+    // loop bound the unrolled model can represent.
+    let ascending = match cond_op {
+        BinaryOp::Lt | BinaryOp::Le => true,
+        BinaryOp::Gt | BinaryOp::Ge => false,
+        _ => return None,
+    };
+
+    // The step is the last statement of the while body.
+    let last = body.last()?;
+    let (target, value) = match last {
+        Statement::Assignment { target, value, .. } => (target, value),
+        _ => return None,
+    };
+    match target {
+        Expression::Identifier { name } if name == iter_name => {}
+        _ => return None,
+    }
+    let (step_op, step_left, step_right) = match value {
+        Expression::BinaryExpr { op, left, right } => (op, left.as_ref(), right.as_ref()),
+        _ => return None,
+    };
+    let step_is_add = match step_op {
+        BinaryOp::Add => true,
+        BinaryOp::Sub => false,
+        _ => return None,
+    };
+
+    let is_iter = |e: &Expression| matches!(e, Expression::Identifier { name } if name == iter_name);
+    let is_one = |e: &Expression| matches!(e, Expression::BigIntLiteral { value } if *value == BigInt::from(1));
+    // Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
+    let unit_step = if step_is_add {
+        (is_iter(step_left) && is_one(step_right)) || (is_one(step_left) && is_iter(step_right))
+    } else {
+        is_iter(step_left) && is_one(step_right)
+    };
+    if !unit_step {
+        return None;
+    }
+    // The step's sign must agree with the comparison direction.
+    if ascending != step_is_add {
+        return None;
+    }
+
+    let operand = Box::new(Expression::Identifier { name: iter_name.clone() });
+    let update_expr = if ascending {
+        Expression::IncrementExpr { operand, prefix: false }
+    } else {
+        Expression::DecrementExpr { operand, prefix: false }
+    };
+
+    Some(Statement::ForStatement {
+        init: Box::new(Statement::VariableDecl {
+            name: iter_name.clone(),
+            var_type: var_type.clone(),
+            mutable: true,
+            init: decl_init.clone(),
+            source_location: decl_loc.clone(),
+        }),
+        condition: condition.clone(),
+        update: Box::new(Statement::ExpressionStatement {
+            expression: update_expr,
+            source_location: for_loc.clone(),
+        }),
+        body: body[..body.len() - 1].to_vec(),
+        source_location: for_loc.clone(),
+    })
+}
+
+/// Collect every `while` stub that survived the fold, at any nesting depth.
+///
+/// A surviving stub is not a loop — it is a ForStatement over a dummy
+/// iterator, and every downstream pass reads a trip count off it as if it were
+/// real. Refusing is the only honest outcome.
+fn collect_unfolded_move_whiles(stmts: &[Statement], out: &mut Vec<SourceLocation>) {
+    for stmt in stmts {
+        match stmt {
+            Statement::ForStatement { body, source_location, .. } => {
+                if is_move_while_stub(stmt) {
+                    out.push(source_location.clone());
+                }
+                collect_unfolded_move_whiles(body, out);
+            }
+            Statement::IfStatement { then_branch, else_branch, .. } => {
+                collect_unfolded_move_whiles(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_unfolded_move_whiles(eb, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

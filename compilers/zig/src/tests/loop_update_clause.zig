@@ -218,6 +218,19 @@ fn expectRejectedWithSharedDiagnostic(
     source: []const u8,
     file_name: []const u8,
 ) !void {
+    return expectRejectedWithDiagnostic(alloc, source, file_name, loop_update_diagnostic);
+}
+
+/// The Move surface's shape diagnostic, verbatim from `parse_move.zig` and
+/// from the six peer tiers.
+const move_while_shape_diagnostic = "must be a bounded counting loop";
+
+fn expectRejectedWithDiagnostic(
+    alloc: Allocator,
+    source: []const u8,
+    file_name: []const u8,
+    expected: []const u8,
+) !void {
     if (compileHex(alloc, source, file_name)) |hex| {
         std.debug.print(
             "{s}: a non-representable loop update must not compile, got {d} hex chars\n",
@@ -229,7 +242,7 @@ fn expectRejectedWithSharedDiagnostic(
     // message itself can be asserted.
     const msgs = try frontendDiagnostics(alloc, source, file_name);
     for (msgs) |m| {
-        if (std.mem.indexOf(u8, m, loop_update_diagnostic) != null) return;
+        if (std.mem.indexOf(u8, m, expected) != null) return;
     }
     std.debug.print("{s}: rejection must carry the shared cross-tier diagnostic, got: ", .{file_name});
     for (msgs) |m| std.debug.print("[{s}] ", .{m});
@@ -282,12 +295,56 @@ test "N-061: a non-unit step is rejected, not coerced (.runar.zig)" {
     try expectRejectedWithSharedDiagnostic(alloc, src, "BoundedLoop.runar.zig");
 }
 
+// The Move surface has no update CLAUSE — the step is the last statement of
+// the `while` body, and the induction variable, its start, the comparison
+// direction and the step are one shape that either folds into a bounded loop
+// or does not. So its rejection carries the Move shape diagnostic rather than
+// the shared for-header update diagnostic. Both sentences say the same thing
+// about the same program; this one names the whole shape because that is what
+// the Move frontend matches on, and all seven tiers now emit it verbatim.
+//
+// This row used to assert the shared wording, which it got by accident: this
+// tier reached the validator's update check because it trimmed `i = i + K`
+// for any K. The other six folded `i = i + 2` into `i++` in the parser and
+// silently ran the loop 5 times over i = 0..4 instead of 3 times over
+// i = 0,2,4 — so "all seven reject a non-unit Move step" was never true.
 test "N-061: a non-unit step is rejected, not coerced (.runar.move)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const src = try std.mem.replaceOwned(u8, alloc, src_move, "i = i + 1;", "i = i + 2;");
-    try expectRejectedWithSharedDiagnostic(alloc, src, "BoundedLoop.runar.move");
+    try expectRejectedWithDiagnostic(alloc, src, "BoundedLoop.runar.move", move_while_shape_diagnostic);
+}
+
+// A DESCENDING Move loop is a loop, not an error. The fold matched
+// `i = i + …` only, so `i = i - 1` fell through to the unfolded stub and
+// unrolled ZERO times — the body, and every assertion in it, silently absent
+// from the script. Two independent facts are pinned here: it compiles, and it
+// compiles to the same bytes as the equivalent TypeScript `for (let i = 5n;
+// i > 1n; i--)`, which this tier already lowered correctly.
+test "R-102: a descending Move while-fold compiles to the TS countdown bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var src = try std.mem.replaceOwned(u8, alloc, src_move, "let i: Int = 0;", "let i: Int = 5;");
+    src = try std.mem.replaceOwned(u8, alloc, src, "while (i < 5) {", "while (i > 1) {");
+    src = try std.mem.replaceOwned(u8, alloc, src, "i = i + 1;", "i = i - 1;");
+
+    const move_hex = compileHex(alloc, src, "BoundedLoop.runar.move") orelse {
+        std.debug.print("descending Move while-fold must compile\n", .{});
+        return error.DescendingMoveLoopRejected;
+    };
+
+    var ts_src = try std.mem.replaceOwned(u8, alloc, src_ts, "let i: bigint = 0n", "let i: bigint = 5n");
+    ts_src = try std.mem.replaceOwned(u8, alloc, ts_src, "i < 5;", "i > 1;");
+    ts_src = try std.mem.replaceOwned(u8, alloc, ts_src, "i++", "i--");
+    const ts_hex = compileHex(alloc, ts_src, "BoundedLoop.runar.ts") orelse {
+        std.debug.print("the TS countdown control must compile\n", .{});
+        return error.TsCountdownRejected;
+    };
+
+    try std.testing.expectEqualStrings(ts_hex, move_hex);
 }
 
 test "N-061: a non-unit step is rejected, not coerced (.runar.java)" {
