@@ -856,13 +856,20 @@ const Parser = struct {
         return ptr;
     }
 
+    /// Emitted for `while (i != N)`, which is not a representable loop bound.
+    const loop_neq_condition_diagnostic =
+        "while loop condition must compare the loop variable against a bound " ++
+        "with '<', '<=', '>' or '>=' — '!=' carries no direction and is not a " ++
+        "loop bound the unrolled loop model can represent.";
+
     /// Parse Zig while loop: `while (cond) : (continue_expr) { body }`
     ///
     /// Supports common Runar patterns:
     ///   var i: i64 = 0; while (i < 10) : (i += 1) { ... }   // count up
     ///   var i: i64 = 10; while (i > 0) : (i -= 1) { ... }   // count down
-    ///   while (i != 0) : (i -= 1) { ... }                    // until value
     ///   while (10 > i) : (i += 1) { ... }                    // reversed operands
+    ///
+    /// `while (i != N)` is NOT one of them — see the `.neq` branch below.
     ///
     /// Produces a ForStmt. The init_value defaults to 0 and is patched by
     /// parseBlock when a preceding let_decl matches the loop variable.
@@ -927,24 +934,25 @@ const Parser = struct {
                         if (bop.op == .gte) bound += 1;
                     }
                 } else if (bop.op == .neq) {
-                    // ident != N (loop until value reached). The direction is
-                    // not recoverable from `!=`, so it is taken from the step
-                    // once the continue expression has been parsed.
-                    if (bop.left == .identifier) var_name = bop.left.identifier;
-                    if (bop.right == .literal_int) bound = bop.right.literal_int;
+                    // `i != N` is NOT a loop bound. `spec/grammar.md`'s RelOp
+                    // production is `< | <= | > | >=`, and all six peer tiers
+                    // refuse the shape from ANF lowering ("For loop counting
+                    // up (i++) must use '<' or '<='"). This tier accepted it
+                    // alone, on the `.runar.zig` surface, which is a frontend
+                    // parity break that no fixture covered — and it accepted
+                    // it WRONGLY, unrolling `bound - start` times (zero for
+                    // any real countdown) because `!=` carries no direction.
+                    //
+                    // Converging onto the spec rather than onto this tier's
+                    // extension: gated by
+                    // conformance/negatives/N39-zig-loop-neq-condition.runar.zig.
+                    self.addError(loop_neq_condition_diagnostic);
                 }
             },
             else => {
-                self.addError("while loop condition must be a comparison (e.g. 'i < N', 'i > 0', 'i != 0')");
+                self.addError("while loop condition must be a comparison (e.g. 'i < N', 'i > 0')");
             },
         }
-        // `i != N` carries no direction of its own — `while (i != 0) : (i -= 1)`
-        // and `while (i != 5) : (i += 1)` are both legal and both bounded. The
-        // direction comes from the STEP, once the continue expression below has
-        // been parsed. This too used to default to ascending, so an
-        // until-zero countdown unrolled `bound - start` times, i.e. zero.
-        const cond_is_neq = cond == .binary_op and cond.binary_op.op == .neq;
-
         // Continue expression: : (i += 1)
         //
         // N-061: this used to be parsed and discarded — only `var_name` and
@@ -982,16 +990,6 @@ const Parser = struct {
                 }
             }
             if (self.current.kind == .rparen) _ = self.bump();
-        }
-
-        if (cond_is_neq) {
-            if (update) |u| {
-                if (u.* == .assign and u.assign.value == .binary_op and
-                    u.assign.value.binary_op.op == .sub)
-                {
-                    descending = true;
-                }
-            }
         }
 
         if (self.expect(.lbrace) == null) return null;
