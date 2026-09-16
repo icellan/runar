@@ -1129,19 +1129,22 @@ func ReverseBytes(data ByteString) ByteString {
 	return ByteString(b)
 }
 
-// Abs returns the absolute value of n. Uses big.Int internally so that
-// Abs(math.MinInt64) returns math.MaxInt64 + 1 ... well, since int64 can't
-// hold that, it wraps to math.MinInt64 itself (the mathematical |MinInt64|
-// is 2^63 which is exactly 1 past int64 range). Use AbsBig for a correct
-// arbitrary-precision result.
+// Abs returns the absolute value of n. Panics on math.MinInt64, whose absolute
+// value is 2^63 — exactly one past int64 — rather than returning a narrowed
+// answer; use AbsBig, which the .runar.go parser lowers to the same abs builtin.
 func Abs(n int64) int64 {
 	if n == math.MinInt64 {
-		// 2^63 is not representable as int64. Return the wrapped value
-		// (MinInt64 itself) rather than panic; this preserves Bitcoin
-		// Script semantics for values whose magnitude fits in int64 and
-		// documents the overflow behavior for those that don't. For
-		// arbitrary precision callers should use AbsBig.
-		return math.MinInt64
+		// This used to return MinInt64 — a NEGATIVE absolute value — under a
+		// comment claiming it "preserves Bitcoin Script semantics". It does the
+		// opposite. Script numbers are arbitrary-width after Genesis, so the
+		// emitted OP_ABS leaves +2^63 and the mock left -2^63: a contract
+		// guarding `assert(abs(x) > 0)` was refused off-chain and SPENT on
+		// chain. The agreement table missed it because its only row was
+		// Abs(-7), which fits int64 — the same shape as the bin2num row that
+		// tested 1000.
+		panic("runar: Abs(math.MinInt64) is 2^63, which does not fit int64 — " +
+			"OP_ABS has no such limit; use AbsBig, which the .runar.go parser " +
+			"lowers to the same abs builtin")
 	}
 	if n < 0 {
 		return -n
@@ -1304,9 +1307,13 @@ func SqrtBig(n *big.Int) *big.Int {
 func Gcd(a, b int64) int64 {
 	r := GcdBig(big.NewInt(a), big.NewInt(b))
 	if !r.IsInt64() {
-		// GCD(MinInt64, 0) = 2^63, which doesn't fit. Return MaxInt64 as
-		// a documented overflow sentinel; correct callers should use GcdBig.
-		return math.MaxInt64
+		// This used to return MaxInt64 as an "overflow sentinel", which is a
+		// wrong ANSWER rather than an error: Gcd(MinInt64, 0) is 2^63 and the
+		// emitted script computes exactly that. A sentinel the caller does not
+		// check is indistinguishable from a result.
+		panic(fmt.Sprintf("runar: Gcd(%d, %d) = %s, which does not fit int64 — "+
+			"the emitted script has no such limit; use GcdBig, which the "+
+			".runar.go parser lowers to the same gcd builtin", a, b, r))
 	}
 	return r.Int64()
 }

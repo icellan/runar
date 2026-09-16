@@ -1,8 +1,10 @@
 package runar
 
 import (
+	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -64,20 +66,33 @@ func TestCheckedAdd_NegativeOverflow(t *testing.T) {
 // surfaces a panic; the *Big siblings never overflow.
 // ---------------------------------------------------------------------------
 
-func TestAbs_MinInt64_DoesNotPanic(t *testing.T) {
-	// Abs(MinInt64) now wraps to MinInt64 itself (int64 cannot hold 2^63).
-	// Previously it panicked.
+func TestAbs_MinInt64_Refuses(t *testing.T) {
+	// This test used to be TestAbs_MinInt64_DoesNotPanic, and it asserted that
+	// Abs(MinInt64) returns MinInt64 — a NEGATIVE absolute value — describing
+	// that as the fix. It was the defect, pinned as intended behaviour.
+	//
+	// "Does not panic" is only an improvement when the value returned instead is
+	// right. Here there is no right int64 to return: |MinInt64| is 2^63, one
+	// past the type. Script numbers are arbitrary-width after Genesis, so the
+	// emitted OP_ABS computes 2^63 exactly, and the wrapped mock disagreed with
+	// it in the direction that spends outputs — `assert(abs(x) > 0)` held on
+	// chain and failed under `go test`.
+	//
+	// Same shape as TestNum2Bin_MinInt64_NeedsNineBytes below, which pinned the
+	// wrong bytes for the same reason.
 	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Abs(MinInt64) should not panic anymore; got: %v", r)
+		r := recover()
+		if r == nil {
+			t.Fatal("Abs(MinInt64) returned a value instead of panicking; there is " +
+				"no correct int64 to return, and a wrapped answer silently " +
+				"disagrees with the emitted OP_ABS")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "AbsBig") {
+			t.Fatalf("Abs(MinInt64) panicked without naming AbsBig, so the caller "+
+				"is not told what to use instead: %s", msg)
 		}
 	}()
-	got := Abs(math.MinInt64)
-	// The wrapped return is MinInt64 because 2^63 is not representable.
-	// Users who need the true magnitude must use AbsBig.
-	if got != math.MinInt64 {
-		t.Fatalf("Abs(MinInt64) expected wrap to MinInt64, got %d", got)
-	}
+	_ = Abs(math.MinInt64)
 }
 
 func TestAbsBig_MinInt64(t *testing.T) {

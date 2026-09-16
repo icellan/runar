@@ -3,6 +3,7 @@ package runar
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -229,6 +230,11 @@ func mathCases() []agreementCase {
 		return c
 	}
 	return []agreementCase{
+		// Abs and Gcd have no row past the boundary because their mocks now
+		// PANIC there rather than return a narrowed answer -- a row would abort
+		// while the table is built. TestNarrowHelpersRefuseWhatTheyCannotHold
+		// asserts that refusal instead, and is the reason this row at -7 is not
+		// the whole story.
 		i("abs", "Abs", Abs(-7), -7),
 		i("min", "Min", Min(7, 3), 7, 3),
 		i("max", "Max", Max(7, 3), 7, 3),
@@ -744,4 +750,65 @@ func TestMerkleRootPoseidon2KBv_CannotBeHeldInInt64(t *testing.T) {
 // line, and so the rest of the test never restates what the emitter does.
 func mockPackedRoot(args ...int64) *big.Int {
 	return MerkleRootPoseidon2KBv(args...)
+}
+
+// TestNarrowHelpersRefuseWhatTheyCannotHold covers the boundary the agreement
+// table structurally cannot.
+//
+// Every row in that table spends the MOCK's answer against the emitted script,
+// so a mock that panics has no answer to spend and no row to occupy. That is
+// exactly the region where the interesting bugs live: `Abs` returned MinInt64
+// for MinInt64 -- a negative absolute value -- and `Gcd` returned MaxInt64 as an
+// "overflow sentinel", while the emitted OP_ABS and gcd lowering computed the
+// true 2^63, script numbers being arbitrary-width after Genesis.
+//
+// Both were reachable from .runar.go contract source (01-parse-go.ts maps
+// Abs -> abs and Gcd -> gcd), and both failed in the dangerous direction: the
+// native `go test` said a guard held while the chain spent the output.
+//
+// docs/formats/go.md claimed no helper narrowed silently and listed seven that
+// panic. These two were missing from that list AND from the behaviour. The list
+// is now accurate; this test is what keeps it that way.
+func TestNarrowHelpersRefuseWhatTheyCannotHold(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func()
+		peer string
+	}{
+		{"Abs(MinInt64)", func() { _ = Abs(math.MinInt64) }, "AbsBig"},
+		{"Gcd(MinInt64, 0)", func() { _ = Gcd(math.MinInt64, 0) }, "GcdBig"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("%s returned a value instead of panicking. The result is "+
+						"2^63, which int64 cannot hold; the emitted script computes it "+
+						"exactly. A narrowed answer here is a silent mock/emitter "+
+						"divergence in the direction that spends outputs.", tc.name)
+				}
+				// The panic must name the wide peer. A bare "overflow" leaves the
+				// caller with nowhere to go, which is how the sentinel survived.
+				if msg := fmt.Sprint(r); !strings.Contains(msg, tc.peer) {
+					t.Fatalf("%s panicked without naming %s, so the caller is not told "+
+						"what to use instead: %s", tc.name, tc.peer, msg)
+				}
+			}()
+			tc.call()
+		})
+	}
+}
+
+// TestAbsBigAndGcdBigCarryTheWholeValue is the other half: the peers the panics
+// name must actually hold what the narrow ones refuse, or the advice is a
+// dead end.
+func TestAbsBigAndGcdBigCarryTheWholeValue(t *testing.T) {
+	twoPow63 := new(big.Int).Lsh(big.NewInt(1), 63)
+
+	if got := AbsBig(big.NewInt(math.MinInt64)); got.Cmp(twoPow63) != 0 {
+		t.Errorf("AbsBig(MinInt64) = %s, want %s", got, twoPow63)
+	}
+	if got := GcdBig(big.NewInt(math.MinInt64), big.NewInt(0)); got.Cmp(twoPow63) != 0 {
+		t.Errorf("GcdBig(MinInt64, 0) = %s, want %s", got, twoPow63)
+	}
 }

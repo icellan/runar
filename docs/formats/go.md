@@ -187,8 +187,18 @@ which compiles and compares the wrong thing.
 
 Nothing narrows silently as a result. Every helper in `packages/runar-go` whose
 result can exceed `int64` — `Pow`, `MulDiv`, `PercentOf`, `Sqrt`, `Bin2Num`,
-`Num2Bin`, `Bn254FieldNegP` — panics rather than returning a truncated answer,
-and names the wide peer to use instead.
+`Num2Bin`, `Bn254FieldNegP`, `Abs`, `Gcd` — panics rather than returning a
+truncated answer, and names the wide peer to use instead.
+
+`Abs` and `Gcd` were absent from that list, and from the behaviour, until the
+sentence was checked against the code. `Abs(math.MinInt64)` returned
+`math.MinInt64` — a negative absolute value — and `Gcd(math.MinInt64, 0)`
+returned `math.MaxInt64` as an "overflow sentinel", which is a wrong answer
+rather than an error. Script numbers are arbitrary-width after Genesis, so the
+emitted `OP_ABS` computes the true `2^63`: a contract guarding
+`runar.Assert(runar.Abs(x) > 0)` was refused by `go test` and **spent on chain**
+for `x = -2^63`. The list above is now enforced by
+`TestNarrowHelpersRefuseWhatTheyCannotHold` rather than maintained by hand.
 
 For values past 2^63, type the field or parameter `runar.BigintBig` (`*big.Int`)
 and spell the arithmetic with the helper functions. **Both type names lower to
