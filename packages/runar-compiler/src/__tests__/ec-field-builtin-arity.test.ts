@@ -145,15 +145,25 @@ export class Probe extends SmartContract {
       // bytes it was handed and so has no selector for a non-canonical
       // coordinate to fool. The five non-EC digests below stay the CONTROL that
       // nothing leaked into bn254 / BabyBear / KoalaBear codegen.
+      //
+      // R-119 (the field-element canonicity gate) re-stamps exactly the THREE
+      // BabyBear / KoalaBear digests — bbFieldAdd, bbExt4Inv0 and kbFieldInv —
+      // because the gate is one `<0> <p> OP_WITHIN OP_VERIFY` per witness
+      // operand on those builtins' public entry points. The two bn254 FIELD
+      // digests are the control that went the other way and must NOT move:
+      // R-141 landed in the same branch and touched only the G1 POINT
+      // builtins, so bn254FieldAdd / bn254FieldNeg are the evidence that the
+      // coordinate gate stayed off the field surface. The four EC digests are
+      // likewise unchanged by both.
       ecAdd: '98a71715a649bbb34b70882213d7588ef1d44b44279bbffe3d72263d99e1ba2a',
       ecPointX: '4579847d2e40a84e69f14ae1f87da077e6937a0aa405d93a0e309cd2edd8c191',
       p256Add: '6fd2d8ea132fedaa3ab9ce31bcb0c80a91b5053849f5e15a5dabd8a2ed6c1399',
       p384Negate: 'd776c22a2e492f48539119a6543c2421633807c2d953c961ce9c30364f1cb8a3',
       bn254FieldAdd: 'fe9e984bb631a254e07b304b081a5cc3b0ebe6394302ef48c52e27340c75ca97',
       bn254FieldNeg: '354ac5ea0ab4cb6d88ec17b91b1ae01cc58428414b1f32994e803e93d4457d4e',
-      bbFieldAdd: '5b5df5087f008f98f854e17fa41afef1444c6dc41dc97f2ab2740754bcb56f63',
-      bbExt4Inv0: '7ffbdd84d8505067d1d1e520f427a69165f154a92a8b4c4eac998fdf417bad4e',
-      kbFieldInv: '6743089245679942e9e61b264521badb78bc7439c9d1ce2ef7a0037267fa8c61',
+      bbFieldAdd: '315257826b086e89f32e63a39807c7b8c6ef936cebedc776bad99c092288b1e9',
+      bbExt4Inv0: 'e9996b756bae7b44bcf76eeecc7e1823363a57d486fca5f29440679b10a8ed59',
+      kbFieldInv: 'bf76a8b2434ba6a2a36de161e78e55e0d67aca72ee758aed2ec2f89c156d0d28',
     };
 
     const CONTROLS: { func: string; args: string[]; params: { name: string; type: string }[] }[] = [

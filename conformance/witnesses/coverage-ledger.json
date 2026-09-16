@@ -203,7 +203,7 @@
       "coveredBy": {
         "kind": "integration",
         "path": "integration/zig/src/merkle_proof_test.zig",
-        "note": "real deploy + spend on a live regtest node: MerkleProof_Sha256_LeafIndex0 (accept) and MerkleProof_Sha256_WrongLeaf_Rejected (reject). Compiled output verified byte-identical to expected-script.hex (201 bytes); fixture is compilers:[go] yet the Zig port matches the Go golden exactly."
+        "note": "real deploy + spend on a live regtest node: MerkleProof_Sha256_LeafIndex0 (accept) and MerkleProof_Sha256_WrongLeaf_Rejected (reject). Compiled output verified byte-identical to expected-script.hex (219 bytes since R-120 added the index-domain and proof-length gates; re-verified here by compiling examples/zig/merkle-proof/MerkleProofDemo.runar.zig with the Zig tier and comparing against the regenerated golden); fixture is compilers:[go] yet the Zig port matches the Go golden exactly."
       }
     },
     {

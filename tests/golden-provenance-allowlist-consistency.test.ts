@@ -43,7 +43,13 @@ const ALLOWLIST = join(ROOT, 'conformance', 'golden-provenance-allowlist.json');
  * not match its file means either the file moved without review, or the entry
  * describes bytes that no longer exist.
  */
-const STALE_PIN_BUDGET = 68;
+// R-120 repaired two of these as a side effect of moving their bytes:
+// conformance/tests/state-covenant/expected-script.hex and
+// conformance/sdk-output/tests/state-covenant/expected-locking.hex were
+// already stale at HEAD, and the Merkle index-domain gate moved them again,
+// so both entries were re-pinned to the bytes they now describe (and each
+// gained an appended section rather than a rewritten reason). 68 -> 66.
+const STALE_PIN_BUDGET = 66;
 
 interface Entry {
   path?: string;
