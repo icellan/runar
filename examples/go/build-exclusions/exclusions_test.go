@@ -13,7 +13,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// RATCHET — exactly NINE .runar.go ports are excluded from the Go build, and
+// RATCHET — exactly SEVEN .runar.go ports are excluded from the Go build, and
 // every one of them carries a written reason.
 //
 // WHY. A `.runar.go` contract is meant to be valid Go as well as valid Rúnar:
@@ -61,9 +61,15 @@ import (
 //	type spelling fails open
 //	  byte-builtins, state-ripemd160
 //
-//	Rúnar's `bigint` is arbitrary precision and the Go mock's `Bigint` is int64
-//	  go-dsl-bytestring-literal, integer-boundary, p256-primitives,
-//	  p384-primitives, schnorr-zkp
+//	a Rúnar bigint LITERAL wider than int64 has no Go spelling. Go constants
+//	are exact and must fit the type they land in, `runar.BigintBig` is
+//	*big.Int and no constant converts to a pointer, and the arithmetic these
+//	three fixtures perform on such a literal (`*`, `+`, a `within` bound) is
+//	the part Go has no operator for. This is NOT the same as "the mock's
+//	Bigint is int64": that was the cause behind p256-primitives and
+//	p384-primitives, whose scalars are merely PASSED to a *big.Int parameter,
+//	and both build now that they are typed `runar.BigintBig`
+//	  go-dsl-bytestring-literal, integer-boundary, schnorr-zkp
 //
 //	the `[N]T{...}` composite literal three of the seven .runar.go parsers
 //	require does not convert to the slice the mock's CheckMultiSig takes
@@ -74,8 +80,6 @@ var excludedPorts = []string{
 	"go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.go",
 	"integer-boundary/IntegerBoundary.runar.go",
 	"multisig-2of3/MultiSig2of3.runar.go",
-	"p256-primitives/P256Primitives.runar.go",
-	"p384-primitives/P384Primitives.runar.go",
 	"schnorr-zkp/SchnorrZKP.runar.go",
 	"state-ripemd160/HashRegistry.runar.go",
 }
@@ -157,7 +161,7 @@ func scanExclusions(t *testing.T, root string) []string {
 	return out
 }
 
-func TestExcludedPorts_AreExactlyTheJustifiedNine(t *testing.T) {
+func TestExcludedPorts_AreExactlyTheJustifiedSeven(t *testing.T) {
 	got := scanExclusions(t, examplesRoot(t))
 	want := append([]string(nil), excludedPorts...)
 	sort.Strings(want)
@@ -236,7 +240,7 @@ func TestEveryExclusion_CarriesAReason(t *testing.T) {
 //
 // The set assertion above is only as good as scanExclusions. A scanner that
 // returned the hard-coded list, or that matched the tag anywhere in the file,
-// would make TestExcludedPorts_AreExactlyTheJustifiedNine pass while telling
+// would make TestExcludedPorts_AreExactlyTheJustifiedSeven pass while telling
 // nobody anything. This runs it over a synthetic tree whose answer is known,
 // and includes the two cases that have actually gone wrong here: a file that
 // only MENTIONS the tag in prose, and a constraint that is not in the leading

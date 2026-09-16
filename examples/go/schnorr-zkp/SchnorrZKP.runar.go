@@ -6,16 +6,24 @@
 //	(untyped int constant) as int64 value in argument to runar.Within (overflows)
 //
 // The malleability gate `runar.Within(s, 1, <secp256k1-n>)` needs the group
-// order as its third argument. That value is 256 bits wide; `runar.Bigint`
-// aliases int64 in the Go mock, so the literal is rejected at compile time. The
+// order as its third argument, inlined as a bare decimal literal so all nine
+// formats lower it to the same bigint_literal node. That value is 256 bits, and
+// Go has no spelling for such a literal: constants are exact and must fit their
+// type, and `runar.BigintBig` is *big.Int, which no constant converts to. The
 // Rúnar conformance suite consumes this file as text through the frontend,
 // where `bigint` is arbitrary precision and the literal is ordinary.
 //
-// Same root cause as integer-boundary, go-dsl-bytestring-literal and the two
-// NIST primitive ports. (This note used to say the exclusion mirrored
-// `ec-primitives` "and the other EC-heavy Go DSL fixtures" — ec-primitives is
-// built by Go now, and its exclusion was a dead `import "runar"` path, not an
-// integer-width limit.)
+// The response `s` and the Fiat-Shamir challenge `e` are 256-bit too, and the
+// body computes `e*k mod n` on them, so even a wide `s` parameter would not be
+// enough: the arithmetic would have to go through runar.BigintBig* helpers
+// while the bound stays unspellable.
+//
+// Shares a root cause with integer-boundary and go-dsl-bytestring-literal.
+// (This note used to add "and the two NIST primitive ports". Those were a
+// different problem — a scalar that only had to REACH a *big.Int parameter —
+// and both build now. An earlier version of the note also claimed kinship with
+// `ec-primitives`, whose exclusion turned out to be a dead `import "runar"`
+// path.)
 
 package contract
 

@@ -8,12 +8,22 @@
 //
 // The contract pins the seven tiers to ONE arbitrary-precision integer domain
 // (issue #162): each operand fits a signed 64-bit slot and each folded result
-// escapes one. `runar.Int` aliases int64 in the Go mock, so `go build` rejects
-// all four assignments at compile time — the constants are untyped and Go
-// evaluates them exactly.
+// escapes one. Go evaluates untyped constants exactly and then requires them to
+// fit the type they land in, so `go build` rejects all four assignments.
 //
-// A Go port that fit in int64 would not be this fixture. Same root cause as
-// go-dsl-bytestring-literal, schnorr-zkp and the two NIST primitive ports.
+// Widening the runtime type does not reach this. `runar.BigintBig` is
+// *big.Int, and no Go constant expression converts to a pointer:
+// `runar.BigintBig(18446744065119617025)` is not a conversion Go accepts, and
+// `big.NewInt` overflows on the argument before it is called. Reaching the
+// value at all would need a constructor taking a string — new surface syntax
+// in all seven .runar.go parsers — and that would defeat the fixture, whose
+// claim is that a BARE literal folds to the same bytes in nine formats.
+//
+// A Go port that fit in int64 would not be this fixture. Shares a root cause
+// with go-dsl-bytestring-literal and schnorr-zkp — a bigint literal wider than
+// int64 has no Go spelling — and NOT with p256-primitives / p384-primitives,
+// which were grouped here, pass their scalar straight to a *big.Int parameter,
+// and build now that the parameter is typed `runar.BigintBig`.
 
 package contract
 

@@ -7,13 +7,22 @@
 //
 // `Check(a runar.Bigint, b runar.BigintBig)` adds the two together because the
 // .runar.go parser maps BOTH to the single Rúnar primitive `bigint`. In Go they
-// are `int64` and `*big.Int`, and there is no arithmetic between them. Making
-// them add would mean giving up the very distinction the fixture exists to
-// exercise.
+// are `int64` and `*big.Int`, and there is no arithmetic between them.
 //
-// Same root cause as integer-boundary, schnorr-zkp, p256-primitives and
-// p384-primitives: Rúnar's `bigint` is arbitrary precision and the Go mock's
-// `Bigint` is int64.
+// Every escape from this deletes the fixture. Typing both parameters the same
+// way removes the distinction it exists to prove. Spelling the addition
+// `runar.BigintBigAdd(a, b)` — the helper the parser rewrites back into `+`,
+// and the one ec-primitives and ec-demo use — needs both operands to be
+// *big.Int, which is the same surrender with more syntax. Go has no operator
+// overloading, so there is no third option: this is the one place in
+// examples/go where "valid Go AND valid Rúnar" is genuinely unsatisfiable
+// rather than merely unimplemented.
+//
+// NOT the same root cause as p256-primitives / p384-primitives, which used to
+// be grouped with it here. Those only PASSED a scalar to a *big.Int parameter,
+// so typing it `runar.BigintBig` fixed them and they build now. The three that
+// remain — this one, integer-boundary and schnorr-zkp — are about arithmetic
+// and literals, not about a parameter type.
 
 package contract
 
