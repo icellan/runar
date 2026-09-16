@@ -2413,6 +2413,24 @@
       "reviewer": "siggi",
       "date": "2026-09-16",
       "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/arithmetic/go/expected-source-map.json",
+      "sha256": "b32e75fe9af5dce4880e4355b3b10f052f6208f00a8618e35bdd55d29b8ab2a5",
+      "verified-against": "intentional-spec-change",
+      "reason": "Source-map golden re-anchored by 481b5489. Not a codegen change and not a semantic one: df02ab7e removed two lines from this fixture's .runar.go source while un-excluding it from the Go build, and a source map records ABSOLUTE line numbers against the file on disk, so every mapping shifted by exactly -2. The conformance IR harness normalises `line`/`column` away -- correct for the loc-free conformance goldens, and the reason this did not surface there -- but the source-map oracle validates those absolute lines against the real file, so it is the one consumer that had to move.\n\nVERIFIED BY THE COORDINATOR, not accepted on report: parsing both the origin/main version and the current one and comparing mapping-by-mapping gives 27 mappings before and 27 after, the set of line deltas is exactly {-2}, and the count of differences in any field other than `line` is ZERO. A mechanical shift is therefore the whole of the change -- no mapping was added, dropped, retargeted or re-associated.\n\nAllowlisted rather than cross-checked because route (A) does not reach this file: conformance/witnesses/<fixture>.json pins conformance/tests/<fixture> goldens, and there is no witness shape for conformance/source-map. Pinned while STALE_PIN_BUDGET is 0, so any later move of these bytes fails at the commit that makes it.",
+      "reviewer": "siggi",
+      "date": "2026-09-16",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/if-else/go/expected-source-map.json",
+      "sha256": "9894c7c91b9b0e791804002b0c4033dd4781d98fc18bd77f04230ec5dd75bbe9",
+      "verified-against": "intentional-spec-change",
+      "reason": "Source-map golden re-anchored by 481b5489. Not a codegen change and not a semantic one: df02ab7e removed two lines from this fixture's .runar.go source while un-excluding it from the Go build, and a source map records ABSOLUTE line numbers against the file on disk, so every mapping shifted by exactly -2. The conformance IR harness normalises `line`/`column` away -- correct for the loc-free conformance goldens, and the reason this did not surface there -- but the source-map oracle validates those absolute lines against the real file, so it is the one consumer that had to move.\n\nVERIFIED BY THE COORDINATOR, not accepted on report: parsing both the origin/main version and the current one and comparing mapping-by-mapping gives 10 mappings before and 10 after, the set of line deltas is exactly {-2}, and the count of differences in any field other than `line` is ZERO. A mechanical shift is therefore the whole of the change -- no mapping was added, dropped, retargeted or re-associated. Note for whoever touches this next: if-else/go was ALREADY in the source-map runner's DIFF set before this branch, so regenerating it wholesale would have silently absorbed three mappings of unrelated pre-existing drift into a commit that claims to be a line shift. Only the shift was applied, and the runner's DIFF set is byte-identical to base -- no new divergence introduced and none of anyone else's masked.\n\nAllowlisted rather than cross-checked because route (A) does not reach this file: conformance/witnesses/<fixture>.json pins conformance/tests/<fixture> goldens, and there is no witness shape for conformance/source-map. Pinned while STALE_PIN_BUDGET is 0, so any later move of these bytes fails at the commit that makes it.",
+      "reviewer": "siggi",
+      "date": "2026-09-16",
+      "review-status": "reviewed"
     }
   ]
 }
