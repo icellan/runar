@@ -1070,8 +1070,16 @@ func Left(data ByteString, length int64) ByteString {
 }
 
 // Right returns the rightmost `length` bytes of `data`. Compiles to
-// `OP_SIZE <length> OP_SUB OP_SPLIT OP_NIP`: the split offset is measured from
-// the END, so Right(d, n) is NOT Split(d, n).
+// `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` (05-stack-lower.ts#lowerRight):
+// `length` is already an operand on the stack, and the two shuffles put it under
+// the size so OP_SUB computes `size - length`. The split offset is therefore
+// measured from the END, which is why Right(d, n) is NOT Split(d, n) -- Split
+// counts from the start.
+//
+// All three keep only one half of the cut, by three different routes: `left` is
+// a plain table entry (`left: ['OP_SPLIT', 'OP_DROP']`), `split` is the table
+// entry `['OP_SPLIT']` with an OP_NIP appended in the same pass, and `right`
+// needs the operand shuffle above and so has its own lowering.
 func Right(data ByteString, length int64) ByteString {
 	if length < 0 || length > int64(len(data)) {
 		panic("runar.Right: length out of range")
