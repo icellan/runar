@@ -6,7 +6,7 @@ Bitcoin Script → Rúnar TypeScript decompiler. v0, TypeScript-only output.
 
 A **left inverse** of `runar-compiler` on its own output. Given a hex Bitcoin Script that was produced by the TS compiler, this package recovers a `.runar.ts` source whose recompiled bytes are byte-identical to the input.
 
-**v0 status** (read from `coverage.json`): **83 of 89 corpus
+**v0 status** (read from `coverage.json`): **86 of 92 corpus
 entries round-trip byte-identical**, with **0 byte-diff, 0 compile-error, 0
 parse-error** and 6 skipped. Every entry the decompiler attempts round-trips —
 the 6 skips are the naive SLH-DSA contracts, whose 200–900 KB scripts are
@@ -16,7 +16,7 @@ Where the wins come from, same file's `pathBreakdown`:
 
 | path | wins |
 |---|---|
-| `template` | 72 |
+| `template` | 81 |
 | `raw_script` | 4 |
 | `assert-recognizer` | 1 |
 | `symexec` | **0** |

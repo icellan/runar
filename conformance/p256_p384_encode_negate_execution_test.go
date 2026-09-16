@@ -139,13 +139,16 @@ const (
 	enCheckNegateThenEncode = 2
 )
 
-// spendEncodeNegate compiles the named fixture with `expectedCompressed` baked
-// in and spends `method`. Returns whether the consensus interpreter ACCEPTED.
-func spendEncodeNegate(t *testing.T, fixture string, expectedCompressed string, method int, pushes ...string) bool {
+// compileFn compiles one fixture with the given constructor args baked in.
+type compileFn func(argsJSON string) (string, error)
+
+// spendEncodeNegate compiles the fixture with `expectedCompressed` baked in and
+// spends `method`. Returns whether the consensus interpreter ACCEPTED.
+func spendEncodeNegate(t *testing.T, compile compileFn, expectedCompressed string, method int, pushes ...string) bool {
 	t.Helper()
-	lockingHex, err := compileRúnar(fixture, `{"expectedCompressed":"`+expectedCompressed+`"}`)
+	lockingHex, err := compile(`{"expectedCompressed":"` + expectedCompressed + `"}`)
 	if err != nil {
-		t.Fatalf("compile %s: %v", fixture, err)
+		t.Fatalf("compile: %v", err)
 	}
 	unlocking := ""
 	for _, p := range pushes {
@@ -167,7 +170,7 @@ func pushHex(t *testing.T, h string) string {
 // runEncodeNegateSuite is the whole battery, parameterised by curve. P-256 and
 // P-384 share one codegen path with different widths, so the interesting
 // question is whether the WIDTHS are right -- which means running both.
-func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
+func runEncodeNegateSuite(t *testing.T, compile compileFn, c *nistCurve) {
 	g := c.g()
 	q := c.mul(big.NewInt(0x1234567890abcdef), g)
 	negG := c.negate(g)
@@ -178,21 +181,21 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	baked := c.compress(negG)
 
 	t.Run("negate/G", func(t *testing.T) {
-		if !spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if !spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, c.blob(g)), pushHex(t, c.blob(negG))) {
 			t.Fatal("negate(G) was rejected on its own correct result")
 		}
 	})
 
 	t.Run("negate/derived point", func(t *testing.T) {
-		if !spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if !spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, c.blob(q)), pushHex(t, c.blob(negQ))) {
 			t.Fatal("negate(Q) was rejected on its own correct result")
 		}
 	})
 
 	t.Run("negate/is an involution", func(t *testing.T) {
-		if !spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if !spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, c.blob(negG)), pushHex(t, c.blob(g))) {
 			t.Fatal("negate(negate(G)) != G")
 		}
@@ -203,11 +206,11 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	// hand every downstream canonicity check a value outside the field.
 	t.Run("negate/y=0 reduces to 0, not to p", func(t *testing.T) {
 		in := c.coord(c.gx) + zero
-		if !spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if !spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, in), pushHex(t, in)) {
 			t.Fatal("negate((x,0)) did not return (x,0)")
 		}
-		if spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, in), pushHex(t, c.coord(c.gx)+c.coord(c.p))) {
 			t.Fatal("negate((x,0)) returned (x,p) -- the subtraction is not reduced")
 		}
@@ -218,13 +221,13 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	t.Run("negate/refuses x >= p", func(t *testing.T) {
 		in := c.coord(c.p) + c.coord(c.gy)
 		out := c.coord(c.p) + c.coord(c.mod(new(big.Int).Sub(c.p, c.gy)))
-		if spendEncodeNegate(t, fixture, baked, enCheckNegate, pushHex(t, in), pushHex(t, out)) {
+		if spendEncodeNegate(t, compile, baked, enCheckNegate, pushHex(t, in), pushHex(t, out)) {
 			t.Fatal("negate accepted a non-canonical x (x == p)")
 		}
 	})
 	t.Run("negate/refuses y >= p", func(t *testing.T) {
 		in := c.coord(c.gx) + c.coord(c.p)
-		if spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, in), pushHex(t, c.coord(c.gx)+zero)) {
 			t.Fatal("negate accepted a non-canonical y (y == p)")
 		}
@@ -233,13 +236,13 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	// Width. CL-BUG-095's other half: an over-length blob used to have its
 	// surplus silently discarded.
 	t.Run("negate/refuses an over-length blob", func(t *testing.T) {
-		if spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, c.blob(g)+"ff"), pushHex(t, c.blob(negG))) {
 			t.Fatal("negate accepted a point with one byte appended")
 		}
 	})
 	t.Run("negate/refuses an under-length blob", func(t *testing.T) {
-		if spendEncodeNegate(t, fixture, baked, enCheckNegate,
+		if spendEncodeNegate(t, compile, baked, enCheckNegate,
 			pushHex(t, c.blob(g)[2:]), pushHex(t, c.blob(negG))) {
 			t.Fatal("negate accepted a point one byte short")
 		}
@@ -250,7 +253,7 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	// Both parities, so a flipped prefix cannot pass either row: G and -G have
 	// opposite y parity by construction.
 	t.Run("encode/G", func(t *testing.T) {
-		if !spendEncodeNegate(t, fixture, baked, enCheckEncode,
+		if !spendEncodeNegate(t, compile, baked, enCheckEncode,
 			pushHex(t, c.blob(g)), pushHex(t, c.compress(g))) {
 			t.Fatal("compress(G) was rejected on its own correct result")
 		}
@@ -259,13 +262,13 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 		if c.compress(g)[:2] == c.compress(negG)[:2] {
 			t.Fatal("test setup: G and -G must have opposite parity")
 		}
-		if !spendEncodeNegate(t, fixture, baked, enCheckEncode,
+		if !spendEncodeNegate(t, compile, baked, enCheckEncode,
 			pushHex(t, c.blob(negG)), pushHex(t, c.compress(negG))) {
 			t.Fatal("compress(-G) was rejected on its own correct result")
 		}
 	})
 	t.Run("encode/derived point", func(t *testing.T) {
-		if !spendEncodeNegate(t, fixture, baked, enCheckEncode,
+		if !spendEncodeNegate(t, compile, baked, enCheckEncode,
 			pushHex(t, c.blob(q)), pushHex(t, c.compress(q))) {
 			t.Fatal("compress(Q) was rejected on its own correct result")
 		}
@@ -280,7 +283,7 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 			return "02" + s[2:]
 		}
 		for name, p := range map[string]*ecPoint{"G": g, "-G": negG} {
-			if spendEncodeNegate(t, fixture, baked, enCheckEncode,
+			if spendEncodeNegate(t, compile, baked, enCheckEncode,
 				pushHex(t, c.blob(p)), pushHex(t, flip(c.compress(p)))) {
 				t.Fatalf("compress(%s) accepted the opposite parity prefix", name)
 			}
@@ -293,7 +296,7 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	t.Run("encode/CL-BUG-095: one appended byte", func(t *testing.T) {
 		for _, suffix := range []string{"00", "ff", "01"} {
 			for _, want := range []string{"02", "03"} {
-				if spendEncodeNegate(t, fixture, baked, enCheckEncode,
+				if spendEncodeNegate(t, compile, baked, enCheckEncode,
 					pushHex(t, c.blob(g)+suffix), pushHex(t, want+c.coord(c.gx))) {
 					t.Fatalf("compress accepted a point with %q appended, claiming prefix %s", suffix, want)
 				}
@@ -302,7 +305,7 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	})
 
 	t.Run("encode/refuses an under-length blob", func(t *testing.T) {
-		if spendEncodeNegate(t, fixture, baked, enCheckEncode,
+		if spendEncodeNegate(t, compile, baked, enCheckEncode,
 			pushHex(t, c.blob(g)[2:]), pushHex(t, c.compress(g))) {
 			t.Fatal("compress accepted a point one byte short")
 		}
@@ -311,23 +314,37 @@ func runEncodeNegateSuite(t *testing.T, fixture string, c *nistCurve) {
 	// --- composed, against the baked constructor arg ---
 
 	t.Run("negate-then-encode/matches the baked value", func(t *testing.T) {
-		if !spendEncodeNegate(t, fixture, baked, enCheckNegateThenEncode, pushHex(t, c.blob(g))) {
+		if !spendEncodeNegate(t, compile, baked, enCheckNegateThenEncode, pushHex(t, c.blob(g))) {
 			t.Fatal("compress(negate(G)) did not match the baked compress(-G)")
 		}
 	})
 	t.Run("negate-then-encode/G itself does not match", func(t *testing.T) {
 		// compress(negate(G)) != compress(G): the composition must actually
 		// negate, not pass the point through.
-		if spendEncodeNegate(t, fixture, c.compress(g), enCheckNegateThenEncode, pushHex(t, c.blob(g))) {
+		if spendEncodeNegate(t, compile, c.compress(g), enCheckNegateThenEncode, pushHex(t, c.blob(g))) {
 			t.Fatal("compress(negate(G)) equalled compress(G) -- the negation is a no-op")
 		}
 	})
 }
 
+// compileP256EncodeNegate and compileP384EncodeNegate exist so each fixture
+// name appears as a LITERAL argument to compileRúnar. conformance/witnesses/
+// coverage-claims.test.ts verifies a "go-script-exec" ledger claim by grepping
+// the execution tests for exactly `compileRúnar("<fixture>"`, and a name
+// threaded through a parameter is invisible to that check — which would let a
+// ledger entry claim coverage this file had stopped providing.
+func compileP256EncodeNegate(argsJSON string) (string, error) {
+	return compileRúnar("p256-encode-negate", argsJSON)
+}
+
+func compileP384EncodeNegate(argsJSON string) (string, error) {
+	return compileRúnar("p384-encode-negate", argsJSON)
+}
+
 func TestP256_EncodeNegate_Boundaries(t *testing.T) {
-	runEncodeNegateSuite(t, "p256-encode-negate", p256Curve)
+	runEncodeNegateSuite(t, compileP256EncodeNegate, p256Curve)
 }
 
 func TestP384_EncodeNegate_Boundaries(t *testing.T) {
-	runEncodeNegateSuite(t, "p384-encode-negate", p384Curve)
+	runEncodeNegateSuite(t, compileP384EncodeNegate, p384Curve)
 }

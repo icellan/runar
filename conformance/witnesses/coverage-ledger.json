@@ -138,6 +138,15 @@
       }
     },
     {
+      "fixture": "byte-builtins",
+      "cause": "crypto-witness-infeasible",
+      "reason": "Stateless codegen-coverage fixture for split / int2str / reverseBytes / the Sha256Hash alias. Neither witness form can drive it: a differential witness needs crypto to mock and this contract calls none beyond a bare OP_SHA256, and a real-crypto witness drives deploy->call against a state continuation this stateless contract does not have. It is NOT uncovered. conformance/byte_builtins_execution_test.go compiles the fixture with a baked SHA-256 digest and SPENDS the resulting locking script on the go-sdk consensus interpreter in 32 subtests, at each builtin's boundaries -- split at 0, at len, on the empty string and out of range; int2str at zero, negative, zero width and a width too small for the value; reverseBytes at 0, 1, odd and 520 bytes, the maximum BSV element. Every group carries negative rows, so a script that ignored its arguments could not pass.",
+      "coveredBy": {
+        "kind": "go-script-exec",
+        "fixture": "byte-builtins"
+      }
+    },
+    {
       "fixture": "convergence-proof",
       "cause": "crypto-witness-infeasible",
       "reason": "secp256k1 EC ops (ecAdd/ecMulGen/ecNegate) — EC point witness, not a checkSig",
@@ -207,6 +216,15 @@
       }
     },
     {
+      "fixture": "p256-encode-negate",
+      "cause": "crypto-witness-infeasible",
+      "reason": "Stateless codegen-coverage fixture for p256Negate / p256EncodeCompressed -- same shape as byte-builtins: no mockable crypto for a differential witness, no state continuation for a real-crypto one. conformance/p256_p384_encode_negate_execution_test.go spends its compiled script on the go-sdk consensus interpreter against P-256 arithmetic reimplemented from the NIST parameters in math/big: negate on G and a derived point, the involution negate(negate(P)) == P, y == 0 reducing to 0 rather than to p, non-canonical x == p and y == p refused, over- and under-length blobs refused, compression in BOTH parities with the flipped prefix refused, and the CL-BUG-095 appended-byte attack refused.",
+      "coveredBy": {
+        "kind": "go-script-exec",
+        "fixture": "p256-encode-negate"
+      }
+    },
+    {
       "fixture": "p256-wallet",
       "cause": "crypto-witness-infeasible",
       "reason": "NIST P-256 signature verification + ECDSA checkSig — non-secp256k1 signature; real signatures required",
@@ -217,6 +235,15 @@
       "coveredBy": {
         "kind": "codegen-golden",
         "family": "p256"
+      }
+    },
+    {
+      "fixture": "p384-encode-negate",
+      "cause": "crypto-witness-infeasible",
+      "reason": "The P-384 half of the same codegen unit, run through the identical battery by conformance/p256_p384_encode_negate_execution_test.go so the 48-byte coordinate widths are exercised too. The two curves share one codegen path at different widths, which is why both are executed rather than one.",
+      "coveredBy": {
+        "kind": "go-script-exec",
+        "fixture": "p384-encode-negate"
       }
     },
     {
