@@ -945,6 +945,7 @@ jobs:
         run: >
           npx vitest run
           conformance/anf-scope.test.ts
+          conformance/corpus-completeness.test.ts
           conformance/fixture-count-doc.test.ts
           conformance/split-stack-desync.test.ts
           conformance/codepart-pin

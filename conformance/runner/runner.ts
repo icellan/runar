@@ -2662,6 +2662,53 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
 }
 
 /**
+ * The corpus this run was supposed to cover, as declared on disk.
+ *
+ * `script-size-baseline.json` carries one entry per fixture, so it is a
+ * COMMITTED list of what the suite contains — independent of whatever a given
+ * run happens to enumerate.
+ */
+export function declaredCorpus(conformanceDir: string): string[] {
+  const p = join(conformanceDir, 'script-size-baseline.json');
+  const raw = JSON.parse(readFileSync(p, 'utf8')) as { fixtures?: Record<string, unknown> };
+  return Object.keys(raw.fixtures ?? {}).sort();
+}
+
+/**
+ * Refuse to report on a partial corpus.
+ *
+ * The summary line is `N passed, 0 failed (N total)`, where N is whatever
+ * discovery found. That denominator is DISCOVERED, not declared, so a run that
+ * enumerates fewer fixtures than the suite holds reports green — it cannot
+ * distinguish "every fixture passed" from "I found fewer fixtures". That is
+ * fail-open, in the harness that gates everything else.
+ *
+ * This is not hypothetical. A run during the R-102 work reported
+ * `78 passed, 0 failed (78 total)` — exit 0 — while the suite held 82. The four
+ * missing were exactly the four fixtures added on this branch, and the cause was
+ * a stale concurrent runner's output being read as the current run's. Nothing
+ * failed, because from the runner's point of view nothing had.
+ *
+ * Silence about a fixture is not a pass. Throwing here converts that into a
+ * loud failure that names what went missing.
+ */
+export function assertCorpusComplete(discovered: string[], declared: string[]): void {
+  const found = new Set(discovered);
+  const missing = declared.filter((f) => !found.has(f));
+  if (missing.length > 0) {
+    throw new Error(
+      `conformance discovery found ${discovered.length} fixtures but ` +
+        `script-size-baseline.json declares ${declared.length}. NOT REPORTING A ` +
+        `PASS on a partial corpus — a missing fixture is not a passing one.\n` +
+        `Missing:\n  ${missing.join('\n  ')}\n` +
+        `If a fixture was deliberately removed, remove its baseline entry in the ` +
+        `same commit. If not, discovery is wrong — check for a concurrent runner ` +
+        `or a stale output file before trusting any green result.`,
+    );
+  }
+}
+
+/**
  * Discover and run all conformance tests in the given directory.
  *
  * Each subdirectory of `testsDir` is treated as a separate test case.
@@ -2676,6 +2723,15 @@ export async function runAllConformanceTests(
     .filter((e) => e.isDirectory())
     .map((e) => join(testsDir, e.name))
     .sort();
+
+  // Checked on the UNFILTERED discovery, before any narrowing: whether the
+  // caller asked for a subset is a separate question from whether the corpus is
+  // all there. Skipped only when `testsDir` is not the real suite — some
+  // harnesses point this at a scratch tree, which has no baseline beside it.
+  const conformanceDir = dirname(testsDir);
+  if (existsSync(join(conformanceDir, 'script-size-baseline.json'))) {
+    assertCorpusComplete(testDirs.map((d) => basename(d)), declaredCorpus(conformanceDir));
+  }
 
   // Optional filter: only run tests whose name includes the filter string
   if (options?.filter) {
