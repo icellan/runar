@@ -182,6 +182,38 @@ contract.highest_bidder = bidder;
 
 Unlike TypeScript Runar, Move syntax does not have `++` and `--` operators. Use explicit assignment. The function must take `contract: &mut ContractName` to mutate state.
 
+### Bounded Loops
+
+Move has no C-style `for`, so a bounded loop is an induction variable declared
+immediately before a `while`, with the step as the **last statement of the
+body**:
+
+```move
+let i: Int = 0;
+while (i < 5) {          // i = 0, 1, 2, 3, 4
+    ...
+    i = i + 1;
+};
+
+let i: Int = 5;
+while (i > 1) {          // i = 5, 4, 3, 2 — counting DOWN
+    ...
+    i = i - 1;
+};
+```
+
+`<` / `<=` count up and `>` / `>=` count down; `<=` and `>=` include their
+bound. The step must be a literal `1`, and its **sign must agree with the
+comparison direction** — `i = i - 1` under `i < N` never terminates, and
+`i = i + 1` under `i > N` never runs.
+
+Any `while` that does not match this shape is a **compile error**, at any
+nesting depth. That includes a non-unit step (`i = i + 2`), a bound that is not
+an integer literal, and a body with no step at all. The compiler unrolls a loop
+by synthesizing iteration `k` as `start + k*step` with a unit step, so none of
+those has a representation; refusing them is the only alternative to compiling
+a loop that runs a different number of times than the source says.
+
 ### add_output
 
 The `add_output` function creates transaction outputs for stateful contracts:

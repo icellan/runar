@@ -302,13 +302,26 @@ All parsers must produce statements using these exact `kind` values.
 }
 ```
 
-| Format | Loop syntax |
-|--------|-------------|
-| TypeScript | `for (let i = 0n; i < 10n; i++)` |
-| Solidity | `for (int256 i = 0; i < 10; i++)` |
-| Move | `let i = 0; while (i < 10) { ... i = i + 1; }` (desugared to for) |
-| Go | `for i := 0; i < 10; i++` |
-| Rust | `for i in 0..10` |
+All nine surfaces, ascending and descending. Every row in a column lowers to
+the same ANF `loop` node, which carries `{count, iterVar, start, step}` and
+synthesizes iteration `k` as `start + k*step` with `step` of `+1` or `-1`.
+
+| Format | Counting up | Counting down |
+|--------|-------------|---------------|
+| TypeScript | `for (let i = 0n; i < 10n; i++)` | `for (let i = 10n; i > 0n; i--)` |
+| Solidity | `for (int256 i = 0; i < 10; i++)` | `for (int256 i = 10; i > 0; i--)` |
+| Move | `let i = 0; while (i < 10) { ... i = i + 1; }` (desugared to for) | `let i = 10; while (i > 0) { ... i = i - 1; }` |
+| Go | `for i := 0; i < 10; i++` | `for i := 10; i > 0; i--` |
+| Rust | `for i in 0..10` | `for i in (0..10).rev()` |
+| Python | `for i in range(0, 10)` | `for i in range(10, 0, -1)` |
+| Zig | `while (i < 10) : (i += 1)` | `while (i > 0) : (i -= 1)` |
+| Ruby | `for i in 0...10` | `for i in 10.downto(1)` |
+| Java | `for (Bigint i = ...; i.lt(...); i = i.plus(Bigint.ONE))` | `for (Bigint i = ...; i.gt(...); i = i.minus(Bigint.ONE))` |
+
+Only a **unit** step is representable, in either direction. A non-unit step —
+`i += 2`, `range(0, 10, 2)`, a Move body ending `i = i + 2` — is a compile
+error in every tier rather than a loop silently rounded to `i++`, and so is a
+step whose sign disagrees with the comparison direction.
 
 ### ReturnStatement
 

@@ -168,9 +168,18 @@ The Rúnar compiler parses `self.add_output(...)` as `this.addOutput(...)` regar
 for i in 0..10 {
     // body
 }
+
+for i in (2..6).rev() {   // i = 5, 4, 3, 2 — counting DOWN
+    // body
+}
 ```
 
 Range syntax maps to a bounded for loop. The upper bound must be a compile-time constant.
+
+A Rust range only ever ascends — `(5..2)` is empty — so a countdown is spelled
+with `Iterator::rev`. It reverses the half-open range, so `(2..6).rev()` starts
+at `6 - 1` and ends at `2` inclusive, iterating 5, 4, 3, 2 exactly as it does in
+Rust. `.rev()` is the only range method the surface accepts.
 
 ### If/Else
 
