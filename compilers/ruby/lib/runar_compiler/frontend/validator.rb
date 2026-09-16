@@ -674,10 +674,46 @@ module RunarCompiler
           end
         end
 
+        validate_for_condition_tests_iterator(stmt)
+
         validate_expression(stmt.init.init)
         validate_for_update(stmt)
         validate_no_output_intrinsic_in_loop(stmt)
         stmt.body.each { |s| validate_statement(s) }
+      end
+
+      # Reject a for-loop whose condition does not test the iterator (W4).
+      #
+      # The bound check above reads only `condition.right`. Nothing required
+      # `condition.left` to BE the iterator, and extract_loop_shape ignores
+      # left entirely: it computes `count = bound - start`. So
+      #
+      #   for (let i = 0n; i + 1n < 2n; i++) { ... }
+      #
+      # runs ONCE in the source language and TWICE in the emitted script
+      # (count = 2 - 0). The extra lap executes the `else` arm the source can
+      # never reach. Measured on @bsv/sdk Spend.validate() with a vault whose
+      # signature check sits in the first lap and whose second lap sets
+      # `authorized = true`: the phantom-lap loop ACCEPTED an empty signature,
+      # while the semantically identical `i < 1n` rejected it.
+      #
+      # Refusal rather than lowering: evaluating a general condition per
+      # iteration means unrolling against a real interpreter at ANF time, a
+      # language extension with no golden behind it. The diagnostic text is
+      # shared verbatim with the other six tiers.
+      def validate_for_condition_tests_iterator(stmt)
+        iter = stmt.init.name
+        cond = stmt.condition
+        return if cond.is_a?(BinaryExpr) && cond.left.is_a?(Identifier) && cond.left.name == iter
+
+        add_error(
+          "For loop condition must compare the loop variable '#{iter}' to a compile-time " \
+          "constant (`#{iter} < 10n`). The unrolled loop binds the iterator as " \
+          "`start + k*step` and takes its trip count from the bound alone, so a condition " \
+          "whose left-hand side is anything else -- a computed expression, or a different " \
+          "variable -- is not the condition the loop actually evaluates",
+          loc: stmt.source_location
+        )
       end
 
       # The three intrinsics that register an output ref.

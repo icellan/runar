@@ -1212,6 +1212,8 @@ fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Ve
                 }
             }
 
+            validate_for_condition_tests_iterator(init, condition, errors);
+
             // Validate init
             if let Statement::VariableDecl { init: init_expr, .. } = init.as_ref() {
                 validate_expression(init_expr, errors);
@@ -1231,6 +1233,57 @@ fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Ve
             }
         }
     }
+}
+
+/// Reject any for-loop whose condition does not test the iterator itself
+/// (W4 / PhantomLap).
+///
+/// The bound check above reads only `condition.right`. Nothing required
+/// `condition.left` to BE the iterator, and `extract_loop_shape` ignores left
+/// entirely: it computes `count = bound - start`. So
+///
+/// ```text
+/// for (let i = 0n; i + 1n < 2n; i++) { ... }
+/// ```
+///
+/// runs ONCE in the source language and TWICE in the emitted script
+/// (count = 2 - 0). The extra lap executes the `else` arm the source can never
+/// reach. Measured on `@bsv/sdk` `Spend.validate()` with a vault whose
+/// signature check sits in the first lap and whose second lap sets
+/// `authorized = true`: the phantom-lap loop ACCEPTED an empty signature, while
+/// the semantically identical `i < 1n` rejected it.
+///
+/// Refusal rather than lowering: evaluating a general condition per iteration
+/// means unrolling against a real interpreter at ANF time, a language extension
+/// with no golden behind it. The diagnostic text is shared verbatim with the
+/// other six tiers.
+fn validate_for_condition_tests_iterator(
+    init: &Statement,
+    condition: &Expression,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let iter = match init {
+        Statement::VariableDecl { name, .. } => name.as_str(),
+        _ => "",
+    };
+    if let Expression::BinaryExpr { left, .. } = condition {
+        if let Expression::Identifier { name } = left.as_ref() {
+            if name == iter {
+                return;
+            }
+        }
+    }
+
+    errors.push(Diagnostic::error(
+        &format!(
+            "For loop condition must compare the loop variable '{iter}' to a compile-time \
+             constant (`{iter} < 10n`). The unrolled loop binds the iterator as \
+             `start + k*step` and takes its trip count from the bound alone, so a condition \
+             whose left-hand side is anything else -- a computed expression, or a different \
+             variable -- is not the condition the loop actually evaluates"
+        ),
+        None,
+    ));
 }
 
 /// Reject any for-loop update clause the loop model cannot represent

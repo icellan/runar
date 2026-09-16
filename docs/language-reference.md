@@ -440,8 +440,25 @@ for (let i: bigint = 0n; i < 10n; i++) {
 ```
 
 - The bound (right side of the comparison) must be a compile-time constant.
-- Only simple increment (`++`) or decrement (`--`) is allowed.
+- The **left** side of the comparison must be the loop variable itself.
+- Only simple increment (`++`) or decrement (`--`) is allowed, and the
+  comparison direction must agree with it (`<`/`<=` with `++`, `>`/`>=` with
+  `--`).
 - Loops are unrolled at compile time -- there are no runtime loops in Bitcoin Script.
+- **A computed left-hand side is rejected, and the reason is spending
+  conditions rather than style.** The unroll binds the iterator as
+  `start + k*step` and takes the trip count from the bound alone, so
+
+  ```typescript
+  for (let i: bigint = 0n; i + 1n < 2n; i++) { /* ... */ }
+  ```
+
+  runs ONCE if you read it as TypeScript and TWICE in the emitted script. A
+  contract whose first lap checks a signature and whose second lap overwrites
+  that result spends on an EMPTY signature -- measured through `@bsv/sdk`
+  `Spend.validate()`. Testing anything but the iterator (`j < 3n` where the
+  iterator is `i`) is rejected for the same reason. Write the bound you mean:
+  `i < 1n`.
 - **Output intrinsics may not appear in a loop body.** `this.addOutput`,
   `this.addRawOutput` and `this.addDataOutput` are rejected inside a loop --
   directly, nested in an `if`, or reached through a private helper called

@@ -1409,6 +1409,10 @@ const Parser = struct {
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // It used to be thrown away, so `i + 1n < 2n` unrolled twice for a loop
+        // the source runs once. Rejected by passes/validate.zig.
+        var cond_tests_iter: bool = true;
         var update: ?*const Statement = null;
         // R-065: did we actually parse a C-style three-part header? Everything
         // below depends on it — `bound` comes from the condition and `update`
@@ -1475,6 +1479,10 @@ const Parser = struct {
                                 descending = bop.op == .gt or bop.op == .gte;
                                 // Issue #121: record inclusivity (`<=`/`>=`).
                                 inclusive = bop.op == .lte or bop.op == .gte;
+                                cond_tests_iter = switch (bop.left) {
+                                    .identifier => |n| std.mem.eql(u8, n, var_name),
+                                    else => false,
+                                };
                                 switch (bop.right) {
                                     .literal_int => |v| {
                                         bound = v;
@@ -1482,7 +1490,7 @@ const Parser = struct {
                                     else => {},
                                 }
                             },
-                            else => {},
+                            else => cond_tests_iter = false,
                         }
                     }
                 }
@@ -1582,7 +1590,7 @@ const Parser = struct {
         }
 
         const body = self.parseBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .update = update, .body = body, .source_loc = loc, .header_requires_update = true } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc, .header_requires_update = true } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

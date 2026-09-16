@@ -886,6 +886,8 @@ function validateForStatement(
     }
   }
 
+  validateForConditionTestsIterator(stmt, ctx);
+
   // Validate init
   validateExpression(stmt.init.init, ctx);
 
@@ -897,6 +899,62 @@ function validateForStatement(
   for (const s of stmt.body) {
     validateStatement(s, ctx);
   }
+}
+
+/**
+ * Reject any for-loop whose condition does not test the iterator itself.
+ *
+ * The comment above used to say "the condition should compare the iter var to
+ * a constant" and then the code read only `stmt.condition.right`. Nothing
+ * required `condition.left` to BE the iterator, and `extractLoopShape` ignores
+ * left entirely: it computes `count = bound - start` from the right-hand side
+ * and the init value. So the source
+ *
+ *   for (let i = 0n; i + 1n < 2n; i++) { ... }
+ *
+ * runs ONCE in TypeScript (i=0: 0+1 < 2; i=1: 1+1 < 2 is false) and TWICE in
+ * the emitted script (count = 2 - 0). The extra lap executes the `else` arm
+ * the source can never reach. Measured on `@bsv/sdk` `Spend.validate()` with a
+ * vault whose signature check sits in the first lap and whose second lap sets
+ * `authorized = true`: the phantom-lap loop ACCEPTED an empty signature, while
+ * the semantically identical `i < 1n` rejected it.
+ *
+ * Refusal rather than lowering: evaluating a general condition per iteration
+ * means unrolling against a real interpreter at ANF time, which is a language
+ * extension with no golden behind it. The loop model the ANF node can carry is
+ * exactly `start + k*step` tested against a constant bound, so the condition
+ * must name the iterator on the left. Same shape as R-065's for-update
+ * rejection, and the diagnostic text is shared verbatim with the other six
+ * tiers.
+ *
+ * The direction rule (`<`/`<=` counts up, `>`/`>=` counts down) is NOT
+ * duplicated here: `extractLoopShape` already refuses a mismatch in every
+ * tier, and `conformance/negatives/N42-loop-direction-mismatch.runar.ts`
+ * gates that across all seven.
+ */
+function validateForConditionTestsIterator(
+  stmt: Extract<Statement, { kind: 'for_statement' }>,
+  ctx: ValidationContext,
+): void {
+  const iter = stmt.init.name;
+  const cond = stmt.condition;
+  if (
+    cond.kind === 'binary_expr' &&
+    cond.left.kind === 'identifier' &&
+    cond.left.name === iter
+  ) {
+    return;
+  }
+
+  ctx.errors.push(makeDiagnostic(
+    `For loop condition must compare the loop variable '${iter}' to a compile-time ` +
+    `constant (\`${iter} < 10n\`). The unrolled loop binds the iterator as ` +
+    '`start + k*step` and takes its trip count from the bound alone, so a condition ' +
+    'whose left-hand side is anything else -- a computed expression, or a different ' +
+    'variable -- is not the condition the loop actually evaluates',
+    'error',
+    stmt.sourceLocation,
+  ));
 }
 
 /**

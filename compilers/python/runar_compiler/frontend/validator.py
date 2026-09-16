@@ -768,12 +768,54 @@ class _ValidationContext:
                 stmt.source_location,
             )
 
+        self._validate_for_condition_tests_iterator(stmt)
+
         if stmt.init is not None:
             self._validate_expression(stmt.init.init)
         self._validate_for_update(stmt)
         self._validate_no_output_intrinsic_in_loop(stmt)
         for s in stmt.body:
             self._validate_statement(s)
+
+    def _validate_for_condition_tests_iterator(self, stmt: ForStmt) -> None:
+        """Reject a for-loop whose condition does not test the iterator (W4).
+
+        The bound check above reads only ``condition.right``. Nothing required
+        ``condition.left`` to BE the iterator, and ``_extract_loop_shape``
+        ignores left entirely: it computes ``count = bound - start``. So::
+
+            for (let i = 0n; i + 1n < 2n; i++) { ... }
+
+        runs ONCE in the source language and TWICE in the emitted script
+        (count = 2 - 0). The extra lap executes the ``else`` arm the source can
+        never reach. Measured on ``@bsv/sdk`` ``Spend.validate()`` with a vault
+        whose signature check sits in the first lap and whose second lap sets
+        ``authorized = true``: the phantom-lap loop ACCEPTED an empty signature,
+        while the semantically identical ``i < 1n`` rejected it.
+
+        Refusal rather than lowering: evaluating a general condition per
+        iteration means unrolling against a real interpreter at ANF time, a
+        language extension with no golden behind it. The diagnostic text is
+        shared verbatim with the other six tiers.
+        """
+        iter_name = stmt.init.name if stmt.init is not None else ""
+        cond = stmt.condition
+        if (
+            isinstance(cond, BinaryExpr)
+            and isinstance(cond.left, Identifier)
+            and cond.left.name == iter_name
+        ):
+            return
+
+        self._add_error(
+            f"For loop condition must compare the loop variable '{iter_name}' to a "
+            f"compile-time constant (`{iter_name} < 10n`). The unrolled loop binds the "
+            "iterator as `start + k*step` and takes its trip count from the bound alone, "
+            "so a condition whose left-hand side is anything else -- a computed "
+            "expression, or a different variable -- is not the condition the loop "
+            "actually evaluates",
+            stmt.source_location,
+        )
 
     # R-127 -- output intrinsics inside a loop body
     # ------------------------------------------------------------------

@@ -931,12 +931,52 @@ func (ctx *validationContext) validateForStatement(stmt ForStmt) {
 		}
 	}
 
+	ctx.validateForConditionTestsIterator(stmt)
+
 	ctx.validateExpression(stmt.Init.Init)
 	ctx.validateForUpdate(stmt)
 	ctx.validateNoOutputIntrinsicInLoop(stmt)
 	for _, s := range stmt.Body {
 		ctx.validateStatement(s)
 	}
+}
+
+// validateForConditionTestsIterator rejects any for-loop whose condition does
+// not test the iterator itself (W4 / PhantomLap).
+//
+// The comment above this function's caller used to say the condition compares
+// the iter var to a constant, and then the code read only `Condition.Right`.
+// Nothing required `Condition.Left` to BE the iterator, and extractLoopShape
+// ignores left entirely: it computes `count = bound - start`. So
+//
+//	for (let i = 0n; i + 1n < 2n; i++) { ... }
+//
+// runs ONCE in the source language and TWICE in the emitted script
+// (count = 2 - 0). The extra lap executes the `else` arm the source can never
+// reach. Measured on @bsv/sdk Spend.validate() with a vault whose signature
+// check sits in the first lap and whose second lap sets `authorized = true`:
+// the phantom-lap loop ACCEPTED an empty signature, while the semantically
+// identical `i < 1n` rejected it.
+//
+// Refusal rather than lowering: evaluating a general condition per iteration
+// means unrolling against a real interpreter at ANF time, a language extension
+// with no golden behind it. The diagnostic text is shared verbatim with the
+// other six tiers.
+func (ctx *validationContext) validateForConditionTestsIterator(stmt ForStmt) {
+	if bin, ok := stmt.Condition.(BinaryExpr); ok {
+		if id, ok := bin.Left.(Identifier); ok && id.Name == stmt.Init.Name {
+			return
+		}
+	}
+	ctx.addErrorWithLoc(forConditionIteratorError(stmt.Init.Name), &stmt.SourceLocation)
+}
+
+func forConditionIteratorError(iter string) string {
+	return "For loop condition must compare the loop variable '" + iter +
+		"' to a compile-time constant (`" + iter + " < 10n`). The unrolled loop binds " +
+		"the iterator as `start + k*step` and takes its trip count from the bound alone, " +
+		"so a condition whose left-hand side is anything else -- a computed expression, " +
+		"or a different variable -- is not the condition the loop actually evaluates"
 }
 
 // loopOutputIntrinsicMsg builds the R-127 rejection. Shared verbatim

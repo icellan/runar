@@ -465,9 +465,16 @@ export class Neg extends SmartContract {
   {
     target: 'For loop condition must be boolean',
     name: 'loop-condition-not-boolean',
+    // The condition used to be the bare literal `4n`. W4 made validate refuse
+    // any for-condition that is not `<iterator> <relop> <expr>`, and validate
+    // runs before typecheck, so that source now stops one pass earlier and this
+    // entry no longer reached the diagnostic it names. `i + 1n` satisfies the
+    // new shape rule -- left IS the iterator, right IS a compile-time constant
+    // -- and is still a bigint where a boolean is required, so the typecheck
+    // diagnostic stays reachable from source rather than becoming dead.
     source: stateless(
       `    let s: bigint = 0n;
-    for (let i = 0n; 4n; i++) {
+    for (let i = 0n; i + 1n; i++) {
       s = s + i;
     }
     assert(s > 0n);`,

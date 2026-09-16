@@ -941,6 +941,8 @@ public final class Validate {
                     f.sourceLocation());
             }
 
+            validateForConditionTestsIterator(f);
+
             validateExpression(f.condition());
             if (f.init() != null) {
                 validateExpression(f.init().init());
@@ -950,6 +952,43 @@ public final class Validate {
             for (Statement s : f.body()) {
                 validateStatement(s);
             }
+        }
+
+        /**
+         * Reject any for-loop whose condition does not test the iterator itself
+         * (W4 / PhantomLap).
+         *
+         * <p>The bound check above reads only {@code condition.right}. Nothing required
+         * {@code condition.left} to BE the iterator, and {@code extractLoopShape} ignores
+         * left entirely: it computes {@code count = bound - start}. So
+         *
+         * <pre>{@code for (let i = 0n; i + 1n < 2n; i++) { ... }}</pre>
+         *
+         * runs ONCE in the source language and TWICE in the emitted script
+         * (count = 2 - 0). The extra lap executes the {@code else} arm the source can
+         * never reach. Measured on {@code @bsv/sdk} {@code Spend.validate()} with a vault
+         * whose signature check sits in the first lap and whose second lap sets
+         * {@code authorized = true}: the phantom-lap loop ACCEPTED an empty signature,
+         * while the semantically identical {@code i < 1n} rejected it.
+         *
+         * <p>Refusal rather than lowering: evaluating a general condition per iteration
+         * means unrolling against a real interpreter at ANF time, a language extension
+         * with no golden behind it. The diagnostic text is shared verbatim with the other
+         * six tiers.
+         */
+        private void validateForConditionTestsIterator(ForStatement f) {
+            String iter = f.init() == null ? "" : f.init().name();
+            if (f.condition() instanceof BinaryExpr be
+                && be.left() instanceof Identifier id
+                && id.name().equals(iter)) {
+                return;
+            }
+            error("For loop condition must compare the loop variable '" + iter
+                + "' to a compile-time constant (`" + iter + " < 10n`). The unrolled loop "
+                + "binds the iterator as `start + k*step` and takes its trip count from the "
+                + "bound alone, so a condition whose left-hand side is anything else -- a "
+                + "computed expression, or a different variable -- is not the condition the "
+                + "loop actually evaluates", f.sourceLocation());
         }
 
         /** The three intrinsics that register an output ref. */

@@ -911,16 +911,29 @@ const Parser = struct {
         // directions set `descending` / `inclusive`, exactly as parse_ts does.
         var descending = false;
         var inclusive = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // `var_name` is TAKEN from the condition here, so a computed left-hand
+        // side (`i + 1 < 2`) left it at its `_loop_var` default while `bound`
+        // was still read from the right -- the phantom-lap shape, on the
+        // `.runar.zig` surface. Rejected by passes/validate.zig.
+        var cond_tests_iter: bool = true;
         switch (cond) {
             .binary_op => |bop| {
                 if (bop.op == .lt or bop.op == .lte) {
                     // ident < N or ident <= N
-                    if (bop.left == .identifier) var_name = bop.left.identifier;
+                    if (bop.left == .identifier) {
+                        var_name = bop.left.identifier;
+                    } else {
+                        cond_tests_iter = false;
+                    }
                     if (bop.right == .literal_int) {
                         bound = bop.right.literal_int;
                         if (bop.op == .lte) bound += 1;
                     }
                 } else if (bop.op == .gt or bop.op == .gte) {
+                    if (bop.left != .identifier and bop.right != .identifier) {
+                        cond_tests_iter = false;
+                    }
                     if (bop.left == .identifier and bop.right == .literal_int) {
                         // ident > N or ident >= N (countdown)
                         var_name = bop.left.identifier;
@@ -1001,6 +1014,7 @@ const Parser = struct {
             .bound = bound,
             .descending = descending,
             .inclusive = inclusive,
+            .cond_tests_iter = cond_tests_iter,
             .update = update,
             .body = body,
             .source_loc = loc,

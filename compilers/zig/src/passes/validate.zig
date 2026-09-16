@@ -1394,6 +1394,37 @@ fn isRepresentableForUpdate(allowed: []const u8, update: Statement) bool {
     };
 }
 
+/// The step direction the loop's UPDATE clause expresses, or null when the
+/// clause carries no direction at all.
+///
+/// Null means "no constraint": a surface whose step is implied by the syntax
+/// (`for i in 0..N`, `range(N)`, a bare `while (c)`) arrives with `update ==
+/// null`, and the while-shaped parsers synthesize an effect-free literal or
+/// bare identifier as a no-op sentinel. Both are direction-free by
+/// construction, so pairing either with a countdown comparison is legal.
+/// Anything the loop model cannot represent at all is rejected separately by
+/// `isRepresentableForUpdate`.
+fn loopUpdateAscends(f: anytype) ?bool {
+    const u = f.update orelse return null;
+    return switch (u.*) {
+        .expr_stmt => |e| switch (e.expr) {
+            .increment => true,
+            .decrement => false,
+            else => null,
+        },
+        // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+        .assign => |a| switch (a.value) {
+            .binary_op => |bop| switch (bop.op) {
+                .add => true,
+                .sub => false,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
+}
+
 /// Validate individual statements (currently checks for-loop bounds).
 fn validateStatement(
     allocator: Allocator,
@@ -1432,6 +1463,74 @@ fn validateStatement(
                     .severity = .@"error",
                     .location = f.source_loc,
                 });
+            }
+            // W4: the condition must test the ITERATOR. Only the bound was ever
+            // looked at -- here and in all six peer tiers' `extractLoopShape`,
+            // which computes `count = bound - start` and ignores the left-hand
+            // side entirely. So `for (let i = 0n; i + 1n < 2n; i++)` unrolled
+            // TWICE for a loop the source runs ONCE, executing an `else` arm the
+            // source can never reach. Measured on @bsv/sdk Spend.validate() with
+            // a vault whose signature check sits in the first lap and whose
+            // second lap sets `authorized = true`: the phantom-lap loop ACCEPTED
+            // an empty signature, while the semantically identical `i < 1n`
+            // rejected it. Refusing is the fix -- evaluating a general condition
+            // per iteration is a language extension. The message is the other
+            // six tiers' sentence, word for word.
+            if (!f.cond_tests_iter) {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "For loop condition must compare the loop variable '{s}' to a " ++
+                            "compile-time constant (`{s} < 10n`). The unrolled loop binds the " ++
+                            "iterator as `start + k*step` and takes its trip count from the " ++
+                            "bound alone, so a condition whose left-hand side is anything else " ++
+                            "-- a computed expression, or a different variable -- is not the " ++
+                            "condition the loop actually evaluates",
+                        .{ f.var_name, f.var_name },
+                    ),
+                    .severity = .@"error",
+                    .location = f.source_loc,
+                });
+            }
+            // W4 (found by the new N42 fixture, not by inspection): the
+            // comparison DIRECTION must agree with the update. The other six
+            // tiers refuse a mismatch inside loop-shape extraction --
+            // "For loop counting up (i++) must use '<' or '<='" -- but this
+            // tier resolves the shape in the PARSER, where `descending` comes
+            // from the operator and the step sign comes from the update, and
+            // nothing ever compared them. Measured on
+            // conformance/negatives/N42-loop-direction-mismatch.runar.ts:
+            //
+            //   ts/go/rust/python/ruby/java   refuse
+            //   zig                           exit 0, script `007c9c`
+            //                                 (OP_0 OP_SWAP OP_NUMEQUAL)
+            //
+            // i.e. the loop body and every assertion in it were dropped from
+            // the locking script with no diagnostic -- the same silent
+            // zero-iteration collapse the Move countdown fold was fixed for.
+            // The message is the other six tiers' sentence, word for word.
+            if (loopUpdateAscends(f)) |ascends| {
+                if (ascends and f.descending) {
+                    try errors.append(allocator, .{
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "For loop counting up (i++) must use '<' or '<=' (got '{s}').",
+                            .{if (f.inclusive) ">=" else ">"},
+                        ),
+                        .severity = .@"error",
+                        .location = f.source_loc,
+                    });
+                } else if (!ascends and !f.descending) {
+                    try errors.append(allocator, .{
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "For loop counting down (i--) must use '>' or '>=' (got '{s}').",
+                            .{if (f.inclusive) "<=" else "<"},
+                        ),
+                        .severity = .@"error",
+                        .location = f.source_loc,
+                    });
+                }
             }
             // N-061 / R-065: reject any update clause the unrolled loop model
             // cannot represent. `null` means the surface syntax carries no

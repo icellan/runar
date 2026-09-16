@@ -1110,6 +1110,10 @@ const Parser = struct {
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // It used to be thrown away, so `i + 1n < 2n` unrolled twice for a loop
+        // the source runs once. Rejected by passes/validate.zig.
+        var cond_tests_iter: bool = true;
 
         // Init: `Type name = expr;` or plain expression
         if (self.current.kind == .ident) {
@@ -1168,12 +1172,16 @@ const Parser = struct {
                         descending = bop.op == .gt or bop.op == .gte;
                         // Issue #121: record inclusivity (`<=`/`>=`).
                         inclusive = bop.op == .lte or bop.op == .gte;
+                        cond_tests_iter = switch (bop.left) {
+                            .identifier => |n| std.mem.eql(u8, n, var_name),
+                            else => false,
+                        };
                         switch (bop.right) {
                             .literal_int => |v| bound = v,
                             else => {},
                         }
                     },
-                    else => {},
+                    else => cond_tests_iter = false,
                 }
             }
         }
@@ -1238,7 +1246,7 @@ const Parser = struct {
         _ = self.expect(.rparen);
 
         const body = self.parseStmtOrBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .update = update, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

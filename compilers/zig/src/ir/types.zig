@@ -333,7 +333,17 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// R-065 rule must refuse the first and accept the second — which it could not
 /// do while the AST conflated them. Only the C-style parsers set it; every
 /// other parser gets the `false` default and is unaffected.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
+/// W4: `cond_tests_iter` records whether the source condition's LEFT-hand side
+/// was the iterator itself. This tier collapses the condition to `bound` +
+/// `descending` + `inclusive` and threw the left-hand side away, exactly as the
+/// other six tiers' `extractLoopShape` ignores it — so `for (let i = 0n;
+/// i + 1n < 2n; i++)` unrolled TWICE (count = 2 - 0) for a source loop that
+/// runs ONCE, executing an `else` arm the source can never reach. Only the
+/// C-style header parsers (TS/Sol/Go/Java) can express a condition that tests
+/// anything but the iterator; the range-based surfaces (`for i in 0..N`,
+/// `range(N)`, `while (c) : (i += 1)`) test it by construction and keep the
+/// `true` default.
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {
