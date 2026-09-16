@@ -951,3 +951,37 @@ fn ec_coordinates_carry_their_full_width() {
     // each row above only pins one direction against the script.
     assert_eq!(ec_make_point(x, y), p, "ec_make_point did not rebuild 5G from its own coordinates");
 }
+
+// ---------------------------------------------------------------------------
+// The interpreter's own limit, pinned rather than assumed
+// ---------------------------------------------------------------------------
+
+/// `UNRUNNABLE` above rests on a claim about `bsv-sdk`: that it refuses OP_2MUL
+/// unconditionally. That claim is the reason three EC rows are excused, so it
+/// has to be CHECKED rather than asserted in a comment — otherwise the excuse
+/// outlives the limitation and three rows stay silently uncovered.
+///
+/// It also scopes the Rust tier's `ScriptVm` far more widely than the EC rows
+/// suggest: `compilers/rust/src/codegen/{ec,p256_p384,bn254,koalabear}.rs` all
+/// emit OP_2MUL, so `ScriptVm::execute` cannot run ANY contract using those
+/// families and reports `success: false` for a script the network would accept.
+#[test]
+fn the_interpreter_refuses_op_2mul_which_is_why_three_ec_rows_are_excused() {
+    // OP_1 OP_2MUL OP_1 — would leave a truthy clean stack if OP_2MUL ran.
+    let lock = vec![0x51u8, 0x8d, 0x51];
+    let res = ScriptVm::new(VmOptions::default()).execute(&[], &lock);
+    assert!(!res.success);
+    assert_eq!(
+        res.error.as_deref(),
+        Some("DisabledOpcode(\"OP_2MUL\")"),
+        "bsv-sdk no longer refuses OP_2MUL. The UNRUNNABLE list above exists only \
+         because it did: re-run those three EC rows, and if they now execute, take \
+         them off the list — an excuse that outlives its reason is how coverage \
+         quietly disappears."
+    );
+
+    // And the control: a script the interpreter WILL run, so the assertion above
+    // is about OP_2MUL and not about `execute` refusing everything.
+    let ok = ScriptVm::new(VmOptions::default()).execute(&[], &[0x51u8]);
+    assert!(ok.success, "the interpreter rejected OP_1; nothing here proves anything");
+}
