@@ -222,7 +222,7 @@ assert!(x >= self.threshold);
 
 | Rust type | Rúnar type |
 |-----------|-----------|
-| `Bigint` / `Int` / `i64` / `u64` / `i128` / `u128` | `bigint` |
+| `Bigint` / `Int` / `i64` / `u64` / `i128` / `u128` / `BigintBig` | `bigint` |
 | `bool` / `Bool` | `boolean` |
 | `ByteString` | `ByteString` |
 | `PubKey` | `PubKey` |
@@ -235,7 +235,48 @@ assert!(x >= self.threshold);
 | `RabinPubKey` | `RabinPubKey` |
 | `Point` | `Point` |
 
-All byte types are `Vec<u8>` aliases. Integer types are `i64` aliases.
+### Integer width
+
+`Bigint` is `i64` in `packages/runar-rs`. A Bitcoin Script number is an
+arbitrary-width byte string and Rúnar's `bigint` is arbitrary precision by
+specification, so the alias is deliberately narrower than the type it stands
+for: the values contracts declare `Bigint` are satoshi counts, loop indices and
+board cells, and `num_bigint::BigInt` is not `Copy`, so making all of them wide
+would stop `self.count + 1` compiling on a borrowed field for no gain.
+
+Nothing narrows silently as a result. `bin2num` and `num2bin` **panic** rather
+than return a truncated answer, and name the wide peer to use instead:
+
+- `bin2num` of a push carrying a value past `i64` panics. It used to return the
+  low 64 bits, so `bin2num` of `123456789012345678901234567890` in sixteen
+  bytes came back as `-4362896299872285998` while `OP_BIN2NUM` left the whole
+  value on the stack. The boundary is the VALUE, not the push width — a
+  sixteen-byte push of `1000` is `1000` and decodes fine.
+- `num2bin` into a width too small for the value panics. `OP_NUM2BIN` has no
+  wrap-around; it FAILS on a size too small for the number. Note that the sign
+  needs a bit of its own, so `255` needs two bytes, and `i64::MIN` needs NINE:
+  in eight, the sign bit and the top magnitude bit are the same bit and the
+  push decodes as `0`.
+
+For values past 2^63, type the field, parameter or binding `BigintBig`
+(`num_bigint::BigInt`) and use `bin2num_big` / `num2bin_big`. **Every one of
+those spellings lowers to the same `bigint` primitive and the same builtins, so
+the emitted Script is byte-identical either way** — `conformance/subtype-parity/
+RustBigintBigSpellings.runar.rs` and its `.runar.ts` reference peer gate exactly
+that, per tier.
+
+Unlike the Go tier, the arithmetic needs no helper functions:
+`num_bigint::BigInt` implements `Add`/`Sub`/`Mul`/`PartialEq`/`PartialOrd`, so
+`a + b` and `a == b` are written as operators and mean what they say. Go needs
+`runar.BigintBigEqual` because `==` on a `*big.Int` silently compares pointers;
+Rust has no such hazard.
+
+A secp256k1 coordinate is 256 bits, so `ec_point_x`, `ec_point_y` and
+`ec_make_point` take and return `BigintBig`. They used to use `i64` and keep the
+low eight bytes of a coordinate, which is wrong for every real curve point.
+
+All byte types are `Vec<u8>` aliases. `Bigint` and `Int` are `i64` aliases;
+`BigintBig` is `num_bigint::BigInt`.
 
 ---
 
@@ -294,8 +335,8 @@ Built-in functions use snake_case and take references for byte-type arguments:
 | `left(&data, n)` | `left(data, n)` |
 | `right(&data, n)` | `right(data, n)` |
 | `reverse_bytes(&data)` | `reverseBytes(data)` |
-| `num2bin(&n, size)` | `num2bin(n, size)` |
-| `bin2num(&data)` / `bin_2_num(&data)` | `bin2num(data)` |
+| `num2bin(&n, size)` / `num2bin_big(&n, size)` | `num2bin(n, size)` |
+| `bin2num(&data)` / `bin_2_num(&data)` / `bin2num_big(&data)` | `bin2num(data)` |
 | `int2str(n, radix)` / `int_2_str(n, radix)` | `int2str(n, radix)` |
 | `to_byte_string(&data)` | `toByteString(data)` |
 

@@ -255,7 +255,7 @@ impl P2PKH {
 }
 ```
 
-The `prelude` exports every type alias (`Bigint`, `Sig`, `PubKey`, `Addr`,
+The `prelude` exports every type alias (`Bigint`, `BigintBig`, `Sig`, `PubKey`, `Addr`,
 `Ripemd160`, `Sha256`, `Sha256Digest`, `Point`, `ByteString`,
 `SigHashPreimage`, `RabinSig`, `RabinPubKey`), every real-crypto verification
 helper (`check_sig`, `check_multi_sig`, `check_preimage`, `verify_rabin_sig`,
@@ -1243,7 +1243,7 @@ Source: [`src/lib.rs`](src/lib.rs).
 ### `runar::prelude` — contract-author surface
 
 Re-exports the proc macros (`contract`, `methods`, `public`,
-`stateful_contract`), every type alias (`Int`, `Bigint`, `PubKey`, `Sig`,
+`stateful_contract`), every type alias (`Int`, `Bigint`, `BigintBig`, `PubKey`, `Sig`,
 `Addr`, `ByteString`, `Sha256`, `Sha256Digest`, `Ripemd160`,
 `SigHashPreimage`, `RabinSig`, `RabinPubKey`, `Point`), every real-crypto
 helper (`check_sig`, `check_multi_sig`, `check_preimage`,
