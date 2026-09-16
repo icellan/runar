@@ -219,7 +219,7 @@ runar analyze 76a914...88ac --json
 
 ### `runar decompile`
 
-Recover Rúnar TypeScript source from a Bitcoin Script byte stream. See `docs/decompiler.md` for the recovery strategy and its limits.
+Recover Rúnar TypeScript source from a Bitcoin Script byte stream. See `packages/decompiler/README.md` for the recovery strategy and its limits.
 
 ```bash
 runar decompile <input> [options]

@@ -362,8 +362,9 @@ fixture regeneration (the `evm-guest/proof.postcard` is pinned at
 locking-script-size measurements above are valid without regen because
 the verifier code path is parameter-determined; only the unlocking
 script (which carries per-query openings) depends on the fixture. A
-follow-up sibling regen target — `tests/vectors/sp1/fri/evm-guest-q64/`
-and `evm-guest-q16/` — is filed if the BSVM team needs end-to-end
+follow-up pair of sibling regen targets alongside the existing
+`tests/vectors/sp1/fri/evm-guest/` — evm-guest-q64 and evm-guest-q16,
+neither of which exists yet — is filed if the BSVM team needs end-to-end
 validation at the fallback tuples; the `regen/src/main.rs` would gain
 a `NUM_QUERIES` const + CLI flag and the existing `make_two_adic_config`
 already parameterises on it.

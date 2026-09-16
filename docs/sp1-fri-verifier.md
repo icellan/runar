@@ -286,7 +286,7 @@ From BSVM handoff §2.1:
 Measurement methodology (Phase 2, `docs/fri-verifier-measurements.md`):
 deploy to BSV regtest, execute a real SP1 v6.0.2 proof from the
 `evm-guest/` fixture, capture `ls -l` on the compiled script,
-`max_stack_depth` from `integration/go/regtest/` instrumentation,
+`max_stack_depth` from the regtest instrumentation in `integration/go/`,
 and wall-clock on a blocks-per-second mining loop.
 
 ## 5. Fallback order (execute in sequence if targets are missed by >3×)
@@ -529,9 +529,12 @@ whitepaper's trust-model language (per handoff §3 step 3).
   off-chain native intrinsic still mocked, mainnet broadcast deferred).
 
 Fixture generation:
-- `tests/vectors/sp1/fri/minimal-guest/proof.bin` + `vk.bin` +
-  `public_values.hex` + `vk_hash.hex`. Regen via the Plonky3
-  `fib_air.rs` test ported to KoalaBear — see subdirectory README.
+- `tests/vectors/sp1/fri/minimal-guest/proof.postcard` +
+  `public_values.hex` (the verifying key travels inside the postcard
+  blob; there is no separate `vk.bin` or `vk_hash.hex`). Regen via the
+  Plonky3 `fib_air.rs` test ported to KoalaBear — see
+  `tests/vectors/sp1/fri/minimal-guest/README.md` and its `regen/`
+  directory.
 - `tests/vectors/sp1/fri/evm-guest/` real SP1 EVM-guest proof. Regen
   via SP1 SDK v6.0.2 toolchain — see subdirectory README.
 - `tests/vectors/sp1/fri/corruptions/*` produced programmatically

@@ -174,8 +174,8 @@ Every existing compiler must learn to parse `.runar.java`. Per the CLAUDE.md che
 | Go | `compilers/go/frontend/parser_java.go` | `frontend.ParseSource()` |
 | Rust | `compilers/rust/src/frontend/parser_java.rs` | `parser::parse_source()` |
 | Python | `compilers/python/runar_compiler/frontend/parser_java.py` | `parser_dispatch.py` |
-| Zig | `compilers/zig/src/frontend/parser_java.zig` | `parseSource()` |
-| Ruby | `compilers/ruby/lib/frontend/parser_java.rb` | `parse_source()` |
+| Zig | `compilers/zig/src/passes/parse_java.zig` | `parseSource()` |
+| Ruby | `compilers/ruby/lib/runar_compiler/frontend/parser_java.rb` | `parse_source()` |
 
 These are hand-written recursive-descent parsers in each language (no javac available outside Java). Each only needs to handle the Rúnar subset of Java syntax — class declaration, annotated fields, annotated methods, `super(...)` calls, expressions drawn from the Rúnar surface. Consistent shape with existing `parser_go.py`, `parser_rust.py`, `parser_ruby.py`, etc.
 
