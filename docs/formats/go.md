@@ -317,13 +317,33 @@ and emitted no bytes; use the value directly, or `runar.ToByteString(...)` if yo
 need an explicit widening. `runar.Sha256Hash(...)` is an unambiguous alias for
 the SHA-256 call if you prefer to avoid the overloaded spelling entirely.
 
-EC constants are available as package-level variables:
+### EC constants are NOT reachable from this surface (measured)
 
-| Go constant | Rúnar constant |
-|------------|---------------|
-| `runar.EC_P` | `EC_P` |
-| `runar.EC_N` | `EC_N` |
-| `runar.EC_G` | `EC_G` |
+| Go constant | Rúnar constant | Status |
+|------------|---------------|--------|
+| `runar.EC_P` | `EC_P` | **not available** |
+| `runar.EC_N` | `EC_N` | **not available** |
+| `runar.EC_G` | `EC_G` | **not available** |
+
+This table used to say the three were "available as package-level variables".
+They are not, in either half of what a `.runar.go` file has to be:
+
+- **As Go.** `packages/runar-go` does not export `EC_P`, `EC_N` or `EC_G`. The
+  values exist as the unexported `ecP` / `ecN` / `ecGX` in `ec.go`, so
+  `runar.EC_P` does not compile.
+- **As Rúnar.** No tier compiles it, and they fail in two different ways. The
+  go, ts, rust, zig and ruby Go-surface parsers have no entry for the name, so
+  the default leading-character rule turns it into `eC_P` and the type checker
+  answers `Undefined variable 'eC_P'`. The python and java parsers DO map it to
+  `EC_P`, get past the type checker, and then fail in stack lowering with
+  `method parameter 'EC_P' is not on the stack` — a message about a parameter
+  that does not exist.
+
+The constants are real in the TypeScript surface
+(`packages/runar-lang/src/ec.ts` exports all three). Reaching them from
+`.runar.go` needs an SDK export plus a parser entry in all seven tiers, which is
+not done. Until then, write the value as a literal in a format that can hold one
+— see "Integers wider than int64" above for why `.runar.go` cannot.
 
 ---
 
