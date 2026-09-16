@@ -13,7 +13,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// RATCHET — exactly SEVEN .runar.go ports are excluded from the Go build, and
+// RATCHET — exactly FIVE .runar.go ports are excluded from the Go build, and
 // every one of them carries a written reason.
 //
 // WHY. A `.runar.go` contract is meant to be valid Go as well as valid Rúnar:
@@ -33,7 +33,7 @@ import (
 //
 // WHY A SET AND NOT A COUNT. `len(excluded) <= 8` is a guard that stops being
 // read: a bound that only has to be "not worse" absorbs the next exclusion
-// without argument. This asserts the SET with reflect.DeepEqual, so a tenth
+// without argument. This asserts the SET with reflect.DeepEqual, so a SIXTH
 // exclusion fails here and has to justify itself in the same commit -- the way
 // STALE_PIN_BUDGET === 0 forces a justification for a stale golden pin.
 // Removing an exclusion fails here too, which is correct: it should be
@@ -56,11 +56,6 @@ import (
 //	Go's unused-local rule vs a deliberately unused binding
 //	  all-readonly-cleanstack
 //
-//	`Ripemd160` is both a Rúnar type name and a Rúnar builtin name, and Go
-//	cannot bind one identifier to both; the SDK binds the function because the
-//	type spelling fails open
-//	  byte-builtins, state-ripemd160
-//
 //	a Rúnar bigint LITERAL wider than int64 has no Go spelling. Go constants
 //	are exact and must fit the type they land in, `runar.BigintBig` is
 //	*big.Int and no constant converts to a pointer, and the arithmetic these
@@ -76,12 +71,10 @@ import (
 //	  multisig-2of3
 var excludedPorts = []string{
 	"all-readonly-cleanstack/AllReadonlyCleanstack.runar.go",
-	"byte-builtins/ByteBuiltins.runar.go",
 	"go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.go",
 	"integer-boundary/IntegerBoundary.runar.go",
 	"multisig-2of3/MultiSig2of3.runar.go",
 	"schnorr-zkp/SchnorrZKP.runar.go",
-	"state-ripemd160/HashRegistry.runar.go",
 }
 
 // reasonMarker is the header every excluded file must carry. Requiring a fixed
@@ -161,7 +154,7 @@ func scanExclusions(t *testing.T, root string) []string {
 	return out
 }
 
-func TestExcludedPorts_AreExactlyTheJustifiedSeven(t *testing.T) {
+func TestExcludedPorts_AreExactlyTheJustifiedFive(t *testing.T) {
 	got := scanExclusions(t, examplesRoot(t))
 	want := append([]string(nil), excludedPorts...)
 	sort.Strings(want)
@@ -240,7 +233,7 @@ func TestEveryExclusion_CarriesAReason(t *testing.T) {
 //
 // The set assertion above is only as good as scanExclusions. A scanner that
 // returned the hard-coded list, or that matched the tag anywhere in the file,
-// would make TestExcludedPorts_AreExactlyTheJustifiedSeven pass while telling
+// would make TestExcludedPorts_AreExactlyTheJustifiedFive pass while telling
 // nobody anything. This runs it over a synthetic tree whose answer is known,
 // and includes the two cases that have actually gone wrong here: a file that
 // only MENTIONS the tag in prose, and a constraint that is not in the leading
@@ -285,7 +278,7 @@ func TestScanner_FindsTagsAndNothingElse(t *testing.T) {
 // TestUnexcludedPortsWereFixedNotDeleted keeps "the set shrank" honest.
 //
 // Every assertion above is satisfied by DELETING a port instead of fixing it.
-// These three were un-excluded by a real fix, and each is checked for the
+// Each port below was un-excluded by a real fix, and each is checked for the
 // construct that used to block it -- so a future cleanup that removes the
 // contract, or quietly reverts the fix, fails here instead of looking like
 // progress.
@@ -311,6 +304,33 @@ func TestUnexcludedPortsWereFixedNotDeleted(t *testing.T) {
 			why: "ec-primitives is where un-excluding independently rediscovered " +
 				"the recorded EcPointX/EcPointY int64 truncation. Losing the " +
 				"port loses that demonstration.",
+		},
+		{
+			rel:      "state-ripemd160/HashRegistry.runar.go",
+			contains: []string{"runar.Ripemd160Hash"},
+			why: "state-ripemd160 was excluded because `runar.Ripemd160` is the " +
+				"hash FUNCTION and no tier's .runar.go type table mapped " +
+				"`Ripemd160Hash`, the name packages/runar-go actually declares " +
+				"for the digest TYPE -- while all seven mapped its SHA-256 peer " +
+				"`Sha256Digest`. Reverting the field to the bare `runar.Ripemd160` " +
+				"spelling stops the file compiling as Go, which is half of what " +
+				"a .runar.go port is for.",
+		},
+		{
+			rel: "byte-builtins/ByteBuiltins.runar.go",
+			contains: []string{
+				"runar.Ripemd160Hash",
+				"runar.Sha256Digest",
+				"runar.Ripemd160(preimage)",
+				"runar.Sha256Hash(preimage)",
+			},
+			why: "byte-builtins is the fixture that needs BOTH halves of the " +
+				"Sha256/Ripemd160 name collision in one file: the digest TYPES " +
+				"in the property annotations and the hash FUNCTIONS in call " +
+				"position. That is only expressible now that Ripemd160Hash is " +
+				"mapped; losing either spelling loses the demonstration, and " +
+				"losing the call spellings loses the only executed coverage the " +
+				"Go mock has for Sha256Hash and Ripemd160.",
 		},
 	} {
 		t.Run(c.rel, func(t *testing.T) {

@@ -1119,11 +1119,19 @@ func Int2str(value int64, byteLen int64) ByteString {
 //     spending key; see
 //     conformance/go_surface_hash_spelling_execution_test.go.
 //
-// Fail loud over fail open. The digest TYPE is spelled Ripemd160Hash here.
-// The surface parser does not map that spelling (mapGoType has `Sha256Digest`
-// as an alias for Sha256 but no peer for Ripemd160), which is why
-// examples/go/state-ripemd160 and examples/go/byte-builtins stay out of the Go
-// build -- see the reasons written into those two files.
+// Fail loud over fail open. The digest TYPE is spelled Ripemd160Hash here, and
+// all seven `.runar.go` type tables now map that spelling onto the Ripemd160
+// primitive, exactly as they map `Sha256Digest` onto Sha256. They did not until
+// R-Ripemd160Hash: the surface accepted the bare name `Ripemd160` in type
+// position -- which this package does not declare as a type at all -- and
+// refused the one it does, which is what held examples/go/state-ripemd160 and
+// examples/go/byte-builtins out of the Go build. conformance/subtype-parity/
+// GoDigestTypeSpellings.runar.go is the gate that keeps the two spellings
+// resolving to the same primitive.
+//
+// Ripemd160Func is the same function under its original name; this is a
+// one-line delegation to it, not a second implementation, and
+// conformance/go_sdk_byte_builtins_execution_test.go asserts the two agree.
 func Ripemd160(data ByteString) Ripemd160Hash {
 	return Ripemd160Func(data)
 }
