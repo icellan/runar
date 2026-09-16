@@ -45,11 +45,12 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //
 // Stateful state deserialization is where the type is load-bearing: each
 // mutable property is read back at a width its TYPE decides
-// (spec/type-system.md §6, "Ripemd160 | 20 bytes pushed directly"). Measured on
-// this contract in the Go tier: `Ripemd160Hash` emits 1359 hex chars,
-// `Sha256Digest` 1359 DIFFERENT ones, `ByteString` 1615. So the two wrong
-// mappings a copy-paste would produce — the sibling digest, or the base type —
-// both diverge from the reference peer, and the removal case fails acceptance.
+// (spec/type-system.md §8, "Ripemd160 | 20 bytes pushed directly"). Measured on
+// THIS contract in the Go tier, varying only the `Ripemd160Hash` arm of
+// mapGoType: `Ripemd160` emits 2348 hex chars, `Sha256` 2348 DIFFERENT ones,
+// `ByteString` 2930. So the two wrong mappings a copy-paste would produce — the
+// sibling digest, or the base type — both diverge from the reference peer, and
+// the removal case fails acceptance outright.
 //
 // Both digest types appear as state AND as method parameters. The parameter
 // rows gate acceptance only, for the reason above; the state rows are what put
