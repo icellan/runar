@@ -1,17 +1,17 @@
 use runar::prelude::*;
 
 #[runar::contract]
-struct ECPrimitives {
+pub struct ECPrimitives {
     #[readonly]
-    pt: Point,
+    pub pt: Point,
 }
 
 impl ECPrimitives {
-    pub fn check_x(&self, expected_x: Bigint) {
+    pub fn check_x(&self, expected_x: BigintBig) {
         assert!(ec_point_x(&self.pt) == expected_x);
     }
 
-    pub fn check_y(&self, expected_y: Bigint) {
+    pub fn check_y(&self, expected_y: BigintBig) {
         assert!(ec_point_y(&self.pt) == expected_y);
     }
 
@@ -19,7 +19,7 @@ impl ECPrimitives {
         assert!(ec_on_curve(&self.pt));
     }
 
-    pub fn check_negate_y(&self, expected_neg_y: Bigint) {
+    pub fn check_negate_y(&self, expected_neg_y: BigintBig) {
         let negated = ec_negate(&self.pt);
         assert!(ec_point_y(&negated) == expected_neg_y);
     }
@@ -28,25 +28,25 @@ impl ECPrimitives {
         assert!(ec_mod_reduce(value, modulus) == expected);
     }
 
-    pub fn check_add(&self, other: &Point, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_add(&self, other: &Point, expected_x: BigintBig, expected_y: BigintBig) {
         let result = ec_add(&self.pt, other);
         assert!(ec_point_x(&result) == expected_x);
         assert!(ec_point_y(&result) == expected_y);
     }
 
-    pub fn check_mul(&self, scalar: Bigint, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_mul(&self, scalar: Bigint, expected_x: BigintBig, expected_y: BigintBig) {
         let result = ec_mul(&self.pt, scalar);
         assert!(ec_point_x(&result) == expected_x);
         assert!(ec_point_y(&result) == expected_y);
     }
 
-    pub fn check_mul_gen(&self, scalar: Bigint, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_mul_gen(&self, scalar: Bigint, expected_x: BigintBig, expected_y: BigintBig) {
         let result = ec_mul_gen(scalar);
         assert!(ec_point_x(&result) == expected_x);
         assert!(ec_point_y(&result) == expected_y);
     }
 
-    pub fn check_make_point(&self, x: Bigint, y: Bigint, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_make_point(&self, x: BigintBig, y: BigintBig, expected_x: BigintBig, expected_y: BigintBig) {
         let pt = ec_make_point(x, y);
         assert!(ec_point_x(&pt) == expected_x);
         assert!(ec_point_y(&pt) == expected_y);

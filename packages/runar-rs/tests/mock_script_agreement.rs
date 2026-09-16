@@ -898,11 +898,10 @@ fn ec_coordinates_carry_their_full_width() {
     let p = ec_mul_gen(5);
     let x = ec_point_x(&p);
     let y = ec_point_y(&p);
-    let truncation = "the accessor returns Bigint (= i64) and reads bytes [24..32] of a \
-        32-byte big-endian coordinate as an unsigned 64-bit number, then casts to i64. The \
-        emitted OP_SPLIT/OP_BIN2NUM pair leaves the whole coordinate. The doc comment says \
-        \"only meaningful for small test values\" — but no curve point has a small \
-        coordinate, so the accessor is wrong for every input it will ever see.";
+    assert!(
+        x.bits() > 64 && y.bits() > 64,
+        "5G's coordinates fit 64 bits, so these rows would not exercise width at all"
+    );
     reconcile_unrunnable(&run_group(
         "EC coordinates",
         vec![
@@ -912,10 +911,10 @@ fn ec_coordinates_carry_their_full_width() {
                 arg_tys: vec!["Point"],
                 args: vec![p.clone()],
                 ret_ty: "bigint",
-                want: num_i(x),
-                tamper: num_i(x.wrapping_add(1)),
+                want: num_b(&x),
+                tamper: num_b(&(&x + 1)),
                 call_extra: vec![],
-                known_divergent: truncation,
+                known_divergent: "",
             },
             AgreementCase {
                 builtin: "ecPointY",
@@ -923,42 +922,32 @@ fn ec_coordinates_carry_their_full_width() {
                 arg_tys: vec!["Point"],
                 args: vec![p.clone()],
                 ret_ty: "bigint",
-                want: num_i(y),
-                tamper: num_i(y.wrapping_add(1)),
+                want: num_b(&y),
+                tamper: num_b(&(&y + 1)),
                 call_extra: vec![],
-                known_divergent: truncation,
+                known_divergent: "",
             },
             // Rebuilding a real point from its own accessors. This is the
-            // identity `examples/rust/ec-unit` asserts in its contract and has
-            // never been able to run: the contract is excluded from native
-            // compilation, so `assert!(ec_on_curve(rebuilt))` has never
-            // executed off-chain in any form.
+            // identity `examples/rust/ec-unit` asserts in its contract and
+            // could not run: the contract was excluded from native compilation
+            // entirely, so `assert!(ec_on_curve(rebuilt))` had never executed
+            // off-chain in any form.
             AgreementCase {
                 builtin: "ecMakePoint",
                 mock: "ec_make_point (real coordinates)",
                 arg_tys: vec!["bigint", "bigint"],
-                args: vec![num_b(&ec_point_x_ref(&p)), num_b(&ec_point_y_ref(&p))],
+                args: vec![num_b(&x), num_b(&y)],
                 ret_ty: "Point",
-                tamper: tamper_bs(&ec_make_point(x, y)),
-                want: ec_make_point(x, y),
+                tamper: tamper_bs(&ec_make_point(x.clone(), y.clone())),
+                want: ec_make_point(x.clone(), y.clone()),
                 call_extra: vec![],
-                known_divergent: "ec_make_point takes two i64 parameters, so it cannot accept \
-                    a curve coordinate at all: it writes eight bytes into buf[24..32] and \
-                    buf[56..64] and leaves the other 48 zero. Feeding it the (truncated) \
-                    output of ec_point_x/ec_point_y returns a 64-byte blob that is not the \
-                    point it came from.",
+                known_divergent: "",
             },
         ],
     ));
-}
 
-/// The true x and y of a Point, decoded by the TEST rather than by the mock.
-///
-/// The accessors under test cannot return these, which is the finding; the
-/// rows above need the real values to push at the script.
-fn ec_point_x_ref(p: &[u8]) -> BigInt {
-    BigInt::from_bytes_be(Sign::Plus, &p[0..32])
-}
-fn ec_point_y_ref(p: &[u8]) -> BigInt {
-    BigInt::from_bytes_be(Sign::Plus, &p[32..64])
+    // The accessors must round-trip to the point they came from. Without this,
+    // ec_point_x and ec_make_point could both be wrong in compensating ways —
+    // each row above only pins one direction against the script.
+    assert_eq!(ec_make_point(x, y), p, "ec_make_point did not rebuild 5G from its own coordinates");
 }

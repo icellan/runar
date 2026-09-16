@@ -7,7 +7,7 @@ use k256::elliptic_curve::group::{Group, GroupEncoding};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 
-use crate::prelude::{Bigint, ByteString, Point};
+use crate::prelude::{Bigint, BigintBig, ByteString, Point};
 
 /// Parse a 64-byte Point (x[32] || y[32]) into a ProjectivePoint.
 fn point_to_projective(p: &[u8]) -> ProjectivePoint {
@@ -108,32 +108,55 @@ pub fn ec_encode_compressed(p: &[u8]) -> ByteString {
 }
 
 /// Construct a Point from two coordinate integers.
-pub fn ec_make_point(x: Bigint, y: Bigint) -> Point {
+///
+/// The coordinates are [`BigintBig`] and not [`Bigint`] because a secp256k1
+/// coordinate is 256 bits: an `i64` parameter cannot accept one, so the only
+/// points this could build were ones no curve contains. It wrote eight bytes
+/// into `buf[24..32]` and `buf[56..64]` and left the other 48 zero.
+///
+/// Contract source spells the type `BigintBig`, which every `.runar.rs` parser
+/// maps to the same `bigint` primitive as `Bigint` — the emitted Script is
+/// unchanged. See [`ec_point_x`] for the other half of the round-trip.
+pub fn ec_make_point(x: BigintBig, y: BigintBig) -> Point {
+    assert!(
+        x.sign() != num_bigint::Sign::Minus && y.sign() != num_bigint::Sign::Minus,
+        "runar: ec_make_point needs unsigned coordinates, got ({x}, {y}) —          a Point is x[32]||y[32] big-endian unsigned"
+    );
+    assert!(
+        x.bits() <= 256 && y.bits() <= 256,
+        "runar: ec_make_point coordinate wider than 32 bytes (x {} bits, y {} bits) —          it would not fit the Point encoding the script builds",
+        x.bits(),
+        y.bits()
+    );
     let mut buf = vec![0u8; 64];
-    let xb = (x as u64).to_be_bytes();
-    let yb = (y as u64).to_be_bytes();
-    buf[24..32].copy_from_slice(&xb);
-    buf[56..64].copy_from_slice(&yb);
+    for (dst, src) in [(0usize, &x), (32usize, &y)] {
+        let (_, mag) = src.clone().into_parts();
+        let be = mag.to_bytes_be();
+        // Right-align the big-endian magnitude in its 32-byte field.
+        let start = dst + 32 - be.len();
+        buf[start..dst + 32].copy_from_slice(&be);
+    }
     buf
 }
 
-/// Extract the x-coordinate from a Point as an i64.
-/// Note: only meaningful for small test values; real coordinates are 256-bit.
-pub fn ec_point_x(p: &[u8]) -> Bigint {
+/// Extract the x-coordinate from a Point.
+///
+/// Returns [`BigintBig`]. It used to return [`Bigint`] (= `i64`) and reach it
+/// by reading bytes `[24..32]` of the 32-byte big-endian coordinate as an
+/// unsigned 64-bit number and casting: `ec_point_x(5G)` came back as a negative
+/// `i64` while the compiled `OP_SPLIT`/`OP_BIN2NUM` pair left the whole 32-byte
+/// coordinate on the stack. The doc comment said "only meaningful for small
+/// test values" — no curve point has a small coordinate, so the accessor was
+/// wrong for every input it would ever see.
+pub fn ec_point_x(p: &[u8]) -> BigintBig {
     assert_eq!(p.len(), 64, "Point must be exactly 64 bytes");
-    // Return as i64 — will only work for small coordinates
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&p[24..32]);
-    u64::from_be_bytes(bytes) as i64
+    BigintBig::from_bytes_be(num_bigint::Sign::Plus, &p[0..32])
 }
 
-/// Extract the y-coordinate from a Point as an i64.
-/// Note: only meaningful for small test values; real coordinates are 256-bit.
-pub fn ec_point_y(p: &[u8]) -> Bigint {
+/// Extract the y-coordinate from a Point. See [`ec_point_x`].
+pub fn ec_point_y(p: &[u8]) -> BigintBig {
     assert_eq!(p.len(), 64, "Point must be exactly 64 bytes");
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&p[56..64]);
-    u64::from_be_bytes(bytes) as i64
+    BigintBig::from_bytes_be(num_bigint::Sign::Plus, &p[32..64])
 }
 
 // ---------------------------------------------------------------------------
@@ -210,12 +233,32 @@ mod tests {
 
     #[test]
     fn ec_make_point_round_trip() {
-        let x: Bigint = 12345;
-        let y: Bigint = 67890;
-        let p = ec_make_point(x, y);
+        let x = BigintBig::from(12345);
+        let y = BigintBig::from(67890);
+        let p = ec_make_point(x.clone(), y.clone());
         assert_eq!(p.len(), 64);
         assert_eq!(ec_point_x(&p), x);
         assert_eq!(ec_point_y(&p), y);
+    }
+
+    /// The round trip at the width it is actually used at.
+    ///
+    /// The test above passes 12345 and 67890, which is how a constructor that
+    /// could only take `i64` coordinates looked correct: no curve point has an
+    /// 8-byte coordinate, so nothing it covered was a point. This rebuilds a
+    /// REAL point from its own accessors and requires the result to be the
+    /// point it came from — the identity `examples/rust/ec-unit` asserts in its
+    /// contract and could not run.
+    #[test]
+    fn ec_make_point_round_trips_a_real_curve_point() {
+        let p = ec_mul_gen(5);
+        let x = ec_point_x(&p);
+        let y = ec_point_y(&p);
+        assert!(x.bits() > 64, "5G's x-coordinate fits 64 bits; it is not a curve point");
+        assert!(y.bits() > 64, "5G's y-coordinate fits 64 bits; it is not a curve point");
+        let rebuilt = ec_make_point(x, y);
+        assert_eq!(rebuilt, p);
+        assert!(ec_on_curve(&rebuilt));
     }
 
     #[test]
