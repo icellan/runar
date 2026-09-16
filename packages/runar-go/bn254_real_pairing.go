@@ -79,8 +79,14 @@ func Bn254G1NegateBigP(p Point) Point { return Bn254G1NegateP(p) }
 func Bn254G1OnCurveBigP(p Point) bool { return Bn254G1OnCurveP(p) }
 
 // Bn254FieldNegBigP returns (p - a) mod p with a full 254-bit input and
-// output. Unlike the int64 Bn254FieldNegP which silently truncates, this
-// variant preserves arbitrary-precision coordinates.
+// output. Bn254FieldNegP takes and returns int64 and so cannot express a
+// result in the 254-bit base field: it PANICS there and names this function,
+// which is the one that preserves arbitrary-precision coordinates.
+//
+// This comment used to say Bn254FieldNegP "silently truncates". It did, until
+// 4135390d stopped it. Note the contrast with Bn254G1ScalarMulBigP below, where
+// "truncates k to int64" is still accurate — there the narrowing happens at the
+// call site, in the parameter type, not in the body.
 func Bn254FieldNegBigP(a BigintBig) BigintBig {
 	if a == nil {
 		return big.NewInt(0)
