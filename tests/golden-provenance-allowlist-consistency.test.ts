@@ -25,6 +25,13 @@
  * is the shape `MAX_UNEXECUTED_GOLDENS` uses in conformance/witnesses, chosen
  * over `<=` for the same reason: a bound that only ever has to be "not worse"
  * stops being read.
+ *
+ * The budget is now ZERO, which makes this an invariant rather than a ratchet:
+ * there is no debt left to amortise, so the next commit that moves a pinned
+ * golden without re-pinning it fails HERE, at that commit, attributed to the
+ * change that caused it. That is the whole point. The failure used to surface
+ * later, as a provenance-gate rejection on an unrelated PR, with no way to
+ * recover which change had actually moved the file.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -43,13 +50,25 @@ const ALLOWLIST = join(ROOT, 'conformance', 'golden-provenance-allowlist.json');
  * not match its file means either the file moved without review, or the entry
  * describes bytes that no longer exist.
  */
-// R-120 repaired two of these as a side effect of moving their bytes:
-// conformance/tests/state-covenant/expected-script.hex and
-// conformance/sdk-output/tests/state-covenant/expected-locking.hex were
-// already stale at HEAD, and the Merkle index-domain gate moved them again,
-// so both entries were re-pinned to the bytes they now describe (and each
-// gained an appended section rather than a rewritten reason). 68 -> 66.
-const STALE_PIN_BUDGET = 66;
+// 68 -> 66 -> 67 -> 0.
+//
+// R-120 repaired two as a side effect of moving their bytes (state-covenant's
+// expected-script.hex and expected-locking.hex were already stale at HEAD, and
+// the Merkle index-domain gate moved them again). The coverage-gap work then
+// ADDED one back by re-stamping conformance/script-size-baseline.json without
+// re-pinning it, which is exactly the recurrence this guard exists to catch,
+// and it caught it.
+//
+// The remaining 67 were then repaired together. Every one traced to a named
+// commit on this branch: 60 to R-010 (_codePart authentication), 25 to N-043
+// (SIZE(_codePart)), 12 to the six EC correctness fixes, 11 to R-187 and its
+// revert -- whose net golden delta was verified to be zero, so those entries
+// were stale only because other movers also touched the same files -- and the
+// rest to the short-circuit, pow and sqrt fixes. No mystery drift, and nothing
+// that reached the tree unreviewed. Each entry kept its original reason and
+// gained an appended section naming its movers, so the record the gate had
+// lost -- which change moved this file -- is recoverable from the entry itself.
+const STALE_PIN_BUDGET = 0;
 
 interface Entry {
   path?: string;
