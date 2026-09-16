@@ -292,6 +292,10 @@ const FAMILIES = [
   { file: 'GoOnlyKoalaBear.runar.ts', family: 'KoalaBear', builtin: 'kbFieldMul' },
   { file: 'GoOnlyBn254.runar.ts', family: 'BN254', builtin: 'bn254FieldMul' },
   { file: 'GoOnlyMerkle.runar.ts', family: 'Merkle', builtin: 'merkleRootSha256' },
+  // R-141 added this one: the field probe above never touched the G1 POINT
+  // surface, so the coordinate-canonicity and OP_SIZE-64 gates on
+  // bn254G1OnCurve / bn254G1Negate had no cross-tier gate at all.
+  { file: 'GoOnlyBn254G1.runar.ts', family: 'BN254 G1', builtin: 'bn254G1OnCurve' },
 ] as const;
 
 const available = TIERS.filter((t) => t.cmd !== null);

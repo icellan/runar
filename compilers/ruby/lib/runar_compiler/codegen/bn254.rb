@@ -597,8 +597,14 @@ module RunarCompiler
       # @param y_name [String]
       def self.bn254_decompose_point(t, point_name, x_name, y_name)
         t.to_top(point_name)
-        # OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+        # R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+        # Point inherits the check -- the same placement CL-BUG-095 chose for
+        # ec.rb's decompose. Without it OP_SPLIT at 32 discards whatever follows
+        # byte 64, so bn254G1OnCurve(G || 0xff) returned TRUE. ABORTING form:
+        # emit_bn254_g1_on_curve must stay TOTAL, so it clamps and flags the
+        # length BEFORE calling this.
         split_fn = ->(e) {
+          EC.emit_point_len_verify(e, 64)
           e.call(make_stack_op(op: "push", value: big_int_push(32)))
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         }
@@ -1115,6 +1121,10 @@ module RunarCompiler
       # @param result_name [String]
       def self.bn254_g1_negate(t, point_name, result_name)
         bn254_decompose_point(t, point_name, "_nx", "_ny")
+        # R-141: bn254_compose_point below is documented as requiring [0, p-1]
+        # and does not check, so without this the negation of a non-canonical
+        # point re-emitted its x half verbatim.
+        bn254_emit_coord_canon_verify(t, "_nx", "_ny")
         # Use bn254_field_neg which already handles prime caching
         bn254_field_neg(t, "_ny", "_neg_y")
         bn254_compose_point(t, "_nx", "_neg_y", result_name)
@@ -1184,6 +1194,64 @@ module RunarCompiler
         t.pop_prime_cache
       end
 
+      # R-141, CLAMPING form -- the BN254 twin of ec.rb's point length gate.
+      # Leaves [flag, clamped] on the tracker. Used by emit_bn254_g1_on_curve,
+      # whose job is to answer "is this an acceptable point?" over untrusted
+      # bytes: for a wrong-length blob the correct answer is FALSE, not an
+      # aborted script.
+      def self.bn254_emit_point_length_gate(t, name, want, flag_name)
+        t.to_top(name)
+        gate_fn = ->(e) {
+          e.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
+          e.call(make_stack_op(op: "push", value: big_int_push(want)))
+          e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL"))
+          e.call(make_stack_op(op: "swap"))
+          e.call(make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: ("\x00".b * want))))
+          e.call(make_stack_op(op: "opcode", code: "OP_CAT"))
+          e.call(make_stack_op(op: "push", value: big_int_push(want)))
+          e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
+          e.call(make_stack_op(op: "drop"))
+        }
+        t.raw_block([name], "", gate_fn)
+        t.nm.push(flag_name)
+        t.nm.push(name)
+      end
+
+      # R-141 -- a BN254 G1 Point's two coordinates must be FIELD ELEMENTS,
+      # aborting form. The direct analogue of ec.rb's R-117 gate, with the
+      # placement re-derived for this curve.
+      #
+      # bn254_decompose_point BIN2NUMs each half as an UNSIGNED integer, so any
+      # value fitting 32 bytes is accepted; p is ~2^253.6, so x + p < 2^256 for
+      # EVERY x < p -- unlike secp256k1, the alias exists for every point on the
+      # curve. Measured before this gate, with G = (1, 2):
+      # bn254G1OnCurve((1+p)||2), bn254G1OnCurve(1||(2+p)) and
+      # bn254G1OnCurve(G||0xff) all returned 1.
+      #
+      # The value builtins abort for a DIFFERENT reason than secp256k1's did:
+      # BN254's adder is not fooled into a wrong answer (bn254G1Add(G, (1+p)||2)
+      # returns the correct 2G, because the infinity flag reduces before it
+      # compares), but bn254_compose_point is documented as requiring [0, p-1]
+      # and not checking, and bn254_g1_negate handed it the raw decomposed x --
+      # a value builtin PRODUCING something that is not a point.
+      #
+      # Deliberately NOT folded into bn254_decompose_point: that helper also
+      # runs inside emit_bn254_g1_on_curve, which must return FALSE not abort.
+      def self.bn254_emit_coord_canon_verify(t, x_name, y_name)
+        lt_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) }
+        t.copy_to_top(x_name, "_cc_x")
+        bn254_push_field_p(t, "_cc_px")
+        t.raw_block(%w[_cc_x _cc_px], "_cc_xok", lt_fn)
+        t.copy_to_top(y_name, "_cc_y")
+        bn254_push_field_p(t, "_cc_py")
+        t.raw_block(%w[_cc_y _cc_py], "_cc_yok", lt_fn)
+        and_verify = ->(e) {
+          e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+          e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+        }
+        t.raw_block(%w[_cc_xok _cc_yok], "", and_verify)
+      end
+
       # Add two BN254 G1 points.
       # Stack in: [point_a, point_b] (b on top)
       # Stack out: [result_point]
@@ -1194,6 +1262,9 @@ module RunarCompiler
         t.push_prime_cache
         bn254_decompose_point(t, "_pa", "px", "py")
         bn254_decompose_point(t, "_pb", "qx", "qy")
+        # R-141: both points must be canonical before anything consumes them.
+        bn254_emit_coord_canon_verify(t, "px", "py")
+        bn254_emit_coord_canon_verify(t, "qx", "qy")
         # The flag must be computed BEFORE the add: bn254_g1_affine_add
         # consumes px/py/qx/qy.
         bn254_g1_infinity_flag(t)
@@ -1246,6 +1317,8 @@ module RunarCompiler
         t.push_prime_cache
         # Decompose to affine base point
         bn254_decompose_point(t, "_pt", "ax", "ay")
+        # R-141: the ladder's base point must be canonical.
+        bn254_emit_coord_canon_verify(t, "ax", "ay")
 
         # Reduce first: the +3r trick below is only sound for k in [0, r-1],
         # and the scalar is caller input.
@@ -1345,7 +1418,27 @@ module RunarCompiler
       def self.emit_bn254_g1_on_curve(emit)
         t = BN254Tracker.new(["_pt"], emit)
         t.push_prime_cache
+
+        # R-141: width. bn254G1OnCurve(G || 0xff) returned TRUE -- the OP_SPLIT
+        # at 32 inside the decomposer discarded the surplus byte. Clamp and
+        # remember the width rather than abort: this predicate must stay TOTAL.
+        bn254_emit_point_length_gate(t, "_pt", 64, "_len_ok")
+
         bn254_decompose_point(t, "_pt", "_x", "_y")
+
+        # R-141: coordinate canonicity. Reject x >= p or y >= p and AND the
+        # result in at the end, so the predicate still returns a boolean.
+        lt_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) }
+        booland_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) }
+        t.copy_to_top("_x", "_x_lt")
+        bn254_push_field_p(t, "_p_for_x")
+        t.raw_block(%w[_x_lt _p_for_x], "_x_canon", lt_fn)
+        t.copy_to_top("_y", "_y_lt")
+        bn254_push_field_p(t, "_p_for_y")
+        t.raw_block(%w[_y_lt _p_for_y], "_y_canon", lt_fn)
+        t.to_top("_x_canon")
+        t.to_top("_y_canon")
+        t.raw_block(%w[_x_canon _y_canon], "_canon", booland_fn)
 
         # lhs = y^2
         bn254_field_sqr(t, "_y", "_y2")
@@ -1361,7 +1454,15 @@ module RunarCompiler
         t.to_top("_y2")
         t.to_top("_rhs")
         eq_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) }
-        t.raw_block(%w[_y2 _rhs], "_result", eq_fn)
+        t.raw_block(%w[_y2 _rhs], "_curve_eq", eq_fn)
+
+        # on-curve = right width AND canonical AND curve-equation
+        t.to_top("_canon")
+        t.to_top("_curve_eq")
+        t.raw_block(%w[_canon _curve_eq], "_eq_ok", booland_fn)
+        t.to_top("_len_ok")
+        t.to_top("_eq_ok")
+        t.raw_block(%w[_len_ok _eq_ok], "_result", booland_fn)
         t.pop_prime_cache
       end
 

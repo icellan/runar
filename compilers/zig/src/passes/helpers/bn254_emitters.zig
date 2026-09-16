@@ -563,6 +563,15 @@ fn fieldInv(t: *BN254Tracker, a_name: []const u8, result_name: []const u8) !void
 fn decomposePoint(t: *BN254Tracker, point_name: []const u8, x_name: []const u8, y_name: []const u8) !void {
     try t.toTop(point_name);
     t.popNames(1);
+    // R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+    // Point inherits the check -- the same placement CL-BUG-095 chose for
+    // ec_emitters.zig. Without it OP_SPLIT at 32 discards whatever follows byte
+    // 64, so bn254G1OnCurve(G || 0xff) returned TRUE. ABORTING form:
+    // emitBN254G1OnCurve must stay TOTAL, so it clamps and flags the length
+    // BEFORE calling this.
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushInt(64);
+    try t.emitOpcode("OP_NUMEQUALVERIFY");
     // OP_SPLIT at 32: [point] -> [x_bytes, y_bytes]
     try t.emitPushInt(32);
     try t.emitOpcode("OP_SPLIT");
@@ -1061,6 +1070,10 @@ fn buildJacobianAddAffineInline(
 /// g1Negate negates a point: (x, p - y).
 fn g1Negate(t: *BN254Tracker, point_name: []const u8, result_name: []const u8) !void {
     try decomposePoint(t, point_name, "_nx", "_ny");
+    // R-141: composePoint below is documented as requiring [0, p-1] and does
+    // not check, so without this the negation of a non-canonical point
+    // re-emitted its x half verbatim.
+    try bn254EmitCoordCanonVerify(t, "_nx", "_ny");
     try fieldNeg(t, "_ny", "_neg_y");
     try composePoint(t, "_nx", "_neg_y", result_name);
 }
@@ -1099,10 +1112,74 @@ fn emitBN254FieldNeg(t: *BN254Tracker) !void {
     try t.popPrimeCache();
 }
 
+/// bn254EmitPointLengthGate -- R-141, CLAMPING form, the BN254 twin of the EC
+/// point length gate. Leaves [flag, clamped] on the tracker. Used by
+/// emitBN254G1OnCurve, whose job is to answer "is this an acceptable point?"
+/// over untrusted bytes: for a wrong-length blob the correct answer is FALSE,
+/// not an aborted script.
+fn bn254EmitPointLengthGate(t: *BN254Tracker, name: []const u8, want: i64, flag_name: []const u8) !void {
+    try t.toTop(name);
+    t.popNames(1);
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushInt(want);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.emitRaw(.{ .swap = {} });
+    try t.emitRaw(.{ .push = .{ .bytes = &[_]u8{0} ** 64 } });
+    try t.emitOpcode("OP_CAT");
+    try t.emitPushInt(want);
+    try t.emitOpcode("OP_SPLIT");
+    try t.emitRaw(.{ .drop = {} });
+    try t.names.append(t.allocator, flag_name);
+    try t.names.append(t.allocator, name);
+}
+
+/// bn254EmitCoordCanonVerify -- R-141: a BN254 G1 Point's two coordinates must
+/// be FIELD ELEMENTS, aborting form. The direct analogue of the R-117 EC gate,
+/// with the placement re-derived for this curve.
+///
+/// decomposePoint BIN2NUMs each half as an UNSIGNED integer, so any value that
+/// fits 32 bytes is accepted; p is ~2^253.6, so x + p < 2^256 for EVERY x < p
+/// -- unlike secp256k1, the alias exists for every point on the curve.
+/// Measured before this gate, with G = (1, 2):
+///
+/// ```text
+/// bn254G1OnCurve((1+p) || 2) -> 1
+/// bn254G1OnCurve(1 || (2+p)) -> 1
+/// bn254G1OnCurve(G || 0xff)  -> 1
+/// ```
+///
+/// The value builtins abort for a DIFFERENT reason than secp256k1's did:
+/// BN254's adder is not fooled into a wrong answer (bn254G1Add(G, (1+p)||2)
+/// returns the correct 2G, because g1InfinityFlag reduces before it compares),
+/// but composePoint is documented as requiring [0, p-1] and not checking, and
+/// g1Negate handed it the raw decomposed x -- a value builtin PRODUCING
+/// something that is not a point.
+///
+/// Deliberately NOT folded into decomposePoint: that helper also runs inside
+/// emitBN254G1OnCurve, which must return FALSE rather than abort.
+fn bn254EmitCoordCanonVerify(t: *BN254Tracker, x_name: []const u8, y_name: []const u8) !void {
+    try t.copyToTop(x_name, "_cc_x");
+    try t.pushFieldP("_cc_px");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_cc_xok");
+    try t.copyToTop(y_name, "_cc_y");
+    try t.pushFieldP("_cc_py");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_cc_yok");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 fn emitBN254G1Add(t: *BN254Tracker) !void {
     try t.pushPrimeCache();
     try decomposePoint(t, "_pa", "px", "py");
     try decomposePoint(t, "_pb", "qx", "qy");
+    // R-141: both points must be canonical before anything consumes them.
+    try bn254EmitCoordCanonVerify(t, "px", "py");
+    try bn254EmitCoordCanonVerify(t, "qx", "qy");
     // The flag must be computed BEFORE the add: g1AffineAdd consumes
     // px/py/qx/qy.
     try g1InfinityFlag(t);
@@ -1116,6 +1193,8 @@ fn emitBN254G1ScalarMul(t: *BN254Tracker) !void {
     try t.pushPrimeCache();
     // Decompose base point to affine (ax, ay)
     try decomposePoint(t, "_pt", "ax", "ay");
+    // R-141: the ladder's base point must be canonical.
+    try bn254EmitCoordCanonVerify(t, "ax", "ay");
 
     // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
     // the scalar is caller input.
@@ -1236,7 +1315,31 @@ fn emitBN254G1Negate(t: *BN254Tracker) !void {
 
 fn emitBN254G1OnCurve(t: *BN254Tracker) !void {
     try t.pushPrimeCache();
+
+    // R-141: width. bn254G1OnCurve(G || 0xff) returned TRUE -- the OP_SPLIT at
+    // 32 inside decomposePoint discarded the surplus byte. Clamp and remember
+    // the width rather than abort: this predicate must stay TOTAL.
+    try bn254EmitPointLengthGate(t, "_pt", 64, "_len_ok");
+
     try decomposePoint(t, "_pt", "_x", "_y");
+
+    // R-141: coordinate canonicity. Reject x >= p or y >= p and AND the result
+    // in at the end, so the predicate still returns a boolean.
+    try t.copyToTop("_x", "_x_lt");
+    try t.pushFieldP("_p_for_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_x_canon");
+    try t.copyToTop("_y", "_y_lt");
+    try t.pushFieldP("_p_for_y");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_y_canon");
+    try t.toTop("_x_canon");
+    try t.toTop("_y_canon");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_canon");
 
     // lhs = y^2
     try fieldSqr(t, "_y", "_y2");
@@ -1253,6 +1356,18 @@ fn emitBN254G1OnCurve(t: *BN254Tracker) !void {
     try t.toTop("_rhs");
     t.popNames(2);
     try t.emitOpcode("OP_EQUAL");
+    try t.names.append(t.allocator, "_curve_eq");
+
+    // on-curve = right width AND canonical AND curve-equation
+    try t.toTop("_canon");
+    try t.toTop("_curve_eq");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_eq_ok");
+    try t.toTop("_len_ok");
+    try t.toTop("_eq_ok");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
     try t.names.append(t.allocator, "_result");
     try t.popPrimeCache();
 }

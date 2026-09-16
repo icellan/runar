@@ -18,6 +18,7 @@
 //! Internal arithmetic uses Jacobian coordinates for scalar multiplication.
 
 use num_bigint::BigInt;
+use super::ec::emit_point_len_verify;
 use super::stack::{PushValue, StackOp};
 
 // ===========================================================================
@@ -599,8 +600,14 @@ pub(crate) fn bn254_decompose_point(
     y_name: &str,
 ) {
     t.to_top(point_name);
-    // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+    // R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+    // Point inherits the check -- the same placement CL-BUG-095 chose for
+    // ec_decompose_point. Without it OP_SPLIT at 32 discards whatever follows
+    // byte 64, so `bn254G1OnCurve(G || 0xff)` returned TRUE. ABORTING form:
+    // emit_bn254_g1_on_curve must stay TOTAL, so it clamps and flags the length
+    // BEFORE calling this, exactly as emit_ec_on_curve does.
     t.raw_block(&[point_name], None, |e| {
+        emit_point_len_verify(e, 64);
         e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
@@ -1069,6 +1076,11 @@ fn bn254_build_jacobian_add_affine_inline(
 /// bn254_g1_negate: negates a point: (x, p - y).
 pub(crate) fn bn254_g1_negate(t: &mut BN254Tracker, point_name: &str, result_name: &str) {
     bn254_decompose_point(t, point_name, "_nx", "_ny");
+    // R-141: bn254_compose_point below is documented as requiring [0, p-1] and
+    // does not check, so without this the negation of a non-canonical point
+    // re-emitted its x half verbatim -- a value builtin PRODUCING a blob that
+    // is not a point.
+    bn254_emit_coord_canon_verify(t, "_nx", "_ny");
     // Use bn254_field_neg which already handles prime caching
     bn254_field_neg(t, "_ny", "_neg_y");
     bn254_compose_point(t, "_nx", "_neg_y", result_name);
@@ -1128,6 +1140,74 @@ pub fn emit_bn254_field_neg(emit: &mut dyn FnMut(StackOp)) {
     t.pop_prime_cache();
 }
 
+/// bn254_emit_point_length_gate -- R-141, CLAMPING form, the BN254 twin of
+/// `emit_point_length_gate` in ec.rs. Leaves [flag, clamped] on the tracker.
+/// Used by `emit_bn254_g1_on_curve`, whose job is to answer "is this an
+/// acceptable point?" over untrusted bytes: for a wrong-length blob the correct
+/// answer is FALSE, not an aborted script.
+fn bn254_emit_point_length_gate(t: &mut BN254Tracker, name: &str, want: usize, flag_name: &str) {
+    t.to_top(name);
+    t.raw_block(&[name], None, |e| {
+        e(StackOp::Opcode("OP_SIZE".into()));
+        e(StackOp::Push(PushValue::Int(BigInt::from(want))));
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+        e(StackOp::Swap);
+        e(StackOp::Push(PushValue::Bytes(vec![0u8; want])));
+        e(StackOp::Opcode("OP_CAT".into()));
+        e(StackOp::Push(PushValue::Int(BigInt::from(want))));
+        e(StackOp::Opcode("OP_SPLIT".into()));
+        e(StackOp::Drop);
+    });
+    t.nm.push(flag_name.to_string());
+    t.nm.push(name.to_string());
+}
+
+/// bn254_emit_coord_canon_verify -- R-141: a BN254 G1 Point's two coordinates
+/// must be FIELD ELEMENTS, aborting form. The direct analogue of
+/// `emit_coord_canon_verify` (R-117), with the placement decision re-derived
+/// for this curve rather than copied.
+///
+/// `bn254_decompose_point` BIN2NUMs each half as an UNSIGNED integer, so any
+/// value that fits 32 bytes is accepted. On BN254 that is wider than on
+/// secp256k1: p is ~2^253.6, so `x + p < 2^256` for EVERY x < p -- the alias
+/// exists for every point on the curve. Measured on the go-sdk interpreter
+/// before this gate, with G = (1, 2):
+///
+/// ```text
+/// bn254G1OnCurve(G)          -> 1
+/// bn254G1OnCurve((1+p) || 2) -> 1
+/// bn254G1OnCurve(1 || (2+p)) -> 1
+/// bn254G1OnCurve(G || 0xff)  -> 1
+/// ```
+///
+/// WHY THE VALUE BUILTINS ABORT. Unlike secp256k1's affine_add, BN254's adder
+/// is NOT fooled into a wrong answer by the alias -- measured,
+/// `bn254G1Add(G, (1+p)||2)` returns the correct 2G, because
+/// `bn254_g1_infinity_flag` reduces before it compares. The reason is
+/// different: `bn254_compose_point`'s own contract says callers must supply
+/// [0, p-1] and that it does not check, and `bn254_g1_negate` handed it the RAW
+/// decomposed x -- a value builtin PRODUCING something that is not a point.
+///
+/// Deliberately NOT folded into `bn254_decompose_point`, for R-117's reason:
+/// that helper also runs inside `emit_bn254_g1_on_curve`, which must return
+/// FALSE rather than abort, and inside the Groth16 / pairing preambles.
+fn bn254_emit_coord_canon_verify(t: &mut BN254Tracker, x_name: &str, y_name: &str) {
+    t.copy_to_top(x_name, "_cc_x");
+    t.push_field_p("_cc_px");
+    t.raw_block(&["_cc_x", "_cc_px"], Some("_cc_xok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top(y_name, "_cc_y");
+    t.push_field_p("_cc_py");
+    t.raw_block(&["_cc_y", "_cc_py"], Some("_cc_yok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.raw_block(&["_cc_xok", "_cc_yok"], None, |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
+    });
+}
+
 /// emit_bn254_g1_add: adds two BN254 G1 points.
 /// Stack in: [point_a, point_b] (b on top)
 /// Stack out: [result_point]
@@ -1136,6 +1216,9 @@ pub fn emit_bn254_g1_add(emit: &mut dyn FnMut(StackOp)) {
     t.push_prime_cache();
     bn254_decompose_point(&mut t, "_pa", "px", "py");
     bn254_decompose_point(&mut t, "_pb", "qx", "qy");
+    // R-141: both points must be canonical before anything consumes them.
+    bn254_emit_coord_canon_verify(&mut t, "px", "py");
+    bn254_emit_coord_canon_verify(&mut t, "qx", "qy");
     // The flag must be computed BEFORE the add: bn254_g1_affine_add consumes
     // px/py/qx/qy.
     bn254_g1_infinity_flag(&mut t);
@@ -1185,6 +1268,8 @@ pub fn emit_bn254_g1_scalar_mul(emit: &mut dyn FnMut(StackOp)) {
     t.push_prime_cache();
     // Decompose to affine base point
     bn254_decompose_point(&mut t, "_pt", "ax", "ay");
+    // R-141: the ladder's base point must be canonical.
+    bn254_emit_coord_canon_verify(&mut t, "ax", "ay");
 
     // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
     // the scalar is caller input.
@@ -1284,7 +1369,35 @@ pub fn emit_bn254_g1_negate(emit: &mut dyn FnMut(StackOp)) {
 pub fn emit_bn254_g1_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = BN254Tracker::new(&["_pt"], emit);
     t.push_prime_cache();
+
+    // R-141: width. `bn254G1OnCurve(G || 0xff)` returned TRUE -- the OP_SPLIT
+    // at 32 inside the decomposer discarded the surplus byte. Clamp and
+    // remember the width rather than abort, because this predicate must stay
+    // TOTAL; the flag is ANDed into the result at the end.
+    bn254_emit_point_length_gate(&mut t, "_pt", 64, "_len_ok");
+
     bn254_decompose_point(&mut t, "_pt", "_x", "_y");
+
+    // R-141: coordinate canonicity. The decomposer BIN2NUMs each coordinate as
+    // an unsigned value that may be >= p, and the field arithmetic below
+    // silently reduces mod p, so a non-canonical ENCODING of a real point
+    // passed. Reject it -- require x < p AND y < p -- and AND the result in at
+    // the end so the predicate still returns a boolean.
+    t.copy_to_top("_x", "_x_lt");
+    t.push_field_p("_p_for_x");
+    t.raw_block(&["_x_lt", "_p_for_x"], Some("_x_canon"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top("_y", "_y_lt");
+    t.push_field_p("_p_for_y");
+    t.raw_block(&["_y_lt", "_p_for_y"], Some("_y_canon"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.to_top("_x_canon");
+    t.to_top("_y_canon");
+    t.raw_block(&["_x_canon", "_y_canon"], Some("_canon"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
 
     // lhs = y^2
     bn254_field_sqr(&mut t, "_y", "_y2");
@@ -1299,8 +1412,20 @@ pub fn emit_bn254_g1_on_curve(emit: &mut dyn FnMut(StackOp)) {
     // Compare
     t.to_top("_y2");
     t.to_top("_rhs");
-    t.raw_block(&["_y2", "_rhs"], Some("_result"), |e| {
+    t.raw_block(&["_y2", "_rhs"], Some("_curve_eq"), |e| {
         e(StackOp::Opcode("OP_EQUAL".into()));
+    });
+
+    // on-curve = right width AND canonical AND curve-equation
+    t.to_top("_canon");
+    t.to_top("_curve_eq");
+    t.raw_block(&["_canon", "_curve_eq"], Some("_eq_ok"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    t.to_top("_len_ok");
+    t.to_top("_eq_ok");
+    t.raw_block(&["_len_ok", "_eq_ok"], Some("_result"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
     });
     t.pop_prime_cache();
 }
@@ -1326,8 +1451,15 @@ mod tests {
     /// test were ported here from Go; before that this tier emitted a ladder
     /// that silently returned a different multiple of P for any scalar outside
     /// (2^255 - 3r, 2^256 - 3r).
+    /// R-141 moved it again: `bn254G1ScalarMul` now gates its base point's
+    /// coordinates (`bn254_emit_coord_canon_verify`) and inherits the
+    /// OP_SIZE-64 verify that `bn254_decompose_point` gained, because the
+    /// predicate used to certify `(x+p) || y` and a 65-byte blob as points.
+    /// 42_910 ops / 134_245 bytes -> 42_921 ops / 134_321 bytes; the new digest
+    /// was produced by Go and independently reproduced, byte for byte, by the
+    /// TypeScript, Python and Ruby tiers before it was written down here.
     const BN254_SCALAR_MUL_SHA256: &str =
-        "0730fd206a234d76e6fe8079b3238cc58a10be6b487e76fa8193578ea0bc589f";
+        "a80bb1910366d399b7d6a6a35f7c8b51678d3655bf6008a6744b57aa2bded02c";
 
     /// r, spelled out here rather than taken from the module so this test
     /// module compiles unchanged against the pre-fix source when reproducing

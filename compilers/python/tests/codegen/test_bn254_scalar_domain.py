@@ -29,8 +29,14 @@ from runar_compiler.codegen.stack import StackMethod
 # SHA-256 of the hex string of the raw (pre-peephole) ladder, taken from the Go
 # reference compiler (codegen.EmitBN254G1ScalarMul -> codegen.Emit) and
 # independently reproduced by the TypeScript tier. 42_910 ops, 134_245 bytes.
+# R-141 moved it again: bn254G1ScalarMul now gates its base point's coordinates
+# and inherits the OP_SIZE-64 verify that the decomposer gained, because the
+# predicate used to certify (x+p) || y and a 65-byte blob as points.
+# 42_910 ops / 134_245 bytes -> 42_921 ops / 134_321 bytes; the new digest was
+# produced by Go and independently reproduced, byte for byte, by the
+# TypeScript, Python and Ruby tiers before it was written down here.
 BN254_SCALAR_MUL_SHA256 = (
-    "0730fd206a234d76e6fe8079b3238cc58a10be6b487e76fa8193578ea0bc589f"
+    "a80bb1910366d399b7d6a6a35f7c8b51678d3655bf6008a6744b57aa2bded02c"
 )
 
 # r, spelled out so this file compares against the reference rather than
