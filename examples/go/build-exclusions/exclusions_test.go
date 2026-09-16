@@ -13,7 +13,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// RATCHET — exactly EIGHT .runar.go ports are excluded from the Go build, and
+// RATCHET — exactly NINE .runar.go ports are excluded from the Go build, and
 // every one of them carries a written reason.
 //
 // WHY. A `.runar.go` contract is meant to be valid Go as well as valid Rúnar:
@@ -22,7 +22,7 @@ import (
 // carrying `//go:build ignore` gets only the second half, silently. 32 of the
 // 84 ports carried the tag; 29 of those imported the module path `"runar"`,
 // which resolves to nothing, and only 3 carried a written reason. Staging each
-// one with the tag stripped and compiling it showed 24 were excluded by that
+// one with the tag stripped and compiling it showed 23 were excluded by that
 // dead import and nothing else. Drift, not a language limit.
 //
 // That is the exact shape this branch keeps finding: `pow` returned
@@ -33,7 +33,7 @@ import (
 //
 // WHY A SET AND NOT A COUNT. `len(excluded) <= 8` is a guard that stops being
 // read: a bound that only has to be "not worse" absorbs the next exclusion
-// without argument. This asserts the SET with reflect.DeepEqual, so a ninth
+// without argument. This asserts the SET with reflect.DeepEqual, so a tenth
 // exclusion fails here and has to justify itself in the same commit -- the way
 // STALE_PIN_BUDGET === 0 forces a justification for a stale golden pin.
 // Removing an exclusion fails here too, which is correct: it should be
@@ -64,11 +64,16 @@ import (
 //	Rúnar's `bigint` is arbitrary precision and the Go mock's `Bigint` is int64
 //	  go-dsl-bytestring-literal, integer-boundary, p256-primitives,
 //	  p384-primitives, schnorr-zkp
+//
+//	the `[N]T{...}` composite literal three of the seven .runar.go parsers
+//	require does not convert to the slice the mock's CheckMultiSig takes
+//	  multisig-2of3
 var excludedPorts = []string{
 	"all-readonly-cleanstack/AllReadonlyCleanstack.runar.go",
 	"byte-builtins/ByteBuiltins.runar.go",
 	"go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.go",
 	"integer-boundary/IntegerBoundary.runar.go",
+	"multisig-2of3/MultiSig2of3.runar.go",
 	"p256-primitives/P256Primitives.runar.go",
 	"p384-primitives/P384Primitives.runar.go",
 	"schnorr-zkp/SchnorrZKP.runar.go",
@@ -152,7 +157,7 @@ func scanExclusions(t *testing.T, root string) []string {
 	return out
 }
 
-func TestExcludedPorts_AreExactlyTheJustifiedEight(t *testing.T) {
+func TestExcludedPorts_AreExactlyTheJustifiedNine(t *testing.T) {
 	got := scanExclusions(t, examplesRoot(t))
 	want := append([]string(nil), excludedPorts...)
 	sort.Strings(want)
@@ -231,7 +236,7 @@ func TestEveryExclusion_CarriesAReason(t *testing.T) {
 //
 // The set assertion above is only as good as scanExclusions. A scanner that
 // returned the hard-coded list, or that matched the tag anywhere in the file,
-// would make TestExcludedPorts_AreExactlyTheJustifiedEight pass while telling
+// would make TestExcludedPorts_AreExactlyTheJustifiedNine pass while telling
 // nobody anything. This runs it over a synthetic tree whose answer is known,
 // and includes the two cases that have actually gone wrong here: a file that
 // only MENTIONS the tag in prose, and a constraint that is not in the leading
@@ -288,17 +293,6 @@ func TestUnexcludedPortsWereFixedNotDeleted(t *testing.T) {
 		contains []string
 		why      string
 	}{
-		{
-			rel: "multisig-2of3/MultiSig2of3.runar.go",
-			contains: []string{
-				"[]runar.Sig{sig1, sig2}",
-				"[]runar.PubKey{c.Pk1, c.Pk2, c.Pk3}",
-			},
-			why: "multisig-2of3 was excluded because its composite literals were " +
-				"spelled `[N]T{...}`, which does not convert to the []Sig / " +
-				"[]PubKey the mock CheckMultiSig takes. The slice spelling is " +
-				"the fix, and both spellings lower to identical ANF.",
-		},
 		{
 			rel:      "countdown-loop/CountdownLoop.runar.go",
 			contains: []string{"for i := runar.Int(5); i > 1; i--"},

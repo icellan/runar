@@ -1,3 +1,5 @@
+//go:build ignore
+
 // MultiSig2of3 — a 2-of-3 multi-signature contract.
 //
 // Funds are locked to three public keys. To spend, the unlocker must supply
@@ -6,15 +8,35 @@
 // signatures must match the order of the corresponding pubkeys in the
 // committed array.
 //
-// runar.CheckMultiSig([]runar.Sig{sig1, sig2}, []runar.PubKey{...}) lowers
-// to two array_literal ANF nodes — one per array argument. The composite
-// literal is spelled as a SLICE, not as `[N]T{...}`: the mock CheckMultiSig in
-// packages/runar-go takes []Sig / []PubKey, and a Go array does not convert to
-// a slice implicitly, so the array spelling is what kept this port out of the
-// Go build. Every .runar.go parser accepts either form and lowers both to the
-// same array_literal nodes — verified by compiling both spellings and
-// comparing the emitted ANF IR byte for byte, and gated ongoing by the
-// all-tier parser-only matrix.
+// EXCLUDED FROM THE GO BUILD — the array spelling three tiers require does not
+// convert to the slice the mock takes.
+//
+//	cannot use [2]runar.Sig{…} (value of type [2]runar.Sig) as []runar.Sig
+//	value in argument to runar.CheckMultiSig
+//
+// runar.CheckMultiSig([2]runar.Sig{sig1, sig2}, [3]runar.PubKey{...}) lowers to
+// two array_literal ANF nodes, one per array argument. packages/runar-go
+// declares CheckMultiSig([]Sig, []PubKey), and a Go array does not convert to a
+// slice implicitly, so the contract does not build as Go.
+//
+// The slice spelling `[]runar.Sig{...}` was tried and REVERTED. It compiles as
+// Go and the Go tier emits byte-identical ANF for both forms -- but three of the
+// seven .runar.go parsers reject it: TypeScript and Ruby flatten the elements
+// and report "checkMultiSig() expects 2 arguments, got 6", and Zig fails to
+// parse `[]runar.Sig{` outright. Proving IR identity with the Go binary alone
+// and generalising to seven tiers is agreement mistaken for evidence; the
+// all-tier `--multi-format` run is what caught it (735/736, multisig
+// [.runar.go]).
+//
+// Two ways out, neither an examples-level change: teach the TS, Zig and Ruby
+// .runar.go parsers the slice composite literal, or relax the mock's
+// CheckMultiSig to accept arrays as well as slices — which costs the static
+// element type on a crypto entry point, so it is a deliberate API decision
+// rather than a tidy-up.
+//
+// The array_literal node this fixture is the canonical callsite for is still
+// covered cross-tier: the other eight surfaces compile and the .runar.go
+// surface is exercised by every tier's parser in the --parser-only matrix.
 //
 // Script layout:
 //
@@ -23,7 +45,7 @@
 //	           OP_VERIFY
 package contract
 
-import runar "github.com/icellan/runar/packages/runar-go"
+import "runar"
 
 type MultiSig2of3 struct {
 	runar.SmartContract
@@ -35,6 +57,6 @@ type MultiSig2of3 struct {
 // Unlock requires two valid signatures from any two of the three committed pubkeys.
 func (c *MultiSig2of3) Unlock(sig1 runar.Sig, sig2 runar.Sig) {
 	runar.Assert(runar.CheckMultiSig(
-		[]runar.Sig{sig1, sig2},
-		[]runar.PubKey{c.Pk1, c.Pk2, c.Pk3}))
+		[2]runar.Sig{sig1, sig2},
+		[3]runar.PubKey{c.Pk1, c.Pk2, c.Pk3}))
 }
