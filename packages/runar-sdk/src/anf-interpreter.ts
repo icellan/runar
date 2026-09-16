@@ -994,8 +994,63 @@ function evalCall(
     case 'extractLocktime':
       return 0n;
 
-    default:
+    // A-3, KNOWN REMAINING GAP: `extractSigHashType` IS a real runar-lang
+    // builtin (`preimage.ts`), unlike its three siblings above it has no
+    // dummy value here, and `04-anf-lower.ts` emits it on every stateful
+    // method. Measured across this package's suite plus `examples/` and
+    // `packages/runar-testing`: 317 evaluations, every one of them consumed
+    // by an `assert` that lenient mode skips, so the `undefined` never
+    // reaches a state field. Refusing it would break every stateful call for
+    // a value nothing reads; giving it a dummy would change strict-mode
+    // assert outcomes. Left as-is and pinned by name in
+    // `a3-unmodelled-builtin-fails-closed.test.ts` so it is visible rather
+    // than silent.
+    case 'extractSigHashType':
       return undefined;
+
+    // A-3: compiler-synthesized pseudo-functions, NOT runar-lang builtins —
+    // `04-anf-lower.ts` emits these `kind:'call'` nodes itself and none of
+    // them is exported by `runar-lang`. They are covenant / constructor
+    // scaffolding whose result the SDK reconstructs on its own (the state
+    // continuation, the change output, the `super(...)` call), so
+    // `undefined` is the correct off-chain answer and must stay
+    // non-throwing. `computeStateOutput` runs on every stateful call in the
+    // measured corpus; a blanket throw would have broken all of them.
+    //
+    // `__array_access` (ByteString `data[i]`) is deliberately NOT here: it is
+    // a value-producing operation this interpreter genuinely does not model,
+    // which is the same defect as an unmodelled builtin, so it falls through
+    // to the refusal below.
+    //
+    // Cross-tier check: every `"func"` appearing in `conformance/
+    // anf-interpreter/programs` is either modelled above or one of these four
+    // (`buildChangeOutput` and `super` occur there and nowhere else in the
+    // measured corpus), so the cross-interpreter parity fixtures still agree
+    // with the six peer interpreters after this change.
+    case 'computeStateOutput':
+    case 'buildChangeOutput':
+    case 'super':
+      return undefined;
+
+    default:
+      // A-3 / NEW-006: FAIL CLOSED. This used to `return undefined`, which
+      // made the `try/catch` guard in `contract.ts` structurally unable to
+      // fire for the 76 of runar-lang's 105 builtins this interpreter does
+      // not model — every EC op, every NIST P-256/P-384 op, all six SLH-DSA
+      // verifies, Rabin, `left`/`right`/`split`, `sha256Compress`,
+      // `merkleRootSha256`. `contract.ts` then spreads the result over the
+      // real state and the `undefined` wins, so a `boolean` state field fed
+      // by a signature verifier silently became false and the eventual error
+      // pointed at the covenant instead of at this gap. Naming the builtin
+      // here is the difference between a five-minute diagnosis and a
+      // multi-hour one.
+      throw new Error(
+        `ANF interpreter does not model the builtin '${func}'. Its result cannot be ` +
+          'computed off-chain, so any state field or data output derived from it would ' +
+          'be silently wrong. Pass an explicit `newState` to `call()` if you know the ' +
+          "post-state, or add an arm for this builtin to `evalCall` in " +
+          'packages/runar-sdk/src/anf-interpreter.ts.',
+      );
   }
 }
 
