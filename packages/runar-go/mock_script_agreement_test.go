@@ -282,9 +282,60 @@ func byteStringCases() []agreementCase {
 			args: [][]byte{bs(Num2BinBig(wideVal, 16))}, retTy: "bigint",
 			want: numB(Bin2NumBig(Num2BinBig(wideVal, 16))),
 			tamper: numB(new(big.Int).Add(Bin2NumBig(Num2BinBig(wideVal, 16)), big.NewInt(1)))},
+		// The same builtin through the int64 mock, at a width that does NOT
+		// fit. The row above it tests Bin2Num with "\xe8\x03" (1000), which
+		// does fit, and that choice is what kept this divergence off the list:
+		// Bin2Num documents "graceful truncation ... return the low 64 bits",
+		// so for wideVal it returns -4362896299872285998 while OP_BIN2NUM
+		// leaves all 16 bytes. Identical shape to the ecPointX / ecPointY
+		// entries below -- a ByteString goes in, an int64 comes out, and the
+		// narrowing is silent.
+		//
+		// This is the `pow` pattern: the callsite existed, nothing exercised
+		// it past the boundary. NOT fixed here for the same reason the EC
+		// accessors are not -- widening the return type is a change to every
+		// tier's notion of the primitive plus its call sites. Recorded so it
+		// cannot go quiet again.
+		{builtin: "bin2num", mock: "Bin2Num (wide)", argTys: []string{"ByteString"},
+			args: [][]byte{bs(Num2BinBig(wideVal, 16))}, retTy: "bigint",
+			want:           numI(Bin2Num(Num2BinBig(wideVal, 16))),
+			tamper:         numI(Bin2Num(Num2BinBig(wideVal, 16)) + 1),
+			knownDivergent: "int64 return truncates a value wider than int64 to its low 8 bytes"},
 		{builtin: "reverseBytes", mock: "ReverseBytes", argTys: []string{"ByteString"},
 			args: [][]byte{bs(src)}, retTy: "ByteString",
 			want: bs(ReverseBytes(src)), tamper: tamperBS(ReverseBytes(src))},
+
+		// split / left / right / int2str / ripemd160 were absent from this
+		// table until packages/runar-go declared them: the .runar.go surface
+		// parser resolved all five, the SDK declared none, and a mock that
+		// does not exist cannot disagree with an emitter. They are the reason
+		// 32 of the 84 ports in examples/go carried `//go:build ignore`.
+		//
+		// split and left are the two halves of ONE cut and right measures its
+		// offset from the far end, so all three take the same index against
+		// the same string on purpose: an SDK that confused any pair of them
+		// produces a different `want` here and the spend refuses it.
+		{builtin: "split", mock: "Split", argTys: []string{"ByteString", "bigint"},
+			args: [][]byte{bs(src), numI(2)}, retTy: "ByteString",
+			want: bs(Split(src, 2)), tamper: tamperBS(Split(src, 2))},
+		{builtin: "left", mock: "Left", argTys: []string{"ByteString", "bigint"},
+			args: [][]byte{bs(src), numI(2)}, retTy: "ByteString",
+			want: bs(Left(src, 2)), tamper: tamperBS(Left(src, 2))},
+		{builtin: "right", mock: "Right", argTys: []string{"ByteString", "bigint"},
+			args: [][]byte{bs(src), numI(2)}, retTy: "ByteString",
+			want: bs(Right(src, 2)), tamper: tamperBS(Right(src, 2))},
+		// Int2Str and Int2str are separate mocks of the SAME builtin -- both
+		// spellings resolve to `int2str` in the Go surface -- so each gets its
+		// own row, the way Num2Bin / Num2BinBig do above.
+		{builtin: "int2str", mock: "Int2Str", argTys: []string{"bigint", "bigint"},
+			args: [][]byte{numI(-1000), numI(8)}, retTy: "ByteString",
+			want: bs(Int2Str(-1000, 8)), tamper: tamperBS(Int2Str(-1000, 8))},
+		{builtin: "int2str", mock: "Int2str", argTys: []string{"bigint", "bigint"},
+			args: [][]byte{numI(-1000), numI(8)}, retTy: "ByteString",
+			want: bs(Int2str(-1000, 8)), tamper: tamperBS(Int2str(-1000, 8))},
+		{builtin: "ripemd160", mock: "Ripemd160", argTys: []string{"ByteString"},
+			args: [][]byte{bs(src)}, retTy: "ByteString",
+			want: bs(ByteString(Ripemd160(src))), tamper: tamperBS(ByteString(Ripemd160(src)))},
 	}
 }
 
