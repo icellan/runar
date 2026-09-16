@@ -1,13 +1,21 @@
 //go:build ignore
 
-// The malleability gate `runar.Within(s, 1, <secp256k1-n>)` requires the
-// secp256k1 group order as a third argument. That value is 256 bits wide
-// and does not fit in a Go int64 (the type `runar.Bigint` aliases), so
-// `go build` and `go vet` would reject the literal as an integer overflow.
-// The Rúnar conformance suite consumes this file as text via the Rúnar
-// frontend, not as a Go-buildable package, so we exclude it from the Go
-// workspace build via `//go:build ignore` (mirroring `ec-primitives` and
-// the other EC-heavy Go DSL fixtures).
+// EXCLUDED FROM THE GO BUILD — the secp256k1 group order does not fit an int64.
+//
+//	cannot use 115792089237316195423570985008687907852837564279074904382605163141518161494337
+//	(untyped int constant) as int64 value in argument to runar.Within (overflows)
+//
+// The malleability gate `runar.Within(s, 1, <secp256k1-n>)` needs the group
+// order as its third argument. That value is 256 bits wide; `runar.Bigint`
+// aliases int64 in the Go mock, so the literal is rejected at compile time. The
+// Rúnar conformance suite consumes this file as text through the frontend,
+// where `bigint` is arbitrary precision and the literal is ordinary.
+//
+// Same root cause as integer-boundary, go-dsl-bytestring-literal and the two
+// NIST primitive ports. (This note used to say the exclusion mirrored
+// `ec-primitives` "and the other EC-heavy Go DSL fixtures" — ec-primitives is
+// built by Go now, and its exclusion was a dead `import "runar"` path, not an
+// integer-width limit.)
 
 package contract
 

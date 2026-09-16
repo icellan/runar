@@ -1,5 +1,20 @@
 //go:build ignore
 
+// EXCLUDED FROM THE GO BUILD — every literal in this fixture overflows int64 by
+// design.
+//
+//	cannot use 4294967295 * 4294967295 (untyped int constant
+//	18446744065119617025) as int value in assignment (overflows)
+//
+// The contract pins the seven tiers to ONE arbitrary-precision integer domain
+// (issue #162): each operand fits a signed 64-bit slot and each folded result
+// escapes one. `runar.Int` aliases int64 in the Go mock, so `go build` rejects
+// all four assignments at compile time — the constants are untyped and Go
+// evaluates them exactly.
+//
+// A Go port that fit in int64 would not be this fixture. Same root cause as
+// go-dsl-bytestring-literal, schnorr-zkp and the two NIST primitive ports.
+
 package contract
 
 import "runar"

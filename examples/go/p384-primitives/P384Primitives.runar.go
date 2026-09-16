@@ -1,5 +1,17 @@
 //go:build ignore
 
+// EXCLUDED FROM THE GO BUILD — a P-384 scalar does not fit the Go mock's
+// `Bigint`.
+//
+//	cannot use k (variable of int64 type runar.Bigint) as *big.Int value in
+//	argument to runar.P384Mul
+//
+// Identical to p256-primitives one curve up: `Verify(k runar.Bigint, …)` is
+// correct Rúnar (the parser maps `Bigint` to the arbitrary-precision `bigint`,
+// and a P-384 scalar is 384 bits), P384Mul correctly takes a `*big.Int`, and
+// the two cannot meet while `runar.Bigint` aliases int64. See the note in
+// p256-primitives for why widening the alias is not an examples-level change.
+
 package contract
 
 import "runar"

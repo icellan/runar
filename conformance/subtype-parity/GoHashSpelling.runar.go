@@ -31,8 +31,11 @@ import runar "github.com/icellan/runar/packages/runar-go"
 // disabled hashing outright in the Go surface would still produce seven
 // identical scripts.
 //
-// `//go:build ignore`: this is a Rúnar frontend input, not a Go compilation
-// unit — the same tag examples/go/byte-builtins and 26 other ports carry.
+// `//go:build ignore`: this is a Rúnar frontend input under conformance/, not
+// a Go compilation unit. (It used to cite "examples/go/byte-builtins and 26
+// other ports" as peers. 24 of those 27 were excluded only by a dead
+// `import "runar"` path and are built by Go now; byte-builtins is one of the
+// eight that remain, each with its reason written into the file.)
 type GoHashSpelling struct {
 	runar.SmartContract
 	Expected runar.ByteString `runar:"readonly"`

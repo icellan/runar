@@ -10,6 +10,10 @@ import (
 // parser-only fixture. The NIST P-384 primitives themselves are exercised
 // natively by the p384-wallet example tests; this suite covers the Rúnar
 // frontend (parse → validate → typecheck) for the p384-primitives surface.
+//
+// The reason for the exclusion is written at the top of the contract file,
+// and examples/go/build-exclusions is the ratchet that keeps the excluded set
+// from growing without one.
 
 func TestP384Primitives_Compile(t *testing.T) {
 	if err := runar.CompileCheck("P384Primitives.runar.go"); err != nil {

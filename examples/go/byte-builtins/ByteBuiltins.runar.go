@@ -1,5 +1,35 @@
 //go:build ignore
 
+// EXCLUDED FROM THE GO BUILD — `Ripemd160` cannot be a Go type and a Go
+// function at once.
+//
+//	runar.Ripemd160 (value of type func(...) ...) is not a type
+//
+// The contract needs BOTH spellings: `ExpectedRipemd runar.Ripemd160` in type
+// position and `runar.Ripemd160(preimage)` in call position. That is legal in
+// the `.runar.go` surface, where parser_gocontract.go maps the name in
+// mapGoType AND in mapGoBuiltin, and impossible in Go, where one identifier is
+// either a type or a function.
+//
+// packages/runar-go resolves the collision in favour of the FUNCTION, on
+// purpose: as a type, `runar.Ripemd160(x)` would silently compile as a
+// conversion returning x and drop the hash — the defect that made the baked
+// digest the spending key in two tiers (see
+// conformance/go_surface_hash_spelling_execution_test.go). Fail loud beats fail
+// open, and this exclusion is the noise that choice makes.
+//
+// The SHA-256 half of the same collision is already solvable: mapGoType carries
+// `Sha256Digest` as an alias, so the field could be spelled that way. There is
+// no peer entry for the RIPEMD-160 digest type — `runar.Ripemd160Hash` is
+// rejected by the frontend with "unsupported type 'Ripemd160Hash' in property
+// declaration". One entry mapping `Ripemd160Hash` to `Ripemd160` in the
+// .runar.go type table of all seven compilers is what unblocks this file and
+// state-ripemd160; that is a cross-tier parser change, not an examples change.
+//
+// `Split`, `Int2str` and `Ripemd160` in CALL position all resolve against
+// packages/runar-go as of the commit that added them — the type annotations are
+// the only remaining blocker.
+
 package contract
 
 import runar "github.com/icellan/runar/packages/runar-go"
@@ -26,9 +56,11 @@ import runar "github.com/icellan/runar/packages/runar-go"
 // baked digest the spending key -- see
 // conformance/go_surface_hash_spelling_execution_test.go.
 //
-// `//go:build ignore` because `Split` and `Int2Str` have no counterpart in
-// `packages/runar-go`; this file is a Rúnar frontend input, not a Go one. The
-// same tag is on `examples/go/loop-shapes` and 26 other ports.
+// `Split`, `Int2str` and `Ripemd160` all have counterparts in
+// `packages/runar-go` now; the remaining blocker is the `runar.Sha256` /
+// `runar.Ripemd160` TYPE annotations above, for the reason at the top of this
+// file. `examples/go/loop-shapes`, named here as a peer exclusion, is built by
+// Go now — its tag was a dead `import "runar"` path.
 type ByteBuiltins struct {
 	runar.SmartContract
 	// ExpectedDigest is the SHA-256 digest baked into the locking script.

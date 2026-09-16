@@ -1,5 +1,20 @@
 //go:build ignore
 
+// EXCLUDED FROM THE GO BUILD — the fixture's whole point is two Go types the
+// DSL unifies and Go does not.
+//
+//	invalid operation: a + b (mismatched types runar.Bigint and runar.BigintBig)
+//
+// `Check(a runar.Bigint, b runar.BigintBig)` adds the two together because the
+// .runar.go parser maps BOTH to the single Rúnar primitive `bigint`. In Go they
+// are `int64` and `*big.Int`, and there is no arithmetic between them. Making
+// them add would mean giving up the very distinction the fixture exists to
+// exercise.
+//
+// Same root cause as integer-boundary, schnorr-zkp, p256-primitives and
+// p384-primitives: Rúnar's `bigint` is arbitrary precision and the Go mock's
+// `Bigint` is int64.
+
 package contract
 
 import "runar"
