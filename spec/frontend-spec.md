@@ -1,6 +1,6 @@
 # Rúnar Frontend Specification
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the **language-agnostic contract** of Rúnar frontend parsers. Every parser -- regardless of input format (TypeScript, Solidity-like, Move-like, Go, Rust, Python, Zig, Ruby) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
@@ -215,10 +215,17 @@ PrimitiveTypeName =
     | "Addr"
     | "SigHashPreimage"
     | "Point"
+    | "P256Point"
+    | "P384Point"
     | "RabinSig"
     | "RabinPubKey"
     | "void"
 ```
+
+`Point` is the secp256k1 point type; `P256Point` and `P384Point` are its NIST
+peers, consumed by the `p256*` / `p384*` builtins. All three are ByteString
+subtypes carrying `x ‖ y` big-endian unsigned with no prefix byte, at 32, 32
+and 48 bytes per coordinate respectively.
 
 ### Type Normalization Rules
 
@@ -490,6 +497,21 @@ Represents `this.x` access. The `this`/`self`/`c.` prefix is stripped; only the 
 ```
 
 Same pattern as IncrementExpr, with `--` / `-= 1` / `x = x - 1`.
+
+### ArrayLiteralExpr
+
+```
+{
+    kind: "array_literal",
+    elements: Expression[]
+}
+```
+
+The initializer for a `FixedArray<T, N>` property. Element count and element
+types are validated in `03b-expand-fixed-arrays`, not by the parser: the
+parser's job is to produce the node with `elements` in source order. A literal
+whose length does not match the declared `N` is a compile-time diagnostic, not
+a parse error.
 
 ---
 

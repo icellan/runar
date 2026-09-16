@@ -648,7 +648,18 @@ expect(result.success).toBe(true);
 
 `TestContract` runs contracts through the reference **AST** interpreter (`RunarInterpreter`, which walks the parsed `ContractNode`), not a Bitcoin Script VM. The interpreter mocks the ECDSA / preimage builtins so you can write business-logic tests without managing real keys, signatures, or transaction sighashes. The trade-off: a `TestContract` test that "rejects a bad signature" by passing a malformed `sig` value **does not actually exercise ECDSA verification** — `checkSig` returned `true` either way. The rejection in such a test, if there is one, comes from some *other* assertion in the method (a hash mismatch, a state check, etc.), not from the signature being invalid.
 
-This applies symmetrically to every native-tier mock package: `runar` (Go), `runar::prelude` (Rust), `runar` (Python), `runar` (Zig), `runar` (Ruby), and `runar.lang` (Java) all ship `MockSig` / `mock_sig` / `MockPubKey` / `MockPreimage` helpers plus mock `CheckSig` / `CheckPreimage` that always return `true`. Native-tier tests are running the contract as plain code in the host language — they verify business logic, not on-chain cryptographic acceptance.
+This applies to every native-tier package — `runar` (Go), `runar::prelude` (Rust), `runar` (Python), `runar` (Zig), `runar` (Ruby), `runar.lang` (Java) — but the crypto is **not** a blanket mock, and the helper names are not uniform. What is actually true today:
+
+| | Signature-verify | `mock_sig` / `mock_pub_key` helpers |
+|---|---|---|
+| Go | **real** ECDSA over the fixed test message (`CheckSig`, `CheckMultiSig`) | **absent** — use `runar.Alice.PubKey` and `runar.SignTestMessage(runar.Alice.PrivKey)`; `MockPreimage()` is the only `Mock*` function |
+| Rust | **real** (`check_sig`) | `mock_sig()`, `mock_pub_key()`, `mock_preimage()` |
+| Python | **real** (`check_sig`) | `mock_sig()`, `mock_pub_key()` |
+| Zig | **real** (`checkSig`, via bsvz) | `mockPreimage()` only |
+| Ruby | **real** (`check_sig`) | `mock_sig`, `mock_pub_key` |
+| Java | mocked — `MockCrypto.checkSig` is a null check | absent |
+
+`checkPreimage` is stubbed to `true` in every tier: real preimage verification needs a full transaction context, which an off-chain unit test does not have. Native-tier tests run the contract as plain code in the host language — they verify business logic, not on-chain acceptance.
 
 ### What is mocked vs. real in the interpreter
 
@@ -958,9 +969,9 @@ import (
 )
 
 func TestP2PKH_Unlock(t *testing.T) {
-	pk := runar.MockPubKey()
+	pk := runar.Alice.PubKey
 	c := &P2PKH{PubKeyHash: runar.Hash160(pk)}
-	c.Unlock(runar.MockSig(), pk)
+	c.Unlock(runar.SignTestMessage(runar.Alice.PrivKey), pk)
 }
 
 func TestP2PKH_Unlock_WrongKey(t *testing.T) {
@@ -969,10 +980,9 @@ func TestP2PKH_Unlock_WrongKey(t *testing.T) {
 			t.Fatal("expected assertion failure for wrong public key")
 		}
 	}()
-	pk := runar.MockPubKey()
-	wrongPk := runar.PubKey("\x03" + string(make([]byte, 32)))
+	pk := runar.Alice.PubKey
 	c := &P2PKH{PubKeyHash: runar.Hash160(pk)}
-	c.Unlock(runar.MockSig(), wrongPk)
+	c.Unlock(runar.SignTestMessage(runar.Bob.PrivKey), runar.Bob.PubKey)
 }
 
 func TestP2PKH_Compile(t *testing.T) {
@@ -1015,7 +1025,7 @@ Contracts that call `AddOutput()` track outputs via the embedded `StatefulSmartC
 ```go
 func TestFungibleToken_Transfer(t *testing.T) {
 	c := newToken(alice, 100)
-	c.Transfer(runar.MockSig(), bob, 30, 1000)
+	c.Transfer(runar.SignTestMessage(runar.Alice.PrivKey), bob, 30, 1000)
 	out := c.Outputs()
 	if len(out) != 2 {
 		t.Fatalf("expected 2 outputs, got %d", len(out))
@@ -1038,10 +1048,10 @@ The `runar` package provides:
 | Category | Functions |
 |----------|-----------|
 | **Types** | `Int`, `Bigint` (`int64`), `Bool` (`bool`), `PubKey`, `Sig`, `ByteString`, `Sha256`, `Addr` (all `string`-backed) |
-| **Mock crypto** | `CheckSig`, `CheckMultiSig`, `CheckPreimage`, `VerifyRabinSig`, `VerifyWOTS` — always return `true` |
+| **Crypto** | `CheckSig`, `CheckMultiSig` — **real** ECDSA over the fixed test message; `VerifyRabinSig`, `VerifyWOTS`, `VerifySLHDSA_*` — **real** verification; `CheckPreimage` — stubbed to `true` (needs a transaction context) |
 | **Real hashes** | `Hash160`, `Hash256`, `Sha256Hash`, `Ripemd160Func` — compute real values |
 | **Math** | `Abs`, `Min`, `Max`, `Within`, `Safediv`, `Safemod`, `Clamp`, `Sign`, `Pow`, `MulDiv`, `PercentOf`, `Sqrt`, `Gcd`, `Log2`, `ToBool` |
-| **Test helpers** | `MockSig()`, `MockPubKey()`, `MockPreimage()` |
+| **Test helpers** | `MockPreimage()`, `SignTestMessage(privKeyHex)`, and the `Alice` / `Bob` / `Charlie` key pairs (`.PubKey`, `.PrivKey`). There is no `MockSig()` or `MockPubKey()` in this package — a real signature over a real key pair is what `CheckSig` needs |
 | **Preimage extractors** | `ExtractLocktime`, `ExtractOutputHash`, `ExtractAmount`, etc. — return fixed test values |
 
 Byte-backed types use `string` (not `[]byte`) so that `==` comparison works naturally in Go.

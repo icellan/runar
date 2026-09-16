@@ -1,6 +1,6 @@
 # Rúnar Compiled Artifact Format
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the JSON artifact produced by the Rúnar compiler. The artifact contains everything needed to deploy and interact with a compiled smart contract on Bitcoin SV.
@@ -27,13 +27,28 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
     "abi": { ... },
     "script": "string",
     "asm": "string",
+    "parentClass": "string",
     "sourceMap": { ... },
     "ir": { ... },
+    "anf": { ... },
     "stateFields": [ ... ],
     "constructorSlots": [ ... ],
+    "templateDigest": { ... },
+    "codeSepIndexSlots": [ ... ],
+    "codeSeparatorIndex": 0,
+    "codeSeparatorIndices": [ ... ],
+    "rawScriptSpans": [ ... ],
+    "unsoundPrimitives": [ ... ],
     "buildTimestamp": "string"
 }
 ```
+
+> **`ir.anf` and top-level `anf` are different fields and are not
+> interchangeable.** `ir` is an optional debugging snapshot, written only when
+> the compiler is invoked with `--ir`. Top-level `anf` is written whenever the
+> contract has mutable state, and it is the one the SDKs read to compute state
+> transitions. An SDK that looked under `ir.anf` would work on artifacts built
+> with `--ir` and fail on every ordinary build of the same contract.
 
 ---
 
@@ -44,15 +59,16 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
 - **Type**: `string`
 - **Required**: Yes
 - **Description**: Artifact format version. Uses `runar-v` prefix followed by semantic versioning.
-- **Example**: `"runar-v0.1.0"`
-- **Rules**: The SDK MUST reject artifacts with a major version it does not support.
+- **Example**: `"runar-v1.0.0-rc.1"` (the value `ARTIFACT_VERSION` in `packages/runar-compiler/src/artifact/assembler.ts` stamps today)
+- **Rules**: The SDK SHOULD reject artifacts with a major version it does not support.
+- **Status**: **Not enforced by any tier.** No SDK currently inspects this field; an artifact carrying any `version` string, or a future major version, is accepted and deployed. The rule is stated as a requirement on future work, not as a description of current behaviour — treat a version mismatch as undetected, not as rejected.
 
 ### 3.2 `compilerVersion`
 
 - **Type**: `string`
 - **Required**: Yes
 - **Description**: Version of the Rúnar compiler that produced this artifact.
-- **Example**: `"0.1.0-alpha.1"`
+- **Example**: `"1.0.0-rc.1"` (the value `DEFAULT_COMPILER_VERSION` in `packages/runar-compiler/src/artifact/assembler.ts` stamps today)
 - **Rules**: Informational. The SDK MAY warn if the compiler version is significantly older or newer than the SDK version.
 
 ### 3.3 `contractName`
@@ -206,7 +222,49 @@ For stateless contracts (no mutable properties), this field is omitted.
 
 The SDK uses these offsets to splice serialized constructor argument values directly into the script bytes, rather than relying on string-based placeholder replacement. This is the preferred mechanism for deployment as it is more robust than textual substitution.
 
-### 3.11 `buildTimestamp`
+### 3.11 `parentClass`
+
+- **Type**: `"SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract"`
+- **Required**: No (present on artifacts produced by current compilers)
+- **Description**: The base class the contract extends. This is the authoritative stateful signal: a `StatefulSmartContract` with zero mutable fields still needs the terminal sighash subscript trim, and `stateFields` being absent does not distinguish it from a stateless contract.
+
+### 3.12 `anf`
+
+- **Type**: `ANFProgram` (see `ir-format.md`)
+- **Required**: No — present whenever the contract has mutable state
+- **Description**: The canonical ANF IR, at the TOP LEVEL of the artifact. This is the field the seven SDKs read to compute state transitions without a caller-supplied `newState`. It is emitted independently of the `--ir` flag and is **not** the same field as `ir.anf` (§3.8), which is an optional debugging snapshot.
+
+### 3.13 `templateDigest`
+
+- **Type**: `TemplateDigest`
+- **Required**: No (present whenever `constructorSlots` is)
+- **Description**: The recipe for recomputing the slot-excised template identity hash — the digest of the locking script with every constructor-argument slot removed. Two deployments of the same contract with different constructor arguments share a template digest; this is what lets a verifier recognise the contract behind an on-chain script.
+
+### 3.14 `codeSepIndexSlots`
+
+- **Type**: `CodeSepIndexSlot[]`
+- **Required**: No (omitted when the script contains no codeSepIndex placeholder)
+- **Description**: Byte offsets of `push_codesep_index` placeholders in the script, in the same shape and for the same reason as `constructorSlots`: the value is not known until byte offsets exist, so the emitter reserves space and records where to patch.
+
+### 3.15 `codeSeparatorIndex` / `codeSeparatorIndices`
+
+- **Type**: `number` / `number[]`
+- **Required**: No (present only for stateful contracts)
+- **Description**: Byte offset(s) of `OP_CODESEPARATOR` in the locking script, needed to compute the BIP-143 sighash subscript. `codeSeparatorIndices` is indexed by public method (index 0 = first public method); `codeSeparatorIndex` is the single-method form. **Multi-method contracts must use `codeSeparatorIndices`** — the singular field names only one separator and signing against it for a different method produces a sighash the script will not accept.
+
+### 3.16 `rawScriptSpans`
+
+- **Type**: `RawScriptSpan[]`
+- **Required**: No (present only when the contract uses `asm(...)`)
+- **Description**: Byte ranges produced by `raw_script` ANF nodes. These bytes are opaque: the stack analyzer cannot model their effect and relies on the declared arity, so a consumer must treat these ranges as unanalysable rather than as ordinary script.
+
+### 3.17 `unsoundPrimitives`
+
+- **Type**: `string[]`
+- **Required**: No — **absent**, not empty, on any artifact that reaches no such builtin
+- **Description**: Names of unsound primitives this artifact's script reaches. Read by the SDKs (`packages/runar-sdk/src/unsound-primitives.ts`) and by all six native tiers.
+
+### 3.18 `buildTimestamp`
 
 - **Type**: `string` (ISO 8601)
 - **Required**: Yes
@@ -359,10 +417,13 @@ The SDK SHOULD ignore unknown fields in the artifact. This allows newer compiler
 
 ### Backward Compatibility
 
-The SDK MUST reject artifacts with a `version` major number it does not support. Minor and patch version differences are acceptable.
+The SDK SHOULD reject artifacts with a `version` major number it does not support. Minor and patch version differences are acceptable.
+
+> **Unimplemented.** No tier reads the `version` field. This rule describes intended behaviour; it does not describe any SDK shipping today, and an artifact from an incompatible future major version will be deployed rather than refused. Stated here so that the gap is visible rather than assumed closed.
 
 ### Version History
 
 | Version | Changes |
 |---|---|
 | `0.1.0` | Initial specification |
+| `1.0.0-rc.1` | Current. Adds `parentClass`, top-level `anf`, `templateDigest`, `codeSepIndexSlots`, `codeSeparatorIndex` / `codeSeparatorIndices`, `rawScriptSpans`, `unsoundPrimitives` |

@@ -684,7 +684,7 @@ Bitcoin Script is a stack-based language. Rúnar compilation targets this stack 
 BSV (post-Genesis) has removed most script size limits, but Rúnar still enforces:
 
 - **Stack depth**: Maximum 800 items (enforced at compile time via static analysis).
-- **Script size**: No hard limit, but the compiler will warn if the generated script exceeds 100 KB.
+- **Script size**: No hard limit, and **no warning at any size**. The compiler emits no size diagnostic: a contract with a single `ecMul` compiles to ~425 KB with `diagnostics.length === 0`. Post-Genesis BSV has no consensus script-size cap, so there is nothing for the compiler to enforce — but do not read the absence of a diagnostic as the compiler having checked. Size is measured, not gated: see `tests/measure-script-size.test.ts` and the per-primitive table in `opcodes.md` §12.2.
 
 ### 9.4 Deterministic Execution
 

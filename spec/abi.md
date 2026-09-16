@@ -1,6 +1,6 @@
 # Rúnar ABI Specification
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the Application Binary Interface (ABI) for Rúnar smart contracts. The ABI defines how constructor parameters, method parameters, and state fields are encoded and decoded for on-chain interaction.

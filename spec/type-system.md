@@ -1,6 +1,6 @@
 # Rúnar Type System
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the type system for Rúnar. The type system is designed to be simple, fully static, and to guarantee that all programs can be compiled to finite Bitcoin Script.
@@ -201,10 +201,39 @@ let result = checkSig(sig, pk);   // inferred: boolean
     ─────────────────────────────────────────────────
     e1 op e2 : bigint
 
-                    Comparison
-    e1 : T    e2 : T    op ∈ {==, ===, !=, !==, <, <=, >, >=}
-    ─────────────────────────────────────────────────────────
+                    Equality
+    e1 : T    e2 : S    (T <: S or S <: T)    op ∈ {==, ===, !=, !==}
+    ─────────────────────────────────────────────────────────────────
     e1 op e2 : boolean
+
+                    Relational
+    e1 : bigint    e2 : bigint    op ∈ {<, <=, >, >=}
+    ─────────────────────────────────────────────────
+    e1 op e2 : boolean
+
+                    Shift
+    e1 : bigint    e2 : bigint    op ∈ {<<, >>}
+    ───────────────────────────────────────────
+    e1 op e2 : bigint
+
+                    Bitwise (numeric)
+    e1 : bigint    e2 : bigint    op ∈ {&, |, ^}
+    ────────────────────────────────────────────
+    e1 op e2 : bigint
+
+                    Bitwise (bytes)
+    e1 : ByteString    e2 : ByteString    op ∈ {&, |, ^}
+    ────────────────────────────────────────────────────
+    e1 op e2 : ByteString
+
+                    Bitwise Complement
+    e : bigint
+    ──────────────
+    ~e : bigint
+
+    e : ByteString
+    ──────────────────
+    ~e : ByteString
 
                     Logical
     e1 : boolean    e2 : boolean    op ∈ {&&, ||}

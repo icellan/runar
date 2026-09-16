@@ -1,6 +1,6 @@
 # Rúnar Language Grammar
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document defines the formal grammar for Rúnar, a strict subset of TypeScript designed for compilation to Bitcoin SV Script. Rúnar source files are valid TypeScript that can be type-checked by `tsc`, but only the constructs defined here are accepted by the Rúnar compiler.

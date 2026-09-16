@@ -387,10 +387,10 @@ Without `OP_CAT`, stateful contracts and many advanced patterns would be impossi
 
 | Hex | Name | Description |
 |-----|------|-------------|
-| `0x61` | `OP_NOP` | No operation |
-| `0xb0`-`0xb9` | `OP_NOP1`-`OP_NOP10` | Reserved no-ops (for soft-fork upgrades in BTC; no special meaning in BSV) |
+| `0x61` | `OP_NOP` | No operation. **Emitted by Rúnar** — see below |
+| `0xb0`-`0xb9` | `OP_NOP1`-`OP_NOP10` | Reserved no-ops in pre-Chronicle policy. Under Chronicle, `0xb6` and `0xb7` are `OP_LSHIFTNUM` / `OP_RSHIFTNUM` and Rúnar emits both — see §13 |
 
-Rúnar does not generate NOP opcodes in normal compilation.
+Every stateful contract's locking script begins `0x61 0xab` — `OP_NOP` followed by `OP_CODESEPARATOR`. The `OP_NOP` is deliberate and costs one byte: it puts the separator at offset **1** rather than offset 0. Implementations that store "index of the last executed `OP_CODESEPARATOR`" in a zero-initialised field cannot distinguish a separator at offset 0 from having seen none, and fall back to hashing the whole script — the BSV go-sdk interpreter does exactly this. Emitting at offset 1 keeps every interpreter on the same side of that guard. See `packages/runar-compiler/src/passes/06-emit.ts` (`emitOpcode('OP_NOP')`).
 
 ---
 
@@ -403,7 +403,8 @@ The following opcodes exist in the Bitcoin Script specification but are **not us
 | `0x65` | `OP_VERIF` | Always fails (reserved) |
 | `0x66` | `OP_VERNOTIF` | Always fails (reserved) |
 | `0xa7` | `OP_SHA1` | Not used by Rúnar (weak hash) |
-| `0xab` | `OP_CODESEPARATOR` | Not used by Rúnar |
+
+`OP_CODESEPARATOR` (`0xab`) used to be listed here as "not used by Rúnar". It is used: the compiler inserts exactly one, at byte offset 1, in every contract with a public method that needs a BIP-143 sighash subscript — that is, every stateful contract. The artifact records its position in `codeSeparatorIndex` / `codeSeparatorIndices` (see `artifact-format.md` §3.15).
 
 ---
 
@@ -494,9 +495,22 @@ The loop runs **257** iterations, not 256, because the ladder multiplies `k + 3n
 
 The following notes document potential future opcodes or extensions that may be available on Chronicle (BSV-derived chains) but are **not part of BSV consensus as of this specification**.
 
-### 13.1 BSV-Native (Available Now)
+### 13.1 Chronicle, not pre-Genesis BSV
 
-All opcodes listed in sections 2-11 are BSV-native and available on mainnet.
+Rúnar compiles for the **Chronicle** opcode policy introduced by SV Node v1.2.0, which activated on BSV mainnet at block 943,816 on 7 April 2026. Sections 2-11 are not uniformly "BSV-native since Genesis", and reading them that way is how a script gets validated by something that silently disagrees with a miner.
+
+Two opcodes Rúnar emits heavily carry a different meaning — or none — under the pre-Chronicle policy:
+
+| Opcode | Byte | Pre-Chronicle | Emitted by |
+|---|---|---|---|
+| `OP_2MUL` | `0x8d` | disabled | `ecMul` (773 occurrences in one call), `ecMulGen`, the NIST ladders |
+| `OP_2DIV` | `0x8e` | disabled | the same ladders |
+| `OP_LSHIFTNUM` | `0xb6` | `OP_NOP7` | numeric shift helpers |
+| `OP_RSHIFTNUM` | `0xb7` | `OP_NOP8` | `ecMul` (255 occurrences in one call) |
+
+The `OP_NOP7`/`OP_NOP8` case is the dangerous one: a pre-Chronicle validator does not fail, it treats the opcode as a no-op, so **the shift silently does not happen** and the script evaluates to a different result rather than an error. `OP_LSHIFT` (`0x98`) and `OP_RSHIFT` (`0x99`), which the ordinary `<<` and `>>` operators compile to, are Genesis-era and unaffected.
+
+`docs/chronicle-opcode-policy.md` is the authority on this; it lists the full emitter table and the tooling that has not upgraded. Contracts Rúnar compiles are spendable on mainnet today — the concern is off-chain libraries and older node builds, not consensus.
 
 ### 13.2 Potential Chronicle Extensions
 
