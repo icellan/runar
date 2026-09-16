@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"math/big"
 	"testing"
 
 	runar "github.com/icellan/runar/packages/runar-go"
@@ -32,7 +33,7 @@ func TestECDemo_CheckX_WrongValue(t *testing.T) {
 
 	pt := testPoint(7)
 	c := &ECDemo{Pt: pt}
-	c.CheckX(999)
+	c.CheckX(big.NewInt(999))
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +56,7 @@ func TestECDemo_CheckY_WrongValue(t *testing.T) {
 
 	pt := testPoint(7)
 	c := &ECDemo{Pt: pt}
-	c.CheckY(999)
+	c.CheckY(big.NewInt(999))
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +67,7 @@ func TestECDemo_CheckMakePoint(t *testing.T) {
 	// Use small values that fit cleanly in int64
 	pt := testPoint(1)
 	c := &ECDemo{Pt: pt}
-	c.CheckMakePoint(10, 20, 10, 20)
+	c.CheckMakePoint(big.NewInt(10), big.NewInt(20), big.NewInt(10), big.NewInt(20))
 }
 
 func TestECDemo_CheckMakePoint_WrongExpected(t *testing.T) {
@@ -78,7 +79,7 @@ func TestECDemo_CheckMakePoint_WrongExpected(t *testing.T) {
 
 	pt := testPoint(1)
 	c := &ECDemo{Pt: pt}
-	c.CheckMakePoint(10, 20, 10, 99)
+	c.CheckMakePoint(big.NewInt(10), big.NewInt(20), big.NewInt(10), big.NewInt(99))
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +119,7 @@ func TestECDemo_CheckAdd_WrongResult(t *testing.T) {
 	other := testPoint(5)
 
 	c := &ECDemo{Pt: pt}
-	c.CheckAdd(other, 0, 0)
+	c.CheckAdd(other, big.NewInt(0), big.NewInt(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +178,7 @@ func TestECDemo_CheckMulGen_WrongExpected(t *testing.T) {
 
 	pt := testPoint(1)
 	c := &ECDemo{Pt: pt}
-	c.CheckMulGen(42, 0, 0)
+	c.CheckMulGen(42, big.NewInt(0), big.NewInt(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +203,7 @@ func TestECDemo_CheckNegate_WrongY(t *testing.T) {
 
 	pt := testPoint(5)
 	c := &ECDemo{Pt: pt}
-	c.CheckNegate(0)
+	c.CheckNegate(big.NewInt(0))
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"math/big"
 	"testing"
 
 	runar "github.com/icellan/runar/packages/runar-go"
@@ -19,25 +20,22 @@ func ecFixture() *ECPrimitives {
 }
 
 // ---------------------------------------------------------------------------
-// A RECORDED NATIVE-VS-SCRIPT DIVERGENCE LIVES IN THIS FIXTURE.
+// THIS FIXTURE USED TO RECORD A NATIVE-VS-SCRIPT DIVERGENCE. IT NO LONGER DOES.
 //
-// runar.EcPointX / EcPointY return `Bigint`, which the Go mock aliases to
-// int64, and they reach it through big.Int.Int64(). A secp256k1 coordinate is
-// 256 bits, so the mock returns the low 8 bytes REINTERPRETED AS SIGNED --
-// EcPointX(3G) is -8790479930575014151 -- while codegen/ec.go's EmitEcPointX
-// leaves the whole 32-byte coordinate on the stack. The divergence is pinned
-// as `knownDivergent` in packages/runar-go/mock_script_agreement_test.go and
-// is the same root cause that keeps examples/go/schnorr-zkp,
-// examples/go/p256-primitives and examples/go/p384-primitives out of the Go
-// build entirely: Rúnar's `bigint` is arbitrary precision and Go's is not.
+// runar.EcPointX / EcPointY returned `Bigint` (int64) and reached it through
+// big.Int.Int64(), so a 256-bit coordinate came back as its low 8 bytes read
+// as signed -- EcPointX(3G) was -8790479930575014151 -- while codegen/ec.go's
+// EmitEcPointX leaves the whole 32-byte coordinate on the stack. Every
+// accessor comparison below was therefore a WIRING check: it proved the method
+// called the accessor, and said nothing about the value the script compares.
 //
-// So the tests below are deliberately split. Everything that compares whole
-// POINTS is faithful and is checked against independently derived points.
-// Everything that goes through a coordinate accessor is a WIRING check only --
-// it proves the contract calls the accessor and compares the result, and it
-// says nothing about the 256-bit value the script would compare. Treating
-// those rows as cryptographic agreement is the mistake this comment exists to
-// prevent.
+// Both accessors and EcMakePoint take and return BigintBig now, the parameters
+// here are typed to match, and `runar.BigintBigEqual(a, b)` is what the Go DSL
+// parser turns into the same `===` node `a == b` produced -- the emitted script
+// is byte-identical. The comparisons below are real value comparisons at 256
+// bits, and the mock/emitter agreement they rest on is proved against the
+// executed opcodes by the ecPointX / ecPointY / ecMakePoint rows of
+// packages/runar-go/mock_script_agreement_test.go, not here.
 // ---------------------------------------------------------------------------
 
 func TestECPrimitives_OnCurveAndNegate(t *testing.T) {
@@ -122,51 +120,60 @@ func TestECPrimitives_ModReduce(t *testing.T) {
 	}
 }
 
-// MakePoint round-trips only for coordinates that FIT in int64. Small values
-// are used on purpose: with a real curve point the accessors truncate and the
-// round trip produces a point that is not even on the curve. That is the
-// recorded divergence above, demonstrated rather than asserted away.
-func TestECPrimitives_MakePointRoundTripsSmallCoordinates(t *testing.T) {
+// MakePoint round-trips at both widths. The small pair is the case the int64
+// constructor could express; the real point is the case it could not, and is
+// the one that matters -- no curve point has an 8-byte coordinate, so a
+// constructor tested only at 11 and 22 was never tested on a point at all.
+func TestECPrimitives_MakePointRoundTrips(t *testing.T) {
 	c := ecFixture()
 	mustAccept(t, "MakePoint(11, 22) round-trips", func() {
-		c.CheckMakePoint(11, 22, 11, 22)
+		c.CheckMakePoint(big.NewInt(11), big.NewInt(22), big.NewInt(11), big.NewInt(22))
 	})
 	mustRefuse(t, "MakePoint with swapped expectations", func() {
-		c.CheckMakePoint(11, 22, 22, 11)
+		c.CheckMakePoint(big.NewInt(11), big.NewInt(22), big.NewInt(22), big.NewInt(11))
 	})
 
-	// The demonstration. A real coordinate does not survive the accessor, so
-	// the round trip leaves the curve. If this ever starts round-tripping,
-	// EcPointX has been widened and the `knownDivergent` entry in
-	// packages/runar-go/mock_script_agreement_test.go is stale.
+	// Past the boundary: 3G's coordinates are 256 bits, so this fails for any
+	// accessor that narrows.
 	p := runar.EcMulGen(3)
-	rt := runar.EcMakePoint(runar.EcPointX(p), runar.EcPointY(p))
-	if rt == p {
-		t.Fatal("EcPointX/EcPointY now round-trip a 256-bit coordinate: the " +
-			"int64 truncation is fixed and the knownDivergent entry in " +
-			"packages/runar-go/mock_script_agreement_test.go must be removed")
+	x, y := runar.EcPointX(p), runar.EcPointY(p)
+	if x.BitLen() <= 64 || y.BitLen() <= 64 {
+		t.Fatalf("3G came back narrow (x %d bits, y %d bits) — a 256-bit "+
+			"coordinate that fits in 64 bits is a truncated one", x.BitLen(), y.BitLen())
 	}
-	if runar.EcOnCurve(rt) {
-		t.Fatal("the truncated round trip landed back on the curve, which the " +
-			"low 64 bits of a secp256k1 X should not do")
+	rt := runar.EcMakePoint(x, y)
+	if rt != p {
+		t.Fatalf("EcMakePoint(EcPointX(3G), EcPointY(3G)) = %x, want %x", rt, p)
 	}
+	if !runar.EcOnCurve(rt) {
+		t.Fatal("the round-tripped point is not on the curve")
+	}
+	mustAccept(t, "CheckMakePoint on a real point", func() { c.CheckMakePoint(x, y, x, y) })
+	mustRefuse(t, "CheckMakePoint on a real point, coordinates swapped", func() {
+		c.CheckMakePoint(x, y, y, x)
+	})
 }
 
-// The accessor-based contract methods are WIRING checks only -- see the
-// divergence note above. They prove the method calls the accessor and compares
-// its result; they do not prove agreement with the 256-bit value the script
-// compares.
-func TestECPrimitives_AccessorMethodsAreWired(t *testing.T) {
+// The accessor-based contract methods compare 256-bit coordinates by value.
+// Each mustRefuse row is the non-vacuity control for the mustAccept above it:
+// without them a method that ignored its argument would pass every one.
+func TestECPrimitives_AccessorMethodsCompareWholeCoordinates(t *testing.T) {
 	c := ecFixture()
 	x, y := runar.EcPointX(c.Pt), runar.EcPointY(c.Pt)
-	if x == y {
+	// Cmp, not ==: on *big.Int, `==` is pointer identity and would be false
+	// for two distinct pointers holding the same number, so the check would
+	// never fire.
+	if x.Cmp(y) == 0 {
 		t.Fatal("EcPointX and EcPointY returned the same coordinate")
 	}
+	if x.BitLen() <= 64 || y.BitLen() <= 64 {
+		t.Fatalf("3G came back narrow (x %d bits, y %d bits)", x.BitLen(), y.BitLen())
+	}
 	mustAccept(t, "CheckX on the mock's X", func() { c.CheckX(x) })
-	mustRefuse(t, "CheckX off by one", func() { c.CheckX(x + 1) })
+	mustRefuse(t, "CheckX off by one", func() { c.CheckX(new(big.Int).Add(x, big.NewInt(1))) })
 	mustRefuse(t, "CheckX given Y", func() { c.CheckX(y) })
 	mustAccept(t, "CheckY on the mock's Y", func() { c.CheckY(y) })
-	mustRefuse(t, "CheckY off by one", func() { c.CheckY(y + 1) })
+	mustRefuse(t, "CheckY off by one", func() { c.CheckY(new(big.Int).Add(y, big.NewInt(1))) })
 
 	negY := runar.EcPointY(runar.EcNegate(c.Pt))
 	mustAccept(t, "CheckNegateY", func() { c.CheckNegateY(negY) })

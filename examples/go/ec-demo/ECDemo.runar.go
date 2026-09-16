@@ -53,8 +53,8 @@ type ECDemo struct {
 //
 // Use cases: comparing public key x-coordinates, Schnorr signature
 // verification (which only uses the x-coordinate).
-func (c *ECDemo) CheckX(expectedX runar.Bigint) {
-	runar.Assert(runar.EcPointX(c.Pt) == expectedX)
+func (c *ECDemo) CheckX(expectedX runar.BigintBig) {
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(c.Pt), expectedX))
 }
 
 // CheckY extracts the y-coordinate from the stored point and verifies it
@@ -64,8 +64,8 @@ func (c *ECDemo) CheckX(expectedX runar.Bigint) {
 // unsigned y-coordinate) and converts to a script number.
 //
 // Use cases: full point comparison, parity checks for compressed encoding.
-func (c *ECDemo) CheckY(expectedY runar.Bigint) {
-	runar.Assert(runar.EcPointY(c.Pt) == expectedY)
+func (c *ECDemo) CheckY(expectedY runar.BigintBig) {
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(c.Pt), expectedY))
 }
 
 // CheckMakePoint constructs a point from x and y coordinates, then verifies
@@ -76,10 +76,10 @@ func (c *ECDemo) CheckY(expectedY runar.Bigint) {
 //
 // Use cases: reconstructing points from stored coordinates, building
 // points from external data.
-func (c *ECDemo) CheckMakePoint(x, y, expectedX, expectedY runar.Bigint) {
+func (c *ECDemo) CheckMakePoint(x, y, expectedX, expectedY runar.BigintBig) {
 	p := runar.EcMakePoint(x, y)
-	runar.Assert(runar.EcPointX(p) == expectedX)
-	runar.Assert(runar.EcPointY(p) == expectedY)
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(p), expectedX))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(p), expectedY))
 }
 
 // CheckOnCurve verifies the stored point lies on the secp256k1 curve.
@@ -107,10 +107,10 @@ func (c *ECDemo) CheckOnCurve() {
 //
 // Use cases: combining public keys (key aggregation), Schnorr multi-sig,
 // Pedersen commitments (C = v*G + r*H).
-func (c *ECDemo) CheckAdd(other runar.Point, expectedX, expectedY runar.Bigint) {
+func (c *ECDemo) CheckAdd(other runar.Point, expectedX, expectedY runar.BigintBig) {
 	result := runar.EcAdd(c.Pt, other)
-	runar.Assert(runar.EcPointX(result) == expectedX)
-	runar.Assert(runar.EcPointY(result) == expectedY)
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(result), expectedX))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(result), expectedY))
 }
 
 // CheckMul multiplies the stored point by a scalar and verifies the result.
@@ -124,10 +124,10 @@ func (c *ECDemo) CheckAdd(other runar.Point, expectedX, expectedY runar.Bigint) 
 //
 // Use cases: public key derivation (P = k*G), Diffie-Hellman shared
 // secrets, BIP-32 child key derivation.
-func (c *ECDemo) CheckMul(scalar, expectedX, expectedY runar.Bigint) {
+func (c *ECDemo) CheckMul(scalar runar.Bigint, expectedX, expectedY runar.BigintBig) {
 	result := runar.EcMul(c.Pt, scalar)
-	runar.Assert(runar.EcPointX(result) == expectedX)
-	runar.Assert(runar.EcPointY(result) == expectedY)
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(result), expectedX))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(result), expectedY))
 }
 
 // CheckMulGen multiplies the generator point G by a scalar and verifies
@@ -140,10 +140,10 @@ func (c *ECDemo) CheckMul(scalar, expectedX, expectedY runar.Bigint) {
 // Use cases: deriving a public key from a private key (the fundamental
 // operation in elliptic curve cryptography), generating nonce points
 // for Schnorr proofs (R = r*G).
-func (c *ECDemo) CheckMulGen(scalar, expectedX, expectedY runar.Bigint) {
+func (c *ECDemo) CheckMulGen(scalar runar.Bigint, expectedX, expectedY runar.BigintBig) {
 	result := runar.EcMulGen(scalar)
-	runar.Assert(runar.EcPointX(result) == expectedX)
-	runar.Assert(runar.EcPointY(result) == expectedY)
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(result), expectedX))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(result), expectedY))
 }
 
 // CheckNegate negates the stored point and verifies the result's
@@ -154,9 +154,9 @@ func (c *ECDemo) CheckMulGen(scalar, expectedX, expectedY runar.Bigint) {
 //
 // Use cases: subtraction of points (A - B = A + (-B)), cancellation
 // checks in zero-knowledge proofs.
-func (c *ECDemo) CheckNegate(expectedNegY runar.Bigint) {
+func (c *ECDemo) CheckNegate(expectedNegY runar.BigintBig) {
 	neg := runar.EcNegate(c.Pt)
-	runar.Assert(runar.EcPointY(neg) == expectedNegY)
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(neg), expectedNegY))
 }
 
 // CheckNegateRoundtrip verifies that negating a point twice returns
@@ -167,8 +167,8 @@ func (c *ECDemo) CheckNegate(expectedNegY runar.Bigint) {
 func (c *ECDemo) CheckNegateRoundtrip() {
 	neg1 := runar.EcNegate(c.Pt)
 	neg2 := runar.EcNegate(neg1)
-	runar.Assert(runar.EcPointX(neg2) == runar.EcPointX(c.Pt))
-	runar.Assert(runar.EcPointY(neg2) == runar.EcPointY(c.Pt))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(neg2), runar.EcPointX(c.Pt)))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(neg2), runar.EcPointY(c.Pt)))
 }
 
 // CheckModReduce performs modular reduction and verifies the result.
@@ -205,8 +205,8 @@ func (c *ECDemo) CheckEncodeCompressed(expected runar.ByteString) {
 // and a useful sanity check that EcMul handles the identity scalar.
 func (c *ECDemo) CheckMulIdentity() {
 	result := runar.EcMul(c.Pt, 1)
-	runar.Assert(runar.EcPointX(result) == runar.EcPointX(c.Pt))
-	runar.Assert(runar.EcPointY(result) == runar.EcPointY(c.Pt))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(result), runar.EcPointX(c.Pt)))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(result), runar.EcPointY(c.Pt)))
 }
 
 // CheckAddOnCurve verifies that the result of EcAdd lies on the curve.

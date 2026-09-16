@@ -35,6 +35,6 @@ func (c *ConvergenceProof) ProveConvergence(deltaO runar.Bigint) {
 	expected := runar.EcMulGen(deltaO)
 
 	// Assert point equality via coordinate comparison
-	runar.Assert(runar.EcPointX(diff) == runar.EcPointX(expected))
-	runar.Assert(runar.EcPointY(diff) == runar.EcPointY(expected))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointX(diff), runar.EcPointX(expected)))
+	runar.Assert(runar.BigintBigEqual(runar.EcPointY(diff), runar.EcPointY(expected)))
 }

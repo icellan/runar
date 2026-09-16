@@ -2,6 +2,7 @@ package runar
 
 import (
 	"encoding/hex"
+	"math/big"
 	"testing"
 )
 
@@ -113,15 +114,16 @@ func TestEcMakePoint_RoundTrip(t *testing.T) {
 }
 
 func TestEcMakePoint_SmallValues(t *testing.T) {
-	// EcMakePoint uses int64, so test with small values and verify round-trip.
-	p := EcMakePoint(100, 200)
+	// Coordinates that fit in a byte still have to round-trip; the wide-value
+	// case lives in ec_coordinate_width_test.go.
+	p := EcMakePoint(big.NewInt(100), big.NewInt(200))
 	gotX := EcPointX(p)
 	gotY := EcPointY(p)
-	if gotX != 100 {
-		t.Fatalf("expected x=100, got %d", gotX)
+	if gotX.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("expected x=100, got %s", gotX)
 	}
-	if gotY != 200 {
-		t.Fatalf("expected y=200, got %d", gotY)
+	if gotY.Cmp(big.NewInt(200)) != 0 {
+		t.Fatalf("expected y=200, got %s", gotY)
 	}
 }
 

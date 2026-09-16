@@ -473,28 +473,38 @@ func ecCases() []agreementCase {
 		{builtin: "ecEncodeCompressed", mock: "EcEncodeCompressed", argTys: []string{"Point"},
 			args: [][]byte{bs(ByteString(p))}, retTy: "ByteString",
 			want: bs(EcEncodeCompressed(p)), tamper: tamperPt(Point(EcEncodeCompressed(p)))},
-		// EcPointX / EcPointY return `Bigint` (= int64) and reach it via
+		// EcPointX / EcPointY returned `Bigint` (= int64) and reached it via
 		// big.Int.Int64(), which truncates modulo 2^64. A secp256k1
-		// coordinate is 256 bits, so the mock returns the low 8 bytes while
-		// the emitter (codegen/ec.go EmitEcPointX) leaves the whole 32-byte
-		// coordinate. Identical shape to N-090; NOT fixed here because
-		// widening the return type rewrites ~40 call sites across
-		// examples/go/ which this change does not own. Recorded so it cannot
-		// go quiet again.
+		// coordinate is 256 bits, so the mock returned the low 8 bytes --
+		// EcPointX(5G) as a negative int64 -- while the emitter
+		// (codegen/ec.go EmitEcPointX) leaves the whole 32-byte coordinate.
+		// Both accessors return BigintBig now and these two rows are the
+		// proof: `p` is a real curve point, so `want` is a 256-bit number and
+		// the spend only accepts if the mock produced exactly the value the
+		// script left on the stack. The `knownDivergent` entries they used to
+		// carry are gone.
 		{builtin: "ecPointX", mock: "EcPointX", argTys: []string{"Point"},
 			args: [][]byte{bs(ByteString(p))}, retTy: "bigint",
-			want: numI(EcPointX(p)), tamper: numI(EcPointX(p) + 1),
-			knownDivergent: "int64 return truncates a 256-bit coordinate"},
+			want: numB(EcPointX(p)), tamper: numB(new(big.Int).Add(EcPointX(p), big.NewInt(1)))},
 		{builtin: "ecPointY", mock: "EcPointY", argTys: []string{"Point"},
 			args: [][]byte{bs(ByteString(p))}, retTy: "bigint",
-			want: numI(EcPointY(p)), tamper: numI(EcPointY(p) + 1),
-			knownDivergent: "int64 return truncates a 256-bit coordinate"},
+			want: numB(EcPointY(p)), tamper: numB(new(big.Int).Add(EcPointY(p), big.NewInt(1)))},
 		{builtin: "ecModReduce", mock: "EcModReduce", argTys: []string{"bigint", "bigint"},
 			args: [][]byte{numI(1000003), numI(97)}, retTy: "bigint",
 			want: numI(EcModReduce(1000003, 97)), tamper: numI(EcModReduce(1000003, 97) + 1)},
 		{builtin: "ecMakePoint", mock: "EcMakePoint", argTys: []string{"bigint", "bigint"},
 			args: [][]byte{numI(11), numI(22)}, retTy: "Point",
-			want: bs(ByteString(EcMakePoint(11, 22))), tamper: tamperPt(EcMakePoint(11, 22))},
+			want: bs(ByteString(EcMakePoint(big.NewInt(11), big.NewInt(22)))),
+			tamper: tamperPt(EcMakePoint(big.NewInt(11), big.NewInt(22)))},
+		// The same builtin at the width it actually gets used at. The row
+		// above it passes 11 and 22, which is how a constructor that can only
+		// take int64 coordinates looked correct: no curve point has an
+		// 8-byte coordinate, so nothing the row covered was a point. This one
+		// rebuilds a real point from its own accessors, which is the identity
+		// examples/go/ec-unit asserts and could not run.
+		{builtin: "ecMakePoint", mock: "EcMakePoint (wide)", argTys: []string{"bigint", "bigint"},
+			args: [][]byte{numB(EcPointX(p)), numB(EcPointY(p))}, retTy: "Point",
+			want: bs(ByteString(p)), tamper: tamperPt(p)},
 		{builtin: "ecMulGen", mock: "EcMulGen", argTys: []string{"bigint"},
 			args: [][]byte{numI(5)}, retTy: "Point", slow: true,
 			want: bs(ByteString(EcMulGen(5))), tamper: tamperPt(EcMulGen(5))},

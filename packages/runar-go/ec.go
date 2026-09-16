@@ -1,11 +1,14 @@
 package runar
 
-import "math/big"
+import (
+	"fmt"
+	"math/big"
+)
 
 // secp256k1 curve parameters
 var (
-	ecP, _ = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16)
-	ecN, _ = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+	ecP, _  = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16)
+	ecN, _  = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
 	ecGX, _ = new(big.Int).SetString("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16)
 	ecGY, _ = new(big.Int).SetString("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8", 16)
 )
@@ -188,20 +191,46 @@ func EcEncodeCompressed(p Point) ByteString {
 }
 
 // EcMakePoint constructs a Point from two coordinate integers.
-func EcMakePoint(x, y Bigint) Point {
-	bx := big.NewInt(x)
-	by := big.NewInt(y)
-	return coordsToPoint(bx, by)
+//
+// The coordinates are BigintBig (*big.Int) and not Bigint (int64) because a
+// secp256k1 coordinate is 256 bits: an int64 parameter cannot accept one, so
+// the only points this could build were ones no curve contains. Contract
+// source spells the type `runar.BigintBig`, which every .runar.go parser maps
+// to the same `bigint` primitive as `runar.Bigint` — the emitted Script is
+// unchanged. See EcPointX for the other half of the round-trip.
+func EcMakePoint(x, y BigintBig) Point {
+	if x == nil {
+		x = new(big.Int)
+	}
+	if y == nil {
+		y = new(big.Int)
+	}
+	if x.Sign() < 0 || y.Sign() < 0 {
+		panic(fmt.Sprintf("runar: EcMakePoint needs unsigned coordinates, got (%s, %s) — "+
+			"a Point is x[32]||y[32] big-endian unsigned", x, y))
+	}
+	if x.BitLen() > 256 || y.BitLen() > 256 {
+		panic(fmt.Sprintf("runar: EcMakePoint coordinate wider than 32 bytes (x %d bits, y %d bits) — "+
+			"it would not fit the Point encoding the script builds", x.BitLen(), y.BitLen()))
+	}
+	return coordsToPoint(x, y)
 }
 
 // EcPointX extracts the x-coordinate from a Point.
-func EcPointX(p Point) Bigint {
+//
+// Returns BigintBig. It used to return Bigint (int64) and reach it through
+// big.Int.Int64(), which keeps the low 8 bytes of a 256-bit coordinate and
+// reads them as signed: EcPointX(3G) came back as -8790479930575014151 while
+// the compiled OP_SPLIT/OP_BIN2NUM pair left the whole 32-byte coordinate on
+// the stack. The divergence was recorded as `knownDivergent` in
+// mock_script_agreement_test.go; that row now has to agree.
+func EcPointX(p Point) BigintBig {
 	x, _ := pointToCoords(p)
-	return x.Int64()
+	return x
 }
 
-// EcPointY extracts the y-coordinate from a Point.
-func EcPointY(p Point) Bigint {
+// EcPointY extracts the y-coordinate from a Point. See EcPointX.
+func EcPointY(p Point) BigintBig {
 	_, y := pointToCoords(p)
-	return y.Int64()
+	return y
 }
