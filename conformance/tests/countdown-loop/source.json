@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/countdown-loop/CountdownLoop.runar.ts",
+    ".runar.sol": "../../../examples/sol/countdown-loop/CountdownLoop.runar.sol",
+    ".runar.move": "../../../examples/move/countdown-loop/CountdownLoop.runar.move",
+    ".runar.go": "../../../examples/go/countdown-loop/CountdownLoop.runar.go",
+    ".runar.rs": "../../../examples/rust/countdown-loop/CountdownLoop.runar.rs",
+    ".runar.py": "../../../examples/python/countdown-loop/CountdownLoop.runar.py",
+    ".runar.zig": "../../../examples/zig/countdown-loop/CountdownLoop.runar.zig",
+    ".runar.rb": "../../../examples/ruby/countdown-loop/CountdownLoop.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/countdown-loop/CountdownLoop.runar.java"
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "contractName": "CountdownLoop",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "target"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "target"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "target",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "target",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "seed"
+          }
+        },
+        {
+          "name": "acc",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t0"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "body": [
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_param",
+                  "name": "i"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "acc",
+                  "op": "+",
+                  "right": "t1"
+                }
+              },
+              {
+                "name": "acc",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t2"
+                }
+              }
+            ],
+            "count": 4,
+            "iterVar": "i",
+            "kind": "loop",
+            "start": 5,
+            "step": -1
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "target"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "bin_op",
+            "left": "acc",
+            "op": "===",
+            "right": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "assert",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "verify",
+      "params": [
+        {
+          "name": "seed",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "target",
+      "readonly": true,
+      "type": "bigint"
+    }
+  ]
+}

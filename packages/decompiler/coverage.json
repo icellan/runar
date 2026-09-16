@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-09-16T05:03:49.450Z",
+  "generatedAt": "2026-09-16T09:09:44.854Z",
   "summary": {
-    "byte-match": 86,
+    "byte-match": 87,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
     "skipped": 6
   },
   "pathBreakdown": {
-    "template": 81,
+    "template": 82,
     "assert-recognizer": 1,
     "symexec": 0,
     "raw_script": 4
@@ -126,6 +126,11 @@
     },
     {
       "id": "convergence-proof/ConvergenceProof",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "countdown-loop/CountdownLoop",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

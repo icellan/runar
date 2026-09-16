@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-09-16T05:04:30.494097Z",
   "summary": {
-    "byte-match": 84,
+    "byte-match": 85,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
@@ -10,7 +10,7 @@
   "pathBreakdown": {
     "assert-recognizer": 1,
     "raw_script": 4,
-    "template": 79
+    "template": 80
   },
   "rows": [
     {
@@ -125,6 +125,11 @@
     },
     {
       "id": "convergence-proof/ConvergenceProof",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "countdown-loop/CountdownLoop",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
