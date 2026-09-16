@@ -22,15 +22,17 @@ import static runar.lang.Builtins.split;
  *
  * <p>See the {@code .runar.ts} port for the full rationale.
  *
- * <p>This file is a Rúnar frontend input, not a Java compilation unit, and
- * {@code examples/java/build.gradle.kts} excludes it from javac — the Go port
- * states the same thing with {@code //go:build ignore}. One signature is why:
- * Rúnar's {@code split} returns the RIGHT half as a single {@code ByteString},
- * because no surface parser accepts array destructuring and the left half is
- * unnameable, while {@code runar.lang.Builtins.split} models it as a
- * {@code ByteString[]} pair. Everything else here is valid Java. The Rúnar side
- * is fully covered: {@code conformance/tests/byte-builtins} reads this file for
- * the {@code .runar.java} surface, and the compiled bytes are spent in
+ * <p>This file is BOTH a Rúnar frontend input and a Java compilation unit:
+ * {@code examples/java/build.gradle.kts} compiles it with every other
+ * {@code .runar.java} example, and {@code javac-source-set.test.ts} holds that
+ * exclusion list empty. It used to be the single exclusion, over one signature:
+ * Rúnar's {@code split} binds the RIGHT half as a single {@code ByteString},
+ * because Rúnar has no tuple type and no surface parser accepts array
+ * destructuring, while {@code runar.lang.Builtins.split} returned a
+ * {@code ByteString[]} pair — so javac rejected the assignment below. The SDK
+ * now returns one {@code ByteString}, matching the language. The Rúnar side is
+ * covered as before: {@code conformance/tests/byte-builtins} reads this file
+ * for the {@code .runar.java} surface, and the compiled bytes are spent in
  * {@code conformance/byte_builtins_execution_test.go}.
  */
 class ByteBuiltins extends SmartContract {

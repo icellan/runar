@@ -287,7 +287,11 @@ public final class Builtins {
         if (!SimulatorContext.isActive()) throw notInSimulator("right");
         return MockCrypto.right(bs, len);
     }
-    public static ByteString[] split(ByteString bs, BigInteger idx) {
+    /**
+     * The bytes of {@code bs} from {@code idx} onwards -- the RIGHT half.
+     * Single-valued; see {@link MockCrypto#split(ByteString, BigInteger)}.
+     */
+    public static ByteString split(ByteString bs, BigInteger idx) {
         if (!SimulatorContext.isActive()) throw notInSimulator("split");
         return MockCrypto.split(bs, idx);
     }

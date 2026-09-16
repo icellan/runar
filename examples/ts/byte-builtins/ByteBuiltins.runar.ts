@@ -39,11 +39,12 @@ import type { ByteString, Sha256, Ripemd160 } from 'runar-lang';
  *                `checkRipemd` is the end-to-end proof, and it is the reason
  *                this contract bakes a SECOND digest.
  *
- * NOTE on `split`: the compiler binds the RIGHT half. `runar-lang` declares
- * `split(): [ByteString, ByteString]`, but no parser accepts array
- * destructuring, so the left half is unnameable and the typechecker's own
- * signature returns a single `ByteString`. This file uses the form that
- * compiles.
+ * NOTE on `split`: it is single-valued and binds the RIGHT half, lowering to
+ * `OP_SPLIT OP_NIP`. Rúnar has no tuple type and no parser accepts array
+ * destructuring, so a pair would be unnameable; `left(data, idx)` is the other
+ * side of the same cut. `runar-lang` used to declare
+ * `split(): [ByteString, ByteString]`, which disagreed with every typechecker
+ * and with this file.
  */
 class ByteBuiltins extends SmartContract {
   readonly expectedDigest: Sha256;

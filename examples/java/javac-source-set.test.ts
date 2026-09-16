@@ -3,36 +3,37 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve, normalize, dirname } from 'node:path';
 
 /**
- * RATCHET — the javac exclusion list for `examples/java` is EXACTLY one entry.
+ * RATCHET — the javac exclusion list for `examples/java` is EMPTY.
  *
  * Every `.runar.java` example is compiled by gradle against the runar-java SDK;
- * that is the point of wiring the extension into the `main` source set. Exactly
- * one file is excluded, `byte-builtins`, and it is excluded for one reason:
+ * that is the point of wiring the extension into the `main` source set. There
+ * used to be exactly one exclusion, `byte-builtins`, for exactly one reason:
  *
- *   Rúnar's `split` returns the RIGHT half as a single `ByteString` — no
- *   surface parser accepts array destructuring, so the left half is unnameable
- *   and the typechecker's own signature returns one value — while
- *   `runar.lang.Builtins.split` models it honestly as a `ByteString[]` pair.
- *   Everything else in that file is valid Java.
+ *   `split` was specified as returning a PAIR, and the language had no way to
+ *   name the left element. `runar.lang.Builtins.split` modelled the pair
+ *   honestly as `ByteString[]`; the frontend's typechecker returned a single
+ *   `ByteString`; no surface parser accepts array destructuring. javac believed
+ *   the SDK and rejected `ByteString tail = split(data, idx);`.
  *
- * That mismatch is one defect with three symptoms, not three defects: the
- * compiler orphans the left half, the Java SDK's signature disagrees with the
- * language, and the stack model carries a `push(null)` for a value nothing ever
- * drops. `substr` escapes only because it NIPs its left half. Whoever decides
- * what `split` actually returns resolves all three, and deleting the exclusion
- * below is how this file finds out.
+ * That was one defect with three symptoms: the compiler also ORPHANED the left
+ * half (a `push(null)` stack slot nothing ever dropped, which desynced the model
+ * and aborted the compile for any read after a split), and `substr` escaped only
+ * because it NIPs its half away. `split` is now single-valued in the language,
+ * in all seven compilers and in the Java SDK, and it lowers to
+ * `OP_SPLIT OP_NIP` — so the file compiles and the exclusion is gone.
  *
  * WHY A RATCHET AND NOT A COMMENT. An exclusion list with nothing watching it is
  * a guard that never runs — the exact pattern this branch keeps rediscovering. A
  * `length <= N` check is the same failure one step later: a bound that only has
- * to be "not worse" stops being read. So this asserts the SET with `toEqual`. A
- * second exclusion fails here and someone has to justify it in the same commit,
- * the way `STALE_PIN_BUDGET === 0` forces a justification for a stale pin.
+ * to be "not worse" stops being read. So this asserts the SET with `toEqual`.
+ * Any exclusion fails here and has to justify itself in the same commit, the way
+ * `STALE_PIN_BUDGET === 0` forces a justification for a stale pin.
  *
- * NON-VACUITY. The parse below is checked against the real file, and the
- * `byte-builtins` entry is checked to still name a real, still-excluded source
- * — so this cannot pass by matching nothing, and it cannot pass after the
- * exclusion is removed but its entry left behind.
+ * NON-VACUITY. An empty expectation is exactly the shape that can pass by
+ * matching nothing, so the second test below feeds the parser a `sourceSets`
+ * block that DOES carry exclusions and requires it to find them. The third keeps
+ * the contract that used to be excluded in the javac source set, still calling
+ * `split`, so this file notices if it is quietly dropped instead of compiled.
  */
 
 const HERE = dirname(new URL(import.meta.url).pathname);
@@ -46,10 +47,9 @@ const BUILD_FILE = join(HERE, 'build.gradle.kts');
  * declarations further down may grow `exclude` calls of their own, and those
  * have nothing to do with which contracts javac sees.
  */
-function javacExclusions(): string[] {
-  const text = readFileSync(BUILD_FILE, 'utf8');
+function parseJavacExclusions(text: string): string[] {
   const start = text.indexOf('sourceSets {');
-  expect(start, `no sourceSets block in ${BUILD_FILE}`).toBeGreaterThanOrEqual(0);
+  expect(start, 'no sourceSets block to scan').toBeGreaterThanOrEqual(0);
 
   // Walk braces from `sourceSets {` to its matching close, so the scan cannot
   // run past the block and pick up an unrelated `exclude`.
@@ -71,39 +71,76 @@ function javacExclusions(): string[] {
   return [...block.matchAll(/(?<!\/\/[^\n]*)\bexclude\("([^"]+)"\)/g)].map((m) => m[1]!);
 }
 
+function javacExclusions(): string[] {
+  return parseJavacExclusions(readFileSync(BUILD_FILE, 'utf8'));
+}
+
 describe('examples/java javac source set', () => {
-  it('excludes EXACTLY the one contract the Builtins.split signature blocks', () => {
+  it('excludes NOTHING — every .runar.java example is compiled by javac', () => {
     expect(
       javacExclusions(),
-      'The javac exclusion list for examples/java changed. Every .runar.java ' +
-        'example is meant to compile against the runar-java SDK; byte-builtins ' +
-        'is the single exception, because Rúnar\'s `split` returns one ByteString ' +
-        'and `runar.lang.Builtins.split` returns a ByteString[] pair. A second ' +
+      'The javac exclusion list for examples/java is no longer empty. Every ' +
+        '.runar.java example is meant to compile against the runar-java SDK. The ' +
+        'one exclusion this list ever carried, byte-builtins, existed because ' +
+        "Runar's `split` returned one ByteString while `runar.lang.Builtins.split` " +
+        'returned a ByteString[] pair; that disagreement is resolved. A new ' +
         'exclusion needs its own reason in the same commit — silently growing ' +
         'this list is how a compile gate stops gating.',
-    ).toEqual(['**/byte-builtins/**']);
+    ).toEqual([]);
   });
 
-  it('the excluded contract still exists and is still what the reason describes', () => {
-    // Without this the assertion above survives the exclusion outliving its
-    // cause: the file deleted, or `split` fixed and the entry left behind.
+  it('the parser finds exclusions when they are there (non-vacuity)', () => {
+    // An empty expectation passes on a parser that returns [] for everything —
+    // a broken regex, the wrong block, a renamed source set. Feed it a block
+    // that carries exclusions, including the one that used to be real, and
+    // require them back. Also checks the two things the scan is scoped for: a
+    // commented-out exclude is not an exclusion, and an `exclude` outside the
+    // sourceSets block is not one either.
+    const fixture = `
+plugins { java }
+configurations.all { exclude("outside-the-block") }
+sourceSets {
+    main {
+        java {
+            include("**/*.runar.java")
+            // exclude("**/commented-out/**")
+            exclude("**/byte-builtins/**")
+            exclude("**/second/**")
+        }
+    }
+}
+dependencies { implementation("x:y:1") { exclude("also-outside") } }
+`;
+    expect(parseJavacExclusions(fixture)).toEqual(['**/byte-builtins/**', '**/second/**']);
+  });
+
+  it('byte-builtins is in the javac source set, still calling split', () => {
+    // The file that used to be excluded has to still be there and still exercise
+    // the builtin whose signature blocked it — otherwise "the exclusion is gone"
+    // would be satisfied by deleting the contract instead of fixing `split`.
     const contract = join(
       HERE,
       'src/main/java/runar/examples/byte-builtins/ByteBuiltins.runar.java',
     );
-    expect(existsSync(contract), `${contract} is gone — drop the exclusion`).toBe(true);
+    expect(existsSync(contract), `${contract} is gone`).toBe(true);
+    const source = readFileSync(contract, 'utf8');
     expect(
-      readFileSync(contract, 'utf8'),
-      'the excluded contract no longer calls split(), so the exclusion has ' +
-        'outlived its reason — remove it and let javac compile the file',
+      source,
+      'byte-builtins no longer calls split(), so it no longer proves the ' +
+        'SDK signature and the language agree',
     ).toContain('split(data, idx)');
+    expect(
+      source,
+      'byte-builtins no longer binds split() to a single ByteString, which is ' +
+        'the exact assignment javac used to reject',
+    ).toContain('ByteString tail = split(data, idx);');
   });
 
-  it('the exclusion is javac-only: conformance still reads the file for the .runar.java surface', () => {
+  it('conformance reads the same file for the .runar.java surface', () => {
     // The nine-surface frontend-parity invariant runs through conformance's
-    // source.json + --parser-only matrix, not through gradle. If a future
-    // exclusion ever reached the fixture's source-resolution path, the coverage
-    // claim in build.gradle.kts and in the contract's javadoc would be false.
+    // source.json + --parser-only matrix, not through gradle. Both paths must
+    // point at one file, or the javac compile and the cross-tier compile stop
+    // being about the same contract.
     const cfg = JSON.parse(
       readFileSync(join(REPO, 'conformance/tests/byte-builtins/source.json'), 'utf8'),
     ) as { sources: Record<string, string> };

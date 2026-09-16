@@ -1350,7 +1350,7 @@ public static ByteString cat(ByteString a, ByteString b);
 public static ByteString substr(ByteString bs, BigInteger start, BigInteger len);
 public static ByteString left(ByteString bs, BigInteger len);
 public static ByteString right(ByteString bs, BigInteger len);
-public static ByteString[] split(ByteString bs, BigInteger idx);
+public static ByteString split(ByteString bs, BigInteger idx);   // RIGHT half
 public static ByteString reverseBytes(ByteString bs);
 public static ByteString num2bin(BigInteger v, BigInteger len);
 public static BigInteger bin2num(ByteString bs);

@@ -196,12 +196,21 @@ export function right(_data: ByteString, _len: bigint): ByteString {
 }
 
 /**
- * Split a byte string at position `index` into two parts.
- * Compiles to: `OP_SPLIT`
+ * Returns the bytes of `data` from `index` onwards — the RIGHT half of the
+ * split at `index`. Aborts if `index` is negative or past the end.
+ * Compiles to: `OP_SPLIT OP_NIP`
  *
- * @returns A tuple [left, right].
+ * `OP_SPLIT` leaves two items on the stack, but `split` is single-valued and
+ * the left half is dropped. Rúnar has no tuple type and no surface parser
+ * accepts array destructuring, so a pair return would be unnameable in all
+ * nine surfaces. Use `left(data, index)` for the other half —
+ * `left(d, i)` and `split(d, i)` are the two sides of the same cut.
+ *
+ * This used to be declared as `[ByteString, ByteString]`, which disagreed with
+ * the language: `spec/grammar.md` and every one of the seven typecheckers gives
+ * `split` a single `ByteString` return.
  */
-export function split(_data: ByteString, _index: bigint): [ByteString, ByteString] {
+export function split(_data: ByteString, _index: bigint): ByteString {
   return compilerStub('split');
 }
 

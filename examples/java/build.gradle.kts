@@ -25,35 +25,12 @@ sourceSets {
             include("**/*.java")
             include("**/*.runar.java")
 
-            // byte-builtins is a Rúnar frontend input, not a Java compilation
-            // unit — the same posture the Go port states with `//go:build
-            // ignore`. ONE signature is why javac rejects it, and it is the
-            // same unresolved question wearing a third face:
-            //
-            //   `split` is specified as returning a PAIR, and the language has
-            //   no way to name the left element. No surface parser accepts
-            //   array destructuring, and the typechecker's own signature
-            //   returns a single ByteString — the RIGHT half.
-            //
-            // Three symptoms, one root, and whoever decides what the builtin
-            // actually returns resolves all three:
-            //   1. the compiler ORPHANS the left half — the stack model carries
-            //      a `push(null)` for it that nothing ever drops;
-            //   2. `runar.lang.Builtins.split` models the pair honestly as
-            //      `ByteString[]`, so it disagrees with the language — this
-            //      exclusion;
-            //   3. `substr` escapes only because it NIPs its left half, which
-            //      is a workaround rather than an answer.
-            //
-            // Everything else in the file is valid Java. Its Rúnar-side coverage
-            // is untouched, and that is checked rather than asserted:
-            // conformance/tests/byte-builtins reads this exact file for the
-            // `.runar.java` surface in the multi-format and parser-only
-            // matrices, its compiled bytes are spent in
-            // conformance/byte_builtins_execution_test.go, and
-            // javac-source-set.test.ts holds this list to EXACTLY one entry so a
-            // second exclusion has to justify itself.
-            exclude("**/byte-builtins/**")
+            // No exclusions. `byte-builtins` used to be one: `split` was
+            // specified as a pair the language could not name, so the compiler
+            // bound the right half while `runar.lang.Builtins.split` returned a
+            // `ByteString[]`, and javac rejected the assignment. `split` is now
+            // single-valued in both, so every .runar.java example compiles.
+            // `javac-source-set.test.ts` holds this list EMPTY.
         }
     }
 }
