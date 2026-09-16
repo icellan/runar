@@ -63,11 +63,12 @@ use std::path::{Path, PathBuf};
 ///     branched-readonly-len
 ///
 /// `to_byte_string("41000000")` IS valid Rust and emits byte-identical script
-/// hex, but it is NOT ANF-neutral: the `.runar.rs` parsers lower it to a
+/// hex, but it is NOT ANF-neutral: every `.runar.rs` parser lowers it to a
 /// `toByteString` call node while the other eight surfaces carry a plain
-/// ByteString literal, and canonical ANF is compared across tiers. Making it
-/// fold would be a seven-parser change. Measured, not assumed — see the report
-/// on this commit.
+/// ByteString literal, and the runner compares each format's ANF against the
+/// ONE `expected-ir.json`. `spec/grammar.md` makes `toByteString '(' 
+/// StringLiteral ')'` the ByteStringLiteral production, so folding it is the
+/// spec-conformant fix — and a seven-parser change. Measured, not assumed.
 ///
 /// `branched-readonly-len` is additionally blocked by `self.add_output(...)`,
 /// which the `#[runar::contract]` proc macro does not generate. That blocks

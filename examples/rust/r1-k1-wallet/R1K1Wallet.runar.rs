@@ -12,10 +12,12 @@
 //   `runar.ByteString` is a `string` there.
 //
 //   `to_byte_string("41000000")` is valid Rust and emits byte-identical script
-//   hex — measured, fold-on and fold-off — but it is NOT ANF-neutral: the
-//   `.runar.rs` parsers lower it to a `toByteString` call node while the other
-//   eight surfaces of this fixture carry a plain ByteString literal, and
-//   canonical ANF is compared across all seven tiers. Making the nine
+//   hex — measured, fold-on and fold-off — but it is NOT ANF-neutral: every
+//   `.runar.rs` parser lowers it to a `toByteString` call node (checked in the
+//   Go and Rust tiers) while the other eight surfaces of this fixture carry a
+//   plain ByteString literal. The runner compares each format's ANF against the
+//   ONE `expected-ir.json`, so the extra node fails `.runar.rs` and
+//   regenerating the golden would fail the other eight. Making the nine
 //   `.runar.rs` parsers fold `toByteString(<string literal>)` into a
 //   ByteStringLiteral — which is what `spec/grammar.md` says it is — would
 //   unblock this file and every other `.runar.rs` contract carrying a hex

@@ -7,10 +7,12 @@
 //   `self.tag = 0x3030;`  — `tag` is a ByteString, which this tier represents
 //   as `Vec<u8>`, and `0x3030` is a Rúnar ByteString LITERAL. rustc:
 //   `expected `Vec<u8>`, found integer`. `to_byte_string("3030")` is valid Rust
-//   and emits byte-identical script hex, but it is NOT ANF-neutral: the
-//   `.runar.rs` parsers lower it to a `toByteString` call node while the other
-//   eight surfaces carry a plain ByteString literal, and canonical ANF is
-//   compared across all seven tiers. Folding it is a seven-parser change.
+//   and emits byte-identical script hex, but it is NOT ANF-neutral: every
+//   `.runar.rs` parser lowers it to a `toByteString` call node while the other
+//   eight surfaces carry a plain ByteString literal, and the runner compares
+//   each format's ANF against the ONE `expected-ir.json`. Folding it — which is
+//   what `spec/grammar.md` says `toByteString '(' StringLiteral ')'` is — is a
+//   seven-parser change.
 //
 //   `self.add_output(1000, self.count, self.tag);` — rustc: `no method named
 //   `add_output``. The `#[runar::contract]` proc macro in
