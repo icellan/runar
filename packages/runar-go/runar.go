@@ -1013,6 +1013,83 @@ func Substr(data ByteString, start, length int64) ByteString {
 	return data[start : start+length]
 }
 
+// Split returns the bytes of `data` from `index` onwards -- the RIGHT half of
+// the cut. It is single-valued: `spec/grammar.md` gives
+// `split(data: ByteString, index: bigint): ByteString`, and the compiler emits
+// `OP_SPLIT OP_NIP`, dropping the left half at the split site. A Go mock that
+// returned a (left, right) pair would contradict the language and reintroduce
+// the stack-desync defect closed by commit 2ea3b737; see
+// conformance/split_residue_execution_test.go for the spend that pins it.
+//
+// Out-of-range indices panic, matching Substr above: at script level OP_SPLIT
+// aborts the whole evaluation, so there is no in-band error value to return.
+func Split(data ByteString, index int64) ByteString {
+	if index < 0 || index > int64(len(data)) {
+		panic("runar.Split: index out of range")
+	}
+	return data[index:]
+}
+
+// Left returns the leftmost `length` bytes of `data` -- the other side of the
+// same cut Split makes. Compiles to `OP_SPLIT OP_DROP`.
+func Left(data ByteString, length int64) ByteString {
+	if length < 0 || length > int64(len(data)) {
+		panic("runar.Left: length out of range")
+	}
+	return data[:length]
+}
+
+// Right returns the rightmost `length` bytes of `data`. Compiles to
+// `OP_SIZE <length> OP_SUB OP_SPLIT OP_NIP`: the split offset is measured from
+// the END, so Right(d, n) is NOT Split(d, n).
+func Right(data ByteString, length int64) ByteString {
+	if length < 0 || length > int64(len(data)) {
+		panic("runar.Right: length out of range")
+	}
+	return data[int64(len(data))-length:]
+}
+
+// Int2Str converts an integer to a fixed-width byte string. It is the alias
+// spelling docs/formats/go.md documents for the `int2str` builtin, which every
+// tier lowers to OP_NUM2BIN -- the same opcode as num2bin -- so this delegates
+// to Num2Bin rather than reimplementing the encoding. One implementation is
+// what stops the two from drifting apart.
+func Int2Str(value int64, byteLen int64) ByteString {
+	return Num2Bin(value, byteLen)
+}
+
+// Int2str is the lower-cased-`s` spelling. Both resolve to the `int2str`
+// builtin in the Go surface parser -- `Int2Str` through an explicit entry in
+// mapGoBuiltin, `Int2str` through the default leading-character rule -- so the
+// SDK has to accept both or a contract that compiles fails to build as Go.
+func Int2str(value int64, byteLen int64) ByteString {
+	return Num2Bin(value, byteLen)
+}
+
+// Ripemd160 computes a RIPEMD-160 hash.
+//
+// `Ripemd160` is BOTH a Rúnar type name and a Rúnar builtin name in the
+// `.runar.go` surface: compilers/go/frontend/parser_gocontract.go maps it in
+// mapGoType AND in mapGoBuiltin. Go cannot bind one identifier to both, so the
+// SDK has to pick one, and it picks the FUNCTION deliberately:
+//
+//   - As a function, writing `runar.Ripemd160` in type position is a loud
+//     compile error.
+//   - As a type, `runar.Ripemd160(x)` would silently compile as a conversion
+//     returning x unchanged -- dropping the hash entirely. That is exactly the
+//     defect two of the seven tiers shipped, which made the baked digest the
+//     spending key; see
+//     conformance/go_surface_hash_spelling_execution_test.go.
+//
+// Fail loud over fail open. The digest TYPE is spelled Ripemd160Hash here.
+// The surface parser does not map that spelling (mapGoType has `Sha256Digest`
+// as an alias for Sha256 but no peer for Ripemd160), which is why
+// examples/go/state-ripemd160 and examples/go/byte-builtins stay out of the Go
+// build -- see the reasons written into those two files.
+func Ripemd160(data ByteString) Ripemd160Hash {
+	return Ripemd160Func(data)
+}
+
 // ReverseBytes returns a reversed copy of a byte string.
 func ReverseBytes(data ByteString) ByteString {
 	b := []byte(data)
