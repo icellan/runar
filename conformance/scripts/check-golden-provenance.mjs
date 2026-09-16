@@ -467,8 +467,44 @@ function printHumanReport(res, { asError }) {
 }
 
 // --- CLI --------------------------------------------------------------------
+
+/**
+ * The repository root, not the caller's cwd.
+ *
+ * Every path this gate handles — the changed set from `git diff --name-only`,
+ * the allowlist's `path` fields, the witness locations — is repo-relative. When
+ * `root` defaulted to `process.cwd()`, running the gate from anywhere but the
+ * repo root made every allowlist lookup miss, and the script reported EVERY
+ * changed golden as "no cross-check co-change and no allowlist entry" and
+ * exited 1.
+ *
+ * That is a false alarm of the worst kind: loud, total, and plausible. Run from
+ * `conformance/` — which is where every other conformance command in this repo
+ * is run from — it announced 122 unjustified goldens on a tree whose real
+ * answer is 122 justified and exit 0. It cost one agent a wrong report and
+ * cost the reviewer of that report a wrong diagnosis on top of it, and the
+ * obvious "fix" for the phantom failure is to mass-restamp provenance that was
+ * never stale.
+ *
+ * `git rev-parse --show-toplevel` is the authority. An explicit `--root` still
+ * wins, and the fallback to cwd only applies outside a git work tree, where the
+ * self-test fixtures run.
+ */
+function repoRoot() {
+  try {
+    const top = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (top) return top;
+  } catch {
+    /* not a git work tree — fall through */
+  }
+  return process.cwd();
+}
+
 function parseArgs(argv) {
-  const args = { root: process.cwd(), base: process.env.GOLDEN_GATE_BASE || 'origin/main' };
+  const args = { root: repoRoot(), base: process.env.GOLDEN_GATE_BASE || 'origin/main' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--self-test') args.selfTest = true;
