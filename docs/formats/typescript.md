@@ -264,7 +264,7 @@ Built-ins are imported from `runar-lang`. The type checker rejects calls to anyt
 |----------|-----------|
 | `cat` | `(a, b: ByteString) => ByteString` |
 | `substr` | `(data: ByteString, start: bigint, len: bigint) => ByteString` |
-| `split` | `(data: ByteString, index: bigint) => [ByteString, ByteString]` |
+| `split` | `(data: ByteString, index: bigint) => ByteString` (the RIGHT half; `left(data, index)` is the other side) |
 | `left`, `right` | `(data, len) => ByteString` |
 | `reverseBytes` | `(data: ByteString) => ByteString` |
 | `len` | `(data: ByteString) => bigint` |

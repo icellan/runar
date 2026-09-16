@@ -506,7 +506,7 @@ private helper(x: bigint): bigint {
 | `toByteString` | `(hex: string) => ByteString` | Compile-time literal construction |
 | `cat` | `(a: ByteString, b: ByteString) => ByteString` | `OP_CAT` |
 | `substr` | `(data: ByteString, start: bigint, length: bigint) => ByteString` | `OP_SPLIT` (twice) |
-| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT` — produces two stack values (left and right). The type checker returns `ByteString` because the language has no tuple type; at the Bitcoin Script level, `OP_SPLIT` pushes two separate items onto the stack. |
+| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT OP_NIP` — the bytes from `pos` onwards (the RIGHT half). `OP_SPLIT` leaves two items on the stack; `split` is single-valued, so the left half is dropped. Rúnar has no tuple type and no surface accepts array destructuring, so a pair would be unnameable — use `left(data, pos)` for the other side of the same cut. |
 | `left` | `(data: ByteString, n: bigint) => ByteString` | `OP_SPLIT OP_DROP` — returns the leftmost n bytes |
 | `right` | `(data: ByteString, n: bigint) => ByteString` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` — returns the rightmost n bytes |
 | `int2str` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |

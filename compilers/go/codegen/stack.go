@@ -1938,10 +1938,20 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		ctx.emitOp(StackOp{Op: "opcode", Code: code})
 	}
 
-	// Some builtins produce two outputs
+	// Some builtins leave more on the runtime stack than the binding names.
 	if funcName == "split" {
-		ctx.sm.push("")          // left part
-		ctx.sm.push(bindingName) // right part (top)
+		// OP_SPLIT leaves [left, right]. `split(data, index)` is single-valued -- it
+		// binds the RIGHT half (spec/grammar.md, spec/type-system.md, and all seven
+		// typecheckers) -- so the left half is dropped here, exactly as `substr`,
+		// `right` and `__array_access` already drop the halves they do not bind.
+		//
+		// It used to be recorded as an anonymous empty-named slot instead. Nothing
+		// ever consumed that slot -- it is unnameable, because no surface parser
+		// accepts array destructuring -- so every later bringToTop had to step over
+		// it and any read after a split resolved to the wrong slot.
+		// conformance/split_residue_execution_test.go spends the result.
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+		ctx.sm.push(bindingName)
 	} else if funcName == "len" {
 		// OP_SIZE leaves original on stack and pushes length on top.
 		// Emit OP_NIP to remove the original value, keeping only the size.

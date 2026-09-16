@@ -2012,8 +2012,19 @@ impl LoweringContext {
             );
         }
 
+        // Some builtins leave more on the runtime stack than the binding names.
         if func_name == "split" {
-            self.sm.push("");
+            // OP_SPLIT leaves [left, right]. `split(data, index)` is single-valued -- it
+            // binds the RIGHT half (spec/grammar.md, spec/type-system.md, and all seven
+            // typecheckers) -- so the left half is dropped here, exactly as `substr`,
+            // `right` and `__array_access` already drop the halves they do not bind.
+            //
+            // It used to be recorded as an anonymous empty-named slot instead. Nothing
+            // ever consumed that slot -- it is unnameable, because no surface parser
+            // accepts array destructuring -- so every later bringToTop had to step over
+            // it and any read after a split resolved to the wrong slot.
+            // conformance/split_residue_execution_test.go spends the result.
+            self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
             self.sm.push(binding_name);
         } else if func_name == "len" {
             // OP_SIZE leaves original on stack and pushes length on top.

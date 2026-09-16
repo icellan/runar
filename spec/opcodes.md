@@ -363,7 +363,7 @@ These opcodes were disabled in BTC but are **re-enabled in BSV**:
 | Rúnar Operation | Opcode |
 |---|---|
 | `a + b` (ByteString) | `OP_CAT` |
-| `split(data, index)` | `OP_SPLIT` |
+| `split(data, index)` | `OP_SPLIT OP_NIP` |
 | `left(data, len)` | `OP_SPLIT OP_DROP` |
 | `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` |
 | `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` |
@@ -576,7 +576,7 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `bool(n)` | `OP_0NOTEQUAL` | `0x92` |
 | `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` | `0x7f 0x77 ... 0x7f 0x75` |
 | `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` | `0x7c 0x82 0x7b 0x94 0x7f 0x77` |
-| `split(data, index)` | `OP_SPLIT` | `0x7f` |
+| `split(data, index)` | `OP_SPLIT OP_NIP` | `0x7f 0x77` |
 | `left(data, len)` | `OP_SPLIT OP_DROP` | `0x7f 0x75` |
 | `if/else` | `OP_IF OP_ELSE OP_ENDIF` | `0x63 0x67 0x68` |
 | `ecAdd(a, b)` | Synthesized (field arithmetic) | — |

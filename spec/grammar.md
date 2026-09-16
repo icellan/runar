@@ -688,7 +688,22 @@ BuiltinFunction_Bytes
     ;
 ```
 
-> **Note on `split`:** At the Bitcoin Script level, `OP_SPLIT` leaves two values on the stack (left part and right part). However, the Rúnar type checker treats the return type as `ByteString` (the right/top part). The left part remains on the stack but is not directly accessible through normal Rúnar expressions. Use `left(data, len)` or `right(data, len)` for explicit single-value extraction.
+> **Note on `split`:** `split(data, index)` is single-valued: it returns the
+> bytes from `index` onwards — the RIGHT half of the cut. At the Bitcoin Script
+> level `OP_SPLIT` leaves two values on the stack, so the compiler emits
+> `OP_SPLIT OP_NIP` and drops the left half at the split site. `left(data,
+> index)` is the other side of the same cut (`OP_SPLIT OP_DROP`), so no
+> information is lost by binding one of them.
+>
+> Rúnar has no tuple type and no surface parser accepts array destructuring, so
+> a pair return would be unnameable in all nine surfaces; this note used to say
+> the left part "remains on the stack but is not directly accessible", which
+> described an implementation artifact rather than a semantic. That artifact was
+> a defect: the stack model carried an anonymous slot for it that nothing ever
+> consumed, so any read after a split resolved to the wrong slot. The behaviour
+> specified here is pinned by `conformance/split-stack-desync.test.ts` and spent
+> on a consensus interpreter by
+> `conformance/split_residue_execution_test.go`.
 
 ### Conversion
 

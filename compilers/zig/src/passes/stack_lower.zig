@@ -2692,11 +2692,21 @@ const LowerCtx = struct {
         try self.bringToTopOperand(args[0], args); // data
         try self.bringToTopOperand(args[1], args); // position
         try self.emitOp(.op_split);
-        // OP_SPLIT consumes data + position, produces left + right (two outputs)
+        // OP_SPLIT consumes data + position and produces left + right.
+        // OP_SPLIT leaves [left, right]. `split(data, index)` is single-valued -- it
+        // binds the RIGHT half (spec/grammar.md, spec/type-system.md, and all seven
+        // typecheckers) -- so the left half is dropped here, exactly as `substr`,
+        // `right` and `__array_access` already drop the halves they do not bind.
+        //
+        // It used to be recorded as an anonymous slot instead. Nothing ever consumed
+        // that slot -- it is unnameable, because no surface parser accepts array
+        // destructuring -- so every later bringToTop had to step over it and any read
+        // after a split resolved to the wrong slot.
+        // conformance/split_residue_execution_test.go spends the result.
         _ = self.stack.pop();
         _ = self.stack.pop();
-        try self.stack.push(self.allocator, null); // left part
-        try self.stack.push(self.allocator, bind_name); // right part (top)
+        try self.emitOp(.op_nip);
+        try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }
 

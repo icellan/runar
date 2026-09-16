@@ -1921,39 +1921,25 @@ interface BytesVar {
 /**
  * Whether `arbBytesExpr` may emit `split`.
  *
- * OFF, because the FIRST thing the arm did when switched on was find a
- * compiler defect it cannot work around. `split` pushes TWO stack-map slots
- * for ONE binding in `05-stack-lower.ts#lowerBuiltinCall`:
+ * ON. It was off, because the FIRST thing the arm did when switched on was find
+ * a compiler defect it could not work around: `split` pushed TWO stack-map slots
+ * for ONE binding in `05-stack-lower.ts#lowerBuiltinCall`, and the orphaned left
+ * half — unnameable, since no surface parser accepts array destructuring —
+ * desynced the model from the runtime stack, so any read AFTER the split
+ * resolved to the wrong slot and lowering aborted.
  *
- *     if (func === 'split') {
- *       this.stackMap.push(null);        // left part  <- orphan, never dropped
- *       this.stackMap.push(bindingName); // right part
- *     }
+ * The lowering now emits `OP_SPLIT OP_NIP` and binds one slot, the same shape
+ * `substr`, `right` and `__array_access` already used for the halves they do
+ * not bind. `conformance/split-stack-desync.test.ts` pins that the shapes which
+ * used to abort now compile, and
+ * `conformance/split_residue_execution_test.go` spends one of them on the go-sdk
+ * consensus interpreter with a value bound before the split read back after it.
  *
- * The orphaned left half desyncs the model from the runtime stack, so a read
- * AFTER the split resolves to the wrong slot and lowering aborts. Minimal
- * repro, pinned by `conformance/split-stack-desync.test.ts`:
- *
- *     const b0: ByteString = split(data, 1n);
- *     assert(len(b0) >= 0n && len(data) >= 0n);
- *     // Value 't11' not found on stack (stack has 1 items: [])
- *
- * Drop the trailing `&& len(data) >= 0n` and it compiles; the same shape with
- * `substr` compiles, because substr NIPs its left half. So `split` is usable
- * only when nothing is read after it, which is why it had no fixture: the only
- * shape that compiles is the trivial one.
- *
- * That belongs to whoever owns `packages/runar-compiler/`, not to this file.
- * Flip this to `true` in the same change that fixes the lowering —
- * `conformance/split-stack-desync.test.ts` goes red when the defect is gone
- * and will tell you so.
- *
- * `split` is NOT uncovered in the meantime: `conformance/tests/byte-builtins`
- * compiles it on all seven tiers and
- * `conformance/byte_builtins_execution_test.go` spends it at index 0, at
- * index == len, on the empty string and out of range.
+ * Leaving this arm on is the point: `split` had no fuzzer reach at all, which is
+ * why the only shape anyone had ever written was the one that happened to
+ * compile.
  */
-const SPLIT_ARM_ENABLED = false;
+const SPLIT_ARM_ENABLED = true;
 
 /**
  * A ByteString expression built from the available ByteString vars, tracking a
@@ -2010,12 +1996,12 @@ function arbBytesExpr(
     // is the point: an off-by-one in the OP_SPLIT lowering shows up at idx 0
     // or at idx == len and nowhere in between.
     //
-    // NOTE the compiler binds the right half only — `runar-lang` declares
-    // `split(): [ByteString, ByteString]` but no parser accepts array
-    // destructuring, so the left half is unnameable. Do not "fix" this arm to
-    // emit a tuple; nothing can compile one.
+    // NOTE `split` is single-valued and binds the RIGHT half. Rúnar has no
+    // tuple type and no parser accepts array destructuring, so the left half is
+    // unnameable; use `left(data, idx)` for it. Do not "fix" this arm to emit a
+    // tuple — nothing can compile one.
     //
-    // DISABLED — see SPLIT_ARM_ENABLED below.
+    // Gated on SPLIT_ARM_ENABLED below.
     ...(SPLIT_ARM_ENABLED
       ? [
         arbBytesExpr(bytesVars, depth - 1).chain((base) =>
