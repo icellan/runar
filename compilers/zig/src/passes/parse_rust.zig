@@ -403,6 +403,13 @@ fn mapBuiltin(allocator: Allocator, name: []const u8) []const u8 {
         .{ "verify_slh_dsa_sha2_256f", "verifySLHDSA_SHA2_256f" },
         .{ "bin_2_num", "bin2num" },
         .{ "num_2_bin", "num2bin" },
+        // The arbitrary-precision encoder spellings from packages/runar-rs.
+        // Mapped here, BEFORE camelisation, so the answer does not depend on
+        // this tier's snakeToCamel. Without them the typechecker answers
+        // "unknown function" -- a TYPECHECK diagnostic, which --parse-only
+        // cannot see. R-RustBigint.
+        .{ "bin2num_big", "bin2num" },
+        .{ "num2bin_big", "num2bin" },
         .{ "to_byte_string", "toByteString" },
         .{ "verify_ecdsa_p256", "verifyECDSA_P256" },
         .{ "p256_add", "p256Add" },
@@ -427,6 +434,11 @@ fn mapBuiltin(allocator: Allocator, name: []const u8) []const u8 {
 fn mapRustType(name: []const u8) []const u8 {
     const tmap = std.StaticStringMap([]const u8).initComptime(.{
         .{ "Bigint", "bigint" },
+        // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half
+        // of a pair whose narrow half (`Bigint` = i64) REFUSES what it cannot
+        // represent. A different Rust runtime type, the same Script primitive:
+        // reaching for it must not change one emitted byte. R-RustBigint.
+        .{ "BigintBig", "bigint" },
         .{ "Int", "bigint" },
         .{ "i64", "bigint" },
         .{ "u64", "bigint" },

@@ -223,6 +223,13 @@ public final class RustParser {
         SPECIAL_BUILTINS.put("verify_slh_dsa_sha2_256s", "verifySLHDSA_SHA2_256s");
         SPECIAL_BUILTINS.put("verify_slh_dsa_sha2_256f", "verifySLHDSA_SHA2_256f");
         SPECIAL_BUILTINS.put("bin_2_num", "bin2num");
+        // The arbitrary-precision encoder spellings from packages/runar-rs.
+        // Mapped here, BEFORE camelisation, so the answer does not depend on
+        // this tier's snakeToCamel. Without them the typechecker answers
+        // "unknown function" -- a TYPECHECK diagnostic, which --parse-only
+        // cannot see. R-RustBigint.
+        SPECIAL_BUILTINS.put("bin2num_big", "bin2num");
+        SPECIAL_BUILTINS.put("num2bin_big", "num2bin");
         SPECIAL_BUILTINS.put("int_2_str", "int2str");
         SPECIAL_BUILTINS.put("to_byte_string", "toByteString");
         // P-256
@@ -269,6 +276,11 @@ public final class RustParser {
     private static final Map<String, String> TYPE_MAP = new HashMap<>();
     static {
         TYPE_MAP.put("Bigint", "bigint");
+        // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half
+        // of a pair whose narrow half (`Bigint` = i64) REFUSES what it cannot
+        // represent. A different Rust runtime type, the same Script primitive:
+        // reaching for it must not change one emitted byte. R-RustBigint.
+        TYPE_MAP.put("BigintBig", "bigint");
         TYPE_MAP.put("Int", "bigint");
         TYPE_MAP.put("i64", "bigint");
         TYPE_MAP.put("u64", "bigint");

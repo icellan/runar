@@ -241,6 +241,11 @@ const RUST_BUILTIN_MAP: Record<string, string> = {
   // Byte operations — fixups for digit-containing names
   num2bin: 'num2bin', num2Bin: 'num2bin',
   bin2num: 'bin2num', bin2Num: 'bin2num',
+  // The arbitrary-precision spellings from packages/runar-rs. `num2bin_big`
+  // camelises to `num2binBig`, which no builtin registry knows, so without
+  // these two entries the typechecker answers "unknown function" — a
+  // TYPECHECK diagnostic, which --parse-only cannot see. R-RustBigint.
+  num2binBig: 'num2bin', bin2numBig: 'bin2num',
   int2str: 'int2str', int2Str: 'int2str',
   // Byte operations — name divergence fixups
   reverseByteString: 'reverseBytes', reverseBytes: 'reverseBytes',
@@ -306,6 +311,11 @@ function mapRustBuiltin(name: string): string {
 const RUST_TYPE_MAP: Record<string, string> = {
   Bigint: 'bigint', Int: 'bigint', i64: 'bigint', u64: 'bigint',
   i128: 'bigint', u128: 'bigint', i256: 'bigint', u256: 'bigint',
+  // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half of a
+  // pair whose narrow half (`Bigint` = i64) REFUSES what it cannot represent.
+  // A different Rust runtime type, the same Script primitive: reaching for it
+  // must not change one emitted byte. R-RustBigint.
+  BigintBig: 'bigint',
   Bool: 'boolean', bool: 'boolean',
   ByteString: 'ByteString',
   PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',

@@ -118,6 +118,13 @@ module RunarCompiler
       "verify_ecdsa_p256"           => "verifyECDSA_P256",
       "verify_ecdsa_p384"           => "verifyECDSA_P384",
       "bin_2_num"                   => "bin2num",
+      # The arbitrary-precision encoder spellings from packages/runar-rs.
+      # Mapped here, BEFORE camelisation, so the answer does not depend on this
+      # tier's snake_to_camel. Without them the typechecker answers "unknown
+      # function" -- a TYPECHECK diagnostic, which --parse-only cannot see.
+      # R-RustBigint.
+      "bin2num_big"                 => "bin2num",
+      "num2bin_big"                 => "num2bin",
       "int_2_str"                   => "int2str",
       "to_byte_string"              => "toByteString",
     }.freeze
@@ -190,6 +197,11 @@ module RunarCompiler
 
     RUST_TYPE_MAP = {
       "Bigint" => "bigint", "Int" => "bigint",
+      # `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half of
+      # a pair whose narrow half (`Bigint` = i64) REFUSES what it cannot
+      # represent. A different Rust runtime type, the same Script primitive:
+      # reaching for it must not change one emitted byte. R-RustBigint.
+      "BigintBig" => "bigint",
       "i64" => "bigint", "u64" => "bigint",
       "i128" => "bigint", "u128" => "bigint",
       "i256" => "bigint", "u256" => "bigint",

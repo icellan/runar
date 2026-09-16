@@ -1224,7 +1224,11 @@ fn snake_to_camel(name: &str) -> String {
 /// parser_zig.rs) -- the Rust DSL was the omission.
 fn map_rust_type(name: &str) -> String {
     match name {
-        "Bigint" | "Int" | "i64" | "u64" | "i128" | "u128" => "bigint".to_string(),
+        // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half
+        // of a pair whose narrow half (`Bigint` = i64) REFUSES what it cannot
+        // represent. A different Rust runtime type, the same Script primitive:
+        // reaching for it must not change one emitted byte. R-RustBigint.
+        "Bigint" | "BigintBig" | "Int" | "i64" | "u64" | "i128" | "u128" => "bigint".to_string(),
         "Bool" | "bool" => "boolean".to_string(),
         "Sha256Digest" => "Sha256".to_string(),
         _ => name.to_string(),
@@ -1244,6 +1248,13 @@ fn map_rust_builtin(name: &str) -> String {
         "verify_slh_dsa_sha2_256s" => return "verifySLHDSA_SHA2_256s".to_string(),
         "verify_slh_dsa_sha2_256f" => return "verifySLHDSA_SHA2_256f".to_string(),
         "bin_2_num" => return "bin2num".to_string(),
+        // The arbitrary-precision encoder spellings from packages/runar-rs.
+        // Mapped here, BEFORE camelisation, so the answer does not depend on
+        // this tier's snake_to_camel. Without them the typechecker answers
+        // "unknown function" — a TYPECHECK diagnostic, which --parse-only
+        // cannot see. R-RustBigint.
+        "bin2num_big" => return "bin2num".to_string(),
+        "num2bin_big" => return "num2bin".to_string(),
         "int_2_str" => return "int2str".to_string(),
         "to_byte_string" => return "toByteString".to_string(),
         "verify_ecdsa_p256" => return "verifyECDSA_P256".to_string(),

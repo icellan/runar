@@ -364,6 +364,21 @@ describe('cross-tier acceptance parity', () => {
         'nowhere else until R-Bigint, so the other six tiers rejected every ' +
         'one of these spellings while the Go SDK shipped them.',
     },
+    {
+      what: 'Rust BigintBig / wide encoders vs the unsuffixed spellings',
+      a: 'RustBigintBigSpellings.runar.rs',
+      b: 'RustBigintBigSpellingsRef.runar.ts',
+      why:
+        'num2bin_big(a, 8) must emit what num2bin(a, 8n) emits, bin2num_big ' +
+        'what bin2num emits, and BigintBig must resolve to the same `bigint` ' +
+        'primitive as `bigint` does — in a property, a parameter and a local ' +
+        'binding. The suffix names a different Rust RUNTIME type (i64 vs ' +
+        'num_bigint::BigInt, and the narrow pair now REFUSES what it cannot ' +
+        'represent), not a different Script operation, so reaching for the ' +
+        'wide spelling must cost zero script bytes. Same position the Go ' +
+        'tier`s runar.BigintBig was in before R-Bigint: shipped by the SDK, ' +
+        'documented, and understood by one tier.',
+    },
   ];
 
   for (const pair of spellingPairs) {

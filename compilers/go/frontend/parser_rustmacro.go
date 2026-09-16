@@ -728,6 +728,12 @@ func rustMapType(name string) string {
 	switch name {
 	case "Bigint", "Int", "i64", "u64", "i128", "u128":
 		return "bigint"
+	// BigintBig is packages/runar-rs's num_bigint::BigInt, the wide half of a
+	// pair whose narrow half (Bigint = i64) REFUSES what it cannot represent.
+	// A different Rust runtime type, the same Script primitive: reaching for
+	// it must not change one emitted byte. R-RustBigint.
+	case "BigintBig":
+		return "bigint"
 	case "Bool", "bool":
 		return "boolean"
 	case "ByteString", "Vec":
@@ -1485,6 +1491,15 @@ func rustMapBuiltin(name string) string {
 	case "bin_2_num":
 		return "bin2num"
 	case "num_2_bin":
+		return "num2bin"
+	// The arbitrary-precision encoder spellings from packages/runar-rs.
+	// Mapped here, BEFORE camelisation, so the answer does not depend on this
+	// tier's snakeToCamel. Without them the typechecker answers "unknown
+	// function" -- a TYPECHECK diagnostic, which --parse-only cannot see.
+	// R-RustBigint.
+	case "bin2num_big":
+		return "bin2num"
+	case "num2bin_big":
 		return "num2bin"
 	case "to_byte_string":
 		return "toByteString"
