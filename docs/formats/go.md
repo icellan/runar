@@ -197,8 +197,16 @@ returned `math.MaxInt64` as an "overflow sentinel", which is a wrong answer
 rather than an error. Script numbers are arbitrary-width after Genesis, so the
 emitted `OP_ABS` computes the true `2^63`: a contract guarding
 `runar.Assert(runar.Abs(x) > 0)` was refused by `go test` and **spent on chain**
-for `x = -2^63`. The list above is now enforced by
-`TestNarrowHelpersRefuseWhatTheyCannotHold` rather than maintained by hand.
+for `x = -2^63`.
+
+`TestNarrowHelpersRefuseWhatTheyCannotHold` covers `Abs` and `Gcd`
+specifically. It does **not** enforce the list above — this sentence previously
+claimed it did, which would have made a nine-item list appear machine-checked
+when two rows were. The other seven are each covered by their own test
+(`TestPow_Overflow`, `TestMulDiv_Overflow`, `TestPercentOf_Overflow`, and the
+`Bin2Num` / `Num2Bin` / `Bn254FieldNegP` width tests), so the behaviour is
+guarded — but adding a tenth helper to this list without a test would be caught
+by nothing. The list is maintained by hand. Treat it that way.
 
 For values past 2^63, type the field or parameter `runar.BigintBig` (`*big.Int`)
 and spell the arithmetic with the helper functions. **Both type names lower to

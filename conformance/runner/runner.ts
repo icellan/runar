@@ -2705,8 +2705,14 @@ export function assertCorpusComplete(discovered: string[], declared: string[]): 
  *
  * Patching the other three copies would have left the same shape: a guard that
  * has to be remembered four times. Collapsing them means there is one place to
- * get it wrong, and `runner-discovery-is-single-sourced.test.ts` fails if a
- * fifth copy appears.
+ * get it wrong, and the "discovers fixtures in exactly one place" case in
+ * `conformance/corpus-completeness.test.ts` fails if a fifth copy appears.
+ *
+ * That sentence originally named a file, `runner-discovery-is-single-sourced.test.ts`,
+ * which does not exist and never did -- written in the same commit that fixed
+ * this guard's scope, and two commits before another was fixed for citing a
+ * test that never existed either. Naming a plausible filename is the cheapest
+ * way to make a comment unverifiable.
  */
 export function discoverFixtureDirs(
   testsDir: string,
