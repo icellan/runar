@@ -3934,16 +3934,15 @@ and threaded through `lowerValueP` / `lowerBindingsP` like `constInts`. -/
 @[simp] def collectRawSlots (bs : List ANFBinding) : List String :=
   collectRawSlotsGo [] bs
 
-/-- Re-minimise a just-loaded slot when it holds a raw byte-array
-result. Depth-neutral: one buffer in, one script number out. Mirrors
-`bringToTop`'s `!allowRaw && this.rawSlots.has(name)` guard
-(`05-stack-lower.ts:1091-1095`). Defaulting to normalisation makes the
-safe choice the automatic one: a forgotten use site emits a redundant
-`OP_BIN2NUM`, which costs one byte and cannot change a value, rather
-than emitting an unspendable script. -/
-def normalizeRaw (rawSlots : List String) (name : String)
+/-- NEW-004 re-minimise hook. The TS reference `bringToTop` does not
+emit `OP_BIN2NUM` here (`05-stack-lower.ts` has no `rawSlots` set), and
+the fold-OFF goldens for `bitwise-ops` / `shift-ops` /
+`oversize-bigint-shift` contain zero of these use-site pins. Kept as an
+identity so call sites and `normalizeRaw_nil` stay, without extra bytes
+the goldens do not have. -/
+def normalizeRaw (_rawSlots : List String) (_name : String)
     (ops : List StackOp) : List StackOp :=
-  if listContains rawSlots name then ops ++ [.opcode "OP_BIN2NUM"] else ops
+  ops
 
 /-- The raw-slot set visible while lowering the binding named
 `bindingName`, i.e. while its OPERANDS are being loaded.
