@@ -855,7 +855,19 @@ is built from it at compile time.
 
 `currentBlockHeight()` is a source-level desugar to
 `extractLocktime(this.txPreimage)`, so it is valid only where that preimage
-exists — inside a `StatefulSmartContract` method.
+exists — inside a `StatefulSmartContract` method. **The name is misleading and
+kept only for source compatibility: it does not read the chain height.** It
+reads the spending transaction's own `nLockTime`, a number the spender writes.
+
+`nLockTime` is a NOT-BEFORE. Consensus asserts only that the chain has already
+reached it, and only for a non-final transaction. Therefore
+`extractLocktime(p) >= T` is sound (pair it with
+`extractSequence(p) !== 0xffffffffn`, or consensus ignores `nLockTime` and the
+gate is script-only), while `extractLocktime(p) < T` — equivalently
+`currentBlockHeight() < T` — proves nothing about the current height: a spender
+at height T + 1000 simply writes a stale locktime. Closing a time window needs a
+time source the contract reads as state, not the spending transaction's own
+locktime.
 
 The cross-covenant pattern these compose into is documented in
 [`docs/cross-covenant-pattern.md`](../docs/cross-covenant-pattern.md), and the

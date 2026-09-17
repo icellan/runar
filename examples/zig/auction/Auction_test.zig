@@ -27,7 +27,7 @@ test "auction init stores constructor fields" {
     try std.testing.expectEqual(@as(i64, 500), auction.deadline);
 }
 
-test "auction accepts a higher bid before deadline through the real contract" {
+test "auction accepts a higher bid through the real contract" {
     var runtime = runar.StatefulSmartContract.init(std.testing.allocator);
     defer runtime.deinit();
     var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
@@ -47,9 +47,16 @@ test "auction closes at or after the deadline through the real contract" {
     auction.close(ctx, runar.signTestMessage(runar.ALICE));
 }
 
-test "auction rejects low or late bids" {
+// W7: there is no "bid too late" negative any more, and adding one back would
+// be vacuous. bid() reads no preimage field: nLockTime is a spender-chosen
+// NOT-BEFORE, so no on-chain assert can prove the deadline has NOT passed.
+// The close() finality guard that replaced it cannot be exercised here either
+// — this tier's mock extractSequence returns a constant — so it is proved
+// where it can be: on the real @bsv/sdk Spend engine, in
+// conformance/witnesses/real-crypto/auction.json and
+// packages/runar-testing/src/__tests__/w7-auction-locktime-polarity.test.ts.
+test "auction rejects low bids" {
     try root.expectAssertFailure("auction-bid-too-low");
-    try root.expectAssertFailure("auction-bid-too-late");
 }
 
 test "auction rejects early close and wrong closing signature" {

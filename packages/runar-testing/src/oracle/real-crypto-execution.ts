@@ -365,6 +365,18 @@ export interface StatefulSpendOptions {
   satoshis?: number;
   /** Optional nLockTime for the call tx (locktime / block-height introspection). */
   lockTime?: number;
+  /**
+   * Optional nSequence for every input of the call tx.
+   *
+   * Left unset the SDK picks `resolveInputSequence`'s default: `0xfffffffe`
+   * (non-final) when `lockTime` is non-zero, `0xffffffff` otherwise. Setting it
+   * explicitly is what lets a spec model the FinalCountdown shape — an
+   * all-final transaction, which consensus mines at ANY height because a final
+   * input makes nLockTime a no-op, against a script whose only time gate is
+   * `extractLocktime(p) >= deadline`. Without this knob the honest default
+   * hides that spend from the oracle entirely.
+   */
+  sequence?: number;
   /** Near-miss: after building a valid call, tamper the continuation output so
    *  the on-chain checkPreimage binding must fail. */
   tamperOutput?: boolean;
@@ -494,8 +506,14 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
     // `dryRun: true`) checks ONLY the primary contract input (index 0), does
     // NO fee/value check, and throws a message unique to that path — see the
     // `reachedEngine` assignment below.
-    const callOpts: { locktime?: number; satoshis?: number; dryRun?: boolean } = { dryRun: true };
+    const callOpts: {
+      locktime?: number;
+      sequence?: number;
+      satoshis?: number;
+      dryRun?: boolean;
+    } = { dryRun: true };
     if (opts.lockTime !== undefined) callOpts.locktime = opts.lockTime;
+    if (opts.sequence !== undefined) callOpts.sequence = opts.sequence;
     if (opts.satoshis !== undefined) callOpts.satoshis = opts.satoshis;
     await contract.call(opts.method, opts.args, provider, signer, callOpts);
     callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);

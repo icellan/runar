@@ -477,6 +477,9 @@ public final class Builtins {
     public static BigInteger extractLocktime(SigHashPreimage p) { return Preimage.extractLocktime(resolvePreimage(p)); }
     public static BigInteger extractLocktime(Preimage p) { return Preimage.extractLocktime(p); }
 
+    public static BigInteger extractSequence(SigHashPreimage p) { return Preimage.extractSequence(resolvePreimage(p)); }
+    public static BigInteger extractSequence(Preimage p) { return Preimage.extractSequence(p); }
+
     public static ByteString extractOutputHash(SigHashPreimage p) {
         // Mirror packages/runar-lang/src/runtime/preimage.ts: when the
         // caller passes a SigHashPreimage whose first 32 bytes hold a

@@ -153,6 +153,22 @@ export function extractOutputs(_txPreimage: SigHashPreimage): Sha256 {
  *
  * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295), so
  * Unix-time locktimes at or beyond 2^31 (after 2038) compare correctly.
+ *
+ * POLARITY — this is a NOT-BEFORE, and it is chosen by the SPENDER.
+ * Consensus asserts only that the chain has already reached `nLockTime`
+ * (and only when the transaction is non-final — see {@link extractSequence}).
+ * Nothing bounds it from above. So:
+ *
+ * - `extractLocktime(p) >= T` is sound: the spend cannot confirm before T.
+ *   Pair it with `extractSequence(p) !== 0xffffffffn` or consensus ignores
+ *   nLockTime altogether and the gate is script-only theatre.
+ * - `extractLocktime(p) < T` proves NOTHING about the current height. A
+ *   spender at height T+1000 simply stamps a stale `nLockTime` of T-1 and
+ *   the node mines it. Do not use this field to close a window.
+ *
+ * A contract that genuinely needs "before T" needs a time source it can read
+ * as state — an oracle or a tick — not the spending transaction's own
+ * locktime. See `examples/ts/auction/Auction.runar.ts`.
  */
 export function extractLocktime(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractLocktime');
@@ -223,6 +239,14 @@ export function requireOutputP2PKH(
  * Shorthand for `extractLocktime(this.txPreimage)`. Only valid in
  * StatefulSmartContract methods. Pure source-level desugar — no new ANF
  * kind or stack codegen.
+ *
+ * THE NAME IS MISLEADING and is kept only for source compatibility. This does
+ * NOT read the chain height. It reads the spending transaction's own
+ * `nLockTime` — a number the spender writes — so every caveat in
+ * {@link extractLocktime} applies verbatim: it is a NOT-BEFORE, it is only
+ * consensus-enforced on a non-final transaction, and comparing it UPWARDS
+ * (`currentBlockHeight() < T`) proves nothing at all. Read it as
+ * `txLocktime()`. Prefer spelling {@link extractLocktime} directly.
  */
 export function currentBlockHeight(): bigint {
   return compilerStub('currentBlockHeight');

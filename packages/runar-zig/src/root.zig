@@ -158,6 +158,7 @@ pub const extractHashPrevouts = builtins.extractHashPrevouts;
 pub const extractOutpoint = builtins.extractOutpoint;
 pub const extractOutputHash = builtins.extractOutputHash;
 pub const extractLocktime = builtins.extractLocktime;
+pub const extractSequence = builtins.extractSequence;
 pub const buildChangeOutput = builtins.buildChangeOutput;
 pub const buildChangeOutputChecked = builtins.buildChangeOutputChecked;
 pub const BuildChangeOutputError = builtins.BuildChangeOutputError;

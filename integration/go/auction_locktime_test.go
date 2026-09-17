@@ -36,10 +36,14 @@ import (
 // default every input to 0xfffffffe whenever CallOptions.Locktime is set, so
 // the SDK's own call path can't accidentally emit an unenforceable locktime.
 //
-//   - TestAuction_CloseBeforeDeadline_FinalSequence_Accepted pins the raw
-//     Bitcoin mechanism directly: a premature close with an all-final
-//     sequence is accepted, proving the script-level assert alone is not a
-//     time-lock.
+//   - TestAuction_CloseBeforeDeadline_FinalSequence_Rejected pins the raw
+//     Bitcoin mechanism directly. Until W7 this test asserted the opposite:
+//     a premature close with an all-final sequence was ACCEPTED, because the
+//     node takes nLockTime out of consensus scope for a final transaction and
+//     the contract only checked nLockTime. The auctioneer could therefore
+//     close at any height. Auction.close now also asserts
+//     `extractSequence(txPreimage) !== 0xffffffffn`, so the SCRIPT refuses the
+//     final-sequence spend before consensus ever gets a say.
 //   - TestAuction_CloseBeforeDeadline_NonFinalSequence_Rejected is the
 //     missing negative test itself: the SAME premature close, but with a
 //     non-final input sequence, never gets mined — proving the auction
@@ -161,17 +165,20 @@ func buildRawCloseTx(t *testing.T, contract *runar.RunarContract, provider runar
 	return spendTx.Hex()
 }
 
-// TestAuction_CloseBeforeDeadline_FinalSequence_Accepted documents the raw
-// Bitcoin consensus mechanism that made issue #131 dangerous: a close() spend
-// whose nLockTime is set to a deadline that is genuinely in the future (far
-// beyond the live regtest chain tip) is nonetheless ACCEPTED by the node when
-// the input's nSequence is final (0xffffffff). The contract's own
-// `assert(extractLocktime(preimage) >= deadline)` is satisfied (nLockTime ==
-// deadline), so acceptance here is purely because an all-final sequence takes
-// nLockTime out of consensus scope entirely — this is standard Bitcoin
-// behavior, not itself a Rúnar bug, and it is why the auction's time-lock is
-// only as strong as the sequence number on the spending transaction.
-func TestAuction_CloseBeforeDeadline_FinalSequence_Accepted(t *testing.T) {
+// TestAuction_CloseBeforeDeadline_FinalSequence_Rejected is the W7 regression
+// guard. The spend it builds is the one that used to steal the auction: a
+// close() whose nLockTime is a deadline genuinely far beyond the live regtest
+// tip, but whose input nSequence is FINAL (0xffffffff). Consensus does not
+// look at nLockTime on a final transaction, so the node would mine it at any
+// height, and the contract's `extractLocktime(preimage) >= deadline` assert was
+// satisfied by the number the spender himself wrote. This test previously
+// asserted that acceptance.
+//
+// Auction.close now also asserts `extractSequence(txPreimage) !== 0xffffffffn`,
+// so the spend dies in the script. Its sibling below — identical except for a
+// non-final 0xfffffffe — is still rejected, by consensus, which is what keeps
+// this pair from passing for one reason instead of two.
+func TestAuction_CloseBeforeDeadline_FinalSequence_Rejected(t *testing.T) {
 	auctioneer := helpers.NewWallet()
 	bidder := helpers.NewWallet()
 
@@ -188,7 +195,8 @@ func TestAuction_CloseBeforeDeadline_FinalSequence_Accepted(t *testing.T) {
 
 	txHex := buildRawCloseTx(t, contract, provider, signer, auctioneer, utxo, uint32(deadline), transaction.DefaultSequenceNumber)
 
-	helpers.AssertTxAccepted(t, txHex)
+	helpers.AssertTxRejected(t, txHex)
+	helpers.AssertUtxoNeverSpent(t, utxo.Txid, utxo.Vout, 5)
 }
 
 // TestAuction_CloseBeforeDeadline_NonFinalSequence_Rejected is the missing

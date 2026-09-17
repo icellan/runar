@@ -740,8 +740,13 @@ func ExtractAmount(p SigHashPreimage) int64 { return 10000 }
 // ExtractVersion returns 1 in test mode.
 func ExtractVersion(p SigHashPreimage) int64 { return 1 }
 
-// ExtractSequence returns 0xffffffff in test mode.
-func ExtractSequence(p SigHashPreimage) int64 { return 0xffffffff }
+// ExtractSequence returns 0xfffffffe in test mode. That is
+// the SDK's own non-final default (`resolveInputSequence`), the value the
+// TypeScript TestContract interpreter returns, and the value all the SDK ANF
+// interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+// one value that makes a #131 finality guard fail off-chain and makes
+// nLockTime a consensus no-op on-chain (W7).
+func ExtractSequence(p SigHashPreimage) int64 { return 0xfffffffe }
 
 // ExtractHashPrevouts returns Hash256(72 zero bytes) in test mode.
 // This is consistent with passing allPrevouts = 72 zero bytes in tests,

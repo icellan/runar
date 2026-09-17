@@ -993,6 +993,17 @@ function evalCall(
       return '00'.repeat(32);
     case 'extractLocktime':
       return 0n;
+    // W7: this arm was MISSING while all six peer SDK interpreters
+    // (runar-rs `anf_interpreter.rs`, runar-py, runar-zig — whose comment
+    // claims it is mirroring this file — and runar-rb) already returned
+    // `0xfffffffe` for it. The omission made every stateful call to a method
+    // that reads nSequence fail closed in the TypeScript SDK alone, which is
+    // exactly the finality guard #131 tells authors to write. `0xfffffffe` is
+    // the SDK's own non-final default (`resolveInputSequence`), so it is the
+    // honest off-chain answer for the same reason `extractLocktime` answers 0:
+    // the real value is a property of a transaction that does not exist yet.
+    case 'extractSequence':
+      return 0xfffffffen;
 
     // A-3, KNOWN REMAINING GAP: `extractSigHashType` IS a real runar-lang
     // builtin (`preimage.ts`), unlike its three siblings above it has no

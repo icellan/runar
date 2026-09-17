@@ -553,6 +553,16 @@ pub fn extract_locktime(_p: &[u8]) -> Int {
     0
 }
 
+/// Returns 0xfffffffe in test mode. That is
+/// the SDK's own non-final default (`resolveInputSequence`), the value the
+/// TypeScript TestContract interpreter returns, and the value all the SDK ANF
+/// interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+/// one value that makes a #131 finality guard fail off-chain and makes
+/// nLockTime a consensus no-op on-chain (W7).
+pub fn extract_sequence(_p: &[u8]) -> Int {
+    0xfffffffe
+}
+
 /// Returns the first 32 bytes of the preimage in test mode.
 /// Tests set `tx_preimage = hash256(expected_output_bytes)` so the assertion
 /// `hash256(outputs) == extract_output_hash(tx_preimage)` passes.

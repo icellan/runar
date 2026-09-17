@@ -307,6 +307,17 @@ pub fn extractLocktime(preimage: base.SigHashPreimage) base.Bigint {
     return extracted;
 }
 
+/// Returns 0xfffffffe in test mode. That is
+/// the SDK's own non-final default (`resolveInputSequence`), the value the
+/// TypeScript TestContract interpreter returns, and the value all the SDK ANF
+/// interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+/// one value that makes a #131 finality guard fail off-chain and makes
+/// nLockTime a consensus no-op on-chain (W7).
+pub fn extractSequence(preimage: base.SigHashPreimage) base.Bigint {
+    _ = preimage;
+    return 0xfffffffe;
+}
+
 // ============================================================================
 // Intent sub-covenant intrinsics (BSVM Phase 13)
 //

@@ -1,6 +1,7 @@
 //! Auction integration test — stateful contract (SDK Deploy path).
 //!
-//! The bid() method checks extractLocktime, and close() requires a Sig.
+//! close() requires the auctioneer's Sig plus a locktime at/after the deadline
+//! and a non-final input sequence; bid() reads no preimage field (W7).
 //! We test compile + deploy via the SDK.
 //!
 //! **Gating**: all on-chain tests are gated with

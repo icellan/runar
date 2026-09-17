@@ -58,6 +58,10 @@ interface SpendSpec {
   signerKey?: string;
   constructorArgs?: unknown;
   lockTime?: number;
+  /** nSequence for every input of the call tx. Unset = the SDK default
+   *  (0xfffffffe when `lockTime` is non-zero, else 0xffffffff). Set it to model
+   *  an all-final transaction, whose nLockTime consensus ignores entirely. */
+  sequence?: number;
   satoshis?: number;
   tamperOutput?: boolean;
   /** Independent, hand-authored expected continuation state after an accepted
@@ -244,6 +248,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               constructorArgs: resolveCtorArray(s.constructorArgs ?? spec.constructorArgs),
               signerKey: s.signerKey ?? spec.signerKey ?? 'alice',
               lockTime: s.lockTime,
+              sequence: s.sequence,
               satoshis: s.satoshis,
               tamperOutput: s.tamperOutput,
             });

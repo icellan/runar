@@ -446,8 +446,14 @@ module Runar
       1
     end
 
+    # Returns 0xfffffffe in test mode. That is
+    # the SDK's own non-final default (`resolveInputSequence`), the value the
+    # TypeScript TestContract interpreter returns, and the value all the SDK ANF
+    # interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+    # one value that makes a #131 finality guard fail off-chain and makes
+    # nLockTime a consensus no-op on-chain (W7).
     def extract_sequence(_preimage)
-      0xFFFFFFFF
+      0xFFFFFFFE
     end
 
     # Returns hash256(72 zero bytes) in test mode.

@@ -188,14 +188,23 @@ Compiler-enforced constraints:
 
 ### `runar.CurrentBlockHeight() -> Bigint`
 
-Returns the spending tx's `nLockTime` interpreted as a BSV block height.
-Pure source-level sugar for `runar.ExtractLocktime(this.TxPreimage)`;
-emits identical Stack-IR. Only callable inside stateful contracts
-(needs the auto-injected `txPreimage`).
+Returns the spending tx's `nLockTime`. Pure source-level sugar for
+`runar.ExtractLocktime(this.TxPreimage)`; emits identical Stack-IR. Only
+callable inside stateful contracts (needs the auto-injected `txPreimage`).
+
+**The name is misleading and kept only for source compatibility: this is not
+the chain height.** `nLockTime` is written by the spender and enforced by
+consensus as a NOT-BEFORE, and only on a non-final transaction. So the
+comparison below is sound — the spend cannot confirm before `TOpen +
+windowSecs` — provided the covenant also asserts
+`runar.ExtractSequence(c.TxPreimage) != 4294967295`, without which consensus
+ignores `nLockTime` altogether. The reverse comparison (`<`, "still inside the
+window") proves nothing at all: a spender past the window writes a stale
+locktime and the node mines it.
 
 ```go
 if runar.CurrentBlockHeight() > c.TOpen + windowSecs {
-    // expired branch
+    // expired branch — sound only alongside the ExtractSequence finality guard
 }
 ```
 

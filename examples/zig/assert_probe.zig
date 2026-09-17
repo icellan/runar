@@ -67,7 +67,6 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "bounded-counter-inactive")) return probeBoundedCounterInactive();
     if (std.mem.eql(u8, probe_case, "counter-underflow")) return probeCounterUnderflow();
     if (std.mem.eql(u8, probe_case, "auction-bid-too-low")) return probeAuctionBidTooLow();
-    if (std.mem.eql(u8, probe_case, "auction-bid-too-late")) return probeAuctionBidTooLate();
     if (std.mem.eql(u8, probe_case, "auction-close-too-early")) return probeAuctionCloseTooEarly();
     if (std.mem.eql(u8, probe_case, "auction-close-wrong-sig")) return probeAuctionCloseWrongSig();
     if (std.mem.eql(u8, probe_case, "covenant-vault-wrong-output")) return probeCovenantVaultWrongOutput();
@@ -246,14 +245,6 @@ fn probeAuctionBidTooLow() !void {
     var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{ .locktime = 499 }));
     auction.bid(ctx, runar.signTestMessage(runar.BOB), runar.BOB.pubKey, 100);
-}
-
-fn probeAuctionBidTooLate() !void {
-    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
-    defer runtime.deinit();
-    var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
-    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{ .locktime = 500 }));
-    auction.bid(ctx, runar.signTestMessage(runar.BOB), runar.BOB.pubKey, 150);
 }
 
 fn probeAuctionCloseTooEarly() !void {
