@@ -4448,7 +4448,7 @@ impl LoweringContext {
 
         match func_name {
             "extractVersion" => {
-                // <preimage> 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // <preimage> 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
@@ -4527,7 +4527,7 @@ impl LoweringContext {
             }
             "extractSigHashType" => {
                 // End-relative: last 4 bytes, converted to number.
-                // <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM
+                // <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4550,7 +4550,7 @@ impl LoweringContext {
             }
             "extractLocktime" => {
                 // End-relative: 4 bytes before the last 4 (sighashType).
-                // <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4614,6 +4614,9 @@ impl LoweringContext {
             "extractAmount" => {
                 // End-relative: 8 bytes at offset -(52) from end.
                 // <preimage> OP_SIZE 52 OP_SUB OP_SPLIT OP_NIP 8 OP_SPLIT OP_DROP OP_BIN2NUM
+                // NOT zero-padded, unlike the four 32-bit extractors: satoshis is 8 bytes
+                // and a value large enough to set the sign bit would be 2^63 satoshis, far
+                // beyond the 21e14 ever minted.
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4645,7 +4648,7 @@ impl LoweringContext {
             }
             "extractSequence" => {
                 // End-relative: 4 bytes (nSequence) at offset -(44) from end.
-                // <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4707,6 +4710,9 @@ impl LoweringContext {
             "extractInputIndex" => {
                 // Input index = vout field of outpoint, at offset 100, 4 bytes.
                 // <preimage> 100 OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // NOT zero-padded: an input index is bounded far below 2^31, so the sign bit
+                // is unreachable. See emitUnsignedBin2Num for the four fields that DO need
+                // it.
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(100))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));

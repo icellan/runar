@@ -4310,7 +4310,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 
 	switch funcName {
 	case "extractVersion":
-		// <preimage> 4 OP_SPLIT OP_DROP OP_BIN2NUM
+		// <preimage> 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
@@ -4389,7 +4389,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 
 	case "extractSigHashType":
 		// End-relative: last 4 bytes, converted to number.
-		// <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM
+		// <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP <0x00> OP_CAT OP_BIN2NUM
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
 		ctx.sm.push("")
 		ctx.sm.push("")
@@ -4412,7 +4412,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 
 	case "extractLocktime":
 		// End-relative: 4 bytes before the last 4 (sighashType).
-		// <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+		// <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
 		ctx.sm.push("")
 		ctx.sm.push("")
@@ -4477,6 +4477,9 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 	case "extractAmount":
 		// End-relative: 8 bytes (LE int64) at offset -(nSequence(4) + hashOutputs(32) + nLocktime(4) + sighashType(4) + amount(8)) = -52 from end.
 		// <preimage> OP_SIZE 52 OP_SUB OP_SPLIT OP_NIP 8 OP_SPLIT OP_DROP OP_BIN2NUM
+		// NOT zero-padded, unlike the four 32-bit extractors: satoshis is 8 bytes
+		// and a value large enough to set the sign bit would be 2^63 satoshis, far
+		// beyond the 21e14 ever minted.
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
 		ctx.sm.push("")
 		ctx.sm.push("")
@@ -4508,7 +4511,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 
 	case "extractSequence":
 		// End-relative: 4 bytes (nSequence) before hashOutputs(32) + nLocktime(4) + sighashType(4) = 44 from end.
-		// <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+		// <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
 		ctx.sm.push("")
 		ctx.sm.push("")
@@ -4570,6 +4573,9 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 	case "extractInputIndex":
 		// Input index = vout field of outpoint, at offset 100, 4 bytes.
 		// <preimage> 100 OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+		// NOT zero-padded: an input index is bounded far below 2^31, so the sign bit
+		// is unreachable. See emitUnsignedBin2Num for the four fields that DO need
+		// it.
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(100)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})

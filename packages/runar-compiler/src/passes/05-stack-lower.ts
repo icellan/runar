@@ -4571,7 +4571,7 @@ class LoweringContext {
 
     switch (func) {
       case 'extractVersion':
-        // <preimage> 4 OP_SPLIT OP_DROP OP_BIN2NUM
+        // <preimage> 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
         // Split at 4, keep left (version bytes), convert to number.
         this.emitOp({ op: 'push', value: 4n });
         this.stackMap.push(null); // push offset
@@ -4659,7 +4659,7 @@ class LoweringContext {
 
       case 'extractSigHashType':
         // End-relative: last 4 bytes, converted to number.
-        // <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM
+        // <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP <0x00> OP_CAT OP_BIN2NUM
         this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
         this.stackMap.push(null); // preimage still there
         this.stackMap.push(null); // size on top
@@ -4683,7 +4683,7 @@ class LoweringContext {
 
       case 'extractLocktime':
         // End-relative: 4 bytes before the last 4 (sighashType).
-        // <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+        // <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
         this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
         this.stackMap.push(null);
         this.stackMap.push(null);
@@ -4781,6 +4781,9 @@ class LoweringContext {
         // End-relative: 8 bytes (LE int64) before nSequence(4) + hashOutputs(32) + nLocktime(4) + sighashType(4) = 44 bytes from end.
         // Total end offset: 44 + 8 = 52. Amount starts 52 bytes from end, is 8 bytes.
         // <preimage> OP_SIZE 52 OP_SUB OP_SPLIT OP_NIP 8 OP_SPLIT OP_DROP OP_BIN2NUM
+        // NOT zero-padded, unlike the four 32-bit extractors: satoshis is 8 bytes
+        // and a value large enough to set the sign bit would be 2^63 satoshis,
+        // which exceeds the 21e14 ever minted. The pad would be dead weight.
         this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
         this.stackMap.push(null);
         this.stackMap.push(null);
@@ -4814,7 +4817,7 @@ class LoweringContext {
       case 'extractSequence':
         // End-relative: 4 bytes (nSequence) before hashOutputs(32) + nLocktime(4) + sighashType(4) = 40 bytes from end.
         // Total end offset: 40 + 4 = 44. nSequence starts 44 bytes from end, is 4 bytes.
-        // <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+        // <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
         this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
         this.stackMap.push(null);
         this.stackMap.push(null);
@@ -4889,6 +4892,9 @@ class LoweringContext {
         // The outpoint's vout field is at bytes 100-103 (4 bytes at offset 100).
         // Outpoint is at offset 68, 36 bytes. vout is the last 4 bytes of outpoint = offset 100.
         // <preimage> 100 OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+        // NOT zero-padded: this is an input index, bounded far below 2^31, so
+        // the sign bit is unreachable. See emitUnsignedBin2Num for the four
+        // fields that DO need it.
         this.emitOp({ op: 'push', value: 100n });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
