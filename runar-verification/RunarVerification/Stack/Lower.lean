@@ -5575,11 +5575,39 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
     maxStackDepth := 0
     needsCodeSeparator := scriptLevel }
 
+/-- Drop per-method `OP_CODESEPARATOR` once the contract hoists a script-level
+separator. TS threads that flag through the lowering context so a
+checkPreimage-only sibling of an `addOutput` method never emits its own;
+`lowerValueP` still keys the skip on `_codePart` being on THIS method's
+stack (threading a Bool through the mutual block breaks Agrees rewrites).
+Applied here, after `lowerMethod`, so those proofs stay on the old
+per-method shape. -/
+def stripCodeSeparators : List StackOp → List StackOp
+  | [] => []
+  | .opcode "OP_CODESEPARATOR" :: rest => stripCodeSeparators rest
+  | .ifOp thn none :: rest =>
+      .ifOp (stripCodeSeparators thn) none :: stripCodeSeparators rest
+  | .ifOp thn (some els) :: rest =>
+      .ifOp (stripCodeSeparators thn) (some (stripCodeSeparators els))
+        :: stripCodeSeparators rest
+  | op :: rest => op :: stripCodeSeparators rest
+
+/-- When any method hoists a script-level separator, drop per-method
+`OP_CODESEPARATOR` from every method. Length-preserving. -/
+def applyHoistedCodeSeparator (methods : List StackMethod) : List StackMethod :=
+  if methods.any (·.needsCodeSeparator) then
+    methods.map (fun m => { m with ops := stripCodeSeparators m.ops })
+  else
+    methods
+
 def lower (p : ANFProgram) : StackProgram :=
   -- Mirror TS: only public methods become top-level `StackMethod` entries.
   -- Private methods are inlined at call sites by `lowerValueP`'s `.methodCall`
   -- arm. Constructors are also excluded (their bodies populate property slots
   -- at deploy time, not at runtime).
+  -- Per-method CODESEPARATOR strip for mixed `_codePart` contracts is applied
+  -- on the hex emit path (`Pipeline.applyHoistedCodeSeparator`), not here —
+  -- Agrees rewrites `lower` as `map lowerMethod` and must keep that shape.
   { contractName := p.contractName
     methods := (p.methods.filter (·.isPublic)).map (lowerMethod p.methods p.properties) }
 

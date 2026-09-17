@@ -171,8 +171,17 @@ def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (exact : Bool) :
     | [] => acc.reverse
   ByteArray.mk (go [] bs.toList).toArray
 
+/-- TS threads `scriptLevelCodeSeparator` through every method so a
+checkPreimage-only sibling of an `addOutput` method does not emit its
+own `OP_CODESEPARATOR`. Applied after `lower` (whose Agrees proofs
+keep the per-method shape) and before peephole/emit. -/
+def hoistStack (p : ANFProgram) : StackProgram :=
+  let lowered := Lower.lower p
+  peepholeProgram
+    { lowered with methods := Lower.applyHoistedCodeSeparator lowered.methods }
+
 def compileWithR010Prologue (p : ANFProgram) : ByteArray :=
-  let stack := peepholeProgram (Lower.lower p)
+  let stack := hoistStack p
   let (exact, delta) := pinCodePartLength stack p.properties
   let bytes := Emit.appendBA (r010CodeSeparatorPrologue stack) (Emit.emitFast stack)
   patchCodePartLenPins bytes delta exact
@@ -276,18 +285,10 @@ def compileSafeWithCodeSepPatches
 
 def compileHexSafe (p : ANFProgram) : Except CompileError String :=
   match compileSafe p with
-  | .ok bytes =>
-      -- Re-lower only to read `needsCodeSeparator`; compileSafe already
-      -- validated the same stack. `appendBA empty bytes` is `bytes` when
-      -- no method authenticates `_codePart`, so pre-R-010 goldens are
-      -- bit-identical to the previous `bytesToHex bytes` path. R-095
-      -- length pins are patched after the prologue is prepended so the
-      -- 4-byte field is the full locking-script length.
-      let stack := peepholeProgram (Lower.lower p)
-      let (exact, delta) := pinCodePartLength stack p.properties
-      .ok (Emit.bytesToHex
-        (patchCodePartLenPins
-          (Emit.appendBA (r010CodeSeparatorPrologue stack) bytes) delta exact))
+  | .ok _ =>
+      -- Validate on the unstripped `lower` (Agrees/`compileSafe` shape),
+      -- then emit the R-010-hoisted bytes Gate 2 compares to goldens.
+      .ok (Emit.bytesToHex (compileWithR010Prologue p))
   | .error e => .error e
 
 def compileHexSafeWithCodeSepPatches (p : ANFProgram) :
