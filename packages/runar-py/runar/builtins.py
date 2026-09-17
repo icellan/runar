@@ -595,6 +595,10 @@ def extract_hash_prevouts(preimage: bytes) -> bytes:
 def extract_outpoint(preimage: bytes) -> bytes:
     return b'\x00' * 36
 
+def extract_script_code(preimage: bytes) -> bytes:
+    """Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks."""
+    return b''
+
 
 # -- Intent sub-covenant intrinsics (BSVM Phase 13) --------------------------
 # Test-mode stubs for the cross-covenant witness-bridge intrinsics. The

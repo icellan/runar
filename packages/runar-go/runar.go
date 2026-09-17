@@ -758,6 +758,10 @@ func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest {
 // ExtractOutpoint returns 36 zero bytes in test mode.
 func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
 
+// ExtractScriptCode returns empty bytes in test mode. Honest merge is pinned
+// by Spend, not native mocks.
+func ExtractScriptCode(p SigHashPreimage) ByteString { return ByteString("") }
+
 // ExtractPrevOutputScript is the test-mode stub for the cross-input
 // previous-output script witness-bridge intrinsic. The compiler emits
 // hash256(witness) == expectedScriptHash on-chain (2-arg form), or

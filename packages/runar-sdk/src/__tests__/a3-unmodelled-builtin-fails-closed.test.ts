@@ -190,4 +190,11 @@ describe('A-3 — an unmodelled builtin must fail closed, naming itself', () => 
     // sha256(0xabcd)
     expect(res.state.h).toBe('123d4c7ef2d1600a1b3a0f6addc60a10f05a3495c9409f2ecbf4cc095d000a6b');
   });
+
+  it('extractHashPrevouts is a modelled dummy, not a refusal', () => {
+    // Needed so SDK prepareCall can build token-ft merge (W8) without dropping anf.
+    const outcome = probe('extractHashPrevouts');
+    expect(outcome.kind).toBe('value');
+    expect((outcome as { value: unknown }).value).toBe('00'.repeat(32));
+  });
 });

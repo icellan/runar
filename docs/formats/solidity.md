@@ -373,7 +373,7 @@ contract FungibleToken is StatefulSmartContract {
 }
 ```
 
-The `mergeBalance` property is the second slot of a two-input merge. That construction only binds when a second token covenant is actually an input; `merge` does not authenticate one (W8 / SoloMerge, UNSOUND). See `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
+The `mergeBalance` property is the second slot of a two-input merge. `token-ft` authenticates the companion via `otherParentTx` (companion-parent merge, W8). See `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
 
 ### SimpleNFT
 

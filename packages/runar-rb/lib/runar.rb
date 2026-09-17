@@ -315,6 +315,10 @@ module Kernel
     Runar.extract_outpoint(preimage)
   end
 
+  def extract_script_code(preimage)
+    Runar.extract_script_code(preimage)
+  end
+
   # EC operations
   def ec_add(a, b)
     Runar::EC.ec_add(a, b)

@@ -174,7 +174,7 @@ class FungibleToken extends StatefulSmartContract {
 1. Each UTXO tracks an `owner` and a `balance` — the number of tokens it holds.
 2. **Split (transfer)**: The owner signs and specifies a recipient and amount. `addOutput` registers two outputs: one for the recipient with the transferred amount, and one for the sender with the remaining balance. The compiler verifies both outputs against the transaction's `hashOutputs`.
 3. **Send**: Transfers the full balance to a new owner in a single output.
-4. **Merge**: Multiple UTXOs can be combined. Each input independently verifies the same output (with `totalBalance`). Since all inputs check the same `hashOutputs`, they must agree — if any input lies about the total, the hash check fails. **UNSOUND (W8 / SoloMerge):** a single input can still set `totalBalance` to whatever it wants; input count is not identity. The `token-ft` example has the same hole. Pin: `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
+4. **Merge**: Multiple UTXOs can be combined. The `token-ft` example authenticates the companion via `otherParentTx` (companion-parent merge, W8). Input count is not identity. Pin: `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
 
 The `tokenId` is `readonly` and baked into the locking script at deploy time.
 

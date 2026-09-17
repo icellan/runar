@@ -297,6 +297,10 @@ pub fn extractOutpoint(preimage: base.SigHashPreimage) base.ByteString {
     return dupeBytes(&extracted);
 }
 
+pub fn extractScriptCode(_preimage: base.SigHashPreimage) base.ByteString {
+    return "";
+}
+
 pub fn extractOutputHash(preimage: base.SigHashPreimage) base.Sha256 {
     const extracted = bsvz.transaction.extractOutputHash(preimage) catch return default_zero_32[0..];
     return dupeBytes(&extracted.bytes);

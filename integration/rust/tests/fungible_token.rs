@@ -1,6 +1,6 @@
 //! FungibleToken integration test — stateful contract with merge via addOutput.
 //!
-//! UNSOUND (W8 / SoloMerge): merge does not authenticate a second token input.
+//! Companion-parent merge (W8): otherParentTx authenticates the companion.
 //!
 //! Tests compile, deploy, transfer (multi-output), and merge (additional
 //! contract inputs with position-dependent balance verification) using the Rúnar SDK.
@@ -316,14 +316,17 @@ fn test_fungible_token_merge() {
         })
         .expect("deploy contract2 failed");
 
+    let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
     let utxo2 = contract2.get_utxo().expect("contract2 has no UTXO").clone();
+    let parent1 = provider.get_raw_transaction(&utxo1.txid).expect("parent1");
+    let parent2 = provider.get_raw_transaction(&utxo2.txid).expect("parent2");
 
     // merge(sig, otherBalance, allPrevouts, outputSatoshis)
     // allPrevouts is auto-computed by SDK (null placeholder)
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
         additional_contract_input_args: Some(vec![
-            vec![SdkValue::Auto, SdkValue::Int(400), SdkValue::Auto, SdkValue::Int(4000)],
+            vec![SdkValue::Auto, SdkValue::Int(400), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
         ]),
         outputs: Some(vec![
             OutputSpec {
@@ -336,7 +339,7 @@ fn test_fungible_token_merge() {
     let (txid, _) = contract1
         .call(
             "merge",
-            &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Int(4000)],
+            &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
             &mut provider,
             &*signer,
             Some(&call_opts),
@@ -388,14 +391,17 @@ fn test_fungible_token_merge_inflated_other_balance() {
         })
         .expect("deploy contract2 failed");
 
+    let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
     let utxo2 = contract2.get_utxo().expect("contract2 has no UTXO").clone();
+    let parent1 = provider.get_raw_transaction(&utxo1.txid).expect("parent1");
+    let parent2 = provider.get_raw_transaction(&utxo2.txid).expect("parent2");
 
     // Attacker lies: input 0 claims otherBalance=1600, input 1 claims otherBalance=1400
     // Outputs won't match → hashOutputs mismatch → rejected
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
         additional_contract_input_args: Some(vec![
-            vec![SdkValue::Auto, SdkValue::Int(1400), SdkValue::Auto, SdkValue::Int(4000)],
+            vec![SdkValue::Auto, SdkValue::Int(1400), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
         ]),
         outputs: Some(vec![
             OutputSpec {
@@ -407,7 +413,7 @@ fn test_fungible_token_merge_inflated_other_balance() {
     };
     let result = contract1.call(
         "merge",
-        &[SdkValue::Auto, SdkValue::Int(1600), SdkValue::Auto, SdkValue::Int(4000)],
+        &[SdkValue::Auto, SdkValue::Int(1600), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
         &mut provider,
         &*signer,
         Some(&call_opts),
@@ -457,12 +463,15 @@ fn test_fungible_token_merge_negative_other_balance() {
         })
         .expect("deploy contract2 failed");
 
+    let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
     let utxo2 = contract2.get_utxo().expect("contract2 has no UTXO").clone();
+    let parent1 = provider.get_raw_transaction(&utxo1.txid).expect("parent1");
+    let parent2 = provider.get_raw_transaction(&utxo2.txid).expect("parent2");
 
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
         additional_contract_input_args: Some(vec![
-            vec![SdkValue::Auto, SdkValue::Int(-1), SdkValue::Auto, SdkValue::Int(4000)],
+            vec![SdkValue::Auto, SdkValue::Int(-1), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
         ]),
         outputs: Some(vec![
             OutputSpec {
@@ -474,7 +483,7 @@ fn test_fungible_token_merge_negative_other_balance() {
     };
     let result = contract1.call(
         "merge",
-        &[SdkValue::Auto, SdkValue::Int(100), SdkValue::Auto, SdkValue::Int(4000)],
+        &[SdkValue::Auto, SdkValue::Int(100), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
         &mut provider,
         &*signer,
         Some(&call_opts),
@@ -524,12 +533,15 @@ fn test_fungible_token_merge_zero_balance() {
         })
         .expect("deploy contract2 failed");
 
+    let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
     let utxo2 = contract2.get_utxo().expect("contract2 has no UTXO").clone();
+    let parent1 = provider.get_raw_transaction(&utxo1.txid).expect("parent1");
+    let parent2 = provider.get_raw_transaction(&utxo2.txid).expect("parent2");
 
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
         additional_contract_input_args: Some(vec![
-            vec![SdkValue::Auto, SdkValue::Int(0), SdkValue::Auto, SdkValue::Int(4000)],
+            vec![SdkValue::Auto, SdkValue::Int(0), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
         ]),
         outputs: Some(vec![
             OutputSpec {
@@ -542,7 +554,7 @@ fn test_fungible_token_merge_zero_balance() {
     let (txid, _) = contract1
         .call(
             "merge",
-            &[SdkValue::Auto, SdkValue::Int(500), SdkValue::Auto, SdkValue::Int(4000)],
+            &[SdkValue::Auto, SdkValue::Int(500), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
             &mut provider,
             &*signer,
             Some(&call_opts),
@@ -595,12 +607,15 @@ fn test_fungible_token_merge_wrong_signer() {
         })
         .expect("deploy contract2 failed");
 
+    let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
     let utxo2 = contract2.get_utxo().expect("contract2 has no UTXO").clone();
+    let parent1 = provider.get_raw_transaction(&utxo1.txid).expect("parent1");
+    let parent2 = provider.get_raw_transaction(&utxo2.txid).expect("parent2");
 
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
         additional_contract_input_args: Some(vec![
-            vec![SdkValue::Auto, SdkValue::Int(400), SdkValue::Auto, SdkValue::Int(4000)],
+            vec![SdkValue::Auto, SdkValue::Int(400), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
         ]),
         outputs: Some(vec![
             OutputSpec {

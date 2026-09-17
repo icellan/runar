@@ -474,6 +474,9 @@ public final class Builtins {
     public static ByteString extractOutpoint(SigHashPreimage p) { return Preimage.extractOutpoint(resolvePreimage(p)); }
     public static ByteString extractOutpoint(Preimage p) { return Preimage.extractOutpoint(p); }
 
+    public static ByteString extractScriptCode(SigHashPreimage p) { return Preimage.extractScriptCode(resolvePreimage(p)); }
+    public static ByteString extractScriptCode(Preimage p) { return Preimage.extractScriptCode(p); }
+
     public static BigInteger extractLocktime(SigHashPreimage p) { return Preimage.extractLocktime(resolvePreimage(p)); }
     public static BigInteger extractLocktime(Preimage p) { return Preimage.extractLocktime(p); }
 

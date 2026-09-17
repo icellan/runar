@@ -447,12 +447,15 @@ export class MockProvider implements Provider {
     this.broadcastedTxObjects.push(tx);
     this.broadcastCount++;
 
-    // Generate a deterministic fake txid purely from the raw tx hex.
-    // Same transaction → same txid (real Bitcoin semantics: txid = hash of tx bytes).
-    const fakeTxid = sha256Hex(`mock-broadcast-${rawTx}`);
+    // Real Bitcoin txid: double-SHA256 of the serialized tx, display order.
+    // BIP-143 outpoints store the internal (byte-reversed) form; the SDK
+    // reverses `sourceTXID` when it builds `allPrevouts`. A fake txid here
+    // made `hash256(parentTx) === companionTxid` unsatisfiable, which is
+    // exactly the W8 companion-parent bind.
+    const txid = tx.id('hex') as string;
 
     // Auto-store raw hex for subsequent getRawTransaction lookups
-    this.rawTransactions.set(fakeTxid, rawTx);
+    this.rawTransactions.set(txid, rawTx);
 
     // Audit finding C4: register the broadcast tx so `getTransaction()`
     // resolves it. Previously only `rawTransactions` + `knownOutpoints` were
@@ -461,20 +464,20 @@ export class MockProvider implements Provider {
     // `finalizeCall()` caught that and returned an empty-`inputs`/`outputs`
     // shell, making every post-broadcast `result.tx.outputs` assertion in the
     // suite vacuous. Unknown txids still throw — see `getTransaction`.
-    this.transactions.set(fakeTxid, txToTransactionData(fakeTxid, tx));
+    this.transactions.set(txid, txToTransactionData(txid, tx));
 
     // Register this tx's own outputs as known outpoints so a subsequent
     // chained call (spending the continuation this broadcast just created)
     // can also be validated.
     for (let i = 0; i < tx.outputs.length; i++) {
       const out = tx.outputs[i]!;
-      this.knownOutpoints.set(`${fakeTxid}:${i}`, {
+      this.knownOutpoints.set(`${txid}:${i}`, {
         script: out.lockingScript.toHex(),
         satoshis: out.satoshis ?? 0,
       });
     }
 
-    return fakeTxid;
+    return txid;
   }
 
   async getUtxos(address: string): Promise<UTXO[]> {
@@ -541,27 +544,4 @@ export class MockProvider implements Provider {
  */
 export function newAlwaysAckMockProvider(network: 'mainnet' | 'testnet' = 'testnet'): MockProvider {
   return new MockProvider(network, { validateBroadcasts: false });
-}
-
-// ---------------------------------------------------------------------------
-// Minimal hex sha256 for deterministic fake txids (no external deps)
-// ---------------------------------------------------------------------------
-
-function sha256Hex(input: string): string {
-  // Simple deterministic hash for mock purposes — not cryptographically
-  // secure. Produces a 64-char hex string that looks like a txid.
-  let h0 = 0x6a09e667;
-  let h1 = 0xbb67ae85;
-  let h2 = 0x3c6ef372;
-  let h3 = 0xa54ff53a;
-  for (let i = 0; i < input.length; i++) {
-    const c = input.charCodeAt(i);
-    h0 = Math.imul(h0 ^ c, 0x01000193) >>> 0;
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
-    h2 = Math.imul(h2 ^ c, 0x01000193) >>> 0;
-    h3 = Math.imul(h3 ^ c, 0x01000193) >>> 0;
-  }
-  return [h0, h1, h2, h3, h0 ^ h2, h1 ^ h3, h0 ^ h1, h2 ^ h3]
-    .map((n) => (n >>> 0).toString(16).padStart(8, '0'))
-    .join('');
 }

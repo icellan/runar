@@ -156,6 +156,7 @@ pub const signTestMessage = builtins.signTestMessage;
 pub const mockPreimage = builtins.mockPreimage;
 pub const extractHashPrevouts = builtins.extractHashPrevouts;
 pub const extractOutpoint = builtins.extractOutpoint;
+pub const extractScriptCode = builtins.extractScriptCode;
 pub const extractOutputHash = builtins.extractOutputHash;
 pub const extractLocktime = builtins.extractLocktime;
 pub const extractSequence = builtins.extractSequence;

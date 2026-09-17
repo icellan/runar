@@ -1004,6 +1004,22 @@ function evalCall(
     // the real value is a property of a transaction that does not exist yet.
     case 'extractSequence':
       return 0xfffffffen;
+    // Dummy 32-byte prevouts hash. The real hash is a property of a
+    // transaction that does not exist yet during off-chain state derivation;
+    // lenient mode skips the on-chain assert that binds it. Without this arm
+    // `prepareCall` fails closed on every `merge` (NEW-006), so no SDK caller
+    // can build the call at all.
+    case 'extractHashPrevouts':
+    case 'extractHashSequence':
+      return '00'.repeat(32);
+    case 'extractOutpoint':
+      return '00'.repeat(36);
+    // Dummy empty scriptCode. The real bytes are a property of a transaction
+    // that does not exist yet during off-chain state derivation; lenient mode
+    // skips the on-chain asserts that bind them. Without this arm `prepareCall`
+    // fails closed on every `merge` that reads extractScriptCode (NEW-006).
+    case 'extractScriptCode':
+      return '';
 
     // A-3, KNOWN REMAINING GAP: `extractSigHashType` IS a real runar-lang
     // builtin (`preimage.ts`), unlike its three siblings above it has no

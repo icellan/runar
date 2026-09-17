@@ -9,10 +9,15 @@ import runar.lang.types.PubKey;
 import runar.lang.types.Sig;
 
 import static runar.lang.Builtins.assertThat;
+import static runar.lang.Builtins.bin2num;
+import static runar.lang.Builtins.cat;
 import static runar.lang.Builtins.checkSig;
 import static runar.lang.Builtins.extractHashPrevouts;
 import static runar.lang.Builtins.extractOutpoint;
+import static runar.lang.Builtins.extractScriptCode;
 import static runar.lang.Builtins.hash256;
+import static runar.lang.Builtins.len;
+import static runar.lang.Builtins.num2bin;
 import static runar.lang.Builtins.substr;
 
 /**
@@ -38,16 +43,10 @@ import static runar.lang.Builtins.substr;
  *   <li>{@code merge}    -- 2 UTXOs -> 1 UTXO (consolidate two token UTXOs).</li>
  * </ul>
  *
- * <h2>UNSOUND merge (W8 / SoloMerge)</h2>
- * <p>{@code merge} never asserts that a second token covenant is an input of
- * the spending transaction. {@code hash256(allPrevouts) === extractHashPrevouts(preimage)}
- * only proves {@code allPrevouts} is the real prevout list. A one-input spend
- * takes the "I am input 0" arm and writes the spender-chosen {@code otherBalance}
- * into the successor. A P2PKH fee input filling {@code len(allPrevouts) == 72}
- * does not close the hole. Pin:
+ * <h2>Companion-parent merge (W8 / SoloMerge)</h2>
+ * <p>{@code merge} authenticates the companion via {@code otherParentTx}.
+ * Input count is not identity. Pin:
  * {@code packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts}.
- * For a construction that binds a specific companion input, see
- * {@code examples/ts/companion-verifier/}.
  *
  * <p>Authorization: all operations require the current owner's ECDSA
  * signature via {@code checkSig}.
@@ -100,32 +99,80 @@ class FungibleToken extends StatefulSmartContract {
     }
 
     /**
-     * Merge: 2 UTXOs -&gt; 1 UTXO. Consolidates two token UTXOs.
-     *
-     * <p>UNSOUND (W8 / SoloMerge): this method does not authenticate a second
-     * token input. A one-input spend writes {@code otherBalance} into the
-     * successor. Pin:
-     * {@code packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts}.
+     * Merge: 2 UTXOs -&gt; 1 UTXO. Companion-parent merge (W8).
      */
     @Public
-    void merge(Sig sig, Bigint otherBalance, ByteString allPrevouts, Bigint outputSatoshis) {
+    void merge(Sig sig, Bigint otherBalance, ByteString allPrevouts, ByteString otherParentTx, Bigint outputSatoshis) {
         assertThat(checkSig(sig, this.owner));
         assertThat(outputSatoshis.ge(Bigint.ONE));
         assertThat(otherBalance.ge(Bigint.ZERO));
+        assertThat(len(this.tokenId).gt(Bigint.ZERO));
 
-        // Verify allPrevouts is authentic (matches the actual transaction inputs)
+        ByteString pad00 = num2bin(Bigint.ZERO, Bigint.ONE);
         assertThat(hash256(allPrevouts).equals(extractHashPrevouts(this.txPreimage)));
+        assertThat(len(allPrevouts).ge(Bigint.of(72)));
 
-        // Determine position: am I the first contract input?
         ByteString myOutpoint = extractOutpoint(this.txPreimage);
         ByteString firstOutpoint = substr(allPrevouts, Bigint.ZERO.value(), Bigint.of(36).value());
-        Bigint myBalance = this.balance.plus(this.mergeBalance);
-
+        ByteString secondOutpoint = substr(allPrevouts, Bigint.of(36).value(), Bigint.of(36).value());
+        ByteString companionOutpoint = firstOutpoint;
         if (myOutpoint.equals(firstOutpoint)) {
-            // I'm input 0: my verified balance goes to slot 0
+            companionOutpoint = secondOutpoint;
+        } else {
+            assertThat(myOutpoint.equals(secondOutpoint));
+        }
+        ByteString companionTxid = substr(companionOutpoint, Bigint.ZERO.value(), Bigint.of(32).value());
+        Bigint companionVout = Bigint.of(bin2num(cat(substr(companionOutpoint, Bigint.of(32).value(), Bigint.of(4).value()), pad00)));
+        assertThat(companionVout.eq(Bigint.ZERO));
+        assertThat(hash256(otherParentTx).equals(companionTxid));
+
+        Bigint inCount = Bigint.of(bin2num(cat(substr(otherParentTx, Bigint.of(4).value(), Bigint.ONE.value()), pad00)));
+        assertThat(inCount.ge(Bigint.ONE));
+        assertThat(inCount.le(Bigint.of(3)));
+        Bigint off = Bigint.of(5);
+        if (Bigint.ZERO.lt(inCount)) {
+            Bigint sl = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.of(36)).value(), Bigint.ONE.value()), pad00)));
+            assertThat(sl.lt(Bigint.of(253)));
+            off = off.plus(Bigint.of(36)).plus(Bigint.ONE).plus(sl).plus(Bigint.of(4));
+        }
+        if (Bigint.ONE.lt(inCount)) {
+            Bigint sl = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.of(36)).value(), Bigint.ONE.value()), pad00)));
+            assertThat(sl.lt(Bigint.of(253)));
+            off = off.plus(Bigint.of(36)).plus(Bigint.ONE).plus(sl).plus(Bigint.of(4));
+        }
+        if (Bigint.of(2).lt(inCount)) {
+            Bigint sl = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.of(36)).value(), Bigint.ONE.value()), pad00)));
+            assertThat(sl.lt(Bigint.of(253)));
+            off = off.plus(Bigint.of(36)).plus(Bigint.ONE).plus(sl).plus(Bigint.of(4));
+        }
+        Bigint outCount = Bigint.of(bin2num(cat(substr(otherParentTx, off.value(), Bigint.ONE.value()), pad00)));
+        assertThat(outCount.ge(Bigint.ONE));
+        Bigint marker = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.of(9)).value(), Bigint.ONE.value()), pad00)));
+        assertThat(marker.eq(Bigint.of(253)));
+        Bigint scriptLen = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.of(10)).value(), Bigint.of(2).value()), pad00)));
+        Bigint scriptStart = off.plus(Bigint.of(12));
+        assertThat(len(otherParentTx).ge(scriptStart.plus(scriptLen)));
+        ByteString companionScript = substr(otherParentTx, scriptStart.value(), scriptLen.value());
+        assertThat(scriptLen.gt(Bigint.of(49)));
+
+        ByteString sc = extractScriptCode(this.txPreimage);
+        Bigint scMarker = Bigint.of(bin2num(cat(substr(sc, Bigint.ZERO.value(), Bigint.ONE.value()), pad00)));
+        assertThat(scMarker.eq(Bigint.of(253)));
+        ByteString myBody = substr(sc, Bigint.of(3).value(), len(sc).minus(Bigint.of(3)).value());
+        ByteString companionBody = substr(companionScript, Bigint.of(2).value(), scriptLen.minus(Bigint.of(2)).value());
+        assertThat(len(myBody).eq(len(companionBody)));
+        assertThat(len(myBody).gt(Bigint.of(49)));
+        assertThat(substr(myBody, Bigint.ZERO.value(), len(myBody).minus(Bigint.of(49)).value()).equals(
+            substr(companionBody, Bigint.ZERO.value(), len(companionBody).minus(Bigint.of(49)).value())));
+
+        Bigint otherPrimary = Bigint.of(bin2num(cat(substr(companionScript, scriptLen.minus(Bigint.of(16)).value(), Bigint.of(8).value()), pad00)));
+        Bigint otherMerge = Bigint.of(bin2num(cat(substr(companionScript, scriptLen.minus(Bigint.of(8)).value(), Bigint.of(8).value()), pad00)));
+        assertThat(otherPrimary.plus(otherMerge).eq(otherBalance));
+
+        Bigint myBalance = this.balance.plus(this.mergeBalance);
+        if (myOutpoint.equals(firstOutpoint)) {
             this.addOutput(outputSatoshis, this.owner, myBalance, otherBalance);
         } else {
-            // I'm input 1: my verified balance goes to slot 1
             this.addOutput(outputSatoshis, this.owner, otherBalance, myBalance);
         }
     }

@@ -468,6 +468,11 @@ module Runar
       '00' * 36
     end
 
+    # Empty scriptCode in test mode. Honest merge is pinned by Spend.
+    def extract_script_code(_preimage)
+      ''
+    end
+
     # -- Intent sub-covenant intrinsics (BSVM Phase 13) ------------------------
     # Test-mode stubs. On-chain the Ruby compiler desugars these into standard
     # primitives + auto-injected witness params; the Ruby runtime mock can't

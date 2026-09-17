@@ -1,38 +1,26 @@
 /**
- * W8 / SoloMerge — `token-ft`'s `merge` mints tokens from nothing, and this
- * test pins that as KNOWN-BROKEN so nobody "fixes" it by mocking a second
- * input again.
+ * W8 / SoloMerge — `token-ft`'s `merge` authenticates a companion via its
+ * parent transaction. This file used to pin the hole as KNOWN-BROKEN
+ * (one-token-input Spend accepted and minted `otherBalance` from nothing).
+ * The protocol half inverted those expectations: do not delete this file.
  *
- * `merge(sig, otherBalance, allPrevouts, outputSatoshis)` writes `otherBalance`
- * — a number the SPENDER chooses — into the successor's second balance slot,
- * on the theory that a second token input running the same covenant is
- * simultaneously forcing the two claims to agree through `hashOutputs`. Nothing
- * in the script ever checks that a second token input exists:
+ * `merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)`:
  *
- *   - `hash256(allPrevouts) === extractHashPrevouts(preimage)` proves
- *     `allPrevouts` is the real prevout list. It says nothing about how many
- *     entries it has or what covenant any of them runs.
- *   - `myOutpoint === substr(allPrevouts, 0, 36)` is a POSITION test. With one
- *     input it is trivially true, so the spend takes the "I am input 0" arm and
- *     `otherBalance` is minted out of thin air.
- *   - `len(allPrevouts) === 72` would not fix it either: a plain P2PKH fee
- *     input fills the second slot without executing the token covenant at all.
- *
- * The docstring that claimed this was a "Secure merge" with an "anti-inflation
- * proof" described a two-covenant argument whose premise is never established.
- * Those claims are removed from all nine surface sources; this test is the
- * executable half of the same correction.
+ *   - `hash256(allPrevouts) === extractHashPrevouts(preimage)` still only
+ *     proves `allPrevouts` is the real prevout list. Input count is not
+ *     identity.
+ *   - I am the first or second 36-byte outpoint; the other of those two is
+ *     the companion; companion vout must be 0; `hash256(otherParentTx)`
+ *     binds that parent.
+ *   - The parent walk requires output 0's script varint to be 0xfd+LE16
+ *     (token scripts are >252 B), so a P2PKH fee input cannot fill the
+ *     companion slot even when `len(allPrevouts) === 72`.
+ *   - Prefix `len-49` of that script must equal this input's scriptCode
+ *     (after CompactSize / OP_CODESEPARATOR), and the state-tail balances
+ *     must sum to `otherBalance`.
  *
  * ORACLE. `@bsv/sdk` `Spend.validate()`, via the real-crypto oracle's
- * `validateContractInput` (same engine, including NEW-005 script detaching).
- * The existing `FungibleToken.test.ts` merge test hands `TestContract` 72
- * mocked zero bytes and a matching mocked hash and merges on a SINGLE contract
- * instance — which is precisely how this survived to v1. Never assert this
- * family on `TestContract`.
- *
- * WHEN THE PROTOCOL IS FIXED: these expectations invert. `soloMergeAccepted`
- * becomes false and the inflation assertion becomes an assertion that supply is
- * conserved. Do not delete the test; flip it, and say so in the commit.
+ * `validateContractInput`. Never assert this family on `TestContract`.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -109,22 +97,11 @@ async function runSoloMerge(
     script: buildP2PKHScript(alice.pubKey),
   });
 
-  // The SDK's OFF-CHAIN ANF interpreter cannot evaluate `merge`: it has no arm
-  // for `extractHashPrevouts`, so `prepareCall` fails closed (NEW-006) before
-  // it builds anything, and there is no `newState` override that gets past it.
-  // Dropping `anf` from a COPY of the artifact turns off exactly that
-  // off-chain state derivation and nothing else — the locking script, the
-  // constructor slots, the BIP-143 preimage and the on-chain `checkPreimage`
-  // continuation check are all untouched — and we then hand it the successor
-  // explicitly. If the successor were wrong, the covenant's own hashOutputs
-  // binding would reject the spend, so this cannot manufacture a pass.
-  //
-  // Worth recording on its own: no SDK caller can build ANY `merge` call today,
-  // including an honest two-input one. `integration/ts/fungible-token.test.ts`
-  // is written against this path.
-  const artifactNoAnf = { ...compiled.artifact, anf: undefined };
-
-  const contract = new RunarContract(artifactNoAnf, [
+  // `outputs` is stated explicitly because off-chain ANF uses dummy
+  // extractors (the real prevouts/scriptCode do not exist yet during
+  // `prepareCall`). The on-chain script recomputes the continuation itself;
+  // a wrong successor here makes Spend REJECT rather than wave it through.
+  const contract = new RunarContract(compiled.artifact, [
     alice.pubKey,
     REAL_BALANCE,
     0n,
@@ -149,18 +126,11 @@ async function runSoloMerge(
       // integration test uses, so the `hash256(allPrevouts) === hashPrevouts`
       // guard is genuinely satisfied rather than side-stepped. The only
       // difference here is that there is no second token input.
-      [null, PHANTOM_BALANCE, null, 1n],
+      [null, PHANTOM_BALANCE, null, deployTx.toHex(), 1n],
       provider,
       signer,
       {
         dryRun: true,
-        // The successor the attacker wants: their real 10, plus a phantom
-        // partner's 999_999. Stated explicitly because the SDK's off-chain ANF
-        // interpreter does not model `extractHashPrevouts` and so cannot derive
-        // it. This is a statement about the OFF-CHAIN builder only — the
-        // on-chain script recomputes the continuation itself and the
-        // `checkPreimage` binding still has to hold, so a wrong value here
-        // makes `Spend` REJECT rather than wave the spend through.
         outputs: [
           {
             satoshis: 1,
@@ -198,25 +168,19 @@ async function runSoloMerge(
   };
 }
 
-describe('W8 / SoloMerge: token-ft merge mints tokens from nothing (KNOWN-BROKEN)', () => {
-  it('a ONE-token-input transaction passes merge and inflates supply', async () => {
+describe('W8 / SoloMerge: token-ft merge authenticates a companion parent', () => {
+  it('a ONE-token-input transaction is rejected (supply is not inflated)', async () => {
     const res = await runSoloMerge();
 
     // Exactly one TOKEN input. The SDK may append a P2PKH fee input after it;
-    // that does not close the hole (a fee input is not a second token covenant).
-    expect(res.tokenInputCount, res.error).toBe(1);
-    expect(res.inputCount, res.error).toBeGreaterThanOrEqual(1);
-
-    // KNOWN-BROKEN. When the protocol half lands this becomes `false` and the
-    // balance assertions below become a supply-conservation check.
-    expect(res.accepted, res.error).toBe(true);
-
-    // 10 in, 1_000_009 out. `send`/`transfer` spend `balance + mergeBalance`.
-    expect(res.successorBalance).toBe(REAL_BALANCE);
-    expect(res.successorMergeBalance).toBe(PHANTOM_BALANCE);
-    expect(
-      (res.successorBalance ?? 0n) + (res.successorMergeBalance ?? 0n),
-    ).toBeGreaterThan(REAL_BALANCE);
+    // that is the token+P2PKH filling of two prevouts, and must also reject.
+    expect(res.accepted, res.error).toBe(false);
+    // If the SDK built a call tx (dry-run off the script failure), it still
+    // has exactly one TOKEN input. A throw before broadcast is also a reject.
+    if (res.tokenInputCount !== undefined) {
+      expect(res.tokenInputCount, res.error).toBe(1);
+      expect(res.inputCount, res.error).toBeGreaterThanOrEqual(1);
+    }
   });
 
   it('NEGATIVE CONTROL: the covenant still rejects a successor it did not compute', async () => {
@@ -228,6 +192,82 @@ describe('W8 / SoloMerge: token-ft merge mints tokens from nothing (KNOWN-BROKEN
     const res = await runSoloMerge(PHANTOM_BALANCE + 1n);
 
     expect(res.accepted).toBe(false);
+  });
+
+  it('two honest token inputs with agreeing balances still spend', async () => {
+    const source = readFileSync(TOKEN_FT_TS, 'utf8');
+    const compiled = compile(source, { fileName: 'FungibleTokenExample.runar.ts' });
+    if (!compiled.artifact) {
+      throw new Error(
+        'compile failed: ' +
+          compiled.diagnostics.filter(d => d.severity === 'error').map(d => d.message).join('; '),
+      );
+    }
+
+    const alice = testKey('alice');
+    const signer = new LocalSigner(alice.privKey);
+    const provider = new MockProvider();
+    const address = await signer.getAddress();
+    provider.addUtxo(address, {
+      txid: alice.privKey.slice(0, 64),
+      outputIndex: 0,
+      satoshis: 500_000,
+      script: buildP2PKHScript(alice.pubKey),
+    });
+
+    const tokenId = '01';
+    const balA = 400n;
+    const balB = 600n;
+    const contractA = new RunarContract(compiled.artifact, [alice.pubKey, balA, 0n, tokenId]);
+    await contractA.deploy(provider, signer, {});
+    const parentA = provider.getBroadcastedTxs()[0]!;
+    const utxoA = contractA.getUtxo();
+    if (!utxoA) throw new Error('deploy A did not leave a tracked UTXO');
+    const deployTxA = Transaction.fromHex(parentA);
+
+    const contractB = new RunarContract(compiled.artifact, [alice.pubKey, balB, 0n, tokenId]);
+    await contractB.deploy(provider, signer, {});
+    const parentB = provider.getBroadcastedTxs()[1]!;
+    const utxoB = contractB.getUtxo();
+    if (!utxoB) throw new Error('deploy B did not leave a tracked UTXO');
+
+    try {
+      await contractA.call(
+        'merge',
+        [null, balB, null, parentB, 1n],
+        provider,
+        signer,
+        {
+          dryRun: true,
+          additionalContractInputs: [utxoB],
+          additionalContractInputArgs: [[null, balA, null, parentA, 1n]],
+          outputs: [
+            {
+              satoshis: 1,
+              state: {
+                owner: alice.pubKey,
+                balance: balA,
+                mergeBalance: balB,
+              },
+            },
+          ],
+        },
+      );
+    } catch (e) {
+      expect.fail(e instanceof Error ? e.message : String(e));
+    }
+
+    const callTx = Transaction.fromHex(provider.getBroadcastedTxs()[2]!);
+    const accepted = validateContractInput(callTx, 0, deployTxA, utxoA.outputIndex);
+    const acceptedB = validateContractInput(callTx, 1, Transaction.fromHex(parentB), utxoB.outputIndex);
+    const state = extractStateFromScript(
+      compiled.artifact,
+      callTx.outputs[0]!.lockingScript.toHex(),
+    ) as Record<string, unknown>;
+
+    expect(accepted, 'input 0 Spend').toBe(true);
+    expect(acceptedB, 'input 1 Spend').toBe(true);
+    expect((state['balance'] as bigint) + (state['mergeBalance'] as bigint)).toBe(balA + balB);
   });
 });
 
@@ -276,9 +316,12 @@ describe('W8 / SoloMerge: no token-ft source claims the merge is secure', () => 
       expect(hits, `${rel}: ${hits.join('; ')}`).toEqual([]);
     });
 
-    it(`${rel} warns that merge is unsound`, () => {
+    it(`${rel} describes the companion-parent merge`, () => {
       const text = readFileSync(join(REPO_ROOT, rel), 'utf8');
-      expect(text).toContain('UNSOUND');
+      expect(
+        /otherParentTx|other_parent_tx|otherParentTx|companion-parent merge/i.test(text),
+        `${rel}: expected otherParentTx / companion-parent wording`,
+      ).toBe(true);
     });
   }
 

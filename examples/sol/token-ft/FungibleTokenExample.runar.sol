@@ -13,17 +13,11 @@
 /// Operations:
 ///   transfer -- Split: 1 UTXO -> 2 UTXOs (recipient + change back to sender)
 ///   send     -- Simple send: 1 UTXO -> 1 UTXO (full balance to new owner)
-///   merge    -- Merge: 2 UTXOs -> 1 UTXO (UNSOUND: does not authenticate a second token input; W8 / SoloMerge)
+///   merge    -- Merge: 2 UTXOs -> 1 UTXO. Companion-parent merge (W8).
 ///
-/// UNSOUND merge (W8 / SoloMerge): merge never asserts that a second token
-/// covenant is an input of the spending transaction. hash256(allPrevouts) ==
-/// extractHashPrevouts(preimage) only proves allPrevouts is the real prevout
-/// list. A one-input spend takes the "I am input 0" arm and writes the
-/// spender-chosen otherBalance into the successor. A P2PKH fee input filling
-/// len(allPrevouts) == 72 does not close the hole. Pin:
+/// Companion-parent merge (W8 / SoloMerge): authenticates the companion via
+/// otherParentTx. Input count is not identity. Pin:
 /// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
-/// For a construction that binds a specific companion input, see
-/// examples/ts/companion-verifier/.
 ///
 /// The output stores both individual balances (balance and mergeBalance) so they can
 /// be independently verified. Subsequent operations use the sum as the available balance.
@@ -78,43 +72,78 @@ contract FungibleToken is StatefulSmartContract {
         this.addOutput(outputSatoshis, to, this.balance + this.mergeBalance, 0);
     }
 
-    /// @notice Merge: 2 UTXOs -> 1 UTXO. Consolidates two token UTXOs.
-    ///
-    /// @dev UNSOUND (W8 / SoloMerge): this method does not authenticate a second
-    /// token input. The position-dependent slot construction below is the
-    /// intended two-input argument; its premise (a second input running this
-    /// covenant) is never checked. A one-input spend writes otherBalance into
-    /// the successor. Pin:
-    /// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
-    ///
-    /// What the script actually does, if two token inputs happen to be present:
-    /// each input writes its own locking-script balance to a slot based on
-    /// whether its outpoint is first in allPrevouts, and hashOutputs then
-    /// forces those two inputs to agree. That is not a proof that a second
-    /// token input exists.
-    ///
-    /// @param sig Current owner's signature (authorization)
-    /// @param otherBalance Claimed balance of the other merging input
-    /// @param allPrevouts Concatenated outpoints of all tx inputs (verified via hashPrevouts)
-    /// @param outputSatoshis Satoshis to fund the merged output UTXO
-    function merge(Sig sig, bigint otherBalance, ByteString allPrevouts, bigint outputSatoshis) public {
+    /// @notice Merge: 2 UTXOs -> 1 UTXO. Companion-parent merge (W8).
+    /// @param otherParentTx Full serialized parent transaction of the companion input
+    function merge(Sig sig, bigint otherBalance, ByteString allPrevouts, ByteString otherParentTx, bigint outputSatoshis) public {
         require(checkSig(sig, this.owner));
         require(outputSatoshis >= 1);
         require(otherBalance >= 0);
+        require(len(this.tokenId) > 0);
 
-        // Verify allPrevouts is authentic (matches the actual transaction inputs)
+        ByteString pad00 = num2bin(0, 1);
         require(hash256(allPrevouts) == extractHashPrevouts(this.txPreimage));
+        require(len(allPrevouts) >= 72);
 
-        // Determine position: am I the first contract input?
         ByteString myOutpoint = extractOutpoint(this.txPreimage);
         ByteString firstOutpoint = substr(allPrevouts, 0, 36);
-        bigint myBalance = this.balance + this.mergeBalance;
-
+        ByteString secondOutpoint = substr(allPrevouts, 36, 36);
+        ByteString companionOutpoint = firstOutpoint;
         if (myOutpoint == firstOutpoint) {
-            // I'm input 0: my verified balance goes to slot 0
+            companionOutpoint = secondOutpoint;
+        } else {
+            require(myOutpoint == secondOutpoint);
+        }
+        ByteString companionTxid = substr(companionOutpoint, 0, 32);
+        bigint companionVout = bin2num(cat(substr(companionOutpoint, 32, 4), pad00));
+        require(companionVout == 0);
+        require(hash256(otherParentTx) == companionTxid);
+
+        bigint inCount = bin2num(cat(substr(otherParentTx, 4, 1), pad00));
+        require(inCount >= 1);
+        require(inCount <= 3);
+        bigint off = 5;
+        if (0 < inCount) {
+            bigint sl = bin2num(cat(substr(otherParentTx, off + 36, 1), pad00));
+            require(sl < 253);
+            off = off + 36 + 1 + sl + 4;
+        }
+        if (1 < inCount) {
+            bigint sl = bin2num(cat(substr(otherParentTx, off + 36, 1), pad00));
+            require(sl < 253);
+            off = off + 36 + 1 + sl + 4;
+        }
+        if (2 < inCount) {
+            bigint sl = bin2num(cat(substr(otherParentTx, off + 36, 1), pad00));
+            require(sl < 253);
+            off = off + 36 + 1 + sl + 4;
+        }
+        bigint outCount = bin2num(cat(substr(otherParentTx, off, 1), pad00));
+        require(outCount >= 1);
+        bigint marker = bin2num(cat(substr(otherParentTx, off + 9, 1), pad00));
+        require(marker == 253);
+        bigint scriptLen = bin2num(cat(substr(otherParentTx, off + 10, 2), pad00));
+        bigint scriptStart = off + 12;
+        require(len(otherParentTx) >= scriptStart + scriptLen);
+        ByteString companionScript = substr(otherParentTx, scriptStart, scriptLen);
+        require(scriptLen > 49);
+
+        ByteString sc = extractScriptCode(this.txPreimage);
+        bigint scMarker = bin2num(cat(substr(sc, 0, 1), pad00));
+        require(scMarker == 253);
+        ByteString myBody = substr(sc, 3, len(sc) - 3);
+        ByteString companionBody = substr(companionScript, 2, scriptLen - 2);
+        require(len(myBody) == len(companionBody));
+        require(len(myBody) > 49);
+        require(substr(myBody, 0, len(myBody) - 49) == substr(companionBody, 0, len(companionBody) - 49));
+
+        bigint otherPrimary = bin2num(cat(substr(companionScript, scriptLen - 16, 8), pad00));
+        bigint otherMerge = bin2num(cat(substr(companionScript, scriptLen - 8, 8), pad00));
+        require(otherPrimary + otherMerge == otherBalance);
+
+        bigint myBalance = this.balance + this.mergeBalance;
+        if (myOutpoint == firstOutpoint) {
             this.addOutput(outputSatoshis, this.owner, myBalance, otherBalance);
         } else {
-            // I'm input 1: my verified balance goes to slot 1
             this.addOutput(outputSatoshis, this.owner, otherBalance, myBalance);
         }
     }

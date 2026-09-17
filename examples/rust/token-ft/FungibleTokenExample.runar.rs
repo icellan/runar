@@ -16,19 +16,13 @@ use runar::prelude::*;
 ///
 /// - `transfer` -- Split: 1 UTXO -> 2 UTXOs (recipient + change back to sender)
 /// - `send`     -- Simple send: 1 UTXO -> 1 UTXO (full balance to new owner)
-/// - `merge`    -- Merge: 2 UTXOs -> 1 UTXO (UNSOUND: does not authenticate a second token input; W8 / SoloMerge)
+/// - `merge`    -- Merge: 2 UTXOs -> 1 UTXO. Companion-parent merge (W8).
 ///
-/// # UNSOUND merge (W8 / SoloMerge)
+/// # Companion-parent merge (W8 / SoloMerge)
 ///
-/// `merge` never asserts that a second token covenant is an input of the
-/// spending transaction. `hash256(all_prevouts) === extract_hash_prevouts(preimage)`
-/// only proves `all_prevouts` is the real prevout list. A one-input spend takes
-/// the "I am input 0" arm and writes the spender-chosen `other_balance` into
-/// the successor. A P2PKH fee input filling `len(all_prevouts) == 72` does not
-/// close the hole. Pin:
+/// Authenticates the companion via `other_parent_tx`. Input count is not
+/// identity. Pin:
 /// `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
-/// For a construction that binds a specific companion input, see
-/// `examples/ts/companion-verifier/`.
 ///
 /// The output stores both individual balances (`balance` and `merge_balance`) so they can
 /// be independently verified. Subsequent operations use the sum as the available balance.
@@ -94,46 +88,77 @@ impl FungibleToken {
         self.add_output(output_satoshis, to, self.balance + self.merge_balance, 0);
     }
 
-    /// Merge: 2 UTXOs -> 1 UTXO. Consolidates two token UTXOs.
-    ///
-    /// # UNSOUND (W8 / SoloMerge)
-    ///
-    /// This method does not authenticate a second token input. The
-    /// position-dependent slot construction below is the intended two-input
-    /// argument; its premise (a second input running this covenant) is never
-    /// checked. A one-input spend writes `other_balance` into the successor.
-    /// Pin:
-    /// `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
-    ///
-    /// What the script actually does, if two token inputs happen to be present:
-    /// each input writes its own locking-script balance to a slot based on
-    /// whether its outpoint is first in `all_prevouts`, and `hash_outputs` then
-    /// forces those two inputs to agree. That is not a proof that a second
-    /// token input exists.
-    ///
-    /// # Parameters
-    /// - `sig` - Current owner's signature (authorization)
-    /// - `other_balance` - Claimed balance of the other merging input
-    /// - `all_prevouts` - Concatenated outpoints of all tx inputs (verified via hash_prevouts)
-    /// - `output_satoshis` - Satoshis to fund the merged output UTXO
-    pub fn merge(&mut self, sig: &Sig, other_balance: Bigint, all_prevouts: ByteString, output_satoshis: Bigint) {
+    /// Merge: 2 UTXOs -> 1 UTXO. Companion-parent merge (W8).
+    pub fn merge(&mut self, sig: &Sig, other_balance: Bigint, all_prevouts: ByteString, other_parent_tx: ByteString, output_satoshis: Bigint) {
         assert!(check_sig(sig, &self.owner));
         assert!(output_satoshis >= 1);
         assert!(other_balance >= 0);
+        assert!(len(&self.token_id) > 0);
 
-        // Verify all_prevouts is authentic (matches the actual transaction inputs)
+        let pad00 = num2bin(0, 1);
         assert!(hash256(&all_prevouts) == extract_hash_prevouts(&self.tx_preimage));
+        assert!(len(&all_prevouts) >= 72);
 
-        // Determine position: am I the first contract input?
         let my_outpoint = extract_outpoint(&self.tx_preimage);
         let first_outpoint = substr(&all_prevouts, 0, 36);
-        let my_balance = self.balance + self.merge_balance;
-
+        let second_outpoint = substr(&all_prevouts, 36, 36);
+        let mut companion_outpoint = first_outpoint.clone();
         if my_outpoint == first_outpoint {
-            // I'm input 0: my verified balance goes to slot 0
+            companion_outpoint = second_outpoint;
+        } else {
+            assert!(my_outpoint == second_outpoint);
+        }
+        let companion_txid = substr(&companion_outpoint, 0, 32);
+        let companion_vout = bin2num(cat(substr(&companion_outpoint, 32, 4), pad00.clone()));
+        assert!(companion_vout == 0);
+        assert!(hash256(&other_parent_tx) == companion_txid);
+
+        let in_count = bin2num(cat(substr(&other_parent_tx, 4, 1), pad00.clone()));
+        assert!(in_count >= 1);
+        assert!(in_count <= 3);
+        let mut off: Bigint = 5;
+        if 0 < in_count {
+            let sl = bin2num(cat(substr(&other_parent_tx, off + 36, 1), pad00.clone()));
+            assert!(sl < 253);
+            off = off + 36 + 1 + sl + 4;
+        }
+        if 1 < in_count {
+            let sl = bin2num(cat(substr(&other_parent_tx, off + 36, 1), pad00.clone()));
+            assert!(sl < 253);
+            off = off + 36 + 1 + sl + 4;
+        }
+        if 2 < in_count {
+            let sl = bin2num(cat(substr(&other_parent_tx, off + 36, 1), pad00.clone()));
+            assert!(sl < 253);
+            off = off + 36 + 1 + sl + 4;
+        }
+        let out_count = bin2num(cat(substr(&other_parent_tx, off, 1), pad00.clone()));
+        assert!(out_count >= 1);
+        let marker = bin2num(cat(substr(&other_parent_tx, off + 9, 1), pad00.clone()));
+        assert!(marker == 253);
+        let script_len = bin2num(cat(substr(&other_parent_tx, off + 10, 2), pad00.clone()));
+        let script_start = off + 12;
+        assert!(len(&other_parent_tx) >= script_start + script_len);
+        let companion_script = substr(&other_parent_tx, script_start, script_len);
+        assert!(script_len > 49);
+
+        let sc = extract_script_code(&self.tx_preimage);
+        let sc_marker = bin2num(cat(substr(&sc, 0, 1), pad00.clone()));
+        assert!(sc_marker == 253);
+        let my_body = substr(&sc, 3, len(&sc) - 3);
+        let companion_body = substr(&companion_script, 2, script_len - 2);
+        assert!(len(&my_body) == len(&companion_body));
+        assert!(len(&my_body) > 49);
+        assert!(substr(&my_body, 0, len(&my_body) - 49) == substr(&companion_body, 0, len(&companion_body) - 49));
+
+        let other_primary = bin2num(cat(substr(&companion_script, script_len - 16, 8), pad00.clone()));
+        let other_merge = bin2num(cat(substr(&companion_script, script_len - 8, 8), pad00));
+        assert!(other_primary + other_merge == other_balance);
+
+        let my_balance = self.balance + self.merge_balance;
+        if my_outpoint == first_outpoint {
             self.add_output(output_satoshis, self.owner.clone(), my_balance, other_balance);
         } else {
-            // I'm input 1: my verified balance goes to slot 1
             self.add_output(output_satoshis, self.owner.clone(), other_balance, my_balance);
         }
     }

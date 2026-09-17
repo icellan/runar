@@ -54,22 +54,14 @@ func TestFungibleToken_Send(t *testing.T) {
 
 func TestFungibleToken_Merge(t *testing.T) {
 	c := newToken(alice, 50)
-	// allPrevouts = 72 zero bytes (two 36-byte zero outpoints),
-	// consistent with mock ExtractHashPrevouts and ExtractOutpoint.
 	allPrevouts := runar.ByteString(make([]byte, 72))
-	c.Merge(aliceSig(), 150, allPrevouts, 1000)
-	out := c.Outputs()
-	if len(out) != 1 {
-		t.Fatalf("expected 1 output, got %d", len(out))
-	}
-	// ExtractOutpoint returns 36 zero bytes == first outpoint, so we're input 0:
-	// balance slot gets myBalance (50), mergeBalance slot gets otherBalance (150).
-	if out[0].Values[1] != runar.Bigint(50) {
-		t.Errorf("output balance: expected 50, got %v", out[0].Values[1])
-	}
-	if out[0].Values[2] != runar.Bigint(150) {
-		t.Errorf("output mergeBalance: expected 150, got %v", out[0].Values[2])
-	}
+	parent := runar.ByteString(make([]byte, 64))
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("mock-zero prevouts must fail companion-parent merge (W8)")
+		}
+	}()
+	c.Merge(aliceSig(), 150, allPrevouts, parent, 1000)
 }
 
 func TestFungibleToken_Merge_NegativeOtherBalance_Fails(t *testing.T) {
@@ -79,7 +71,7 @@ func TestFungibleToken_Merge_NegativeOtherBalance_Fails(t *testing.T) {
 		}
 	}()
 	allPrevouts := runar.ByteString(make([]byte, 72))
-	newToken(alice, 100).Merge(aliceSig(), -1, allPrevouts, 1000)
+	newToken(alice, 100).Merge(aliceSig(), -1, allPrevouts, runar.ByteString(make([]byte, 64)), 1000)
 }
 
 func TestFungibleToken_Merge_TamperedPrevouts_Fails(t *testing.T) {
@@ -92,24 +84,19 @@ func TestFungibleToken_Merge_TamperedPrevouts_Fails(t *testing.T) {
 	for i := range tampered {
 		tampered[i] = 0xff
 	}
-	newToken(alice, 30).Merge(aliceSig(), 70, runar.ByteString(tampered), 1000)
+	newToken(alice, 30).Merge(aliceSig(), 70, runar.ByteString(tampered), runar.ByteString(make([]byte, 64)), 1000)
 }
 
 func TestFungibleToken_Merge_PreExistingMergeBalance(t *testing.T) {
 	c := &FungibleToken{Owner: alice, Balance: 20, MergeBalance: 10, TokenId: tokenId}
 	allPrevouts := runar.ByteString(make([]byte, 72))
-	c.Merge(aliceSig(), 50, allPrevouts, 1000)
-	out := c.Outputs()
-	if len(out) != 1 {
-		t.Fatalf("expected 1 output, got %d", len(out))
-	}
-	// myBalance = 20 + 10 = 30
-	if out[0].Values[1] != runar.Bigint(30) {
-		t.Errorf("output balance: expected 30, got %v", out[0].Values[1])
-	}
-	if out[0].Values[2] != runar.Bigint(50) {
-		t.Errorf("output mergeBalance: expected 50, got %v", out[0].Values[2])
-	}
+	parent := runar.ByteString(make([]byte, 64))
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("mock-zero prevouts must fail companion-parent merge (W8)")
+		}
+	}()
+	c.Merge(aliceSig(), 50, allPrevouts, parent, 1000)
 }
 
 func TestFungibleToken_Transfer_ExactBalance(t *testing.T) {

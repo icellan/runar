@@ -8,11 +8,10 @@
  *   - tokenId: ByteString (readonly)
  *
  * Methods: transfer(sig, to, amount, outputSatoshis), send(sig, to, outputSatoshis),
- *          merge(sig, otherBalance, allPrevouts, outputSatoshis)
+ *          merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)
  *
- * UNSOUND (W8 / SoloMerge): merge does not authenticate a second token input.
- * Two-input tests here exercise hashOutputs agreement when both covenants run;
- * they do not prove a one-input spend is rejected. Pin:
+ * Companion-parent merge (W8): otherParentTx authenticates the companion.
+ * One-input reject is pinned by
  * packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
  */
 
@@ -203,14 +202,15 @@ describe('FungibleToken', () => {
 
     const utxo1 = contract1.getUtxo()!;
     const utxo2 = contract2.getUtxo()!;
+    const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
+    const parent2 = await provider.getRawTransaction(utxo2.txid);
 
-    // merge(sig, otherBalance, allPrevouts, outputSatoshis)
-    // allPrevouts is auto-computed by the SDK from the transaction inputs (null = auto)
+    // merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)
     const { txid } = await contract1.call(
-      'merge', [null, 600n, null, 1n], provider, signer,
+      'merge', [null, 600n, null, parent2, 1n], provider, signer,
       {
         additionalContractInputs: [utxo2],
-        additionalContractInputArgs: [[null, 400n, null, 1n]],
+        additionalContractInputArgs: [[null, 400n, null, parent1, 1n]],
         outputs: [
           { satoshis: 1, state: { owner: pubKeyHex, balance: 400n, mergeBalance: 600n } },
         ],
@@ -237,12 +237,14 @@ describe('FungibleToken', () => {
     // But input 1 would produce balance=1400, mergeBalance=600
     // These don't match → hashOutputs mismatch → rejected on-chain
     const utxo2 = contract2.getUtxo()!;
+    const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
+    const parent2 = await provider.getRawTransaction(utxo2.txid);
     await expect(
       contract1.call(
-        'merge', [null, 1600n, null, 1n], provider, signer,
+        'merge', [null, 1600n, null, parent2, 1n], provider, signer,
         {
           additionalContractInputs: [utxo2],
-          additionalContractInputArgs: [[null, 1400n, null, 1n]],
+          additionalContractInputArgs: [[null, 1400n, null, parent1, 1n]],
           outputs: [
             { satoshis: 1, state: { owner: pubKeyHex, balance: 400n, mergeBalance: 1600n } },
           ],
@@ -265,12 +267,14 @@ describe('FungibleToken', () => {
 
     // Attacker passes otherBalance=-1 for input 1 — fails assert(otherBalance >= 0)
     const utxo2 = contract2.getUtxo()!;
+    const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
+    const parent2 = await provider.getRawTransaction(utxo2.txid);
     await expect(
       contract1.call(
-        'merge', [null, 100n, null, 1n], provider, signer,
+        'merge', [null, 100n, null, parent2, 1n], provider, signer,
         {
           additionalContractInputs: [utxo2],
-          additionalContractInputArgs: [[null, -1n, null, 1n]],
+          additionalContractInputArgs: [[null, -1n, null, parent1, 1n]],
           outputs: [
             { satoshis: 1, state: { owner: pubKeyHex, balance: 100n, mergeBalance: 400n } },
           ],
@@ -292,11 +296,13 @@ describe('FungibleToken', () => {
     await contract2.deploy(provider, signer, {});
 
     const utxo2 = contract2.getUtxo()!;
+    const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
+    const parent2 = await provider.getRawTransaction(utxo2.txid);
     const { txid } = await contract1.call(
-      'merge', [null, 500n, null, 1n], provider, signer,
+      'merge', [null, 500n, null, parent2, 1n], provider, signer,
       {
         additionalContractInputs: [utxo2],
-        additionalContractInputArgs: [[null, 0n, null, 1n]],
+        additionalContractInputArgs: [[null, 0n, null, parent1, 1n]],
         outputs: [
           { satoshis: 1, state: { owner: pubKeyHex, balance: 0n, mergeBalance: 500n } },
         ],
@@ -320,12 +326,14 @@ describe('FungibleToken', () => {
     await contract2.deploy(provider, ownerSigner, {});
 
     const utxo2 = contract2.getUtxo()!;
+    const parent1 = await provider.getRawTransaction(contract1.getUtxo()!.txid);
+    const parent2 = await provider.getRawTransaction(utxo2.txid);
     await expect(
       contract1.call(
-        'merge', [null, 600n, null, 1n], provider, wrongSigner,
+        'merge', [null, 600n, null, parent2, 1n], provider, wrongSigner,
         {
           additionalContractInputs: [utxo2],
-          additionalContractInputArgs: [[null, 400n, null, 1n]],
+          additionalContractInputArgs: [[null, 400n, null, parent1, 1n]],
           outputs: [
             { satoshis: 1, state: { owner: ownerPubKey, balance: 400n, mergeBalance: 600n } },
           ],

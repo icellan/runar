@@ -587,6 +587,11 @@ pub fn extract_outpoint(_p: &[u8]) -> ByteString {
     vec![0u8; 36]
 }
 
+/// Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks.
+pub fn extract_script_code(_p: &[u8]) -> ByteString {
+    vec![]
+}
+
 /// Returns a mock state script (empty bytes).
 pub fn get_state_script<T>(_contract: &T) -> ByteString {
     vec![]

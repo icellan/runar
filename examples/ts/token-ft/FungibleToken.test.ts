@@ -118,22 +118,20 @@ describe('FungibleToken', () => {
   });
 
   describe('merge', () => {
-    it('creates one output with position-dependent balances', () => {
+    it('rejects the mock-zero prevouts path (W8: that was the solo-merge hole)', () => {
+      // INTERPRETER-ONLY. The 72-zero allPrevouts trick is the exploit the
+      // companion-parent walk now refuses. Honest two-input Spend is pinned
+      // by w8-token-ft-solo-merge-known-broken.test.ts.
       const token = makeToken(ALICE.pubKey, 30n);
-      // Set up mock preimage so hash256(allPrevouts) matches extractHashPrevouts
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
         sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: MOCK_PREVOUTS,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
-      expect(result.success).toBe(true);
-      expect(result.outputs).toHaveLength(1);
-      // Mock outpoint is 36 zero bytes, first 36 bytes of prevouts is also zeros → isFirst=true
-      expect(result.outputs[0]!.balance).toBe(30n);
-      expect(result.outputs[0]!.mergeBalance).toBe(70n);
-      expect(result.outputs[0]!.owner).toBe(ALICE.pubKey);
+      expect(result.success).toBe(false);
     });
 
     it('rejects merge with negative otherBalance', () => {
@@ -143,6 +141,7 @@ describe('FungibleToken', () => {
         sig: ALICE_SIG,
         otherBalance: -1n,
         allPrevouts: MOCK_PREVOUTS,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
       expect(result.success).toBe(false);
@@ -156,30 +155,10 @@ describe('FungibleToken', () => {
         sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: tamperedPrevouts,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
       expect(result.success).toBe(false);
-    });
-
-    it('merge with pre-existing mergeBalance uses total', () => {
-      const token = TestContract.fromSource(source, {
-        owner: ALICE.pubKey,
-        balance: 20n,
-        mergeBalance: 10n,
-        tokenId: TOKEN_ID,
-      });
-      token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
-      const result = token.call('merge', {
-        sig: ALICE_SIG,
-        otherBalance: 50n,
-        allPrevouts: MOCK_PREVOUTS,
-        outputSatoshis: SATS,
-      });
-      expect(result.success).toBe(true);
-      expect(result.outputs).toHaveLength(1);
-      // myBalance = balance + mergeBalance = 20 + 10 = 30
-      expect(result.outputs[0]!.balance).toBe(30n);
-      expect(result.outputs[0]!.mergeBalance).toBe(50n);
     });
   });
 
