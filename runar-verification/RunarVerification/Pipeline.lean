@@ -171,12 +171,52 @@ def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (exact : Bool) :
     | [] => acc.reverse
   ByteArray.mk (go [] bs.toList).toArray
 
+/-- Copy-to-top at depth `d`. Mirrors `Tracker.pick` / TS `bringToTop(_, false)`. -/
+def copyAtDepth : Nat → StackOp
+  | 0 => .dup
+  | 1 => .over
+  | n + 2 => .pickStruct (n + 2)
+
+/-- W3 / BoolBamboozle: 9-byte ABI domain pin `{empty, 0x01}` on one
+boolean witness. Net stack 0. Mirrors `emitBooleanParamGate`. -/
+def booleanParamGateOps (depth : Nat) : List StackOp :=
+  copyAtDepth depth ::
+    [ .dup
+    , .push (.bigint 0), .opcode "OP_EQUAL"
+    , .swap
+    , .push (.bigint 1), .opcode "OP_EQUAL"
+    , .opcode "OP_BOOLOR"
+    , .opcode "OP_VERIFY" ]
+
+/-- Gates in declaration order. Depth of param `i` of `n` is `n-1-i`
+(last param is TOS). `_codePart` sits under the user params, so user
+depths are unchanged. -/
+def booleanGatesForMethod (m : ANFMethod) : List StackOp :=
+  if !m.isPublic then []
+  else
+    let n := m.params.length
+    (List.range n).foldl (init := ([] : List StackOp)) fun acc i =>
+      match m.params[i]? with
+      | some p =>
+          if p.type == .bool then
+            acc ++ booleanParamGateOps (n - 1 - i)
+          else acc
+      | none => acc
+
+def applyBooleanParamGates (p : ANFProgram) (stack : StackProgram) :
+    StackProgram :=
+  { stack with methods := stack.methods.map (fun sm =>
+      match p.methods.find? (fun m => m.name == sm.name) with
+      | none => sm
+      | some m => { sm with ops := booleanGatesForMethod m ++ sm.ops }) }
+
 /-- TS threads `scriptLevelCodeSeparator` through every method so a
 checkPreimage-only sibling of an `addOutput` method does not emit its
 own `OP_CODESEPARATOR`. Applied after `lower` (whose Agrees proofs
-keep the per-method shape) and before peephole/emit. -/
+keep the per-method shape) and before peephole/emit. W3 boolean ABI
+gates are prepended on the same path. -/
 def hoistStack (p : ANFProgram) : StackProgram :=
-  let lowered := Lower.lower p
+  let lowered := applyBooleanParamGates p (Lower.lower p)
   peepholeProgram
     { lowered with methods := Lower.applyHoistedCodeSeparator lowered.methods }
 
