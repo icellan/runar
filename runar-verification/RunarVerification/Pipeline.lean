@@ -88,9 +88,25 @@ remain for proofs). -/
 def compile (p : ANFProgram) : ByteArray :=
   Emit.emitFast (peepholeProgram (Lower.lower p))
 
+/-- R-010: when any public method authenticates `_codePart`, TS `emit`
+prepends `OP_NOP OP_CODESEPARATOR` (bytes `0x61 0xab`) at offsets 0–1 of
+the locking script. Kept off `Emit.emitFast` so the existing
+`unfold emitFast` proof surface stays on the pre-R-010 single-method
+shape; Gate 2 (`compileHex` / `compileHexSafe`) is the path that must
+match `expected-script.hex`. -/
+def r010CodeSeparatorPrologue (stack : StackProgram) : ByteArray :=
+  if stack.methods.any (·.needsCodeSeparator) then
+    ByteArray.mk #[0x61, 0xab]
+  else
+    ByteArray.empty
+
+def compileWithR010Prologue (p : ANFProgram) : ByteArray :=
+  let stack := peepholeProgram (Lower.lower p)
+  Emit.appendBA (r010CodeSeparatorPrologue stack) (Emit.emitFast stack)
+
 /-- Hex-encoded form, matching the `expected-script.hex` format. -/
 def compileHex (p : ANFProgram) : String :=
-  Emit.bytesToHex (compile p)
+  Emit.bytesToHex (compileWithR010Prologue p)
 
 /-! ## Fail-closed compiler entrypoint -/
 
@@ -187,7 +203,13 @@ def compileSafeWithCodeSepPatches
 
 def compileHexSafe (p : ANFProgram) : Except CompileError String :=
   match compileSafe p with
-  | .ok bytes => .ok (Emit.bytesToHex bytes)
+  | .ok bytes =>
+      -- Re-lower only to read `needsCodeSeparator`; compileSafe already
+      -- validated the same stack. `appendBA empty bytes` is `bytes` when
+      -- no method authenticates `_codePart`, so pre-R-010 goldens are
+      -- bit-identical to the previous `bytesToHex bytes` path.
+      let stack := peepholeProgram (Lower.lower p)
+      .ok (Emit.bytesToHex (Emit.appendBA (r010CodeSeparatorPrologue stack) bytes))
   | .error e => .error e
 
 def compileHexSafeWithCodeSepPatches (p : ANFProgram) :
@@ -7034,7 +7056,7 @@ theorem compileSafe_observational_correct_stateful_consume
     (pre : String) (ty : ANFType)
     (hParams : anfM.params = [ANFParam.mk pre ty])
     (hBody : anfM.body = StatefulBridge.gatedStatefulPrologueBody pre)
-    (hne1 : pre ≠ "_cp0")
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart")
     (ctx : TxContext) (preimage : ByteArray)
     (rest : List RunarVerification.ANF.Eval.Value)
     (_hValid : ValidTxContext ctx)
@@ -7059,7 +7081,7 @@ theorem compileSafe_observational_correct_stateful_consume
   have hOps : (Lower.lowerMethod p.methods p.properties anfM).ops
       = AgreesStateful.statefulPrologueOps :=
     AgreesStateful.lowerMethod_ops_statefulPrologue p.methods p.properties anfM
-      pre ty hParams hBody hPublic hne1
+      pre ty hParams hBody hPublic hne1 hneCode
   have hPeeped : (peepholedLoweredMethod p anfM).ops
       = AgreesStateful.statefulPrologueOps := by
     show peepholeMethodOps (Lower.lowerMethod p.methods p.properties anfM).ops = _
@@ -7125,7 +7147,7 @@ theorem smoke_stateful_consume_fires :
   exact compileSafe_observational_correct_stateful_consume
     stSmokeProg AgreesStateful.smokeMethod bytes
     (by simp [stSmokeProg]) rfl hSafe stSmokeAnf stSmokeStk rfl (by decide)
-    "pre" .byteString rfl rfl (by decide)
+    "pre" .byteString rfl rfl (by decide) (by decide)
     Stack.TxContext.sampleCtx stSmokePreimage []
     RunarVerification.Stack.ValidTxContext.sampleCtx_valid rfl rfl rfl
 
@@ -7143,6 +7165,32 @@ reconstruct as `.ifOp`s; int pushes above OP_16 come back as byte pushes —
 handled by the consensus CScriptNum coercion `Eval.asNum?` on
 `OP_LESSTHAN`).  No sub-omnibus axiom appears in the discharge. -/
 
+private def rollPickFoldOpNoopB : StackOp → Bool
+  | .roll 0 | .roll 1 | .roll 2 | .pick 0 | .pick 1 => false
+  | _ => true
+
+private theorem rollPickFoldOpNoop_of_b (op : StackOp)
+    (h : rollPickFoldOpNoopB op = true) : Peephole.rollPickFoldOpNoop op := by
+  cases op with
+  | roll n =>
+      cases n with
+      | zero => simp [rollPickFoldOpNoopB] at h
+      | succ n1 =>
+        cases n1 with
+        | zero => simp [rollPickFoldOpNoopB] at h
+        | succ n2 =>
+          cases n2 with
+          | zero => simp [rollPickFoldOpNoopB] at h
+          | succ _ => simp [Peephole.rollPickFoldOpNoop]
+  | pick n =>
+      cases n with
+      | zero => simp [rollPickFoldOpNoopB] at h
+      | succ n1 =>
+        cases n1 with
+        | zero => simp [rollPickFoldOpNoopB] at h
+        | succ _ => simp [Peephole.rollPickFoldOpNoop]
+  | _ => simp [Peephole.rollPickFoldOpNoop]
+
 set_option maxRecDepth 8192 in
 /-- The 4-pass peephole pipeline is the identity on the composed constant
 ops (the flat `OP_IF` chain is named-opcode-only, so `noIfOp` holds and
@@ -7152,8 +7200,7 @@ theorem peepholeMethodOps_statefulFull :
       = AgreesStateful.statefulFullOps := by
   unfold peepholeMethodOps
   have hNoIf : Peephole.noIfOp AgreesStateful.statefulFullOps := by
-    simp [AgreesStateful.statefulFullOps, AgreesStateful.statefulFullEpilogueOps,
-      Lower.varintEncodingOps, Peephole.noIfOp]
+    native_decide
   rw [Peephole.peepholePassAll_eq_flat_of_noIfOp _ hNoIf]
   have hFlat : Peephole.peepholePassAllFlat AgreesStateful.statefulFullOps
       = AgreesStateful.statefulFullOps := by
@@ -7163,13 +7210,15 @@ theorem peepholeMethodOps_statefulFull :
       (Peephole.applyPushOneAdd AgreesStateful.statefulFullOps)
       = AgreesStateful.statefulFullOps := by
     with_unfolding_all rfl
+  have hRollB : AgreesStateful.statefulFullOps.all rollPickFoldOpNoopB = true := by
+    native_decide
+  have hRoll : Peephole.rollPickFoldFlatNoop AgreesStateful.statefulFullOps := by
+    intro op hop
+    exact rollPickFoldOpNoop_of_b op ((List.all_eq_true.mp hRollB) op hop)
   rw [hPost,
     Peephole.peepholeChainFold_eq_self_of_noIfOp_stepId _ hNoIf (by
       with_unfolding_all rfl),
-    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_flatNoop _ hNoIf (by
-      simp +decide [AgreesStateful.statefulFullOps,
-        AgreesStateful.statefulFullEpilogueOps, Lower.varintEncodingOps,
-        Peephole.rollPickFoldFlatNoop, Peephole.rollPickFoldOpNoop])]
+    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_flatNoop _ hNoIf hRoll]
 
 /-- **Widened stateful consume theorem (prologue + state-output epilogue,
 acceptance bit).**
@@ -7215,7 +7264,7 @@ theorem compileSafe_observational_correct_statefulFull_consume
   -- BUG-100: no spender-witness signature and no serialization readiness
   -- hypotheses — the deployed script's acceptance is the preimage verdict via
   -- the opaque `runOps_statefulFullParsedOps_scriptAccepts` shim.
-  obtain ⟨hPE, hPC, _hPv1, _hPso, _hPO, _hPcp,
+  obtain ⟨hPE, hPC, _hPv1, _hPso, _hPO, hPcp,
     hSE, hSC, hS2, _hSso, _hSO, hSCp, hSA,
     hVE, hVC, hV2, _hVso, _hVO, hVCp, hVA,
     hPS, hPV, hSV⟩ := AgreesStateful.statefulFullNamesOk_unpack pre sats stateVal hNames
@@ -7232,7 +7281,7 @@ theorem compileSafe_observational_correct_statefulFull_consume
       = AgreesStateful.statefulFullOps :=
     AgreesStateful.lowerMethod_ops_statefulFull p.methods p.properties anfM
       pre sats stateVal pn tyS tyV tyP hParams hBody hPublic hProps
-      hPE hPS hPV hPC hSE hVE hSV hSC hVC hVCp hSCp hVA hSA
+      hPE hPS hPV hPC hSE hVE hSV hSC hVC hVCp hSCp hPcp hVA hSA
   have hPeeped : (peepholedLoweredMethod p anfM).ops
       = AgreesStateful.statefulFullOps := by
     show peepholeMethodOps (Lower.lowerMethod p.methods p.properties anfM).ops = _
@@ -9548,9 +9597,16 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
           · obtain ⟨pre, ty, ctx, preimage, restV, hStParams, hStBody,
               hStNe1, hStValid, hStPreLink, hStAnfPre, hStStk⟩ :=
               hStatefulFrag hStShape
+            have hneCode : pre ≠ "_codePart" := by
+              intro hEq
+              have hFalse : AgreesStateful.statefulConsumeShapeBool anfM = false := by
+                simp [AgreesStateful.statefulConsumeShapeBool, hStParams, hStBody, hEq,
+                  StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody]
+              rw [hFalse] at hStShape
+              cases hStShape
             exact compileSafe_observational_correct_stateful_consume
               p anfM bytes hMem hPublic hSafe initialAnf initialStack
-              hStSingle hStName pre ty hStParams hStBody hStNe1
+              hStSingle hStName pre ty hStParams hStBody hStNe1 hneCode
               ctx preimage restV hStValid hStPreLink hStAnfPre hStStk
           · have hResidue : cryptoCallResidueB p anfM = true := by
               simp only [cryptoCallResidueB, hPublic, hStateful, Bool.true_and,

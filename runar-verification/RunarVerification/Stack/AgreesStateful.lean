@@ -155,7 +155,7 @@ in place (d0 last-use), `_opPushTxSig` swapped up (d1 consume), `G` pushed,
 theorem lowerValueP_checkPreimage_statefulPrologue
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat) (localBindings : List String) (pre : String)
-    (hne1 : pre ≠ "_cp0") :
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
     Lower.lowerValueP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre] "_cp0" (.checkPreimage pre)
       = (statefulPrologueOps, (["_cp0"] : Stack.Lower.StackMap), localBindings) := by
@@ -163,7 +163,7 @@ theorem lowerValueP_checkPreimage_statefulPrologue
   simp [Lower.lowerCheckPreimageOpsLive, Lower.loadRefLive, Lower.bringToTop,
     Lower.StackMap.depth?, Lower.isLastUse,
     Lower.lastUsesLookup, Lower.listContains, List.findIdx?, List.findIdx?.go,
-    Ne.symm hne1, statefulPrologueOps]
+    Ne.symm hne1, hneCode, statefulPrologueOps]
 
 /-- The auto-injected `assert _cp0` lowers to the bare `OP_VERIFY` (the
 `_cp0` slot is consumed in place at d0 last-use). -/
@@ -187,7 +187,7 @@ in `lowerMethod` (TS `cleanupExcessStack` parity) now inspects. -/
 theorem lowerBindingsP_statefulPrologue
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat) (localBindings : List String) (pre : String)
-    (hne1 : pre ≠ "_cp0") :
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
     (Lower.lowerBindingsP progMethods props budget 0 [("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre]
         (StatefulBridge.gatedStatefulPrologueBody pre))
@@ -198,7 +198,7 @@ theorem lowerBindingsP_statefulPrologue
       = (statefulPrologueOps ++ [.opcode "OP_VERIFY"], [])
   rw [Lower.lowerBindingsP.eq_def]
   simp only [lowerValueP_checkPreimage_statefulPrologue progMethods props budget
-    localBindings pre hne1]
+    localBindings pre hne1 hneCode]
   rw [Lower.lowerBindingsP.eq_def]
   simp only [lowerValueP_assert_statefulPrologue progMethods props budget
     localBindings pre hne1]
@@ -217,7 +217,7 @@ theorem lowerMethod_ops_statefulPrologue
     (hParams : anfM.params = [ANFParam.mk pre ty])
     (hBody : anfM.body = StatefulBridge.gatedStatefulPrologueBody pre)
     (hPub : anfM.isPublic = true)
-    (hne1 : pre ≠ "_cp0") :
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
     (Lower.lowerMethod progMethods props anfM).ops = statefulPrologueOps := by
   unfold Lower.lowerMethod
   rw [hParams, hBody, hPub]
@@ -272,7 +272,7 @@ theorem lowerMethod_ops_statefulPrologue
         simp [StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody,
           Lower.arrayElemsOf]]
   simp only [lowerBindingsP_statefulPrologue progMethods props
-    Lower.defaultInlineBudget ["_cp0", "_v"] pre hne1]
+    Lower.defaultInlineBudget ["_cp0", "_v"] pre hne1 hneCode]
   simp [hEndsAssert, hNoDeser, statefulPrologueOps]
 
 /-! ## Part 2 — the runtime walk (Stack acceptance = the preimage verdict) -/
@@ -306,7 +306,8 @@ def statefulConsumeShapeBool (m : ANFMethod) : Bool :=
   match m.params, m.body with
   | [p], [⟨bn1, .checkPreimage pre, none⟩, ⟨bn2, .assert ref, none⟩] =>
       (bn1 == "_cp0") && (bn2 == "_v") && (ref == "_cp0") &&
-      (p.name == pre) && !(pre == "_cp0") && !(pre == "_opPushTxSig")
+      (p.name == pre) && !(pre == "_cp0") && !(pre == "_opPushTxSig") &&
+      !(pre == "_codePart")
   | _, _ => false
 
 /-! ## Part 5 — MANDATORY smokes (anti-vacuity) -/
@@ -327,7 +328,7 @@ theorem smoke_classifier_fires : statefulConsumeShapeBool smokeMethod = true := 
 theorem smoke_lowerMethod_ops :
     (Lower.lowerMethod [] [] smokeMethod).ops = statefulPrologueOps :=
   lowerMethod_ops_statefulPrologue [] [] smokeMethod "pre" .byteString
-    rfl rfl rfl (by decide)
+    rfl rfl rfl (by decide) (by decide)
 
 
 /-! # Part 6 — the WIDENED fragment: prologue + state-output epilogue
@@ -396,14 +397,23 @@ def statefulFullEpilogueOps : List StackOp :=
   ++ [.swap, .opcode "OP_CAT", .swap, .push (.bigint 8), .opcode "OP_NUM2BIN",
       .swap, .opcode "OP_CAT"]
 
-/-- The composed method's CONSTANT lowered op list (BUG-100): the gated
-prologue (`OP_CODESEPARATOR` + the 428-byte binding blob), the SURVIVING
-mid-body `OP_VERIFY`, then the state-output epilogue. No `_opPushTxSig`
-witness / `G` push / `OP_CHECKSIGVERIFY` — the binding is inside the blob. -/
+/-- R-010 check_preimage on the widened fragment: `_codePart` is on the
+stack, so the per-method CODESEPARATOR is skipped and the scriptCode pin
+runs. Concrete names match `smokeFullMethod`. -/
+def statefulFullCheckPreimageOps : List StackOp :=
+  (Lower.lowerCheckPreimageOpsLive
+      (["pre", "stateVal", "sats", "_codePart"] : Stack.Lower.StackMap)
+      "_cp0" "pre" 0
+      [("", 2), ("stateVal", 2), ("sats", 2), ("_cp0", 1), ("pre", 0)]
+      [] true
+      [{ name := "count", type := .bigint, readonly := false }]).1
+
+/-- The composed method's CONSTANT lowered op list (BUG-100 + R-010): the
+gated prologue (on-chain blob + `_codePart` pin, no per-method
+CODESEPARATOR), the SURVIVING mid-body `OP_VERIFY`, then the state-output
+epilogue. -/
 def statefulFullOps : List StackOp :=
-  [.opcode "OP_CODESEPARATOR", .rawBytes Lower.checkPreimageBindingBytes,
-   .opcode "OP_VERIFY"]
-  ++ statefulFullEpilogueOps
+  statefulFullCheckPreimageOps ++ [.opcode "OP_VERIFY"] ++ statefulFullEpilogueOps
 
 open RunarVerification.Script RunarVerification.Script.Parse in
 /-- The composed method's parse image — what the DEPLOYED bytes run. Defined
@@ -428,18 +438,27 @@ theorem computeLastUses_statefulFull (pre sats stateVal : String)
     Ne.symm hPC, Ne.symm hPE, Ne.symm hSE, Ne.symm hVE, Ne.symm hSC,
     Ne.symm hVC, Ne.symm hSP, Ne.symm hVP, Ne.symm hSV]
 
-/-- The `check_preimage` binding on the FULL initial map (BUG-100): preimage
-consumed in place (d0 last-use), then the 428-byte binding blob. No
-`_opPushTxSig` slot exists — only `_codePart` sits below the user params. -/
+/-- The `check_preimage` binding on the FULL initial map (BUG-100 + R-010):
+preimage consumed in place (d0 last-use), the 428-byte binding blob, then
+the `_codePart` pin. `scriptLevelCodeSeparator = true` skips the
+per-method CODESEPARATOR. -/
 theorem lowerValueP_checkPreimage_statefulFull
     (progMethods : List ANFMethod) (props : List ANFProperty)
-    (budget : Nat) (localBindings : List String) (pre sats stateVal : String)
-    (hPE : pre ≠ "") (hPS : pre ≠ sats) (hPV : pre ≠ stateVal) (hPC : pre ≠ "_cp0") :
+    (budget : Nat) (localBindings : List String) (pre sats stateVal pn : String)
+    (hProps : props.filter (fun pp => !pp.readonly)
+        = [{ name := pn, type := .bigint, readonly := false }])
+    (hPE : pre ≠ "") (hPS : pre ≠ sats) (hPV : pre ≠ stateVal) (hPC : pre ≠ "_cp0")
+    (hPCp : pre ≠ "_codePart") (hSCp : sats ≠ "_codePart")
+    (hVCp : stateVal ≠ "_codePart") :
     Lower.lowerValueP progMethods props budget 0
         [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
         [] localBindings [] [pre, stateVal, sats, "_codePart"]
         "_cp0" (.checkPreimage pre)
-      = ([.opcode "OP_CODESEPARATOR", .rawBytes Lower.checkPreimageBindingBytes],
+      = ((Lower.lowerCheckPreimageOpsLive
+            ([pre, stateVal, sats, "_codePart"] : Stack.Lower.StackMap)
+            "_cp0" pre 0
+            [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
+            [] true props).1,
          (["_cp0", stateVal, sats, "_codePart"] : Stack.Lower.StackMap),
          localBindings) := by
   have e1 : ("" == pre) = false := beq_eq_false_iff_ne.mpr (Ne.symm hPE)
@@ -450,7 +469,8 @@ theorem lowerValueP_checkPreimage_statefulFull
   simp [Lower.lowerCheckPreimageOpsLive, Lower.loadRefLive, Lower.bringToTop,
     Lower.StackMap.depth?, Lower.isLastUse,
     Lower.lastUsesLookup, Lower.listContains, List.find?, List.findIdx?,
-    List.findIdx?.go, e1, e2, e3, e4]
+    List.findIdx?.go, e1, e2, e3, e4, hPCp, hSCp, hVCp, hProps,
+    Lower.emitCodePartAuthentication_snd]
 
 /-- The mid-body `assert _cp0` lowers to a SURVIVING `OP_VERIFY` (no
 terminal elision — the body continues into the epilogue). -/
@@ -506,6 +526,7 @@ theorem lowerBindingsP_statefulFull
     (hSE : sats ≠ "") (hVE : stateVal ≠ "") (hSV : sats ≠ stateVal)
     (hSC : sats ≠ "_cp0") (hVC : stateVal ≠ "_cp0")
     (hVCp : stateVal ≠ "_codePart") (hSCp : sats ≠ "_codePart")
+    (hPCp : pre ≠ "_codePart")
     (hVA : stateVal ≠ "_acc") (hSA : sats ≠ "_acc") :
     Lower.lowerBindingsP progMethods props budget 0
         [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
@@ -520,7 +541,7 @@ theorem lowerBindingsP_statefulFull
       = (statefulFullOps, (["_so0", "_codePart"] : Stack.Lower.StackMap))
   rw [Lower.lowerBindingsP.eq_def]
   simp only [lowerValueP_checkPreimage_statefulFull progMethods props budget
-    localBindings pre sats stateVal hPE hPS hPV hPC]
+    localBindings pre sats stateVal pn hProps hPE hPS hPV hPC hPCp hSCp hVCp]
   rw [Lower.lowerBindingsP.eq_def]
   simp only [lowerValueP_assert_statefulFull progMethods props budget
     localBindings pre sats stateVal hPC hSC hVC]
@@ -528,7 +549,31 @@ theorem lowerBindingsP_statefulFull
   simp only [lowerValueP_addOutput_statefulFull progMethods props budget
     localBindings pre sats stateVal pn hProps hSE hVE hSV hVCp hSCp hVA hSA]
   rw [Lower.lowerBindingsP.eq_def]
-  simp [statefulFullOps, statefulFullEpilogueOps]
+  have hCp :
+      (Lower.lowerCheckPreimageOpsLive
+          ([pre, stateVal, sats, "_codePart"] : Stack.Lower.StackMap)
+          "_cp0" pre 0
+          [("", 2), (stateVal, 2), (sats, 2), ("_cp0", 1), (pre, 0)]
+          [] true props).1 = statefulFullCheckPreimageOps := by
+    have e1 : ("" == pre) = false := beq_eq_false_iff_ne.mpr (Ne.symm hPE)
+    have e2 : (stateVal == pre) = false := beq_eq_false_iff_ne.mpr (Ne.symm hPV)
+    have e3 : (sats == pre) = false := beq_eq_false_iff_ne.mpr (Ne.symm hPS)
+    have e4 : ("_cp0" == pre) = false := beq_eq_false_iff_ne.mpr (Ne.symm hPC)
+    have e5 : ("pre" == pre) = decide ("pre" = pre) := rfl
+    have hPreCp : (some pre == some "_codePart") = false := by simp [hPCp]
+    have hSvCp : (some stateVal == some "_codePart") = false := by simp [hVCp]
+    have hSatsCp : (some sats == some "_codePart") = false := by simp [hSCp]
+    unfold statefulFullCheckPreimageOps Lower.lowerCheckPreimageOpsLive
+      Lower.emitCodePartAuthentication
+    simp [Lower.loadRefLive, Lower.bringToTop, Lower.StackMap.depth?,
+      Lower.StackMap.pushAnon, Lower.isLastUse, Lower.lastUsesLookup,
+      Lower.listContains, List.find?, List.findIdx?, List.findIdx?.go,
+      Lower.hasStateSection, Lower.mutableProperties, hProps,
+      Lower.fixedStateSectionLength?, Lower.fixedStateSectionLengthGo,
+      Lower.fixedStateFieldSize?,
+      Lower.codePartAuthAfterPick, Lower.varintStripOps,
+      e1, e2, e3, e4, hPCp, hSCp, hVCp, hPreCp, hSvCp, hSatsCp]
+  simp [hCp, statefulFullOps, statefulFullEpilogueOps]
 
 /-- **The method-level lowering reduction (widened fragment).**  A public
 3-param method whose body is the composed prologue+epilogue lowers to the
@@ -550,6 +595,7 @@ theorem lowerMethod_ops_statefulFull
     (hSE : sats ≠ "") (hVE : stateVal ≠ "") (hSV : sats ≠ stateVal)
     (hSC : sats ≠ "_cp0") (hVC : stateVal ≠ "_cp0")
     (hVCp : stateVal ≠ "_codePart") (hSCp : sats ≠ "_codePart")
+    (hPCp : pre ≠ "_codePart")
     (hVA : stateVal ≠ "_acc") (hSA : sats ≠ "_acc") :
     (Lower.lowerMethod progMethods props anfM).ops = statefulFullOps := by
   unfold Lower.lowerMethod
@@ -603,7 +649,7 @@ theorem lowerMethod_ops_statefulFull
           Lower.arrayElemsOf]]
   simp only [lowerBindingsP_statefulFull progMethods props
     Lower.defaultInlineBudget ["_cp0", "_v", "_so0"] pre sats stateVal pn hProps
-    hPE hPS hPV hPC hSE hVE hSV hSC hVC hVCp hSCp hVA hSA]
+    hPE hPS hPV hPC hSE hVE hSV hSC hVC hVCp hSCp hPCp hVA hSA]
   simp [hEndsAssert, statefulFullOps, statefulFullEpilogueOps,
     Lower.varintEncodingOps]
 
@@ -879,6 +925,6 @@ theorem smoke_full_lowerMethod_ops :
     "pre" "sats" "stateVal" "count" .bigint .bigint .byteString rfl rfl rfl rfl
     (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
     (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide)
+    (by decide) (by decide)
 
 end RunarVerification.Stack.AgreesStateful

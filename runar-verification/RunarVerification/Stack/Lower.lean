@@ -1704,6 +1704,32 @@ def varintEncodingOps : List StackOp :=
     ++ emitPrefix 0xff
     ++ [opc "OP_ENDIF", opc "OP_ENDIF", opc "OP_ENDIF"]
 
+/-- Strip BIP-143 scriptCode varint prefix (1/3/5/9-byte). On entry the
+top of stack is `varint || scriptCode`; on exit it is `scriptCode`.
+Mirrors TS `emitStripScriptCodeVarint` (`05-stack-lower.ts:4168`). -/
+def varintStripOps : List StackOp :=
+  let opc (s : String) : StackOp := .opcode s
+  let push (n : Int) : StackOp := .push (.bigint n)
+  let dropMore (n : Int) : List StackOp :=
+    [push n, opc "OP_SPLIT", .nip]
+  -- Split first byte, swap so [..., rest, fb], pad+BIN2NUM
+  [push 1, opc "OP_SPLIT", .swap,
+   .push (.bytes (ByteArray.mk #[0x00])), opc "OP_CAT", opc "OP_BIN2NUM"]
+  -- Outer IF: fb < 253 → 1-byte (drop fb)
+  ++ [.dup, push 253, opc "OP_LESSTHAN", opc "OP_IF", .drop, opc "OP_ELSE"]
+  -- Middle IF: fb == 254 → 5-byte (drop fb, then 4 more)
+  ++ [.dup, push 254, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
+  ++ dropMore 4
+  ++ [opc "OP_ELSE"]
+  -- Inner IF: fb == 255 → 9-byte (drop fb, then 8 more)
+  ++ [.dup, push 255, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
+  ++ dropMore 8
+  ++ [opc "OP_ELSE"]
+  -- Else: fb == 253 → 3-byte (drop fb, then 2 more)
+  ++ [.drop]
+  ++ dropMore 2
+  ++ [opc "OP_ENDIF", opc "OP_ENDIF", opc "OP_ENDIF"]
+
 /--
 Lowering for `add_raw_output(satoshis, scriptBytes)` and
 `add_data_output(satoshis, scriptBytes)` (their stack-IR shape is
@@ -1858,31 +1884,130 @@ def lowerCheckPreimageOps (sm : StackMap) (bindingName : String)
   let s2 : List StackOp := [.rawBytes checkPreimageBindingBytes]
   (s0 ++ s1 ++ s2, sm.push bindingName)
 
+/-- Mutable properties only — R-010 clause 8 keys off this list. -/
+def mutableProperties (props : List ANFProperty) : List ANFProperty :=
+  props.filter (fun p => !p.readonly)
+
+/-- R-010: trailing `OP_RETURN || state` exists iff any property is mutable. -/
+def hasStateSection (props : List ANFProperty) : Bool :=
+  !(mutableProperties props).isEmpty
+
+/-- Byte size of one fixed-width state field. `none` for variable-length. -/
+def fixedStateFieldSize? : ANFType → Option Nat
+  | .bigint | .rabinSig | .rabinPubKey => some 8
+  | .bool => some 1
+  | .pubKey => some 33
+  | .addr | .ripemd160 => some 20
+  | .sha256 => some 32
+  | .point | .p256Point => some 64
+  | .p384Point => some 96
+  | _ => none
+
+/-- `some n` when every mutable property is fixed-width; `none` if any
+variable-length field makes the section un-pinnable at compile time. -/
+def fixedStateSectionLengthGo : List ANFProperty → Option Nat
+  | [] => some 0
+  | p :: rest =>
+      match fixedStateFieldSize? p.type with
+      | none => none
+      | some n =>
+          match fixedStateSectionLengthGo rest with
+          | none => none
+          | some acc => some (n + acc)
+
+def fixedStateSectionLength? (props : List ANFProperty) : Option Nat :=
+  fixedStateSectionLengthGo (mutableProperties props)
+
+/-- Ops after `_codePart` has been PICK-copied to the top. Mirrors TS
+`emitCodePartAuthentication` steps 6–10 (`05-stack-lower.ts:4380-4508`).
+`fixedRestLen = none` skips clause 8a's remainder-length pin (variable
+state; R-095 `verify_code_part_len` is a separate emit-time back-patch
+and is not modelled here). -/
+def codePartAuthAfterPick (hasState : Bool) (fixedRestLen : Option Nat) :
+    List StackOp :=
+  let opc (s : String) : StackOp := .opcode s
+  let push (n : Int) : StackOp := .push (.bigint n)
+  let sizePin : List StackOp :=
+    match fixedRestLen with
+    | some n => [opc "OP_SIZE", push (Int.ofNat n), opc "OP_NUMEQUALVERIFY"]
+    | none   => []
+  let restPin : List StackOp :=
+    if hasState then
+      [push 1, opc "OP_SPLIT", .drop,
+       .push (.bytes (ByteArray.mk #[0x6a])), opc "OP_EQUALVERIFY"]
+    else
+      [.drop]
+  [opc "OP_SIZE", push 2, opc "OP_SUB", .rot, .swap, opc "OP_SPLIT"]
+    ++ sizePin ++ restPin
+    ++ [.push (.bytes (ByteArray.mk #[0x61, 0xab])), .swap, opc "OP_CAT",
+        opc "OP_EQUALVERIFY"]
+
+/-- R-010 / CL-BUG-091 — bind the spender-supplied `_codePart` witness to
+the executing locking script. Net stack effect 0: `[..., preimage]` in,
+`[..., preimage]` out. Mirrors TS `emitCodePartAuthentication`. -/
+def emitCodePartAuthentication (sm : StackMap) (props : List ANFProperty) :
+    (List StackOp × StackMap) :=
+  let opc (s : String) : StackOp := .opcode s
+  let push (n : Int) : StackOp := .push (.bigint n)
+  -- 1–4. DUP preimage, drop 104-byte BIP-143 header, drop 52-byte tail,
+  -- strip scriptCode varint. One extra anonymous slot on top of `sm`.
+  let headerOps : List StackOp :=
+    [.dup, push 104, opc "OP_SPLIT", .nip,
+     opc "OP_SIZE", push 52, opc "OP_SUB", opc "OP_SPLIT", .drop]
+    ++ varintStripOps
+  let smWork := sm.pushAnon
+  let (sCode, _) := bringToTop smWork "_codePart" false
+  let hasState := hasStateSection props
+  let pinOps : List StackOp :=
+    match hasState, fixedStateSectionLength? props with
+    | true, none   => codePartAuthAfterPick true none
+    | true, some n => codePartAuthAfterPick true (some (1 + n))
+    | false, _     => codePartAuthAfterPick false (some 0)
+  -- Auth is net-zero; return the incoming map (top still the preimage).
+  (headerOps ++ sCode ++ pinOps, sm)
+
+@[simp] theorem emitCodePartAuthentication_snd (sm : StackMap)
+    (props : List ANFProperty) :
+    (emitCodePartAuthentication sm props).snd = sm := rfl
+
 /--
 Liveness-aware variant of `lowerCheckPreimageOps` (BUG-100 on-chain
-binding). Mirrors TS `lowerCheckPreimage` (`05-stack-lower.ts:3156-3197`):
-`OP_CODESEPARATOR`, bring the preimage to top (ROLL-on-last-use), then emit
-the fixed 428-byte OP_PUSH_TX binding blob as a single opaque `.rawBytes`
-op. Net stack effect is zero — the preimage stays on top, renamed to
-`bindingName`. No `_opPushTxSig` witness is loaded (the signature is derived
-on-chain from the preimage), so `lowerMethod` no longer prepends it.
+binding + R-010 `_codePart` authentication).
+
+`scriptLevelCodeSeparator` (default `false`) is the contract-level flag:
+when any method authenticates `_codePart`, the hex pipeline hoists a
+single `OP_NOP OP_CODESEPARATOR` to offset 1 and per-method separators
+must not fire (a later separator would re-narrow `scriptCode`). Default
+`false` keeps `AgreesStateful`'s no-`_codePart` simp path on
+`OP_CODESEPARATOR` + the 428-byte blob.
+
+When `_codePart` is on the stack, `emitCodePartAuthentication` pins it
+against the now-authentic preimage `scriptCode`.
 -/
 def lowerCheckPreimageOpsLive (sm : StackMap) (bindingName : String)
     (preimage : String) (currentIndex : Nat)
     (lastUses : List (String × Nat))
-    (outerProtected : List String) : (List StackOp × StackMap) :=
-  let s0 : List StackOp := [.opcode "OP_CODESEPARATOR"]
+    (outerProtected : List String)
+    (scriptLevelCodeSeparator : Bool := false)
+    (props : List ANFProperty := []) : (List StackOp × StackMap) :=
+  let s0 : List StackOp :=
+    if scriptLevelCodeSeparator then [] else [.opcode "OP_CODESEPARATOR"]
   -- Step 1: bring preimage to top, consuming on last use.
   let (s1, sm1) := loadRefLive sm preimage currentIndex lastUses outerProtected
   -- Step 2: derive + verify the signature on-chain (single opaque raw_bytes
   -- blob; net stack effect 0 — preimage in → preimage out).
   let s2 : List StackOp := [.rawBytes checkPreimageBindingBytes]
+  -- Step 3: R-010 pin, only when this method's stack carries `_codePart`.
+  let (sAuth, smAuth) :=
+    match sm1.depth? "_codePart" with
+    | some _ => emitCodePartAuthentication sm1 props
+    | none   => ([], sm1)
   -- The preimage stays on top; rename the slot to bindingName.
   let smFinal :=
-    match sm1 with
+    match smAuth with
     | _ :: rest => bindingName :: rest
     | []        => [bindingName]
-  (s0 ++ s1 ++ s2, smFinal)
+  (s0 ++ s1 ++ s2 ++ sAuth, smFinal)
 
 /-! ## Phase 3z-E framework intrinsics: change & state-output helpers
 
@@ -2576,33 +2701,11 @@ decoding each ByteString as a Bitcoin push-data prefix. The helpers
 below are pure op-list builders mirroring those byte-for-byte.
 -/
 
-/-- Strip BIP-143 scriptCode varint prefix (1/3/5/9-byte). On entry the
-top of stack is `varint || scriptCode`; on exit it is `scriptCode`.
-Mirrors TS `05-stack-lower.ts:2643-2730`. -/
-def varintStripOps : List StackOp :=
-  let opc (s : String) : StackOp := .opcode s
-  let push (n : Int) : StackOp := .push (.bigint n)
-  let dropMore (n : Int) : List StackOp :=
-    [push n, opc "OP_SPLIT", .nip]
-  -- Split first byte, swap so [..., rest, fb], pad+BIN2NUM
-  [push 1, opc "OP_SPLIT", .swap,
-   .push (.bytes (ByteArray.mk #[0x00])), opc "OP_CAT", opc "OP_BIN2NUM"]
-  -- Outer IF: fb < 253 → 1-byte (drop fb)
-  ++ [.dup, push 253, opc "OP_LESSTHAN", opc "OP_IF", .drop, opc "OP_ELSE"]
-  -- Middle IF: fb == 254 → 5-byte (drop fb, then 4 more)
-  ++ [.dup, push 254, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
-  ++ dropMore 4
-  ++ [opc "OP_ELSE"]
-  -- Inner IF: fb == 255 → 9-byte (drop fb, then 8 more)
-  ++ [.dup, push 255, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
-  ++ dropMore 8
-  ++ [opc "OP_ELSE"]
-  -- Else: fb == 253 → 3-byte (drop fb, then 2 more)
-  ++ [.drop]
-  ++ dropMore 2
-  ++ [opc "OP_ENDIF", opc "OP_ENDIF", opc "OP_ENDIF"]
+/-- `varintStripOps` is defined next to `varintEncodingOps` (same
+`emitStripScriptCodeVarint` sequence) so R-010 `_codePart` authentication
+can reuse it.
 
-/-- Push-data prefix decode. On entry stack is `[..., bytes]`; on exit
+Push-data prefix decode. On entry stack is `[..., bytes]`; on exit
 `[..., data, remaining]`. Mirrors TS `emitPushDataDecode`
 (`05-stack-lower.ts:687-790`). -/
 def pushDataDecodeOps : List StackOp :=
@@ -3890,6 +3993,64 @@ stated at the `rawSlots := []` default keep reducing unchanged. -/
 @[simp] theorem normalizeRaw_nil (name : String) (ops : List StackOp) :
     normalizeRaw [] name ops = ops := rfl
 
+/-- Whether a method body needs the implicit `_codePart` parameter. Hoisted
+above `lowerValueP` so the `check_preimage` arm can decide R-010's
+contract-level CODESEPARATOR skip without threading a Bool through the
+whole program-aware mutual block. -/
+def bindingsUseCodePart : List ANFBinding → Bool
+  | []                  => false
+  | (.mk _ v _) :: rest =>
+      let here : Bool :=
+        match v with
+        | .addOutput _ _ _    => true
+        | .addRawOutput _ _   => true
+        | .call f _           =>
+            f = "computeStateOutput" || f = "computeStateOutputHash"
+        | .ifVal _ thn els _    =>
+            bindingsUseCodePart thn || bindingsUseCodePart els
+        | .loop _ body _      => bindingsUseCodePart body
+        | _                   => false
+      here || bindingsUseCodePart rest
+
+def bindingsReadVarLenState (progMethods : List ANFMethod)
+    (varLenProps : List String) : Nat → List ANFBinding → Bool
+  | _,    []                  => false
+  | fuel, (.mk _ v _) :: rest =>
+      let here : Bool :=
+        match v with
+        | .loadProp n         => listContains varLenProps n
+        | .ifVal _ thn els _  =>
+            bindingsReadVarLenState progMethods varLenProps fuel thn
+              || bindingsReadVarLenState progMethods varLenProps fuel els
+        | .loop _ body _      =>
+            bindingsReadVarLenState progMethods varLenProps fuel body
+        | .methodCall _ mn _  =>
+            match fuel with
+            | 0         => false
+            | fuel' + 1 =>
+                match lookupMethod progMethods mn with
+                | some tgt =>
+                    bindingsReadVarLenState progMethods varLenProps fuel' tgt.body
+                | none     => false
+        | _                   => false
+      here || bindingsReadVarLenState progMethods varLenProps fuel rest
+termination_by fuel bs => (fuel, sizeOf bs)
+
+def varLenPropNames (props : List ANFProperty) : List String :=
+  (props.filter (fun p => !p.readonly && p.type = .byteString)).map (·.name)
+
+def methodNeedsCodePart (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) : Bool :=
+  bindingsUseCodePart m.body
+    || bindingsReadVarLenState progMethods (varLenPropNames props)
+         progMethods.length m.body
+
+def programNeedsScriptLevelCodeSeparator (progMethods : List ANFMethod)
+    (props : List ANFProperty) (m : ANFMethod) : Bool :=
+  methodNeedsCodePart progMethods props m
+    || (progMethods.filter (fun mm => mm.name == "constructor" || mm.isPublic)).any
+         (fun mm => methodNeedsCodePart progMethods props mm)
+
 mutual
 
 /-- Mirrors TS `LoweringContext.localBindings` (`05-stack-lower.ts:856-857`).
@@ -5123,7 +5284,17 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       let (ops, sm') := lowerAddRawOutputOpsLive sm bindingName sat scr currentIndex lastUses outerProtected
       (ops, sm', localBindings)
   | .checkPreimage pre       =>
+      -- R-010: skip the per-method CODESEPARATOR when this method's stack
+      -- carries `_codePart` (the implicit is only prepended for methods
+      -- that authenticate). Mixed contracts whose checkPreimage-only
+      -- public sibling must also skip are handled by `needsCodeSeparator`
+      -- on every method of such a contract (the hex pipeline hoists one
+      -- separator); a leftover per-method separator on a no-`_codePart`
+      -- sibling is a known residual vs TS, which threads a contract-level
+      -- flag through the lowering context.
+      let scriptLevel : Bool := (sm.depth? "_codePart").isSome
       let (ops, sm') := lowerCheckPreimageOpsLive sm bindingName pre currentIndex lastUses outerProtected
+          scriptLevel props
       (ops, sm', localBindings)
   -- Phase 3z-A: property-table-aware framework intrinsics.
   | .getStateScript          =>
@@ -5238,82 +5409,6 @@ def bindingsUseCheckPreimage : List ANFBinding → Bool
       here || bindingsUseCheckPreimage rest
 
 /--
-Whether a method body needs the implicit `_codePart` parameter. Mirrors
-TS `methodUsesCodePart` (`05-stack-lower.ts:4896-4908`):
-* `add_output`, `add_raw_output` — both reference `_codePart` directly
-* `call computeStateOutput` / `call computeStateOutputHash` — single-
-  output stateful continuations.
-
-Note: `add_data_output` is intentionally excluded (the TS reference's
-`lowerAddDataOutput` does not reference `_codePart`).
--/
-def bindingsUseCodePart : List ANFBinding → Bool
-  | []                  => false
-  | (.mk _ v _) :: rest =>
-      let here : Bool :=
-        match v with
-        | .addOutput _ _ _    => true
-        | .addRawOutput _ _   => true
-        | .call f _           =>
-            f = "computeStateOutput" || f = "computeStateOutputHash"
-        | .ifVal _ thn els _    =>
-            bindingsUseCodePart thn || bindingsUseCodePart els
-        | .loop _ body _      => bindingsUseCodePart body
-        | _                   => false
-      here || bindingsUseCodePart rest
-
-/--
-Whether a method body READS a mutable variable-length (`ByteString`)
-state field, via `load_prop`. Mirrors TS `methodReadsVarLenState`
-(`05-stack-lower.ts:5980-6003`).
-
-Issue #100: such a method needs `_codePart` even when it builds NO
-continuation output. `lowerDeserializeState`'s variable-length path
-locates the mutable-state region inside the BIP-143 scriptCode by
-subtracting `_codePart`'s length; without `_codePart` on the stack it
-takes its `none` fallback, drops the scriptCode and skips state
-decoding entirely — so a terminal var-length read silently returns the
-DEPLOY-time value instead of the live on-chain one.
-
-C18: the read may sit entirely inside a private helper reached by
-`method_call`. Private methods are INLINED by `lowerValueP`, so their
-`load_prop` executes in the caller's stack context at runtime — a
-public method whose only var-len read is behind a helper must still
-provision `_codePart`. `fuel` bounds that descent (the reference uses a
-`seen` set for the same purpose); `progMethods.length` is always
-enough, since a descent that revisited a method is exactly what the
-reference's cycle guard cuts off.
--/
-def bindingsReadVarLenState (progMethods : List ANFMethod)
-    (varLenProps : List String) : Nat → List ANFBinding → Bool
-  | _,    []                  => false
-  | fuel, (.mk _ v _) :: rest =>
-      let here : Bool :=
-        match v with
-        | .loadProp n         => listContains varLenProps n
-        | .ifVal _ thn els _  =>
-            bindingsReadVarLenState progMethods varLenProps fuel thn
-              || bindingsReadVarLenState progMethods varLenProps fuel els
-        | .loop _ body _      =>
-            bindingsReadVarLenState progMethods varLenProps fuel body
-        | .methodCall _ mn _  =>
-            match fuel with
-            | 0         => false
-            | fuel' + 1 =>
-                match lookupMethod progMethods mn with
-                | some tgt =>
-                    bindingsReadVarLenState progMethods varLenProps fuel' tgt.body
-                | none     => false
-        | _                   => false
-      here || bindingsReadVarLenState progMethods varLenProps fuel rest
-termination_by fuel bs => (fuel, sizeOf bs)
-
-/-- The mutable `ByteString` property names — TS `lowerMethod`'s
-`varLenProps` set (`05-stack-lower.ts:6033-6035`). -/
-def varLenPropNames (props : List ANFProperty) : List String :=
-  (props.filter (fun p => !p.readonly && p.type = .byteString)).map (·.name)
-
-/--
 Whether a method body contains a `deserialize_state` binding. Mirrors the
 TS `lowerMethod` post-pass at `05-stack-lower.ts:4937-4942`:
 
@@ -5401,6 +5496,9 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
   -- site (the array binding itself is metadata-only and never occupies a
   -- stack-map slot).
   let bodyArrayElems := arrayElemsOf m.body
+  -- R-010: contract-level flag. Threaded into every check_preimage so a
+  -- later per-method CODESEPARATOR cannot re-narrow scriptCode.
+  let scriptLevel := programNeedsScriptLevelCodeSeparator progMethods props m
   let (rawOps, finalSm) :=
     lowerBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal bodyConstInts initialMap m.body bodyRawSlots false bodyArrayElems
   -- Terminal-assert elision:
@@ -5460,7 +5558,8 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
   let ops := opsAfterAssert ++ nipOps
   { name := m.name
     ops := ops
-    maxStackDepth := 0 }
+    maxStackDepth := 0
+    needsCodeSeparator := scriptLevel }
 
 def lower (p : ANFProgram) : StackProgram :=
   -- Mirror TS: only public methods become top-level `StackMethod` entries.
