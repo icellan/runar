@@ -753,6 +753,70 @@ class LoweringContext {
   }
 
   /**
+   * W3 / BoolBamboozle — enforce the `boolean` ABI domain on-chain.
+   *
+   * The source type `boolean` denotes `{true, false}`, but a witness item is
+   * arbitrary bytes. Nothing used to check the domain, and comparisons lower to
+   * `OP_NUMEQUAL`, so a raw spender pushing `OP_2` matched neither `=== true`
+   * nor `=== false`: an exhaustive-looking two-arm split took NEITHER arm and
+   * every guard inside both arms was skipped.
+   *
+   * Emitted once per `boolean` parameter of a PUBLIC method, at the unlocking
+   * boundary, before any of the method body runs. Private helpers inherit the
+   * guarantee because their arguments come from an already-gated caller.
+   *
+   *     <copy of param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+   *                      OP_BOOLOR OP_VERIFY
+   *
+   * `OP_EQUAL` (bytewise), not `OP_NUMEQUAL`: the ABI encoding is exactly the
+   * empty item or `{0x01}`, so non-minimal spellings of 0/1 are rejected too,
+   * and an over-long witness item fails cleanly instead of overflowing the
+   * script-number decoder.
+   *
+   * Deliberately NOT `OP_0NOTEQUAL`: canonicalising to truthiness would map `2`
+   * onto `true` and silently run an arm the author never authorised for it.
+   *
+   * Net stack effect is zero — the parameter itself is left exactly where the
+   * body expects to find it.
+   */
+  emitBooleanParamGate(name: string): void {
+    const slot = this.renamedParams.get(name) ?? name;
+
+    // Copy of the witness value on top; the original stays in its slot.
+    this.bringToTop(slot, false);
+
+    this.emitOp({ op: 'dup' });
+    this.stackMap.dup();
+
+    this.emitOp({ op: 'push', value: 0n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_EQUAL' });
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null); // isFalse
+
+    this.emitOp({ op: 'swap' });
+    this.stackMap.swap();
+
+    this.emitOp({ op: 'push', value: 1n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_EQUAL' });
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null); // isTrue
+
+    this.emitOp({ op: 'opcode', code: 'OP_BOOLOR' });
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });
+    this.stackMap.pop();
+
+    this.trackDepth();
+  }
+
+  /**
    * Clean up excess stack items below the top-of-stack result.
    * Used after method body lowering to ensure a clean stack for Bitcoin Script.
    */
@@ -6667,6 +6731,20 @@ function lowerMethod(
   // must NOT emit a per-method one — a later separator would win and re-narrow
   // `scriptCode`, undoing the `_codePart` authentication.
   ctx.setScriptLevelCodeSeparator(scriptLevelCodeSeparator);
+
+  // W3 / BoolBamboozle: a public method's `boolean` parameters arrive from the
+  // unlocking script as arbitrary bytes. Pin each of them to the ABI domain
+  // {empty, 0x01} before a single body opcode runs — see emitBooleanParamGate.
+  // Constructor args are baked into the locking script by the assembler, never
+  // pushed by a spender, so only public methods need the gate.
+  if (method.isPublic) {
+    for (const param of method.params) {
+      if (param.type === 'boolean') {
+        ctx.emitBooleanParamGate(param.name);
+      }
+    }
+  }
+
   // Pass terminalAssert=true for public methods so the last assert leaves
   // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
   ctx.lowerBindings(method.body, method.isPublic);

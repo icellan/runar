@@ -1156,6 +1156,71 @@ func (ctx *loweringContext) bringToTop(name string, consume bool) {
 	ctx.trackDepth()
 }
 
+// emitBooleanParamGate enforces the `boolean` ABI domain on-chain (W3 /
+// BoolBamboozle).
+//
+// The source type `boolean` denotes {true, false}, but a witness item is
+// arbitrary bytes. Nothing used to check the domain, and comparisons lower to
+// OP_NUMEQUAL, so a raw spender pushing OP_2 matched neither `=== true` nor
+// `=== false`: an exhaustive-looking two-arm split took NEITHER arm and every
+// guard inside both arms was skipped.
+//
+// Emitted once per `boolean` parameter of a PUBLIC method, at the unlocking
+// boundary, before any of the method body runs. Private helpers inherit the
+// guarantee because their arguments come from an already-gated caller.
+//
+//	<copy of param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+//	                 OP_BOOLOR OP_VERIFY
+//
+// OP_EQUAL (bytewise), not OP_NUMEQUAL: the ABI encoding is exactly the empty
+// item or {0x01}, so non-minimal spellings of 0/1 are rejected too, and an
+// over-long witness item fails cleanly instead of overflowing the script-number
+// decoder.
+//
+// Deliberately NOT OP_0NOTEQUAL: canonicalising to truthiness would map 2 onto
+// true and silently run an arm the author never authorised for it.
+//
+// Net stack effect is zero.
+func (ctx *loweringContext) emitBooleanParamGate(name string) {
+	slot := name
+	if renamed, ok := ctx.renamedParams[name]; ok {
+		slot = renamed
+	}
+
+	// Copy of the witness value on top; the original stays in its slot.
+	ctx.bringToTop(slot, false)
+
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.dup()
+
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // isFalse
+
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // isTrue
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	ctx.sm.pop()
+
+	ctx.trackDepth()
+}
+
 // drainBranchPrivateResidue removes branch-private residue from below TOS at
 // the end of a branch body, so both branches converge to a layout the parent
 // stack model can faithfully describe before OP_ENDIF (issue #36).
@@ -5903,6 +5968,19 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 		}
 		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig, methodUsesGroth16WAPreambleWithMSM(method.Body))
 		ctx.skipGroth16WAMarker = true
+	}
+
+	// W3 / BoolBamboozle: a public method's `boolean` parameters arrive from the
+	// unlocking script as arbitrary bytes. Pin each of them to the ABI domain
+	// {empty, 0x01} before a single body opcode runs — see emitBooleanParamGate.
+	// Constructor args are baked into the locking script by the assembler, never
+	// pushed by a spender, so only public methods need the gate.
+	if method.IsPublic {
+		for _, p := range method.Params {
+			if p.Type == "boolean" {
+				ctx.emitBooleanParamGate(p.Name)
+			}
+		}
 	}
 
 	// Pass terminalAssert=true for public methods so the last assert leaves

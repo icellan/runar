@@ -69,7 +69,10 @@ const SRC_EXIT =
     \\  }
     \\}
 ;
-const EXPECTED_EXIT = "00009d6900009c77";
+// W3 / BoolBamboozle re-stamp: `run(c: boolean)` takes a `boolean`
+// parameter, so the method opens with its 9-byte ABI-domain gate. Re-derived
+// from the TypeScript reference compiler.
+const EXPECTED_EXIT = "767600877c51879b6900009d6900009c77";
 
 test "R-069: exit() lowers to OP_VERIFY, byte-identical to the peer tiers" {
     try expectProbeHex(SRC_EXIT, EXPECTED_EXIT);

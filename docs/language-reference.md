@@ -216,6 +216,14 @@ private square(x: bigint): bigint {
 
 `bigint` literals use the `n` suffix: `0n`, `42n`, `-1n`.
 
+A `boolean` parameter of a public method arrives from the unlocking script,
+where the spender can write any bytes at all. The compiler therefore emits a
+domain check at method entry — `OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+OP_BOOLOR OP_VERIFY` over a copy of the parameter — so the only values that
+reach your code are the empty item and `{0x01}`. Anything else aborts the
+script. This is what makes `if (b === true) ... else if (b === false) ...`
+actually exhaustive on-chain; see `spec/type-system.md` § 2 for why.
+
 ### ByteString Types
 
 | Type | Size (bytes) | Description |

@@ -26,6 +26,15 @@
 //!
 //! Every `want` below is the hex that ALL SIX other tiers (ts, go, rust, python,
 //! ruby, java) produce for that source, in both constant-folding modes.
+//!
+//! W3 / BoolBamboozle re-stamp: every case whose method takes a `boolean`
+//! parameter now opens with that parameter's ABI-domain gate -- `78 76 00 87 7c
+//! 51 87 9b 69` for `f` at depth 1, plus `52 79 76 00 87 7c 51 87 9b 69` ahead
+//! of it in the two nested-ternary cases, where `f` sits at depth 2. The `want`
+//! values below were re-derived from the TypeScript reference compiler, in both
+//! fold modes, and `ctl/statement-private-call` -- the one method here with no
+//! `boolean` parameter -- is deliberately UNCHANGED, which is what keeps this
+//! table discriminating.
 
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
@@ -190,24 +199,24 @@ const Case = struct {
 
 /// The shapes N-100 moves. `want` is the six-tier hex.
 const REGRESSION_CASES = [_]Case{
-    .{ .label = "else-arm/private-call", .source = ELSE_ARM_PRIVATE_CALL, .want = "7c63007768009c" },
-    .{ .label = "both-arms/private-call", .source = BOTH_ARMS_PRIVATE_CALL, .want = "7c6368009c" },
-    .{ .label = "nested-ternary/inner-else", .source = NESTED_TERNARY_INNER_ELSE, .want = "7b63007b7577677c6300776868009c" },
-    .{ .label = "nested-ternary/in-then-arm", .source = NESTED_TERNARY_IN_THEN_ARM, .want = "7b637c6300776867007b757768009c" },
-    .{ .label = "else-arm/p+0n", .source = ELSE_ARM_ADD_ZERO, .want = "7c63007768009c" },
-    .{ .label = "else-arm/p-0n", .source = ELSE_ARM_SUB_ZERO, .want = "7c63007768009c" },
+    .{ .label = "else-arm/private-call", .source = ELSE_ARM_PRIVATE_CALL, .want = "787600877c51879b697c63007768009c" },
+    .{ .label = "both-arms/private-call", .source = BOTH_ARMS_PRIVATE_CALL, .want = "787600877c51879b697c6368009c" },
+    .{ .label = "nested-ternary/inner-else", .source = NESTED_TERNARY_INNER_ELSE, .want = "52797600877c51879b69787600877c51879b697b63007b7577677c6300776868009c" },
+    .{ .label = "nested-ternary/in-then-arm", .source = NESTED_TERNARY_IN_THEN_ARM, .want = "52797600877c51879b69787600877c51879b697b637c6300776867007b757768009c" },
+    .{ .label = "else-arm/p+0n", .source = ELSE_ARM_ADD_ZERO, .want = "787600877c51879b697c63007768009c" },
+    .{ .label = "else-arm/p-0n", .source = ELSE_ARM_SUB_ZERO, .want = "787600877c51879b697c63007768009c" },
 };
 
 /// The shapes N-100 must leave alone. `want` is the hex Zig already emitted
 /// BEFORE the fix, which is also the six-tier hex.
 const CONTROL_CASES = [_]Case{
-    .{ .label = "ctl/ternary-no-call", .source = CTL_TERNARY_NO_CALL, .want = "7c63007768009c" },
-    .{ .label = "ctl/then-arm-private-call", .source = CTL_THEN_ARM_PRIVATE_CALL, .want = "7c6367007768009c" },
+    .{ .label = "ctl/ternary-no-call", .source = CTL_TERNARY_NO_CALL, .want = "787600877c51879b697c63007768009c" },
+    .{ .label = "ctl/then-arm-private-call", .source = CTL_THEN_ARM_PRIVATE_CALL, .want = "787600877c51879b697c6367007768009c" },
     .{ .label = "ctl/statement-private-call", .source = CTL_STATEMENT_PRIVATE_CALL, .want = "76009c77" },
-    .{ .label = "ctl/if-statement-else-private-call", .source = CTL_IF_STATEMENT_ELSE_PRIVATE_CALL, .want = "007b630076537a7577677c767676537a75777768517a75009c" },
-    .{ .label = "ctl/else-arm-builtin-call", .source = CTL_ELSE_ARM_BUILTIN_CALL, .want = "7c630077679068009c" },
-    .{ .label = "ctl/else-arm-nontrivial-helper", .source = CTL_ELSE_ARM_NONTRIVIAL_HELPER, .want = "7c630077678b68009c" },
-    .{ .label = "ctl/if-statement-both-arms-call", .source = CTL_IF_STATEMENT_BOTH_ARMS_CALL, .want = "7c6300009c7767767c9c68" },
+    .{ .label = "ctl/if-statement-else-private-call", .source = CTL_IF_STATEMENT_ELSE_PRIVATE_CALL, .want = "787600877c51879b69007b630076537a7577677c767676537a75777768517a75009c" },
+    .{ .label = "ctl/else-arm-builtin-call", .source = CTL_ELSE_ARM_BUILTIN_CALL, .want = "787600877c51879b697c630077679068009c" },
+    .{ .label = "ctl/else-arm-nontrivial-helper", .source = CTL_ELSE_ARM_NONTRIVIAL_HELPER, .want = "787600877c51879b697c630077678b68009c" },
+    .{ .label = "ctl/if-statement-both-arms-call", .source = CTL_IF_STATEMENT_BOTH_ARMS_CALL, .want = "787600877c51879b697c6300009c7767767c9c68" },
 };
 
 const CompileOut = struct {

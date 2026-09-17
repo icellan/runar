@@ -202,7 +202,12 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
   describe('controls: every other state type is byte-unchanged', () => {
     const TERMINAL_PINS: Record<string, string> = {
       bigint: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
-      boolean: 'afd72eb728f3bfbda2c70b909aa3c0ac8afa48f5c4fb28258fb59dcabb72c345',
+      // W3 / BoolBamboozle re-stamp: `check(expected: boolean)` is a public
+      // method with a `boolean` parameter, so its entry now carries the
+      // 9-byte ABI-domain gate. The other six rows are unmoved, which is the
+      // point of the control — the gate is scoped to boolean PARAMS and does
+      // not touch state encoding for any type, boolean included.
+      boolean: '92a509b1441238ebe8903c8c04004c8c4dfd150e02c88f256212266f54ddcece',
       RabinSig: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
       RabinPubKey: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
       PubKey: '584bda4d3de4e73ace367fdfc3d5500a37967a7327af5c7c1421b474702598af',
@@ -214,7 +219,11 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       ByteString: '5f873f911dbb2caf364021413581423af0f6aaf8ba882d787c8ee9f72d0c0e5b',
       PubKey: 'c0ba2f049c2a412f6ee80f36ca97d7c615c938cf75f19c33888aa9a26d8cd572',
       bigint: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
-      boolean: 'e96be6491169a1d03cdf6793a70c17eb44fc8e1ed579cf85017a9821f774039d',
+      // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
+      // parameter and so gains the 9-byte ABI-domain gate. `bigint` and
+      // `RabinSig` still agree with each other, which is the equality this
+      // table exists to defend.
+      boolean: '9d0412948a994626f8d3f87b74bdf191ef7cad96d668df73bb944b5d0646a918',
       RabinSig: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
     };
 

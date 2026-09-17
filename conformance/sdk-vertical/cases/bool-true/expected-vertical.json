@@ -12,16 +12,16 @@
       "value": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
     }
   ],
-  "codePartByteLength": 38,
+  "codePartByteLength": 47,
   "slots": [
     {
       "name": "flag",
       "paramIndex": 0,
-      "templateByteOffset": 0,
-      "byteOffset": 0,
+      "templateByteOffset": 9,
+      "byteOffset": 9,
       "byteLength": 1,
       "headerBytes": 0,
-      "valueByteOffset": 0,
+      "valueByteOffset": 9,
       "valueByteLength": 1,
       "encoding": "bool",
       "pushedHex": "01"
@@ -29,11 +29,11 @@
     {
       "name": "owner",
       "paramIndex": 1,
-      "templateByteOffset": 3,
-      "byteOffset": 3,
+      "templateByteOffset": 12,
+      "byteOffset": 12,
       "byteLength": 34,
       "headerBytes": 1,
-      "valueByteOffset": 4,
+      "valueByteOffset": 13,
       "valueByteLength": 33,
       "encoding": "data",
       "pushedHex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"

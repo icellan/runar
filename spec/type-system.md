@@ -48,9 +48,29 @@ RabinSig RabinPubKey
 #### `boolean`
 
 - Two values: `true` and `false`.
-- Represented on the stack as `OP_TRUE` (non-zero) and `OP_FALSE` (`OP_0`, empty byte vector).
+- Represented on the stack as `OP_TRUE` (`0x01`) and `OP_FALSE` (`OP_0`, empty byte vector).
 - Result type of comparison and logical operations.
 - `bigint` values are NOT implicitly convertible to `boolean`. Use explicit comparison: `x !== 0n`.
+- **The domain is enforced on-chain, not merely declared.** A `boolean` parameter
+  of a public method is a witness item the spender writes, so the compiler emits
+  a domain check at method entry, before any of the body runs:
+
+  ```
+  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY
+  ```
+
+  applied to a copy of the parameter. `OP_EQUAL` is a byte comparison, so the
+  only two accepted encodings are the empty item and `{0x01}`; a non-minimal
+  `{0x00}`, a `-1`, or any other value aborts the script. Without it a spender
+  could push `OP_2`, which is equal to neither `true` nor `false`, and an
+  exhaustive-looking `=== true` / `=== false` split would take NEITHER arm — so
+  every check inside both arms would be skipped. The gate costs 9 bytes per
+  parameter (10 or 11 when the parameter is not on top of the entry stack) and
+  is emitted once, at the unlocking boundary; private helpers inherit it,
+  because their arguments come from an already-gated caller.
+- The gate deliberately does NOT canonicalise with `OP_0NOTEQUAL`. Mapping every
+  truthy value onto `true` would make `OP_2` take the `=== true` arm, which is
+  not the contract the author wrote.
 
 #### `ByteString`
 
@@ -468,7 +488,7 @@ For each method:
 | Rúnar Type | Script Representation |
 |---|---|
 | `bigint` | Script number (little-endian sign-magnitude, minimal encoding) |
-| `boolean` | `OP_TRUE` (0x01) or `OP_FALSE` (empty) |
+| `boolean` | `OP_TRUE` (0x01) or `OP_FALSE` (empty); public-method parameters are domain-checked on-chain — see § 2 `boolean` |
 | `ByteString` | Raw bytes pushed with appropriate `OP_PUSHDATA` |
 | `PubKey` | 33 bytes pushed directly |
 | `Sig` | DER bytes pushed directly |

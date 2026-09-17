@@ -1214,6 +1214,74 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    /// W3 / BoolBamboozle — enforce the `boolean` ABI domain on-chain.
+    ///
+    /// The source type `boolean` denotes `{true, false}`, but a witness item is
+    /// arbitrary bytes. Nothing used to check the domain, and comparisons lower
+    /// to `OP_NUMEQUAL`, so a raw spender pushing `OP_2` matched neither
+    /// `=== true` nor `=== false`: an exhaustive-looking two-arm split took
+    /// NEITHER arm and every guard inside both arms was skipped.
+    ///
+    /// Emitted once per `boolean` parameter of a PUBLIC method, at the
+    /// unlocking boundary, before any of the method body runs. Private helpers
+    /// inherit the guarantee because their arguments come from an already-gated
+    /// caller.
+    ///
+    /// ```text
+    /// <copy of param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+    ///                  OP_BOOLOR OP_VERIFY
+    /// ```
+    ///
+    /// `OP_EQUAL` (bytewise), not `OP_NUMEQUAL`: the ABI encoding is exactly
+    /// the empty item or `{0x01}`, so non-minimal spellings of 0/1 are rejected
+    /// too, and an over-long witness item fails cleanly instead of overflowing
+    /// the script-number decoder.
+    ///
+    /// Deliberately NOT `OP_0NOTEQUAL`: canonicalising to truthiness would map
+    /// `2` onto `true` and silently run an arm the author never authorised.
+    ///
+    /// Net stack effect is zero.
+    fn emit_boolean_param_gate(&mut self, name: &str) {
+        let slot = self
+            .renamed_params
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string());
+
+        // Copy of the witness value on top; the original stays in its slot.
+        self.bring_to_top(&slot, false);
+
+        self.emit_op(StackOp::Dup);
+        self.sm.dup();
+
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // isFalse
+
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // isTrue
+
+        self.emit_op(StackOp::Opcode("OP_BOOLOR".to_string()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
+        self.sm.pop();
+
+        self.track_depth();
+    }
+
     /// Drain branch-private residue from below TOS at the end of a branch
     /// body, so both branches converge to a layout the parent stack model can
     /// faithfully describe before OP_ENDIF (issue #36).
@@ -6481,6 +6549,21 @@ fn lower_method_with_private_methods(
     // must NOT emit a per-method one — a later separator would win and re-narrow
     // `scriptCode`, undoing the `_codePart` authentication.
     ctx.script_level_code_separator = script_level_code_separator;
+
+    // W3 / BoolBamboozle: a public method's `boolean` parameters arrive from
+    // the unlocking script as arbitrary bytes. Pin each of them to the ABI
+    // domain {empty, 0x01} before a single body opcode runs — see
+    // `emit_boolean_param_gate`. Constructor args are baked into the locking
+    // script by the assembler, never pushed by a spender, so only public
+    // methods need the gate.
+    if method.is_public {
+        for p in &method.params {
+            if p.param_type == "boolean" {
+                ctx.emit_boolean_param_gate(&p.name);
+            }
+        }
+    }
+
     // Pass terminal_assert=true for public methods so the last assert leaves
     // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
     ctx.lower_bindings(&method.body, method.is_public);

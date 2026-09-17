@@ -677,6 +677,67 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// W3 / BoolBamboozle — enforce the `boolean` ABI domain on-chain.
+    ///
+    /// The source type `boolean` denotes {true, false}, but a witness item is
+    /// arbitrary bytes. Nothing used to check the domain, and comparisons lower
+    /// to OP_NUMEQUAL, so a raw spender pushing OP_2 matched neither
+    /// `=== true` nor `=== false`: an exhaustive-looking two-arm split took
+    /// NEITHER arm and every guard inside both arms was skipped.
+    ///
+    /// Emitted once per `boolean` parameter of a PUBLIC method, at the
+    /// unlocking boundary, before any of the method body runs. Private helpers
+    /// inherit the guarantee because their arguments come from an already-gated
+    /// caller.
+    ///
+    ///     <copy of param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+    ///                      OP_BOOLOR OP_VERIFY
+    ///
+    /// OP_EQUAL (bytewise), not OP_NUMEQUAL: the ABI encoding is exactly the
+    /// empty item or {0x01}, so non-minimal spellings of 0/1 are rejected too,
+    /// and an over-long witness item fails cleanly instead of overflowing the
+    /// script-number decoder.
+    ///
+    /// Deliberately NOT OP_0NOTEQUAL: canonicalising to truthiness would map 2
+    /// onto true and silently run an arm the author never authorised for it.
+    ///
+    /// Net stack effect is zero.
+    fn emitBooleanParamGate(self: *LowerCtx, name: []const u8) !void {
+        const slot = self.renamed_params.get(name) orelse name;
+
+        // Copy of the witness value on top; the original stays in its slot.
+        try self.bringToTop(slot, false);
+
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, null);
+
+        try self.emitPushInt(0);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_equal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // isFalse
+
+        try self.emitOp(.op_swap);
+
+        try self.emitPushInt(1);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_equal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // isTrue
+
+        try self.emitOp(.op_boolor);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        try self.emitOp(.op_verify);
+        _ = self.stack.pop();
+
+        self.trackDepth();
+    }
+
     fn isLastUse(self: *const LowerCtx, name: []const u8) bool {
         if (self.last_uses.get(name)) |last_idx| {
             return self.current_idx >= last_idx;
@@ -6134,6 +6195,16 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         ctx.copy_ref_aliases = false;
         ctx.script_level_code_separator = script_level_code_separator;
 
+        // W3 / BoolBamboozle: a public method's `boolean` parameters arrive
+        // from the unlocking script as arbitrary bytes. Pin each of them to the
+        // ABI domain {empty, 0x01} before a single body opcode runs — see
+        // `emitBooleanParamGate`. Constructor args are baked into the locking
+        // script by the assembler, never pushed by a spender, so only public
+        // methods need the gate (and `lower` only visits public ones anyway).
+        for (method.params) |param| {
+            if (paramIsBoolean(param)) try ctx.emitBooleanParamGate(param.name);
+        }
+
         // Use body or bindings (whichever is populated)
         const bindings = if (method.body.len > 0) method.body else method.bindings;
         try ctx.lowerBindings(bindings, method.is_public);
@@ -6341,6 +6412,13 @@ fn setupMethodStack(ctx: *LowerCtx, program: types.ANFProgram, method: types.ANF
 // R-295: `setupPropertyStack` used to live here. Its entire body was
 // `_ = ctx; _ = program;` — it took two parameters, discarded both, and had no
 // callers.
+
+/// W3: a parameter's declared type is `boolean`. The `--source` path fills
+/// `type_info` from the surface parser; the `--ir` path (`ir/json.zig`
+/// `parseParams`) only carries the textual `type`, so both spellings count.
+fn paramIsBoolean(param: types.ANFParam) bool {
+    return param.type_info == .boolean or std.mem.eql(u8, param.type_name, "boolean");
+}
 
 pub fn methodBindings(method: types.ANFMethod) []const types.ANFBinding {
     return if (method.body.len > 0) method.body else method.bindings;

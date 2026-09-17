@@ -172,8 +172,13 @@ export class EmptyElseGuard extends SmartContract {
   }
 }
 `,
-  foldOff: '0063516776686351916968006351776891',
-  foldOn: '006351677668635100696700680063517b75677c689177',
+  // W3 / BoolBamboozle re-stamp: `m(b: boolean)` is a public method with a
+  // `boolean` parameter, so both spellings now open with the 9-byte ABI-domain
+  // gate `76 76 00 87 7c 51 87 9b 69`. The mutation this pin kills lives in the
+  // empty-else reconcile further down the stream and is unaffected — the tail
+  // of both strings is byte-for-byte what it was.
+  foldOff: '767600877c51879b690063516776686351916968006351776891',
+  foldOn: '767600877c51879b69006351677668635100696700680063517b75677c689177',
 };
 
 // ---------------------------------------------------------------------------

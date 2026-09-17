@@ -926,6 +926,19 @@ public final class StackLower {
 
         LoweringContext ctx = new LoweringContext(paramNames, properties, privateMethods);
         ctx.scriptLevelCodeSeparator = scriptLevelCodeSeparator;
+
+        // W3 / BoolBamboozle: a public method's `boolean` parameters arrive from
+        // the unlocking script as arbitrary bytes. Pin each of them to the ABI
+        // domain {empty, 0x01} before a single body opcode runs — see
+        // emitBooleanParamGate. Constructor args are baked into the locking
+        // script by the assembler, never pushed by a spender, so only public
+        // methods need the gate.
+        if (method.isPublic()) {
+            for (AnfParam p : method.params()) {
+                if ("boolean".equals(p.type())) ctx.emitBooleanParamGate(p.name());
+            }
+        }
+
         ctx.lowerBindings(method.body(), method.isPublic());
 
         // Strip excess stack items below the top-of-stack boolean (CLEANSTACK).
@@ -1222,6 +1235,73 @@ public final class StackLower {
         }
 
         // ---------------- bring_to_top ----------------
+
+        /**
+         * W3 / BoolBamboozle — enforce the {@code boolean} ABI domain on-chain.
+         *
+         * <p>The source type {@code boolean} denotes {true, false}, but a
+         * witness item is arbitrary bytes. Nothing used to check the domain,
+         * and comparisons lower to OP_NUMEQUAL, so a raw spender pushing OP_2
+         * matched neither {@code === true} nor {@code === false}: an
+         * exhaustive-looking two-arm split took NEITHER arm and every guard
+         * inside both arms was skipped.
+         *
+         * <p>Emitted once per {@code boolean} parameter of a PUBLIC method, at
+         * the unlocking boundary, before any of the method body runs. Private
+         * helpers inherit the guarantee because their arguments come from an
+         * already-gated caller.
+         *
+         * <pre>
+         * &lt;copy of param&gt;  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+         *                  OP_BOOLOR OP_VERIFY
+         * </pre>
+         *
+         * <p>OP_EQUAL (bytewise), not OP_NUMEQUAL: the ABI encoding is exactly
+         * the empty item or {0x01}, so non-minimal spellings of 0/1 are
+         * rejected too, and an over-long witness item fails cleanly instead of
+         * overflowing the script-number decoder.
+         *
+         * <p>Deliberately NOT OP_0NOTEQUAL: canonicalising to truthiness would
+         * map 2 onto true and silently run an arm the author never authorised.
+         *
+         * <p>Net stack effect is zero.
+         */
+        void emitBooleanParamGate(String name) {
+            String slot = renamedParams.getOrDefault(name, name);
+
+            // Copy of the witness value on top; the original stays in its slot.
+            bringToTop(slot, false);
+
+            emitOp(new DupOp());
+            sm.dup();
+
+            emitOp(new PushOp(PushValue.of(0)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_EQUAL"));
+            sm.pop();
+            sm.pop();
+            sm.push(""); // isFalse
+
+            emitOp(new SwapOp());
+            sm.swap();
+
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_EQUAL"));
+            sm.pop();
+            sm.pop();
+            sm.push(""); // isTrue
+
+            emitOp(new OpcodeOp("OP_BOOLOR"));
+            sm.pop();
+            sm.pop();
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_VERIFY"));
+            sm.pop();
+
+            trackDepth();
+        }
 
         void bringToTop(String name, boolean consume) {
             int depth = sm.findDepth(name);

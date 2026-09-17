@@ -34,18 +34,18 @@
         }
       ]
     },
-    "script": "007c9d00ac",
+    "script": "767600877c51879b69007c9d00ac",
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 0,
+        "byteOffset": 9,
         "name": "flag",
         "type": "boolean",
         "valueEncoding": "bool"
       },
       {
         "paramIndex": 1,
-        "byteOffset": 3,
+        "byteOffset": 12,
         "name": "owner",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -61,7 +61,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 0,
+          "byteOffset": 9,
           "slot": "flag"
         },
         {
@@ -69,7 +69,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 3,
+          "byteOffset": 12,
           "slot": "owner"
         },
         {
