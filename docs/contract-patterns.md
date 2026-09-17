@@ -368,9 +368,15 @@ This pattern demonstrates combining multiple stateful fields, time-based conditi
 > `extractLocktime(preimage) >= deadline` (or `< deadline`) assertion can be
 > bypassed by a hand-built all-final-sequence spend. To make a locktime gate
 > consensus-enforced, also assert the spend is non-final:
-> `assert(extractSequence(this.txPreimage) < 0xffffffffn);`. The compiler emits
+> `assert(extractSequence(this.txPreimage) !== 0xffffffffn);`. The compiler emits
 > an advisory warning for any method that reads `extractLocktime` without such a
-> guard. The SDK's `CallOptions` help on the tx side: when you set a non-zero
+> guard. `extractSequence` returns the UNSIGNED 32-bit wire field, so the
+> comparison means what it reads as. (Before the W1 fix the four 32-bit
+> extractors ended in a bare `OP_BIN2NUM` and decoded sign-magnitude, which made
+> the sentinel read as a negative script number — a `< 0xffffffffn` guard was
+> then true for exactly the value it excluded. A `<=` bound on the sentinel is
+> still a tautology and is not accepted as a guard.) The SDK's `CallOptions`
+> help on the tx side: when you set a non-zero
 > `locktime`, `sequence` defaults to `0xfffffffe` (non-final) automatically — but
 > the covenant itself must still assert the sequence bound so no other unlocking
 > path can supply an all-final tx.

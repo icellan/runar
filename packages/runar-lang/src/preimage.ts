@@ -55,6 +55,10 @@ export function checkPreimage(_txPreimage: SigHashPreimage): boolean {
 /**
  * Extract the 4-byte transaction version (nVersion) from the preimage.
  * Preimage bytes [0..4).
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295). The
+ * compiled script zero-pads before `OP_BIN2NUM`, so a value with the high bit
+ * of the last byte set is not read as a negative script number.
  */
 export function extractVersion(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractVersion');
@@ -113,6 +117,12 @@ export function extractAmount(_txPreimage: SigHashPreimage): bigint {
 /**
  * Extract the 4-byte nSequence of the current input.
  * Located immediately after the amount field.
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295) — so
+ * `0xfffffffe` is 4294967294 and the finality sentinel `0xffffffff` is
+ * 4294967295, not the negative script numbers a bare `OP_BIN2NUM` would give.
+ * To make a locktime gate consensus-enforced, assert
+ * `extractSequence(p) !== 0xffffffffn`; `<= 0xffffffffn` is a tautology.
  */
 export function extractSequence(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractSequence');
@@ -140,6 +150,9 @@ export function extractOutputs(_txPreimage: SigHashPreimage): Sha256 {
 /**
  * Extract the 4-byte nLocktime from the preimage.
  * Located after hashOutputs.
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295), so
+ * Unix-time locktimes at or beyond 2^31 (after 2038) compare correctly.
  */
 export function extractLocktime(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractLocktime');
@@ -147,6 +160,8 @@ export function extractLocktime(_txPreimage: SigHashPreimage): bigint {
 
 /**
  * Extract the 4-byte sighash type from the end of the preimage.
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295).
  */
 export function extractSigHashType(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractSigHashType');
