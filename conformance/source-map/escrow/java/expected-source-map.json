@@ -2,9 +2,13 @@
   "mappings": [
     {"opcodeIndex": 5, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 62, "column": 8},
     {"opcodeIndex": 6, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 62, "column": 8},
-    {"opcodeIndex": 7, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 63, "column": 8},
-    {"opcodeIndex": 11, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 72, "column": 8},
-    {"opcodeIndex": 12, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 72, "column": 8},
-    {"opcodeIndex": 13, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 73, "column": 8}
+    {"opcodeIndex": 7, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 62, "column": 8},
+    {"opcodeIndex": 8, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 63, "column": 8},
+    {"opcodeIndex": 9, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 63, "column": 8},
+    {"opcodeIndex": 13, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 72, "column": 8},
+    {"opcodeIndex": 14, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 72, "column": 8},
+    {"opcodeIndex": 15, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 72, "column": 8},
+    {"opcodeIndex": 16, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 73, "column": 8},
+    {"opcodeIndex": 17, "sourceFile": "examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java", "line": 73, "column": 8}
   ]
 }

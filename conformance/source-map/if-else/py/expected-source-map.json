@@ -1,67 +1,85 @@
 {
   "mappings": [
     {
-      "opcodeIndex": 0,
+      "opcodeIndex": 9,
       "sourceFile": "examples/python/if-else/IfElse.runar.py",
       "line": 12,
       "column": 8
     },
     {
-      "opcodeIndex": 1,
+      "opcodeIndex": 10,
       "sourceFile": "examples/python/if-else/IfElse.runar.py",
       "line": 13,
       "column": 8
-    },
-    {
-      "opcodeIndex": 2,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 13,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 3,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 14,
-      "column": 12
-    },
-    {
-      "opcodeIndex": 4,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 14,
-      "column": 12
-    },
-    {
-      "opcodeIndex": 5,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 14,
-      "column": 12
-    },
-    {
-      "opcodeIndex": 7,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 16,
-      "column": 12
-    },
-    {
-      "opcodeIndex": 8,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 16,
-      "column": 12
-    },
-    {
-      "opcodeIndex": 9,
-      "sourceFile": "examples/python/if-else/IfElse.runar.py",
-      "line": 16,
-      "column": 12
     },
     {
       "opcodeIndex": 11,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 13,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 12,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 14,
+      "column": 12
+    },
+    {
+      "opcodeIndex": 13,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 14,
+      "column": 12
+    },
+    {
+      "opcodeIndex": 14,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 14,
+      "column": 12
+    },
+    {
+      "opcodeIndex": 18,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 16,
+      "column": 12
+    },
+    {
+      "opcodeIndex": 19,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 16,
+      "column": 12
+    },
+    {
+      "opcodeIndex": 20,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 16,
+      "column": 12
+    },
+    {
+      "opcodeIndex": 24,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 13,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 25,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 13,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 26,
+      "sourceFile": "examples/python/if-else/IfElse.runar.py",
+      "line": 13,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 27,
       "sourceFile": "examples/python/if-else/IfElse.runar.py",
       "line": 17,
       "column": 8
     },
     {
-      "opcodeIndex": 12,
+      "opcodeIndex": 28,
       "sourceFile": "examples/python/if-else/IfElse.runar.py",
       "line": 17,
       "column": 8

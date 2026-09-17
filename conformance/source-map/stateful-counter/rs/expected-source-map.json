@@ -1,420 +1,6 @@
 {
   "mappings": [
     {
-      "opcodeIndex": 38,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 39,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 40,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 41,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 42,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 43,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 44,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 45,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 46,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 47,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 48,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 49,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 50,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 51,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 52,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 53,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 54,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 55,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 56,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 57,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 58,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 59,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 60,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 61,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 62,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 63,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 64,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 65,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 66,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 67,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 68,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 69,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 70,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 71,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 72,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 73,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 74,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 75,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 76,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 77,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 78,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 79,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 80,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 81,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 82,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 83,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 84,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 85,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 86,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 87,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 88,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 89,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 90,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 91,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 92,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 93,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 94,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 95,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 96,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 97,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 98,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 99,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 100,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 101,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 102,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 103,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 104,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 105,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
-      "opcodeIndex": 106,
-      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 36,
-      "column": 8
-    },
-    {
       "opcodeIndex": 107,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 36,
@@ -703,715 +289,1129 @@
       "column": 8
     },
     {
+      "opcodeIndex": 155,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 156,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 157,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 158,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 159,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 160,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 161,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 162,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 163,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 164,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 165,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 166,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 167,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 168,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 169,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 170,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 171,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 172,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 173,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 174,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 175,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 176,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 177,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 178,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 179,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 180,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 181,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 182,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 183,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 184,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 185,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 186,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 187,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
       "opcodeIndex": 188,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 42,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 189,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 42,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 190,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 42,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 191,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 42,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 192,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 193,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 194,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 195,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 196,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 197,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 198,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 199,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 200,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 201,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 202,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 203,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 204,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 205,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 206,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 207,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 208,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 209,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 210,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 211,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 212,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 213,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 214,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 215,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 216,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 217,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 218,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 219,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 220,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 221,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 222,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
-      "line": 43,
+      "line": 36,
       "column": 8
     },
     {
       "opcodeIndex": 223,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 36,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 324,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 42,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 325,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 42,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 326,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 42,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 327,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 42,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 328,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 329,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 330,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 331,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 332,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 333,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 334,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 335,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 336,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 337,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 338,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 339,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 340,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 341,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 342,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 343,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 344,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 345,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 346,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 347,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 348,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 349,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 350,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 351,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 352,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 353,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 354,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 355,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 356,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 357,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 358,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
+      "line": 43,
+      "column": 8
+    },
+    {
+      "opcodeIndex": 359,
+      "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 224,
+      "opcodeIndex": 360,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 225,
+      "opcodeIndex": 361,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 226,
+      "opcodeIndex": 362,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 227,
+      "opcodeIndex": 363,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 228,
+      "opcodeIndex": 364,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 229,
+      "opcodeIndex": 365,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 230,
+      "opcodeIndex": 366,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 231,
+      "opcodeIndex": 367,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 232,
+      "opcodeIndex": 368,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 233,
+      "opcodeIndex": 369,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 234,
+      "opcodeIndex": 370,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 235,
+      "opcodeIndex": 371,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 236,
+      "opcodeIndex": 372,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 237,
+      "opcodeIndex": 373,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 238,
+      "opcodeIndex": 374,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 239,
+      "opcodeIndex": 375,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 240,
+      "opcodeIndex": 376,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 241,
+      "opcodeIndex": 377,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 242,
+      "opcodeIndex": 378,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 243,
+      "opcodeIndex": 379,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 244,
+      "opcodeIndex": 380,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 245,
+      "opcodeIndex": 381,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 246,
+      "opcodeIndex": 382,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 247,
+      "opcodeIndex": 383,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 248,
+      "opcodeIndex": 384,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 249,
+      "opcodeIndex": 385,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 250,
+      "opcodeIndex": 386,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 251,
+      "opcodeIndex": 387,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 252,
+      "opcodeIndex": 388,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 253,
+      "opcodeIndex": 389,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 254,
+      "opcodeIndex": 390,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 255,
+      "opcodeIndex": 391,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 256,
+      "opcodeIndex": 392,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 257,
+      "opcodeIndex": 393,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 258,
+      "opcodeIndex": 394,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 259,
+      "opcodeIndex": 395,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 260,
+      "opcodeIndex": 396,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 261,
+      "opcodeIndex": 397,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 262,
+      "opcodeIndex": 398,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 263,
+      "opcodeIndex": 399,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 264,
+      "opcodeIndex": 400,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 265,
+      "opcodeIndex": 401,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 266,
+      "opcodeIndex": 402,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 267,
+      "opcodeIndex": 403,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 268,
+      "opcodeIndex": 404,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 269,
+      "opcodeIndex": 405,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 270,
+      "opcodeIndex": 406,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 271,
+      "opcodeIndex": 407,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 272,
+      "opcodeIndex": 408,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 273,
+      "opcodeIndex": 409,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 274,
+      "opcodeIndex": 410,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 275,
+      "opcodeIndex": 411,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 276,
+      "opcodeIndex": 412,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 277,
+      "opcodeIndex": 413,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 278,
+      "opcodeIndex": 414,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 279,
+      "opcodeIndex": 415,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 280,
+      "opcodeIndex": 416,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 281,
+      "opcodeIndex": 417,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 282,
+      "opcodeIndex": 418,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 283,
+      "opcodeIndex": 419,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 284,
+      "opcodeIndex": 420,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 285,
+      "opcodeIndex": 421,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 286,
+      "opcodeIndex": 422,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 287,
+      "opcodeIndex": 423,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 288,
+      "opcodeIndex": 424,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 289,
+      "opcodeIndex": 425,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 290,
+      "opcodeIndex": 426,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 291,
+      "opcodeIndex": 427,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 292,
+      "opcodeIndex": 428,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 293,
+      "opcodeIndex": 429,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 294,
+      "opcodeIndex": 430,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 295,
+      "opcodeIndex": 431,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 296,
+      "opcodeIndex": 432,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 297,
+      "opcodeIndex": 433,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 298,
+      "opcodeIndex": 434,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 299,
+      "opcodeIndex": 435,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 300,
+      "opcodeIndex": 436,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 301,
+      "opcodeIndex": 437,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 302,
+      "opcodeIndex": 438,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 303,
+      "opcodeIndex": 439,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 304,
+      "opcodeIndex": 440,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 305,
+      "opcodeIndex": 441,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8
     },
     {
-      "opcodeIndex": 306,
+      "opcodeIndex": 442,
       "sourceFile": "examples/rust/stateful-counter/Counter.runar.rs",
       "line": 43,
       "column": 8

@@ -1,61 +1,79 @@
 {
   "mappings": [
     {
-      "opcodeIndex": 0,
+      "opcodeIndex": 9,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 11,
       "column": 1
     },
     {
-      "opcodeIndex": 1,
+      "opcodeIndex": 10,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 12,
       "column": 1
     },
     {
-      "opcodeIndex": 3,
+      "opcodeIndex": 12,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 13,
       "column": 2
     },
     {
-      "opcodeIndex": 4,
+      "opcodeIndex": 13,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 13,
       "column": 2
     },
     {
-      "opcodeIndex": 5,
+      "opcodeIndex": 14,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 13,
       "column": 2
     },
     {
-      "opcodeIndex": 7,
+      "opcodeIndex": 18,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 15,
       "column": 2
     },
     {
-      "opcodeIndex": 8,
+      "opcodeIndex": 19,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 15,
       "column": 2
     },
     {
-      "opcodeIndex": 9,
+      "opcodeIndex": 20,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 15,
       "column": 2
     },
     {
-      "opcodeIndex": 11,
+      "opcodeIndex": 24,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 12,
+      "column": 1
+    },
+    {
+      "opcodeIndex": 25,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 12,
+      "column": 1
+    },
+    {
+      "opcodeIndex": 26,
+      "sourceFile": "examples/go/if-else/IfElse.runar.go",
+      "line": 12,
+      "column": 1
+    },
+    {
+      "opcodeIndex": 27,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 17,
       "column": 1
     },
     {
-      "opcodeIndex": 12,
+      "opcodeIndex": 28,
       "sourceFile": "examples/go/if-else/IfElse.runar.go",
       "line": 17,
       "column": 1

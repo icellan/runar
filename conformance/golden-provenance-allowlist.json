@@ -2199,11 +2199,155 @@
     },
     {
       "path": "conformance/source-map/if-else/go/expected-source-map.json",
-      "sha256": "9894c7c91b9b0e791804002b0c4033dd4781d98fc18bd77f04230ec5dd75bbe9",
+      "sha256": "d75b44d31cc2438081b576a6b7542c16e3d4a524ff79047f98e50bc5b23729f3",
       "verified-against": "intentional-spec-change",
-      "reason": "Source-map golden re-anchored by 481b5489. Not a codegen change and not a semantic one: df02ab7e removed two lines from this fixture's .runar.go source while un-excluding it from the Go build, and a source map records ABSOLUTE line numbers against the file on disk, so every mapping shifted by exactly -2. The conformance IR harness normalises `line`/`column` away -- correct for the loc-free conformance goldens, and the reason this did not surface there -- but the source-map oracle validates those absolute lines against the real file, so it is the one consumer that had to move.\n\nVERIFIED BY THE COORDINATOR, not accepted on report: parsing both the origin/main version and the current one and comparing mapping-by-mapping gives 10 mappings before and 10 after, the set of line deltas is exactly {-2}, and the count of differences in any field other than `line` is ZERO. A mechanical shift is therefore the whole of the change -- no mapping was added, dropped, retargeted or re-associated. Note for whoever touches this next: if-else/go was ALREADY in the source-map runner's DIFF set before this branch, so regenerating it wholesale would have silently absorbed three mappings of unrelated pre-existing drift into a commit that claims to be a line shift. Only the shift was applied, and the runner's DIFF set is byte-identical to base -- no new divergence introduced and none of anyone else's masked.\n\nAllowlisted rather than cross-checked because route (A) does not reach this file: conformance/witnesses/<fixture>.json pins conformance/tests/<fixture> goldens, and there is no witness shape for conformance/source-map. Pinned while STALE_PIN_BUDGET is 0, so any later move of these bytes fails at the commit that makes it.",
+      "reason": "Source-map golden re-anchored by 481b5489. Not a codegen change and not a semantic one: df02ab7e removed two lines from this fixture's .runar.go source while un-excluding it from the Go build, and a source map records ABSOLUTE line numbers against the file on disk, so every mapping shifted by exactly -2. The conformance IR harness normalises `line`/`column` away -- correct for the loc-free conformance goldens, and the reason this did not surface there -- but the source-map oracle validates those absolute lines against the real file, so it is the one consumer that had to move.\n\nVERIFIED BY THE COORDINATOR, not accepted on report: parsing both the origin/main version and the current one and comparing mapping-by-mapping gives 10 mappings before and 10 after, the set of line deltas is exactly {-2}, and the count of differences in any field other than `line` is ZERO. A mechanical shift is therefore the whole of the change -- no mapping was added, dropped, retargeted or re-associated. Note for whoever touches this next: if-else/go was ALREADY in the source-map runner's DIFF set before this branch, so regenerating it wholesale would have silently absorbed three mappings of unrelated pre-existing drift into a commit that claims to be a line shift. Only the shift was applied, and the runner's DIFF set is byte-identical to base -- no new divergence introduced and none of anyone else's masked.\n\nAllowlisted rather than cross-checked because route (A) does not reach this file: conformance/witnesses/<fixture>.json pins conformance/tests/<fixture> goldens, and there is no witness shape for conformance/source-map. Pinned while STALE_PIN_BUDGET is 0, so any later move of these bytes fails at the commit that makes it.\n\nRE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
       "reviewer": "siggi",
-      "date": "2026-09-16",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/arithmetic/java/expected-source-map.json",
+      "sha256": "40988bbbcd8e4d4ca1c6cd5d26f7617c1a80f5ea1c4e8098add6e0043ba93f0d",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/basic-p2pkh/java/expected-source-map.json",
+      "sha256": "39eec8756db00ee9b598e5feb05ed7d3f7e00d67352e15a0ac6bfb73716a8343",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/escrow/java/expected-source-map.json",
+      "sha256": "431a3ec8d42dd09c550502f431a88839c5bbfa88b4e238435ebc7622d3418f9f",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/if-else/java/expected-source-map.json",
+      "sha256": "1ae0d93601059f5ce7a9282bdc39fb45862e80905d088a144ed4a0613b2ed5a7",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/if-else/py/expected-source-map.json",
+      "sha256": "f6c4cfa5f54b720b91b2f2d209073a808ca688cda559718e09c5f28aca006641",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/if-else/rb/expected-source-map.json",
+      "sha256": "4b0c1575c41d8366a81da5541c8803f9c460df0da01da03747a8ec0816161856",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/if-else/rs/expected-source-map.json",
+      "sha256": "0a47f4d017c3e7521a47737e1880cacff31c8e261ac6d38e94d0d73721de4fdf",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/if-else/ts/expected-source-map.json",
+      "sha256": "ba513edbc31095101db8771c91b2f25b0b0b13e2fa262b5fe28947dc1391cab8",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/if-else/zig/expected-source-map.json",
+      "sha256": "c2b40151e4656bf4a3d647c5f003b511148061108be24075ebaf555838bb26f7",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/stateful-counter/go/expected-source-map.json",
+      "sha256": "53213bb6462e63dddbdfefbb0d1f8af4b0e15032eecbb3270c61bb71a80e9f61",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/stateful-counter/java/expected-source-map.json",
+      "sha256": "25c42df47d5a33aa063815ab3d453f3b170f044f14a920f48f991442d563ef85",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/stateful-counter/py/expected-source-map.json",
+      "sha256": "d97e9e61b3a5ee1edb68ee4466730a12db7bf7c833d3b0a784e9141b304ac0b6",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/stateful-counter/rb/expected-source-map.json",
+      "sha256": "06c342962b7c00119f6ca7d6c9061534fa3819fad9c8377f870155b573c19965",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/stateful-counter/rs/expected-source-map.json",
+      "sha256": "8e0eeb9539688115f012fc2c4602da85cf2779e787c5c4c5bbdea2ee7ae85eca",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/stateful-counter/ts/expected-source-map.json",
+      "sha256": "21429f3c525bcb774012d64ace5c7714908fcc26d2278c8bd606174443b45132",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
+      "review-status": "reviewed"
+    },
+    {
+      "path": "conformance/source-map/stateful-counter/zig/expected-source-map.json",
+      "sha256": "14e6cc18945e523ce88cd87039fc6c43d18a08bcbf835729705fcea63dae0ecf",
+      "verified-against": "second-implementation",
+      "reason": "RE-PIN 2026-09-17. Source-map goldens restamped after compiler output moved (W1 unsigned extractors / W8 merge body / related). conformance/source-map/run.ts: 35/35 byte-id + structural + independent-oracle anchor checks pass after --update. These files are self-produced by that runner; the independent check is independent-oracle.ts against the real .runar.* sources, which stayed OK on the old goldens and stays OK on the new ones.",
+      "reviewer": "siggi",
+      "date": "2026-09-17",
       "review-status": "reviewed"
     }
   ]

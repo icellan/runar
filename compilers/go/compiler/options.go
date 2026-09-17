@@ -114,18 +114,18 @@ type CompileOptions struct {
 // a named preset. The presets cover:
 //
 //   - "minimal-guest"   — PoC tuple, matches
-//                         tests/vectors/sp1/fri/minimal-guest/proof.postcard
-//                         (degreeBits=3, num_queries=2, log_blowup=2,
-//                         log_final_poly_len=2, commit/query_pow_bits=1).
+//     tests/vectors/sp1/fri/minimal-guest/proof.postcard
+//     (degreeBits=3, num_queries=2, log_blowup=2,
+//     log_final_poly_len=2, commit/query_pow_bits=1).
 //   - "evm-guest"       — production-scale tuple, matches
-//                         tests/vectors/sp1/fri/evm-guest/proof.postcard
-//                         (degreeBits=10, num_queries=100, log_blowup=1,
-//                         log_final_poly_len=0, commit/query_pow_bits=16).
+//     tests/vectors/sp1/fri/evm-guest/proof.postcard
+//     (degreeBits=10, num_queries=100, log_blowup=1,
+//     log_final_poly_len=0, commit/query_pow_bits=16).
 //   - "production-100"  — alias for "evm-guest".
 //   - "production-64"   — production-scale w/ num_queries=64 fallback
-//                         (per docs/sp1-fri-verifier.md §5).
+//     (per docs/sp1-fri-verifier.md §5).
 //   - "production-16"   — production-scale w/ num_queries=16 fallback
-//                         (per docs/sp1-fri-verifier.md §5).
+//     (per docs/sp1-fri-verifier.md §5).
 //
 // Returns an error when the preset name is unrecognised.
 func SP1FriPreset(name string) (codegen.SP1FriVerifierParams, error) {

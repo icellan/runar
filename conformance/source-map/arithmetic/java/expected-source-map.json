@@ -26,6 +26,7 @@
     {"opcodeIndex": 23, "sourceFile": "examples/java/src/main/java/runar/examples/arithmetic/Arithmetic.runar.java", "line": 32, "column": 8},
     {"opcodeIndex": 24, "sourceFile": "examples/java/src/main/java/runar/examples/arithmetic/Arithmetic.runar.java", "line": 32, "column": 8},
     {"opcodeIndex": 25, "sourceFile": "examples/java/src/main/java/runar/examples/arithmetic/Arithmetic.runar.java", "line": 32, "column": 8},
-    {"opcodeIndex": 26, "sourceFile": "examples/java/src/main/java/runar/examples/arithmetic/Arithmetic.runar.java", "line": 33, "column": 8}
+    {"opcodeIndex": 26, "sourceFile": "examples/java/src/main/java/runar/examples/arithmetic/Arithmetic.runar.java", "line": 33, "column": 8},
+    {"opcodeIndex": 27, "sourceFile": "examples/java/src/main/java/runar/examples/arithmetic/Arithmetic.runar.java", "line": 33, "column": 8}
   ]
 }

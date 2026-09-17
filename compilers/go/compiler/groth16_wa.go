@@ -320,8 +320,8 @@ func CompileGroth16WA(vkPath string, opts Groth16WAOpts) (*Artifact, error) {
 				},
 			},
 		},
-		Script:         emitResult.ScriptHex,
-		ASM:            emitResult.ScriptAsm,
+		Script: emitResult.ScriptHex,
+		ASM:    emitResult.ScriptAsm,
 		// buildTimestamp(), not time.Now(): this path used to stamp the clock
 		// directly, so SOURCE_DATE_EPOCH was honoured by every artifact except
 		// the one whose entire purpose is to be reproduced from the same
