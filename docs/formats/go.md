@@ -186,9 +186,11 @@ from contract source — and would silently redefine `==` as pointer identity,
 which compiles and compares the wrong thing.
 
 Nothing narrows silently as a result. Every helper in `packages/runar-go` whose
-result can exceed `int64` — `Pow`, `MulDiv`, `PercentOf`, `Sqrt`, `Bin2Num`,
+result can exceed `int64` — `Pow`, `MulDiv`, `PercentOf`, `Bin2Num`,
 `Num2Bin`, `Bn254FieldNegP`, `Abs`, `Gcd` — panics rather than returning a
-truncated answer, and names the wide peer to use instead.
+truncated answer, and names the wide peer to use instead. `Sqrt` is not on
+that list: √int64 always fits int64, and its only panic is `"sqrt: negative
+input"`, which does not name `SqrtBig`.
 
 `Abs` and `Gcd` were absent from that list, and from the behaviour, until the
 sentence was checked against the code. `Abs(math.MinInt64)` returned
@@ -201,11 +203,11 @@ for `x = -2^63`.
 
 `TestNarrowHelpersRefuseWhatTheyCannotHold` covers `Abs` and `Gcd`
 specifically. It does **not** enforce the list above — this sentence previously
-claimed it did, which would have made a nine-item list appear machine-checked
-when two rows were. The other seven are each covered by their own test
+claimed it did, which would have made the list appear machine-checked
+when two rows were. The other six are each covered by their own test
 (`TestPow_Overflow`, `TestMulDiv_Overflow`, `TestPercentOf_Overflow`, and the
 `Bin2Num` / `Num2Bin` / `Bn254FieldNegP` width tests), so the behaviour is
-guarded — but adding a tenth helper to this list without a test would be caught
+guarded — but adding another helper to this list without a test would be caught
 by nothing. The list is maintained by hand. Treat it that way.
 
 For values past 2^63, type the field or parameter `runar.BigintBig` (`*big.Int`)

@@ -8,11 +8,14 @@ from TS/Go/Rust on contracts with position-dispatch patterns (nested
 All 6 Rúnar compilers must produce byte-identical Bitcoin Script for the
 same canonical TypeScript source. For the canonical TicTacToe contracts
 (both v1 hand-rolled and v2 FixedArray), the expected locking script size
-is **7778 bytes** (15556 hex chars). Three independent changes moved this
-number and both are recorded, because a merged count that only mentions one
-of them is how a pin stops meaning anything.
+is **7796 bytes** (15592 hex chars). Independent changes moved this
+number and all of them are recorded, because a merged count that only
+mentions one of them is how a pin stops meaning anything.
 
-The Any-S OP_PUSH_TX construction took it 9616 -> 7624, and R-010's
+W1's unsigned 32-bit BIP-143 extractors (pad `<0x00> OP_CAT` before
+`OP_BIN2NUM` on extractVersion/extractSequence/extractLocktime/extractSigHashType)
+took it 7778 -> 7796 (six pad sites × 3 bytes). Before that, the Any-S
+OP_PUSH_TX construction took it 9616 -> 7624, and R-010's
 `_codePart` authentication (plus hoisting OP_CODESEPARATOR to a single
 script-level separator) took it 7624 -> 7778. TicTacToe is
 stateful with six covenant methods, and each carries one preimage-binding

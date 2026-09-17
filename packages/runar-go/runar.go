@@ -1248,7 +1248,7 @@ func Pow(base, exp int64) int64 {
 	}
 	r := PowBig(big.NewInt(base), big.NewInt(exp))
 	if !r.IsInt64() {
-		panic("pow: int64 overflow — use PowBig for arbitrary precision")
+		panic("pow: int64 overflow — PowBig is a native Go *big.Int helper only; it is not a .runar.go builtin")
 	}
 	return r.Int64()
 }
@@ -1273,7 +1273,7 @@ func MulDiv(a, b, c int64) int64 {
 	}
 	r := MulDivBig(big.NewInt(a), big.NewInt(b), big.NewInt(c))
 	if !r.IsInt64() {
-		panic("mulDiv: int64 overflow in quotient — use MulDivBig for arbitrary precision")
+		panic("mulDiv: int64 overflow in quotient — MulDivBig is a native Go *big.Int helper only; it is not a .runar.go builtin")
 	}
 	return r.Int64()
 }
@@ -1292,7 +1292,7 @@ func MulDivBig(a, b, c *big.Int) *big.Int {
 func PercentOf(amount, bps int64) int64 {
 	r := PercentOfBig(big.NewInt(amount), big.NewInt(bps))
 	if !r.IsInt64() {
-		panic("percentOf: int64 overflow — use PercentOfBig for arbitrary precision")
+		panic("percentOf: int64 overflow — PercentOfBig is a native Go *big.Int helper only; it is not a .runar.go builtin")
 	}
 	return r.Int64()
 }
