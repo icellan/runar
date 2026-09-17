@@ -41,6 +41,10 @@ open RunarVerification.Stack
 @[inline] def wOpc (s : String) : StackOp := .opcode s
 @[inline] def wPushI (n : Int) : StackOp := .push (.bigint n)
 
+/-- Total WOTS+ signature length in bytes: `len` (67 chains) * `n` (32).
+TS `WOTS_SIG_LEN` in `wots-codegen.ts`. -/
+def WOTS_SIG_LEN : Nat := 67 * 32
+
 /-- Push a 2-byte ADRS literal `[chainIndex, j]`. -/
 @[inline] def wPushAdrs (chainIndex : Nat) (j : Nat) : StackOp :=
   .push (.bytes (ByteArray.mk #[(chainIndex.toUInt8), (j.toUInt8)]))
@@ -231,6 +235,12 @@ def wotsBodyOps : List StackOp :=
   , wOpc "OP_SHA256"                     -- pubSeed sig msgHash
   -- Canonical layout: pubSeed sig csum=0 endptAcc=empty hashRem
   , .swap                                -- pubSeed msgHash sig
+  -- R-135: exact signature length. The chain loop SPLITs LEN*N bytes
+  -- then drops the remainder, so without this gate `sig || junk`
+  -- verified identically to `sig`.
+  , wOpc "OP_SIZE"
+  , wPushI (Int.ofNat WOTS_SIG_LEN)
+  , wOpc "OP_EQUALVERIFY"
   , wPushI 0                             -- pubSeed msgHash sig 0
   , wOpc "OP_0"                          -- pubSeed msgHash sig 0 empty
   , wPushI 3, wOpc "OP_ROLL"             -- pubSeed sig 0 empty msgHash
