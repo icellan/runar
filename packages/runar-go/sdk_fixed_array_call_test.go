@@ -227,7 +227,10 @@ func TestFixedArrayCall_Inbound_ReadsRestoredGroupedState(t *testing.T) {
 
 	// Reconnect from chain. This is the fund-path scenario: a fresh process
 	// that only ever sees the deployed script.
-	restored := FromUtxo(loadArrayWriteArtifact(t), onChainUtxo)
+	restored, err := FromUtxo(loadArrayWriteArtifact(t), onChainUtxo)
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 	if _, leaked := restored.GetState()["table__1"]; leaked {
 		t.Fatal("FromUtxo produced a synthetic leaf; this test no longer probes the grouped-only restore path")
 	}

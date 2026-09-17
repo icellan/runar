@@ -316,12 +316,15 @@ func TestFromUtxo_RoundTripsInscription(t *testing.T) {
 	envelope := BuildInscriptionEnvelope("text/plain", data)
 	onChainScript := "aabbccdd" + envelope
 
-	contract := FromUtxo(artifact, UTXO{
+	contract, err := FromUtxo(artifact, UTXO{
 		Txid:        strings.Repeat("ab", 32),
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      onChainScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 
 	insc := contract.GetInscription()
 	if insc == nil {
@@ -350,12 +353,15 @@ func TestFromUtxo_RoundTripsInscription_Stateful(t *testing.T) {
 	stateHex := SerializeState(artifact.StateFields, map[string]interface{}{"count": int64(99)})
 	onChainScript := "aabbccdd" + envelope + "6a" + stateHex
 
-	contract := FromUtxo(artifact, UTXO{
+	contract, err := FromUtxo(artifact, UTXO{
 		Txid:        strings.Repeat("ab", 32),
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      onChainScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 
 	insc := contract.GetInscription()
 	if insc == nil {
@@ -394,12 +400,15 @@ func TestFromUtxo_NoDoubleEnvelopeInjection(t *testing.T) {
 	stateHex := SerializeState(artifact.StateFields, map[string]interface{}{"count": int64(42)})
 	onChainScript := "aabbccdd" + envelope + "6a" + stateHex
 
-	contract := FromUtxo(artifact, UTXO{
+	contract, err := FromUtxo(artifact, UTXO{
 		Txid:        strings.Repeat("ab", 32),
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      onChainScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 
 	// GetLockingScript should produce the same script (using codeScript from chain)
 	lockingScript := contract.GetLockingScript()

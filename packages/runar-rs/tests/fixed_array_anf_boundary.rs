@@ -198,7 +198,7 @@ fn inbound_reconnected_contract_commits_the_restored_state() {
     );
 
     // A fresh process that only ever sees the deployed script.
-    let mut restored = RunarContract::from_utxo(load_artifact(), &on_chain);
+    let mut restored = RunarContract::from_utxo(load_artifact(), &on_chain).expect("from_utxo");
     assert!(
         !restored.state().contains_key("table__1"),
         "from_utxo leaked a synthetic leaf; this test no longer probes the grouped-only restore path"

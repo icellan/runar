@@ -182,12 +182,15 @@ func TestBSV21Token_DeployMintFromUtxoRoundTrip(t *testing.T) {
 	}
 
 	lockingScript := contract.GetLockingScript()
-	reconnected := runar.FromUtxo(a, runar.UTXO{
+	reconnected, err := runar.FromUtxo(a, runar.UTXO{
 		Txid:        "0000000000000000000000000000000000000000000000000000000000000000",
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      lockingScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 	if reconnected.GetInscription() == nil {
 		t.Fatal("expected inscription after FromUtxo")
 	}
@@ -210,12 +213,15 @@ func TestBSV21Token_TransferFromUtxoRoundTrip(t *testing.T) {
 	}
 
 	lockingScript := contract.GetLockingScript()
-	reconnected := runar.FromUtxo(a, runar.UTXO{
+	reconnected, err := runar.FromUtxo(a, runar.UTXO{
 		Txid:        "0000000000000000000000000000000000000000000000000000000000000000",
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      lockingScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 	if reconnected.GetInscription() == nil {
 		t.Fatal("expected inscription after FromUtxo")
 	}

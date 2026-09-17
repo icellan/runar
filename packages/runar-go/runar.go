@@ -755,6 +755,12 @@ func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest {
 	return Hash256(ByteString(make([]byte, 72)))
 }
 
+// ExtractHashSequence returns Hash256 of a single 0xfffffffe nSequence
+// (the SDK non-final default) in test mode, matching ExtractSequence.
+func ExtractHashSequence(p SigHashPreimage) Sha256Digest {
+	return Hash256(ByteString([]byte{0xfe, 0xff, 0xff, 0xff}))
+}
+
 // ExtractOutpoint returns 36 zero bytes in test mode.
 func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
 

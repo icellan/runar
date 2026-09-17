@@ -56,7 +56,10 @@ class Restorable extends StatefulSmartContract {
 	}
 
 	// Restore from the deployed UTXO — must recover tag=42, not the 0 placeholder.
-	restored := FromUtxo(&art, *c.currentUtxo)
+	restored, err := FromUtxo(&art, *c.currentUtxo)
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 	if len(restored.constructorArgs) == 0 {
 		t.Fatal("restored contract has no constructor args")
 	}

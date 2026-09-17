@@ -135,7 +135,8 @@ fn test_inscription_survives_from_utxo_round_trip() {
             satoshis: 1,
             script: locking_script,
         },
-    );
+    )
+    .expect("from_utxo");
 
     let insc = reconnected
         .inscription()

@@ -166,12 +166,15 @@ func TestOrdinalNFT_InscriptionRoundTripFromUtxo(t *testing.T) {
 
 	lockingScript := contract.GetLockingScript()
 
-	reconnected := runar.FromUtxo(a, runar.UTXO{
+	reconnected, err := runar.FromUtxo(a, runar.UTXO{
 		Txid:        "0000000000000000000000000000000000000000000000000000000000000000",
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      lockingScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 	insc := reconnected.GetInscription()
 	if insc == nil {
 		t.Fatal("expected inscription after FromUtxo")

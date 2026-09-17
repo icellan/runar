@@ -2211,7 +2211,7 @@ impl RunarContract {
     pub fn from_utxo(
         artifact: RunarArtifact,
         utxo: &Utxo,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // Recover the real constructor args baked into the deployed script
         // (issue #119). Filling zeros made restored stateful spends compute the
         // wrong state continuation and codesep/OP_PUSH_TX offset — unspendable.
@@ -2254,23 +2254,20 @@ impl RunarContract {
         //
         // FAILS CLOSED (C2). `utxo.script` is a locking script any third party
         // can construct, and the state decoded from it is what the next `call`
-        // commits to in the continuation output. Rust has no null to return and
-        // `from_utxo` has no error channel, so a blob that does not decode
-        // EXACTLY as the artifact's `state_fields` describe panics here rather
-        // than leaving the contract carrying constructor-initial values dressed
-        // up as live on-chain state — the same "every result would be wrong"
-        // contract `state_field_i64` documents on the serialize side.
+        // commits to in the continuation output. A blob that does not decode
+        // EXACTLY as the artifact's `state_fields` describe is an error, not a
+        // panic and not constructor-initial values dressed up as live state.
         if let Some(ref state_fields) = contract.artifact.state_fields {
             if !state_fields.is_empty() {
                 match extract_state_from_script(&contract.artifact, &utxo.script) {
                     Ok(Some(state)) => contract.state = state,
                     Ok(None) => {}
-                    Err(e) => panic!("RunarContract::from_utxo: {e}"),
+                    Err(e) => return Err(format!("RunarContract::from_utxo: {e}")),
                 }
             }
         }
 
-        contract
+        Ok(contract)
     }
 
     /// Reconnect to an existing deployed contract from its deployment transaction.
@@ -2292,12 +2289,12 @@ impl RunarContract {
 
         let output = &tx.outputs[output_index];
 
-        Ok(RunarContract::from_utxo(artifact, &Utxo {
+        RunarContract::from_utxo(artifact, &Utxo {
             txid: txid.to_string(),
             output_index: output_index as u32,
             satoshis: output.satoshis,
             script: output.script.clone(),
-        }))
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -4329,7 +4326,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script,
-        });
+        })
+        .expect("from_utxo");
 
         let insc = reconnected.inscription().unwrap();
         assert_eq!(insc.content_type, "image/png");
@@ -4371,7 +4369,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: "012a93".to_string(),
-        });
+        })
+        .expect("from_utxo");
         assert_eq!(reconnected.constructor_args, vec![SdkValue::Int(42)]);
     }
 
@@ -4391,7 +4390,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script,
-        });
+        })
+        .expect("from_utxo");
 
         // Inscription round-trips
         let insc = reconnected.inscription().unwrap();
@@ -4418,7 +4418,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script.clone(),
-        });
+        })
+        .expect("from_utxo");
 
         // Reconnected contract should produce the same locking script
         assert_eq!(reconnected.get_locking_script(), locking_script);
@@ -4435,9 +4436,29 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script,
-        });
+        })
+        .expect("from_utxo");
 
         assert!(reconnected.inscription().is_none());
+    }
+
+    #[test]
+    fn from_utxo_hostile_state_is_an_error() {
+        let artifact = make_stateful_artifact("00");
+        let err = RunarContract::from_utxo(
+            artifact,
+            &Utxo {
+                txid: "00".repeat(32),
+                output_index: 0,
+                satoshis: 1,
+                script: "6a55".to_string(),
+            },
+        )
+        .expect_err("hostile state must be an error, not a panic or a live contract");
+        assert!(
+            err.to_lowercase().contains("from_utxo"),
+            "error must name from_utxo: {err}"
+        );
     }
 
     #[test]
