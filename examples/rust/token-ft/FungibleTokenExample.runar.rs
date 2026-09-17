@@ -1,3 +1,23 @@
+// EXCLUDED FROM NATIVE RUST COMPILATION
+//
+// `cargo test` does not `#[path]`-include this file. FungibleToken_test.rs
+// keeps an inline duplicate because native tests need recorded `add_output`
+// results (`outputs.len()`, per-output balances). The runar-rs-macros
+// contract proc-macro now generates `add_output`, but that impl discards the arguments
+// (`let _ = field`) so a `#[path]` include would compile and then make every
+// transfer/send assertion vacuous.
+//
+// W8 merge also walks a real companion parent (`hash256(other_parent_tx)`,
+// `extract_outpoint`, `extract_script_code`, CompactSize 0xfd+LE16). Native
+// mocks return empty scriptCode and zero outpoints, so that walk cannot be
+// exercised as Rust without a Spend-level parent. That pin lives in
+// `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
+// `test_compile` still runs `runar::compile_check` on this file.
+//
+// Pinned by `examples/rust/native-exclusions/exclusions_test.rs`. Remove this
+// header and the entry there in the same commit that wires a recording
+// `add_output` surface and a native W8 parent walk.
+
 use runar::prelude::*;
 
 /// A UTXO-based fungible token using Runar's multi-output (`add_output`) facility.

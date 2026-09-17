@@ -297,7 +297,9 @@ pub fn extractOutpoint(preimage: base.SigHashPreimage) base.ByteString {
     return dupeBytes(&extracted);
 }
 
-pub fn extractScriptCode(_preimage: base.SigHashPreimage) base.ByteString {
+/// Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks.
+pub fn extractScriptCode(preimage: base.SigHashPreimage) base.ByteString {
+    _ = preimage;
     return "";
 }
 

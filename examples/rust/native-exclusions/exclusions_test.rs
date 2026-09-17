@@ -64,7 +64,10 @@ use std::path::{Path, PathBuf};
 /// literal in ANF lowering, so `to_byte_string("41000000")` — the only
 /// spelling that is both valid Rust and valid Rúnar — reaches the IR
 /// indistinguishable from the bare literal the other eight surfaces carry.
-const EXCLUDED: &[&str] = &["branched-readonly-len/BranchedReadonlyLen.runar.rs"];
+const EXCLUDED: &[&str] = &[
+    "branched-readonly-len/BranchedReadonlyLen.runar.rs",
+    "token-ft/FungibleTokenExample.runar.rs",
+];
 
 /// The header every excluded contract must carry. A fixed marker, rather than
 /// "some comment", is what stops a future exclusion from being justified by
@@ -421,12 +424,11 @@ fn the_universe_is_not_empty() {
     let u = universe(&root);
     assert_eq!(
         u.len(),
-        // 7 -> 9: the two tic-tac-toe contracts joined the universe when their
-        // `init()` initializers were rewritten from bare `&str` (which is not
-        // valid Rust for a `ByteString`/`PubKey`, both `Vec<u8>`) to
-        // `to_byte_string(...)`, once the validator accepted that spelling in a
-        // property INITIALIZER. Both are now `#[path]`-included and run natively.
-        9,
+        // 9 -> 10: W8 companion-parent merge added `substr`/`cat`/`len` calls
+        // to token-ft, so it joined the byte-builtin universe. It is excluded
+        // (see EXCLUDED) rather than `#[path]`-included: native tests need
+        // recorded outputs, and the mock add_output discards them.
+        10,
         "the number of .runar.rs contracts calling one of the eight byte builtins moved \
          from 7 to {}. That is fine — but check that the scan is still finding calls and \
          not, say, matching nothing because a builtin was renamed: {:?}",
