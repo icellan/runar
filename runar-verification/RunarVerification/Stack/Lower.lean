@@ -5016,7 +5016,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
           let elsDepth := smElsAfter.length
           let inhModel := inheritedModel smBranch smThnAfter
           let padsBelow : Bool := results.isEmpty && !thn.isEmpty && !els.isEmpty
-          let (extraEls, smElsPad) :=
+          let (extraEls, _smElsPad) :=
             padArm padsBelow (smElsAfter == inhModel) (thnDepth - elsDepth) smElsAfter
           let (extraThn, smThnPad) :=
             padArm padsBelow (smThnAfter == inhModel) (elsDepth - thnDepth) smThnAfter
@@ -5114,7 +5114,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                   -- The deficit is measured against the POST-cleanup else map
                   -- (TS's `while (thenDepth > elseDepth)` runs after phase 1),
                   -- which is `k` only when the else arm gave up nothing.
-                  let (padOps, smElsCopy) :=
+                  let (padOps, _smElsCopy) :=
                     ifWithoutElseCopyPad smThnAfter
                       (smThnAfter.length - smElsAfter.length) smElsAfter
                   let elsCopyOps := elsOps ++ elsCleanupOps ++ padOps
