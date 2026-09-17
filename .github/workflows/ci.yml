@@ -510,7 +510,13 @@ jobs:
         # the other seven rot, and a vector file added tomorrow must be gated the
         # day it lands. `tests/ci-covers-root-tests.test.ts` fails if this step is
         # ever narrowed back to a file list.
-        run: npx vitest run tests/
+        run: |
+          # tests/golden-provenance-gate-is-cwd-independent.test.ts diffs
+          # against origin/main. actions/checkout is a shallow PR ref and
+          # does not create that remote; without it the gate crashes
+          # `fatal: ambiguous argument 'origin/main'` and the test is vacuous.
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          npx vitest run tests/
       - run: pnpm run typecheck
 
   go-compiler:

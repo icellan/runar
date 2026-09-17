@@ -30,6 +30,10 @@ const ROOTS = [
   'docs/', 'spec/', 'integration/', 'tests/', '.github/',
 ];
 
+/** Build outputs: absent from a clean checkout by design, not dangling.
+ * Same set as tests/r307-doc-paths-exist.test.ts. */
+const GENERATED = /(^|\/)(build|target|dist|node_modules|zig-out|zig-pkg|coverage)(\/|$)/;
+
 function documentedPaths(markdown: string): string[] {
   const found = new Set<string>();
   // Backtick-quoted spans are where this document puts paths.
@@ -38,6 +42,7 @@ function documentedPaths(markdown: string): string[] {
     if (!ROOTS.some(r => raw.startsWith(r))) continue;
     // A shape, not a file.
     if (/[{}<>*]/.test(raw)) continue;
+    if (GENERATED.test(raw)) continue;
     // A trailing slash is an unambiguous directory reference. The extension
     // rule below skipped these, which is how `packages/runar-zig/src/sdk/`
     // survived in a guard written to catch dangling paths in this very file —
