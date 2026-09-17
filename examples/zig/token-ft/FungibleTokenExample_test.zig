@@ -84,26 +84,11 @@ test "fungible token send records a single full-balance output" {
     try expectContinuationOutput(ctx.outputs()[0], "ft:", .{ runar.BOB.pubKey, @as(i64, 30), @as(i64, 0) }, ":script");
 }
 
-test "fungible token merge preserves first-input ordering through the real contract" {
-    var runtime = runar.StatefulSmartContract.init(std.testing.allocator);
-    defer runtime.deinit();
-    try runtime.setContinuationEnvelope("ft:", ":script");
-    var token = FungibleTokenExample.init(runar.ALICE.pubKey, 25, 5, "token");
-    const first = [_]u8{'a'} ** 36;
-    const second = [_]u8{'b'} ** 36;
-    const all_prevouts = first ++ second;
-    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
-        .hashPrevouts = runar.hash256(all_prevouts[0..]),
-        .outpoint = first[0..],
-    }));
-
-    token.merge(ctx, runar.signTestMessage(runar.ALICE), 12, all_prevouts[0..], 1);
-
-    try std.testing.expectEqual(@as(usize, 1), ctx.outputs().len);
-    try expectBytes(ctx.outputs()[0].values[0], runar.ALICE.pubKey);
-    try expectBigint(ctx.outputs()[0].values[1], 30);
-    try expectBigint(ctx.outputs()[0].values[2], 12);
-    try expectContinuationOutput(ctx.outputs()[0], "ft:", .{ runar.ALICE.pubKey, @as(i64, 30), @as(i64, 12) }, ":script");
+test "fungible token merge dummy companion parent is refused" {
+    // Native mocks return empty extractScriptCode; the W8 parent walk cannot
+    // succeed here. Honest merge is pinned by Spend.validate() in
+    // w8-token-ft-solo-merge-known-broken.test.ts.
+    try root.expectAssertFailure("token-ft-merge-dummy-parent");
 }
 
 test "fungible token rejects invalid transfers and prevout mismatches" {

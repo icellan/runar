@@ -94,6 +94,7 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "token-ft-transfer-too-much")) return probeTokenFTTransferTooMuch();
     if (std.mem.eql(u8, probe_case, "token-ft-transfer-wrong-sig")) return probeTokenFTTransferWrongSig();
     if (std.mem.eql(u8, probe_case, "token-ft-merge-prevouts-mismatch")) return probeTokenFTMergePrevoutsMismatch();
+    if (std.mem.eql(u8, probe_case, "token-ft-merge-dummy-parent")) return probeTokenFTMergeDummyParent();
     if (std.mem.eql(u8, probe_case, "token-nft-transfer-wrong-sig")) return probeTokenNFTTransferWrongSig();
     if (std.mem.eql(u8, probe_case, "token-nft-transfer-invalid-satoshis")) return probeTokenNFTTransferInvalidSatoshis();
     if (std.mem.eql(u8, probe_case, "token-nft-burn-wrong-sig")) return probeTokenNFTBurnWrongSig();
@@ -527,7 +528,23 @@ fn probeTokenFTMergePrevoutsMismatch() !void {
         .hashPrevouts = runar.hash256("wrong-prevouts"),
         .outpoint = first[0..],
     }));
-    token.merge(ctx, runar.signTestMessage(runar.ALICE), 12, all_prevouts[0..], 1);
+    const dummy_parent = [_]u8{0} ** 64;
+    token.merge(ctx, runar.signTestMessage(runar.ALICE), 12, all_prevouts[0..], dummy_parent[0..], 1);
+}
+
+fn probeTokenFTMergeDummyParent() !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    var token = FungibleTokenExample.init(runar.ALICE.pubKey, 25, 5, "token");
+    const first = [_]u8{'a'} ** 36;
+    const second = [_]u8{'b'} ** 36;
+    const all_prevouts = first ++ second;
+    const dummy_parent = [_]u8{0} ** 64;
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
+        .hashPrevouts = runar.hash256(all_prevouts[0..]),
+        .outpoint = first[0..],
+    }));
+    token.merge(ctx, runar.signTestMessage(runar.ALICE), 12, all_prevouts[0..], dummy_parent[0..], 1);
 }
 
 fn probeTokenNFTTransferWrongSig() !void {

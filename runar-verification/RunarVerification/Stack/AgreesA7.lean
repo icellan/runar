@@ -176,10 +176,10 @@ theorem lowerValueP_loop_zero_ops_nil
     (outerProtected localBindings : List String)
     (constInts : List (String × Int))
     (sm : StackMap) (bindingName iterVar : String)
-    (body : List ANFBinding) :
+    (body : List ANFBinding) (start : Int := 0) (step : Int := 1) :
     (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
         outerProtected localBindings constInts sm bindingName
-        (.loop 0 body iterVar)).1 = [] := by
+        (.loop 0 body iterVar start step)).1 = [] := by
   unfold Stack.Lower.lowerValueP
   simp [Stack.Lower.lowerLoopItersP]
 
@@ -204,11 +204,13 @@ theorem lowerValueP_loop_one_empty_ops
     (lastUses : List (String × Nat))
     (outerProtected localBindings : List String)
     (constInts : List (String × Int))
-    (sm : StackMap) (bindingName iterVar : String) :
+    (sm : StackMap) (bindingName iterVar : String)
+    (start : Int := 0) (step : Int := 1) :
     (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
         outerProtected localBindings constInts sm bindingName
-        (.loop 1 [] iterVar)).1
-      = [.push (.bigint 0), .drop] := by
+        (.loop 1 [] iterVar start step)).1
+      = [.push (.bigint (if start == 0 && step == 1 then (0 : Int) else start)),
+         .drop] := by
   unfold Stack.Lower.lowerValueP
   simp [Stack.Lower.lowerLoopItersP, Stack.Lower.iterVarCleanup,
         Stack.Lower.lowerBindingsP, Stack.Lower.computeLastUses,
@@ -223,25 +225,23 @@ off, returning the original state.
 
 This is the operational core of the Tier 1 widening: the `count = 1`
 empty-body loop lowers to this exact two-op no-op sequence. -/
-theorem runOps_push_zero_drop_id (s : StackState) :
-    runOps [.push (.bigint 0), .drop] s = .ok s := by
-  -- Unfold one cons step: push reduces to `.ok (s.push (vBigint 0))`.
-  show runOps (.push (.bigint 0) :: .drop :: []) s = .ok s
+theorem runOps_push_int_drop_id (i : Int) (s : StackState) :
+    runOps [.push (.bigint i), .drop] s = .ok s := by
+  show runOps (.push (.bigint i) :: .drop :: []) s = .ok s
   unfold runOps
-  -- Reduce the push step using its rfl-level lemma.
-  rw [show stepNonIf (.push (.bigint 0)) s = .ok (s.push (.vBigint 0)) from rfl]
-  -- Now we have `runOps (.drop :: []) (s.push (.vBigint 0))`.
-  show runOps (.drop :: []) (s.push (.vBigint 0)) = .ok s
+  rw [show stepNonIf (.push (.bigint i)) s = .ok (s.push (.vBigint i)) from rfl]
+  show runOps (.drop :: []) (s.push (.vBigint i)) = .ok s
   unfold runOps
-  -- Reduce the drop step. `s.push (.vBigint 0)` has stack `vBigint 0 :: s.stack`,
-  -- so `applyDrop` returns `.ok { s with stack := s.stack } = .ok s`.
-  rw [show stepNonIf .drop (s.push (.vBigint 0))
+  rw [show stepNonIf .drop (s.push (.vBigint i))
         = .ok s from by
-      show applyDrop (s.push (.vBigint 0)) = .ok s
+      show applyDrop (s.push (.vBigint i)) = .ok s
       unfold applyDrop StackState.push
       simp]
-  -- `runOps [] s = .ok s` by `runOps_nil`.
   exact Stack.Eval.runOps_nil s
+
+theorem runOps_push_zero_drop_id (s : StackState) :
+    runOps [.push (.bigint 0), .drop] s = .ok s :=
+  runOps_push_int_drop_id 0 s
 
 /-- For any `v` satisfying `structuralLoopValue`, the lowered op-list
 runs as the identity on the starting stack state. -/
@@ -266,12 +266,12 @@ theorem runOps_lowerValueP_structuralLoopValue_id
   | call _ _ => exact (hSupp).elim
   | methodCall _ _ _ => exact (hSupp).elim
   | ifVal _ _ _ _ => exact (hSupp).elim
-  | loop count body iv _ _ =>
+  | loop count body iv start step =>
       cases count with
       | zero =>
           rw [lowerValueP_loop_zero_ops_nil progMethods props budget
                 currentIndex lastUses outerProtected localBindings
-                constInts sm bindingName iv body]
+                constInts sm bindingName iv body start step]
           exact Stack.Eval.runOps_nil s
       | succ k =>
           cases k with
@@ -282,8 +282,8 @@ theorem runOps_lowerValueP_structuralLoopValue_id
               subst hBody
               rw [lowerValueP_loop_one_empty_ops progMethods props budget
                     currentIndex lastUses outerProtected localBindings
-                    constInts sm bindingName iv]
-              exact runOps_push_zero_drop_id s
+                    constInts sm bindingName iv start step]
+              exact runOps_push_int_drop_id _ s
           | succ _ =>
               -- count ≥ 2 is not in the predicate.
               exact absurd hSupp (by simp [structuralLoopValue])
@@ -521,25 +521,30 @@ bytes), each of which is identity on the stack state. -/
 `assemble` chain for the empty-body case. Defined OUTSIDE the
 `lowerValueP` term so we can induct on it without unfolding the
 mutual recursion. -/
-def loopEmptyAssemble (count : Nat) : Nat → List StackOp
+def loopEmptyAssemble (count n : Nat) (start : Int := 0) (step : Int := 1) : List StackOp :=
+  match n with
   | 0     => []
   | n + 1 =>
-      [.push (.bigint (Int.ofNat (count - (n + 1)))), .drop]
-        ++ loopEmptyAssemble count n
+      let i := count - (n + 1)
+      let iVal : Int :=
+        if start == 0 && step == 1 then Int.ofNat i
+        else start + Int.ofNat i * step
+      [.push (.bigint iVal), .drop] ++ loopEmptyAssemble count n start step
 
 /-- `runOps` of any `loopEmptyAssemble count n` is identity on the stack
 state, by structural induction on the recursion depth `n`. -/
-theorem runOps_loopEmptyAssemble_id (count : Nat) :
-    ∀ (n : Nat) (s : StackState), runOps (loopEmptyAssemble count n) s = .ok s
+theorem runOps_loopEmptyAssemble_id (count : Nat) (start : Int := 0) (step : Int := 1) :
+    ∀ (n : Nat) (s : StackState),
+      runOps (loopEmptyAssemble count n start step) s = .ok s
   | 0, s => by
       simp [loopEmptyAssemble]
       exact Stack.Eval.runOps_nil s
   | n + 1, s => by
       unfold loopEmptyAssemble
       rw [Stack.Sim.runOps_append]
-      rw [runOps_push_i_drop_id (count - (n + 1)) s]
+      rw [runOps_push_int_drop_id _ s]
       simp only []
-      exact runOps_loopEmptyAssemble_id count n s
+      exact runOps_loopEmptyAssemble_id count start step n s
 
 /-- The per-iteration fold `Stack.Lower.lowerLoopItersP` applied to an
 EMPTY body equals our standalone `loopEmptyAssemble`, and threads the
@@ -554,11 +559,11 @@ theorem lowerLoopItersP_empty_eq
     (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat) (naturalLU nonFinalLU : List (String × Nat))
     (loopLocal : List String) (constInts : List (String × Int))
-    (iterVar : String) (count : Nat) :
+    (iterVar : String) (count : Nat) (start : Int := 0) (step : Int := 1) :
     ∀ (n : Nat) (sm : StackMap),
       Stack.Lower.lowerLoopItersP progMethods props budget naturalLU
-        nonFinalLU loopLocal constInts [] iterVar count sm n
-        = (loopEmptyAssemble count n, sm)
+        nonFinalLU loopLocal constInts [] iterVar count sm n [] false [] start step
+        = (loopEmptyAssemble count n start step, sm)
   | 0, sm => by
       simp [Stack.Lower.lowerLoopItersP, loopEmptyAssemble]
   | n + 1, sm => by
@@ -568,7 +573,7 @@ theorem lowerLoopItersP_empty_eq
                  Stack.Lower.StackMap.depth?, Stack.Lower.StackMap.removeAtDepth,
                  List.findIdx?_cons, beq_self_eq_true, if_true]
       rw [lowerLoopItersP_empty_eq progMethods props budget naturalLU
-            nonFinalLU loopLocal constInts iterVar count n sm]
+            nonFinalLU loopLocal constInts iterVar count start step n sm]
       simp
 
 /-- The closed-form lowering of `.loop count [] iv` produces exactly the
@@ -583,11 +588,12 @@ theorem lowerValueP_loop_empty_ops_eq
     (lastUses : List (String × Nat))
     (outerProtected localBindings : List String)
     (constInts : List (String × Int))
-    (sm : StackMap) (bindingName iterVar : String) (count : Nat) :
+    (sm : StackMap) (bindingName iterVar : String)
+    (count : Nat) (start : Int := 0) (step : Int := 1) :
     (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
         outerProtected localBindings constInts sm bindingName
-        (.loop count [] iterVar)).1
-      = loopEmptyAssemble count count := by
+        (.loop count [] iterVar start step)).1
+      = loopEmptyAssemble count count start step := by
   unfold Stack.Lower.lowerValueP
   simp only [lowerLoopItersP_empty_eq]
 
@@ -601,16 +607,16 @@ theorem runOps_lowerValueP_loop_empty_id
     (outerProtected localBindings : List String)
     (constInts : List (String × Int))
     (sm : StackMap) (bindingName iterVar : String)
-    (count : Nat) (s : StackState) :
+    (count : Nat) (s : StackState) (start : Int := 0) (step : Int := 1) :
     runOps
       (Stack.Lower.lowerValueP progMethods props budget currentIndex lastUses
         outerProtected localBindings constInts sm bindingName
-        (.loop count [] iterVar)).1 s
+        (.loop count [] iterVar start step)).1 s
       = .ok s := by
   rw [lowerValueP_loop_empty_ops_eq progMethods props budget currentIndex
         lastUses outerProtected localBindings constInts sm bindingName
-        iterVar count]
-  exact runOps_loopEmptyAssemble_id count count s
+        iterVar count start step]
+  exact runOps_loopEmptyAssemble_id count start step count s
 
 /-! ### Widened predicate: empty body, any count -/
 
@@ -753,12 +759,12 @@ theorem runOps_lowerValueP_structuralLoopValueExt_id
   | call _ _ => exact (hSupp).elim
   | methodCall _ _ _ => exact (hSupp).elim
   | ifVal _ _ _ _ => exact (hSupp).elim
-  | loop count body iv _ _ =>
+  | loop count body iv start step =>
       cases count with
       | zero =>
           rw [lowerValueP_loop_zero_ops_nil progMethods props budget
                 currentIndex lastUses outerProtected localBindings
-                constInts sm bindingName iv body]
+                constInts sm bindingName iv body start step]
           exact Stack.Eval.runOps_nil s
       | succ k =>
           -- count ≥ 1: structuralLoopValueExt forces body = [].
@@ -767,7 +773,7 @@ theorem runOps_lowerValueP_structuralLoopValueExt_id
           subst hBody
           exact runOps_lowerValueP_loop_empty_id progMethods props budget
             currentIndex lastUses outerProtected localBindings
-            constInts sm bindingName iv (k + 1) s
+            constInts sm bindingName iv (k + 1) s start step
   | assert _ => exact (hSupp).elim
   | updateProp _ _ => exact (hSupp).elim
   | getStateScript => exact (hSupp).elim
@@ -2406,8 +2412,7 @@ theorem lowerLoopItersP_one_eq
       = ([.push (.bigint (Int.ofNat (count - 1)))] ++ bodyOps ++ dropOps,
          smIter) := by
   unfold Stack.Lower.lowerLoopItersP
-  simp only [hBody, hClean, beq_self_eq_true, if_true,
-             lowerLoopItersP_zero_eq, List.append_nil]
+  simp [hBody, hClean, lowerLoopItersP_zero_eq]
 
 /-- Cleanup gate for a BURIED iter var: a map of shape `x :: iv :: sm`
 (with `x ≠ iv`) does NOT fire the depth-0 drop. -/
@@ -4028,8 +4033,8 @@ theorem lowerLoopItersP_loopOkBody_eq
       -- Match the assemble/strand `m = 1` (final) cases.
       unfold loopOkAssemble loopOkStrandMap
       refine Prod.ext ?_ ?_
-      · simp only [Stack.Lower.StackMap.push, List.cons_append, List.append_assoc,
-                   List.nil_append, List.singleton_append]
+      · simp [Stack.Lower.StackMap.push, List.cons_append, List.append_assoc,
+              List.nil_append, List.singleton_append]
       · -- "sum" :: "i" :: (replicate k ++ tail) = "sum" :: "i" :: (replicate k ++ "start"::tail).erase "start"
         show (some "sum" :: some "i" :: (List.replicate k (some "i") ++ tail) : StackMap)
               = some "sum" :: some "i" :: (List.replicate k (some "i") ++ some "start" :: tail).erase "start"
@@ -4076,8 +4081,8 @@ theorem lowerLoopItersP_loopOkBody_eq
       -- `loopOkAssemble`/`loopOkStrandMap`; its recursive call is exactly the
       -- IH term (`"sum" :: "i" :: rest = grown map` via `hGrow`).
       refine Prod.ext ?_ ?_ <;>
-        simp only [loopOkAssemble, loopOkStrandMap, Stack.Lower.StackMap.push,
-                   List.cons_append, List.nil_append, List.append_assoc, ← hGrow]
+        simp [loopOkAssemble, loopOkStrandMap, Stack.Lower.StackMap.push,
+              List.cons_append, List.nil_append, List.append_assoc, ← hGrow]
 
 /-- **Value-level lift.** `lowerValueP` of `.loop count loopOkBody "i"`
 against the real loop-entry map `"sum" :: "start" :: tail` (sum at depth

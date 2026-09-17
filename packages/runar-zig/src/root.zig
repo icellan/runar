@@ -168,6 +168,7 @@ pub const MockPreimageError = builtins.MockPreimageError;
 pub const signTestMessageChecked = builtins.signTestMessageChecked;
 pub const SignTestMessageError = builtins.SignTestMessageError;
 pub const cat = builtins.cat;
+pub const len = builtins.byteStringLen;
 pub const substr = builtins.substr;
 pub const num2bin = builtins.num2bin;
 pub const bin2num = builtins.bin2num;
