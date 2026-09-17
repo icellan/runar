@@ -61,6 +61,22 @@ import "math/big"
 func bn254AssertG1OnCurve(t *BN254Tracker, xName, yName, sfx string) {
 	pfx := "_occhk_" + sfx + "_"
 
+	// GAP-301 / R-141 class: reject (x+k·p, y) before the curve equation.
+	// Byte-level OP_EQUALVERIFY on unreduced coordinates would accept an
+	// alias of a valid point. Require 0 ≤ x,y < p (unsigned by construction).
+	t.copyToTop(xName, pfx+"cx")
+	bn254PushFieldP(t, pfx+"cpx")
+	t.rawBlock([]string{pfx + "cx", pfx + "cpx"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+	t.copyToTop(yName, pfx+"cy")
+	bn254PushFieldP(t, pfx+"cpy")
+	t.rawBlock([]string{pfx + "cy", pfx + "cpy"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+
 	// lhs = y^2 mod p
 	t.copyToTop(yName, pfx+"y")
 	bn254FieldSqr(t, pfx+"y", pfx+"lhs")

@@ -5713,24 +5713,40 @@ func methodUsesCheckPreimageRec(
 // is always inserted at the very start of the method, before regular
 // arg binding).
 func methodUsesGroth16WAPreamble(bindings []ir.ANFBinding) bool {
-	for _, b := range bindings {
-		if b.Value.Kind == "call" && (b.Value.Func == "assertGroth16WitnessAssisted" || b.Value.Func == "assertGroth16WitnessAssistedWithMSM") {
-			return true
-		}
-	}
-	return false
+	return groth16WAMarkerRec(bindings) != ""
 }
 
 // methodUsesGroth16WAPreambleWithMSM returns true when the method's body
 // contains the MSM-binding marker assertGroth16WitnessAssistedWithMSM.
 // Determines which of the two preamble codegen paths to invoke.
 func methodUsesGroth16WAPreambleWithMSM(bindings []ir.ANFBinding) bool {
+	return groth16WAMarkerRec(bindings) == "assertGroth16WitnessAssistedWithMSM"
+}
+
+// groth16WAMarkerRec walks if/loop arms (R-158). A top-level-only scan
+// silently selected the unsound no-preamble variant when the marker sat
+// inside a branch — the same class methodUsesCheckPreimageRec already
+// closed for check_preimage.
+func groth16WAMarkerRec(bindings []ir.ANFBinding) string {
 	for _, b := range bindings {
-		if b.Value.Kind == "call" && b.Value.Func == "assertGroth16WitnessAssistedWithMSM" {
-			return true
+		if b.Value.Kind == "call" && (b.Value.Func == "assertGroth16WitnessAssisted" || b.Value.Func == "assertGroth16WitnessAssistedWithMSM") {
+			return b.Value.Func
+		}
+		if b.Value.Kind == "if" {
+			if k := groth16WAMarkerRec(b.Value.Then); k != "" {
+				return k
+			}
+			if k := groth16WAMarkerRec(b.Value.Else); k != "" {
+				return k
+			}
+		}
+		if b.Value.Kind == "loop" {
+			if k := groth16WAMarkerRec(b.Value.Body); k != "" {
+				return k
+			}
 		}
 	}
-	return false
+	return ""
 }
 
 // emitGroth16WAPreamble emits the witness-assisted BN254 Groth16 verifier
