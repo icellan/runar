@@ -783,7 +783,7 @@ BuiltinFunction_State
 
 BuiltinFunction_Intent
     = 'requireOutputP2PKH'      /* requireOutputP2PKH(outputIndex: bigint, pubKeyHash: ByteString, amount: bigint): void */
-    | 'extractPrevOutputScript' /* extractPrevOutputScript(inputIndex: bigint, expectedHash: ByteString): ByteString */
+    | 'extractPrevOutputScript' /* extractPrevOutputScript(witnessSlot: bigint, expectedHash: ByteString): ByteString -- hash-preimage check on a caller-supplied string; does NOT read an input (W6) */
     | 'currentBlockHeight'      /* currentBlockHeight(): bigint */
     ;
 ```
@@ -859,10 +859,22 @@ calls `addDataOutput` (a variable-length OP_RETURN breaks the stride) or
 See R-300 — note that this is a ban on the CONTRACT's own outputs and was never
 a constraint on the transaction, which is what the index rule above adds.
 
-`extractPrevOutputScript(i, expectedHash)` returns the locking script of the
-transaction's input `i`, injecting `_prevOutScript_<i>` as a witness parameter
-and asserting its hash. **`i` must be an integer literal** — the parameter name
-is built from it at compile time.
+`extractPrevOutputScript(i, expectedHash)` injects `_prevOutScript_<i>` as a
+witness parameter, asserts `hash256` of that witness equals `expectedHash`, and
+returns the witness bytes. **`i` must be an integer literal** — the parameter
+name is built from it at compile time.
+
+**`i` is a label, not an input (W6 / GhostInput).** The emitted script contains
+no vin lookup, no parent transaction, no outpoint comparison and no input-count
+check; what it proves is that the SPENDER knows a byte string with the given
+hash. A transaction with one input satisfies a covenant calling
+`extractPrevOutputScript(1n, ...)`, because nothing looks for a second one. And
+locking scripts are public, so knowing the bytes of a deployed covenant costs
+nothing. Use it for intent-TEMPLATE matching, never as evidence that a companion
+covenant is being spent alongside you. The construction that does bind a
+specific companion UTXO — parse the companion input's parent tx, hash-bound to
+the spending tx through the BIP-143 preimage — is written out and tested in
+`examples/ts/companion-verifier/`.
 
 `currentBlockHeight()` is a source-level desugar to
 `extractLocktime(this.txPreimage)`, so it is valid only where that preimage

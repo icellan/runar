@@ -3,13 +3,16 @@ package x
 import runar "github.com/icellan/runar/packages/runar-go"
 
 // IntentPrevOutputScript exercises the runar.ExtractPrevOutputScript
-// intrinsic. The contract reads input 0's previous-output locking script
-// via the witness-bridge pattern and asserts it is non-empty after the
-// hash-equality check the intrinsic emits internally.
-//
-// The auto-injected method parameter `_prevOutScript_0` is supplied by
-// the unlocking script and verified against `expectedHash` inside the
 // intrinsic.
+//
+// It does NOT read input 0 (W6 / GhostInput). The intrinsic asserts that a
+// caller-supplied byte string hashes to `expectedHash` and returns it; this
+// contract then asserts the string is non-empty. The first argument is a
+// compile-time label naming the auto-injected witness parameter
+// `_prevOutScript_0`, which the unlocking script supplies. There is no vin
+// lookup, no parent transaction and no input-count check in the emitted
+// script. For a construction that binds a specific companion INPUT, see
+// `examples/ts/companion-verifier/`.
 type IntentPrevOutputScript struct {
 	runar.StatefulSmartContract
 

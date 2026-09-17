@@ -82,8 +82,11 @@ const stateRoot = substr(referencedOutput, stateRootOffset, 32n);
   referenced output script. This is determined by the source covenant's
   script structure.
 
-- This verifies a *specific output script hash*, not a *specific UTXO*.
-  Multiple UTXOs with the same script would all pass verification.
+- This verifies a *specific output script hash*, not a *specific UTXO*, and not
+  even that any UTXO with that script is being spent by this transaction. All it
+  proves is that the spender could produce bytes with that hash — and locking
+  scripts are public, so that is free. Multiple UTXOs with the same script would
+  all pass verification, and so would a transaction spending none of them.
 
 ## Example
 
@@ -120,12 +123,33 @@ above. They emit the same Stack-IR shape (`hash256` + `equalverify` +
 re-push) but free the contract author from the bookkeeping and centralise
 the unsafe-stub vs safe-binding distinction in the compiler.
 
-### `runar.ExtractPrevOutputScript(inputIndex: int, expectedScriptHash: ByteString) -> ByteString`
+### `runar.ExtractPrevOutputScript(witnessSlot: int, expectedScriptHash: ByteString) -> ByteString`
 
-Reads the previous-output locking script of input `inputIndex` via the
-witness-bridge pattern, asserts its `hash256` matches
-`expectedScriptHash`, and returns the script bytes on the stack for
-caller substring extraction.
+Asserts that a caller-supplied byte string hashes to `expectedScriptHash` and
+returns it on the stack for substring extraction. It is the hand-rolled
+witness-bridge pattern above, packaged.
+
+> **It does NOT read an input of the spending transaction (W6 / GhostInput).**
+> The first argument is a compile-time LABEL used to name the hidden witness
+> parameter `_prevOutScript_<witnessSlot>`, nothing more. The emitted script is
+> `OP_HASH256 OP_EQUALVERIFY` over that witness: no vin lookup, no parent
+> transaction, no outpoint comparison, no input-count check. A transaction with
+> a SINGLE input satisfies a covenant calling `ExtractPrevOutputScript(1, ...)`,
+> because nothing ever looks for a second input. And because locking scripts are
+> public, "the spender knows these bytes" costs an attacker nothing. Use it for
+> intent-TEMPLATE matching; never as evidence that a companion covenant is being
+> spent alongside you. For that, see
+> the "Verified Companion Inputs" pointer above — `examples/ts/companion-verifier/` — which
+> binds a specific UTXO by parsing the companion input's parent transaction.
+>
+> **v1 decision.** The primitive keeps its behaviour and its name; what changed
+> is every sentence that oversold it. Making it actually bind `vin[i]` means
+> parsing the authenticated current transaction, selecting the input, fetching
+> and hashing its parent tx, matching the outpoint txid, bounds-checking vout
+> and extracting that output's script — a v2-sized change, and one this repo
+> already ships as a hand-written, tested pattern in `companion-verifier`.
+> Renaming the symbol at v1 would break every downstream caller and every
+> surface parser without changing the emitted script by one byte.
 
 ```go
 intentScript := runar.ExtractPrevOutputScript(1, c.IntentCovenantScriptHash)
@@ -134,18 +158,19 @@ bClaimed := runar.Bin2Num(runar.ReverseBytes(runar.Substr(intentScript, 65, 4)))
 
 Compiler-enforced constraints:
 
-- `inputIndex` MUST be a compile-time integer literal. Variable indices
-  are rejected at typecheck. Each distinct literal index used in one
+- `witnessSlot` MUST be a compile-time integer literal. Variable indices
+  are rejected at typecheck. Each distinct literal used in one
   method auto-injects one hidden witness parameter
-  `_prevOutScript_<inputIndex>` of type `ByteString` — the unlocker
-  supplies the script bytes; the compiler emits the hash assertion.
+  `_prevOutScript_<witnessSlot>` of type `ByteString` — the unlocker
+  supplies the bytes; the compiler emits the hash assertion.
 - `expectedScriptHash` may be any `ByteString` expression, typically a
   `readonly` contract field pinned at construction time.
 
-Equivalent hand-rolled form (what the compiler emits in spirit):
+Equivalent hand-rolled form (what the compiler emits, in full — there is
+nothing else):
 
 ```go
-public func CoSpendPrivileged(
+public func WitnessMatchingHash(
     stateCovScript runar.ByteString,  // ← compiler auto-injects this
     ... // user params
 ) {

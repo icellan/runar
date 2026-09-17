@@ -193,15 +193,37 @@ export function extractSigHashType(_txPreimage: SigHashPreimage): bigint {
 // docs/cross-covenant-pattern.md for the on-chain semantics.
 
 /**
- * Extract the previous-output locking script for an arbitrary input of the
- * spending transaction. `inputIndex` MUST be a compile-time integer
- * literal. The compiler auto-injects a hidden method parameter
- * `_prevOutScript_<inputIndex>` (the unlocking script supplies the witness
- * bytes) and emits a hash assertion.
+ * Prove the spender knows a byte string whose hash matches `expectedScriptHash`,
+ * and return those bytes for further inspection.
+ *
+ * **This does NOT verify an input of the spending transaction, and it is not a
+ * co-spend (W6 / GhostInput).** `inputIndex` is a compile-time LABEL: the
+ * compiler uses it to name a hidden witness parameter
+ * `_prevOutScript_<inputIndex>`, which the unlocking script fills in, and then
+ * emits `hash256(witness) === expectedScriptHash`. There is no vin lookup, no
+ * parent transaction, no outpoint comparison and no input-count check anywhere
+ * in the emitted script. A transaction with a SINGLE input satisfies a contract
+ * that calls `extractPrevOutputScript(1n, ...)`, because nothing ever looks for
+ * a second input.
+ *
+ * Locking scripts are public, so "knows the bytes" is free for anyone who can
+ * read the chain. Use this only where a hash preimage is genuinely what you
+ * want — matching an intent TEMPLATE, say — never as evidence that some other
+ * covenant is being spent alongside you.
+ *
+ * For the strong construction — binding a SPECIFIC companion input of the
+ * current transaction by parsing its parent tx, hash-bound to the spending tx
+ * through the BIP-143 preimage — see the worked example pair in
+ * `examples/ts/companion-verifier/` (`AttributedToken.runar.ts` +
+ * `CompanionVerifier.runar.ts`). That pattern binds a UTXO; this intrinsic
+ * binds a string.
+ *
+ * `inputIndex` MUST be a compile-time integer literal, because the parameter
+ * name is built from it at compile time.
  *
  * Two forms:
  * - 2-arg: emits `hash256(witness) === expectedScriptHash`, pinning the
- *   full prev-output script byte-for-byte.
+ *   witness byte-for-byte.
  * - 3-arg: emits `hash256(substr(witness, 0, prefixLen)) === expectedScriptPrefixHash`,
  *   pinning only the policy prefix and leaving the pushdata tail free
  *   to vary. `prefixLen` MUST also be a compile-time integer literal.
