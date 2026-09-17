@@ -1092,6 +1092,16 @@ jobs:
         # step needs no extra assertion. Runs in the `conformance` job because
         # it needs the same seven compiler binaries already downloaded above.
         run: npx tsx conformance/analyzer/run.ts
+      - name: Derived-artifact freshness
+        # Analyzer reports, sdk-output input.json / locking hex, source-map
+        # goldens, decompiler templates + coverage, and the script-size
+        # baseline are all children of compiler output. Each had (or has) its
+        # own job, and a codegen change that moved bytes could leave those
+        # children internally consistent — every existing job green — while
+        # they no longer described the compiler. This is the single `--check`
+        # that covers every listed corpus. See
+        # conformance/scripts/check-derived-artifacts.ts.
+        run: npx tsx conformance/scripts/check-derived-artifacts.ts --check
 
   conformance-anf-parity:
     # Cross-interpreter parity for the ANF lenient interpreter shipped by

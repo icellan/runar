@@ -91,6 +91,7 @@
     "decompiler:fingerprints:check": "pnpm --filter runar-decompiler run fingerprints:build && git diff --quiet -- packages/decompiler/fingerprints.json || (echo 'fingerprints.json drift — run pnpm run decompiler:fingerprints:check and commit' && exit 1)",
     "decompiler:templates:build": "pnpm --filter runar-decompiler run templates:build",
     "decompiler:templates:check": "pnpm --filter runar-decompiler run templates:build && git diff --quiet -- packages/decompiler/templates-data.json || (echo 'templates-data.json drift — run pnpm run decompiler:templates:check and commit' && exit 1)",
+    "derived-artifacts:check": "npx tsx conformance/scripts/check-derived-artifacts.ts --check",
     "whitepaper": "cd docs && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex",
     "release": "./scripts/release.sh",
     "publish-all": "./scripts/publish-all.sh",
