@@ -200,8 +200,41 @@ func isLiteralExpression(expr Expression) bool {
 				return true
 			}
 		}
+	case CallExpr:
+		// `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+		// spec/grammar.md section 11:
+		//
+		//     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+		//
+		// 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+		// position. This check runs on the AST, BEFORE ANF lowering, so an
+		// initializer still arrives here as a call node and was refused -- in
+		// the one position the `.runar.rs` surface needs it, since the Rust
+		// DSL writes initializers as assignments inside `init()` that the
+		// parser LIFTS into PropertyNode.Initializer, and a bare `"1976a914"`
+		// is a `&str` that cannot be assigned to a `ByteString` (`Vec<u8>`).
+		//
+		// Accepting it here is only half the job: extractLiteralValue in
+		// anf_lower.go must UNWRAP the same shape, or the property validates
+		// and then loses its default entirely.
+		//
+		// Literal argument ONLY. `toByteString(x)` for a non-literal `x` is
+		// not this production and stays a non-literal initializer.
+		return isToByteStringLiteral(e)
 	}
 	return false
+}
+
+// isToByteStringLiteral reports whether e is the `toByteString(<literal>)`
+// ByteStringLiteral production. Peer of the TS helper of the same name in
+// 02-validate.ts.
+func isToByteStringLiteral(e CallExpr) bool {
+	id, ok := e.Callee.(Identifier)
+	if !ok || id.Name != "toByteString" || len(e.Args) != 1 {
+		return false
+	}
+	_, isLit := e.Args[0].(ByteStringLiteral)
+	return isLit
 }
 
 // isArrayLiteralOfLiterals returns true if the expression is an array

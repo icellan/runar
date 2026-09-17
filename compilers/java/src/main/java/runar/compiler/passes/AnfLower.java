@@ -310,6 +310,17 @@ public final class AnfLower {
             && u.operand() instanceof BigIntLiteral bil) {
             return new BigIntConst(bil.value().negate());
         }
+        // `toByteString('<hex>')` IS the ByteStringLiteral production (see
+        // spec/grammar.md section 11 and the peer check in Validate.java).
+        // UNWRAP it so initialValue holds the bare value, byte-identical to
+        // what the bare `'<hex>'` spelling produces. Without this the
+        // validator would accept the property and this method would return
+        // null for it — silently DROPPING the default rather than storing a
+        // call node. Literal argument only.
+        if (Validate.isToByteStringLiteral(e)
+            && ((CallExpr) e).args().get(0) instanceof ByteStringLiteral tbs) {
+            return new BytesConst(tbs.value());
+        }
         return null;
     }
 

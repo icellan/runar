@@ -279,8 +279,39 @@ fn isLiteralExpression(expr: Expression) bool {
             .literal_int, .literal_bigint => true,
             else => false,
         },
+        // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+        // spec/grammar.md section 11:
+        //
+        //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        //
+        // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        // position. This check runs on the AST, BEFORE ANF lowering, so an
+        // initializer still arrives here as a call node and was refused -- in
+        // the one position the `.runar.rs` surface needs it, since the Rust
+        // DSL writes initializers as assignments inside `init()` that the
+        // parser LIFTS into `PropertyNode.initializer`, and a bare
+        // `"1976a914"` is a `&str` that cannot be assigned to a `ByteString`
+        // (`Vec<u8>`).
+        //
+        // Accepting it here is only half the job: `extractLiteralValue` in
+        // anf_lower.zig must UNWRAP the same shape, or the property validates
+        // and then loses its default entirely.
+        .call => isToByteStringLiteral(expr),
         else => false,
     };
+}
+
+/// Whether the expression is the `toByteString(<literal>)` ByteStringLiteral
+/// production. Literal argument ONLY -- `toByteString(x)` for a non-literal
+/// `x` is not this production and stays a non-literal initializer. Peer of the
+/// TS helper of the same name in `02-validate.ts`.
+pub fn isToByteStringLiteral(expr: Expression) bool {
+    const c = switch (expr) {
+        .call => |c| c,
+        else => return false,
+    };
+    if (!std.mem.eql(u8, c.callee, "toByteString") or c.args.len != 1) return false;
+    return c.args[0] == .literal_bytes;
 }
 
 /// Whether an expression is an array literal whose elements are all literal

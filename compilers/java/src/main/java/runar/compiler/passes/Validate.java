@@ -1407,7 +1407,39 @@ public final class Validate {
             && u.operand() instanceof BigIntLiteral) {
             return true;
         }
-        return false;
+        // `toByteString('<hex>')` IS the ByteStringLiteral production — see
+        // spec/grammar.md section 11:
+        //
+        //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        //
+        // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        // position. This check runs on the AST, BEFORE ANF lowering, so an
+        // initializer still arrives here as a call node and was refused — in
+        // the one position the `.runar.rs` surface needs it, since the Rust
+        // DSL writes initializers as assignments inside `init()` that the
+        // parser LIFTS into PropertyNode.initializer, and a bare "1976a914"
+        // is a &str that cannot be assigned to a ByteString (Vec<u8>).
+        //
+        // Accepting it here is only half the job: extractLiteralValue in
+        // AnfLower.java must UNWRAP the same shape, or the property validates
+        // and then loses its default entirely.
+        return isToByteStringLiteral(e);
+    }
+
+    /**
+     * Whether the expression is the {@code toByteString(<literal>)}
+     * ByteStringLiteral production.
+     *
+     * <p>Literal argument ONLY. {@code toByteString(x)} for a non-literal
+     * {@code x} is not this production and stays a non-literal initializer.
+     * Peer of the TS helper of the same name in {@code 02-validate.ts}.
+     */
+    public static boolean isToByteStringLiteral(Expression e) {
+        return e instanceof CallExpr c
+            && c.callee() instanceof Identifier id
+            && "toByteString".equals(id.name())
+            && c.args().size() == 1
+            && c.args().get(0) instanceof ByteStringLiteral;
     }
 
     private static boolean isArrayLiteralOfLiterals(Expression e) {

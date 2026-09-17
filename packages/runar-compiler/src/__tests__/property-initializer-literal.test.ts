@@ -23,6 +23,7 @@
 import { describe, it, expect } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { validate } from '../passes/02-validate.js';
+import { lowerToANF } from '../passes/04-anf-lower.js';
 import type { ValidationResult } from '../passes/02-validate.js';
 import type { ContractNode } from '../ir/index.js';
 
@@ -107,5 +108,92 @@ class Good extends StatefulSmartContract {
 `;
     const result = validateSource(source);
     expect(result.errors).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // `toByteString('<hex>')` IS the ByteStringLiteral production — see
+  // spec/grammar.md section 11:
+  //
+  //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+  //
+  // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+  // position. A property INITIALIZER is not an expression position: this
+  // validator check runs on the AST, BEFORE ANF lowering, and still saw a
+  // call node. So the one spelling that is both valid Rust and valid Rúnar
+  // was refused in the one position `.runar.rs` needs it — the Rust DSL
+  // writes initializers as assignments inside `init()`, which the parser
+  // LIFTS into `PropertyNode.initializer`.
+  //
+  // Both halves are asserted below, because half one alone yields a contract
+  // that validates and then lowers a CALL NODE into `initialValue`.
+  // -------------------------------------------------------------------------
+  it('accepts toByteString(<literal>) as a property initializer', () => {
+    const source = `
+class Wrapped extends SmartContract {
+  readonly prefix: ByteString = toByteString('1976a914');
+  readonly owner: Addr;
+
+  constructor(owner: Addr) {
+    super(owner);
+    this.owner = owner;
+  }
+
+  public unlock(x: ByteString) {
+    assert(x == this.prefix);
+  }
+}
+`;
+    const result = validateSource(source);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('unwraps toByteString(<literal>) to a bare value in ANF initialValue', () => {
+    const wrapped = `
+class Wrapped extends SmartContract {
+  readonly prefix: ByteString = toByteString('1976a914');
+  readonly owner: Addr;
+
+  constructor(owner: Addr) {
+    super(owner);
+    this.owner = owner;
+  }
+
+  public unlock(x: ByteString) {
+    assert(x == this.prefix);
+  }
+}
+`;
+    const bare = wrapped.replace("toByteString('1976a914')", "'1976a914'");
+
+    const wrappedAnf = lowerToANF(parseContract(wrapped));
+    const bareAnf = lowerToANF(parseContract(bare));
+
+    // Half two: a bare value, not a call node.
+    expect(wrappedAnf.properties[0]!.initialValue).toBe('1976a914');
+    // ...and the whole program is indistinguishable from the bare spelling,
+    // which is what keeps `expected-ir.json` from moving.
+    expect(JSON.stringify(wrappedAnf)).toBe(JSON.stringify(bareAnf));
+  });
+
+  it('still rejects toByteString(<non-literal>) as a property initializer', () => {
+    // Not the ByteStringLiteral production — a real call, and a call is not a
+    // literal. Guards the accept from widening into "any toByteString call".
+    const source = `
+class Bad3 extends SmartContract {
+  readonly prefix: ByteString = toByteString(someIdent);
+  readonly owner: Addr;
+
+  constructor(owner: Addr) {
+    super(owner);
+    this.owner = owner;
+  }
+
+  public unlock(x: ByteString) {
+    assert(x == this.prefix);
+  }
+}
+`;
+    const result = validateSource(source);
+    expect(hasError(result, NON_LITERAL_INIT)).toBe(true);
   });
 });

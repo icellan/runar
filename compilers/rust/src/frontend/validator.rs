@@ -155,8 +155,42 @@ fn is_literal_expression(expr: &Expression) -> bool {
         Expression::UnaryExpr { op, operand } => {
             *op == UnaryOp::Neg && matches!(operand.as_ref(), Expression::BigIntLiteral { .. })
         }
-        _ => false,
+        // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+        // spec/grammar.md section 11:
+        //
+        //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        //
+        // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        // position. This check runs on the AST, BEFORE ANF lowering, so an
+        // initializer still arrives here as a call node and was refused -- in
+        // the one position THIS tier's surface needs it, since the Rust DSL
+        // writes initializers as assignments inside `init()` that the parser
+        // LIFTS into `PropertyNode.initializer`, and a bare `"1976a914"` is a
+        // `&str` that cannot be assigned to a `ByteString` (`Vec<u8>`).
+        //
+        // Accepting it here is only half the job: `extract_literal_value` in
+        // anf_lower.rs must UNWRAP the same shape, or the property validates
+        // and then loses its default entirely.
+        //
+        // Literal argument ONLY. `toByteString(x)` for a non-literal `x` is
+        // not this production and stays a non-literal initializer.
+        _ => is_to_byte_string_literal(expr),
     }
+}
+
+/// Reports whether the expression is the `toByteString(<literal>)`
+/// ByteStringLiteral production. Peer of the TS helper of the same name in
+/// `02-validate.ts`.
+pub(crate) fn is_to_byte_string_literal(expr: &Expression) -> bool {
+    let Expression::CallExpr { callee, args, .. } = expr else {
+        return false;
+    };
+    let Expression::Identifier { name } = callee.as_ref() else {
+        return false;
+    };
+    name == "toByteString"
+        && args.len() == 1
+        && matches!(args[0], Expression::ByteStringLiteral { .. })
 }
 
 /// Reports whether the expression is an array literal whose elements are all

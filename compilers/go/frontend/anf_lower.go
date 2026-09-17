@@ -328,6 +328,17 @@ func extractLiteralValue(expr Expression) interface{} {
 				return new(big.Int).Neg(lit.Value)
 			}
 		}
+	case CallExpr:
+		// `toByteString('<hex>')` IS the ByteStringLiteral production (see
+		// spec/grammar.md section 11 and the peer check in validator.go).
+		// UNWRAP it so InitialValue holds the bare value, byte-identical to
+		// what the bare `'<hex>'` spelling produces. Without this the
+		// validator would accept the property and this function would return
+		// nil for it -- silently DROPPING the default rather than storing a
+		// call node. Literal argument only.
+		if isToByteStringLiteral(e) {
+			return e.Args[0].(ByteStringLiteral).Value
+		}
 	}
 	return nil
 }

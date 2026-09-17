@@ -16,6 +16,7 @@ require_relative "../ir/loader"
 require_relative "ast_nodes"
 require_relative "sighash_directive"
 require_relative "typecheck"
+require_relative "validator"
 
 module RunarCompiler
   module Frontend
@@ -288,6 +289,15 @@ module RunarCompiler
       if expr.is_a?(UnaryExpr) && expr.op == "-"
         return -expr.operand.value if expr.operand.is_a?(BigIntLiteral)
       end
+      # `toByteString('<hex>')` IS the ByteStringLiteral production (see
+      # spec/grammar.md section 11 and the peer check in validator.rb). UNWRAP
+      # it so `initial_value` holds the bare value, byte-identical to what the
+      # bare `'<hex>'` spelling produces. Without this the validator would
+      # accept the property and this method would return nil for it -- silently
+      # DROPPING the default rather than storing a call node. Literal argument
+      # only.
+      return expr.args[0].value if Frontend.to_byte_string_literal?(expr)
+
       nil
     end
     private_class_method :_extract_literal_value

@@ -15,6 +15,14 @@
 
 use runar_compiler_rust::compile_from_source_str;
 
+// The v2 contract is `#[path]`-included as well as compiled as text. Until
+// `toByteString(<literal>)` was accepted in a property INITIALIZER, `init()`
+// assigned bare `&str` to `ByteString` / `PubKey` (both `Vec<u8>` here), so
+// this file was not valid Rust and could only ever be fed to the compiler as a
+// string — the Rust type checker never saw it.
+#[path = "TicTacToe.v2.runar.rs"]
+mod contract;
+
 const V1_SOURCE: &str = include_str!("TicTacToe.runar.rs");
 const V2_SOURCE: &str = include_str!("TicTacToe.v2.runar.rs");
 
@@ -61,4 +69,32 @@ fn test_v2_state_field_is_fixed_array() {
         fa.synthetic_names, expected,
         "synthetic names must be board__0..board__8"
     );
+}
+
+#[test]
+fn test_v2_init_decodes_bytestring_initializers_natively() {
+    use runar::prelude::*;
+
+    let mut g = contract::TicTacToe {
+        player_x: ALICE.pub_key.to_vec(),
+        bet_amount: 1000,
+        // Deliberately NOT the real defaults, so a missing `init()` fails loudly.
+        p2pkh_prefix: Vec::new(),
+        p2pkh_suffix: Vec::new(),
+        player_o: Vec::new(),
+        board: [-1; 9],
+        turn: -1,
+        status: -1,
+        tx_preimage: mock_preimage(),
+    };
+    g.init();
+
+    // `to_byte_string("1976a914")` denotes the four bytes 19 76 a9 14 — not
+    // the eight ASCII bytes of the string.
+    assert_eq!(g.p2pkh_prefix, vec![0x19, 0x76, 0xa9, 0x14]);
+    assert_eq!(g.p2pkh_suffix, vec![0x88, 0xac]);
+    assert_eq!(g.player_o, vec![0u8; 33]);
+    assert_eq!(g.board, [0i64; 9]);
+    assert_eq!(g.turn, 0);
+    assert_eq!(g.status, 0);
 }

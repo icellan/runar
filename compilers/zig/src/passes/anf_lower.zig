@@ -18,6 +18,7 @@ const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
 const typecheck = @import("typecheck.zig");
+const validate = @import("validate.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -446,6 +447,18 @@ fn extractLiteralValue(expr: Expression) ?ConstValue {
                     // (which emits load_const(0) and a unary-op binding).
                     else => {},
                 }
+            }
+        },
+        // `toByteString('<hex>')` IS the ByteStringLiteral production (see
+        // spec/grammar.md section 11 and the peer check in validate.zig).
+        // UNWRAP it so `initial_value` holds the bare value, byte-identical to
+        // what the bare `'<hex>'` spelling produces. Without this the
+        // validator would accept the property and this function would return
+        // null for it -- silently DROPPING the default rather than storing a
+        // call node. Literal argument only.
+        .call => |c| {
+            if (validate.isToByteStringLiteral(expr)) {
+                return .{ .string = c.args[0].literal_bytes };
             }
         },
         else => {},

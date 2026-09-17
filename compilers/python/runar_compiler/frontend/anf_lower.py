@@ -43,6 +43,7 @@ from runar_compiler.frontend.ast_nodes import (
     UnaryExpr,
     VariableDeclStmt,
 )
+from runar_compiler.frontend.validator import is_to_byte_string_literal
 from runar_compiler.ir.types import (
     ANFBinding,
     ANFMethod,
@@ -367,6 +368,14 @@ def _extract_literal_value(expr: Expression) -> str | int | bool | None:
     if isinstance(expr, UnaryExpr) and expr.op == "-":
         if isinstance(expr.operand, BigIntLiteral):
             return -expr.operand.value
+    # `toByteString('<hex>')` IS the ByteStringLiteral production (see
+    # spec/grammar.md section 11 and the peer check in validator.py). UNWRAP it
+    # so `initial_value` holds the bare value, byte-identical to what the bare
+    # `'<hex>'` spelling produces. Without this the validator would accept the
+    # property and this function would return None for it -- silently DROPPING
+    # the default rather than storing a call node. Literal argument only.
+    if is_to_byte_string_literal(expr):
+        return expr.args[0].value
     return None
 
 

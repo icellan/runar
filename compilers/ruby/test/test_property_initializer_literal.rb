@@ -99,4 +99,92 @@ class TestPropertyInitializerLiteral < Minitest::Test
     result = validate_source(source)
     assert_empty result.error_strings
   end
+
+  # ---------------------------------------------------------------------------
+  # `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+  # spec/grammar.md section 11:
+  #
+  #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+  #
+  # 0e192af6 folded it in ANF lowering, which covers every EXPRESSION position.
+  # A property INITIALIZER is not one: the validator runs on the AST, BEFORE
+  # ANF lowering, and still saw a call node. The `.runar.rs` surface needs
+  # exactly this spelling in exactly this position -- the Rust DSL writes
+  # initializers as assignments inside `init()` that the parser LIFTS into
+  # `PropertyNode.initializer`, and a bare `"1976a914"` is a `&str` that cannot
+  # be assigned to a `ByteString` (`Vec<u8>`).
+  #
+  # Both halves are asserted: accepting it in the validator alone yields a
+  # property that validates and then loses its default, because
+  # `_extract_literal_value` returns nil for a call node.
+  # ---------------------------------------------------------------------------
+
+  TO_BYTE_STRING_INIT = <<~TS
+    import { SmartContract, Addr, ByteString, toByteString, assert } from 'runar-lang';
+
+    class Wrapped extends SmartContract {
+      readonly prefix: ByteString = toByteString('1976a914');
+      readonly owner: Addr;
+
+      constructor(owner: Addr) {
+        super(owner);
+        this.owner = owner;
+      }
+
+      public unlock(x: ByteString): void {
+        assert(x === this.prefix);
+      }
+    }
+  TS
+
+  def test_accepts_to_byte_string_literal_property_initializer
+    result = validate_source(TO_BYTE_STRING_INIT)
+    assert_empty result.error_strings
+  end
+
+  def test_unwraps_to_byte_string_literal_initializer_in_anf
+    require "runar_compiler/cli"
+    require "json"
+
+    anf_of = lambda do |src|
+      parsed = RunarCompiler.send(:_parse_source, src, "Test.runar.ts")
+      refute_nil parsed.contract, "expected a contract from parsing"
+      RunarCompiler::Frontend.lower_to_anf(parsed.contract)
+    end
+
+    wrapped = anf_of.call(TO_BYTE_STRING_INIT)
+    bare = anf_of.call(TO_BYTE_STRING_INIT.sub("toByteString('1976a914')", "'1976a914'"))
+
+    # Half two: a bare value, not a call node and not a dropped default.
+    assert_equal "1976a914", wrapped.properties[0].initial_value
+
+    # ...and the whole program is indistinguishable from the bare spelling,
+    # which is what keeps expected-ir.json from moving.
+    assert_equal JSON.generate(RunarCompiler::CLI.send(:_anf_to_camel_dict, bare)),
+                 JSON.generate(RunarCompiler::CLI.send(:_anf_to_camel_dict, wrapped)),
+                 "wrapped ANF must be byte-identical to the bare-literal ANF"
+  end
+
+  def test_rejects_to_byte_string_non_literal_property_initializer
+    # Not the ByteStringLiteral production -- a real call, and a call is not a
+    # literal. Guards the accept from widening into "any toByteString call".
+    source = <<~TS
+      import { SmartContract, Addr, ByteString, toByteString, assert } from 'runar-lang';
+
+      class Bad3 extends SmartContract {
+        readonly prefix: ByteString = toByteString(someIdent);
+        readonly owner: Addr;
+
+        constructor(owner: Addr) {
+          super(owner);
+          this.owner = owner;
+        }
+
+        public unlock(x: ByteString): void {
+          assert(x === this.prefix);
+        }
+      }
+    TS
+    assert_non_literal_init_error(validate_source(source))
+  end
 end

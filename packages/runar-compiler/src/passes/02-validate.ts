@@ -151,7 +151,39 @@ function isLiteralExpression(expr: Expression): boolean {
   if (expr.kind === 'bytestring_literal') return true;
   // Allow negative literals: -42n
   if (expr.kind === 'unary_expr' && expr.op === '-' && expr.operand.kind === 'bigint_literal') return true;
+  // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+  // spec/grammar.md section 11:
+  //
+  //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+  //
+  // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+  // position. This check runs on the AST, BEFORE ANF lowering, so an
+  // initializer still arrives here as a call node and was refused -- in the
+  // one position the `.runar.rs` surface needs it, since the Rust DSL writes
+  // initializers as assignments inside `init()` that the parser LIFTS into
+  // `PropertyNode.initializer`, and a bare `'1976a914'` is a `&str` that
+  // cannot be assigned to a `ByteString` (`Vec<u8>`).
+  //
+  // Accepting it here is only half the job: `extractLiteralValue` in
+  // 04-anf-lower.ts must UNWRAP the same shape, or the property validates and
+  // then loses its default entirely.
+  if (isToByteStringLiteral(expr)) return true;
   return false;
+}
+
+/**
+ * `toByteString(<literal>)` -- the ByteStringLiteral production.
+ *
+ * Literal argument ONLY. `toByteString(x)` for a non-literal `x` is not this
+ * production; it stays an ordinary identity-cast call and remains a
+ * non-literal initializer.
+ */
+function isToByteStringLiteral(expr: Expression): boolean {
+  return expr.kind === 'call_expr'
+    && expr.callee.kind === 'identifier'
+    && expr.callee.name === 'toByteString'
+    && expr.args.length === 1
+    && expr.args[0]!.kind === 'bytestring_literal';
 }
 
 /**

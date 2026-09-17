@@ -233,6 +233,21 @@ function extractLiteralValue(expr: Expression): string | bigint | boolean | unde
         return -expr.operand.value;
       }
       return undefined;
+    case 'call_expr':
+      // `toByteString('<hex>')` IS the ByteStringLiteral production (see
+      // spec/grammar.md section 11 and the peer check in 02-validate.ts).
+      // UNWRAP it so `initialValue` holds the bare value, byte-identical to
+      // what the bare `'<hex>'` spelling produces. Without this the validator
+      // would accept the property and this function would return `undefined`
+      // for it -- silently DROPPING the default rather than storing a call
+      // node. Literal argument only.
+      if (
+        expr.callee.kind === 'identifier' && expr.callee.name === 'toByteString'
+        && expr.args.length === 1 && expr.args[0]!.kind === 'bytestring_literal'
+      ) {
+        return expr.args[0]!.value;
+      }
+      return undefined;
     default:
       return undefined;
   }

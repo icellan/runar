@@ -303,6 +303,23 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
                 None
             }
         }
+        // `toByteString('<hex>')` IS the ByteStringLiteral production (see
+        // spec/grammar.md section 11 and the peer check in validator.rs).
+        // UNWRAP it so `initial_value` holds the bare value, byte-identical to
+        // what the bare `'<hex>'` spelling produces. Without this the validator
+        // would accept the property and this function would return `None` for
+        // it -- silently DROPPING the default rather than storing a call node.
+        // Literal argument only.
+        Expression::CallExpr { args, .. }
+            if super::validator::is_to_byte_string_literal(expr) =>
+        {
+            match &args[0] {
+                Expression::ByteStringLiteral { value } => {
+                    Some(serde_json::Value::String(value.clone()))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

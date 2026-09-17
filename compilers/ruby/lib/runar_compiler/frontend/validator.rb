@@ -12,6 +12,21 @@ require_relative "sighash_validate"
 
 module RunarCompiler
   module Frontend
+    # Whether the expression is the `toByteString(<literal>)` ByteStringLiteral
+    # production (spec/grammar.md section 11).
+    #
+    # Literal argument ONLY -- `toByteString(x)` for a non-literal `x` is not
+    # this production and stays a non-literal initializer. Peer of the TS
+    # helper of the same name in `02-validate.ts`. Shared with `anf_lower.rb`,
+    # which must UNWRAP exactly the shape this accepts.
+    def self.to_byte_string_literal?(expr)
+      expr.is_a?(CallExpr) &&
+        expr.callee.is_a?(Identifier) &&
+        expr.callee.name == "toByteString" &&
+        expr.args.length == 1 &&
+        expr.args[0].is_a?(ByteStringLiteral)
+    end
+
     # Output of the validation pass.
     class ValidationResult
       attr_reader :errors, :warnings
@@ -427,7 +442,23 @@ module RunarCompiler
         return true if expr.is_a?(BigIntLiteral) || expr.is_a?(BoolLiteral) || expr.is_a?(ByteStringLiteral)
         return expr.operand.is_a?(BigIntLiteral) if expr.is_a?(UnaryExpr) && expr.op == "-"
 
-        false
+        # `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+        # spec/grammar.md section 11:
+        #
+        #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        #
+        # 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        # position. This check runs on the AST, BEFORE ANF lowering, so an
+        # initializer still arrives here as a call node and was refused -- in
+        # the one position the `.runar.rs` surface needs it, since the Rust DSL
+        # writes initializers as assignments inside `init()` that the parser
+        # LIFTS into `PropertyNode.initializer`, and a bare `"1976a914"` is a
+        # `&str` that cannot be assigned to a `ByteString` (`Vec<u8>`).
+        #
+        # Accepting it here is only half the job: `_extract_literal_value` in
+        # anf_lower.rb must UNWRAP the same shape, or the property validates
+        # and then loses its default entirely.
+        Frontend.to_byte_string_literal?(expr)
       end
 
       # Whether the expression is an array literal whose elements are all

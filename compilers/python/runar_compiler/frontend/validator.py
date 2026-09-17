@@ -1452,7 +1452,39 @@ def _is_literal_expression(expr: Expression | None) -> bool:
         return True
     if isinstance(expr, UnaryExpr) and expr.op == "-":
         return isinstance(expr.operand, BigIntLiteral)
-    return False
+    # `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+    # spec/grammar.md section 11:
+    #
+    #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+    #
+    # 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+    # position. This check runs on the AST, BEFORE ANF lowering, so an
+    # initializer still arrives here as a call node and was refused -- in the
+    # one position the `.runar.rs` surface needs it, since the Rust DSL writes
+    # initializers as assignments inside `init()` that the parser LIFTS into
+    # `PropertyNode.initializer`, and a bare `"1976a914"` is a `&str` that
+    # cannot be assigned to a `ByteString` (`Vec<u8>`).
+    #
+    # Accepting it here is only half the job: `_extract_literal_value` in
+    # anf_lower.py must UNWRAP the same shape, or the property validates and
+    # then loses its default entirely.
+    return is_to_byte_string_literal(expr)
+
+
+def is_to_byte_string_literal(expr: Expression | None) -> bool:
+    """Whether the expression is the ``toByteString(<literal>)`` production.
+
+    Literal argument ONLY. ``toByteString(x)`` for a non-literal ``x`` is not
+    this production and stays a non-literal initializer. Peer of the TS helper
+    of the same name in ``02-validate.ts``.
+    """
+    return (
+        isinstance(expr, CallExpr)
+        and isinstance(expr.callee, Identifier)
+        and expr.callee.name == "toByteString"
+        and len(expr.args) == 1
+        and isinstance(expr.args[0], ByteStringLiteral)
+    )
 
 
 def _is_array_literal_of_literals(expr: Expression | None) -> bool:
