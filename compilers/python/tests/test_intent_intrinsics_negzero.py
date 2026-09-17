@@ -124,13 +124,17 @@ def test_control_literal_zero_index_still_installs_the_covenant():
         "extractPrevOutputScript(0, ...) must still auto-inject its witness param"
     )
 
+    # W2: 0 is the only index this intrinsic accepts. The state write also has
+    # to go: R-300 refuses requireOutputP2PKH(0, ...) in a state-mutating
+    # method, because the implicit continuation puts the contract's own
+    # codePart at output 0. Index 1 used to dodge that and is no longer legal.
     rop = ROP_NEG_ZERO_SRC.replace(
-        "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(1,"
-    )
+        "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(0,"
+    ).replace("    c.Count = c.Count + 1\n", "")
     text = _anf_str(rop)
     assert text is not None, "valid rop contract must lower"
     assert "_serialisedOutputs" in text, (
-        "requireOutputP2PKH(1, ...) must still auto-inject _serialisedOutputs"
+        "requireOutputP2PKH(0, ...) must still auto-inject _serialisedOutputs"
     )
 
 

@@ -400,8 +400,9 @@ type Cov struct {
 }
 
 func (c *Cov) PayMulti() {
+    // W2: both calls name index 0 -- any literal index above 0 is refused now.
     runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
-    runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
 }
 """
         program = _must_lower_go_source(source)
@@ -616,10 +617,13 @@ type CondBond struct {
 }
 
 func (c *CondBond) PayBond(useA runar.Bool) {
+    // W2: index 0 is the only one this intrinsic accepts; the branch-binding
+    // property under test is about which ARM emits the commitment, not which
+    // output index it names.
     if useA {
-        runar.RequireOutputP2PKH(1, c.PkhA, c.Bond)
+        runar.RequireOutputP2PKH(0, c.PkhA, c.Bond)
     } else {
-        runar.RequireOutputP2PKH(1, c.PkhB, c.Bond)
+        runar.RequireOutputP2PKH(0, c.PkhB, c.Bond)
     }
 }
 """
@@ -671,7 +675,8 @@ type Cov struct {
 }
 
 func (c *Cov) PayBond() {
-    runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+    // W2: index 0 is the only one this intrinsic accepts.
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
 }
 """
         program = _must_lower_go_source(source)
@@ -699,8 +704,10 @@ type Cov struct {
 }
 
 func (c *Cov) PayMulti() {
-    runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
-    runar.RequireOutputP2PKH(2, c.BondPKH, c.Bond)
+    // W2: index 0 is the only one this intrinsic accepts; the dedup property
+    // under test is per-path, not per-index.
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
 }
 """
         program = _must_lower_go_source(source)

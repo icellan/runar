@@ -49,12 +49,13 @@ describe('R-2 / R-4 intent intrinsic bounds', () => {
         }
 
         public pay() {
-          // 2000 > 1000 bound — should be rejected at typecheck.
+          // W2: any literal index above 0 is rejected at typecheck. 2000 was
+          // chosen when the bound was <= 1000 and still exercises it.
           requireOutputP2PKH(2000n, this.pkh, this.a);
         }
       }
     `;
-    expectErrorContains(typecheckSource(source), 'bound to <= 1000');
+    expectErrorContains(typecheckSource(source), 'must be 0 in v1');
   });
 
   it('requireOutputP2PKH() rejects negative index', () => {
@@ -213,9 +214,10 @@ describe('N-060 negative-zero intent intrinsic index', () => {
     if (!anfJson(eps).includes('_prevOutScript_0')) {
       throw new Error('extractPrevOutputScript(0n, ...) must still auto-inject its witness param');
     }
-    const rop = ROP_NEG_ZERO_SRC.replace('requireOutputP2PKH(-0n,', 'requireOutputP2PKH(1n,');
+    // W2: the only index this intrinsic accepts is 0, so the control uses it.
+    const rop = ROP_NEG_ZERO_SRC.replace('requireOutputP2PKH(-0n,', 'requireOutputP2PKH(0n,');
     if (!anfJson(rop).includes('_serialisedOutputs')) {
-      throw new Error('requireOutputP2PKH(1n, ...) must still auto-inject _serialisedOutputs');
+      throw new Error('requireOutputP2PKH(0n, ...) must still auto-inject _serialisedOutputs');
     }
   });
 

@@ -843,8 +843,10 @@ export class Neg extends SmartContract {
     ),
   },
   {
-    target: 'requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000',
-    name: 'requireoutput-index-too-large',
+    // W2: the bound used to be <= 1000; any literal index above 0 is refused
+    // now, because `outputIndex * 34` is an output boundary only at 0.
+    target: 'requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1',
+    name: 'requireoutput-index-nonzero',
     source: stateful(
       `    this.count = this.count + x;
     requireOutputP2PKH(5000n, 'aabb', 1000n);

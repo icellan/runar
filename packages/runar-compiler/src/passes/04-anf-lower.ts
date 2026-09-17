@@ -2212,11 +2212,11 @@ function lowerCallExpr(
   // emits its own (R-072 — the substring assertion alone only constrains the
   // spender-supplied witness, not the transaction).
   //
-  // v1 assumes all outputs in the serialised set are exactly 34 bytes
-  // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
-  // of output i is i*34. If the method also calls this.addDataOutput(...)
-  // the assumption breaks (variable-length OP_RETURN) — typecheck
-  // rejects that mix; see checkMethod in 03-typecheck.ts (Crit-3).
+  // Byte offset of output i is i*34, which is only an output BOUNDARY when
+  // every earlier output is exactly 34 bytes — and nothing in a transaction
+  // makes that true. v1 therefore accepts index 0 ONLY (W2 / OutputInception);
+  // see the refusal in 03-typecheck.ts for the full reasoning and the backstop
+  // below for why it is stated twice.
   if (callee.kind === 'identifier' && callee.name === 'requireOutputP2PKH') {
     if (expr.args.length !== 3) {
       return ctx.emit({ kind: 'load_const', value: '' });
@@ -2226,6 +2226,21 @@ function lowerCallExpr(
       return ctx.emit({ kind: 'load_const', value: '' });
     }
     const idx = idxArg.value;
+    // W2 backstop. The user-facing refusal lives in `03-typecheck.ts`, where a
+    // diagnostic carries a source location — but `lowerToANF` is a PUBLIC
+    // export, so `parse()` -> `lowerToANF()` arrives here having type-checked
+    // nothing, and that is the path this repo's own intent tests take. R-012 is
+    // the standing lesson about a security check that lives in exactly one
+    // pass. Throws rather than returning a diagnostic: in the normal pipeline
+    // typecheck answers first and this is unreachable.
+    if (idx !== 0n) {
+      throw new Error(
+        `requireOutputP2PKH: outputIndex must be 0; got ${idx.toString()}. The emitted ` +
+        'assertion reads output i at byte offset i*34, which is an output boundary only ' +
+        'if every earlier output is exactly 34 bytes — an attacker sizes output 0 freely ' +
+        "and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset.",
+      );
+    }
 
     ctx.methodScope.recordAutoInjectedParam('_serialisedOutputs', 'ByteString');
     ctx.addParam('_serialisedOutputs');

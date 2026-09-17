@@ -1389,6 +1389,20 @@ export class RunarInterpreter {
         expected.set([0x19, 0x76, 0xa9, 0x14], 8);
         expected.set(pubkeyHash, 12);
         expected.set([0x88, 0xac], 32);
+        // W2 backstop. `idx * 34` is the START of output idx only when every
+        // earlier output is exactly 34 bytes, and nothing makes that true --
+        // an attacker sizes output 0 freely and can hide the expected P2PKH
+        // bytes inside its OP_RETURN payload at that offset. The compiler
+        // refuses a literal index above 0 (typecheck plus an ANF-lowering
+        // backstop); refuse it here too, or this interpreter would ACCEPT
+        // spends the compiled script cannot even be built for, and would have
+        // been a second implementation agreeing with the bug.
+        if (idx !== 0n) {
+          throw new AssertionError(
+            `requireOutputP2PKH(${idx}): outputIndex must be 0 — byte offset ` +
+            'idx*34 is an output boundary only at 0 (W2)',
+          );
+        }
         const offset = Number(idx * 34n);
         const slice = serialised.slice(offset, offset + 34);
         if (!bytesEqual(slice, expected)) {

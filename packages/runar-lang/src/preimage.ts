@@ -226,6 +226,22 @@ export function extractPrevOutputScript(
  * emits a one-shot `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
  * check, and per call asserts the 34-byte substring at offset
  * `outputIndex * 34` equals the expected P2PKH bytes.
+ *
+ * **v1 accepts `outputIndex` 0 and nothing else** (W2 / OutputInception).
+ * `outputIndex * 34` is the START of output `outputIndex` only if every
+ * earlier output is exactly 34 bytes, and a transaction guarantees no such
+ * thing: an output is `value[8] ‖ CompactSize(len) ‖ script[len]`, and the
+ * spender picks output 0's length. For `outputIndex = 1` an attacker builds
+ * output 0 as a 78-byte OP_RETURN whose payload carries the promised 34-byte
+ * P2PKH serialisation starting at global offset 34, and points the real output
+ * 1 at themselves. The witness still hashes to `hashOutputs` — it IS the real
+ * output set — so the script is satisfied and the payment is not made.
+ *
+ * Offset 0 has no such gap: it is a genuine output boundary, so matching 34
+ * bytes there forces output 0 to BE the expected P2PKH. Asserting an output
+ * beyond the first needs a CompactSize walk from byte 0, which the v1 codegen
+ * does not emit; the compiler refuses the call rather than emitting a check
+ * that can be satisfied without the payment.
  */
 export function requireOutputP2PKH(
   _outputIndex: bigint,

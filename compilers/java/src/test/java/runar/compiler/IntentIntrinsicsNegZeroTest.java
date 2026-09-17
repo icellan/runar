@@ -160,13 +160,19 @@ class IntentIntrinsicsNegZeroTest {
             names.contains("_prevOutScript_0"),
             "extractPrevOutputScript(0, ...) must still auto-inject its witness param");
 
-        String rop = ROP_NEG_ZERO_SRC.replace(
-            "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(1,");
+        // W2: 0 is the only index this intrinsic accepts. The state write also
+        // has to go: R-300 refuses requireOutputP2PKH(0, ...) in a
+        // state-mutating method, because the implicit continuation puts the
+        // contract's own codePart at output 0. Index 1 used to dodge that and
+        // is no longer legal.
+        String rop = ROP_NEG_ZERO_SRC
+            .replace("RequireOutputP2PKH(-0,", "RequireOutputP2PKH(0,")
+            .replace("\tc.Count = c.Count + 1\n", "");
         names = loweredParamNames(rop);
         assertNotNull(names, "valid rop contract must lower");
         assertTrue(
             names.contains("_serialisedOutputs"),
-            "requireOutputP2PKH(1, ...) must still auto-inject _serialisedOutputs");
+            "requireOutputP2PKH(0, ...) must still auto-inject _serialisedOutputs");
     }
 
     @Test

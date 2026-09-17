@@ -1623,8 +1623,8 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 					if idx < 0 {
 						tc.addError(fmt.Sprintf("%s() argument 1 (index) must be >= 0; got %d", funcName, idx))
 					}
-					if funcName == "requireOutputP2PKH" && idx > 1000 {
-						tc.addError(fmt.Sprintf("requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got %d (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)", idx))
+					if funcName == "requireOutputP2PKH" && idx > 0 {
+						tc.addError(fmt.Sprintf("requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got %d. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit", idx))
 					}
 				}
 			}

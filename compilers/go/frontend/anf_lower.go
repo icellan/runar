@@ -2247,6 +2247,14 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 			return ctx.emit(makeLoadConstString(""))
 		}
 		idx := ir.MustIntValueExact(idxLit.Value, "requireOutputP2PKH: output index")
+		// W2 backstop. The user-facing refusal lives in the typechecker, where a
+		// diagnostic carries a source location -- but ANF lowering is reachable from
+		// callers that run no typechecker, and R-012 is this repo's standing lesson about
+		// a security check that lives in exactly one pass. Unreachable in the normal
+		// pipeline: typecheck answers first.
+		if idx != 0 {
+			panic(fmt.Sprintf("requireOutputP2PKH: outputIndex must be 0; got %d. The emitted assertion reads output i at byte offset i*34, which is an output boundary only if every earlier output is exactly 34 bytes -- an attacker sizes output 0 freely and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset.", idx))
+		}
 
 		ctx.methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString")
 		ctx.addParam("_serialisedOutputs")

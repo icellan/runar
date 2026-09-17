@@ -174,13 +174,24 @@ Compiler-enforced constraints:
 
 - `outputIndex` MUST be a compile-time integer literal. Variable indices
   are rejected at typecheck.
-- v1 assumes every output in the tx's serialised output set is exactly
-  34 bytes (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). The
-  byte offset of output `i` is `i * 34`. Methods that also call
-  `c.AddDataOutput(...)` (OP_RETURN) in the same body are rejected at
-  typecheck — the variable-length OP_RETURN breaks the fixed-offset
-  assumption. If BSVM needs mixed output sets later, a v2 will accept a
-  literal `precedingOutputSizes [...]int64` argument.
+- **`outputIndex` MUST be `0` in v1.** The byte offset of output `i` is
+  `i * 34`, which is that output's START only if every earlier output is
+  exactly 34 bytes — and a transaction guarantees no such thing. An
+  output is `value[8] ‖ CompactSize(len) ‖ script[len]`, and the spender
+  picks output 0's length: for `i = 1` an attacker builds output 0 as a
+  78-byte OP_RETURN carrying the promised 34 P2PKH bytes at global offset
+  34, and points the transaction's real output 1 at themselves. The
+  witness still hashes to `hashOutputs` — it IS the real output set — so
+  the assertion passes and the payment is not made (W2). Offset 0 is a
+  genuine boundary, so index 0 is sound. Asserting a later output needs a
+  CompactSize walk from byte 0, which the v1 codegen does not emit.
+- The same 34-byte assumption is why methods that also call
+  `c.AddDataOutput(...)` (OP_RETURN), `c.AddOutput(...)` or
+  `c.AddRawOutput(...)` in the same body are rejected at typecheck
+  (R-300). That is a ban on the CONTRACT's own outputs and was never a
+  constraint on the transaction an attacker builds, which is what the
+  index rule above adds. If BSVM needs mixed output sets later, a v2 will
+  parse the CompactSize chain on chain.
 - The serialised-outputs witness is auto-injected as a hidden method
   parameter `_serialisedOutputs` of type `ByteString` — supplied by the
   unlocker once per method, regardless of how many `RequireOutputP2PKH`

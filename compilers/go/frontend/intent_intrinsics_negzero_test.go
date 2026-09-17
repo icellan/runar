@@ -113,13 +113,18 @@ func TestNegZeroControl_LiteralZeroIndexStillInstallsTheCovenant(t *testing.T) {
 		t.Error("extractPrevOutputScript(0, ...) must still auto-inject its witness param")
 	}
 
-	rop := strings.Replace(ropNegZeroSrc, "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(1,", 1)
+	// W2: 0 is the only index this intrinsic accepts. The state write also has
+	// to go: R-300 refuses `requireOutputP2PKH(0, ...)` in a state-mutating
+	// method, because the implicit continuation puts the contract's own
+	// codePart at output 0. Index 1 used to dodge that and is no longer legal.
+	rop := strings.Replace(ropNegZeroSrc, "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(0,", 1)
+	rop = strings.Replace(rop, "\tc.Count = c.Count + 1\n", "", 1)
 	jsonStr, lowered = anfJSONForNegZero(t, rop)
 	if !lowered {
 		t.Fatal("valid rop contract must lower")
 	}
 	if !strings.Contains(jsonStr, "_serialisedOutputs") {
-		t.Error("requireOutputP2PKH(1, ...) must still auto-inject _serialisedOutputs")
+		t.Error("requireOutputP2PKH(0, ...) must still auto-inject _serialisedOutputs")
 	}
 }
 

@@ -1257,9 +1257,9 @@ class _TypeChecker:
                         self._add_error(
                             f"{func_name}() argument 1 (index) must be >= 0; got {idx}"
                         )
-                    if func_name == "requireOutputP2PKH" and idx > 1000:
+                    if func_name == "requireOutputP2PKH" and idx > 0:
                         self._add_error(
-                            f"requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got {idx} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)"
+                            f"requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got {idx}. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit"
                         )
 
         # extractPrevOutputScript variable-arity special case (2-arg full-hash

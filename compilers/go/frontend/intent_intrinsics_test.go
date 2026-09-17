@@ -201,7 +201,7 @@ func (c *Cov) Pay() {
 	runar.RequireOutputP2PKH(2000, c.PKH, c.A)
 }
 `
-	expectIntrinsicTypeError(t, source, "bound to <= 1000")
+	expectIntrinsicTypeError(t, source, "must be 0 in v1")
 }
 
 func TestRequireOutputP2PKH_NegativeIndex_Rejects(t *testing.T) {
@@ -504,8 +504,9 @@ type Cov struct {
 }
 
 func (c *Cov) PayMulti() {
+	// W2: both calls name index 0 -- any literal index above 0 is refused now.
 	runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
-	runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+	runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
 }
 `
 	p := mustLowerGoSource(t, source)

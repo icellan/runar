@@ -48,7 +48,7 @@ func (c *Cov) Pay() {
 }
 "#;
     let errors = typecheck_errors(source);
-    assert_error_contains(&errors, "bound to <= 1000");
+    assert_error_contains(&errors, "must be 0 in v1");
 }
 
 #[test]
@@ -219,12 +219,18 @@ fn test_literal_zero_index_still_installs_the_covenant() {
         "extractPrevOutputScript(0, ...) must still auto-inject its witness param"
     );
 
-    let rop = ROP_NEG_ZERO_SRC.replace("RequireOutputP2PKH(-0,", "RequireOutputP2PKH(1,");
+    // W2: 0 is the only index this intrinsic accepts. The state write also has
+    // to go: R-300 refuses `requireOutputP2PKH(0, ...)` in a state-mutating
+    // method, because the implicit continuation puts the contract's own
+    // codePart at output 0. Index 1 used to dodge that and is no longer legal.
+    let rop = ROP_NEG_ZERO_SRC
+        .replace("RequireOutputP2PKH(-0,", "RequireOutputP2PKH(0,")
+        .replace("    c.Count = c.Count + 1\n", "");
     let program = lower_to_ir_result(&rop, "Test.runar.go").expect("valid rop contract must lower");
     let json = serde_json::to_string(&program).expect("serialize ANF");
     assert!(
         json.contains("_serialisedOutputs"),
-        "requireOutputP2PKH(1, ...) must still auto-inject _serialisedOutputs"
+        "requireOutputP2PKH(0, ...) must still auto-inject _serialisedOutputs"
     );
 }
 

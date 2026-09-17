@@ -90,6 +90,15 @@ pub const LowerError = error{
     /// the call site has no value to reference. See
     /// `inlinePrivateMethodCall` (R-290).
     EmptyInlinedPrivateBody,
+    /// `requireOutputP2PKH(i, ...)` with a literal `i` other than 0 (W2).
+    /// The emitted assertion reads output i at byte offset i*34, which is an
+    /// output boundary only if every earlier output is exactly 34 bytes --
+    /// nothing enforces that, and an attacker who sizes output 0 freely can put
+    /// the expected P2PKH bytes inside its OP_RETURN payload at that offset
+    /// while the transaction's real output i pays someone else.
+    /// `passes/typecheck.zig` refuses it with a located diagnostic; this is the
+    /// backstop for callers that lower without typechecking (R-012).
+    OutputIndexMustBeZero,
 };
 
 /// Name set used for the "what does the code after this statement still read"
@@ -2299,9 +2308,10 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     // emits its own (R-072 — the substring assertion alone only constrains the
     // spender-supplied witness, not the transaction).
     //
-    // v1 assumes all outputs in the serialised set are exactly 34 bytes
-    // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
-    // of output i is i*34.
+    // Byte offset of output i is i*34, which is an output BOUNDARY only when
+    // every earlier output is exactly 34 bytes -- and nothing in a transaction
+    // makes that true. v1 therefore accepts index 0 ONLY (W2 / OutputInception);
+    // see `LowerError.OutputIndexMustBeZero`.
     if (std.mem.eql(u8, c.callee, "requireOutputP2PKH")) {
         if (c.args.len != 3) {
             return try ctx.emit(makeLoadConstString(ctx.allocator, ""));
@@ -2310,6 +2320,11 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
             .literal_int => |v| v,
             else => return try ctx.emit(makeLoadConstString(ctx.allocator, "")),
         };
+        // W2 backstop -- see `LowerError.OutputIndexMustBeZero`. The located
+        // refusal lives in the typechecker; this covers callers that lower
+        // without typechecking (R-012), and is unreachable in the normal
+        // pipeline.
+        if (idx != 0) return LowerError.OutputIndexMustBeZero;
 
         try ctx.recordAutoInjectedParam("_serialisedOutputs", .byte_string, "ByteString");
         try ctx.addParam("_serialisedOutputs");

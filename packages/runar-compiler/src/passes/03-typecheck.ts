@@ -2004,9 +2004,9 @@ class TypeChecker {
                 args[0]!.sourceLocation,
               ));
             }
-            if (funcName === 'requireOutputP2PKH' && litValue > 1000n) {
+            if (funcName === 'requireOutputP2PKH' && litValue > 0n) {
               this.errors.push(makeDiagnostic(
-                `requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got ${litValue.toString()} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)`,
+                `requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got ${litValue.toString()}. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit`,
                 'error',
                 args[0]!.sourceLocation,
               ));

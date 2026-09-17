@@ -239,8 +239,9 @@ test "intent: requireOutputP2PKH multiple calls one _serialisedOutputs param" {
         \\}
         \\
         \\func (c *Cov) PayMulti() {
+        \\    // W2: both calls name index 0 -- any literal index above 0 is refused now.
         \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
-        \\    runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+        \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
         \\}
     ;
 
@@ -608,10 +609,12 @@ test "intent R-2: requireOutputP2PKH index over 1000 errors" {
         \\}
     ;
 
-    try expectIntrinsicTypeError(allocator, source, "bound to <= 1000");
+    try expectIntrinsicTypeError(allocator, source, "must be 0 in v1");
 }
 
-test "intent R-2: requireOutputP2PKH index 1000 is allowed" {
+// W2: the accepted index is 0, not 1000. Kept as the positive half of the
+// bound pair so the refusal above cannot pass by refusing everything.
+test "intent R-2: requireOutputP2PKH index 0 is allowed" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -628,7 +631,7 @@ test "intent R-2: requireOutputP2PKH index 1000 is allowed" {
         \\}
         \\
         \\func (c *Cov) PayBond() {
-        \\    runar.RequireOutputP2PKH(1000, c.BondPKH, c.Bond)
+        \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
         \\}
     ;
 
@@ -897,7 +900,12 @@ test "intent N-060 CONTROL: a literal 0 index still installs the covenant" {
     const eps_methods = (try lowerIfAccepted(allocator, eps)) orelse return error.ValidEpsContractMustLower;
     try std.testing.expect(anyParam(eps_methods, "_prevOutScript_0"));
 
-    const rop = try std.mem.replaceOwned(u8, allocator, rop_neg_zero_src, "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(1,");
+    // W2: 0 is the only index this intrinsic accepts. The state write also has
+    // to go: R-300 refuses `requireOutputP2PKH(0, ...)` in a state-mutating
+    // method, because the implicit continuation puts the contract's own
+    // codePart at output 0. Index 1 used to dodge that and is no longer legal.
+    const rop_idx0 = try std.mem.replaceOwned(u8, allocator, rop_neg_zero_src, "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(0,");
+    const rop = try std.mem.replaceOwned(u8, allocator, rop_idx0, "\n    c.Count = c.Count + 1", "");
     const rop_methods = (try lowerIfAccepted(allocator, rop)) orelse return error.ValidRopContractMustLower;
     try std.testing.expect(anyParam(rop_methods, "_serialisedOutputs"));
 }

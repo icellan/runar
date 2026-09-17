@@ -842,11 +842,22 @@ parameter plus the assertions that bind it to the spending transaction.
 `requireOutputP2PKH(i, pubKeyHash, amount)` asserts that output `i` of the
 spending transaction is a standard 34-byte P2PKH paying `amount` to
 `pubKeyHash`. It injects `_serialisedOutputs` and commits it to the preimage's
-`hashOutputs` once per control-flow path. **`i` must be an integer literal**, and
-the byte offsets it reads assume every output in the set is exactly 34 bytes —
-so the type checker refuses a method that also calls `addDataOutput` (a
-variable-length OP_RETURN breaks the stride) or `addOutput` / `addRawOutput` (a
-state-continuation output is never 34 bytes). See R-300.
+`hashOutputs` once per control-flow path. **`i` must be an integer literal, and
+in v1 it must be `0`.**
+
+The check reads output `i` at byte offset `i*34`, which is the start of output
+`i` only if every earlier output is exactly 34 bytes. A transaction guarantees
+no such thing — an output is `value[8] ‖ CompactSize(len) ‖ script[len]` and the
+spender picks output 0's length — so for `i > 0` an attacker places the promised
+34 P2PKH bytes inside an earlier output's OP_RETURN at that offset and sends the
+real output `i` elsewhere. Offset 0 IS a boundary, so index 0 is sound; anything
+beyond it needs a CompactSize walk the v1 codegen does not emit (W2).
+
+The same 34-byte assumption is why the type checker refuses a method that also
+calls `addDataOutput` (a variable-length OP_RETURN breaks the stride) or
+`addOutput` / `addRawOutput` (a state-continuation output is never 34 bytes).
+See R-300 — note that this is a ban on the CONTRACT's own outputs and was never
+a constraint on the transaction, which is what the index rule above adds.
 
 `extractPrevOutputScript(i, expectedHash)` returns the locking script of the
 transaction's input `i`, injecting `_prevOutScript_<i>` as a witness parameter
