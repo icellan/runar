@@ -1511,12 +1511,14 @@ def extractorBody (func : String) : List StackOp :=
       [opc "OP_SIZE", push 52, opc "OP_SUB", opc "OP_SPLIT", .nip,
        push 8, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
   | "extractScriptCode" =>
-      -- scriptCode lives between the prevout (36 + outpoint stuff) and
-      -- the trailing fixed-size fields. The TS reference uses a custom
-      -- multi-split sequence that we do not reproduce here; downstream
-      -- fixtures using extractScriptCode go through the dedicated state
-      -- helpers (deserialize_state) instead.
-      []
+      -- TS `lowerExtractor` case `extractScriptCode`
+      -- (`05-stack-lower.ts:4915-4949`): variable-length field at offset
+      -- 104 (version 4 + hashPrevouts 32 + hashSequence 32 + outpoint 36).
+      -- After skipping that prefix, drop the last 52 bytes (amount 8 +
+      -- nSequence 4 + hashOutputs 32 + nLocktime 4 + sighashType 4).
+      -- scriptCode = preimage[104 .. len-52].
+      [push 104, opc "OP_SPLIT", .nip,
+       opc "OP_SIZE", push 52, opc "OP_SUB", opc "OP_SPLIT", .drop]
   | _ => []
 
 /-! ## Per-binding lowering
