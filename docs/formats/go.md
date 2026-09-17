@@ -369,8 +369,19 @@ binds the **function** in each case and gives the digest types distinct names:
 |---|---|
 | the SHA-256 **hash** | `runar.Sha256(data)` (alias `runar.Sha256Hash`) |
 | the SHA-256 **digest type** | `runar.Sha256Digest` |
-| the RIPEMD-160 **hash** | `runar.Ripemd160(data)` (alias `runar.Ripemd160Func`) |
+| the RIPEMD-160 **hash** | `runar.Ripemd160(data)` |
 | the RIPEMD-160 **digest type** | `runar.Ripemd160Hash` |
+
+`runar.Sha256Hash` is a real second contract spelling: it is a compatibility
+alias carried in all seven tiers' builtin tables, and contracts use it today
+(`examples/go/r1-k1-wallet`, `examples/go/byte-builtins`). `Ripemd160Func` is
+**not** its counterpart, and this table used to imply it was. It is the Go-side
+original name that `runar.Ripemd160` delegates to in one line — callable from
+Go test code, in no tier's builtin table, and a contract that writes it is
+rejected by all seven with `unknown function 'ripemd160Func'` (measured). Write
+`runar.Ripemd160(data)`; it needs no alias because nothing shadows it in call
+position. `tests/go-md-call-spellings-resolve.test.ts` now holds every
+`(alias ...)` in this file to that standard.
 
 Use the `…Digest` / `…Hash` type names in field and parameter annotations. They
 are what a `.runar.go` file needs to be **both** valid Go and valid Rúnar, which
