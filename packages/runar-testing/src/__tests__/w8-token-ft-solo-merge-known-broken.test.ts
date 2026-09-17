@@ -47,7 +47,7 @@ import {
   buildP2PKHScript,
 } from 'runar-sdk';
 import { compile } from 'runar-compiler';
-import { testKey, validateContractInput } from '../oracle/real-crypto-execution.js';
+import { testKey, validateContractInput } from '../oracle/index.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
 const TOKEN_FT_TS = join(
@@ -278,7 +278,7 @@ describe('W8 / SoloMerge: no token-ft source claims the merge is secure', () => 
 
     it(`${rel} warns that merge is unsound`, () => {
       const text = readFileSync(join(REPO_ROOT, rel), 'utf8');
-      expect(text).toMatch(/UNSOUND/);
+      expect(text).toContain('UNSOUND');
     });
   }
 

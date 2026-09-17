@@ -1743,11 +1743,13 @@ function warnLocktimeWithoutSequenceGuard(method: MethodNode, ctx: ValidationCon
     const current = queue.shift()!;
     walkExpressionsInBody(current.body, (expr) => {
       if (isLocktimeRead(expr)) readsLocktime = true;
-    });
-    // F7: a comparison that is never asserted does not enforce anything.
-    // `const ok = extractSequence(...) !== 0xffffffffn` used to silence this.
-    walkAssertedExpressions(current.body, (expr) => {
-      if (isSequenceFinalityGuard(expr)) hasSequenceGuard = true;
+      if (isAssertCall(expr) && expr.kind === 'call_expr') {
+        for (const arg of expr.args) {
+          walkExpr(arg, (inner) => {
+            if (isSequenceFinalityGuard(inner)) hasSequenceGuard = true;
+          });
+        }
+      }
     });
     // Follow calls into private helpers so a guard (or locktime read) supplied
     // by an inlined helper is seen by the public entry point.
@@ -1779,29 +1781,6 @@ function walkExpressionsInBody(
 ): void {
   for (const stmt of stmts) {
     walkExpressionsInStatement(stmt, visitor);
-  }
-}
-
-/** Walk only expressions that sit inside an `assert(...)` argument. */
-function walkAssertedExpressions(
-  stmts: Statement[],
-  visitor: (expr: Expression) => void,
-): void {
-  for (const stmt of stmts) {
-    switch (stmt.kind) {
-      case 'expression_statement':
-        if (isAssertCall(stmt.expression) && stmt.expression.kind === 'call_expr') {
-          for (const arg of stmt.expression.args) walkExpr(arg, visitor);
-        }
-        break;
-      case 'if_statement':
-        walkAssertedExpressions(stmt.then, visitor);
-        if (stmt.else) walkAssertedExpressions(stmt.else, visitor);
-        break;
-      case 'for_statement':
-        walkAssertedExpressions(stmt.body, visitor);
-        break;
-    }
   }
 }
 

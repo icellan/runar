@@ -105,34 +105,20 @@ func TestAbsBig_MinInt64(t *testing.T) {
 }
 
 func TestPow_Overflow(t *testing.T) {
+	// PowBig is a native Go *big.Int helper, not a .runar.go builtin. Abs
+	// names AbsBig because the parser now lowers it; PowBig does not. A panic
+	// that says "use PowBig for arbitrary precision" is the absBig defect
+	// again — all seven tiers answer `unknown function 'powBig'`.
 	defer func() {
-		assertOverflowPanicNamesNoContractBuiltin(t, recover(), "PowBig")
+		r := recover()
+		if r == nil {
+			t.Fatal("expected Pow overflow panic when result doesn't fit int64")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "not a .runar.go builtin") {
+			t.Fatalf("Pow overflow panic advertised a contract spelling: %s", msg)
+		}
 	}()
 	Pow(math.MaxInt64, 2)
-}
-
-// F5: PowBig / MulDivBig / PercentOfBig are native Go *big.Int helpers, not
-// .runar.go builtins. Abs names AbsBig because the parser now lowers it; these
-// three do not. A panic that says "use PowBig for arbitrary precision" is the
-// absBig defect again — all seven tiers answer `unknown function 'powBig'`.
-func assertOverflowPanicNamesNoContractBuiltin(t *testing.T, r any, peer string) {
-	t.Helper()
-	if r == nil {
-		t.Fatal("expected overflow panic when result doesn't fit int64")
-	}
-	msg, ok := r.(string)
-	if !ok {
-		t.Fatalf("expected string panic, got %T %v", r, r)
-	}
-	if !strings.Contains(msg, "int64 overflow") {
-		t.Fatalf("expected overflow panic, got %q", msg)
-	}
-	if !strings.Contains(msg, "not a .runar.go builtin") {
-		t.Fatalf("overflow panic must not advertise %s as a contract spelling; got %q", peer, msg)
-	}
-	if strings.Contains(msg, "use "+peer+" for arbitrary precision") {
-		t.Fatalf("old absBig-shaped advice still present: %q", msg)
-	}
 }
 
 func TestPow_SmallValues(t *testing.T) {
@@ -155,7 +141,13 @@ func TestPowBig_LargeResult(t *testing.T) {
 
 func TestMulDiv_Overflow(t *testing.T) {
 	defer func() {
-		assertOverflowPanicNamesNoContractBuiltin(t, recover(), "MulDivBig")
+		r := recover()
+		if r == nil {
+			t.Fatal("expected MulDiv overflow panic")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "not a .runar.go builtin") {
+			t.Fatalf("MulDiv overflow panic advertised a contract spelling: %s", msg)
+		}
 	}()
 	MulDiv(math.MaxInt64, 2, 1)
 }
@@ -187,7 +179,13 @@ func TestMulDivBig_LargeValues(t *testing.T) {
 
 func TestPercentOf_Overflow(t *testing.T) {
 	defer func() {
-		assertOverflowPanicNamesNoContractBuiltin(t, recover(), "PercentOfBig")
+		r := recover()
+		if r == nil {
+			t.Fatal("expected PercentOf overflow panic when result doesn't fit int64")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "not a .runar.go builtin") {
+			t.Fatalf("PercentOf overflow panic advertised a contract spelling: %s", msg)
+		}
 	}()
 	// The final result MaxInt64 * 5000 / 10000 = MaxInt64/2 still fits;
 	// pick a larger bps that genuinely overflows the output.

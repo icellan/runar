@@ -129,16 +129,20 @@ describe('H2 (#131): extractLocktime without extractSequence guard', () => {
     expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(true);
   });
 
-  // F7: a comparison that is never asserted does not enforce anything.
-  // `let ok = extractSequence !== 0xffffffffn` used to silence the warning.
+  // -------------------------------------------------------------------------
+  // Comparisons that do not enforce anything
+  // -------------------------------------------------------------------------
+
   it('STILL warns when the comparison is assigned, not asserted', () => {
+    // A comparison that is never asserted does not enforce anything.
+    // `let ok = extractSequence !== 0xffffffffn` used to silence the warning.
     const guard = 'const ok: boolean = extractSequence(this.txPreimage) !== 0xffffffffn;';
     expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(true);
   });
 
-  // F7: `extractSequence < 0n` is never true for an unsigned nSequence, so it
-  // is not a finality guard. strictBoundOk used to admit any literal <= 2^32-1.
   it('STILL warns for a vacuous strict bound (extractSequence < 0n)', () => {
+    // Unsigned nSequence is never negative, so `< 0n` is not a finality guard.
+    // strictBoundOk used to admit any literal <= 2^32-1.
     const guard = 'assert(extractSequence(this.txPreimage) < 0n);';
     expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(true);
   });

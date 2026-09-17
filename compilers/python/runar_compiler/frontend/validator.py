@@ -1335,13 +1335,16 @@ def _is_sequence_finality_guard(expr: Expression) -> bool:
     Accepted::
 
         extractSequence(pre) !== 0xffffffff   # and the reversed spelling
-        extractSequence(pre) <  N, N <= 0xffffffff   # reversed: N > ...
+        extractSequence(pre) <  N, 0 < N <= 0xffffffff   # reversed: N > ...
         extractSequence(pre) <= N, N <  0xffffffff   # reversed: N >= ...
 
     Deliberately NOT accepted: ``<= 0xffffffff`` and ``>= 0xffffffff``.
     nSequence cannot exceed 0xffffffff, so those are true for every transaction
     including the final one -- a tautology that used to silence this warning on
     a contract with no guard at all (W1 / FinalCountdown).
+
+    Also NOT accepted: ``extractSequence(pre) < 0``. Unsigned nSequence is
+    never negative, so that comparison is vacuous.
     """
     if not isinstance(expr, BinaryExpr):
         return False
@@ -1385,17 +1388,18 @@ def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagn
     reads_locktime = False
     has_sequence_guard = False
 
+    def mark_guard(inner: Expression) -> None:
+        nonlocal has_sequence_guard
+        if _is_sequence_finality_guard(inner):
+            has_sequence_guard = True
+
     def visitor(expr: Expression) -> None:
         nonlocal reads_locktime, has_sequence_guard
         if _is_locktime_read(expr):
             reads_locktime = True
         if _is_assert_call(expr) and isinstance(expr, CallExpr):
             for arg in expr.args:
-                def _guard(inner: Expression) -> None:
-                    nonlocal has_sequence_guard
-                    if _is_sequence_finality_guard(inner):
-                        has_sequence_guard = True
-                _walk_expr(arg, _guard)
+                _walk_expr(arg, mark_guard)
 
     visited: set[str] = {method.name}
     queue: list = [method]

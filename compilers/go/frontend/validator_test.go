@@ -1865,8 +1865,8 @@ class TimeLock extends StatefulSmartContract {
 	}
 }
 
-func TestValidate_H2_AssignedComparison_StillWarns(t *testing.T) {
-	// F7: a comparison that is never asserted does not enforce anything.
+func TestValidate_H2_AssignedComparison_Warns(t *testing.T) {
+	// A comparison that is never asserted does not enforce anything.
 	source := `
 import { StatefulSmartContract, assert, extractLocktime, extractSequence } from 'runar-lang';
 
@@ -1892,7 +1892,7 @@ class TimeLock extends StatefulSmartContract {
 	}
 }
 
-func TestValidate_H2_VacuousStrictBound_StillWarns(t *testing.T) {
+func TestValidate_H2_VacuousStrictBound_Warns(t *testing.T) {
 	source := `
 import { StatefulSmartContract, assert, extractLocktime, extractSequence } from 'runar-lang';
 

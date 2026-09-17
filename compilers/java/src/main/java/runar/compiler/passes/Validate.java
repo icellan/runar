@@ -1740,7 +1740,7 @@ public final class Validate {
      * {@code emitUnsignedBin2Num} in {@code StackLower}).
      *
      * <p>Accepted: {@code extractSequence(pre) !== 0xffffffff} (and reversed);
-     * {@code < N} with N &lt;= 0xffffffff (reversed {@code N > ...});
+     * {@code < N} with 0 &lt; N &lt;= 0xffffffff (reversed {@code N > ...});
      * {@code <= N} with N &lt; 0xffffffff (reversed {@code N >= ...}).
      *
      * <p>Deliberately NOT accepted: {@code <= 0xffffffff} and
@@ -1748,6 +1748,9 @@ public final class Validate {
      * true for every transaction including the final one — a tautology that
      * used to silence this warning on a contract with no guard at all
      * (W1 / FinalCountdown).
+     *
+     * <p>Also NOT accepted: {@code extractSequence(pre) < 0}. Unsigned nSequence
+     * is never negative, so that comparison is vacuous.
      */
     private static boolean isSequenceFinalityGuard(Expression expr) {
         if (!(expr instanceof BinaryExpr be)) return false;

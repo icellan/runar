@@ -1451,14 +1451,18 @@ func isLocktimeRead(expr Expression) bool {
 // (see emitUnsignedBin2Num in codegen/stack.go).
 //
 // Accepted:
-//   extractSequence(pre) !== 0xffffffff   and the reversed spelling
-//   extractSequence(pre) <  N, N <= 0xffffffff   (reversed: N > ...)
-//   extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
+//
+//	extractSequence(pre) !== 0xffffffff   and the reversed spelling
+//	extractSequence(pre) <  N, 0 < N <= 0xffffffff   (reversed: N > ...)
+//	extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
 //
 // Deliberately NOT accepted: <= 0xffffffff and >= 0xffffffff. nSequence cannot
 // exceed 0xffffffff, so those are true for every transaction including the
 // final one — a tautology that used to silence this warning on a contract with
 // no guard at all (W1 / FinalCountdown).
+//
+// Also NOT accepted: extractSequence(pre) < 0. Unsigned nSequence is never
+// negative, so that comparison is vacuous.
 func isSequenceFinalityGuard(expr Expression) bool {
 	bin, ok := expr.(BinaryExpr)
 	if !ok {

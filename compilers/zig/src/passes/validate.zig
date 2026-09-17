@@ -1744,13 +1744,16 @@ fn sequenceLiteral(expr: Expression) ?i128 {
 ///
 /// Accepted:
 ///   extractSequence(pre) !== 0xffffffff   and the reversed spelling
-///   extractSequence(pre) <  N, N <= 0xffffffff   (reversed: N > ...)
+///   extractSequence(pre) <  N, 0 < N <= 0xffffffff   (reversed: N > ...)
 ///   extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
 ///
 /// Deliberately NOT accepted: `<= 0xffffffff` and `>= 0xffffffff`. nSequence
 /// cannot exceed 0xffffffff, so those are true for every transaction including
 /// the final one — a tautology that used to silence this warning on a contract
 /// with no guard at all (W1 / FinalCountdown).
+///
+/// Also NOT accepted: `extractSequence(pre) < 0`. Unsigned nSequence is never
+/// negative, so that comparison is vacuous.
 fn isSequenceFinalityGuard(expr: Expression) bool {
     const b = switch (expr) {
         .binary_op => |bp| bp,
@@ -3194,7 +3197,7 @@ test "H2: warns when the locktime read is in a private helper but no sequence gu
     try testing.expect(std.mem.indexOf(u8, w.message, "unlock") != null);
 }
 
-test "H2 F7: assigned comparison still warns" {
+test "H2: assigned comparison still warns" {
     const allocator = testing.allocator;
 
     var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
@@ -3236,7 +3239,7 @@ test "H2 F7: assigned comparison still warns" {
     try testing.expect(hasLocktimeWarning(result));
 }
 
-test "H2 F7: vacuous strict bound still warns" {
+test "H2: vacuous strict bound still warns" {
     const allocator = testing.allocator;
 
     var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
