@@ -162,7 +162,7 @@ class R069BuiltinParityTest {
         """;
 
     /** OP_4 OP_SPLIT OP_DROP OP_BIN2NUM OP_0 OP_GREATERTHAN. */
-    private static final String EXPECTED_EXTRACT_VERSION = "00009d547f758100a0";
+    private static final String EXPECTED_EXTRACT_VERSION = "00009d547f7501007e8100a0";
 
     @Test
     void extractVersionLowersToTheLeadingFourByteSlice() throws Exception {
@@ -205,7 +205,7 @@ class R069BuiltinParityTest {
     @Test
     void extractVersionActuallyYieldsNVersion() throws Exception {
         String hex = PipelineTestSupport.hex(SRC_EXTRACT_VERSION, FILE);
-        String core = "547f7581"; // <4> OP_SPLIT OP_DROP OP_BIN2NUM
+        String core = "547f7501007e81"; // <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM (W1)
         assertTrue(hex.contains(core), "extractVersion core sequence not emitted");
         assertEquals("02", MiniVm.runOn(core, PREIMAGE_HEX));
     }

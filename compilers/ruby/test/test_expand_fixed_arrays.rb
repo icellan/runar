@@ -346,8 +346,10 @@ class TestExpandFixedArrays < Minitest::Test
     # Then R-010 took it 7624 -> 7778: each of the six methods now
     # authenticates its `_codePart` witness against the preimage's scriptCode,
     # and the six per-method OP_CODESEPARATORs collapse into one at offset 1.
-    assert_equal 7778, v1.script.length / 2, "v1 script must be 7778 bytes"
-    assert_equal 7778, v2.script.length / 2, "v2 script must be 7778 bytes"
+    # W1 took it 7778 -> 7796: six 32-bit-extractor call sites each gained a
+    # 3-byte zero-pad ahead of their OP_BIN2NUM.
+    assert_equal 7796, v1.script.length / 2, "v1 script must be 7796 bytes"
+    assert_equal 7796, v2.script.length / 2, "v2 script must be 7796 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 

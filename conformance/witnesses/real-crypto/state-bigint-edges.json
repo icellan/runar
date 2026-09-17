@@ -121,5 +121,8 @@
       "note": "tampered continuation output — the negative state field must be committed to by hashOutputs",
       "satoshis": 1000
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "e8db3e928364ce7394e84cfcda778067b72e5a52d8fc03e86d2b20e2a23b28d9"
+  }
 }

@@ -4455,7 +4455,7 @@ const LowerCtx = struct {
                 try self.stack.push(self.allocator, null);
                 try self.emitOp(.op_drop);
                 _ = self.stack.pop();
-                try self.emitOp(.op_bin2num);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
             },
             .extractSigHashType => {
                 // End-relative: last 4 bytes -> number.
@@ -4479,7 +4479,7 @@ const LowerCtx = struct {
                 _ = self.stack.pop();
                 _ = self.stack.pop();
                 try self.stack.push(self.allocator, null);
-                try self.emitOp(.op_bin2num);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
             },
             .extractOutputHash => {
                 try self.emitOp(.op_size);
@@ -4517,7 +4517,8 @@ const LowerCtx = struct {
             .extractVersion => {
                 // nVersion is the LEADING 4 bytes:
                 // <4> OP_SPLIT OP_DROP OP_BIN2NUM
-                try self.emitLeadingExtract(4, true);
+                try self.emitLeadingExtract(4, false);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
             },
             .extractHashSequence => {
                 // Skip 4 + 32, take 32.
@@ -4534,7 +4535,8 @@ const LowerCtx = struct {
             },
             .extractSequence => {
                 // nSequence(4) sits 44 bytes from the end.
-                try self.emitTrailingExtract(44, 4, true);
+                try self.emitTrailingExtract(44, 4, false);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
             },
             .extractOutputs => {
                 // Alias of extractOutputHash: hashOutputs(32), 40 bytes from the end.
@@ -4574,6 +4576,29 @@ const LowerCtx = struct {
 
         try self.stack.renameAtDepth(self.allocator, 0, bind_name);
         self.trackDepth();
+    }
+
+    /// Convert the 4-byte little-endian field on top of the stack to an
+    /// UNSIGNED script number.
+    ///
+    /// nVersion, nSequence, nLockTime and the trailing sighash type are
+    /// unsigned 32-bit wire fields, but a Bitcoin script number is
+    /// sign-magnitude: the high bit of the LAST byte is the sign. A bare
+    /// OP_BIN2NUM therefore reads `feffffff` (0xfffffffe, the SDK's non-final
+    /// default) as -2147483646 and `ffffffff` (the finality sentinel) as
+    /// -2147483647, which makes `extractSequence(p) < 0xffffffff` true for the
+    /// exact value it exists to exclude (W1 / FinalCountdown). Appending a
+    /// zero byte first makes the value a five-byte non-negative number, so the
+    /// whole 0..2^32-1 range reads as itself. Same trick
+    /// emitStripScriptCodeVarint already uses for 0xfd/0xfe/0xff.
+    fn emitUnsignedBin2Num(self: *LowerCtx) !void {
+        try self.emitPushData(&.{0x00});
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_cat);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_bin2num);
     }
 
     /// Slice the LEADING `length` bytes off the value on top of the stack:

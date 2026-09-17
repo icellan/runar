@@ -3737,6 +3737,28 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    /// Convert the 4-byte little-endian field on top of the stack to an
+    /// UNSIGNED script number.
+    ///
+    /// `nVersion`, `nSequence`, `nLockTime` and the trailing sighash type are
+    /// unsigned 32-bit wire fields, but a Bitcoin script number is
+    /// sign-magnitude: the high bit of the LAST byte is the sign. A bare
+    /// `OP_BIN2NUM` therefore reads `feffffff` (`0xfffffffe`, the SDK's
+    /// non-final default) as -2147483646 and `ffffffff` (the finality
+    /// sentinel) as -2147483647, which makes `extractSequence(p) < 0xffffffff`
+    /// true for the exact value it exists to exclude (W1 / FinalCountdown).
+    /// Appending a zero byte first makes the value a five-byte non-negative
+    /// number, so the whole 0..2^32-1 range reads as itself. Same trick
+    /// `emit_strip_script_code_varint` already uses for `0xfd`/`0xfe`/`0xff`.
+    fn emit_unsigned_bin2num(&mut self) {
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+    }
+
     /// Strip the BIP-143 scriptCode varint length prefix.
     ///
     ///   `[..., varint || scriptCode]` -> `[..., scriptCode]`
@@ -4435,7 +4457,7 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
                 self.sm.pop();
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractHashPrevouts" => {
                 // <preimage> 4 OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP
@@ -4524,7 +4546,7 @@ impl LoweringContext {
                 self.sm.pop();
                 self.sm.pop();
                 self.sm.push("");
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractLocktime" => {
                 // End-relative: 4 bytes before the last 4 (sighashType).
@@ -4556,7 +4578,7 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
                 self.sm.pop();
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractOutputHash" | "extractOutputs" => {
                 // End-relative: 32 bytes before the last 8 (nLocktime 4 + sighashType 4).
@@ -4651,7 +4673,7 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
                 self.sm.pop();
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractScriptCode" => {
                 // Variable-length field at offset 104. End-relative tail = 52 bytes.

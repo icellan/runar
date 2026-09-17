@@ -159,7 +159,7 @@ class R025FieldPreservationTest {
                 moved.add(i / 2);
             }
         }
-        assertEquals(List.of(394, 519), moved,
+        assertEquals(List.of(394, 522), moved,
             "expected exactly the two 0x41->0x43 sighash bytes; got " + moved);
     }
 

@@ -341,7 +341,7 @@ test "N-086 FixedArray SINGLE differs from default at exactly the binding-flag b
     // the failure mode. Exactly two flag bytes move: the auto-injected
     // `extractSigHashType(pre) === <mode>` assert push and the OP_PUSH_TX
     // binding blob's appended DER sighash byte.
-    try std.testing.expectEqualSlices(usize, &[_]usize{ 394, 519 }, moved);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 394, 522 }, moved);
 }
 
 test "N-086 control: no-FixedArray SINGLE moves the same two flag bytes" {

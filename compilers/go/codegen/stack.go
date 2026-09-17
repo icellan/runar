@@ -3865,6 +3865,28 @@ func (ctx *loweringContext) lowerCheckMultiSig(bindingName string, args []string
 	ctx.trackDepth()
 }
 
+// emitUnsignedBin2Num converts the 4-byte little-endian field on top of the
+// stack to an UNSIGNED script number.
+//
+// nVersion, nSequence, nLockTime and the trailing sighash type are unsigned
+// 32-bit wire fields, but a Bitcoin script number is sign-magnitude: the high
+// bit of the LAST byte is the sign. A bare OP_BIN2NUM therefore reads
+// `feffffff` (0xfffffffe, the SDK's non-final default) as -2147483646 and
+// `ffffffff` (the finality sentinel) as -2147483647, which makes
+// `extractSequence(p) < 0xffffffff` true for the exact value it exists to
+// exclude (W1 / FinalCountdown). Appending a zero byte first makes the value a
+// five-byte non-negative number, so the whole 0..2^32-1 range reads as itself.
+// Same trick emitStripScriptCodeVarint already uses for 0xfd/0xfe/0xff.
+func (ctx *loweringContext) emitUnsignedBin2Num() {
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+}
+
 // emitStripScriptCodeVarint strips the BIP-143 scriptCode varint length prefix.
 //
 //	[..., varint || scriptCode]  ->  [..., scriptCode]
@@ -4297,7 +4319,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "drop"})
 		ctx.sm.pop()
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		ctx.emitUnsignedBin2Num() // UNSIGNED 32-bit wire field (W1)
 
 	case "extractHashPrevouts":
 		// <preimage> 4 OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP
@@ -4386,7 +4408,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.sm.pop()
 		ctx.sm.pop()
 		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		ctx.emitUnsignedBin2Num() // UNSIGNED 32-bit wire field (W1)
 
 	case "extractLocktime":
 		// End-relative: 4 bytes before the last 4 (sighashType).
@@ -4418,7 +4440,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "drop"})
 		ctx.sm.pop()
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		ctx.emitUnsignedBin2Num() // UNSIGNED 32-bit wire field (W1)
 
 	case "extractOutputHash", "extractOutputs":
 		// End-relative: 32 bytes before the last 8 (nLocktime 4 + sighashType 4).
@@ -4514,7 +4536,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "drop"})
 		ctx.sm.pop()
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		ctx.emitUnsignedBin2Num() // UNSIGNED 32-bit wire field (W1)
 
 	case "extractScriptCode":
 		// Variable-length field at offset 104. End-relative tail = 52 bytes.

@@ -3455,6 +3455,29 @@ class _LoweringContext:
     # check_preimage (OP_PUSH_TX)
     # -----------------------------------------------------------------
 
+    def _emit_unsigned_bin2num(self) -> None:
+        """Convert the 4-byte little-endian field on top of the stack to an
+        UNSIGNED script number.
+
+        nVersion, nSequence, nLockTime and the trailing sighash type are
+        unsigned 32-bit wire fields, but a Bitcoin script number is
+        sign-magnitude: the high bit of the LAST byte is the sign. A bare
+        OP_BIN2NUM therefore reads ``feffffff`` (0xfffffffe, the SDK's
+        non-final default) as -2147483646 and ``ffffffff`` (the finality
+        sentinel) as -2147483647, which makes ``extractSequence(p) <
+        0xffffffff`` true for the exact value it exists to exclude
+        (W1 / FinalCountdown). Appending a zero byte first makes the value a
+        five-byte non-negative number, so the whole 0..2**32-1 range reads as
+        itself. Same trick _emit_strip_script_code_varint already uses for
+        0xfd/0xfe/0xff.
+        """
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+
     def _emit_strip_script_code_varint(self) -> None:
         """Strip the BIP-143 scriptCode varint length prefix.
 
@@ -3852,7 +3875,7 @@ class _LoweringContext:
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name == "extractHashPrevouts":
             self.emit_op(StackOp(op="push", value=big_int_push(4)))
@@ -3937,7 +3960,7 @@ class _LoweringContext:
             self.sm.pop()
             self.sm.pop()
             self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name == "extractLocktime":
             self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
@@ -3967,7 +3990,7 @@ class _LoweringContext:
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name in ("extractOutputHash", "extractOutputs"):
             self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
@@ -4056,7 +4079,7 @@ class _LoweringContext:
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name == "extractScriptCode":
             self.emit_op(StackOp(op="push", value=big_int_push(104)))

@@ -4689,7 +4689,8 @@ public final class StackLower {
                     // skip: push 4, OP_SPLIT, OP_DROP the tail, OP_BIN2NUM.
                     // emitAbsoluteSplit(0, 4, ...) would emit an extra
                     // OP_0 OP_SPLIT OP_NIP prologue and diverge from the peers.
-                    emitLeadingExtract(4, true);
+                    emitLeadingExtract(4, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
                     break;
                 case "extractHashPrevouts":
                     emitAbsoluteSplit(4, 32, false);
@@ -4701,10 +4702,12 @@ public final class StackLower {
                     emitAbsoluteSplit(68, 36, false);
                     break;
                 case "extractSigHashType":
-                    emitTrailingExtract(4, 0, true);
+                    emitTrailingExtract(4, 0, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
                     break;
                 case "extractLocktime":
-                    emitTrailingExtract(8, 4, true);
+                    emitTrailingExtract(8, 4, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
                     break;
                 case "extractOutputHash":
                 case "extractOutputs":
@@ -4714,7 +4717,8 @@ public final class StackLower {
                     emitTrailingExtract(52, 8, true);
                     break;
                 case "extractSequence":
-                    emitTrailingExtract(44, 4, true);
+                    emitTrailingExtract(44, 4, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
                     break;
                 case "extractScriptCode":
                     emitScriptCodeExtract();
@@ -4741,6 +4745,30 @@ public final class StackLower {
          *                    keep the field as raw bytes; trailing extractors
          *                    that want a number should call {@link #emitTrailingExtract}.
          */
+        /**
+         * Convert the 4-byte little-endian field on top of the stack to an
+         * UNSIGNED script number.
+         *
+         * <p>nVersion, nSequence, nLockTime and the trailing sighash type are
+         * unsigned 32-bit wire fields, but a Bitcoin script number is
+         * sign-magnitude: the high bit of the LAST byte is the sign. A bare
+         * OP_BIN2NUM therefore reads {@code feffffff} (0xfffffffe, the SDK's
+         * non-final default) as -2147483646 and {@code ffffffff} (the finality
+         * sentinel) as -2147483647, which makes
+         * {@code extractSequence(p) < 0xffffffff} true for the exact value it
+         * exists to exclude (W1 / FinalCountdown). Appending a zero byte first
+         * makes the value a five-byte non-negative number, so the whole
+         * 0..2^32-1 range reads as itself.
+         */
+        private void emitUnsignedBin2Num() {
+            emitOp(new PushOp(PushValue.ofHex("00")));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+        }
+
         /**
          * Slice the LEADING {@code length} bytes off the value on top of the
          * stack: push length; OP_SPLIT; OP_DROP; optionally OP_BIN2NUM.

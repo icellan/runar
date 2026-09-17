@@ -55,5 +55,8 @@
       "expect": "reject",
       "note": "wrong signer: owner=bob signed by alice"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "19573ca3d47d689931ed7592a9603d1c02f47e7013a6e8fc91e6bf0dae356755"
+  }
 }

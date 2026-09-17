@@ -38,7 +38,7 @@
 //!     built — the opposite of the stated policy.
 //!
 //! Measured with all six peers built: zig, go, rust, python, ruby and java
-//! agree byte-for-byte, with 0x43 at byte offsets 394 and 519 — the
+//! agree byte-for-byte, with 0x43 at byte offsets 394 and 522 — the
 //! auto-injected `extractSigHashType` assert const and the OP_PUSH_TX binding
 //! blob's appended DER sighash byte.
 
@@ -67,7 +67,7 @@ const SRC =
 /// Byte offsets carrying the BIP-143 binding flag in the emitted script, and
 /// the value the declared mode must put there. Pinned rather than "contains
 /// 0143" so an unrelated 0x43 push cannot satisfy the assertion.
-const FLAG_OFFSETS = [_]usize{ 394, 519 };
+const FLAG_OFFSETS = [_]usize{ 394, 522 };
 const FLAG_BYTE = "43";
 
 /// One peer tier: a display name, the repo-relative working directory its CLI

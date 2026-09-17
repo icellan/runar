@@ -4073,6 +4073,34 @@ class LoweringContext {
    * bytes (e.g. embedded BN254 verifiers) and surfaces as
    * `Invalid OP_SPLIT range` on regtest.
    */
+  /**
+   * Convert the 4-byte little-endian field on top of the stack to an UNSIGNED
+   * script number.
+   *
+   * `nVersion`, `nSequence`, `nLockTime` and the trailing sighash type are all
+   * unsigned 32-bit wire fields, but a Bitcoin script number is sign-magnitude:
+   * the high bit of the LAST byte is the sign. A bare `OP_BIN2NUM` therefore
+   * reads `feffffff` (`0xfffffffe`, the SDK's non-final default) as
+   * -2147483646 and `ffffffff` (the finality sentinel) as -2147483647, which
+   * makes `extractSequence(p) < 0xffffffffn` true for the exact value it exists
+   * to exclude (W1 / FinalCountdown).
+   *
+   * Appending a zero byte before `OP_BIN2NUM` makes the value a five-byte
+   * non-negative number, so the whole 0..2^32-1 range reads as itself. Same
+   * trick `emitStripScriptCodeVarint` already uses for `0xfd`/`0xfe`/`0xff`.
+   *
+   * Consumes the 4-byte string, leaves one number. Caller keeps the stack-map
+   * slot count unchanged.
+   */
+  private emitUnsignedBin2Num(): void {
+    this.emitOp({ op: 'push', value: new Uint8Array([0]) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+  }
+
   private emitStripScriptCodeVarint(): void {
     this.emitOp({ op: 'push', value: 1n });
     this.stackMap.push(null);
@@ -4554,7 +4582,7 @@ class LoweringContext {
         this.stackMap.push(null); // right: rest
         this.emitOp({ op: 'drop' }); // drop the rest
         this.stackMap.pop();
-        this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // convert to number
+        this.emitUnsignedBin2Num(); // convert to an UNSIGNED number (W1)
         break;
 
       case 'extractHashPrevouts':
@@ -4650,7 +4678,7 @@ class LoweringContext {
         this.stackMap.pop();
         this.stackMap.pop();
         this.stackMap.push(null);
-        this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+        this.emitUnsignedBin2Num(); // convert to an UNSIGNED number (W1)
         break;
 
       case 'extractLocktime':
@@ -4683,7 +4711,7 @@ class LoweringContext {
         this.stackMap.push(null);
         this.emitOp({ op: 'drop' });
         this.stackMap.pop();
-        this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+        this.emitUnsignedBin2Num(); // convert to an UNSIGNED number (W1)
         break;
 
       case 'extractOutputHash':
@@ -4814,7 +4842,7 @@ class LoweringContext {
         this.stackMap.push(null);
         this.emitOp({ op: 'drop' });
         this.stackMap.pop();
-        this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+        this.emitUnsignedBin2Num(); // convert to an UNSIGNED number (W1)
         break;
 
       case 'extractScriptCode':

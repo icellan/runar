@@ -107,7 +107,7 @@ class StaleStateProbe extends StatefulSmartContract {
 
 # Byte-invariance pins, captured from the PRE-fix build. The control and the
 # no-state-read variant are outside the fix's blast radius and must not move.
-CONTROL_SHA256 = "8ee030d0e733355ecac30d4c94698f0b8ed3a3dab6d3943c3e639377d9e97cb5"
+CONTROL_SHA256 = "4b1bff88a334cbc0604fada46ea297efada0825ed26769bbeef8c888c08b6722"
 
 # The broken script this finding is about. Pinned as a MUST-NOT-EQUAL so a
 # future regression cannot quietly restore it.

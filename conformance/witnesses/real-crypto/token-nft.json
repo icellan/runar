@@ -67,5 +67,8 @@
         }
       }
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "c3c006e40eaf2cf07c54f1e844821a7d21b1ed0039b8180021d631e93b830889"
+  }
 }

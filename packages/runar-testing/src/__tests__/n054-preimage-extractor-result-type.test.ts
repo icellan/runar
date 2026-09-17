@@ -417,8 +417,14 @@ describe('N-054 preimage extractor result typing', () => {
   it('`+` on a bigint extractor is arithmetic, not concatenation', () => {
     const hex = compileEverywhere(PLUS_SRC, 'N054Plus.runar.ts');
     const ops = opcodes(hex);
+    // Exactly ONE OP_CAT, and it is not the `+`: it is W1's zero-pad in
+    // `extractLocktime` (`push [0x00] OP_CAT OP_BIN2NUM`, so the unsigned
+    // 32-bit field is not read as a negative script number). `extractAmount`
+    // is an 8-byte field and is not padded, so it contributes none. A `+`
+    // that regressed to concatenation would make this 2 and drop OP_1ADD to
+    // 0 — both halves still have to hold.
     expect(count(ops, [OP_CAT]),
-      `a bigint extractor is being CONCATENATED instead of added: ${hex}`).toBe(0);
+      `a bigint extractor is being CONCATENATED instead of added: ${hex}`).toBe(1);
     expect(count(ops, [OP_1ADD])).toBe(2);
   });
 

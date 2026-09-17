@@ -131,9 +131,9 @@ class StaleStateUnrelatedVarLenTest {
      * (TypeScript, Go, Rust, Python, Ruby). sha256 is taken over the ASCII hex
      * string, exactly as the sibling Python and Zig tests do.
      */
-    private static final int PROBE_FIXED_LEN = 1274;
+    private static final int PROBE_FIXED_LEN = 1280;
     private static final String PROBE_FIXED_SHA256 =
-        "2e00e577d635a79a4e370ebd52f34f864ba665e673c1d9c62617fe02bfcda0da";
+        "782ca34bbffc1d3889b034d74e4af18b4d326fa1910229086a7b08befd64232d";
 
     /**
      * The broken script this finding is about. Pinned as a MUST-NOT-EQUAL so a
@@ -143,9 +143,9 @@ class StaleStateUnrelatedVarLenTest {
         "150cb2a01cca2eb26bbbe02e2c090aa5d0c33957b07a7e385d951ec6452e0fb8";
 
     /** Outside the fix's blast radius — must not move. */
-    private static final int CONTROL_FIXED_LEN = 946;
+    private static final int CONTROL_FIXED_LEN = 952;
     private static final String CONTROL_SHA256 =
-        "8ee030d0e733355ecac30d4c94698f0b8ed3a3dab6d3943c3e639377d9e97cb5";
+        "4b1bff88a334cbc0604fada46ea297efada0825ed26769bbeef8c888c08b6722";
 
     /**
      * The BIP-143 scriptCode varint-strip cascade ({@code <fd00> OP_LESSTHAN

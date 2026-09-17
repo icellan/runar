@@ -69,7 +69,7 @@ TS_V1 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.runar.ts"
 TS_V2 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.v2.runar.ts"
 PY_DSL = REPO_ROOT / "examples" / "python" / "tic-tac-toe" / "TicTacToe.runar.py"
 
-EXPECTED_BYTES = 7778
+EXPECTED_BYTES = 7796  # W1: +18 bytes, six 32-bit-extractor zero-pad sites
 
 
 def _byte_len(hex_str: str) -> int:

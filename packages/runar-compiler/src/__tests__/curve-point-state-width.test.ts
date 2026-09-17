@@ -126,20 +126,23 @@ describe('P256Point / P384Point are fixed-width raw state', () => {
   // -------------------------------------------------------------------------
   describe('byte-invariance pins (all seven tiers agreed on these)', () => {
     const PINS: Array<{ shape: 0 | 1; type: string; digest: string; hexLen: number }> = [
-      { shape: 0, type: 'Point', digest: '2761cc05', hexLen: 1354 },
-      { shape: 0, type: 'P256Point', digest: '2761cc05', hexLen: 1354 },
-      { shape: 0, type: 'P384Point', digest: '29cd9c42', hexLen: 1354 },
-      { shape: 0, type: 'PubKey', digest: 'a2bcebd6', hexLen: 1354 },
-      { shape: 0, type: 'Sha256', digest: '28399e2d', hexLen: 1354 },
-      { shape: 0, type: 'ByteString', digest: 'bccc912f', hexLen: 1610 },
-      { shape: 0, type: 'Sig', digest: 'bccc912f', hexLen: 1610 },
-      { shape: 1, type: 'Point', digest: '0e683f83', hexLen: 936 },
-      { shape: 1, type: 'P256Point', digest: '0e683f83', hexLen: 936 },
-      { shape: 1, type: 'P384Point', digest: '529ebc30', hexLen: 936 },
-      { shape: 1, type: 'PubKey', digest: '5c258cfc', hexLen: 936 },
-      { shape: 1, type: 'Sha256', digest: 'b5fc88e4', hexLen: 936 },
-      { shape: 1, type: 'ByteString', digest: 'd839d166', hexLen: 1264 },
-      { shape: 1, type: 'Sig', digest: 'd839d166', hexLen: 1264 },
+      // W1 added a 3-byte zero-pad (`01 00 7e`) before the auto-injected
+      // sighash-type pin's OP_BIN2NUM, so every shape here is 6 hex chars
+      // longer than it was; the discriminating equalities are unchanged.
+      { shape: 0, type: 'Point', digest: '8d309734', hexLen: 1360 },
+      { shape: 0, type: 'P256Point', digest: '8d309734', hexLen: 1360 },
+      { shape: 0, type: 'P384Point', digest: '0aa41b99', hexLen: 1360 },
+      { shape: 0, type: 'PubKey', digest: 'c0ba2f04', hexLen: 1360 },
+      { shape: 0, type: 'Sha256', digest: '2e528831', hexLen: 1360 },
+      { shape: 0, type: 'ByteString', digest: '5f873f91', hexLen: 1616 },
+      { shape: 0, type: 'Sig', digest: '5f873f91', hexLen: 1616 },
+      { shape: 1, type: 'Point', digest: 'a1e544fa', hexLen: 942 },
+      { shape: 1, type: 'P256Point', digest: 'a1e544fa', hexLen: 942 },
+      { shape: 1, type: 'P384Point', digest: '69b87cde', hexLen: 942 },
+      { shape: 1, type: 'PubKey', digest: '75d147d3', hexLen: 942 },
+      { shape: 1, type: 'Sha256', digest: 'e2b1b50e', hexLen: 942 },
+      { shape: 1, type: 'ByteString', digest: 'ecfc6f7a', hexLen: 1270 },
+      { shape: 1, type: 'Sig', digest: 'ecfc6f7a', hexLen: 1270 },
     ];
 
     for (const pin of PINS) {

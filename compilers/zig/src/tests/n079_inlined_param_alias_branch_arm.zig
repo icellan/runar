@@ -255,16 +255,16 @@ const Case = struct {
 };
 
 const CASES = [_]Case{
-    .{ .label = "if-arm", .source = IF_ARM, .want_len = 705, .want_sha = "5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8" },
-    .{ .label = "if-arm-manual", .source = IF_ARM_MANUAL, .want_len = 705, .want_sha = "5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8" },
-    .{ .label = "if-arm-200", .source = IF_ARM_200, .want_len = 706, .want_sha = "b9aaa48a3400eb488fba40c6e7898c4928aafdce60b0a85899572b80093477aa" },
-    .{ .label = "ternary-arm", .source = TERNARY_ARM, .want_len = 691, .want_sha = "f6b2ae0526262ccee7adc71d1291bb8e0ae193de42c1a4e3936b782da95e3caf" },
-    .{ .label = "ternary-arm-manual", .source = TERNARY_ARM_MANUAL, .want_len = 691, .want_sha = "f6b2ae0526262ccee7adc71d1291bb8e0ae193de42c1a4e3936b782da95e3caf" },
-    .{ .label = "loop-body", .source = LOOP_BODY, .want_len = 698, .want_sha = "3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55" },
-    .{ .label = "loop-body-manual", .source = LOOP_BODY_MANUAL, .want_len = 698, .want_sha = "3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55" },
-    .{ .label = "no-if", .source = NO_IF, .want_len = 683, .want_sha = "2807bc651b0cfac58c0a0835f42b39cf46ce28d1e64d1ba7421279ccfe6680ed" },
-    .{ .label = "stmt-level", .source = STMT_LEVEL, .want_len = 701, .want_sha = "9f61cc84ac3a68d928a73a5f0bb9dc129b9bf7d0d3ca873c4f4bd0cbad214d62" },
-    .{ .label = "passthrough", .source = PASSTHROUGH, .want_len = 703, .want_sha = "5c30a0ad7a1e728ce44f723cefe1823ff9855b28a1d52ececf28c7715924adb0" },
+    .{ .label = "if-arm", .source = IF_ARM, .want_len = 708, .want_sha = "d0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470" },
+    .{ .label = "if-arm-manual", .source = IF_ARM_MANUAL, .want_len = 708, .want_sha = "d0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470" },
+    .{ .label = "if-arm-200", .source = IF_ARM_200, .want_len = 709, .want_sha = "76b75efe60492121334561aa1f44639aa538efac39f0c8c078a68b7ecccc935e" },
+    .{ .label = "ternary-arm", .source = TERNARY_ARM, .want_len = 694, .want_sha = "697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde" },
+    .{ .label = "ternary-arm-manual", .source = TERNARY_ARM_MANUAL, .want_len = 694, .want_sha = "697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde" },
+    .{ .label = "loop-body", .source = LOOP_BODY, .want_len = 701, .want_sha = "7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a" },
+    .{ .label = "loop-body-manual", .source = LOOP_BODY_MANUAL, .want_len = 701, .want_sha = "7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a" },
+    .{ .label = "no-if", .source = NO_IF, .want_len = 686, .want_sha = "7ac476f9ac2eaac74d9b7d6ec51483a1ef7fe8f267998ff371728b5408511300" },
+    .{ .label = "stmt-level", .source = STMT_LEVEL, .want_len = 704, .want_sha = "c7df31bb403a85a97117ba27f16da98b58068b9ffc5be12dbd3d76d0a5ae0c79" },
+    .{ .label = "passthrough", .source = PASSTHROUGH, .want_len = 706, .want_sha = "8826b46db122ecd01f584ff3148ef7f24d9dd948088bd97cee4c086235efdd56" },
 };
 
 fn compileScriptHex(

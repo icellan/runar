@@ -48,5 +48,8 @@
       "note": "tampered continuation output — the merged-local result block must still be committed to by hashOutputs",
       "satoshis": 1000
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "1ec8620375e679d8ddb60e0fcdcf713d704f9763f1e42d85aaea5284d4435b65"
+  }
 }

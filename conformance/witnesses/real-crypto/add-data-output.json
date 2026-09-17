@@ -28,5 +28,8 @@
       "expect": "reject",
       "note": "tampered continuation output"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "302c2e2d126df425d78d61677004ae78e3cd7b85f1e658d5f5373c20bd76673b"
+  }
 }

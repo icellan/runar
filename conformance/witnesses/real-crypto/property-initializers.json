@@ -37,5 +37,8 @@
         "count": "0n"
       }
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "66085c49e2d525c6fc09170fdfcf77de2b90926641285c663d30d83fe7fe40d3"
+  }
 }

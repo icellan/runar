@@ -196,8 +196,10 @@ fn bytesExtractorSource(comptime fn_name: []const u8) []const u8 {
         "}\n";
 }
 
-test "R-069: extractVersion lowers to <4> OP_SPLIT OP_DROP OP_BIN2NUM" {
-    try expectProbeHex(numericExtractorSource("extractVersion"), "00009d547f758100a0");
+test "R-069: extractVersion lowers to <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM" {
+    // W1: the trailing `01007e81` is the zero-pad, so the unsigned 32-bit
+    // nVersion field is not read as a negative script number.
+    try expectProbeHex(numericExtractorSource("extractVersion"), "00009d547f7501007e8100a0");
 }
 
 test "R-069: extractInputIndex lowers to the peer tiers' vout slice" {
@@ -209,7 +211,8 @@ test "R-069: extractAmount lowers to the peer tiers' end-relative 8-byte slice" 
 }
 
 test "R-069: extractSequence lowers to the peer tiers' end-relative 4-byte slice" {
-    try expectProbeHex(numericExtractorSource("extractSequence"), "00009d82012c947f77547f758100a0");
+    // W1: zero-padded before OP_BIN2NUM — nSequence is unsigned.
+    try expectProbeHex(numericExtractorSource("extractSequence"), "00009d82012c947f77547f7501007e8100a0");
 }
 
 test "R-069: extractHashSequence lowers to the peer tiers' 36/32 absolute slice" {
@@ -379,6 +382,17 @@ const Vm = struct {
                     try self.push(a);
                     try self.push(b);
                 },
+                0x7e => { // OP_CAT
+                    const b_top = try self.pop();
+                    defer self.allocator.free(b_top);
+                    const a_under = try self.pop();
+                    defer self.allocator.free(a_under);
+                    const joined = try self.allocator.alloc(u8, a_under.len + b_top.len);
+                    defer self.allocator.free(joined);
+                    @memcpy(joined[0..a_under.len], a_under);
+                    @memcpy(joined[a_under.len..], b_top);
+                    try self.push(joined);
+                },
                 0x7f => { // OP_SPLIT
                     const pos_bytes = try self.pop();
                     defer self.allocator.free(pos_bytes);
@@ -490,8 +504,8 @@ test "R-069 semantics: the synthetic preimage is the length the layout implies" 
 }
 
 test "R-069 semantics: extractVersion yields nVersion (2)" {
-    // <4> OP_SPLIT OP_DROP OP_BIN2NUM
-    try expectExtractorValue(numericExtractorSource("extractVersion"), "547f7581", "02");
+    // <4> OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
+    try expectExtractorValue(numericExtractorSource("extractVersion"), "547f7501007e81", "02");
 }
 
 test "R-069 semantics: extractInputIndex yields the outpoint vout (7)" {
@@ -505,7 +519,7 @@ test "R-069 semantics: extractAmount yields the satoshi amount (100000)" {
 }
 
 test "R-069 semantics: extractSequence yields nSequence (10)" {
-    try expectExtractorValue(numericExtractorSource("extractSequence"), "82012c947f77547f7581", "0a");
+    try expectExtractorValue(numericExtractorSource("extractSequence"), "82012c947f77547f7501007e81", "0a");
 }
 
 test "R-069 semantics: extractHashSequence yields the 32-byte hashSequence" {

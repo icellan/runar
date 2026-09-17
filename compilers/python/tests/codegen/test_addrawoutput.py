@@ -82,7 +82,7 @@ def _send_to_script_ops() -> list[StackOp]:
 # Pinned baseline captured from the Python implementation. This contract has
 # both an add_raw_output AND an add_output continuation, so the count covers
 # the complete sendToScript method.
-EXPECTED_TOTAL_OPS = 278  # captured baseline (incl. GAP-302 sighash-type pin; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard; R-010: +65 ops for the `_codePart` authentication, minus the per-method OP_CODESEPARATOR now emitted once by the emitter)
+EXPECTED_TOTAL_OPS = 280  # captured baseline (incl. GAP-302 sighash-type pin, W1: +2 ops for the zero-pad ahead of its OP_BIN2NUM; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard; R-010: +65 ops for the `_codePart` authentication, minus the per-method OP_CODESEPARATOR now emitted once by the emitter)
 
 
 def test_send_to_script_total_op_count_pinned():

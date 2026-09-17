@@ -3754,6 +3754,26 @@ module RunarCompiler::Codegen
     # forms corrupts extraction for scripts whose scriptCode exceeds 65,535
     # bytes (e.g. embedded BN254 verifiers) and surfaces as
     # `Invalid OP_SPLIT range` on regtest.
+    # Convert the 4-byte little-endian field on top of the stack to an
+    # UNSIGNED script number.
+    #
+    # nVersion, nSequence, nLockTime and the trailing sighash type are unsigned
+    # 32-bit wire fields, but a Bitcoin script number is sign-magnitude: the
+    # high bit of the LAST byte is the sign. A bare OP_BIN2NUM therefore reads
+    # `feffffff` (0xfffffffe, the SDK's non-final default) as -2147483646 and
+    # `ffffffff` (the finality sentinel) as -2147483647, which makes
+    # `extractSequence(p) < 0xffffffff` true for the exact value it exists to
+    # exclude (W1 / FinalCountdown). Appending a zero byte first makes the
+    # value a five-byte non-negative number, so the whole 0..2**32-1 range
+    # reads as itself. Same trick _emit_strip_script_code_varint already uses
+    # for 0xfd/0xfe/0xff.
+    def _emit_unsigned_bin2num
+      emit_push_bytes([0].pack("C"))
+      @sm.push("")
+      emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_BIN2NUM")
+    end
+
     def _emit_strip_script_code_varint
       emit_push_int(1); @sm.push("")
       emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
@@ -4042,7 +4062,7 @@ module RunarCompiler::Codegen
         emit_push_int(4); @sm.push("")
         emit_opcode("OP_SPLIT"); @sm.pop; @sm.push(""); @sm.push("")
         emit_op({ op: "drop" }); @sm.pop
-        emit_opcode("OP_BIN2NUM")
+        _emit_unsigned_bin2num # UNSIGNED 32-bit wire field (W1)
 
       when "extractHashPrevouts"
         emit_push_int(4); @sm.push("")
@@ -4074,7 +4094,7 @@ module RunarCompiler::Codegen
         emit_opcode("OP_SUB"); @sm.pop; @sm.pop; @sm.push("")
         emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
         emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
-        emit_opcode("OP_BIN2NUM")
+        _emit_unsigned_bin2num # UNSIGNED 32-bit wire field (W1)
 
       when "extractLocktime"
         emit_opcode("OP_SIZE"); @sm.push(""); @sm.push("")
@@ -4085,7 +4105,7 @@ module RunarCompiler::Codegen
         emit_push_int(4); @sm.push("")
         emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
         emit_op({ op: "drop" }); @sm.pop
-        emit_opcode("OP_BIN2NUM")
+        _emit_unsigned_bin2num # UNSIGNED 32-bit wire field (W1)
 
       when "extractOutputHash", "extractOutputs"
         emit_opcode("OP_SIZE"); @sm.push(""); @sm.push("")
@@ -4117,7 +4137,7 @@ module RunarCompiler::Codegen
         emit_push_int(4); @sm.push("")
         emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
         emit_op({ op: "drop" }); @sm.pop
-        emit_opcode("OP_BIN2NUM")
+        _emit_unsigned_bin2num # UNSIGNED 32-bit wire field (W1)
 
       when "extractScriptCode"
         emit_push_int(104); @sm.push("")

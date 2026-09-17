@@ -188,30 +188,34 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
 
   // -------------------------------------------------------------------------
   // Controls — every state type OTHER than Sig / SigHashPreimage must be
-  // byte-identical to the pre-fix build. The digests below are sha256 of the
-  // fold-OFF script hex, captured from the build immediately before this
-  // change; a moved byte anywhere else in the state-type tables breaks one.
+  // byte-identical to the Sig/SigHashPreimage build. The digests below are
+  // sha256 of the fold-OFF script hex; a moved byte anywhere else in the
+  // state-type tables breaks one. They were re-stamped once, for W1's 3-byte
+  // zero-pad before the auto-injected sighash-type pin's OP_BIN2NUM — a change
+  // that hits EVERY stateful script equally, which is why the equalities the
+  // controls encode (bigint == RabinSig == RabinPubKey, and ByteString ==
+  // curve-point-state-width's own ByteString digest) all survive it.
   //
   // `RabinSig` / `RabinPubKey` are the load-bearing entries: they are the
   // types this change must NOT touch.
   // -------------------------------------------------------------------------
   describe('controls: every other state type is byte-unchanged', () => {
     const TERMINAL_PINS: Record<string, string> = {
-      bigint: 'e258b5415ff46c5786dc1e665a3132eee36e784c485afaf6f96d500b386e2ddd',
-      boolean: '807484bded138b4fd1494f01d8c58ef12289529d726c2c93815078167ad8de26',
-      RabinSig: 'e258b5415ff46c5786dc1e665a3132eee36e784c485afaf6f96d500b386e2ddd',
-      RabinPubKey: 'e258b5415ff46c5786dc1e665a3132eee36e784c485afaf6f96d500b386e2ddd',
-      PubKey: 'cfa28ff1c0308373ad9c17057fdc4fcfdb9ed8c6ffe409ee3be03f90d55a0d1f',
-      Sha256: '62e80b36d93a8f86ef70c4f67af5968128767d2be4a8efb1e5437c16e34feba9',
-      Addr: 'a48253052aa95a1e06b380b91f948645436d587ff8a1d43c557b7daecfe30d2d',
+      bigint: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
+      boolean: 'afd72eb728f3bfbda2c70b909aa3c0ac8afa48f5c4fb28258fb59dcabb72c345',
+      RabinSig: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
+      RabinPubKey: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
+      PubKey: '584bda4d3de4e73ace367fdfc3d5500a37967a7327af5c7c1421b474702598af',
+      Sha256: '18ba16775519004de420c6d32178843d9ace1242f906c9aef4f4f7d7d75fbe6f',
+      Addr: 'cb372d34a9db0c8a9c56989796bc204f51e171397573c7f87656e86b0faab04c',
     };
 
     const WRITE_PINS: Record<string, string> = {
-      ByteString: 'bccc912ffd7cfdd944c37162ac3a5561f95c0fe464a1d0dcff0ed571eb82d624',
-      PubKey: 'a2bcebd69d25e711ebf834c4d848d2cf2961453b063b7b7280060d249f8110ba',
-      bigint: 'a84c9329687c21088de066e0021c2aa106acc612bc0b0a53a0c206471e69da08',
-      boolean: '958fdff43c43bdbe1ad8511ea5685e37b2440be8b394bf7bfc95680a0ad418c4',
-      RabinSig: 'a84c9329687c21088de066e0021c2aa106acc612bc0b0a53a0c206471e69da08',
+      ByteString: '5f873f911dbb2caf364021413581423af0f6aaf8ba882d787c8ee9f72d0c0e5b',
+      PubKey: 'c0ba2f049c2a412f6ee80f36ca97d7c615c938cf75f19c33888aa9a26d8cd572',
+      bigint: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
+      boolean: 'e96be6491169a1d03cdf6793a70c17eb44fc8e1ed579cf85017a9821f774039d',
+      RabinSig: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
     };
 
     for (const [type, digest] of Object.entries(TERMINAL_PINS)) {
@@ -228,7 +232,7 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
 
     it('the ByteString control read path is byte-unchanged', () => {
       expect(sha256(hexOf(terminalSource('ByteString'), READ_FILE))).toBe(
-        'd839d16658e2556ea82fae143338fb4c0d4de25c58a91347e2823e313b9abb71',
+        'ecfc6f7aea65c879be7375ffbb232a756cada31e1679b5b71c23f73309659522',
       );
     });
   });

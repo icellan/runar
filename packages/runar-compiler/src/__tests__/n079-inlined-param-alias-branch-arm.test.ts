@@ -243,16 +243,19 @@ const PASSTHROUGH = contract(`  private pay(v: bigint): void {
 
 /** label -> [script byte length, sha256 of the lowercase script hex]. */
 const SEVEN_TIER: Record<string, [number, string]> = {
-  'if-arm': [705, '5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8'],
-  'if-arm-manual': [705, '5b4b45b5cf4156695b412b132d4c302aab58770ec0bffe4b307d1bfce4f2d8a8'],
-  'if-arm-200': [706, 'b9aaa48a3400eb488fba40c6e7898c4928aafdce60b0a85899572b80093477aa'],
-  'ternary-arm': [691, 'f6b2ae0526262ccee7adc71d1291bb8e0ae193de42c1a4e3936b782da95e3caf'],
-  'ternary-arm-manual': [691, 'f6b2ae0526262ccee7adc71d1291bb8e0ae193de42c1a4e3936b782da95e3caf'],
-  'loop-body': [698, '3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55'],
-  'loop-body-manual': [698, '3692231cef9275b5a87f1f9f9b268f5a39cc3c4f37fe6354a1b57b2e8d356d55'],
-  'no-if': [683, '2807bc651b0cfac58c0a0835f42b39cf46ce28d1e64d1ba7421279ccfe6680ed'],
-  'stmt-level': [701, '9f61cc84ac3a68d928a73a5f0bb9dc129b9bf7d0d3ca873c4f4bd0cbad214d62'],
-  'passthrough': [703, '5c30a0ad7a1e728ce44f723cefe1823ff9855b28a1d52ececf28c7715924adb0'],
+  // W1: +3 bytes each — the zero-pad (`01 00 7e`) before the auto-injected
+  // sighash-type pin's OP_BIN2NUM. One pad site per script; the alias-survival
+  // equalities between the `-manual` pairs are unchanged.
+  'if-arm': [708, 'd0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470'],
+  'if-arm-manual': [708, 'd0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470'],
+  'if-arm-200': [709, '76b75efe60492121334561aa1f44639aa538efac39f0c8c078a68b7ecccc935e'],
+  'ternary-arm': [694, '697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde'],
+  'ternary-arm-manual': [694, '697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde'],
+  'loop-body': [701, '7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a'],
+  'loop-body-manual': [701, '7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a'],
+  'no-if': [686, '7ac476f9ac2eaac74d9b7d6ec51483a1ef7fe8f267998ff371728b5408511300'],
+  'stmt-level': [704, 'c7df31bb403a85a97117ba27f16da98b58068b9ffc5be12dbd3d76d0a5ae0c79'],
+  'passthrough': [706, '8826b46db122ecd01f584ff3148ef7f24d9dd948088bd97cee4c086235efdd56'],
 };
 
 const CASES: [string, string][] = [

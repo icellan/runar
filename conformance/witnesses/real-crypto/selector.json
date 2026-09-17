@@ -44,5 +44,8 @@
       "expect": "reject",
       "note": "C20: out-of-range selector i=2 matches no branch -> re-emitted assert(cond0||cond1) aborts on-chain"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "3dc60aeca136ad28dd2cd64d793047057ed8ef111ef2a829c4d611faa047967f"
+  }
 }

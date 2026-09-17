@@ -101,5 +101,8 @@
         "highestBid": "100n"
       }
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "7bf6b63b5edb434b136a787b026fd4dd6bb6666d1331d9ca68a41d11429b6d88"
+  }
 }

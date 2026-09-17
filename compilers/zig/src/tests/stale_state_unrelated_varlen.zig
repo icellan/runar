@@ -112,19 +112,22 @@ const NO_STATE_READ_SRC =
 /// Cross-tier pins, captured from the five tiers that already carry the fix
 /// (TypeScript, Go, Rust, Python, Ruby). sha256 is taken over the ASCII hex
 /// string, exactly as the sibling Python test does.
-const PROBE_FIXED_LEN: usize = 1274;
+const PROBE_FIXED_LEN: usize = 1280;
 const PROBE_FIXED_SHA256 =
-    "2e00e577d635a79a4e370ebd52f34f864ba665e673c1d9c62617fe02bfcda0da";
+    "782ca34bbffc1d3889b034d74e4af18b4d326fa1910229086a7b08befd64232d";
 
 /// The broken script this finding is about. Pinned as a MUST-NOT-EQUAL so a
-/// future regression cannot quietly restore it.
+/// future regression cannot quietly restore it. NOTE: this digest is of the
+/// PRE-W1 broken bytes; W1's zero-pad moved every stateful script by 3 bytes
+/// per 32-bit-extractor call site, so the inequality is now trivially true and
+/// the live guard is the PROBE_FIXED_SHA256 equality above.
 const PROBE_BROKEN_SHA256 =
     "150cb2a01cca2eb26bbbe02e2c090aa5d0c33957b07a7e385d951ec6452e0fb8";
 
 /// Outside the fix's blast radius — must not move.
-const CONTROL_FIXED_LEN: usize = 946;
+const CONTROL_FIXED_LEN: usize = 952;
 const CONTROL_SHA256 =
-    "8ee030d0e733355ecac30d4c94698f0b8ed3a3dab6d3943c3e639377d9e97cb5";
+    "4b1bff88a334cbc0604fada46ea297efada0825ed26769bbeef8c888c08b6722";
 
 /// The BIP-143 scriptCode varint-strip cascade (`<fd00> OP_LESSTHAN OP_IF`)
 /// emitted ONLY on the `_codePart`-relative live-state path — never on the

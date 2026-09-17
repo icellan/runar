@@ -322,7 +322,10 @@ const CORRECT_ARITY_FINGERPRINTS: &[(&str, usize, usize, u64)] = &[
     ("percentOf", 2, 7, 0x1500fd62d3a9851e),
     ("gcd", 2, 777, 0x5377409bb251c204),
     ("divmod", 2, 10, 0x574b420e0160789c),
-    ("extractVersion", 1, 4, 0x64a454494e990a9f),
+    // W1: 4 -> 6 top-level ops. The zero-pad (push 0x00, OP_CAT) before
+    // OP_BIN2NUM, so the unsigned 32-bit nVersion field is not read as a
+    // negative script number.
+    ("extractVersion", 1, 6, 0x41fafbc2363896f1),
     ("reverseBytes", 1, 2083, 0xaa355cbc2102a10c),
     ("sign", 1, 2, 0x00a1c571bf6296bf),
     ("sqrt", 1, 10, 0xbfe239cb7a0312f2), // R-169: 2 -> 10 top-level ops (2 domain guards, 8 ops, ahead of the unchanged OP_DUP + OP_IF pair); the 256-round min-clamped Newton body lives inside the If and does not add top-level ops

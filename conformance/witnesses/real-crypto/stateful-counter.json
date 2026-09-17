@@ -33,5 +33,8 @@
         "count": "4n"
       }
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "8470cbd1f7e2c1049ed7f238f97f56fab0d758635b18c54981d1fa81676c943e"
+  }
 }
