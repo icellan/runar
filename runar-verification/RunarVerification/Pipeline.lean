@@ -100,21 +100,71 @@ def r010CodeSeparatorPrologue (stack : StackProgram) : ByteArray :=
   else
     ByteArray.empty
 
+/-- Push-header length `encodePushData` puts in front of an N-byte
+payload. Mirrors TS `pushHeaderLen` (`05-stack-lower.ts`). -/
+def pushHeaderLen (valueBytes : Nat) : Nat :=
+  if valueBytes ≤ 75 then 1
+  else if valueBytes ≤ 255 then 2
+  else if valueBytes ≤ 65535 then 3
+  else 5
+
+/-- Deploy-time byte growth of one OP_0 constructor slot, or `none` when
+the type has no compile-time width. Mirrors TS `constructorSlotGrowth`. -/
+def constructorSlotGrowth : ANFType → Option Nat
+  | .bool => some 0
+  | .pubKey => some (pushHeaderLen 33 + 33 - 1)
+  | .sha256 => some (pushHeaderLen 32 + 32 - 1)
+  | .addr => some (pushHeaderLen 20 + 20 - 1)
+  | .ripemd160 => some (pushHeaderLen 20 + 20 - 1)
+  | .point => some (pushHeaderLen 64 + 64 - 1)
+  | .p256Point => some (pushHeaderLen 64 + 64 - 1)
+  | .p384Point => some (pushHeaderLen 96 + 96 - 1)
+  | _ => none
+
+def collectPlaceholderIndices : List StackOp → List Nat
+  | [] => []
+  | .placeholder i _ :: rest => i :: collectPlaceholderIndices rest
+  | .ifOp thn none :: rest =>
+      collectPlaceholderIndices thn ++ collectPlaceholderIndices rest
+  | .ifOp thn (some els) :: rest =>
+      collectPlaceholderIndices thn
+        ++ collectPlaceholderIndices els
+        ++ collectPlaceholderIndices rest
+  | _ :: rest => collectPlaceholderIndices rest
+
+/-- R-095 `pinCodePartLength`: `(exact, delta)` from the placeholders
+that public methods actually emit. Unknown-width slots demote `exact`. -/
+def pinCodePartLength (stack : StackProgram) (props : List ANFProperty) :
+    Bool × Nat :=
+  let ctorProps := props.filter (fun p => p.initialValue.isNone)
+  let idxs := stack.methods.foldl (init := ([] : List Nat)) fun acc m =>
+    if m.name == "constructor" then acc
+    else acc ++ collectPlaceholderIndices m.ops
+  idxs.foldl (init := (true, 0)) fun (exact, delta) i =>
+    match ctorProps[i]? with
+    | none => (false, delta)
+    | some prop =>
+        match constructorSlotGrowth prop.type with
+        | none => (false, delta)
+        | some g => (exact, delta + g)
+
 /-- R-095: overwrite the 4-byte zero field in every
 `OP_DUP <04 00 00 00 00> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL)
-OP_VERIFY` pin with the script's own length (little-endian). In-place
-overwrite keeps the length stable. -/
-def patchCodePartLenPins (bs : ByteArray) : ByteArray :=
-  let len := bs.size
+OP_VERIFY` pin with `scriptLen + delta`, and rewrite the comparison to
+NUMEQUAL when `exact`. In-place overwrite keeps the length stable. -/
+def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (exact : Bool) :
+    ByteArray :=
+  let len := bs.size + delta
   let b0 : UInt8 := UInt8.ofNat (len &&& 0xff)
   let b1 : UInt8 := UInt8.ofNat ((len >>> 8) &&& 0xff)
   let b2 : UInt8 := UInt8.ofNat ((len >>> 16) &&& 0xff)
   let b3 : UInt8 := UInt8.ofNat ((len >>> 24) &&& 0xff)
+  let cmp : UInt8 := if exact then 0x9c else 0xa2
   -- Accumulator form so a 10 KB WOTS script does not blow the 8 MB stack.
   let rec go (acc : List UInt8) : List UInt8 → List UInt8
     | 0x76 :: 0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest =>
         if c == 0x9c || c == 0xa2 then
-          go (0x69 :: c :: 0x81 :: b3 :: b2 :: b1 :: b0 :: 0x04 :: 0x76 :: acc) rest
+          go (0x69 :: cmp :: 0x81 :: b3 :: b2 :: b1 :: b0 :: 0x04 :: 0x76 :: acc) rest
         else
           go (0x76 :: acc) (0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest)
     | x :: rest => go (x :: acc) rest
@@ -123,8 +173,9 @@ def patchCodePartLenPins (bs : ByteArray) : ByteArray :=
 
 def compileWithR010Prologue (p : ANFProgram) : ByteArray :=
   let stack := peepholeProgram (Lower.lower p)
+  let (exact, delta) := pinCodePartLength stack p.properties
   let bytes := Emit.appendBA (r010CodeSeparatorPrologue stack) (Emit.emitFast stack)
-  patchCodePartLenPins bytes
+  patchCodePartLenPins bytes delta exact
 
 /-- Hex-encoded form, matching the `expected-script.hex` format. -/
 def compileHex (p : ANFProgram) : String :=
@@ -233,9 +284,10 @@ def compileHexSafe (p : ANFProgram) : Except CompileError String :=
       -- length pins are patched after the prologue is prepended so the
       -- 4-byte field is the full locking-script length.
       let stack := peepholeProgram (Lower.lower p)
+      let (exact, delta) := pinCodePartLength stack p.properties
       .ok (Emit.bytesToHex
         (patchCodePartLenPins
-          (Emit.appendBA (r010CodeSeparatorPrologue stack) bytes)))
+          (Emit.appendBA (r010CodeSeparatorPrologue stack) bytes) delta exact))
   | .error e => .error e
 
 def compileHexSafeWithCodeSepPatches (p : ANFProgram) :
