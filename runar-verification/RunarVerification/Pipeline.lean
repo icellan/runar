@@ -100,9 +100,31 @@ def r010CodeSeparatorPrologue (stack : StackProgram) : ByteArray :=
   else
     ByteArray.empty
 
+/-- R-095: overwrite the 4-byte zero field in every
+`OP_DUP <04 00 00 00 00> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL)
+OP_VERIFY` pin with the script's own length (little-endian). In-place
+overwrite keeps the length stable. -/
+def patchCodePartLenPins (bs : ByteArray) : ByteArray :=
+  let len := bs.size
+  let b0 : UInt8 := UInt8.ofNat (len &&& 0xff)
+  let b1 : UInt8 := UInt8.ofNat ((len >>> 8) &&& 0xff)
+  let b2 : UInt8 := UInt8.ofNat ((len >>> 16) &&& 0xff)
+  let b3 : UInt8 := UInt8.ofNat ((len >>> 24) &&& 0xff)
+  -- Accumulator form so a 10 KB WOTS script does not blow the 8 MB stack.
+  let rec go (acc : List UInt8) : List UInt8 → List UInt8
+    | 0x76 :: 0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest =>
+        if c == 0x9c || c == 0xa2 then
+          go (0x69 :: c :: 0x81 :: b3 :: b2 :: b1 :: b0 :: 0x04 :: 0x76 :: acc) rest
+        else
+          go (0x76 :: acc) (0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest)
+    | x :: rest => go (x :: acc) rest
+    | [] => acc.reverse
+  ByteArray.mk (go [] bs.toList).toArray
+
 def compileWithR010Prologue (p : ANFProgram) : ByteArray :=
   let stack := peepholeProgram (Lower.lower p)
-  Emit.appendBA (r010CodeSeparatorPrologue stack) (Emit.emitFast stack)
+  let bytes := Emit.appendBA (r010CodeSeparatorPrologue stack) (Emit.emitFast stack)
+  patchCodePartLenPins bytes
 
 /-- Hex-encoded form, matching the `expected-script.hex` format. -/
 def compileHex (p : ANFProgram) : String :=
@@ -207,9 +229,13 @@ def compileHexSafe (p : ANFProgram) : Except CompileError String :=
       -- Re-lower only to read `needsCodeSeparator`; compileSafe already
       -- validated the same stack. `appendBA empty bytes` is `bytes` when
       -- no method authenticates `_codePart`, so pre-R-010 goldens are
-      -- bit-identical to the previous `bytesToHex bytes` path.
+      -- bit-identical to the previous `bytesToHex bytes` path. R-095
+      -- length pins are patched after the prologue is prepended so the
+      -- 4-byte field is the full locking-script length.
       let stack := peepholeProgram (Lower.lower p)
-      .ok (Emit.bytesToHex (Emit.appendBA (r010CodeSeparatorPrologue stack) bytes))
+      .ok (Emit.bytesToHex
+        (patchCodePartLenPins
+          (Emit.appendBA (r010CodeSeparatorPrologue stack) bytes)))
   | .error e => .error e
 
 def compileHexSafeWithCodeSepPatches (p : ANFProgram) :

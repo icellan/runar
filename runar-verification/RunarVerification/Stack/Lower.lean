@@ -1918,11 +1918,21 @@ def fixedStateSectionLengthGo : List ANFProperty → Option Nat
 def fixedStateSectionLength? (props : List ANFProperty) : Option Nat :=
   fixedStateSectionLengthGo (mutableProperties props)
 
+/-- R-095 template: `OP_DUP <04 00 00 00 00> OP_BIN2NUM OP_GREATERTHANOREQUAL
+OP_VERIFY`. The four length bytes are patched after emit to the script's
+own byte length. Var-len state always uses GTE (constructor-slot growth
+is unknown). -/
+def verifyCodePartLenOps : List StackOp :=
+  [ .dup
+  , .push (.bytes (ByteArray.mk #[0, 0, 0, 0]))
+  , .opcode "OP_BIN2NUM"
+  , .opcode "OP_GREATERTHANOREQUAL"
+  , .opcode "OP_VERIFY" ]
+
 /-- Ops after `_codePart` has been PICK-copied to the top. Mirrors TS
 `emitCodePartAuthentication` steps 6–10 (`05-stack-lower.ts:4380-4508`).
 `fixedRestLen = none` skips clause 8a's remainder-length pin (variable
-state; R-095 `verify_code_part_len` is a separate emit-time back-patch
-and is not modelled here). -/
+state) and inserts R-095 `verifyCodePartLenOps` instead. -/
 def codePartAuthAfterPick (hasState : Bool) (fixedRestLen : Option Nat) :
     List StackOp :=
   let opc (s : String) : StackOp := .opcode s
@@ -1937,7 +1947,11 @@ def codePartAuthAfterPick (hasState : Bool) (fixedRestLen : Option Nat) :
        .push (.bytes (ByteArray.mk #[0x6a])), opc "OP_EQUALVERIFY"]
     else
       [.drop]
-  [opc "OP_SIZE", push 2, opc "OP_SUB", .rot, .swap, opc "OP_SPLIT"]
+  let lenPin : List StackOp :=
+    match hasState, fixedRestLen with
+    | true, none => verifyCodePartLenOps
+    | _,    _    => []
+  [opc "OP_SIZE"] ++ lenPin ++ [push 2, opc "OP_SUB", .rot, .swap, opc "OP_SPLIT"]
     ++ sizePin ++ restPin
     ++ [.push (.bytes (ByteArray.mk #[0x61, 0xab])), .swap, opc "OP_CAT",
         opc "OP_EQUALVERIFY"]
