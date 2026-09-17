@@ -445,6 +445,25 @@ function validateSpend(
   return spend.validate();
 }
 
+/**
+ * Replay ONE input of an already-built transaction on the real `Spend` engine.
+ *
+ * `runStatefulSpend` covers the common deploy -> call shape, but a spec that has
+ * to build its own call transaction — because a method argument depends on the
+ * transaction itself, e.g. `token-ft`'s `allPrevouts` — still needs the same
+ * verdict from the same engine, including the NEW-005 script detaching that
+ * makes a replay repeatable. Exported so those specs do not hand-roll a second,
+ * subtly different `Spend` construction.
+ */
+export function validateContractInput(
+  tx: Transaction,
+  inputIdx: number,
+  sourceTx: Transaction,
+  sourceOutputIdx: number,
+): boolean {
+  return validateSpend(tx, inputIdx, sourceTx, sourceOutputIdx, false);
+}
+
 export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<RealExecResult> {
   const compiled = compile(opts.source, { fileName: opts.fileName });
   if (!compiled.artifact) {

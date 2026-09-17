@@ -43,6 +43,12 @@ pub const FungibleToken = struct {
         ctx.addOutput(outputSatoshis, .{ to, self.balance + self.mergeBalance, 0 });
     }
 
+    // UNSOUND (W8 / SoloMerge): merge does not authenticate a second token
+    // input. A one-input spend writes the spender-chosen otherBalance into
+    // the successor. Pin:
+    // packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
+    // For a construction that binds a specific companion input, see
+    // examples/ts/companion-verifier/.
     pub fn merge(
         self: *FungibleToken,
         ctx: runar.StatefulContext,

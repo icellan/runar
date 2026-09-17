@@ -19,16 +19,18 @@ class FungibleToken(StatefulSmartContract):
     Operations:
         transfer -- Split: 1 UTXO -> 2 UTXOs (recipient + change back to sender)
         send     -- Simple send: 1 UTXO -> 1 UTXO (full balance to new owner)
-        merge    -- Secure merge: 2 UTXOs -> 1 UTXO (consolidate two token UTXOs)
+        merge    -- Merge: 2 UTXOs -> 1 UTXO (UNSOUND: does not authenticate a second token input; W8 / SoloMerge)
 
-    Secure merge design:
-        The merge uses position-dependent output construction verified via hash_prevouts.
-        Each input reads its own balance from its locking script (verified by OP_PUSH_TX)
-        and writes it to a specific slot in the output based on its position in the
-        transaction. Since hash_outputs forces both inputs to agree on the exact same
-        output, each input's claimed other_balance must equal the other input's real
-        verified balance. This prevents the inflation attack where an attacker lies
-        about other_balance.
+    UNSOUND merge (W8 / SoloMerge):
+        merge never asserts that a second token covenant is an input of the
+        spending transaction. hash256(all_prevouts) == extract_hash_prevouts(preimage)
+        only proves all_prevouts is the real prevout list. A one-input spend takes
+        the "I am input 0" arm and writes the spender-chosen other_balance into
+        the successor. A P2PKH fee input filling len(all_prevouts) == 72 does not
+        close the hole. Pin:
+        packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
+        For a construction that binds a specific companion input, see
+        examples/ts/companion-verifier/.
 
         The output stores both individual balances (balance and merge_balance) so they
         can be independently verified. Subsequent operations use the sum as the
@@ -93,31 +95,20 @@ class FungibleToken(StatefulSmartContract):
 
     @public
     def merge(self, sig: Sig, other_balance: Bigint, all_prevouts: ByteString, output_satoshis: Bigint):
-        """Secure merge: 2 UTXOs -> 1 UTXO. Consolidates two token UTXOs.
+        """Merge: 2 UTXOs -> 1 UTXO. Consolidates two token UTXOs.
 
-        Why this is secure (anti-inflation proof):
+        UNSOUND (W8 / SoloMerge): this method does not authenticate a second
+        token input. The position-dependent slot construction below is the
+        intended two-input argument; its premise (a second input running this
+        covenant) is never checked. A one-input spend writes other_balance into
+        the successor. Pin:
+        packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
 
-        Each input reads its own balance from its locking script (self.balance), which is
-        verified by OP_PUSH_TX — it cannot be faked. Each input writes its verified balance
-        to a specific output slot based on its position in the transaction.
-
-        Position is derived from all_prevouts (verified against hash_prevouts in the
-        preimage, so it reflects the real transaction) and the input's own outpoint.
-
-        The output has two balance slots: balance (slot 0) and merge_balance (slot 1).
-        Each input places its own verified balance in its slot, and the claimed other_balance
-        in the other slot::
-
-            Input 0 (balance=400): add_output(sats, owner, 400, other_balance_0)
-            Input 1 (balance=600): add_output(sats, owner, other_balance_1, 600)
-
-        Both inputs must produce byte-identical outputs (enforced by hash_outputs in BIP-143).
-        This forces:
-            - slot 0: 400 == other_balance_1  ->  input 1 MUST pass 400
-            - slot 1: other_balance_0 == 600  ->  input 0 MUST pass 600
-
-        Any lie causes a hash_outputs mismatch and the transaction is rejected on-chain.
-        The inputs can be in any order — each self-discovers its position from the preimage.
+        What the script actually does, if two token inputs happen to be present:
+        each input writes its own locking-script balance to a slot based on
+        whether its outpoint is first in all_prevouts, and hash_outputs then
+        forces those two inputs to agree. That is not a proof that a second
+        token input exists.
 
         Args:
             sig: Current owner's signature (authorization).

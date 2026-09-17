@@ -38,15 +38,16 @@ import static runar.lang.Builtins.substr;
  *   <li>{@code merge}    -- 2 UTXOs -> 1 UTXO (consolidate two token UTXOs).</li>
  * </ul>
  *
- * <h2>Secure merge design</h2>
- * <p>The merge uses position-dependent output construction verified via
- * {@code hashPrevouts}. Each input reads its own balance from its locking
- * script (verified by OP_PUSH_TX) and writes it to a specific slot in the
- * output based on its position in the transaction. Since {@code hashOutputs}
- * forces both inputs to agree on the exact same output, each input's
- * claimed {@code otherBalance} must equal the other input's real verified
- * balance. This prevents the inflation attack where an attacker lies about
- * {@code otherBalance}.
+ * <h2>UNSOUND merge (W8 / SoloMerge)</h2>
+ * <p>{@code merge} never asserts that a second token covenant is an input of
+ * the spending transaction. {@code hash256(allPrevouts) === extractHashPrevouts(preimage)}
+ * only proves {@code allPrevouts} is the real prevout list. A one-input spend
+ * takes the "I am input 0" arm and writes the spender-chosen {@code otherBalance}
+ * into the successor. A P2PKH fee input filling {@code len(allPrevouts) == 72}
+ * does not close the hole. Pin:
+ * {@code packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts}.
+ * For a construction that binds a specific companion input, see
+ * {@code examples/ts/companion-verifier/}.
  *
  * <p>Authorization: all operations require the current owner's ECDSA
  * signature via {@code checkSig}.
@@ -99,7 +100,12 @@ class FungibleToken extends StatefulSmartContract {
     }
 
     /**
-     * Secure merge: 2 UTXOs -> 1 UTXO. Consolidates two token UTXOs.
+     * Merge: 2 UTXOs -&gt; 1 UTXO. Consolidates two token UTXOs.
+     *
+     * <p>UNSOUND (W8 / SoloMerge): this method does not authenticate a second
+     * token input. A one-input spend writes {@code otherBalance} into the
+     * successor. Pin:
+     * {@code packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts}.
      */
     @Public
     void merge(Sig sig, Bigint otherBalance, ByteString allPrevouts, Bigint outputSatoshis) {

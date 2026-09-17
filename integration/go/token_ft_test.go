@@ -213,8 +213,9 @@ func TestFungibleToken_Transfer(t *testing.T) {
 }
 
 func TestFungibleToken_Merge(t *testing.T) {
-	// Merge consolidates 2 UTXOs into 1 output (same owner)
-	// Uses position-dependent balance slots for anti-inflation security
+	// Merge consolidates 2 UTXOs into 1 output (same owner).
+	// UNSOUND (W8 / SoloMerge): this path supplies two token inputs. It does
+	// not prove a one-input spend is rejected.
 	alice := helpers.NewWallet()
 	balance1 := int64(400)
 	balance2 := int64(600)
@@ -253,9 +254,9 @@ func TestFungibleToken_Merge(t *testing.T) {
 }
 
 func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
-	// Attacker lies about otherBalance. With secure merge, each input writes its
-	// own verified balance to a position-dependent slot. hashOutputs forces both
-	// inputs to produce identical outputs, so lying causes a mismatch.
+	// Attacker lies about otherBalance. With TWO token inputs, each writes its
+	// own verified balance to a position-dependent slot and hashOutputs forces
+	// them to agree, so lying causes a mismatch. That is not a one-input check.
 	alice := helpers.NewWallet()
 	balance1 := int64(400)
 	balance2 := int64(600)

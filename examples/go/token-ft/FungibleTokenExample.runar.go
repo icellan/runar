@@ -16,15 +16,17 @@ import runar "github.com/icellan/runar/packages/runar-go"
 // Operations:
 //   - Transfer -- Split: 1 UTXO -> 2 UTXOs (recipient + change back to sender)
 //   - Send     -- Simple send: 1 UTXO -> 1 UTXO (full balance to new owner)
-//   - Merge    -- Secure merge: 2 UTXOs -> 1 UTXO (consolidate two token UTXOs)
+//   - Merge    -- Merge: 2 UTXOs -> 1 UTXO (UNSOUND: does not authenticate a second token input; W8 / SoloMerge)
 //
-// Secure merge design:
-// The merge uses position-dependent output construction verified via hashPrevouts.
-// Each input reads its own balance from its locking script (verified by OP_PUSH_TX)
-// and writes it to a specific slot in the output based on its position in the transaction.
-// Since hashOutputs forces both inputs to agree on the exact same output, each input's
-// claimed otherBalance must equal the other input's real verified balance.
-// This prevents the inflation attack where an attacker lies about otherBalance.
+// UNSOUND merge (W8 / SoloMerge): Merge never asserts that a second token
+// covenant is an input of the spending transaction. hash256(allPrevouts) ===
+// extractHashPrevouts(preimage) only proves allPrevouts is the real prevout
+// list. A one-input spend takes the "I am input 0" arm and writes the
+// spender-chosen otherBalance into the successor. A P2PKH fee input filling
+// len(allPrevouts) == 72 does not close the hole. Pin:
+// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
+// For a construction that binds a specific companion input, see
+// examples/ts/companion-verifier/.
 //
 // The output stores both individual balances (Balance and MergeBalance) so they can
 // be independently verified. Subsequent operations use the sum as the available balance.
@@ -81,32 +83,21 @@ func (c *FungibleToken) Send(sig runar.Sig, to runar.PubKey, outputSatoshis runa
 	c.AddOutput(outputSatoshis, to, c.Balance+c.MergeBalance, 0)
 }
 
-// Merge securely consolidates two token UTXOs into one.
+// Merge consolidates two token UTXOs into one.
 // (2 UTXOs -> 1 UTXO)
 //
-// Why this is secure (anti-inflation proof):
+// UNSOUND (W8 / SoloMerge): this method does not authenticate a second
+// token input. The position-dependent slot construction below is the
+// intended two-input argument; its premise (a second input running this
+// covenant) is never checked. A one-input spend writes otherBalance into
+// the successor. Pin:
+// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
 //
-// Each input reads its own balance from its locking script (c.Balance), which is
-// verified by OP_PUSH_TX — it cannot be faked. Each input writes its verified balance
-// to a specific output slot based on its position in the transaction.
-//
-// Position is derived from allPrevouts (verified against hashPrevouts in the
-// preimage, so it reflects the real transaction) and the input's own outpoint.
-//
-// The output has two balance slots: Balance (slot 0) and MergeBalance (slot 1).
-// Each input places its own verified balance in its slot, and the claimed otherBalance
-// in the other slot:
-//
-//	Input 0 (balance=400): AddOutput(sats, owner, 400, otherBalance_0)
-//	Input 1 (balance=600): AddOutput(sats, owner, otherBalance_1, 600)
-//
-// Both inputs must produce byte-identical outputs (enforced by hashOutputs in BIP-143).
-// This forces:
-//   - slot 0: 400 == otherBalance_1  ->  input 1 MUST pass 400
-//   - slot 1: otherBalance_0 == 600  ->  input 0 MUST pass 600
-//
-// Any lie causes a hashOutputs mismatch and the transaction is rejected on-chain.
-// The inputs can be in any order — each self-discovers its position from the preimage.
+// What the script actually does, if two token inputs happen to be present:
+// each input writes its own locking-script balance to a slot based on
+// whether its outpoint is first in allPrevouts, and hashOutputs then
+// forces those two inputs to agree. That is not a proof that a second
+// token input exists.
 //
 // Parameters:
 //   - sig: current owner's signature (authorization)

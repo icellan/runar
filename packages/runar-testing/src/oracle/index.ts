@@ -9,6 +9,7 @@ export type { FoldEqOptions, FoldEqResult, FoldEqDivergence } from './fold-equiv
 export {
   runStatelessSigned,
   runStatefulSpend,
+  validateContractInput,
   testKey,
 } from './real-crypto-execution.js';
 export type {

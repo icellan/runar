@@ -1,5 +1,5 @@
 /**
- * FungibleToken integration test — stateful contract with secure merge via addOutput.
+ * FungibleToken integration test — stateful contract with merge via addOutput.
  *
  * FungibleToken is a StatefulSmartContract with properties:
  *   - owner: PubKey (mutable)
@@ -10,9 +10,10 @@
  * Methods: transfer(sig, to, amount, outputSatoshis), send(sig, to, outputSatoshis),
  *          merge(sig, otherBalance, allPrevouts, outputSatoshis)
  *
- * The merge uses position-dependent output construction: each input writes its own
- * verified balance to a slot based on its position in the transaction. hashOutputs
- * in BIP-143 forces both inputs to agree on identical outputs, preventing inflation.
+ * UNSOUND (W8 / SoloMerge): merge does not authenticate a second token input.
+ * Two-input tests here exercise hashOutputs agreement when both covenants run;
+ * they do not prove a one-input spend is rejected. Pin:
+ * packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
  */
 
 import { describe, it, expect } from 'vitest';

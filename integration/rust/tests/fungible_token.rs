@@ -1,4 +1,6 @@
-//! FungibleToken integration test — stateful contract with secure merge via addOutput.
+//! FungibleToken integration test — stateful contract with merge via addOutput.
+//!
+//! UNSOUND (W8 / SoloMerge): merge does not authenticate a second token input.
 //!
 //! Tests compile, deploy, transfer (multi-output), and merge (additional
 //! contract inputs with position-dependent balance verification) using the Rúnar SDK.
@@ -271,7 +273,7 @@ fn test_fungible_token_transfer() {
 
 // ---------------------------------------------------------------------------
 // Merge test — consolidates 2 UTXOs into 1 output (SDK additional inputs)
-// Uses position-dependent balance slots for anti-inflation security.
+// Two-input path: position-dependent balance slots. Not a one-input check.
 // ---------------------------------------------------------------------------
 
 #[test]

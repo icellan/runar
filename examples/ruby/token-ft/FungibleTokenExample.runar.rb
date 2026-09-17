@@ -34,6 +34,12 @@ class FungibleToken < Runar::StatefulSmartContract
     add_output(output_satoshis, to, @balance + @merge_balance, 0)
   end
 
+  # UNSOUND (W8 / SoloMerge): merge does not authenticate a second token
+  # input. A one-input spend writes the spender-chosen other_balance into
+  # the successor. Pin:
+  # packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
+  # For a construction that binds a specific companion input, see
+  # examples/ts/companion-verifier/.
   runar_public sig: Sig, other_balance: Bigint, all_prevouts: ByteString, output_satoshis: Bigint
   def merge(sig, other_balance, all_prevouts, output_satoshis)
     assert check_sig(sig, @owner)
