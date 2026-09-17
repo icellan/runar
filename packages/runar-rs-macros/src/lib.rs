@@ -62,9 +62,57 @@ fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
         }
     };
 
+    let ident = s.ident.clone();
+    let mut_fields = mutable_named_fields(&s.fields);
     strip_readonly_from_fields(&mut s.fields);
 
-    quote! { #s }.into()
+    let field_args = mut_fields.iter().map(|(n, ty)| quote! { #n: #ty });
+    let field_uses = mut_fields.iter().map(|(n, _)| quote! { let _ = #n; });
+
+    // A second impl block is visible to the contract's own `impl` in the
+    // same module (`#[path]` tests). Extra args match mutable properties
+    // in declaration order — the same positional convention the compiler
+    // uses for `this.addOutput(satoshis, ...)`.
+    quote! {
+        #s
+        impl #ident {
+            #[allow(dead_code)]
+            fn add_output<S>(&mut self, _satoshis: S, #(#field_args),*) {
+                #(#field_uses)*
+            }
+            #[allow(dead_code)]
+            fn add_raw_output<S, B: ::core::convert::AsRef<[u8]>>(
+                &mut self,
+                _satoshis: S,
+                _script: B,
+            ) {
+            }
+            #[allow(dead_code)]
+            fn add_data_output<S, B: ::core::convert::AsRef<[u8]>>(
+                &mut self,
+                _satoshis: S,
+                _data: B,
+            ) {
+            }
+        }
+    }
+    .into()
+}
+
+fn mutable_named_fields(fields: &Fields) -> Vec<(syn::Ident, syn::Type)> {
+    match fields {
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .filter_map(|f| {
+                if f.attrs.iter().any(is_readonly_attr) {
+                    return None;
+                }
+                Some((f.ident.clone()?, f.ty.clone()))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Marks a struct as a stateful Rúnar smart contract.
