@@ -1413,6 +1413,9 @@ def builtinOpcode (name : String) : List String :=
   -- Byte ops
   | "cat"         => ["OP_CAT"]
   | "len"         => ["OP_SIZE", "OP_NIP"]   -- mirrors 05-stack-lower.ts:1168
+  -- Unparameterized `lowerValue` / Agrees Stage C still emit bare OP_SPLIT
+  -- (Sim.lower_call_split). Production `lowerValueP` adds OP_NIP after it so
+  -- the bound value is the RIGHT half (TS `05-stack-lower.ts:2080-2094`).
   | "split"       => ["OP_SPLIT"]
   -- Numeric helpers
   | "abs"         => ["OP_ABS"]
@@ -1425,6 +1428,8 @@ def builtinOpcode (name : String) : List String :=
   -- ByteString ⇄ Int coercions
   | "num2bin"     => ["OP_NUM2BIN"]
   | "bin2num"     => ["OP_BIN2NUM"]
+  -- `int2str(n, size)` is the same opcode as `num2bin` (TS BUILTIN_OPCODES).
+  | "int2str"     => ["OP_NUM2BIN"]
   -- Casts (no-op — argument is already on the stack with the right repr)
   | "toByteString" => []
   | "pack"         => []
@@ -4261,6 +4266,48 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             , smFinal, localBindings )
         | _ =>
             ([.opcode "OP_RUNAR_SUBSTR_ARITY"], sm.push bindingName, localBindings)
+      else if func = "reverseBytes" then
+        -- TS `lowerReverseBytes` (`05-stack-lower.ts:6166-6214`): variable-
+        -- length reversal by 520 unrolled iterations (max BSV element size).
+        --   <data> OP_0 OP_SWAP
+        --   520×: DUP SIZE NIP OP_IF <1> SPLIT SWAP ROT CAT SWAP OP_ENDIF
+        --   DROP
+        match args with
+        | [arg] =>
+            let (load, sm1) := loadRefLive sm arg currentIndex lastUses outerProtected
+            let smFinal : StackMap := (sm1.popN 1).push bindingName
+            let iter : List StackOp :=
+              [ StackOp.dup
+              , StackOp.opcode "OP_SIZE"
+              , StackOp.nip
+              , StackOp.ifOp
+                  [ StackOp.push (.bigint 1)
+                  , StackOp.opcode "OP_SPLIT"
+                  , StackOp.swap
+                  , StackOp.rot
+                  , StackOp.opcode "OP_CAT"
+                  , StackOp.swap ]
+                  none ]
+            let body : List StackOp :=
+              [StackOp.push (.bigint 0), StackOp.swap]
+                ++ (List.range 520).flatMap (fun _ => iter)
+                ++ [StackOp.drop]
+            (load ++ body, smFinal, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_REVERSEBYTES_ARITY"], sm.push bindingName, localBindings)
+      else if func = "split" then
+        -- TS `lowerCall` (`05-stack-lower.ts:2080-2094`): OP_SPLIT leaves
+        -- [left, right]; `split(data, index)` is single-valued and binds
+        -- the RIGHT half, so NIP drops left. Stack-map effect matches the
+        -- generic pop-2/push-1 path (Agrees arity-2 copy lemmas).
+        match args with
+        | [_, _] =>
+            let (argOps, sm1) :=
+              lowerArgsLive currentIndex lastUses outerProtected args sm args
+            let sm2 := (sm1.popN 2).push bindingName
+            (argOps ++ [StackOp.opcode "OP_SPLIT", StackOp.nip], sm2, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_SPLIT_ARITY"], sm.push bindingName, localBindings)
       else if func = "percentOf" then
         -- TS `lowerPercentOf` (`05-stack-lower.ts:3520-3552`): emit
         -- `<amount> <bps> OP_MUL <push 10000> OP_DIV`. Net stack effect:
@@ -4335,12 +4382,12 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         | _ =>
             ([.opcode "OP_RUNAR_CLAMP_ARITY"], sm.push bindingName, localBindings)
       else if func = "pow" then
-        -- TS `lowerPow` (`05-stack-lower.ts:3407-3483`): bounded
-        -- 32-iteration multiply. The loop body is a flat opcode sequence
-        -- (no structured if-blocks at the StackMap level — each iteration
-        -- emits a `StackOp.ifOp` whose body multiplies into the accumulator).
+        -- TS `lowerPow` (`05-stack-lower.ts:5096-5179`, R-169): bounded
+        -- 32-iteration multiply with a domain guard so the script ABORTS
+        -- outside `0 <= exp < 33` instead of returning the clamped value.
         --
         --   <base> <exp>
+        --   OP_DUP <0> <33> OP_WITHIN OP_VERIFY
         --   OP_SWAP OP_1                       -- exp base 1
         --   for i in 0..32:                    -- exp base acc
         --     <2> OP_PICK                       -- exp base acc exp
@@ -4353,7 +4400,13 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             let (loadE, sm2) := loadRefOperand sm1 exp [base, exp] currentIndex lastUses outerProtected
             let smFinal : StackMap := (sm2.popN 2).push bindingName
             let header : List StackOp :=
-              [StackOp.swap, StackOp.push (.bigint 1)]
+              [ StackOp.opcode "OP_DUP"
+              , StackOp.push (.bigint 0)
+              , StackOp.push (.bigint 33)
+              , StackOp.opcode "OP_WITHIN"
+              , StackOp.opcode "OP_VERIFY"
+              , StackOp.swap
+              , StackOp.push (.bigint 1) ]
             let iter (i : Nat) : List StackOp :=
               [ StackOp.push (.bigint 2)
               , StackOp.opcode "OP_PICK"
@@ -4367,15 +4420,18 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         | _ =>
             ([.opcode "OP_RUNAR_POW_ARITY"], sm.push bindingName, localBindings)
       else if func = "sqrt" then
-        -- TS `lowerSqrt` (`05-stack-lower.ts:3564-3610`): integer square
-        -- root via Newton's method, guarded by `OP_DUP OP_IF ... OP_ENDIF`
-        -- so that `n == 0` skips the iteration (avoids div-by-zero) and
-        -- the original 0 remains on the stack.
+        -- TS `lowerSqrt` (`05-stack-lower.ts:5308-5366`, R-169): integer
+        -- square root via min-clamped Newton, 256 rounds. Domain guards
+        -- refuse n < 0 and encodings wider than 62 bytes; n == 0 skips
+        -- the iteration (avoids div-by-zero) and leaves 0 on the stack.
         --
-        --   <n> OP_DUP
+        --   <n>
+        --   OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY
+        --   OP_SIZE <63> OP_LESSTHAN OP_VERIFY
+        --   OP_DUP
         --   OP_IF
         --     OP_DUP                           -- n guess(=n)
-        --     16x: OP_OVER OP_OVER OP_DIV OP_ADD <2> OP_DIV
+        --     256x: OVER OVER DIV OVER ADD <2> DIV MIN
         --     OP_NIP                           -- result
         --   OP_ENDIF
         match args with
@@ -4385,14 +4441,24 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             let iter : List StackOp :=
               [ StackOp.over, StackOp.over
               , StackOp.opcode "OP_DIV"
+              , StackOp.over
               , StackOp.opcode "OP_ADD"
               , StackOp.push (.bigint 2)
-              , StackOp.opcode "OP_DIV" ]
+              , StackOp.opcode "OP_DIV"
+              , StackOp.opcode "OP_MIN" ]
             let newtonOps : List StackOp :=
               StackOp.opcode "OP_DUP"
-                :: ((List.range 16).flatMap (fun _ => iter)) ++ [StackOp.nip]
+                :: ((List.range 256).flatMap (fun _ => iter)) ++ [StackOp.nip]
             let body : List StackOp :=
               [ StackOp.opcode "OP_DUP"
+              , StackOp.push (.bigint 0)
+              , StackOp.opcode "OP_GREATERTHANOREQUAL"
+              , StackOp.opcode "OP_VERIFY"
+              , StackOp.opcode "OP_SIZE"
+              , StackOp.push (.bigint 63)
+              , StackOp.opcode "OP_LESSTHAN"
+              , StackOp.opcode "OP_VERIFY"
+              , StackOp.opcode "OP_DUP"
               , StackOp.ifOp newtonOps none ]
             (loadN ++ body, smFinal, localBindings)
         | _ =>
@@ -5706,6 +5772,7 @@ def isSpecialCallFunc (func : String) : Bool :=
   func.startsWith "extract" ||
   func == "buildChangeOutput" || func == "computeStateOutput" ||
   func == "computeStateOutputHash" || func == "substr" ||
+  func == "reverseBytes" || func == "split" ||
   func == "percentOf" || func == "mulDiv" ||
   func == "safediv" || func == "safemod" ||
   func == "clamp" || func == "pow" || func == "sqrt" ||
