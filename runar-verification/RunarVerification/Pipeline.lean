@@ -3139,7 +3139,7 @@ def valueOperandsNodupB : ANFValue → Bool
   | .addRawOutput a b => a != b
   | .addDataOutput a b => a != b
   | .ifVal _ thn els _ => noAliasedOperandsB thn && noAliasedOperandsB els
-  | .loop _ body _ => noAliasedOperandsB body
+  | .loop _ body _ _ _ => noAliasedOperandsB body
   | _ => true
 
 /-- Every binding in the body reads pairwise-distinct refs per value. -/
@@ -3151,7 +3151,7 @@ end
 mutual
 /-- The value contains a `loop` anywhere (recursing into branch bodies). -/
 def valueUsesLoopB : ANFValue → Bool
-  | .loop _ _ _ => true
+  | .loop _ _ _ _ _ => true
   | .ifVal _ thn els _ => bindingsUseLoopB thn || bindingsUseLoopB els
   | _ => false
 
@@ -3193,7 +3193,7 @@ their branches are loop-free. Designed to be required ALONGSIDE
 def valueLoopMapNeutralB (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat) (constInts : List (String × Int)) (sm : Lower.StackMap) :
     ANFValue → Bool
-  | .loop _count body iterVar =>
+  | .loop _count body iterVar _ _ =>
       let smInner := sm.push iterVar
       let naturalLU := Lower.computeLastUses body
       let outerRefs := Lower.bodyOuterRefs body iterVar
@@ -3234,7 +3234,7 @@ theorem valueLoopMapNeutralB_of_no_loop
     (v : ANFValue) (h : valueUsesLoopB v = false) :
     valueLoopMapNeutralB progMethods props budget constInts sm v = true := by
   cases v with
-  | loop count body iterVar => simp [valueUsesLoopB] at h
+  | loop count body iterVar _ _ => simp [valueUsesLoopB] at h
   | ifVal cond thn els _ =>
       simp only [valueUsesLoopB] at h
       simp [valueLoopMapNeutralB, h]
@@ -4635,7 +4635,7 @@ theorem arithOnlyBody_of_emittableArithChainReadyNoDblNeg
       | call _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | methodCall _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | ifVal _ _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
-      | loop _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
+      | loop _ _ _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | assert _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | updateProp _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | getStateScript => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
@@ -4764,7 +4764,7 @@ theorem noMethodCallBindings_true_of_mathByteNoLen :
       | .unaryOp op o rt => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .methodCall n a r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .ifVal c t e _ => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
-      | .loop a b c => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
+      | .loop a b c _ _ => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .assert r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp n r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
@@ -9950,7 +9950,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ (.methodCall _ _ _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
-                | [.mk _ (.loop _ _ _) _] =>
+                | [.mk _ (.loop _ _ _ _ _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ (.assert _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])

@@ -91,15 +91,15 @@ requires `body = []` because an empty body is the only shape whose
 lowered ops are a no-op on the stack independent of any per-body
 operational hypotheses. -/
 def structuralLoopValue : ANFValue → Prop
-  | .loop 0 _ _      => True
-  | .loop 1 body _   => body = []
+  | .loop 0 _ _ _ _ => True
+  | .loop 1 body _ _ _ => body = []
   | _                => False
 
 /-- Bool checker counterpart for `structuralLoopValue`, used to derive a
 `Decidable` instance via `inferInstanceAs`. -/
 def structuralLoopValueB : ANFValue → Bool
-  | .loop 0 _ _        => true
-  | .loop 1 [] _       => true
+  | .loop 0 _ _ _ _ => true
+  | .loop 1 [] _ _ _ => true
   | _                  => false
 
 theorem structuralLoopValue_iff_B (v : ANFValue) :
@@ -113,7 +113,7 @@ theorem structuralLoopValue_iff_B (v : ANFValue) :
   | call _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | methodCall _ _ _ => simp [structuralLoopValue, structuralLoopValueB]
   | ifVal _ _ _ _ => simp [structuralLoopValue, structuralLoopValueB]
-  | loop count body _ =>
+  | loop count body _ _ _ =>
       cases count with
       | zero => simp [structuralLoopValue, structuralLoopValueB]
       | succ k =>
@@ -266,7 +266,7 @@ theorem runOps_lowerValueP_structuralLoopValue_id
   | call _ _ => exact (hSupp).elim
   | methodCall _ _ _ => exact (hSupp).elim
   | ifVal _ _ _ _ => exact (hSupp).elim
-  | loop count body iv =>
+  | loop count body iv _ _ =>
       cases count with
       | zero =>
           rw [lowerValueP_loop_zero_ops_nil progMethods props budget
@@ -366,9 +366,9 @@ theorem collectRawSlots_nil_of_structuralLoopBody :
         obtain ⟨hv, hrest⟩ := h
         have hTail := ih hrest
         match v, hv with
-        | .loop 0 _ _, _ =>
+        | .loop 0 _ _ _ _, _ =>
             simpa [Stack.Lower.collectRawSlotsGo] using hTail
-        | .loop 1 body _, hb =>
+        | .loop 1 body _ _ _, hb =>
             subst hb
             simpa [Stack.Lower.collectRawSlotsGo] using hTail
   intro bs h
@@ -390,9 +390,9 @@ theorem arrayElemsOf_nil_of_structuralLoopBody :
       obtain ⟨hv, hrest⟩ := h
       have hTail := ih hrest
       match v, hv with
-      | .loop 0 _ _, _ =>
+      | .loop 0 _ _ _ _, _ =>
           simpa [Stack.Lower.arrayElemsOf] using hTail
-      | .loop 1 body _, hb =>
+      | .loop 1 body _ _ _, hb =>
           subst hb
           simpa [Stack.Lower.arrayElemsOf] using hTail
 
@@ -618,14 +618,14 @@ theorem runOps_lowerValueP_loop_empty_id
 `.loop count [] iv` for ANY `count`, plus the `.loop 0 _ _` arm (any
 body, since the `count = 0` case lowers to `[]` regardless). -/
 def structuralLoopValueExt : ANFValue → Prop
-  | .loop 0 _ _      => True
-  | .loop _ body _   => body = []
+  | .loop 0 _ _ _ _ => True
+  | .loop _ body _ _ _ => body = []
   | _                => False
 
 /-- Bool checker counterpart for `structuralLoopValueExt`. -/
 def structuralLoopValueExtB : ANFValue → Bool
-  | .loop 0 _ _      => true
-  | .loop _ [] _     => true
+  | .loop 0 _ _ _ _ => true
+  | .loop _ [] _ _ _ => true
   | _                => false
 
 theorem structuralLoopValueExt_iff_B (v : ANFValue) :
@@ -639,7 +639,7 @@ theorem structuralLoopValueExt_iff_B (v : ANFValue) :
   | call _ _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
   | methodCall _ _ _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
   | ifVal _ _ _ _ => simp [structuralLoopValueExt, structuralLoopValueExtB]
-  | loop count body _ =>
+  | loop count body _ _ _ =>
       cases count with
       | zero => simp [structuralLoopValueExt, structuralLoopValueExtB]
       | succ k =>
@@ -697,7 +697,7 @@ theorem structuralLoopValue_implies_Ext (v : ANFValue)
   | call _ _ => exact h
   | methodCall _ _ _ => exact h
   | ifVal _ _ _ _ => exact h
-  | loop count body iv =>
+  | loop count body iv _ _ =>
       cases count with
       | zero => simp [structuralLoopValueExt]
       | succ k =>
@@ -753,7 +753,7 @@ theorem runOps_lowerValueP_structuralLoopValueExt_id
   | call _ _ => exact (hSupp).elim
   | methodCall _ _ _ => exact (hSupp).elim
   | ifVal _ _ _ _ => exact (hSupp).elim
-  | loop count body iv =>
+  | loop count body iv _ _ =>
       cases count with
       | zero =>
           rw [lowerValueP_loop_zero_ops_nil progMethods props budget
@@ -836,9 +836,9 @@ theorem collectRawSlots_nil_of_structuralLoopBodyExt :
         obtain ⟨hv, hrest⟩ := h
         have hTail := ih hrest
         match v, hv with
-        | .loop 0 _ _, _ =>
+        | .loop 0 _ _ _ _, _ =>
             simpa [Stack.Lower.collectRawSlotsGo] using hTail
-        | .loop (_ + 1) body _, hb =>
+        | .loop (_ + 1) body _ _ _, hb =>
             subst hb
             simpa [Stack.Lower.collectRawSlotsGo] using hTail
   intro bs h
@@ -858,9 +858,9 @@ theorem arrayElemsOf_nil_of_structuralLoopBodyExt :
       obtain ⟨hv, hrest⟩ := h
       have hTail := ih hrest
       match v, hv with
-      | .loop 0 _ _, _ =>
+      | .loop 0 _ _ _ _, _ =>
           simpa [Stack.Lower.arrayElemsOf] using hTail
-      | .loop (_ + 1) body _, hb =>
+      | .loop (_ + 1) body _ _ _, hb =>
           subst hb
           simpa [Stack.Lower.arrayElemsOf] using hTail
 
@@ -1434,7 +1434,7 @@ theorem lowerBindingsP_structuralLoopConstBody_ops :
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.call _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.methodCall _ _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.ifVal _ _ _ _) _ :: _, h => h.elim
-  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.loop _ _ _) _ :: _, h => h.elim
+  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.loop _ _ _ _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.assert _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.updateProp _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ .getStateScript _ :: _, h => h.elim
@@ -1489,7 +1489,7 @@ theorem lowerBindingsP_structuralLoopConstBody_sm :
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.call _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.methodCall _ _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.ifVal _ _ _ _) _ :: _, h => h.elim
-  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.loop _ _ _) _ :: _, h => h.elim
+  | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.loop _ _ _ _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.assert _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ (.updateProp _ _) _ :: _, h => h.elim
   | _, _, _, _, _, _, _, _, _, ANFBinding.mk _ .getStateScript _ :: _, h => h.elim
@@ -1543,8 +1543,8 @@ theorem constBodyStackMap_preserves_listContains
           | ifVal _ _ _ _ =>
               show ((constBodyStackMap (ANFBinding.mk _ (.ifVal _ _ _ _) _ :: rest) sm).any (· == name)) = true
               unfold constBodyStackMap; exact ih sm name h
-          | loop _ _ _ =>
-              show ((constBodyStackMap (ANFBinding.mk _ (.loop _ _ _) _ :: rest) sm).any (· == name)) = true
+          | loop _ _ _ _ _ =>
+              show ((constBodyStackMap (ANFBinding.mk _ (.loop _ _ _ _ _) _ :: rest) sm).any (· == name)) = true
               unfold constBodyStackMap; exact ih sm name h
           | assert _ =>
               show ((constBodyStackMap (ANFBinding.mk _ (.assert _) _ :: rest) sm).any (· == name)) = true
@@ -1612,7 +1612,7 @@ theorem runOps_emitConstChain_structuralLoopConstBody :
   | ANFBinding.mk _ (.call _ _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.methodCall _ _ _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.ifVal _ _ _ _) _ :: _, h, _ => h.elim
-  | ANFBinding.mk _ (.loop _ _ _) _ :: _, h, _ => h.elim
+  | ANFBinding.mk _ (.loop _ _ _ _ _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.assert _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ (.updateProp _ _) _ :: _, h, _ => h.elim
   | ANFBinding.mk _ .getStateScript _ :: _, h, _ => h.elim
@@ -1734,7 +1734,7 @@ private theorem applyDrop_constChainPostState_dropLast
     | call _ _ => exact h.elim
     | methodCall _ _ _ => exact h.elim
     | ifVal _ _ _ _ => exact h.elim
-    | loop _ _ _ => exact h.elim
+    | loop _ _ _ _ _ => exact h.elim
     | assert _ => exact h.elim
     | updateProp _ _ => exact h.elim
     | getStateScript => exact h.elim

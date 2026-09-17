@@ -255,7 +255,7 @@ theorem lowerValueP_eq_lowerValue_structuralCall
   | unaryOp _ _ _ => simp [structuralCallValue] at h
   | methodCall _ _ _ => simp [structuralCallValue] at h
   | ifVal _ _ _ _ => simp [structuralCallValue] at h
-  | loop _ _ _ => simp [structuralCallValue] at h
+  | loop _ _ _ _ _ => simp [structuralCallValue] at h
   | assert _ => simp [structuralCallValue] at h
   | updateProp _ _ => simp [structuralCallValue] at h
   | getStateScript => simp [structuralCallValue] at h
@@ -464,7 +464,7 @@ theorem evalValue_structuralCallValue_ok
   | unaryOp _ _ _ => simp [structuralCallValue] at h
   | methodCall _ _ _ => simp [structuralCallValue] at h
   | ifVal _ _ _ _ => simp [structuralCallValue] at h
-  | loop _ _ _ => simp [structuralCallValue] at h
+  | loop _ _ _ _ _ => simp [structuralCallValue] at h
   | assert _ => simp [structuralCallValue] at h
   | updateProp _ _ => simp [structuralCallValue] at h
   | getStateScript => simp [structuralCallValue] at h
@@ -4342,8 +4342,8 @@ theorem mathByteSingleArgShapeBool_iff :
           apply mathByteShape_false_of_notSingleCall bn (.ifVal c t e r) src rest tsm
           · cases tsm <;> simp [mathByteSingleArgShapeBool]
           · intro f a hEq; exact absurd hEq (by simp)
-      | .loop c b iv =>
-          apply mathByteShape_false_of_notSingleCall bn (.loop c b iv) src rest tsm
+      | .loop c b iv start step =>
+          apply mathByteShape_false_of_notSingleCall bn (.loop c b iv start step) src rest tsm
           · cases tsm <;> simp [mathByteSingleArgShapeBool]
           · intro f a hEq; exact absurd hEq (by simp)
       | .assert r =>
@@ -5627,7 +5627,7 @@ theorem mathByteEmitNoNip_of_noLenFragment :
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .ifVal c t e _ =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .loop a b c =>
+      | .loop a b c _ _ =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .assert a =>
           cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5696,7 +5696,7 @@ theorem bindingsUseCheckPreimage_false_of_noLen :
       | .unaryOp op o rt => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .methodCall n a r => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .ifVal c t e _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .loop a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .loop a b c _ _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5747,7 +5747,7 @@ theorem collectRawSlots_nil_of_noLen :
         | .unaryOp op o rt => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .methodCall n a r => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .ifVal c t e _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-        | .loop a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+        | .loop a b c _ _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
         | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5797,7 +5797,7 @@ theorem bindingsUseCodePart_false_of_noLen :
       | .unaryOp op o rt => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .methodCall n a r => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .ifVal c t e _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .loop a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .loop a b c _ _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5841,7 +5841,7 @@ theorem bindingsUseDeserializeState_false_of_noLen :
       | .unaryOp op o rt => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .methodCall n a r => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .ifVal c t e _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .loop a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .loop a b c _ _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
@@ -5889,7 +5889,7 @@ theorem bodyEndsInAssert_false_of_noLen :
       | .unaryOp op o rt => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .methodCall n a r => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .ifVal c t e _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
-      | .loop a b c => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
+      | .loop a b c _ _ => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .assert a => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp a b => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [mathByteSingleArgShapeNoLenBool] at hShape

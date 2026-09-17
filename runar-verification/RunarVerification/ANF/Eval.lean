@@ -1896,7 +1896,7 @@ def evalValue (s : State) : ANFValue → EvalResult (Value × State)
               | none   => .ok (.vBool false, s')
           | none => .ok (.vBool false, s')
       | _ => .error (.typeError "if expects boolean condition")
-  | .loop count body iterVar => do
+  | .loop count body iterVar _ _ => do
       -- Unroll exactly `count` iterations, registering iterVar as a
       -- synthetic param for the body's scope. Each iteration sees the
       -- accumulated bindings (loop-carry shadowing falls out for free).
@@ -2169,7 +2169,7 @@ def evalValueP (methods : List ANFMethod) (s : State) : ANFValue → EvalResult 
               | none   => .ok (.vBool false, s')
           | none => .ok (.vBool false, s')
       | _ => .error (.typeError "if expects boolean condition")
-  | .loop count body iterVar => do
+  | .loop count body iterVar _ _ => do
       let s' ← runLoopP methods count body iterVar s
       .ok (.vBool true, s')
   | .assert ref => do
@@ -2260,7 +2260,7 @@ through `ifVal` branches and `loop` bodies). -/
 def noMethodCallValue : ANFValue → Bool
   | .methodCall _ _ _ => false
   | .ifVal _ thenBs elseBs _ => noMethodCallBindings thenBs && noMethodCallBindings elseBs
-  | .loop _ body _ => noMethodCallBindings body
+  | .loop _ body _ _ _ => noMethodCallBindings body
   | _ => true
 
 /-- `true` iff every binding in the list has a methodCall-free value. -/
@@ -2304,7 +2304,7 @@ theorem evalValueP_eq_evalValue_of_noMethodCall
             | vBytes _ => rfl
             | vThis => rfl
             | vOpaque _ => rfl
-    | loop count body iterVar =>
+    | loop count body iterVar _ _ =>
         intro hNo
         simp only [noMethodCallValue] at hNo
         rw [evalValueP, evalValue]

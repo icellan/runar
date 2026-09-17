@@ -159,7 +159,7 @@ def collectRefs : ANFValue → List String
   | .methodCall obj _ args    => (obj :: args : List String)
   | .ifVal cond thn els _       =>
       (cond :: collectRefsBindings thn) ++ collectRefsBindings els
-  | .loop _ body _            => collectRefsBindings body
+  | .loop _ body _ _ _ => collectRefsBindings body
   | .assert ref               => [ref]
   | .updateProp _ ref         => [ref]
   | .checkPreimage pre        => [pre]
@@ -222,7 +222,7 @@ def collectConstInts : List ANFBinding → List (String × Int)
         match v with
         | .loadConst (.int i)   => [(name, i)]
         | .ifVal _ thn els _      => collectConstInts thn ++ collectConstInts els
-        | .loop _ body _        => collectConstInts body
+        | .loop _ body _ _ _ => collectConstInts body
         | _                     => []
       here ++ collectConstInts rest
 
@@ -266,8 +266,8 @@ def arrayElemsOf : List ANFBinding → List (String × List String)
         -- A zero-count loop is never lowered, so the reference's
         -- `lowerArrayLiteral` never runs for its body and the entries never
         -- reach `arrayElements`. Same gate `collectRawSlotsGo` applies.
-        | .loop 0 _ _          => []
-        | .loop _ body _       => arrayElemsOf body
+        | .loop 0 _ _ _ _ => []
+        | .loop _ body _ _ _ => arrayElemsOf body
         | _                    => []
       here ++ arrayElemsOf rest
 
@@ -351,7 +351,7 @@ def collectDeepBindingNames : List ANFBinding → List String
   | (.mk name (.ifVal _ t e _) _) :: rest =>
       (name :: (collectDeepBindingNames t ++ collectDeepBindingNames e))
         ++ collectDeepBindingNames rest
-  | (.mk name (.loop _ body _) _) :: rest =>
+  | (.mk name (.loop _ body _ _ _) _) :: rest =>
       (name :: collectDeepBindingNames body) ++ collectDeepBindingNames rest
   | (.mk name _ _) :: rest => name :: collectDeepBindingNames rest
 termination_by xs => sizeOf xs
@@ -363,7 +363,7 @@ Mirrors TS `flattenNestedLoopBodies`. Only `collectLoopCarriedRebinds`
 uses it, and only to order reads against rebindings. -/
 def flattenNestedLoopBodies : List ANFBinding → List ANFBinding
   | [] => []
-  | (.mk _ (.loop _ body _) _) :: rest =>
+  | (.mk _ (.loop _ body _ _ _) _) :: rest =>
       flattenNestedLoopBodies body ++ flattenNestedLoopBodies rest
   | (.mk _ (.ifVal _ t e _) _) :: rest =>
       (flattenNestedLoopBodies t ++ flattenNestedLoopBodies e)
@@ -3724,7 +3724,7 @@ def lowerValue (sm : StackMap) (bindingName : String) :
       (loadRef sm ref ++ [.opcode "OP_VERIFY"], sm)
   | .updateProp _ ref =>
       (loadRef sm ref ++ [.opcode "OP_RUNAR_UPDATEPROP_UNSUPPORTED"], sm)
-  | .loop count body iterVar =>
+  | .loop count body iterVar _ _ =>
       -- Phase 3d: full count-bounded unroll. The body is lowered once
       -- (with `iterVar` registered as a synthetic param at depth 0);
       -- `unrollIter` then iterates the body `count` times, each
@@ -3924,8 +3924,8 @@ the aliased value's behalf before its real consumer is known. -/
         -- in its body (`lowerLoop` adds markers from inside the iteration
         -- loop, which does not run). Iterations beyond the first re-lower
         -- the same body and re-add the same names, so one pass suffices.
-        | .loop 0 _ _        => acc
-        | .loop _ body _     => collectRawSlotsGo acc body
+        | .loop 0 _ _ _ _ => acc
+        | .loop _ body _ _ _ => collectRawSlotsGo acc body
         | _ => if rawResultValue v then name :: acc else acc
       collectRawSlotsGo acc' rest
 
@@ -4021,7 +4021,7 @@ def bindingsUseCodePart : List ANFBinding → Bool
             f = "computeStateOutput" || f = "computeStateOutputHash"
         | .ifVal _ thn els _    =>
             bindingsUseCodePart thn || bindingsUseCodePart els
-        | .loop _ body _      => bindingsUseCodePart body
+        | .loop _ body _ _ _ => bindingsUseCodePart body
         | _                   => false
       here || bindingsUseCodePart rest
 
@@ -4035,7 +4035,7 @@ def bindingsReadVarLenState (progMethods : List ANFMethod)
         | .ifVal _ thn els _  =>
             bindingsReadVarLenState progMethods varLenProps fuel thn
               || bindingsReadVarLenState progMethods varLenProps fuel els
-        | .loop _ body _      =>
+        | .loop _ body _ _ _ =>
             bindingsReadVarLenState progMethods varLenProps fuel body
         | .methodCall _ mn _  =>
             match fuel with
@@ -5206,7 +5206,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       -- re-minimised on the way in, so the state continuation commits the
       -- minimal encoding.
       (normalizeRaw (rawSlotsInScope rawSlots bindingName) ref load ++ cleanup, sm2, localBindings)
-  | .loop count body iterVar =>
+  | .loop count body iterVar start step =>
       -- Loop-fidelity rewrite (2026-06-11; replaces the Phase 3z-F
       -- lower-once-and-replay arm): per-ITERATION re-lowering against the
       -- live threaded stack map, mirroring TS `lowerLoop` at
@@ -5267,7 +5267,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       let (ops, smPostLoop) :=
         lowerLoopItersP progMethods props budget finalLU nonFinalLU
           loopLocal constInts body iterVar count sm count rawSlots insideBranch
-          arrayElems
+          arrayElems start step
       -- Loops are statements, not expressions — no stack value is produced
       -- (TS 2172-2175) and the enclosing localBindings set is restored
       -- (TS 2171). The post-loop sm is the THREADED map from the final
@@ -5351,12 +5351,18 @@ def lowerLoopItersP (progMethods : List ANFMethod) (props : List ANFProperty)
     (body : List ANFBinding) (iterVar : String) (count : Nat)
     (sm : StackMap) (n : Nat) (rawSlots : List String := [])
     (insideBranch : Bool := false)
-    (arrayElems : List (String × List String) := []) :
+    (arrayElems : List (String × List String) := [])
+    (start : Int := 0) (step : Int := 1) :
     (List StackOp × StackMap) :=
   match n with
   | 0 => ([], sm)
   | remaining + 1 =>
       let i := count - (remaining + 1)
+      -- Default start=0/step=1 is definitionally `Int.ofNat i` so AgreesA7
+      -- loop pins that unfold this push stay `rfl`.
+      let iVal : Int :=
+        if start == 0 && step == 1 then Int.ofNat i
+        else start + Int.ofNat i * step
       let lu := if remaining == 0 then naturalLU else nonFinalLU
       let smInner := sm.push iterVar
       let (bodyOps, smBody) :=
@@ -5365,8 +5371,8 @@ def lowerLoopItersP (progMethods : List ANFMethod) (props : List ANFProperty)
       let (restOps, smFinal) :=
         lowerLoopItersP progMethods props budget naturalLU nonFinalLU
           loopLocal constInts body iterVar count smIter remaining rawSlots insideBranch
-          arrayElems
-      ([StackOp.push (.bigint (Int.ofNat i))] ++ bodyOps ++ dropOps ++ restOps,
+          arrayElems start step
+      ([StackOp.push (.bigint iVal)] ++ bodyOps ++ dropOps ++ restOps,
        smFinal)
 termination_by (budget, sizeOf body, n)
 
@@ -5417,7 +5423,7 @@ def bindingsUseCheckPreimage : List ANFBinding → Bool
         | .checkPreimage _    => true
         | .ifVal _ thn els _    =>
             bindingsUseCheckPreimage thn || bindingsUseCheckPreimage els
-        | .loop _ body _      => bindingsUseCheckPreimage body
+        | .loop _ body _ _ _ => bindingsUseCheckPreimage body
         | _                   => false
       here || bindingsUseCheckPreimage rest
 
@@ -5449,7 +5455,7 @@ def bindingsUseDeserializeState : List ANFBinding → Bool
         | .deserializeState _ => true
         | .ifVal _ thn els _    =>
             bindingsUseDeserializeState thn || bindingsUseDeserializeState els
-        | .loop _ body _      => bindingsUseDeserializeState body
+        | .loop _ body _ _ _ => bindingsUseDeserializeState body
         | _                   => false
       here || bindingsUseDeserializeState rest
 
@@ -5646,7 +5652,7 @@ def simpleValue : ANFValue → Bool
   | .methodCall _ _ _         => true
   | .ifVal _ thn els _          =>
       simpleBindings thn && simpleBindings els
-  | .loop _ body _            =>
+  | .loop _ body _ _ _ =>
       simpleBindings body
   -- Phase 3w-b — concretely lowered framework intrinsics:
   | .checkPreimage _          => true

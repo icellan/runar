@@ -2152,7 +2152,7 @@ theorem updatePropArithValueB_iff (v : ANFValue) :
   | call _ _ => simp [updatePropArithValueB, updatePropArithValue]
   | methodCall _ _ _ => simp [updatePropArithValueB, updatePropArithValue]
   | ifVal _ _ _ _ => simp [updatePropArithValueB, updatePropArithValue]
-  | loop _ _ _ => simp [updatePropArithValueB, updatePropArithValue]
+  | loop _ _ _ _ _ => simp [updatePropArithValueB, updatePropArithValue]
   | assert _ => simp [updatePropArithValueB, updatePropArithValue]
   | updateProp _ _ => simp [updatePropArithValueB, updatePropArithValue]
   | getStateScript => simp [updatePropArithValueB, updatePropArithValue]

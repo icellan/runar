@@ -69,7 +69,7 @@ def valueKindName : ANFValue → String
   | .call func _          => s!"call:{func}"
   | .methodCall _ m _     => s!"method_call:{m}"
   | .ifVal _ _ _ _          => "if"
-  | .loop _ _ _           => "loop"
+  | .loop _ _ _ _ _ => "loop"
   | .assert _             => "assert"
   | .updateProp _ _       => "update_prop"
   | .getStateScript       => "get_state_script"
@@ -122,7 +122,7 @@ partial def firstFailure (retEnv : List (String × ANFType)) (Γ : TypeEnv) :
                 let τIf := τThen.orElse (fun _ => τElse) |>.getD .bool
                 firstFailure retEnv (Γ.extend name τIf) rest
             | _, _ => some (name, "if (branch failed to check)")
-    | .loop _count body iterVar =>
+    | .loop _count body iterVar _ _ =>
         match firstFailure retEnv (Γ.extend iterVar .bigint) body with
         | some f => some f
         | none =>

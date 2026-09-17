@@ -209,8 +209,11 @@ inductive ANFValue where
   -/
   | ifVal           (cond : TempRef) (thenBranch elseBranch : List ANFBinding)
                     (results : List String := []) : ANFValue
-  /-- `{kind: "loop", count, body, iterVar}` — bounded loop, fully unrollable. -/
-  | loop            (count : Nat) (body : List ANFBinding) (iterVar : String) : ANFValue
+  /-- `{kind: "loop", count, body, iterVar, start?, step?}`. `start`/`step`
+  default to `0`/`1` so existing `.loop c b v` applications stay valid.
+  Countdown / non-zero-start goldens carry them explicitly. -/
+  | loop            (count : Nat) (body : List ANFBinding) (iterVar : String)
+                    (start : Int := 0) (step : Int := 1) : ANFValue
   /-- `{kind: "assert", value}` — script aborts iff `value` is false. -/
   | assert          (value : TempRef) : ANFValue
   /-- `{kind: "update_prop", name, value}` — write to a (mutable) property slot. -/

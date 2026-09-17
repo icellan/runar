@@ -303,7 +303,7 @@ theorem lowerBindingsP_singleton_leafEmpty_methodCall_ops
           | .unaryOp _ _ _    => simp [leafEmptyMethodCallValueB] at hVal
           | .call _ _         => simp [leafEmptyMethodCallValueB] at hVal
           | .ifVal _ _ _ _      => simp [leafEmptyMethodCallValueB] at hVal
-          | .loop _ _ _       => simp [leafEmptyMethodCallValueB] at hVal
+          | .loop _ _ _ _ _ => simp [leafEmptyMethodCallValueB] at hVal
           | .assert _         => simp [leafEmptyMethodCallValueB] at hVal
           | .updateProp _ _   => simp [leafEmptyMethodCallValueB] at hVal
           | .getStateScript   => simp [leafEmptyMethodCallValueB] at hVal
@@ -638,7 +638,7 @@ theorem runOps_lowerBindingsP_singleton_methodCallLeaf_isSome
           | .unaryOp _ _ _    => simp [singletonMethodCallLeafValue] at hVal
           | .call _ _         => simp [singletonMethodCallLeafValue] at hVal
           | .ifVal _ _ _ _      => simp [singletonMethodCallLeafValue] at hVal
-          | .loop _ _ _       => simp [singletonMethodCallLeafValue] at hVal
+          | .loop _ _ _ _ _ => simp [singletonMethodCallLeafValue] at hVal
           | .assert _         => simp [singletonMethodCallLeafValue] at hVal
           | .updateProp _ _   => simp [singletonMethodCallLeafValue] at hVal
           | .getStateScript   => simp [singletonMethodCallLeafValue] at hVal
@@ -970,7 +970,7 @@ theorem runOps_lowerBindingsP_leafEmptyMethodCall_then_const_isSome
               leafEmptyMethodCallValue] at hVal
           | .ifVal _ _ _ _      => simp [leafEmptyMethodCallValueB,
               leafEmptyMethodCallValue] at hVal
-          | .loop _ _ _       => simp [leafEmptyMethodCallValueB,
+          | .loop _ _ _ _ _ => simp [leafEmptyMethodCallValueB,
               leafEmptyMethodCallValue] at hVal
           | .assert _         => simp [leafEmptyMethodCallValueB,
               leafEmptyMethodCallValue] at hVal
@@ -2393,7 +2393,7 @@ theorem methodCallConsumeShapeBool_extract
                   | unaryOp _ _ _ => rw [hPa, hBd] at h; simp at h
                   | call _ _      => rw [hPa, hBd] at h; simp at h
                   | ifVal _ _ _ _   => rw [hPa, hBd] at h; simp at h
-                  | loop _ _ _    => rw [hPa, hBd] at h; simp at h
+                  | loop _ _ _ _ _    => rw [hPa, hBd] at h; simp at h
                   | assert _      => rw [hPa, hBd] at h; simp at h
                   | updateProp _ _ => rw [hPa, hBd] at h; simp at h
                   | getStateScript => rw [hPa, hBd] at h; simp at h
