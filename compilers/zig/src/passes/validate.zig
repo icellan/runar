@@ -659,7 +659,7 @@ fn validateMethods(
         }
 
         // #131: warn when a public method gates on extractLocktime but never
-        // asserts the spending tx is non-final (extractSequence < 0xffffffff).
+        // asserts the spending tx is non-final (extractSequence !== 0xffffffff).
         // Advisory only — no effect on emitted bytecode.
         if (method.is_public) {
             try warnLocktimeWithoutSequenceGuard(allocator, contract, method, warnings);
@@ -1695,43 +1695,68 @@ fn isLocktimeRead(expr: Expression) bool {
     return isCallToNamed(expr, "extractLocktime") or isCallToNamed(expr, "currentBlockHeight");
 }
 
-/// True when `expr` is an int/bigint literal no greater than the finality
-/// sentinel (0xffffffff), so a guard against it genuinely forces non-finality.
-/// The TS reference matches a `bigint_literal`; the Zig frontend lowers small
-/// bigints to `literal_int` and only oversize values to `literal_bigint`, so
-/// both variants are accepted here.
-fn sequenceBoundOk(expr: Expression) bool {
+/// True when `expr` is an int/bigint literal EQUAL to the finality sentinel
+/// (0xffffffff). The TS reference matches a `bigint_literal`; the Zig frontend
+/// lowers small bigints to `literal_int` and only oversize values to
+/// `literal_bigint`, so both variants are accepted here.
+fn sequenceLiteral(expr: Expression) ?i128 {
     return switch (expr) {
-        .literal_int => |v| @as(i128, v) <= SEQUENCE_FINAL,
-        .literal_bigint => |s| blk: {
-            const n = std.fmt.parseInt(i128, s, 10) catch break :blk false;
-            break :blk n <= SEQUENCE_FINAL;
-        },
-        else => false,
+        .literal_int => |v| @as(i128, v),
+        .literal_bigint => |str| std.fmt.parseInt(i128, str, 10) catch null,
+        else => null,
     };
 }
 
-/// True when `expr` is an `extractSequence(...) < <final>`-style comparison
-/// (the guard that makes a locktime gate consensus-enforced). Accepts the two
-/// natural spellings: `extractSequence(pre) < N` / `<= N`, and the reversed
-/// `N > extractSequence(pre)` / `>= ...`. `N` must be an int/bigint literal no
-/// greater than the finality sentinel.
+/// True when `expr` is a comparison on `extractSequence(...)` that genuinely
+/// EXCLUDES the finality sentinel 0xffffffff, reading the field as the
+/// unsigned 32-bit wire value it is (see emitUnsignedBin2Num in stack_lower).
+///
+/// Accepted:
+///   extractSequence(pre) !== 0xffffffff   and the reversed spelling
+///   extractSequence(pre) <  N, N <= 0xffffffff   (reversed: N > ...)
+///   extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
+///
+/// Deliberately NOT accepted: `<= 0xffffffff` and `>= 0xffffffff`. nSequence
+/// cannot exceed 0xffffffff, so those are true for every transaction including
+/// the final one — a tautology that used to silence this warning on a contract
+/// with no guard at all (W1 / FinalCountdown).
 fn isSequenceFinalityGuard(expr: Expression) bool {
     const b = switch (expr) {
         .binary_op => |bp| bp,
         else => return false,
     };
-    if ((b.op == .lt or b.op == .lte) and
-        isCallToNamed(b.left, "extractSequence") and sequenceBoundOk(b.right))
-    {
-        return true;
+    switch (b.op) {
+        .neq => {
+            if (isCallToNamed(b.left, "extractSequence")) {
+                if (sequenceLiteral(b.right)) |n| return n == SEQUENCE_FINAL;
+            }
+            if (isCallToNamed(b.right, "extractSequence")) {
+                if (sequenceLiteral(b.left)) |n| return n == SEQUENCE_FINAL;
+            }
+            return false;
+        },
+        .lt => {
+            if (!isCallToNamed(b.left, "extractSequence")) return false;
+            if (sequenceLiteral(b.right)) |n| return n <= SEQUENCE_FINAL;
+            return false;
+        },
+        .lte => {
+            if (!isCallToNamed(b.left, "extractSequence")) return false;
+            if (sequenceLiteral(b.right)) |n| return n < SEQUENCE_FINAL;
+            return false;
+        },
+        .gt => {
+            if (!isCallToNamed(b.right, "extractSequence")) return false;
+            if (sequenceLiteral(b.left)) |n| return n <= SEQUENCE_FINAL;
+            return false;
+        },
+        .gte => {
+            if (!isCallToNamed(b.right, "extractSequence")) return false;
+            if (sequenceLiteral(b.left)) |n| return n < SEQUENCE_FINAL;
+            return false;
+        },
+        else => return false,
     }
-    if ((b.op == .gt or b.op == .gte) and
-        isCallToNamed(b.right, "extractSequence") and sequenceBoundOk(b.left))
-    {
-        return true;
-    }
-    return false;
 }
 
 /// Recursively scan an expression for a locktime read and/or a sequence guard,
@@ -1792,7 +1817,7 @@ fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool)
 
 /// #131: warn when `method` (transitively, through the private-helper call
 /// graph) reads the tx locktime but never asserts the tx is non-final. A
-/// locktime gate is not consensus-enforced unless `extractSequence < 0xffffffff`
+/// locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
 /// is also asserted — otherwise an all-final-sequence spend bypasses it.
 /// Advisory (warning) only — no effect on emitted bytecode. The message is
 /// allocator-owned (matches sighash_validate's allocPrint'd diagnostics).
@@ -1844,8 +1869,8 @@ fn warnLocktimeWithoutSequenceGuard(
         const msg = try std.fmt.allocPrint(
             allocator,
             "method '{s}' reads extractLocktime but does not assert extractSequence " ++
-                "< 0xffffffff; a locktime gate is not consensus-enforced unless the tx " ++
-                "is non-final — add assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+                "is not 0xffffffff; a locktime gate is not consensus-enforced unless the tx " ++
+                "is non-final — add assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
             .{method.name},
         );
         try warnings.append(allocator, .{

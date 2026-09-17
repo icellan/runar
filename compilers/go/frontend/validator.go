@@ -554,7 +554,7 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 	}
 
 	// #131: warn when a public method gates on extractLocktime but never asserts
-	// the spending tx is non-final (extractSequence < 0xffffffff). Advisory only.
+	// the spending tx is non-final (extractSequence !== 0xffffffff). Advisory only.
 	if method.Visibility == "public" {
 		ctx.warnLocktimeWithoutSequenceGuard(method)
 	}
@@ -1412,26 +1412,49 @@ func isLocktimeRead(expr Expression) bool {
 	return isCallToNamed(expr, "extractLocktime") || isCallToNamed(expr, "currentBlockHeight")
 }
 
-// isSequenceFinalityGuard reports whether expr is an
-// `extractSequence(...) < <final>`-style comparison (the guard that makes a
-// locktime gate consensus-enforced). Accepts the two natural spellings:
-// `extractSequence(pre) < N` / `<= N`, and the reversed `N > extractSequence(pre)`
-// / `>= ...`. N must be a bigint literal no greater than the finality sentinel,
-// so the guard genuinely forces non-finality.
+// isSequenceFinalityGuard reports whether expr is a comparison on
+// extractSequence(...) that genuinely EXCLUDES the finality sentinel
+// 0xffffffff, reading the field as the unsigned 32-bit wire value it is
+// (see emitUnsignedBin2Num in codegen/stack.go).
+//
+// Accepted:
+//   extractSequence(pre) !== 0xffffffff   and the reversed spelling
+//   extractSequence(pre) <  N, N <= 0xffffffff   (reversed: N > ...)
+//   extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
+//
+// Deliberately NOT accepted: <= 0xffffffff and >= 0xffffffff. nSequence cannot
+// exceed 0xffffffff, so those are true for every transaction including the
+// final one — a tautology that used to silence this warning on a contract with
+// no guard at all (W1 / FinalCountdown).
 func isSequenceFinalityGuard(expr Expression) bool {
 	bin, ok := expr.(BinaryExpr)
 	if !ok {
 		return false
 	}
-	boundOk := func(e Expression) bool {
+	isFinalSentinel := func(e Expression) bool {
+		lit, ok := e.(BigIntLiteral)
+		return ok && lit.Value != nil && lit.Value.Cmp(sequenceFinal) == 0
+	}
+	strictBoundOk := func(e Expression) bool {
 		lit, ok := e.(BigIntLiteral)
 		return ok && lit.Value != nil && lit.Value.Cmp(sequenceFinal) <= 0
 	}
-	if (bin.Op == "<" || bin.Op == "<=") && isCallToNamed(bin.Left, "extractSequence") && boundOk(bin.Right) {
-		return true
+	nonStrictBoundOk := func(e Expression) bool {
+		lit, ok := e.(BigIntLiteral)
+		return ok && lit.Value != nil && lit.Value.Cmp(sequenceFinal) < 0
 	}
-	if (bin.Op == ">" || bin.Op == ">=") && isCallToNamed(bin.Right, "extractSequence") && boundOk(bin.Left) {
-		return true
+	switch bin.Op {
+	case "!==":
+		return (isCallToNamed(bin.Left, "extractSequence") && isFinalSentinel(bin.Right)) ||
+			(isCallToNamed(bin.Right, "extractSequence") && isFinalSentinel(bin.Left))
+	case "<":
+		return isCallToNamed(bin.Left, "extractSequence") && strictBoundOk(bin.Right)
+	case "<=":
+		return isCallToNamed(bin.Left, "extractSequence") && nonStrictBoundOk(bin.Right)
+	case ">":
+		return isCallToNamed(bin.Right, "extractSequence") && strictBoundOk(bin.Left)
+	case ">=":
+		return isCallToNamed(bin.Right, "extractSequence") && nonStrictBoundOk(bin.Left)
 	}
 	return false
 }
@@ -1439,7 +1462,7 @@ func isSequenceFinalityGuard(expr Expression) bool {
 // warnLocktimeWithoutSequenceGuard warns when method (transitively, through the
 // private-helper call graph) reads the tx locktime but never asserts the tx is
 // non-final. A locktime gate is not consensus-enforced unless
-// extractSequence < 0xffffffff is also asserted — otherwise an all-final-sequence
+// extractSequence !== 0xffffffff is also asserted — otherwise an all-final-sequence
 // spend bypasses it. Advisory (warning) only — no effect on emitted bytecode.
 func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode) {
 	privateMethods := make(map[string]MethodNode)
@@ -1482,9 +1505,9 @@ func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode
 
 	if readsLocktime && !hasSequenceGuard {
 		ctx.addWarningWithLoc(fmt.Sprintf(
-			"method '%s' reads extractLocktime but does not assert extractSequence < 0xffffffff; "+
+			"method '%s' reads extractLocktime but does not assert extractSequence is not 0xffffffff; "+
 				"a locktime gate is not consensus-enforced unless the tx is non-final — add "+
-				"assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+				"assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
 			method.Name), &method.SourceLocation)
 	}
 }

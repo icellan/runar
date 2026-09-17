@@ -550,7 +550,7 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
   }
 
   // #131: warn when a public method gates on extractLocktime but never asserts
-  // the spending tx is non-final (extractSequence < 0xffffffff). Advisory only.
+  // the spending tx is non-final (extractSequence !== 0xffffffff). Advisory only.
   if (method.visibility === 'public') {
     warnLocktimeWithoutSequenceGuard(method, ctx);
   }
@@ -1640,24 +1640,47 @@ function isLocktimeRead(expr: Expression): boolean {
 }
 
 /**
- * True when `expr` is an `extractSequence(...) < <final>`-style comparison
- * (the guard that makes a locktime gate consensus-enforced). Accepts the two
- * natural spellings: `extractSequence(pre) < N` / `<= N`, and the reversed
- * `N > extractSequence(pre)` / `>= ...`. `N` must be a bigint literal no
- * greater than the finality sentinel, so the guard genuinely forces
- * non-finality.
+ * True when `expr` is a comparison on `extractSequence(...)` that genuinely
+ * EXCLUDES the finality sentinel `0xffffffff`, reading the field as the
+ * unsigned 32-bit wire value it is (see `emitUnsignedBin2Num` in
+ * `05-stack-lower.ts`).
+ *
+ * Accepted:
+ *   `extractSequence(pre) !== 0xffffffffn`   and the reversed spelling
+ *   `extractSequence(pre) <  N`, N <= 0xffffffff   (reversed: `N > ...`)
+ *   `extractSequence(pre) <= N`, N <  0xffffffff   (reversed: `N >= ...`)
+ *
+ * Deliberately NOT accepted: `<= 0xffffffff` and `>= 0xffffffff`. nSequence
+ * cannot exceed 0xffffffff, so those are true for every transaction including
+ * the final one — a tautology that used to silence this warning on a contract
+ * with no guard at all (W1 / FinalCountdown).
  */
 function isSequenceFinalityGuard(expr: Expression): boolean {
   if (expr.kind !== 'binary_expr') return false;
-  const boundOk = (e: Expression): boolean =>
+  const isFinalSentinel = (e: Expression): boolean =>
+    e.kind === 'bigint_literal' && e.value === SEQUENCE_FINAL;
+  const strictBoundOk = (e: Expression): boolean =>
     e.kind === 'bigint_literal' && e.value <= SEQUENCE_FINAL;
-  if ((expr.op === '<' || expr.op === '<=') &&
-      isCallToNamed(expr.left, 'extractSequence') && boundOk(expr.right)) {
-    return true;
+  const nonStrictBoundOk = (e: Expression): boolean =>
+    e.kind === 'bigint_literal' && e.value < SEQUENCE_FINAL;
+
+  if (expr.op === '!==') {
+    return (
+      (isCallToNamed(expr.left, 'extractSequence') && isFinalSentinel(expr.right)) ||
+      (isCallToNamed(expr.right, 'extractSequence') && isFinalSentinel(expr.left))
+    );
   }
-  if ((expr.op === '>' || expr.op === '>=') &&
-      isCallToNamed(expr.right, 'extractSequence') && boundOk(expr.left)) {
-    return true;
+  if (expr.op === '<' && isCallToNamed(expr.left, 'extractSequence')) {
+    return strictBoundOk(expr.right);
+  }
+  if (expr.op === '<=' && isCallToNamed(expr.left, 'extractSequence')) {
+    return nonStrictBoundOk(expr.right);
+  }
+  if (expr.op === '>' && isCallToNamed(expr.right, 'extractSequence')) {
+    return strictBoundOk(expr.left);
+  }
+  if (expr.op === '>=' && isCallToNamed(expr.right, 'extractSequence')) {
+    return nonStrictBoundOk(expr.left);
   }
   return false;
 }
@@ -1665,7 +1688,7 @@ function isSequenceFinalityGuard(expr: Expression): boolean {
 /**
  * #131: warn when `method` (transitively, through the private-helper call
  * graph) reads the tx locktime but never asserts the tx is non-final. A
- * locktime gate is not consensus-enforced unless `extractSequence < 0xffffffff`
+ * locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
  * is also asserted — otherwise an all-final-sequence spend bypasses it.
  * Advisory (warning) only — no effect on emitted bytecode.
  */
@@ -1702,9 +1725,9 @@ function warnLocktimeWithoutSequenceGuard(method: MethodNode, ctx: ValidationCon
   if (readsLocktime && !hasSequenceGuard) {
     ctx.warnings.push(makeDiagnostic(
       `method '${method.name}' reads extractLocktime but does not assert ` +
-        `extractSequence < 0xffffffff; a locktime gate is not consensus-enforced ` +
-        `unless the tx is non-final — add ` +
-        `assert(extractSequence(this.txPreimage) < 0xffffffffn)`,
+        `extractSequence is not 0xffffffff; a locktime gate is not ` +
+        `consensus-enforced unless the tx is non-final — add ` +
+        `assert(extractSequence(this.txPreimage) !== 0xffffffffn)`,
       'warning',
       method.sourceLocation,
     ));

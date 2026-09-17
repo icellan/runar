@@ -567,7 +567,7 @@ public final class Validate {
 
             // #131: warn when a public method gates on extractLocktime but
             // never asserts the spending tx is non-final
-            // (extractSequence < 0xffffffff). Advisory only — no effect on the
+            // (extractSequence !== 0xffffffff). Advisory only — no effect on the
             // emitted bytecode.
             if (m.visibility() == Visibility.PUBLIC) {
                 warnLocktimeWithoutSequenceGuard(m, this);
@@ -1702,36 +1702,60 @@ public final class Validate {
     }
 
     /**
-     * True when {@code expr} is an {@code extractSequence(...) < <final>}-style
-     * comparison (the guard that makes a locktime gate consensus-enforced).
-     * Accepts the two natural spellings: {@code extractSequence(pre) < N} /
-     * {@code <= N}, and the reversed {@code N > extractSequence(pre)} /
-     * {@code >= ...}. {@code N} must be a bigint literal no greater than the
-     * finality sentinel, so the guard genuinely forces non-finality.
+     * True when {@code expr} is a comparison on {@code extractSequence(...)}
+     * that genuinely EXCLUDES the finality sentinel {@code 0xffffffff},
+     * reading the field as the unsigned 32-bit wire value it is (see
+     * {@code emitUnsignedBin2Num} in {@code StackLower}).
+     *
+     * <p>Accepted: {@code extractSequence(pre) !== 0xffffffff} (and reversed);
+     * {@code < N} with N &lt;= 0xffffffff (reversed {@code N > ...});
+     * {@code <= N} with N &lt; 0xffffffff (reversed {@code N >= ...}).
+     *
+     * <p>Deliberately NOT accepted: {@code <= 0xffffffff} and
+     * {@code >= 0xffffffff}. nSequence cannot exceed 0xffffffff, so those are
+     * true for every transaction including the final one — a tautology that
+     * used to silence this warning on a contract with no guard at all
+     * (W1 / FinalCountdown).
      */
     private static boolean isSequenceFinalityGuard(Expression expr) {
         if (!(expr instanceof BinaryExpr be)) return false;
         Expression.BinaryOp op = be.op();
-        if ((op == Expression.BinaryOp.LT || op == Expression.BinaryOp.LE)
-            && isCallToNamed(be.left(), "extractSequence") && isSequenceBound(be.right())) {
-            return true;
+        if (op == Expression.BinaryOp.NEQ) {
+            return (isCallToNamed(be.left(), "extractSequence") && isFinalSentinel(be.right()))
+                || (isCallToNamed(be.right(), "extractSequence") && isFinalSentinel(be.left()));
         }
-        if ((op == Expression.BinaryOp.GT || op == Expression.BinaryOp.GE)
-            && isCallToNamed(be.right(), "extractSequence") && isSequenceBound(be.left())) {
-            return true;
+        if (op == Expression.BinaryOp.LT) {
+            return isCallToNamed(be.left(), "extractSequence") && isStrictSequenceBound(be.right());
+        }
+        if (op == Expression.BinaryOp.LE) {
+            return isCallToNamed(be.left(), "extractSequence") && isNonStrictSequenceBound(be.right());
+        }
+        if (op == Expression.BinaryOp.GT) {
+            return isCallToNamed(be.right(), "extractSequence") && isStrictSequenceBound(be.left());
+        }
+        if (op == Expression.BinaryOp.GE) {
+            return isCallToNamed(be.right(), "extractSequence") && isNonStrictSequenceBound(be.left());
         }
         return false;
     }
 
-    private static boolean isSequenceBound(Expression e) {
+    private static boolean isFinalSentinel(Expression e) {
+        return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) == 0;
+    }
+
+    private static boolean isStrictSequenceBound(Expression e) {
         return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) <= 0;
+    }
+
+    private static boolean isNonStrictSequenceBound(Expression e) {
+        return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) < 0;
     }
 
     /**
      * #131: warn when {@code method} (transitively, through the private-helper
      * call graph) reads the tx locktime but never asserts the tx is non-final.
      * A locktime gate is not consensus-enforced unless
-     * {@code extractSequence < 0xffffffff} is also asserted — otherwise an
+     * {@code extractSequence !== 0xffffffff} is also asserted — otherwise an
      * all-final-sequence spend bypasses it. Advisory (warning) only — no effect
      * on emitted bytecode.
      */
@@ -1771,9 +1795,9 @@ public final class Validate {
         if (readsLocktime[0] && !hasSequenceGuard[0]) {
             ctx.warn(
                 "method '" + method.name() + "' reads extractLocktime but does not assert "
-                    + "extractSequence < 0xffffffff; a locktime gate is not consensus-enforced "
+                    + "extractSequence is not 0xffffffff; a locktime gate is not consensus-enforced "
                     + "unless the tx is non-final — add "
-                    + "assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+                    + "assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
                 method.sourceLocation());
         }
     }

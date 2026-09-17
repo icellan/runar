@@ -483,7 +483,7 @@ class _ValidationContext:
             _warn_manual_preimage_usage(method, self.warnings)
 
         # #131: warn when a public method gates on extractLocktime but never
-        # asserts the spending tx is non-final (extractSequence < 0xffffffff).
+        # asserts the spending tx is non-final (extractSequence !== 0xffffffff).
         # Advisory only.
         if method.visibility == "public":
             _warn_locktime_without_sequence_guard(method, self.contract, self.warnings)
@@ -1327,36 +1327,54 @@ def _is_locktime_read(expr: Expression) -> bool:
 
 
 def _is_sequence_finality_guard(expr: Expression) -> bool:
-    """True when *expr* is an ``extractSequence(...) < <final>``-style comparison
-    (the guard that makes a locktime gate consensus-enforced).
+    """True when *expr* is a comparison on ``extractSequence(...)`` that
+    genuinely EXCLUDES the finality sentinel ``0xffffffff``, reading the field
+    as the unsigned 32-bit wire value it is (see ``_emit_unsigned_bin2num`` in
+    ``codegen/stack.py``).
 
-    Accepts the two natural spellings: ``extractSequence(pre) < N`` / ``<= N``,
-    and the reversed ``N > extractSequence(pre)`` / ``>= ...``. ``N`` must be a
-    bigint literal no greater than the finality sentinel, so the guard genuinely
-    forces non-finality.
+    Accepted::
+
+        extractSequence(pre) !== 0xffffffff   # and the reversed spelling
+        extractSequence(pre) <  N, N <= 0xffffffff   # reversed: N > ...
+        extractSequence(pre) <= N, N <  0xffffffff   # reversed: N >= ...
+
+    Deliberately NOT accepted: ``<= 0xffffffff`` and ``>= 0xffffffff``.
+    nSequence cannot exceed 0xffffffff, so those are true for every transaction
+    including the final one -- a tautology that used to silence this warning on
+    a contract with no guard at all (W1 / FinalCountdown).
     """
     if not isinstance(expr, BinaryExpr):
         return False
 
-    def bound_ok(e: Expression) -> bool:
+    def is_final_sentinel(e: Expression) -> bool:
+        return isinstance(e, BigIntLiteral) and e.value == _SEQUENCE_FINAL
+
+    def strict_bound_ok(e: Expression) -> bool:
         return isinstance(e, BigIntLiteral) and e.value <= _SEQUENCE_FINAL
 
-    if (expr.op in ("<", "<=")
-            and _is_call_to_named(expr.left, "extractSequence")
-            and bound_ok(expr.right)):
-        return True
-    if (expr.op in (">", ">=")
-            and _is_call_to_named(expr.right, "extractSequence")
-            and bound_ok(expr.left)):
-        return True
-    return False
+    def non_strict_bound_ok(e: Expression) -> bool:
+        return isinstance(e, BigIntLiteral) and e.value < _SEQUENCE_FINAL
 
+    if expr.op == "!==":
+        return (
+            (_is_call_to_named(expr.left, "extractSequence") and is_final_sentinel(expr.right))
+            or (_is_call_to_named(expr.right, "extractSequence") and is_final_sentinel(expr.left))
+        )
+    if expr.op == "<":
+        return _is_call_to_named(expr.left, "extractSequence") and strict_bound_ok(expr.right)
+    if expr.op == "<=":
+        return _is_call_to_named(expr.left, "extractSequence") and non_strict_bound_ok(expr.right)
+    if expr.op == ">":
+        return _is_call_to_named(expr.right, "extractSequence") and strict_bound_ok(expr.left)
+    if expr.op == ">=":
+        return _is_call_to_named(expr.right, "extractSequence") and non_strict_bound_ok(expr.left)
+    return False
 
 def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagnostic]) -> None:
     """#131: warn when *method* (transitively, through the private-helper call
     graph) reads the tx locktime but never asserts the tx is non-final.
 
-    A locktime gate is not consensus-enforced unless ``extractSequence <
+    A locktime gate is not consensus-enforced unless ``extractSequence !==
     0xffffffff`` is also asserted -- otherwise an all-final-sequence spend
     bypasses it. Advisory (warning) only -- no effect on emitted bytecode.
     """
@@ -1391,9 +1409,9 @@ def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagn
     if reads_locktime and not has_sequence_guard:
         warnings.append(Diagnostic(
             message=f"method '{method.name}' reads extractLocktime but does not assert "
-            f"extractSequence < 0xffffffff; a locktime gate is not consensus-enforced "
+            f"extractSequence is not 0xffffffff; a locktime gate is not consensus-enforced "
             f"unless the tx is non-final — add "
-            f"assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+            f"assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
             severity=Severity.WARNING,
             loc=method.source_location,
         ))

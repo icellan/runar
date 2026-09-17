@@ -479,7 +479,7 @@ fn validate_methods(contract: &ContractNode, errors: &mut Vec<Diagnostic>, warni
         }
 
         // #131: warn when a public method gates on extractLocktime but never
-        // asserts the spending tx is non-final (extractSequence < 0xffffffff).
+        // asserts the spending tx is non-final (extractSequence !== 0xffffffff).
         // Advisory only.
         if method.visibility == Visibility::Public {
             warn_locktime_without_sequence_guard(method, contract, warnings);
@@ -1715,33 +1715,50 @@ fn is_locktime_read(expr: &Expression) -> bool {
     is_call_to_named(expr, "extractLocktime") || is_call_to_named(expr, "currentBlockHeight")
 }
 
-/// True when `expr` is an `extractSequence(...) < <final>`-style comparison
-/// (the guard that makes a locktime gate consensus-enforced). Accepts the two
-/// natural spellings: `extractSequence(pre) < N` / `<= N`, and the reversed
-/// `N > extractSequence(pre)` / `>= ...`. `N` must be a bigint literal no
-/// greater than the finality sentinel, so the guard genuinely forces
-/// non-finality.
+/// True when `expr` is a comparison on `extractSequence(...)` that genuinely
+/// EXCLUDES the finality sentinel `0xffffffff`, reading the field as the
+/// unsigned 32-bit wire value it is (see `emit_unsigned_bin2num` in
+/// `codegen/stack.rs`).
+///
+/// Accepted:
+///   `extractSequence(pre) !== 0xffffffff`   and the reversed spelling
+///   `extractSequence(pre) <  N`, N <= 0xffffffff   (reversed: `N > ...`)
+///   `extractSequence(pre) <= N`, N <  0xffffffff   (reversed: `N >= ...`)
+///
+/// Deliberately NOT accepted: `<= 0xffffffff` and `>= 0xffffffff`. nSequence
+/// cannot exceed 0xffffffff, so those are true for every transaction including
+/// the final one — a tautology that used to silence this warning on a contract
+/// with no guard at all (W1 / FinalCountdown).
 fn is_sequence_finality_guard(expr: &Expression) -> bool {
     let Expression::BinaryExpr { op, left, right } = expr else {
         return false;
     };
-    let bound_ok = |e: &Expression| -> bool {
-        matches!(
-            e,
-            Expression::BigIntLiteral { value }
-                if *value <= num_bigint::BigInt::from(SEQUENCE_FINAL)
-        )
+    let final_sentinel = num_bigint::BigInt::from(SEQUENCE_FINAL);
+    let is_final_sentinel = |e: &Expression| -> bool {
+        matches!(e, Expression::BigIntLiteral { value } if *value == final_sentinel)
+    };
+    let strict_bound_ok = |e: &Expression| -> bool {
+        matches!(e, Expression::BigIntLiteral { value } if *value <= final_sentinel)
+    };
+    let non_strict_bound_ok = |e: &Expression| -> bool {
+        matches!(e, Expression::BigIntLiteral { value } if *value < final_sentinel)
     };
     match op {
-        BinaryOp::Lt | BinaryOp::Le => is_call_to_named(left, "extractSequence") && bound_ok(right),
-        BinaryOp::Gt | BinaryOp::Ge => is_call_to_named(right, "extractSequence") && bound_ok(left),
+        BinaryOp::StrictNe => {
+            (is_call_to_named(left, "extractSequence") && is_final_sentinel(right))
+                || (is_call_to_named(right, "extractSequence") && is_final_sentinel(left))
+        }
+        BinaryOp::Lt => is_call_to_named(left, "extractSequence") && strict_bound_ok(right),
+        BinaryOp::Le => is_call_to_named(left, "extractSequence") && non_strict_bound_ok(right),
+        BinaryOp::Gt => is_call_to_named(right, "extractSequence") && strict_bound_ok(left),
+        BinaryOp::Ge => is_call_to_named(right, "extractSequence") && non_strict_bound_ok(left),
         _ => false,
     }
 }
 
 /// #131: warn when `method` (transitively, through the private-helper call
 /// graph) reads the tx locktime but never asserts the tx is non-final. A
-/// locktime gate is not consensus-enforced unless `extractSequence < 0xffffffff`
+/// locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
 /// is also asserted — otherwise an all-final-sequence spend bypasses it.
 /// Advisory (warning) only — no effect on emitted bytecode.
 fn warn_locktime_without_sequence_guard(
@@ -1792,9 +1809,9 @@ fn warn_locktime_without_sequence_guard(
         warnings.push(Diagnostic::warning(
             format!(
                 "method '{}' reads extractLocktime but does not assert \
-                 extractSequence < 0xffffffff; a locktime gate is not \
+                 extractSequence is not 0xffffffff; a locktime gate is not \
                  consensus-enforced unless the tx is non-final — add \
-                 assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+                 assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
                 method.name
             ),
             Some(method.source_location.clone()),
