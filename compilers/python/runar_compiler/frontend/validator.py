@@ -1350,7 +1350,7 @@ def _is_sequence_finality_guard(expr: Expression) -> bool:
         return isinstance(e, BigIntLiteral) and e.value == _SEQUENCE_FINAL
 
     def strict_bound_ok(e: Expression) -> bool:
-        return isinstance(e, BigIntLiteral) and e.value <= _SEQUENCE_FINAL
+        return isinstance(e, BigIntLiteral) and e.value > 0 and e.value <= _SEQUENCE_FINAL
 
     def non_strict_bound_ok(e: Expression) -> bool:
         return isinstance(e, BigIntLiteral) and e.value < _SEQUENCE_FINAL
@@ -1389,8 +1389,13 @@ def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagn
         nonlocal reads_locktime, has_sequence_guard
         if _is_locktime_read(expr):
             reads_locktime = True
-        if _is_sequence_finality_guard(expr):
-            has_sequence_guard = True
+        if _is_assert_call(expr) and isinstance(expr, CallExpr):
+            for arg in expr.args:
+                def _guard(inner: Expression) -> None:
+                    nonlocal has_sequence_guard
+                    if _is_sequence_finality_guard(inner):
+                        has_sequence_guard = True
+                _walk_expr(arg, _guard)
 
     visited: set[str] = {method.name}
     queue: list = [method]

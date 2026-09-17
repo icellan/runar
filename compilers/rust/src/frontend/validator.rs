@@ -1771,8 +1771,9 @@ fn is_sequence_finality_guard(expr: &Expression) -> bool {
     let is_final_sentinel = |e: &Expression| -> bool {
         matches!(e, Expression::BigIntLiteral { value } if *value == final_sentinel)
     };
+    let zero = num_bigint::BigInt::from(0);
     let strict_bound_ok = |e: &Expression| -> bool {
-        matches!(e, Expression::BigIntLiteral { value } if *value <= final_sentinel)
+        matches!(e, Expression::BigIntLiteral { value } if *value > zero && *value <= final_sentinel)
     };
     let non_strict_bound_ok = |e: &Expression| -> bool {
         matches!(e, Expression::BigIntLiteral { value } if *value < final_sentinel)
@@ -1820,8 +1821,16 @@ fn warn_locktime_without_sequence_guard(
             if is_locktime_read(expr) {
                 reads_locktime = true;
             }
-            if is_sequence_finality_guard(expr) {
-                has_sequence_guard = true;
+            if is_assert_call(expr) {
+                if let Expression::CallExpr { args, .. } = expr {
+                    for arg in args {
+                        walk_expression(arg, &mut |inner| {
+                            if is_sequence_finality_guard(inner) {
+                                has_sequence_guard = true;
+                            }
+                        });
+                    }
+                }
             }
         });
         // Follow calls into private helpers so a guard (or locktime read)

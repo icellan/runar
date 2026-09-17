@@ -1387,7 +1387,7 @@ module RunarCompiler
         return false unless expr.is_a?(BinaryExpr)
 
         final_sentinel = ->(e) { e.is_a?(BigIntLiteral) && e.value == SEQUENCE_FINAL }
-        strict_bound_ok = ->(e) { e.is_a?(BigIntLiteral) && e.value <= SEQUENCE_FINAL }
+        strict_bound_ok = ->(e) { e.is_a?(BigIntLiteral) && e.value > 0 && e.value <= SEQUENCE_FINAL }
         non_strict_bound_ok = ->(e) { e.is_a?(BigIntLiteral) && e.value < SEQUENCE_FINAL }
 
         case expr.op
@@ -1428,7 +1428,13 @@ module RunarCompiler
           current = queue.shift
           walk_expressions_in_body(current.body, proc do |expr|
             reads_locktime = true if locktime_read?(expr)
-            has_sequence_guard = true if sequence_finality_guard?(expr)
+            if assert_call?(expr)
+              expr.args.each do |arg|
+                walk_expr(arg, proc do |inner|
+                  has_sequence_guard = true if sequence_finality_guard?(inner)
+                end)
+              end
+            end
           end)
 
           # Follow calls into private helpers so a guard (or locktime read)

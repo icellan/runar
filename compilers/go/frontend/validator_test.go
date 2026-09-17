@@ -1865,6 +1865,59 @@ class TimeLock extends StatefulSmartContract {
 	}
 }
 
+func TestValidate_H2_AssignedComparison_StillWarns(t *testing.T) {
+	// F7: a comparison that is never asserted does not enforce anything.
+	source := `
+import { StatefulSmartContract, assert, extractLocktime, extractSequence } from 'runar-lang';
+
+class TimeLock extends StatefulSmartContract {
+  count: bigint;
+  readonly deadline: bigint;
+  constructor(count: bigint, deadline: bigint) {
+    super(count, deadline);
+    this.count = count;
+    this.deadline = deadline;
+  }
+  public unlock(): void {
+    const ok: boolean = extractSequence(this.txPreimage) !== 0xffffffffn;
+    assert(extractLocktime(this.txPreimage) >= this.deadline);
+    this.count++;
+  }
+}
+`
+	contract := mustParseTS(t, source)
+	result := Validate(contract)
+	if !hasLocktimeWarning(result) {
+		t.Errorf("assigned comparison must not silence the warning, got: %v", result.WarningStrings())
+	}
+}
+
+func TestValidate_H2_VacuousStrictBound_StillWarns(t *testing.T) {
+	source := `
+import { StatefulSmartContract, assert, extractLocktime, extractSequence } from 'runar-lang';
+
+class TimeLock extends StatefulSmartContract {
+  count: bigint;
+  readonly deadline: bigint;
+  constructor(count: bigint, deadline: bigint) {
+    super(count, deadline);
+    this.count = count;
+    this.deadline = deadline;
+  }
+  public unlock(): void {
+    assert(extractSequence(this.txPreimage) < 0n);
+    assert(extractLocktime(this.txPreimage) >= this.deadline);
+    this.count++;
+  }
+}
+`
+	contract := mustParseTS(t, source)
+	result := Validate(contract)
+	if !hasLocktimeWarning(result) {
+		t.Errorf("extractSequence < 0n is not a finality guard, got: %v", result.WarningStrings())
+	}
+}
+
 // R-136 / R-233 (CL-BUG-005, CL-DOC-031): all nine asm() diagnostics used the
 // locationless ctx.addError while nearly every other validator diagnostic in
 // this file carries a SourceLocation — including the "public method must end

@@ -1768,7 +1768,7 @@ fn isSequenceFinalityGuard(expr: Expression) bool {
         },
         .lt => {
             if (!isCallToNamed(b.left, "extractSequence")) return false;
-            if (sequenceLiteral(b.right)) |n| return n <= SEQUENCE_FINAL;
+            if (sequenceLiteral(b.right)) |n| return n > 0 and n <= SEQUENCE_FINAL;
             return false;
         },
         .lte => {
@@ -1778,7 +1778,7 @@ fn isSequenceFinalityGuard(expr: Expression) bool {
         },
         .gt => {
             if (!isCallToNamed(b.right, "extractSequence")) return false;
-            if (sequenceLiteral(b.left)) |n| return n <= SEQUENCE_FINAL;
+            if (sequenceLiteral(b.left)) |n| return n > 0 and n <= SEQUENCE_FINAL;
             return false;
         },
         .gte => {
@@ -1790,30 +1790,31 @@ fn isSequenceFinalityGuard(expr: Expression) bool {
     }
 }
 
-/// Recursively scan an expression for a locktime read and/or a sequence guard,
-/// setting the respective flags. Pure — no allocation.
-fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool) void {
+/// Recursively scan an expression for a locktime read and, when `count_guard`
+/// is set, a sequence-finality guard. Guards only count inside `assert`
+/// (F7): an assignment of the comparison does not enforce anything.
+fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool, count_guard: bool) void {
     if (isLocktimeRead(expr)) reads_locktime.* = true;
-    if (isSequenceFinalityGuard(expr)) has_guard.* = true;
+    if (count_guard and isSequenceFinalityGuard(expr)) has_guard.* = true;
     switch (expr) {
-        .call => |c| for (c.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard),
-        .method_call => |mc| for (mc.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard),
+        .call => |c| for (c.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard, count_guard),
+        .method_call => |mc| for (mc.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard, count_guard),
         .binary_op => |b| {
-            scanExprForLocktime(b.left, reads_locktime, has_guard);
-            scanExprForLocktime(b.right, reads_locktime, has_guard);
+            scanExprForLocktime(b.left, reads_locktime, has_guard, count_guard);
+            scanExprForLocktime(b.right, reads_locktime, has_guard, count_guard);
         },
-        .unary_op => |u| scanExprForLocktime(u.operand, reads_locktime, has_guard),
+        .unary_op => |u| scanExprForLocktime(u.operand, reads_locktime, has_guard, count_guard),
         .ternary => |t| {
-            scanExprForLocktime(t.condition, reads_locktime, has_guard);
-            scanExprForLocktime(t.then_expr, reads_locktime, has_guard);
-            scanExprForLocktime(t.else_expr, reads_locktime, has_guard);
+            scanExprForLocktime(t.condition, reads_locktime, has_guard, count_guard);
+            scanExprForLocktime(t.then_expr, reads_locktime, has_guard, count_guard);
+            scanExprForLocktime(t.else_expr, reads_locktime, has_guard, count_guard);
         },
         .index_access => |ia| {
-            scanExprForLocktime(ia.object, reads_locktime, has_guard);
-            scanExprForLocktime(ia.index, reads_locktime, has_guard);
+            scanExprForLocktime(ia.object, reads_locktime, has_guard, count_guard);
+            scanExprForLocktime(ia.index, reads_locktime, has_guard, count_guard);
         },
-        .increment => |inc| scanExprForLocktime(inc.operand, reads_locktime, has_guard),
-        .decrement => |dec| scanExprForLocktime(dec.operand, reads_locktime, has_guard),
+        .increment => |inc| scanExprForLocktime(inc.operand, reads_locktime, has_guard, count_guard),
+        .decrement => |dec| scanExprForLocktime(dec.operand, reads_locktime, has_guard, count_guard),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
         .property_access, .array_literal,
         => {},
@@ -1823,14 +1824,14 @@ fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool
 /// Statement walker feeding `scanExprForLocktime`.
 fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool) void {
     switch (stmt) {
-        .expr_stmt => |expr| scanExprForLocktime(expr.expr, reads_locktime, has_guard),
-        .const_decl => |cd| scanExprForLocktime(cd.value, reads_locktime, has_guard),
+        .expr_stmt => |e| scanExprForLocktime(e.expr, reads_locktime, has_guard, isCallToNamed(e.expr, "assert")),
+        .const_decl => |cd| scanExprForLocktime(cd.value, reads_locktime, has_guard, false),
         .let_decl => |ld| {
-            if (ld.value) |v| scanExprForLocktime(v, reads_locktime, has_guard);
+            if (ld.value) |v| scanExprForLocktime(v, reads_locktime, has_guard, false);
         },
-        .assign => |a| scanExprForLocktime(a.value, reads_locktime, has_guard),
+        .assign => |a| scanExprForLocktime(a.value, reads_locktime, has_guard, false),
         .if_stmt => |if_s| {
-            scanExprForLocktime(if_s.condition, reads_locktime, has_guard);
+            scanExprForLocktime(if_s.condition, reads_locktime, has_guard, false);
             for (if_s.then_body) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
             if (if_s.else_body) |eb| {
                 for (eb) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
@@ -1839,9 +1840,9 @@ fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool)
         .for_stmt => |fs| {
             for (fs.body) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
         },
-        .assert_stmt => |a| scanExprForLocktime(a.condition, reads_locktime, has_guard),
+        .assert_stmt => |a| scanExprForLocktime(a.condition, reads_locktime, has_guard, true),
         .return_stmt => |opt_expr| {
-            if (opt_expr) |expr| scanExprForLocktime(expr, reads_locktime, has_guard);
+            if (opt_expr) |expr| scanExprForLocktime(expr, reads_locktime, has_guard, false);
         },
     }
 }
@@ -3191,4 +3192,88 @@ test "H2: warns when the locktime read is in a private helper but no sequence gu
     const w = locktimeWarning(result).?;
     // The warning names the public entry point, not the helper.
     try testing.expect(std.mem.indexOf(u8, w.message, "unlock") != null);
+}
+
+test "H2 F7: assigned comparison still warns" {
+    const allocator = testing.allocator;
+
+    var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var seq_call = types.CallExpr{ .callee = "extractSequence", .args = &seq_args };
+    var seq_cmp = types.BinaryOp{ .op = .neq, .left = .{ .call = &seq_call }, .right = .{ .literal_int = 0xffffffff } };
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    var lt_cmp = types.BinaryOp{
+        .op = .gte,
+        .left = .{ .call = &lt_call },
+        .right = .{ .property_access = .{ .object = "this", .property = "deadline" } },
+    };
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .const_decl = .{ .name = "ok", .value = .{ .binary_op = &seq_cmp } } },
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &lt_cmp } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{
+        makeProperty("count", .bigint, false),
+        makeProperty("deadline", .bigint, true),
+    };
+    var assignments = [_]types.AssignmentNode{ makeAssignment("count"), makeAssignment("deadline") };
+    var super_args = [_]Expression{ .{ .identifier = "count" }, .{ .identifier = "deadline" } };
+    var params = [_]types.ParamNode{ makeParam("count"), makeParam("deadline") };
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
+}
+
+test "H2 F7: vacuous strict bound still warns" {
+    const allocator = testing.allocator;
+
+    var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var seq_call = types.CallExpr{ .callee = "extractSequence", .args = &seq_args };
+    var seq_cmp = types.BinaryOp{ .op = .lt, .left = .{ .call = &seq_call }, .right = .{ .literal_int = 0 } };
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    var lt_cmp = types.BinaryOp{
+        .op = .gte,
+        .left = .{ .call = &lt_call },
+        .right = .{ .property_access = .{ .object = "this", .property = "deadline" } },
+    };
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &seq_cmp } } },
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &lt_cmp } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{
+        makeProperty("count", .bigint, false),
+        makeProperty("deadline", .bigint, true),
+    };
+    var assignments = [_]types.AssignmentNode{ makeAssignment("count"), makeAssignment("deadline") };
+    var super_args = [_]Expression{ .{ .identifier = "count" }, .{ .identifier = "deadline" } };
+    var params = [_]types.ParamNode{ makeParam("count"), makeParam("deadline") };
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
 }

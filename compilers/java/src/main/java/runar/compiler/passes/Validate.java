@@ -1776,7 +1776,9 @@ public final class Validate {
     }
 
     private static boolean isStrictSequenceBound(Expression e) {
-        return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) <= 0;
+        return e instanceof BigIntLiteral lit
+            && lit.value().signum() > 0
+            && lit.value().compareTo(SEQUENCE_FINAL) <= 0;
     }
 
     private static boolean isNonStrictSequenceBound(Expression e) {
@@ -1810,7 +1812,13 @@ public final class Validate {
             MethodNode current = queue.poll();
             Ctx.walkExpressionsInBody(current.body(), expr -> {
                 if (isLocktimeRead(expr)) readsLocktime[0] = true;
-                if (isSequenceFinalityGuard(expr)) hasSequenceGuard[0] = true;
+                if (isAssertCall(expr) && expr instanceof CallExpr call) {
+                    for (Expression arg : call.args()) {
+                        Ctx.walkExpression(arg, inner -> {
+                            if (isSequenceFinalityGuard(inner)) hasSequenceGuard[0] = true;
+                        });
+                    }
+                }
             });
             // Follow calls into private helpers so a guard (or locktime read)
             // supplied by an inlined helper is seen by the public entry point.

@@ -159,4 +159,50 @@ class TestH2LocktimeWarning < Minitest::Test
     assert has_locktime_warning?(result),
            "transitive locktime read through a private helper -- must warn"
   end
+
+  def test_warns_when_comparison_is_assigned_not_asserted
+    source = <<~TS
+      class TimeLock extends StatefulSmartContract {
+        count: bigint;
+        readonly deadline: bigint;
+        constructor(count: bigint, deadline: bigint) {
+          super(count, deadline);
+          this.count = count;
+          this.deadline = deadline;
+        }
+        public unlock() {
+          const ok: boolean = extractSequence(this.txPreimage) !== 0xffffffffn;
+          assert(extractLocktime(this.txPreimage) >= this.deadline);
+          this.count++;
+        }
+      }
+    TS
+
+    result = validate_source(source)
+    assert has_locktime_warning?(result),
+           "assigned comparison must not silence the warning"
+  end
+
+  def test_warns_for_vacuous_strict_bound
+    source = <<~TS
+      class TimeLock extends StatefulSmartContract {
+        count: bigint;
+        readonly deadline: bigint;
+        constructor(count: bigint, deadline: bigint) {
+          super(count, deadline);
+          this.count = count;
+          this.deadline = deadline;
+        }
+        public unlock() {
+          assert(extractSequence(this.txPreimage) < 0n);
+          assert(extractLocktime(this.txPreimage) >= this.deadline);
+          this.count++;
+        }
+      }
+    TS
+
+    result = validate_source(source)
+    assert has_locktime_warning?(result),
+           "extractSequence < 0n is not a finality guard"
+  end
 end

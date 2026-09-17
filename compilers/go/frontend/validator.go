@@ -1470,7 +1470,7 @@ func isSequenceFinalityGuard(expr Expression) bool {
 	}
 	strictBoundOk := func(e Expression) bool {
 		lit, ok := e.(BigIntLiteral)
-		return ok && lit.Value != nil && lit.Value.Cmp(sequenceFinal) <= 0
+		return ok && lit.Value != nil && lit.Value.Sign() > 0 && lit.Value.Cmp(sequenceFinal) <= 0
 	}
 	nonStrictBoundOk := func(e Expression) bool {
 		lit, ok := e.(BigIntLiteral)
@@ -1517,8 +1517,15 @@ func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode
 			if isLocktimeRead(expr) {
 				readsLocktime = true
 			}
-			if isSequenceFinalityGuard(expr) {
-				hasSequenceGuard = true
+			if isAssertCall(expr) {
+				call := expr.(CallExpr)
+				for _, arg := range call.Args {
+					walkExpr(arg, func(inner Expression) {
+						if isSequenceFinalityGuard(inner) {
+							hasSequenceGuard = true
+						}
+					})
+				}
 			}
 		})
 		// Follow calls into private helpers so a guard (or locktime read) supplied

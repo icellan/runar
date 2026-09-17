@@ -168,3 +168,57 @@ class TimeLock(StatefulSmartContract):
 """
     result = _validate_source(source)
     assert _has_locktime_warning(result)
+
+
+def test_warns_when_comparison_is_assigned_not_asserted() -> None:
+    source = """
+from runar import (
+    StatefulSmartContract, Bigint, Readonly,
+    public, assert_, extract_locktime, extract_sequence,
+)
+
+
+class TimeLock(StatefulSmartContract):
+    deadline: Readonly[Bigint]
+    count: Bigint
+
+    def __init__(self, deadline: Bigint, count: Bigint):
+        super().__init__(deadline, count)
+        self.deadline = deadline
+        self.count = count
+
+    @public
+    def unlock(self):
+        ok = extract_sequence(self.tx_preimage) != 0xffffffff
+        assert_(extract_locktime(self.tx_preimage) >= self.deadline)
+        self.count = self.count + 1
+"""
+    result = _validate_source(source)
+    assert _has_locktime_warning(result)
+
+
+def test_warns_for_vacuous_strict_bound() -> None:
+    source = """
+from runar import (
+    StatefulSmartContract, Bigint, Readonly,
+    public, assert_, extract_locktime, extract_sequence,
+)
+
+
+class TimeLock(StatefulSmartContract):
+    deadline: Readonly[Bigint]
+    count: Bigint
+
+    def __init__(self, deadline: Bigint, count: Bigint):
+        super().__init__(deadline, count)
+        self.deadline = deadline
+        self.count = count
+
+    @public
+    def unlock(self):
+        assert_(extract_sequence(self.tx_preimage) < 0)
+        assert_(extract_locktime(self.tx_preimage) >= self.deadline)
+        self.count = self.count + 1
+"""
+    result = _validate_source(source)
+    assert _has_locktime_warning(result)
