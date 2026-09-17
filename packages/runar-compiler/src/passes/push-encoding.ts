@@ -163,3 +163,65 @@ export function encodePushBytesHex(value: Uint8Array): string {
   }
   return bytesToHex(encodePushData(value));
 }
+
+/**
+ * Inverse of `encodePushData`. Reads one push from `bytes` at `offset`.
+ *
+ * SDKs emit OP_PUSHDATA4 (`0x4e`) for payloads ≥ 65536 bytes. A decoder
+ * that only understands direct / PUSHDATA1 / PUSHDATA2 reads `0x4e` as
+ * length 78 (or as PUSHDATA1) and desynchronises every later field.
+ */
+export function decodePushData(
+  bytes: Uint8Array,
+  offset: number = 0,
+): { data: Uint8Array; next: number } {
+  if (offset >= bytes.length) {
+    throw new Error('decodePushData: truncated opcode');
+  }
+  const opcode = bytes[offset]!;
+  if (opcode <= 75) {
+    const end = offset + 1 + opcode;
+    if (end > bytes.length) {
+      throw new Error(`decodePushData: truncated ${opcode}-byte push`);
+    }
+    return { data: bytes.subarray(offset + 1, end), next: end };
+  }
+  if (opcode === 0x4c) {
+    if (offset + 2 > bytes.length) {
+      throw new Error('decodePushData: truncated OP_PUSHDATA1 length');
+    }
+    const len = bytes[offset + 1]!;
+    const end = offset + 2 + len;
+    if (end > bytes.length) {
+      throw new Error('decodePushData: truncated OP_PUSHDATA1 payload');
+    }
+    return { data: bytes.subarray(offset + 2, end), next: end };
+  }
+  if (opcode === 0x4d) {
+    if (offset + 3 > bytes.length) {
+      throw new Error('decodePushData: truncated OP_PUSHDATA2 length');
+    }
+    const len = bytes[offset + 1]! | (bytes[offset + 2]! << 8);
+    const end = offset + 3 + len;
+    if (end > bytes.length) {
+      throw new Error('decodePushData: truncated OP_PUSHDATA2 payload');
+    }
+    return { data: bytes.subarray(offset + 3, end), next: end };
+  }
+  if (opcode === 0x4e) {
+    if (offset + 5 > bytes.length) {
+      throw new Error('decodePushData: truncated OP_PUSHDATA4 length');
+    }
+    const len =
+      bytes[offset + 1]! |
+      (bytes[offset + 2]! << 8) |
+      (bytes[offset + 3]! << 16) |
+      (bytes[offset + 4]! << 24);
+    const end = offset + 5 + len;
+    if (end > bytes.length) {
+      throw new Error('decodePushData: truncated OP_PUSHDATA4 payload');
+    }
+    return { data: bytes.subarray(offset + 5, end), next: end };
+  }
+  throw new Error(`decodePushData: byte 0x${opcode.toString(16)} is not a push opcode`);
+}

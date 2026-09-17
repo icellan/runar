@@ -472,6 +472,57 @@ func encodePushData(data []byte) []byte {
 	return result
 }
 
+// decodePushData is the inverse of encodePushData. SDKs emit OP_PUSHDATA4
+// (0x4e) for payloads ≥ 65536 bytes; a decoder that only understands
+// direct / PUSHDATA1 / PUSHDATA2 treats 0x4e as length 78 (R-168).
+func decodePushData(data []byte, offset int) (payload []byte, next int, err error) {
+	if offset >= len(data) {
+		return nil, 0, fmt.Errorf("decodePushData: truncated opcode")
+	}
+	opcode := data[offset]
+	if opcode <= 75 {
+		end := offset + 1 + int(opcode)
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated %d-byte push", opcode)
+		}
+		return data[offset+1 : end], end, nil
+	}
+	if opcode == 0x4c {
+		if offset+2 > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA1 length")
+		}
+		n := int(data[offset+1])
+		end := offset + 2 + n
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA1 payload")
+		}
+		return data[offset+2 : end], end, nil
+	}
+	if opcode == 0x4d {
+		if offset+3 > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA2 length")
+		}
+		n := int(data[offset+1]) | int(data[offset+2])<<8
+		end := offset + 3 + n
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA2 payload")
+		}
+		return data[offset+3 : end], end, nil
+	}
+	if opcode == 0x4e {
+		if offset+5 > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA4 length")
+		}
+		n := int(data[offset+1]) | int(data[offset+2])<<8 | int(data[offset+3])<<16 | int(data[offset+4])<<24
+		end := offset + 5 + n
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA4 payload")
+		}
+		return data[offset+5 : end], end, nil
+	}
+	return nil, 0, fmt.Errorf("decodePushData: byte 0x%02x is not a push opcode", opcode)
+}
+
 // encodePushValue converts a PushValue to hex and asm strings.
 func encodePushValue(value PushValue) (hexStr string, asmStr string) {
 	switch value.Kind {

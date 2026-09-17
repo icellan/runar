@@ -416,6 +416,61 @@ pub fn encode_push_data(data: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Inverse of [`encode_push_data`]. SDKs emit OP_PUSHDATA4 (`0x4e`) for
+/// payloads ≥ 65536 bytes (R-168).
+pub fn decode_push_data(bytes: &[u8], offset: usize) -> Result<(Vec<u8>, usize), String> {
+    if offset >= bytes.len() {
+        return Err("decode_push_data: truncated opcode".into());
+    }
+    let opcode = bytes[offset];
+    if opcode <= 75 {
+        let end = offset + 1 + opcode as usize;
+        if end > bytes.len() {
+            return Err(format!("decode_push_data: truncated {opcode}-byte push"));
+        }
+        return Ok((bytes[offset + 1..end].to_vec(), end));
+    }
+    if opcode == 0x4c {
+        if offset + 2 > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA1 length".into());
+        }
+        let n = bytes[offset + 1] as usize;
+        let end = offset + 2 + n;
+        if end > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA1 payload".into());
+        }
+        return Ok((bytes[offset + 2..end].to_vec(), end));
+    }
+    if opcode == 0x4d {
+        if offset + 3 > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA2 length".into());
+        }
+        let n = bytes[offset + 1] as usize | (bytes[offset + 2] as usize) << 8;
+        let end = offset + 3 + n;
+        if end > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA2 payload".into());
+        }
+        return Ok((bytes[offset + 3..end].to_vec(), end));
+    }
+    if opcode == 0x4e {
+        if offset + 5 > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA4 length".into());
+        }
+        let n = bytes[offset + 1] as usize
+            | (bytes[offset + 2] as usize) << 8
+            | (bytes[offset + 3] as usize) << 16
+            | (bytes[offset + 4] as usize) << 24;
+        let end = offset + 5 + n;
+        if end > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA4 payload".into());
+        }
+        return Ok((bytes[offset + 5..end].to_vec(), end));
+    }
+    Err(format!(
+        "decode_push_data: byte 0x{opcode:02x} is not a push opcode"
+    ))
+}
+
 /// Encode a push value to hex and asm strings.
 fn encode_push_value(value: &PushValue) -> (String, String) {
     match value {
@@ -1670,6 +1725,16 @@ mod tests {
                 &got[..got.len().min(12)],
             );
         }
+    }
+
+    #[test]
+    fn test_decode_push_data_pushdata4_roundtrip() {
+        let payload = vec![0x5au8; 65536];
+        let encoded = encode_push_data(&payload);
+        assert_eq!(encoded[0], 0x4e, "encode must use OP_PUSHDATA4");
+        let (got, next) = decode_push_data(&encoded, 0).expect("decode");
+        assert_eq!(next, encoded.len());
+        assert_eq!(got, payload);
     }
 
     // -----------------------------------------------------------------------
