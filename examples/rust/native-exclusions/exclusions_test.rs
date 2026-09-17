@@ -421,7 +421,12 @@ fn the_universe_is_not_empty() {
     let u = universe(&root);
     assert_eq!(
         u.len(),
-        7,
+        // 7 -> 9: the two tic-tac-toe contracts joined the universe when their
+        // `init()` initializers were rewritten from bare `&str` (which is not
+        // valid Rust for a `ByteString`/`PubKey`, both `Vec<u8>`) to
+        // `to_byte_string(...)`, once the validator accepted that spelling in a
+        // property INITIALIZER. Both are now `#[path]`-included and run natively.
+        9,
         "the number of .runar.rs contracts calling one of the eight byte builtins moved \
          from 7 to {}. That is fine — but check that the scan is still finding calls and \
          not, say, matching nothing because a builtin was renamed: {:?}",
