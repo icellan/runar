@@ -12,10 +12,10 @@ pipeline. The package is useful in two roles:
 
 | Area | Status |
 |---|---:|
-| Conformance fixtures discovered (Lean-recognised) | 74/74 (dynamic readDir) |
+| Conformance fixtures discovered (Lean-recognised) | 82/82 (dynamic readDir) |
 | ANF parse + well-formedness | 64/64 |
 | ANF JSON round-trip | 64/64 |
-| Default byte-exact gate (`pipelineGolden`) | 58/74 byte-exact (50 baseline + 8 live-regenerated crypto anchors; see note) |
+| Default byte-exact gate (`pipelineGolden`) | 64/82 byte-exact (61 baseline + 3 live-regenerated crypto anchors; see note) |
 | Formal-evidence gate (`pipelineConformance`) | **0/64 VERIFIED-direct**, **64/64 VERIFIED-modulo-codegen-axioms** (Phase D harness omnibus tier; soundness conditional on the codegen-soundness axioms documented in `TRUST_MANIFEST.md`) |
 | Crypto-heavy fixtures | 20 `cryptoAxiomPending` (8 byte-exact via stored constants) |
 | Full/sharded byte-exact target | live `cryptoAxiomPending` bucket regeneration |
@@ -29,8 +29,8 @@ pipeline. The package is useful in two roles:
 | End-to-end capstone — multi-method dispatch | `Pipeline.compileSafe_multi_public_observational_correct` (Phase D) |
 | Crypto codegen-to-spec links | 13 primitive families (SHA-256 / RIPEMD-160 / hash160 / hash256 / BLAKE3 / secp256k1 / P-256 / P-384 / ECDSA / BabyBear / Merkle / WOTS+ / SLH-DSA × 6 / Rabin) |
 
-Default `pipelineGolden` is the fast gate and currently reports 58/74
-fixtures byte-exact (49 baseline + 8 live-regenerated crypto anchors).
+Default `pipelineGolden` is the fast gate and currently reports 64/82
+fixtures byte-exact (61 baseline + 3 live-regenerated crypto anchors).
 Three fixtures — `shift-ops`, `bitwise-ops` and `oversize-bigint-shift` —
 sit in `lowerDivergencePending`: the real compilers emit a minimality
 normalisation (OP_BIN2NUM at numeric reads of byte-array results) that this

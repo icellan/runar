@@ -80,20 +80,19 @@ describe('FungibleToken (Solidity)', () => {
   });
 
   describe('merge', () => {
-    it('creates one output with position-dependent balances', () => {
+    it('rejects the mock-zero prevouts path (W8: that was the solo-merge hole)', () => {
+      // INTERPRETER-ONLY. Honest two-input Spend is pinned by
+      // w8-token-ft-solo-merge-known-broken.test.ts.
       const token = makeToken(ALICE.pubKey, 30n);
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
         sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: MOCK_PREVOUTS,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
-      expect(result.success).toBe(true);
-      expect(result.outputs).toHaveLength(1);
-      expect(result.outputs[0]!.balance).toBe(30n);
-      expect(result.outputs[0]!.mergeBalance).toBe(70n);
-      expect(result.outputs[0]!.owner).toBe(ALICE.pubKey);
+      expect(result.success).toBe(false);
     });
 
     it('rejects merge with negative otherBalance', () => {
@@ -103,6 +102,7 @@ describe('FungibleToken (Solidity)', () => {
         sig: ALICE_SIG,
         otherBalance: -1n,
         allPrevouts: MOCK_PREVOUTS,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
       expect(result.success).toBe(false);
@@ -116,29 +116,10 @@ describe('FungibleToken (Solidity)', () => {
         sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: tamperedPrevouts,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
       expect(result.success).toBe(false);
-    });
-
-    it('merge with pre-existing mergeBalance uses total', () => {
-      const token = TestContract.fromSource(source, {
-        owner: ALICE.pubKey,
-        balance: 20n,
-        mergeBalance: 10n,
-        tokenId: TOKEN_ID,
-      }, FILE_NAME);
-      token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
-      const result = token.call('merge', {
-        sig: ALICE_SIG,
-        otherBalance: 50n,
-        allPrevouts: MOCK_PREVOUTS,
-        outputSatoshis: SATS,
-      });
-      expect(result.success).toBe(true);
-      expect(result.outputs).toHaveLength(1);
-      expect(result.outputs[0]!.balance).toBe(30n);
-      expect(result.outputs[0]!.mergeBalance).toBe(50n);
     });
   });
 
