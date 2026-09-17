@@ -79,3 +79,25 @@ func (c *GoBigintBigOperators) CheckComparisons(a runar.BigintBig, b runar.Bigin
 	runar.Assert(runar.BigintBigNotEqual(a, b))
 	runar.Assert(runar.BigintBigEqual(a, a))
 }
+
+// CheckWideMath exercises the two *Big MATH spellings. They sat one step
+// further out than the encoders above: `Num2BinBig` / `Bin2NumBig` were at
+// least mapped in compilers/go, so six tiers disagreed with one. `AbsBig` and
+// `GcdBig` were mapped in ZERO tiers — they existed only in packages/runar-go,
+// its tests and docs — while `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)`
+// panic with a message instructing the author to "use AbsBig, which the
+// .runar.go parser lowers to the same abs builtin". Following that advice got
+// `unknown function 'runar.AbsBig'` from all seven, and a contract holding a
+// `runar.BigintBig` could not spell abs or gcd at all.
+//
+// As with the encoders, the `Big` suffix names a different Go RUNTIME type —
+// *big.Int, so the Go-side mock does not narrow at MinInt64 — not a different
+// Script operation. OP_ABS and the gcd builtin are arbitrary-width after
+// Genesis, so the bytes must be the ones the unsuffixed spelling produces.
+// GoBigintBigOperatorsRef.runar.ts writes this method with `abs` / `gcd` and
+// the pair must agree.
+func (c *GoBigintBigOperators) CheckWideMath(a runar.BigintBig, b runar.BigintBig) {
+	magnitude := runar.AbsBig(a)
+	divisor := runar.GcdBig(a, b)
+	runar.Assert(runar.BigintBigEqual(runar.BigintBigAdd(magnitude, divisor), c.Expected))
+}

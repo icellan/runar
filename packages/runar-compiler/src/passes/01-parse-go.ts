@@ -298,6 +298,10 @@ export const GO_BUILTIN_MAP: Record<string, string> = {
   Num2BinBig: 'num2bin',
   Bin2NumBig: 'bin2num',
 
+  // the *Big peers of abs / gcd. Same rule as Num2BinBig / Bin2NumBig above: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not narrow at MinInt64), not a different Script operation — OP_ABS and the gcd builtin are arbitrary-width after Genesis. These were mapped in ZERO tiers while `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` in packages/runar-go panic telling the author to use them, naming the .runar.go parser as the thing that lowers them
+  AbsBig: 'abs',
+  GcdBig: 'gcd',
+
   // Assertions
   Assert: 'assert',
   // Hashing

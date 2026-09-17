@@ -1,4 +1,4 @@
-import { SmartContract, assert, num2bin, bin2num } from 'runar-lang';
+import { SmartContract, assert, num2bin, bin2num, abs, gcd } from 'runar-lang';
 
 /**
  * R-Bigint — the reference half of the `BigintBig` operator-helper pair.
@@ -51,5 +51,11 @@ class GoBigintBigOperatorsRef extends SmartContract {
     assert(b >= a);
     assert(a !== b);
     assert(a === a);
+  }
+
+  public checkWideMath(a: bigint, b: bigint) {
+    const magnitude = abs(a);
+    const divisor = gcd(a, b);
+    assert(magnitude + divisor === this.expected);
   }
 }

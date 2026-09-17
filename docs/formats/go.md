@@ -227,6 +227,33 @@ so the emitted Script is byte-identical either way:**
 | `a > b` / `runar.BigintBigGreater(a, b)` | `>` |
 | `a >= b` / `runar.BigintBigGreaterEq(a, b)` | `>=` |
 
+Four `*Big` helpers are not operators but ordinary builtins, and are callable
+from contract source the same way. The `Big` suffix names a different Go
+**runtime** type (`*big.Int`, so the Go-side mock does not narrow), not a
+different Script operation — each lowers to the unsuffixed builtin and emits
+identical bytes:
+
+| Contract source | Rúnar node |
+|---|---|
+| `runar.AbsBig(n)` | `abs(n)` |
+| `runar.GcdBig(a, b)` | `gcd(a, b)` |
+| `runar.Num2BinBig(n, size)` | `num2bin(n, size)` |
+| `runar.Bin2NumBig(data)` | `bin2num(data)` |
+
+`AbsBig` and `GcdBig` are the peers `Abs(math.MinInt64)` and
+`Gcd(math.MinInt64, 0)` name when they panic. Until R-AbsGcd no tier's Go
+builtin table carried them, so a contract author following that advice got
+`unknown function 'absBig'` from all seven and a `runar.BigintBig` value could
+not be passed to abs or gcd at all. The pair is now gated cross-tier by
+`conformance/subtype-parity/GoBigintBigOperators.runar.go` and its `abs`/`gcd`
+reference half, which requires all seven tiers to accept it AND to emit the
+bytes the unsuffixed spelling emits.
+
+The other wide helpers the package header mentions — `PowBig`, `MulDivBig`,
+`PercentOfBig`, `SqrtBig`, `Log2Big` — are Go-callable only. They are not in
+any tier's builtin table and are **not** spellings a `.runar.go` contract can
+use.
+
 `examples/go/ec-primitives` and `examples/go/ec-demo` use this for 256-bit
 secp256k1 coordinates; `examples/go/p256-primitives` and
 `examples/go/p384-primitives` for NIST scalars.

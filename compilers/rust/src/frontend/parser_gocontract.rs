@@ -136,6 +136,16 @@ fn map_go_builtin(name: &str) -> String {
         // the *Big peers of num2bin / bin2num. They lower to the SAME builtins as Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate), not a different Script operation. Six tiers fell through to the default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has (R-Bigint)
         "Num2BinBig" => "num2bin".to_string(),
         "Bin2NumBig" => "bin2num".to_string(),
+
+        // the *Big peers of abs / gcd. Same rule as Num2BinBig / Bin2NumBig above: the
+        // suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does
+        // not narrow at MinInt64), not a different Script operation -- OP_ABS and the
+        // gcd builtin are arbitrary-width after Genesis. These were mapped in ZERO
+        // tiers while `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` in
+        // packages/runar-go panic telling the author to use them, naming the .runar.go
+        // parser as the thing that lowers them.
+        "AbsBig" => "abs".to_string(),
+        "GcdBig" => "gcd".to_string(),
         "Assert" => "assert".to_string(),
         "Hash160" => "hash160".to_string(),
         "Hash256" => "hash256".to_string(),

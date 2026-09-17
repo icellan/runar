@@ -979,6 +979,14 @@ describe('Go surface: builtin aliases the default rule cannot produce', () => {
         `compilers/java/src/main/java/runar/compiler/frontend/GoParser.java — ` +
         `or the tiers that lack it reject the spelling as an unknown function.`,
     ).toEqual([
+      // AbsBig / GcdBig are the *Big peers of abs / gcd, and joined the at-risk
+      // class for a reason the others did not have: packages/runar-go's
+      // `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` panic with a message
+      // telling the author to "use AbsBig, which the .runar.go parser lowers to
+      // the same abs builtin". No tier mapped them, so following that advice
+      // produced `unknown function 'absBig'` — a comment asserting a checkable
+      // fact about another file that was false.
+      'AbsBig',
       'Bin2Num',
       // Bin2NumBig / Num2BinBig joined the at-risk class in R-Bigint. They are
       // the *big.Int-typed peers of bin2num / num2bin in packages/runar-go —
@@ -988,6 +996,7 @@ describe('Go surface: builtin aliases the default rule cannot produce', () => {
       // default rule, produced `bin2NumBig` / `num2BinBig`, and rejected every
       // contract that used the documented wide spelling.
       'Bin2NumBig',
+      'GcdBig',
       'Int2Str',
       'Num2Bin',
       'Num2BinBig',

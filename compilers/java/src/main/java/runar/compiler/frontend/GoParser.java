@@ -219,6 +219,16 @@ public final class GoParser {
         // (R-Bigint).
         GO_BUILTIN_MAP.put("Num2BinBig", "num2bin");
         GO_BUILTIN_MAP.put("Bin2NumBig", "bin2num");
+
+        // the *Big peers of abs / gcd. Same rule as Num2BinBig / Bin2NumBig above: the
+        // suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does
+        // not narrow at MinInt64), not a different Script operation -- OP_ABS and the
+        // gcd builtin are arbitrary-width after Genesis. These were mapped in ZERO
+        // tiers while `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` in
+        // packages/runar-go panic telling the author to use them, naming the .runar.go
+        // parser as the thing that lowers them.
+        GO_BUILTIN_MAP.put("AbsBig", "abs");
+        GO_BUILTIN_MAP.put("GcdBig", "gcd");
         // `Int2Str` is the spelling docs/formats/go.md documents. Without it the
         // default rule camel-cases the leading character to `int2Str`, which is
         // registered nowhere — the call is rejected as an unknown function.
