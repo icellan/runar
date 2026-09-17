@@ -26,14 +26,16 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Transaction } from '@bsv/sdk';
+import { Transaction, LockingScript, UnlockingScript } from '@bsv/sdk';
 import {
   RunarContract,
   MockProvider,
   LocalSigner,
   extractStateFromScript,
   buildP2PKHScript,
+  encodePushData,
 } from 'runar-sdk';
+import type { UTXO } from 'runar-sdk';
 import { compile } from 'runar-compiler';
 import { testKey, validateContractInput } from '../oracle/index.js';
 
@@ -47,6 +49,48 @@ const TOKEN_FT_TS = join(
 const REAL_BALANCE = 10n;
 /** Balance the attacker claims the (non-existent) other input holds. */
 const PHANTOM_BALANCE = 999_999n;
+
+/**
+ * MockProvider never drops spent coins from `getUtxos`. After deploy the
+ * synthetic funding UTXO is still selectable, so coin-selection cannot be
+ * trusted to pick a specific P2PKH parent. Replace the wallet contents.
+ */
+function replaceAddressUtxos(provider: MockProvider, address: string, next: UTXO[]): void {
+  const bag = provider as unknown as { utxos: Map<string, UTXO[]> };
+  bag.utxos.set(address, []);
+  for (const u of next) provider.addUtxo(address, u);
+}
+
+/** Broadcast a 1-in/1-out tx whose output 0 is P2PKH (companion vout must be 0). */
+async function broadcastVout0P2pkh(
+  provider: MockProvider,
+  signer: LocalSigner,
+  seed: UTXO,
+  destScript: string,
+  destSats: number,
+): Promise<{ parentHex: string; utxo: UTXO }> {
+  const tx = new Transaction();
+  tx.addInput({
+    sourceTXID: seed.txid,
+    sourceOutputIndex: seed.outputIndex,
+    unlockingScript: new UnlockingScript(),
+    sequence: 0xffffffff,
+  });
+  tx.addOutput({
+    satoshis: destSats,
+    lockingScript: LockingScript.fromHex(destScript),
+  });
+  const sig = await signer.sign(tx.toHex(), 0, seed.script, seed.satoshis);
+  const pub = await signer.getPublicKey();
+  tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(
+    encodePushData(sig) + encodePushData(pub),
+  );
+  const txid = await provider.broadcast(tx);
+  return {
+    parentHex: tx.toHex(),
+    utxo: { txid, outputIndex: 0, satoshis: destSats, script: destScript },
+  };
+}
 
 interface SoloMergeResult {
   accepted: boolean;
@@ -181,6 +225,109 @@ describe('W8 / SoloMerge: token-ft merge authenticates a companion parent', () =
       expect(res.tokenInputCount, res.error).toBe(1);
       expect(res.inputCount, res.error).toBeGreaterThanOrEqual(1);
     }
+  });
+
+  it('a token + P2PKH fee input bound as the companion parent is rejected', async () => {
+    // The attack YOINK named: two prevouts (token + P2PKH), `otherParentTx`
+    // is the P2PKH's REAL parent so hash256 binds, then the walk must refuse
+    // a 25-byte script (varint is not 0xfd+LE16). Binding the token parent
+    // instead fails earlier at `hash256(otherParentTx) === companionTxid`
+    // and never reaches that walk.
+    const source = readFileSync(TOKEN_FT_TS, 'utf8');
+    const compiled = compile(source, { fileName: 'FungibleTokenExample.runar.ts' });
+    if (!compiled.artifact) {
+      throw new Error(
+        'compile failed: ' +
+          compiled.diagnostics.filter(d => d.severity === 'error').map(d => d.message).join('; '),
+      );
+    }
+
+    const alice = testKey('alice');
+    const signer = new LocalSigner(alice.privKey);
+    const provider = new MockProvider();
+    const address = await signer.getAddress();
+    const pkhScript = buildP2PKHScript(alice.pubKey);
+
+    const parentSeed: UTXO = {
+      txid: '11'.repeat(32),
+      outputIndex: 0,
+      satoshis: 100_000,
+      script: pkhScript,
+    };
+    provider.addUtxo(address, parentSeed);
+    const parent = await broadcastVout0P2pkh(provider, signer, parentSeed, pkhScript, 50_000);
+
+    provider.addUtxo(address, {
+      txid: '22'.repeat(32),
+      outputIndex: 0,
+      satoshis: 500_000,
+      script: pkhScript,
+    });
+
+    const contract = new RunarContract(compiled.artifact, [
+      alice.pubKey,
+      REAL_BALANCE,
+      0n,
+      '01',
+    ]);
+    await contract.deploy(provider, signer, {});
+    const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
+    const spent = contract.getUtxo();
+    if (!spent) throw new Error('deploy did not leave a tracked UTXO');
+
+    replaceAddressUtxos(provider, address, [parent.utxo]);
+    contract.connect(provider, signer);
+
+    const prepared = await contract.prepareCall(
+      'merge',
+      [null, PHANTOM_BALANCE, null, parent.parentHex, 1n],
+      {
+        dryRun: true,
+        outputs: [
+          {
+            satoshis: 1,
+            state: {
+              owner: alice.pubKey,
+              balance: REAL_BALANCE,
+              mergeBalance: PHANTOM_BALANCE,
+            },
+          },
+        ],
+      },
+    );
+
+    let mIdx = 0;
+    if (prepared._parentStateful) {
+      const pubMethods = compiled.artifact.abi.methods.filter(m => m.isPublic);
+      if (pubMethods.length > 1) {
+        const idx = pubMethods.findIndex(m => m.name === 'merge');
+        if (idx >= 0) mIdx = idx;
+      }
+    }
+    const sigSubscript = prepared._parentStateful
+      ? contract.getSubscriptForSigning(prepared._contractUtxo.script, mIdx)
+      : prepared._contractUtxo.script;
+    const signatures: Record<number, string> = {};
+    const txHex = prepared.tx.toHex();
+    for (const idx of prepared.sigIndices) {
+      signatures[idx] = await signer.sign(
+        txHex, 0, sigSubscript, prepared._contractUtxo.satoshis,
+      );
+    }
+    await expect(contract.finalizeCall(prepared, signatures)).rejects.toThrow();
+
+    const callTx = prepared.tx;
+    expect(callTx.inputs.length, 'token + P2PKH').toBe(2);
+    expect(callTx.inputs[1]!.sourceOutputIndex).toBe(0);
+    expect(callTx.inputs[1]!.sourceTXID).toBe(parent.utxo.txid);
+
+    let accepted = false;
+    try {
+      accepted = validateContractInput(callTx, 0, deployTx, spent.outputIndex);
+    } catch {
+      accepted = false;
+    }
+    expect(accepted).toBe(false);
   });
 
   it('NEGATIVE CONTROL: the covenant still rejects a successor it did not compute', async () => {
