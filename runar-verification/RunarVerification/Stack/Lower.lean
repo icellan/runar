@@ -1458,9 +1458,14 @@ which keeps a robust no-op fallback for non-supported field names.
 def extractorBody (func : String) : List StackOp :=
   let opc (s : String) : StackOp := .opcode s
   let push (n : Int) : StackOp := .push (.bigint n)
+  -- W1 / FinalCountdown: 32-bit preimage fields are unsigned. A bare
+  -- OP_BIN2NUM reads `feffffff` as negative. Append a zero byte first.
+  -- Mirrors TS `emitUnsignedBin2Num` (`05-stack-lower.ts`).
+  let unsignedBin2Num : List StackOp :=
+    [.push (.bytes (ByteArray.mk #[0x00])), opc "OP_CAT", opc "OP_BIN2NUM"]
   match func with
   | "extractVersion" =>
-      [push 4, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
+      [push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractHashPrevouts" =>
       [push 4, opc "OP_SPLIT", .nip, push 32, opc "OP_SPLIT", .drop]
   | "extractHashSequence" =>
@@ -1482,19 +1487,27 @@ def extractorBody (func : String) : List StackOp :=
        push 32, opc "OP_SPLIT", .drop]
   | "extractNLocktime" =>
       [opc "OP_SIZE", push 8, opc "OP_SUB", opc "OP_SPLIT", .nip,
-       push 4, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
+       push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractLocktime" =>
       -- TS `lowerExtractor` case `extractLocktime` (`05-stack-lower.ts:3087-3115`):
       -- end-relative 4 bytes before the last 4 (sighashType).
       [opc "OP_SIZE", push 8, opc "OP_SUB", opc "OP_SPLIT", .nip,
-       push 4, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
+       push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractSigHashType" =>
-      [opc "OP_SIZE", push 4, opc "OP_SUB", opc "OP_SPLIT", .nip,
-       opc "OP_BIN2NUM"]
+      [opc "OP_SIZE", push 4, opc "OP_SUB", opc "OP_SPLIT", .nip]
+        ++ unsignedBin2Num
+  | "extractSequence" =>
+      -- End-relative: nSequence is 4 bytes before hashOutputs(32) +
+      -- nLocktime(4) + sighashType(4) = 44 bytes from the end.
+      -- Mirrors TS `extractSequence` (`05-stack-lower.ts`).
+      [opc "OP_SIZE", push 44, opc "OP_SUB", opc "OP_SPLIT", .nip,
+       push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractAmount" =>
       -- Amount is 8 bytes immediately after scriptCode (nSeq is 4 after).
       -- Layout from end: nSeq(4) + hashOutputs(32) + nLocktime(4) + hashType(4) = 44 from end,
       -- amount(8) precedes that → amount starts at SIZE-52.
+      -- NOT zero-padded: satoshis is 8 bytes and a value large enough to
+      -- set the sign bit would exceed the 21e14 ever minted.
       [opc "OP_SIZE", push 52, opc "OP_SUB", opc "OP_SPLIT", .nip,
        push 8, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
   | "extractScriptCode" =>
