@@ -365,6 +365,11 @@ jobs:
       RUNAR_REQUIRE_ALL_COMPILERS: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          # tests/golden-provenance-gate-is-cwd-independent.test.ts diffs
+          # origin/main...HEAD. A shallow PR checkout has no merge-base
+          # (`fatal: origin/main...HEAD: no merge base`).
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -511,10 +516,6 @@ jobs:
         # day it lands. `tests/ci-covers-root-tests.test.ts` fails if this step is
         # ever narrowed back to a file list.
         run: |
-          # tests/golden-provenance-gate-is-cwd-independent.test.ts diffs
-          # against origin/main. actions/checkout is a shallow PR ref and
-          # does not create that remote; without it the gate crashes
-          # `fatal: ambiguous argument 'origin/main'` and the test is vacuous.
           git fetch --no-tags origin main:refs/remotes/origin/main
           npx vitest run tests/
       - run: pnpm run typecheck
