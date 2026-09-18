@@ -17,6 +17,15 @@ from conftest import (
 from runar.sdk import RunarContract, DeployOptions, CallOptions
 
 
+def _merge_parents(provider, contract1, contract2):
+    """Companion-parent raw txs for merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)."""
+    utxo1 = contract1.get_utxo()
+    utxo2 = contract2.get_utxo()
+    parent1 = provider.get_raw_transaction(utxo1.txid)
+    parent2 = provider.get_raw_transaction(utxo2.txid)
+    return parent1, parent2, utxo2
+
+
 class TestFungibleToken:
 
     def test_compile(self):
@@ -195,14 +204,14 @@ class TestFungibleToken:
         contract2 = RunarContract(artifact, [owner_wallet["pubKeyHex"], 600, 0, token_id_hex])
         contract2.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
-        utxo2 = contract2.get_utxo()
+        parent1, parent2, utxo2 = _merge_parents(provider, contract1, contract2)
         call_txid, _ = contract1.call(
             "merge",
-            [None, 600, None, 4000],
+            [None, 600, None, parent2, 4000],
             provider, owner_wallet["signer"],
             options=CallOptions(
                 additional_contract_inputs=[utxo2],
-                additional_contract_input_args=[[None, 400, None, 4000]],
+                additional_contract_input_args=[[None, 400, None, parent1, 4000]],
                 outputs=[{"satoshis": 4000, "state": {"owner": owner_wallet["pubKeyHex"], "balance": 400, "mergeBalance": 600}}],
             ),
         )
@@ -222,7 +231,7 @@ class TestFungibleToken:
         contract2 = RunarContract(artifact, [owner_wallet["pubKeyHex"], 600, 0, token_id_hex])
         contract2.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
-        utxo2 = contract2.get_utxo()
+        parent1, parent2, utxo2 = _merge_parents(provider, contract1, contract2)
 
         # A negative test must prove the NODE rejected this spend.
         # pytest.raises(Exception) catches anything at all, including the
@@ -232,11 +241,11 @@ class TestFungibleToken:
         with pytest.raises(Exception):
             contract1.call(
                 "merge",
-                [None, 1600, None, 4000],
+                [None, 1600, None, parent2, 4000],
                 provider, owner_wallet["signer"],
                 options=CallOptions(
                     additional_contract_inputs=[utxo2],
-                    additional_contract_input_args=[[None, 1400, None, 4000]],
+                    additional_contract_input_args=[[None, 1400, None, parent1, 4000]],
                     outputs=[{"satoshis": 4000, "state": {"owner": owner_wallet["pubKeyHex"], "balance": 400, "mergeBalance": 1600}}],
                 ),
             )
@@ -258,7 +267,7 @@ class TestFungibleToken:
         contract2 = RunarContract(artifact, [owner_wallet["pubKeyHex"], 600, 0, token_id_hex])
         contract2.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
-        utxo2 = contract2.get_utxo()
+        parent1, parent2, utxo2 = _merge_parents(provider, contract1, contract2)
 
         # A negative test must prove the NODE rejected this spend.
         # pytest.raises(Exception) catches anything at all, including the
@@ -268,11 +277,11 @@ class TestFungibleToken:
         with pytest.raises(Exception):
             contract1.call(
                 "merge",
-                [None, 100, None, 4000],
+                [None, 100, None, parent2, 4000],
                 provider, owner_wallet["signer"],
                 options=CallOptions(
                     additional_contract_inputs=[utxo2],
-                    additional_contract_input_args=[[None, -100, None, 4000]],
+                    additional_contract_input_args=[[None, -100, None, parent1, 4000]],
                     outputs=[{"satoshis": 4000, "state": {"owner": owner_wallet["pubKeyHex"], "balance": 400, "mergeBalance": 100}}],
                 ),
             )
@@ -294,15 +303,15 @@ class TestFungibleToken:
         contract2 = RunarContract(artifact, [owner_wallet["pubKeyHex"], 500, 0, token_id_hex])
         contract2.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
-        utxo2 = contract2.get_utxo()
+        parent1, parent2, utxo2 = _merge_parents(provider, contract1, contract2)
 
         call_txid, _ = contract1.call(
             "merge",
-            [None, 500, None, 4000],
+            [None, 500, None, parent2, 4000],
             provider, owner_wallet["signer"],
             options=CallOptions(
                 additional_contract_inputs=[utxo2],
-                additional_contract_input_args=[[None, 0, None, 4000]],
+                additional_contract_input_args=[[None, 0, None, parent1, 4000]],
                 outputs=[{"satoshis": 4000, "state": {"owner": owner_wallet["pubKeyHex"], "balance": 0, "mergeBalance": 500}}],
             ),
         )
@@ -323,7 +332,7 @@ class TestFungibleToken:
         contract2 = RunarContract(artifact, [owner_wallet["pubKeyHex"], 600, 0, token_id_hex])
         contract2.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
-        utxo2 = contract2.get_utxo()
+        parent1, parent2, utxo2 = _merge_parents(provider, contract1, contract2)
 
         # A negative test must prove the NODE rejected this spend.
         # pytest.raises(Exception) catches anything at all, including the
@@ -333,11 +342,11 @@ class TestFungibleToken:
         with pytest.raises(Exception):
             contract1.call(
                 "merge",
-                [None, 600, None, 4000],
+                [None, 600, None, parent2, 4000],
                 provider, wrong_wallet["signer"],
                 options=CallOptions(
                     additional_contract_inputs=[utxo2],
-                    additional_contract_input_args=[[None, 400, None, 4000]],
+                    additional_contract_input_args=[[None, 400, None, parent1, 4000]],
                     outputs=[{"satoshis": 4000, "state": {"owner": owner_wallet["pubKeyHex"], "balance": 400, "mergeBalance": 600}}],
                 ),
             )

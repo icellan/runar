@@ -14,6 +14,7 @@ import runar.integration.helpers.RpcProvider;
 import runar.lang.sdk.CallOptions;
 import runar.lang.sdk.RunarArtifact;
 import runar.lang.sdk.RunarContract;
+import runar.lang.sdk.UTXO;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -132,19 +133,26 @@ class TokenFtIntegrationTest extends IntegrationBase {
             owner.pubKeyHex(), b2, BigInteger.ZERO, tokenId));
         c2.deploy(provider, owner.signer(), 5_000L);
 
-        // merge(sig, otherBalance, allPrevouts, outputSatoshis). Input 0 reports
-        // input 1's balance and vice versa; hashOutputs forces both inputs to
-        // commit to the same output, which is what makes the merge safe.
+        // merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis).
+        // Input 0 reports input 1's balance and vice versa; hashOutputs forces
+        // both inputs to commit to the same output, which is what makes the merge safe.
+        UTXO utxo1 = c1.currentUtxo();
+        UTXO utxo2 = c2.currentUtxo();
+        String parent1 = provider.getRawTransaction(utxo1.txid());
+        String parent2 = provider.getRawTransaction(utxo2.txid());
+
         ArrayList<Object> args = new ArrayList<>();
         args.add(null);                          // sig: auto-signed
         args.add(b2);                            // otherBalance as seen by input 0
         args.add(null);                          // allPrevouts: auto-computed
+        args.add(parent2);
         args.add(BigInteger.valueOf(outputSats));
 
         ArrayList<Object> input1Args = new ArrayList<>();
         input1Args.add(null);
         input1Args.add(b1);                      // otherBalance as seen by input 1
         input1Args.add(null);
+        input1Args.add(parent1);
         input1Args.add(BigInteger.valueOf(outputSats));
 
         // The continuation state must be stated explicitly, exactly as the TS,
@@ -191,16 +199,23 @@ class TokenFtIntegrationTest extends IntegrationBase {
         // would mint 1000 tokens from nothing. The two inputs then compute
         // different outputs, and hashOutputs forces one output set, so the node
         // rejects. Mirrors the Go and Zig tiers' equivalents.
+        UTXO utxo1 = c1.currentUtxo();
+        UTXO utxo2 = c2.currentUtxo();
+        String parent1 = provider.getRawTransaction(utxo1.txid());
+        String parent2 = provider.getRawTransaction(utxo2.txid());
+
         ArrayList<Object> args = new ArrayList<>();
         args.add(null);
         args.add(BigInteger.valueOf(1600));
         args.add(null);
+        args.add(parent2);
         args.add(BigInteger.valueOf(outputSats));
 
         ArrayList<Object> input1Args = new ArrayList<>();
         input1Args.add(null);
         input1Args.add(BigInteger.valueOf(1400));
         input1Args.add(null);
+        input1Args.add(parent1);
         input1Args.add(BigInteger.valueOf(outputSats));
 
         java.util.Map<String, Object> lied = new java.util.LinkedHashMap<>();
