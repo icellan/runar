@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-17T23:04:05.422Z",
+  "generatedAt": "2026-09-18T01:18:35.419Z",
   "summary": {
     "byte-match": 87,
     "byte-diff": 0,
@@ -8,10 +8,10 @@
     "skipped": 6
   },
   "pathBreakdown": {
-    "template": 81,
+    "template": 82,
     "assert-recognizer": 1,
     "symexec": 0,
-    "raw_script": 5
+    "raw_script": 4
   },
   "rows": [
     {
@@ -447,7 +447,7 @@
     {
       "id": "token-ft/FungibleTokenExample",
       "outcome": "byte-match",
-      "recoveryPath": "raw_script"
+      "recoveryPath": "template"
     },
     {
       "id": "token-nft/NFTExample",
