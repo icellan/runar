@@ -531,10 +531,14 @@ jobs:
           cache-dependency-path: compilers/go/go.sum
       - run: cd compilers/go && go build ./...
       - run: cd compilers/go && go build -o runar-go .
-      # -p 1: race-instrumented compiler + codegen together OOM the 7 GiB
-      # GitHub runner (exit 143 / "runner has received a shutdown signal").
-      # No -v: the same suite's verbose logs have also tripped the runner.
-      - run: cd compilers/go && go test -race -p 1 -timeout 20m ./...
+      # Race-instrumented `go test ./...` OOMs the 7 GiB GitHub runner
+      # (exit 143 / "runner has received a shutdown signal"). Root package
+      # passes; codegen dies ~70s in. Split so each package is a fresh
+      # process, and skip -race on codegen (SLH/EC tests).
+      - run: cd compilers/go && go test -race -timeout 10m .
+      - run: cd compilers/go && go test -race -timeout 10m ./frontend ./ir
+      - run: cd compilers/go && go test -race -timeout 20m ./compiler
+      - run: cd compilers/go && go test -timeout 20m ./codegen
       - uses: actions/upload-artifact@v4
         with:
           name: runar-go
