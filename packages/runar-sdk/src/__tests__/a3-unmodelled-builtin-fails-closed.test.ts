@@ -140,8 +140,8 @@ describe('A-3 — an unmodelled builtin must fail closed, naming itself', () => 
     }
   });
 
-  it('RED: the byte-slicing gap (left / right / split / sha256Compress / merkleRootSha256) is refused too', () => {
-    for (const name of ['left', 'right', 'split', 'sha256Compress', 'sha256Finalize', 'merkleRootSha256']) {
+  it('RED: the byte-slicing gap (left / right / split / sha256Compress) is refused too', () => {
+    for (const name of ['left', 'right', 'split', 'sha256Compress', 'sha256Finalize']) {
       expect(probe(name), `${name} must be refused`).toMatchObject({ kind: 'refused' });
     }
   });
@@ -196,5 +196,11 @@ describe('A-3 — an unmodelled builtin must fail closed, naming itself', () => 
     const outcome = probe('extractHashPrevouts');
     expect(outcome.kind).toBe('value');
     expect((outcome as { value: unknown }).value).toBe('00'.repeat(32));
+  });
+
+  it('extractVersion is a modelled dummy, not a refusal', () => {
+    const outcome = probe('extractVersion');
+    expect(outcome.kind).toBe('value');
+    expect((outcome as { value: unknown }).value).toBe(1n);
   });
 });

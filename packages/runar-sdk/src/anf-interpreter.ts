@@ -986,6 +986,25 @@ function evalCall(
     case 'percentOf': {
       return (toBigInt(args[0]) * toBigInt(args[1])) / 10000n;
     }
+    // Baby Bear (p = 2^31 - 2^27 + 1). Needed so StateCovenant.advanceState
+    // can auto-derive continuation state instead of failing closed.
+    case 'bbFieldMul': {
+      const p = 2013265921n;
+      return (toBigInt(args[0]) * toBigInt(args[1])) % p;
+    }
+    case 'merkleRootSha256': {
+      let current = String(args[0] ?? '');
+      const proof = String(args[1] ?? '');
+      const index = toBigInt(args[2]);
+      const depth = Number(toBigInt(args[3]));
+      for (let i = 0; i < depth; i++) {
+        const sibling = proof.slice(i * 64, (i + 1) * 64);
+        const bit = (index >> BigInt(i)) & 1n;
+        const preimage = bit === 1n ? sibling + current : current + sibling;
+        current = hashFn('sha256', preimage);
+      }
+      return current;
+    }
 
     // Preimage intrinsics — return dummy values in simulation
     case 'extractOutputHash':
@@ -993,6 +1012,11 @@ function evalCall(
       return '00'.repeat(32);
     case 'extractLocktime':
       return 0n;
+    // Dummy nVersion. Peers (runar-py/rs/zig/rb/java) already return 1;
+    // runar-lang runtime does too. Without this arm `prepareCall` fails
+    // closed on PreimageExtractors.tick (NEW-006).
+    case 'extractVersion':
+      return 1n;
     // W7: this arm was MISSING while all six peer SDK interpreters
     // (runar-rs `anf_interpreter.rs`, runar-py, runar-zig — whose comment
     // claims it is mirroring this file — and runar-rb) already returned
