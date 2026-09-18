@@ -781,8 +781,7 @@ impl<'a> JavaParser<'a> {
                     source_location: member_loc,
                     sighash_type: None,
                     binding_variant: None,
-                    binding_variant: None,
-                });
+});
                 return;
             }
         }
@@ -842,8 +841,7 @@ impl<'a> JavaParser<'a> {
                 source_location: member_loc,
                 sighash_type: None,
                 binding_variant: None,
-                binding_variant: None,
-            });
+});
             return;
         }
 
@@ -2374,8 +2372,7 @@ fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode
         source_location: loc,
         sighash_type: None,
         binding_variant: None,
-        binding_variant: None,
-    }
+}
 }
 
 // ---------------------------------------------------------------------------
