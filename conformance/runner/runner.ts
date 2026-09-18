@@ -512,6 +512,8 @@ export function findGoBinary(): string | null {
   const candidates = [
     join(GO_COMPILER_DIR, 'runar-go'),
     join(GO_COMPILER_DIR, 'runar-go.exe'),
+    join(REPO_ROOT, 'runar-go'),
+    join(REPO_ROOT, 'runar-go.exe'),
     join(process.cwd(), 'runar-go'),
     join(process.cwd(), 'runar-go.exe'),
   ];
@@ -544,6 +546,8 @@ export function findRustBinary(): string | null {
     join(RUST_COMPILER_DIR, 'target/release/runar-compiler-rust'),
     join(RUST_COMPILER_DIR, 'target/debug/runar-compiler-rust'),
     join(RUST_COMPILER_DIR, 'runar-compiler-rust'),
+    join(REPO_ROOT, 'runar-compiler-rust'),
+    join(REPO_ROOT, 'runar-compiler-rust.exe'),
     join(process.cwd(), 'runar-compiler-rust'),
     join(process.cwd(), 'runar-compiler-rust.exe'),
   ];
@@ -974,6 +978,8 @@ export function findZigBinary(): string | null {
   const candidates = [
     join(ZIG_COMPILER_DIR, 'zig-out/bin/runar-zig'),
     join(ZIG_COMPILER_DIR, 'runar-zig'),
+    join(REPO_ROOT, 'runar-zig'),
+    join(REPO_ROOT, 'runar-zig.exe'),
     join(process.cwd(), 'runar-zig'),
     join(process.cwd(), 'runar-zig.exe'),
   ];
