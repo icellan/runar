@@ -141,11 +141,20 @@ func TestGroth16WASDK_DeployAndCall_SP1(t *testing.T) {
 	receiverWallet := helpers.NewWallet()
 	receiverScriptHex := runar.BuildP2PKHScript(receiverWallet.Address)
 
+	// CompileGroth16WA emits the MSM-binding verifier. GenerateWitness
+	// (fix.witness) omits the 5 public-input scalars; the MSM preamble
+	// then OP_DROPs an empty stack. BuildFromProofWithInputs is the
+	// layout CompileGroth16WA documents.
+	w, err := bn254witness.BuildFromProofWithInputs(fix.vk, fix.proof, fix.publicInputs)
+	if err != nil {
+		t.Fatalf("BuildFromProofWithInputs: %v", err)
+	}
+
 	start := time.Now()
 	spendTxid, spendData, err := g.CallWithWitness(
 		nil, // provider/signer from Connect()
 		nil,
-		fix.witness,
+		w,
 		"",
 		receiverScriptHex,
 	)
@@ -205,9 +214,9 @@ func TestGroth16WASDK_RejectsTamperedWitness(t *testing.T) {
 	tamperedProof.A[0] = g1.X.BigInt(new(big.Int))
 	tamperedProof.A[1] = g1.Y.BigInt(new(big.Int))
 
-	badW, err := bn254witness.GenerateWitness(fix.vk, tamperedProof, fix.publicInputs)
+	badW, err := bn254witness.BuildFromProofWithInputs(fix.vk, tamperedProof, fix.publicInputs)
 	if err != nil {
-		t.Fatalf("GenerateWitness for tampered proof.A: %v", err)
+		t.Fatalf("BuildFromProofWithInputs for tampered proof.A: %v", err)
 	}
 
 	receiverWallet := helpers.NewWallet()

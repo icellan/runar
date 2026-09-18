@@ -232,10 +232,10 @@ func TestFungibleToken_Transfer(t *testing.T) {
 }
 
 func TestFungibleToken_Merge(t *testing.T) {
-	// W8 companion-parent merge walks extractScriptCode(txPreimage). The
-	// Go SDK mock returns empty bytes (packages/runar-go ExtractScriptCode),
-	// so the ANF interpreter cannot complete the walk. Honest two-input
-	// merge is pinned by Spend.validate() in
+	// Two-input merge. The Go native mock of extractScriptCode is empty;
+	// Call() walks the ANF interpreter (substr of empty is now empty, not
+	// a panic) and the node evaluates the real preimage. Solo-merge is
+	// pinned by Spend.validate() in
 	// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
 	alice := helpers.NewWallet()
 	balance1 := int64(400)
@@ -250,7 +250,7 @@ func TestFungibleToken_Merge(t *testing.T) {
 
 	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
-	_, _, err := contract1.Call("merge",
+	txid, _, err := contract1.Call("merge",
 		[]interface{}{nil, balance2, nil, parent2, outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
 			Outputs: []runar.OutputSpec{
@@ -263,9 +263,10 @@ func TestFungibleToken_Merge(t *testing.T) {
 				{nil, balance1, nil, parent1, outputSatoshis},
 			},
 		})
-	if err == nil {
-		t.Fatal("expected merge to fail: SDK extractScriptCode is empty")
+	if err != nil {
+		t.Fatalf("merge call: %v", err)
 	}
+	t.Logf("merge TX: %s", txid)
 }
 
 func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
