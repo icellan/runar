@@ -14,108 +14,108 @@ import (
 // ---------------------------------------------------------------------------
 
 var opcodes = map[string]byte{
-	"OP_0":                    0x00,
-	"OP_FALSE":                0x00,
-	"OP_PUSHDATA1":            0x4c,
-	"OP_PUSHDATA2":            0x4d,
-	"OP_PUSHDATA4":            0x4e,
-	"OP_1NEGATE":              0x4f,
-	"OP_1":                    0x51,
-	"OP_TRUE":                 0x51,
-	"OP_2":                    0x52,
-	"OP_3":                    0x53,
-	"OP_4":                    0x54,
-	"OP_5":                    0x55,
-	"OP_6":                    0x56,
-	"OP_7":                    0x57,
-	"OP_8":                    0x58,
-	"OP_9":                    0x59,
-	"OP_10":                   0x5a,
-	"OP_11":                   0x5b,
-	"OP_12":                   0x5c,
-	"OP_13":                   0x5d,
-	"OP_14":                   0x5e,
-	"OP_15":                   0x5f,
-	"OP_16":                   0x60,
-	"OP_NOP":                  0x61,
-	"OP_IF":                   0x63,
-	"OP_NOTIF":                0x64,
-	"OP_ELSE":                 0x67,
-	"OP_ENDIF":                0x68,
-	"OP_VERIFY":               0x69,
-	"OP_RETURN":               0x6a,
-	"OP_TOALTSTACK":           0x6b,
-	"OP_FROMALTSTACK":         0x6c,
-	"OP_2DROP":                0x6d,
-	"OP_2DUP":                 0x6e,
-	"OP_3DUP":                 0x6f,
-	"OP_2OVER":                0x70,
-	"OP_2ROT":                 0x71,
-	"OP_2SWAP":                0x72,
-	"OP_IFDUP":                0x73,
-	"OP_DEPTH":                0x74,
-	"OP_DROP":                 0x75,
-	"OP_DUP":                  0x76,
-	"OP_NIP":                  0x77,
-	"OP_OVER":                 0x78,
-	"OP_PICK":                 0x79,
-	"OP_ROLL":                 0x7a,
-	"OP_ROT":                  0x7b,
-	"OP_SWAP":                 0x7c,
-	"OP_TUCK":                 0x7d,
-	"OP_CAT":                  0x7e,
-	"OP_SPLIT":                0x7f,
-	"OP_NUM2BIN":              0x80,
-	"OP_BIN2NUM":              0x81,
-	"OP_SIZE":                 0x82,
-	"OP_INVERT":               0x83,
-	"OP_AND":                  0x84,
-	"OP_OR":                   0x85,
-	"OP_XOR":                  0x86,
-	"OP_EQUAL":                0x87,
-	"OP_EQUALVERIFY":          0x88,
-	"OP_1ADD":                 0x8b,
-	"OP_1SUB":                 0x8c,
-	"OP_2MUL":                 0x8d, // Chronicle: multiply by 2
-	"OP_2DIV":                 0x8e, // Chronicle: divide by 2
-	"OP_NEGATE":               0x8f,
-	"OP_ABS":                  0x90,
-	"OP_NOT":                  0x91,
-	"OP_0NOTEQUAL":            0x92,
-	"OP_ADD":                  0x93,
-	"OP_SUB":                  0x94,
-	"OP_MUL":                  0x95,
-	"OP_DIV":                  0x96,
-	"OP_MOD":                  0x97,
-	"OP_LSHIFT":               0x98,
-	"OP_RSHIFT":               0x99,
-	"OP_BOOLAND":              0x9a,
-	"OP_BOOLOR":               0x9b,
-	"OP_NUMEQUAL":             0x9c,
-	"OP_NUMEQUALVERIFY":       0x9d,
-	"OP_NUMNOTEQUAL":          0x9e,
-	"OP_LESSTHAN":             0x9f,
-	"OP_GREATERTHAN":          0xa0,
-	"OP_LESSTHANOREQUAL":      0xa1,
-	"OP_GREATERTHANOREQUAL":   0xa2,
-	"OP_MIN":                  0xa3,
-	"OP_MAX":                  0xa4,
-	"OP_WITHIN":               0xa5,
-	"OP_RIPEMD160":            0xa6,
-	"OP_SHA1":                 0xa7,
-	"OP_SHA256":               0xa8,
-	"OP_HASH160":              0xa9,
-	"OP_HASH256":              0xaa,
-	"OP_CODESEPARATOR":        0xab,
-	"OP_CHECKSIG":             0xac,
-	"OP_CHECKSIGVERIFY":       0xad,
-	"OP_CHECKMULTISIG":        0xae,
-	"OP_CHECKMULTISIGVERIFY":  0xaf,
-	"OP_SUBSTR":               0xb3, // Chronicle: substring
-	"OP_LEFT":                 0xb4, // Chronicle: left N chars
-	"OP_RIGHT":                0xb5, // Chronicle: right N chars
-	"OP_LSHIFTNUM":            0xb6, // Chronicle: numeric left-shift
-	"OP_RSHIFTNUM":            0xb7, // Chronicle: numeric right-shift
+	"OP_0":                   0x00,
+	"OP_FALSE":               0x00,
+	"OP_PUSHDATA1":           0x4c,
+	"OP_PUSHDATA2":           0x4d,
+	"OP_PUSHDATA4":           0x4e,
+	"OP_1NEGATE":             0x4f,
+	"OP_1":                   0x51,
+	"OP_TRUE":                0x51,
+	"OP_2":                   0x52,
+	"OP_3":                   0x53,
+	"OP_4":                   0x54,
+	"OP_5":                   0x55,
+	"OP_6":                   0x56,
+	"OP_7":                   0x57,
+	"OP_8":                   0x58,
+	"OP_9":                   0x59,
+	"OP_10":                  0x5a,
+	"OP_11":                  0x5b,
+	"OP_12":                  0x5c,
+	"OP_13":                  0x5d,
+	"OP_14":                  0x5e,
+	"OP_15":                  0x5f,
+	"OP_16":                  0x60,
+	"OP_NOP":                 0x61,
+	"OP_IF":                  0x63,
+	"OP_NOTIF":               0x64,
+	"OP_ELSE":                0x67,
+	"OP_ENDIF":               0x68,
+	"OP_VERIFY":              0x69,
+	"OP_RETURN":              0x6a,
+	"OP_TOALTSTACK":          0x6b,
+	"OP_FROMALTSTACK":        0x6c,
+	"OP_2DROP":               0x6d,
+	"OP_2DUP":                0x6e,
+	"OP_3DUP":                0x6f,
+	"OP_2OVER":               0x70,
+	"OP_2ROT":                0x71,
+	"OP_2SWAP":               0x72,
+	"OP_IFDUP":               0x73,
+	"OP_DEPTH":               0x74,
+	"OP_DROP":                0x75,
+	"OP_DUP":                 0x76,
+	"OP_NIP":                 0x77,
+	"OP_OVER":                0x78,
+	"OP_PICK":                0x79,
+	"OP_ROLL":                0x7a,
+	"OP_ROT":                 0x7b,
+	"OP_SWAP":                0x7c,
+	"OP_TUCK":                0x7d,
+	"OP_CAT":                 0x7e,
+	"OP_SPLIT":               0x7f,
+	"OP_NUM2BIN":             0x80,
+	"OP_BIN2NUM":             0x81,
+	"OP_SIZE":                0x82,
+	"OP_INVERT":              0x83,
+	"OP_AND":                 0x84,
+	"OP_OR":                  0x85,
+	"OP_XOR":                 0x86,
+	"OP_EQUAL":               0x87,
+	"OP_EQUALVERIFY":         0x88,
+	"OP_1ADD":                0x8b,
+	"OP_1SUB":                0x8c,
+	"OP_2MUL":                0x8d, // Chronicle: multiply by 2
+	"OP_2DIV":                0x8e, // Chronicle: divide by 2
+	"OP_NEGATE":              0x8f,
+	"OP_ABS":                 0x90,
+	"OP_NOT":                 0x91,
+	"OP_0NOTEQUAL":           0x92,
+	"OP_ADD":                 0x93,
+	"OP_SUB":                 0x94,
+	"OP_MUL":                 0x95,
+	"OP_DIV":                 0x96,
+	"OP_MOD":                 0x97,
+	"OP_LSHIFT":              0x98,
+	"OP_RSHIFT":              0x99,
+	"OP_BOOLAND":             0x9a,
+	"OP_BOOLOR":              0x9b,
+	"OP_NUMEQUAL":            0x9c,
+	"OP_NUMEQUALVERIFY":      0x9d,
+	"OP_NUMNOTEQUAL":         0x9e,
+	"OP_LESSTHAN":            0x9f,
+	"OP_GREATERTHAN":         0xa0,
+	"OP_LESSTHANOREQUAL":     0xa1,
+	"OP_GREATERTHANOREQUAL":  0xa2,
+	"OP_MIN":                 0xa3,
+	"OP_MAX":                 0xa4,
+	"OP_WITHIN":              0xa5,
+	"OP_RIPEMD160":           0xa6,
+	"OP_SHA1":                0xa7,
+	"OP_SHA256":              0xa8,
+	"OP_HASH160":             0xa9,
+	"OP_HASH256":             0xaa,
+	"OP_CODESEPARATOR":       0xab,
+	"OP_CHECKSIG":            0xac,
+	"OP_CHECKSIGVERIFY":      0xad,
+	"OP_CHECKMULTISIG":       0xae,
+	"OP_CHECKMULTISIGVERIFY": 0xaf,
+	"OP_SUBSTR":              0xb3, // Chronicle: substring
+	"OP_LEFT":                0xb4, // Chronicle: left N chars
+	"OP_RIGHT":               0xb5, // Chronicle: right N chars
+	"OP_LSHIFTNUM":           0xb6, // Chronicle: numeric left-shift
+	"OP_RSHIFTNUM":           0xb7, // Chronicle: numeric right-shift
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ type ConstructorSlot struct {
 // (OP_0) in the emitted script. The SDK replaces it with the adjusted
 // codeSeparatorIndex at deployment time.
 type CodeSepIndexSlot struct {
-	ByteOffset  int `json:"byteOffset"`
+	ByteOffset   int `json:"byteOffset"`
 	CodeSepIndex int `json:"codeSepIndex"`
 }
 
@@ -172,14 +172,14 @@ type RawScriptSpan struct {
 
 // EmitResult holds the outputs of the emission pass.
 type EmitResult struct {
-	ScriptHex              string
-	ScriptAsm              string
-	ConstructorSlots       []ConstructorSlot
-	CodeSepIndexSlots      []CodeSepIndexSlot
-	CodeSeparatorIndex     int   // -1 if no OP_CODESEPARATOR was emitted
-	CodeSeparatorIndices   []int // per-method byte offsets
-	SourceMap              []SourceMapping
-	RawScriptSpans         []RawScriptSpan // byte ranges produced by raw_script ANF nodes
+	ScriptHex            string
+	ScriptAsm            string
+	ConstructorSlots     []ConstructorSlot
+	CodeSepIndexSlots    []CodeSepIndexSlot
+	CodeSeparatorIndex   int   // -1 if no OP_CODESEPARATOR was emitted
+	CodeSeparatorIndices []int // per-method byte offsets
+	SourceMap            []SourceMapping
+	RawScriptSpans       []RawScriptSpan // byte ranges produced by raw_script ANF nodes
 }
 
 // ---------------------------------------------------------------------------
@@ -187,17 +187,27 @@ type EmitResult struct {
 // ---------------------------------------------------------------------------
 
 type emitContext struct {
-	hexParts               []string
-	asmParts               []string
-	byteLength             int
-	constructorSlots       []ConstructorSlot
-	codeSepIndexSlots      []CodeSepIndexSlot
-	codeSeparatorIndex     int
-	codeSeparatorIndices   []int
-	opcodeIndex            int
-	sourceMap              []SourceMapping
-	pendingSourceLoc       *ir.SourceLocation
-	rawScriptSpans         []RawScriptSpan
+	hexParts             []string
+	asmParts             []string
+	byteLength           int
+	constructorSlots     []ConstructorSlot
+	codeSepIndexSlots    []CodeSepIndexSlot
+	codeSeparatorIndex   int
+	codeSeparatorIndices []int
+	opcodeIndex          int
+	sourceMap            []SourceMapping
+	pendingSourceLoc     *ir.SourceLocation
+	rawScriptSpans       []RawScriptSpan
+	// R-095 — verify_code_part_len length fields awaiting back-patch.
+	codePartLenFixups []codePartLenFixup
+}
+
+// codePartLenFixup records one fixed-width length field reserved by
+// verify_code_part_len, to be filled in once the whole script exists.
+type codePartLenFixup struct {
+	valueByteOffset int
+	asmIndex        int
+	delta           int
 }
 
 func newEmitContext() *emitContext {
@@ -295,11 +305,76 @@ func (ctx *emitContext) emitRawBytes(bytes []byte, inArity, outArity int) {
 	})
 }
 
+// codeSepIndexGrowth is the deploy-time byte growth contributed by the
+// codeSepIndex placeholders.
+//
+// Each is a 1-byte OP_0 in the template that the SDK replaces with a push of
+// the adjusted separator index. Post-R-010 that index is always 1 (N-032: the
+// separator sits at offset 1 and no constructor slot precedes it), which bakes
+// as the single opcode byte OP_1 — zero growth. The guard is not decoration:
+// if the separator ever moves, the pin's arithmetic goes silently wrong and
+// every honest spend of a variable-length-state contract becomes unspendable.
+func (ctx *emitContext) codeSepIndexGrowth() (int, error) {
+	for _, slot := range ctx.codeSepIndexSlots {
+		if slot.CodeSepIndex != 1 {
+			return 0, fmt.Errorf(
+				"emit: codeSepIndex placeholder resolves to %d, not 1; the verify_code_part_len "+
+					"pin assumes the post-R-010 layout (a single OP_CODESEPARATOR at offset 1, so "+
+					"the placeholder bakes as OP_1 and adds no bytes)", slot.CodeSepIndex)
+		}
+	}
+	return 0, nil
+}
+
+// applyCodePartLenFixups resolves every verify_code_part_len length field
+// (R-095). Runs once the whole script has been emitted, because the value each
+// field carries is the DEPLOYED length of the very script it sits in:
+//
+//	deployedCodeLen = emitted template length
+//	                + growth of the constructor-arg placeholders (delta)
+//	                + growth of the codeSepIndex placeholders (0)
+//
+// Idempotent: it overwrites a fixed-width field rather than splicing, so the
+// script's length never changes.
+func (ctx *emitContext) applyCodePartLenFixups() error {
+	if len(ctx.codePartLenFixups) == 0 {
+		return nil
+	}
+	codeSepGrowth, err := ctx.codeSepIndexGrowth()
+	if err != nil {
+		return err
+	}
+	hex := strings.Join(ctx.hexParts, "")
+	for _, fixup := range ctx.codePartLenFixups {
+		deployedLen := ctx.byteLength + fixup.delta + codeSepGrowth
+		if deployedLen < 0 || deployedLen > 0x7fffffff {
+			return fmt.Errorf("emit: code part length %d does not fit the 4-byte pin field", deployedLen)
+		}
+		le := ""
+		for i := 0; i < 4; i++ {
+			le += fmt.Sprintf("%02x", (deployedLen>>(8*i))&0xff)
+		}
+		start := fixup.valueByteOffset * 2
+		hex = hex[:start] + le + hex[start+8:]
+		if fixup.asmIndex >= 0 && fixup.asmIndex < len(ctx.asmParts) {
+			ctx.asmParts[fixup.asmIndex] = "<" + le + ">"
+		}
+	}
+	ctx.hexParts = []string{hex}
+	return nil
+}
+
 func (ctx *emitContext) getHex() string {
+	if err := ctx.applyCodePartLenFixups(); err != nil {
+		panic(err)
+	}
 	return strings.Join(ctx.hexParts, "")
 }
 
 func (ctx *emitContext) getAsm() string {
+	if err := ctx.applyCodePartLenFixups(); err != nil {
+		panic(err)
+	}
 	return strings.Join(ctx.asmParts, " ")
 }
 
@@ -397,6 +472,57 @@ func encodePushData(data []byte) []byte {
 	return result
 }
 
+// decodePushData is the inverse of encodePushData. SDKs emit OP_PUSHDATA4
+// (0x4e) for payloads ≥ 65536 bytes; a decoder that only understands
+// direct / PUSHDATA1 / PUSHDATA2 treats 0x4e as length 78 (R-168).
+func decodePushData(data []byte, offset int) (payload []byte, next int, err error) {
+	if offset >= len(data) {
+		return nil, 0, fmt.Errorf("decodePushData: truncated opcode")
+	}
+	opcode := data[offset]
+	if opcode <= 75 {
+		end := offset + 1 + int(opcode)
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated %d-byte push", opcode)
+		}
+		return data[offset+1 : end], end, nil
+	}
+	if opcode == 0x4c {
+		if offset+2 > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA1 length")
+		}
+		n := int(data[offset+1])
+		end := offset + 2 + n
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA1 payload")
+		}
+		return data[offset+2 : end], end, nil
+	}
+	if opcode == 0x4d {
+		if offset+3 > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA2 length")
+		}
+		n := int(data[offset+1]) | int(data[offset+2])<<8
+		end := offset + 3 + n
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA2 payload")
+		}
+		return data[offset+3 : end], end, nil
+	}
+	if opcode == 0x4e {
+		if offset+5 > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA4 length")
+		}
+		n := int(data[offset+1]) | int(data[offset+2])<<8 | int(data[offset+3])<<16 | int(data[offset+4])<<24
+		end := offset + 5 + n
+		if end > len(data) {
+			return nil, 0, fmt.Errorf("decodePushData: truncated OP_PUSHDATA4 payload")
+		}
+		return data[offset+5 : end], end, nil
+	}
+	return nil, 0, fmt.Errorf("decodePushData: byte 0x%02x is not a push opcode", opcode)
+}
+
 // encodePushValue converts a PushValue to hex and asm strings.
 func encodePushValue(value PushValue) (hexStr string, asmStr string) {
 	switch value.Kind {
@@ -418,7 +544,21 @@ func encodePushValue(value PushValue) (hexStr string, asmStr string) {
 		return h, fmt.Sprintf("<%s>", hex.EncodeToString(value.Bytes))
 
 	default:
-		return "00", "OP_0"
+		// R-174: this used to return ("00", "OP_0") — a ZERO. An unrecognised
+		// or unset Kind was emitted as false/empty with no error, producing
+		// valid script that computes something else, which is the one failure
+		// mode nothing downstream can notice.
+		//
+		// Fails closed now, like the sibling switch in emitStackOp
+		// ("unknown stack op: %s") and like HasSideEffect / collectValueRefs in
+		// frontend/, whose comments give the same reason: a silent
+		// fall-through lets a newly-added variant change the emitted program
+		// without anyone seeing it.
+		//
+		// Unreachable from today's code — every in-repo PushValue sets a Kind
+		// — which is exactly the state in which a fail-open default survives
+		// review. It is one zero-valued struct away from being live.
+		panic(fmt.Sprintf("unknown push kind %q: refusing to emit a silent OP_0 for it", value.Kind))
 	}
 }
 
@@ -507,6 +647,42 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 		// into the artifact's rawScriptSpans so the analyzer can treat the
 		// span as one opaque stack-effect step.
 		ctx.emitRawBytes(op.RawBytes, op.InArity, op.OutArity)
+	case "verify_code_part_len":
+		// R-095: pin SIZE(_codePart) against the code part's own deployed byte
+		// length.
+		//
+		//   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+		//
+		// LL LL LL LL is a FIXED-WIDTH little-endian field, not a minimal
+		// Script number push: the value being patched IS the length of the
+		// script that contains it, so a width that varied with the value would
+		// be self-referential. OP_BIN2NUM normalises it back to a minimal
+		// Script number so the comparison is numeric.
+		if err := ctx.emitOpcode("OP_DUP"); err != nil {
+			return err
+		}
+		// +1 skips the single-byte push header the 4-byte data push carries.
+		valueByteOffset := ctx.byteLength + 1
+		asmIndex := len(ctx.asmParts)
+		ctx.emitPush(PushValue{Kind: "bytes", Bytes: make([]byte, 4)})
+		if err := ctx.emitOpcode("OP_BIN2NUM"); err != nil {
+			return err
+		}
+		cmp := "OP_GREATERTHANOREQUAL"
+		if op.CodePartLenExact {
+			cmp = "OP_NUMEQUAL"
+		}
+		if err := ctx.emitOpcode(cmp); err != nil {
+			return err
+		}
+		if err := ctx.emitOpcode("OP_VERIFY"); err != nil {
+			return err
+		}
+		ctx.codePartLenFixups = append(ctx.codePartLenFixups, codePartLenFixup{
+			valueByteOffset: valueByteOffset,
+			asmIndex:        asmIndex,
+			delta:           op.CodePartLenDelta,
+		})
 	case "push_codesep_index":
 		// Emit an OP_0 placeholder that the SDK will replace with the adjusted
 		// codeSeparatorIndex at runtime.
@@ -520,7 +696,7 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 		ctx.appendAsm("OP_0")
 		ctx.nextOpcodeIndex()
 		ctx.codeSepIndexSlots = append(ctx.codeSepIndexSlots, CodeSepIndexSlot{
-			ByteOffset:  byteOff,
+			ByteOffset:   byteOff,
 			CodeSepIndex: codeSepIdx,
 		})
 	default:
@@ -581,6 +757,42 @@ func Emit(methods []StackMethod) (*EmitResult, error) {
 
 	if len(publicMethods) == 0 {
 		return &EmitResult{ScriptHex: "", ScriptAsm: "", ConstructorSlots: nil, CodeSeparatorIndex: -1}, nil
+	}
+
+	// R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness
+	// gets ONE OP_CODESEPARATOR, and it goes at offset 1 of the locking script,
+	// behind a single OP_NOP. Contracts with no `_codePart` keep the pre-R-010
+	// per-method separators (emitted by lowerCheckPreimage) instead.
+	//
+	// The separator used to be emitted per method, at the method's entry, which
+	// kept the preimage small but hid the dispatch preamble and every preceding
+	// method body from scriptCode — and those hidden bytes are exactly the ones
+	// the spender-supplied `_codePart` witness claims to reproduce. With the
+	// separator near the front, scriptCode == lockingScript[2:], so the script
+	// can pin `_codePart` byte for byte (see emitCodePartAuthentication in
+	// stack.go).
+	//
+	// Offset 1, not 0: implementations that store "index of the last executed
+	// OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+	// offset 0" from "no separator seen" and fall back to the whole script. The
+	// BSV go-sdk interpreter does exactly this (thread.subScript:
+	// `if t.lastCodeSep > 0 { skip = t.lastCodeSep + 1 }`), while Bitcoin
+	// Core's pbegincodehash is a true position. Offset 1 keeps every
+	// implementation on the same side of that guard, and costs one byte.
+	needsCodeSep := false
+	for _, m := range publicMethods {
+		if m.NeedsCodeSeparator {
+			needsCodeSep = true
+			break
+		}
+	}
+	if needsCodeSep {
+		if err := ctx.emitOpcode("OP_NOP"); err != nil {
+			return nil, err
+		}
+		if err := ctx.emitOpcode("OP_CODESEPARATOR"); err != nil {
+			return nil, err
+		}
 	}
 
 	if len(publicMethods) == 1 {

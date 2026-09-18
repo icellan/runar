@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -194,17 +195,118 @@ class EnvelopeInteropTest {
             String bad = new String(chars);
             Map<String, Object> input = new java.util.LinkedHashMap<>();
             input.put(key, bad);
-            Throwable caught = null;
-            String got = null;
-            try {
-                got = Envelope.canonicalJson(input);
-            } catch (Throwable t) {
-                caught = t;
-            }
-            if (caught == null) {
-                throw new AssertionError(
-                    "vector " + id + ": canonical_json MUST reject lone surrogate; got " + got);
+            // R-262: this used to catch Throwable and assert only that
+            // SOMETHING was thrown, which passes for any reason at all —
+            // proven by neutering canonicalJson to throw unconditionally,
+            // after which the test stayed green. Assert the specific type and
+            // a message discriminator instead.
+            IllegalArgumentException e = assertThrows(
+                IllegalArgumentException.class,
+                () -> Envelope.canonicalJson(input),
+                "vector " + id + ": canonicalJson MUST reject the lone surrogate");
+            assertTrue(e.getMessage().contains("surrogate"),
+                "vector " + id + ": rejected for the wrong reason: " + e.getMessage());
+
+            // CONTROL: the same map, the same key, the same code path — the
+            // only change is that U+D800 is now the HIGH half of a valid pair
+            // (U+1F600). It must serialise, and byte-identically to every
+            // other tier. Without this the test passes for a guard that
+            // rejects everything.
+            Map<String, Object> good = new java.util.LinkedHashMap<>();
+            good.put(key, "\uD83D\uDE00");
+            assertEquals("{\"" + key + "\":\"\uD83D\uDE00\"}", Envelope.canonicalJson(good),
+                "vector " + id + ": paired-surrogate control");
+        }
+    }
+    // -------------------------------------------------------------------
+    // R-260 — shared payload depth bound
+    // -------------------------------------------------------------------
+
+    /**
+     * verify must bound payload nesting ITSELF rather than inherit whatever cap
+     * its JSON parser happens to impose, because that cap differs per tier
+     * (ruby 100, rust 127, ts/go/python/zig none) and THIS tier had no cap at
+     * all: {@link Json}'s readValue/readObject/readArray are mutually recursive
+     * and {@code verify} catches {@code Exception}, not {@code Error}, so a
+     * ~10 KB deep payload threw {@link StackOverflowError} straight out of
+     * {@code verify} — a contract escape on unauthenticated input, at a depth
+     * set by the JVM's {@code -Xss} flag rather than by the protocol.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void payloadDepthVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("depth_vectors");
+        assertFalse(vectors.isEmpty(), "depth_vectors missing or empty");
+        for (Map<String, Object> dv : vectors) {
+            String vid = (String) dv.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap((Map<String, Object>) dv.get("envelope"));
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(dv.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(dv.get("reason"), r.reason.wire, vid);
             }
         }
     }
+
+    /**
+     * The bound is part of the wire contract, so the fixture pins it and every
+     * tier asserts its own constant against the fixture's number.
+     */
+    @Test
+    void payloadDepthLimitMatchesFixture() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        assertEquals(
+            ((Number) fixture.get("payload_depth_limit")).intValue(),
+            Envelope.MAX_ENVELOPE_PAYLOAD_DEPTH);
+    }
+
+    // -------------------------------------------------------------------
+    // R-261 — explicit clock options
+    // -------------------------------------------------------------------
+
+    /**
+     * An EXPLICIT clock override of 0 must mean the epoch, not "not supplied".
+     * This tier read {@code nowMs != 0 ? nowMs : System.currentTimeMillis()},
+     * so an explicit 0 fell back to the wall clock and returned {@code expired}
+     * on an envelope that python, ruby, rust and zig all accepted. (Its
+     * clockSkewMs was already correct — a field default of 5_000 that an
+     * explicit 0 overrides — and cs1 is the control proving that.) A null in
+     * the vector means the caller supplies nothing and the default applies, so
+     * cs2 and cs3 redden if a fix drops the default instead of honouring zero.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void clockSkewVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        Envelope.SignedEnvelope env = envelopeFromMap((Map<String, Object>) fixture.get("valid_envelope"));
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("clock_skew_vectors");
+        assertFalse(vectors.isEmpty(), "clock_skew_vectors missing or empty");
+        for (Map<String, Object> cv : vectors) {
+            String vid = (String) cv.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = env;
+            Number skew = (Number) cv.get("clock_skew_ms");
+            if (skew != null) {
+                vo.clockSkewMs = skew.longValue();
+            }
+            Number now = (Number) cv.get("now_ms");
+            if (now != null) {
+                vo.nowMs = now.longValue();
+            }
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(cv.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(cv.get("reason"), r.reason.wire, vid);
+            }
+        }
+    }
+
 }

@@ -12,6 +12,9 @@
 module RunarCompiler
   module Codegen
     module WOTS
+      # Total WOTS+ signature length in bytes: len (67 chains) * n (32).
+      WOTS_SIG_LEN = 67 * 32
+
       # -----------------------------------------------------------------
       # Lazy StackOp / PushValue constructors
       # -----------------------------------------------------------------
@@ -130,7 +133,16 @@ module RunarCompiler
         emit.call(_make_stack_op(op: "opcode", code: "OP_SHA256"))
 
         # Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
-        emit.call(_make_stack_op(op: "swap"))
+        emit.call(_make_stack_op(op: "swap")) # pubSeed msgHash sig
+
+        # R-135: enforce the exact signature length on-chain. The chain loop consumes
+        # WOTS_SIG_LEN bytes via OP_SPLIT and then drops whatever is left, so without
+        # this gate `sig || junk` verified identically to `sig`. Short signatures already
+        # abort inside OP_SPLIT; this closes the over-long direction. Net stack effect 0.
+        emit.call(_make_stack_op(op: "opcode", code: "OP_SIZE"))
+        emit.call(_make_stack_op(op: "push", value: _big_int_push(WOTS_SIG_LEN)))
+        emit.call(_make_stack_op(op: "opcode", code: "OP_EQUALVERIFY"))
+
         emit.call(_make_stack_op(op: "push", value: _big_int_push(0)))
         emit.call(_make_stack_op(op: "opcode", code: "OP_0"))
         emit.call(_make_stack_op(op: "push", value: _big_int_push(3)))

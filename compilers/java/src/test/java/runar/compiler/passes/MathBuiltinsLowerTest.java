@@ -176,6 +176,58 @@ class MathBuiltinsLowerTest {
     }
 
     @Test
+    void powGuardsTheExponentDomainBeforeUnrolling() {
+        // R-169, the pow half. The 32 rounds compute base^min(exp, 32), so
+        // without a guard an exponent outside 0..32 returned that CLAMPED
+        // value with no error -- measured on the real VM at pow(2,40) = 2^32.
+        // The constant folder computed the TRUE power for exp <= 256 and the
+        // reference interpreter is exact for every exp >= 0, so one builtin
+        // meant three different things. All three now refuse outside 0..32.
+        //
+        // Pinned as an ORDERED window sited BEFORE the first round, not as a
+        // membership test: a guard emitted after the SWAP would be reading the
+        // base rather than the exponent, and one without OP_VERIFY would leave
+        // a boolean on the stack instead of aborting.
+        List<StackOp> ops = compileSingleCall(
+            "Bigint r = pow(this.a, this.b); assertThat(r >= Bigint.ZERO);"
+        );
+        int w = -1;
+        for (int i = 0; i < ops.size(); i++) {
+            if (ops.get(i) instanceof OpcodeOp o && o.code().equals("OP_WITHIN")) {
+                assertEquals(-1, w, "pow must emit exactly one OP_WITHIN");
+                w = i;
+            }
+        }
+        assertTrue(w >= 3, "pow must emit an OP_WITHIN exponent guard");
+        assertTrue(ops.get(w - 3) instanceof OpcodeOp o0 && o0.code().equals("OP_DUP"),
+            "the guard must DUP the exponent");
+        assertEquals(java.math.BigInteger.ZERO, pushInt(ops.get(w - 2)),
+            "guard lower bound must be 0");
+        assertEquals(java.math.BigInteger.valueOf(StackLower.POW_EXPONENT_LIMIT + 1),
+            pushInt(ops.get(w - 1)),
+            "guard upper bound must be POW_EXPONENT_LIMIT + 1 = 33; OP_WITHIN is "
+                + "half-open, so a bound of 32 would reject the largest exponent "
+                + "the unroll can actually compute");
+        assertTrue(ops.get(w + 1) instanceof OpcodeOp o1 && o1.code().equals("OP_VERIFY"),
+            "the domain check must ABORT, not leave a boolean on the stack");
+
+        int firstRound = -1;
+        for (int i = 0; i < ops.size(); i++) {
+            if (ops.get(i) instanceof IfOp) { firstRound = i; break; }
+        }
+        assertTrue(firstRound > w,
+            "the exponent guard must run before the first unrolled round");
+    }
+
+    /** The BigInteger a push op carries, or null if it is not an integer push. */
+    private static java.math.BigInteger pushInt(StackOp op) {
+        if (op instanceof PushOp p && p.value().raw() instanceof java.math.BigInteger b) {
+            return b;
+        }
+        return null;
+    }
+
+    @Test
     void powEmitsFinalDoubleNip() {
         List<StackOp> ops = compileSingleCall(
             "Bigint r = pow(this.a, this.b); assertThat(r >= Bigint.ZERO);"
@@ -207,22 +259,26 @@ class MathBuiltinsLowerTest {
     /* ================================================================== */
 
     @Test
-    void sqrtEmits16NewtonIterations() {
+    void sqrtEmits256MinClampedNewtonRounds() {
         List<StackOp> ops = compileSingleCall(
             "Bigint r = sqrt(this.a); assertThat(r >= Bigint.ZERO);"
         );
-        // Each Newton iteration emits: OVER OVER OP_DIV OP_ADD push2 OP_DIV.
-        // The 0-guard is wrapped in an IF; the iterations live INSIDE that IF.
-        // At 16 iterations: 32 OP_DIV (2 per iter), 16 OP_ADD.
-        assertEquals(32, countOpcode(ops, "OP_DIV"),
-            "sqrt must emit 32 OP_DIV (2 per Newton iteration × 16)");
-        assertEquals(16, countOpcode(ops, "OP_ADD"),
-            "sqrt must emit 16 OP_ADD (1 per Newton iteration)");
-        // OVER appears 32 times (2 per iter).
-        long overCount = ops.stream().filter(op -> op instanceof OverOp).count();
-        // At top level: 0 OVERs (they're inside the IF). Recurse.
+        // R-169. Each round emits: OVER OVER OP_DIV OVER OP_ADD push2 OP_DIV OP_MIN.
+        // The 0-guard is wrapped in an IF; the rounds live INSIDE that IF.
+        // At 256 rounds: 512 OP_DIV (2 per round), 256 OP_ADD, 768 OVER (3 per
+        // round), 256 OP_MIN.
+        assertEquals(512, countOpcode(ops, "OP_DIV"),
+            "sqrt must emit 512 OP_DIV (2 per Newton round × 256)");
+        assertEquals(256, countOpcode(ops, "OP_ADD"),
+            "sqrt must emit 256 OP_ADD (1 per Newton round)");
+        // The third OVER per round is what preserves the previous iterate so
+        // OP_MIN can clamp against it — it IS the convergence break. Without it
+        // integer Newton oscillates between floor(sqrt(n)) and floor+1 and a
+        // fixed round count returns whichever side the parity lands on.
         long deepOver = deepCountOver(ops);
-        assertEquals(32, deepOver, "sqrt must emit 32 OVER ops (2 per iteration × 16)");
+        assertEquals(768, deepOver, "sqrt must emit 768 OVER ops (3 per round × 256)");
+        assertEquals(256, countOpcode(ops, "OP_MIN"),
+            "sqrt must emit 256 OP_MIN — one per round, the convergence break");
     }
 
     private static long deepCountOver(List<StackOp> ops) {
@@ -466,14 +522,19 @@ class MathBuiltinsLowerTest {
     }
 
     @Test
-    void sqrtIterationsMatchGoReference16() {
-        // Go's lowerSqrt at stack.go:3576 uses const sqrtIterations = 16.
+    void sqrtIterationsMatchGoReference256() {
+        // Go's lowerSqrt uses const sqrtIterations = 256 (R-169). 16 was not
+        // short by a tuning margin: seeded at guess = n the iterate only halves
+        // per round until it nears sqrt(n), so ~log2(n)/2 rounds are needed —
+        // 20 for a 32-bit n, 37 for 64-bit, 135 for 256-bit. 256 also matches
+        // the constant folder's bound, which is what makes the emitted script
+        // the same function as the folder rather than merely close to it.
         List<StackOp> ops = compileSingleCall(
             "Bigint r = sqrt(this.a); assertThat(r >= Bigint.ZERO);"
         );
-        // 16 iterations × OP_ADD = 16
-        assertEquals(16, countOpcode(ops, "OP_ADD"),
-            "Java sqrt must emit exactly 16 OP_ADDs (Go reference: 16 iterations)");
+        // 256 rounds × OP_ADD = 256
+        assertEquals(256, countOpcode(ops, "OP_ADD"),
+            "Java sqrt must emit exactly 256 OP_ADDs (Go reference: 256 rounds)");
     }
 
     @Test

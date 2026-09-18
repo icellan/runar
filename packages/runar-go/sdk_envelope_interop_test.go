@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,25 @@ type fixtureRejection struct {
 	Envelope SignedEnvelope `json:"envelope"`
 }
 
+type fixtureDepthVector struct {
+	VectorID string         `json:"_vector_id"`
+	MaxDepth int            `json:"max_depth"`
+	ExpectOK bool           `json:"expect_ok"`
+	Reason   string         `json:"reason"`
+	Envelope SignedEnvelope `json:"envelope"`
+}
+
+type fixtureClockVector struct {
+	VectorID string `json:"_vector_id"`
+	// Pointers so a JSON null ("the caller supplies nothing") is
+	// distinguishable from an explicit 0 — which is the whole point of the
+	// vector set.
+	ClockSkewMs *int64 `json:"clock_skew_ms"`
+	NowMs       *int64 `json:"now_ms"`
+	ExpectOK    bool   `json:"expect_ok"`
+	Reason      string `json:"reason"`
+}
+
 type fixture struct {
 	FixtureVersion       int                      `json:"fixture_version"`
 	AlicePubHex          string                   `json:"alice_pub_hex"`
@@ -40,6 +60,9 @@ type fixture struct {
 	CanonicalJSONVectors []fixtureCanonicalVector `json:"canonical_json_vectors"`
 	ValidEnvelope        SignedEnvelope           `json:"valid_envelope"`
 	RejectionVectors     []fixtureRejection       `json:"rejection_vectors"`
+	PayloadDepthLimit    int                      `json:"payload_depth_limit"`
+	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
+	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
 }
 
 func loadFixture(t *testing.T) fixture {
@@ -122,7 +145,7 @@ func TestEnvelopeInterop_VerifyValid(t *testing.T) {
 	f := loadFixture(t)
 	r := VerifyEnvelope(VerifyEnvelopeOpts{
 		Envelope: f.ValidEnvelope,
-		NowMs:    f.VerifyNowMs,
+		NowMs:    Int64Ptr(f.VerifyNowMs),
 	})
 	if !r.OK {
 		t.Fatalf("expected ok=true for valid_envelope; reason=%s", r.Reason)
@@ -136,7 +159,7 @@ func TestEnvelopeInterop_RejectionVectors(t *testing.T) {
 		// against verify_now_ms.
 		r := VerifyEnvelope(VerifyEnvelopeOpts{
 			Envelope: rv.Envelope,
-			NowMs:    f.VerifyNowMs,
+			NowMs:    Int64Ptr(f.VerifyNowMs),
 		})
 		if r.OK {
 			t.Errorf("rejection %q: expected ok=false", rv.Reason)
@@ -194,6 +217,26 @@ func TestEnvelopeInterop_CanonicalJSONRejectionVectors(t *testing.T) {
 		got, err := CanonicalJSON(input)
 		if err == nil {
 			t.Errorf("vector %s: CanonicalJSON did NOT reject lone surrogate; got %s", id, got)
+			continue
+		}
+		// R-262: assert WHY it was rejected. This used to check only that err
+		// was non-nil, which passes for any reason at all — proven by
+		// neutering CanonicalJSON to fail unconditionally, after which the
+		// test stayed green.
+		if !strings.Contains(err.Error(), "lone surrogate") {
+			t.Errorf("vector %s: rejected for the wrong reason: %v", id, err)
+		}
+
+		// CONTROL: the same map, the same key, the same code path — the only
+		// change is that U+D800 is now the HIGH half of a valid pair
+		// (U+1F600). It must serialise, and byte-identically to every other
+		// tier. Without this the test passes for a guard that rejects
+		// everything.
+		good, err := CanonicalJSON(map[string]any{key: "\U0001F600"})
+		if err != nil {
+			t.Errorf("vector %s: control (paired surrogate) was rejected: %v", id, err)
+		} else if want := "{\"" + key + "\":\"\U0001F600\"}"; good != want {
+			t.Errorf("vector %s: control got %s want %s", id, good, want)
 		}
 	}
 }
@@ -262,6 +305,80 @@ func TestEnvelopeInterop_SigningVectors(t *testing.T) {
 		got := hex.EncodeToString(der)
 		if got != expectedSig {
 			t.Errorf("vector %s: signature divergence\n  got:  %s\n want:  %s", id, got, expectedSig)
+		}
+	}
+}
+
+// TestEnvelopeInterop_DepthVectors — R-260. VerifyEnvelope must bound payload
+// nesting ITSELF rather than inherit whatever cap encoding/json happens to
+// impose, because that cap differs per tier (ruby 100, rust 127, ts/go/python/
+// zig none, java a StackOverflowError whose threshold is the JVM's -Xss flag).
+// All seven tiers enforce MaxEnvelopePayloadDepth on the payload TEXT, so the
+// same bytes get the same VerifyEnvelopeReason everywhere.
+func TestEnvelopeInterop_DepthVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.DepthVectors) == 0 {
+		t.Fatal("depth_vectors missing or empty")
+	}
+	for _, dv := range f.DepthVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: dv.Envelope, NowMs: Int64Ptr(f.VerifyNowMs)})
+		if dv.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", dv.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", dv.VectorID)
+			continue
+		}
+		if string(r.Reason) != dv.Reason {
+			t.Errorf("%s: got reason=%s want=%s", dv.VectorID, r.Reason, dv.Reason)
+		}
+	}
+}
+
+// The bound is part of the wire contract, so the fixture pins it and every
+// tier asserts its own constant against the fixture's number.
+func TestEnvelopeInterop_PayloadDepthLimitMatchesFixture(t *testing.T) {
+	f := loadFixture(t)
+	if f.PayloadDepthLimit != MaxEnvelopePayloadDepth {
+		t.Fatalf("fixture payload_depth_limit=%d, MaxEnvelopePayloadDepth=%d", f.PayloadDepthLimit, MaxEnvelopePayloadDepth)
+	}
+}
+
+// TestEnvelopeInterop_ClockSkewVectors — R-261. An EXPLICIT clock skew of 0
+// must mean 0, not "not supplied". Six tiers already distinguished the two;
+// THIS tier conflated them (`ClockSkewMs int64 // defaults to 5_000 when
+// zero`), so a caller asking for strict expiry silently got a five-second
+// replay window — measured ok:true on the valid envelope 2000 ms past expiry
+// where rust, python, ruby, zig and java all said expired. The same
+// zero-value sentinel sat on NowMs. A nil in the vector means the caller
+// supplies nothing and the tier default applies; cs2 and cs3 are the controls
+// that redden if a fix made explicit zero strict by dropping the default.
+func TestEnvelopeInterop_ClockSkewVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.ClockSkewVectors) == 0 {
+		t.Fatal("clock_skew_vectors missing or empty")
+	}
+	for _, cv := range f.ClockSkewVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{
+			Envelope:    f.ValidEnvelope,
+			ClockSkewMs: cv.ClockSkewMs,
+			NowMs:       cv.NowMs,
+		})
+		if cv.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", cv.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", cv.VectorID)
+			continue
+		}
+		if string(r.Reason) != cv.Reason {
+			t.Errorf("%s: got reason=%s want=%s", cv.VectorID, r.Reason, cv.Reason)
 		}
 	}
 }

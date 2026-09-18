@@ -12,13 +12,6 @@ fi
 
 if [ "$1" == "start" ]; then
 
-  mkdir -p $HOME/.keystore
-
-  if [ ! -f "$HOME/.keystore/ps.key" ]; then
-    echo "Creating $HOME/.keystore/ps.key..."
-    echo "tprv8ZgxMBicQKsPfPCcKvAPAhga6QNeC1xPXhPBhFtw1CvRisZHnCF4LAjDbkcY7CwhndHrvTvmRWWwqRM9XzaAVRxwh81wnPV1kX8gU1XbEhx" > $HOME/.keystore/ps.key
-  fi
-
   if [ -L "$0" ]; then
     DIR="$(cd "$($(pwd)/$(readlink "$0"))" && pwd)"
   else
@@ -31,13 +24,29 @@ if [ "$1" == "start" ]; then
 
     if [ ! -f "$D/bitcoin.conf" ]; then
       echo "Creating $D/bitcoin.conf..."
+      # RPC reachability (R-153). This file used to carry
+      # `rpcallowip=0.0.0.0/0`, two lines under the rpcuser/rpcpassword it also
+      # writes, and the container published 18332 on every interface. Regtest
+      # coins are worthless; the pattern is not, and a demo script is a template
+      # people copy onto a laptop on a café network or a cloud box with a public
+      # IP.
+      #
+      # `rpcbind` stays 0.0.0.0 — that is the address bitcoind binds INSIDE the
+      # container, and a process listening only on the container's loopback
+      # cannot receive a connection forwarded by `docker run -p`. The exposure is
+      # closed on the two layers that decide reachability: rpcallowip below, and
+      # the 127.0.0.1: prefix on every published port in the `docker run` line.
+      #
+      # Docker forwards from the bridge GATEWAY (172.17.0.1 by default), not
+      # from 127.0.0.1, so both entries are needed.
       cat << EOL > $D/bitcoin.conf
 port=18333
 rpcbind=0.0.0.0
 rpcport=18332
 rpcuser=bitcoin
 rpcpassword=bitcoin
-rpcallowip=0.0.0.0/0
+rpcallowip=127.0.0.1
+rpcallowip=172.16.0.0/12
 dnsseed=0
 listenonion=0
 listen=1
@@ -66,14 +75,9 @@ EOL
 
   mkdir -p $DIR/regtest/n1/regtest
 
-  if [ ! -f "$DIR/regtest/n1/regtest/wallet.dat" ] && [ -f "$DIR/regtest_wallet.dat" ]; then
-    echo "Creating $DIR/regtest/n1/regtest/wallet.dat..."
-    cp "$DIR/regtest_wallet.dat" "$DIR/regtest/n1/regtest/wallet.dat"
-  fi
-
   #IP=$(docker network inspect bridge --format='{{(index .IPAM.Config 0).Gateway}}')
 
-  docker run --rm --platform linux/amd64 --name bitcoin-sv-regtest -p 18332:18332 -p 18333:18333 -p 28332:28332 --volume $DIR/regtest/n1:/data -d bitcoinsv/bitcoin-sv:latest bitcoind -minminingtxfee=0.00000001
+  docker run --rm --platform linux/amd64 --name bitcoin-sv-regtest -p 127.0.0.1:18332:18332 -p 127.0.0.1:18333:18333 -p 127.0.0.1:28332:28332 --volume $DIR/regtest/n1:/data -d bitcoinsv/bitcoin-sv:latest bitcoind -minminingtxfee=0.00000001
 
 else
 

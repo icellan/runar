@@ -23,6 +23,15 @@ use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFProperty, ANFValue, ConstV
 
 const MAX_STACK_DEPTH: usize = 800;
 
+/// The largest exponent `pow(base, exp)` computes, and therefore the largest
+/// one the emitted script ACCEPTS — `lower_pow` unrolls exactly this many
+/// conditional multiplies and refuses anything outside
+/// `0 <= exp <= POW_EXPONENT_LIMIT`. The same number lives in
+/// `frontend/constant_fold.rs` (which must decline to fold outside it); they
+/// have to move together or `pow` means different things folded and executed
+/// (R-169).
+const POW_EXPONENT_LIMIT: u32 = 32;
+
 // ---------------------------------------------------------------------------
 // Stack IR types
 // ---------------------------------------------------------------------------
@@ -50,6 +59,38 @@ pub enum StackOp {
         param_name: String,
     },
     PushCodeSepIndex,
+    /// R-095 — pin `SIZE(_codePart)` against the code part's own DEPLOYED byte
+    /// length.
+    ///
+    /// Consumes nothing: expects the numeric `SIZE(_codePart)` on top of the
+    /// stack and leaves it there, aborting via OP_VERIFY when the claimed code
+    /// part is not the length the deployed script actually has.
+    ///
+    /// The length is not known when the stack lowerer runs (byte offsets only
+    /// exist after `emit`), so the emitter resolves it: it reserves a
+    /// FIXED-WIDTH 9-byte sequence
+    ///
+    /// ```text
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// ```
+    ///
+    /// and back-patches `LL LL LL LL` (little-endian) once the whole script has
+    /// been emitted. The width is fixed so that the patched value can never
+    /// change the length it is describing — a minimal script-number push would
+    /// be self-referential.
+    ///
+    /// `delta` is the deploy-time byte GROWTH of the template's OP_0
+    /// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`.
+    /// `exact` says whether every placeholder's growth is type-determined:
+    /// `true` → equality pin (OP_NUMEQUAL), `false` → lower-bound pin
+    /// (OP_GREATERTHANOREQUAL). Both are resolved by `pin_code_part_length`
+    /// once every method has been lowered.
+    VerifyCodePartLen {
+        /// Deploy-time byte growth of the template's OP_0 placeholders.
+        delta: i64,
+        /// true → exact equality pin; false → lower-bound pin.
+        exact: bool,
+    },
     /// An opaque opcode-byte span emitted verbatim by a `raw_script` ANF node.
     /// The stack effect is declared via `in_arity` / `out_arity`; the bytes are
     /// never inspected and the peephole optimizer treats this op as a hard
@@ -89,6 +130,11 @@ pub struct StackMethod {
     /// continuation builders OR terminal methods that read variable-length
     /// (ByteString) state (issue #100). Propagated to ABIMethod.uses_code_part.
     pub uses_code_part: bool,
+    /// True if this method's lowering needs the script-level OP_CODESEPARATOR
+    /// the emitter places at offset 1 of the locking script (R-010).
+    /// Contract-level: true for every method of a contract in which ANY method
+    /// authenticates a `_codePart` witness.
+    pub needs_code_separator: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,10 +204,30 @@ fn is_merkle_builtin(name: &str) -> bool {
     matches!(name, "merkleRootSha256" | "merkleRootHash256" | "merkleRootPoseidon2KB")
 }
 
+/// Fixed byte width a numeric state-field type occupies in the state section,
+/// or 0 when the type is not numeric state.
+///
+/// Single source of truth for BOTH sides of the state section: the READER
+/// (`is_numeric_state_type`, below) and the two state SERIALIZERS in
+/// `lower_get_state_script` / `lower_add_output`. Those serializers used to
+/// carry their own literal `prop.prop_type == "bigint"` test and drifted from
+/// this list when the reader alone was widened for `RabinSig` / `RabinPubKey`
+/// — a writer that emits a value's minimal script-number encoding into a
+/// section the reader splits at a fixed width builds a continuation its own
+/// script cannot re-read.
+fn numeric_state_type_width(t: &str) -> usize {
+    match t {
+        // `RabinSig`/`RabinPubKey` are bigint aliases, same 8-byte layout.
+        "bigint" | "RabinSig" | "RabinPubKey" => 8,
+        "boolean" => 1,
+        _ => 0,
+    }
+}
+
 /// State-field types that are stored as script numbers (require OP_BIN2NUM
-/// after extraction). `RabinSig`/`RabinPubKey` are bigint aliases.
+/// after extraction).
 fn is_numeric_state_type(t: &str) -> bool {
-    matches!(t, "bigint" | "boolean" | "RabinSig" | "RabinPubKey")
+    numeric_state_type_width(t) > 0
 }
 
 /// State-field types that are stored with a push-data length prefix and thus
@@ -647,6 +713,9 @@ struct LoweringContext {
     max_depth: usize,
     properties: Vec<ANFProperty>,
     private_methods: HashMap<String, ANFMethod>,
+    /// R-010: true when the emitter supplies the script-level
+    /// OP_CODESEPARATOR, so `lower_check_preimage` must not emit its own.
+    script_level_code_separator: bool,
     /// Binding names defined in the current lowerBindings scope.
     /// Used by @ref: handler to decide whether to consume (local) or copy (outer-scope).
     local_bindings: HashSet<String>,
@@ -680,6 +749,7 @@ impl LoweringContext {
             max_depth: 0,
             properties: properties.to_vec(),
             private_methods: HashMap::new(),
+            script_level_code_separator: false,
             local_bindings: HashSet::new(),
             outer_protected_refs: None,
             inside_branch: false,
@@ -730,6 +800,25 @@ impl LoweringContext {
         self.ops.push(op);
         self.source_locs.push(self.current_source_loc.clone());
         self.track_depth();
+    }
+
+    /// Push an op from a delegated codegen module, keeping `source_locs` in step.
+    ///
+    /// R-166: the crypto / EC / hash delegates emit through a `&mut |op| ...`
+    /// callback, and every one of them pushed straight onto `self.ops`. That
+    /// left `source_locs` SHORTER than `ops`, and the peephole's
+    /// loc-preserving variant blanks every location when the two lengths
+    /// disagree — so any contract touching EC, SHA-256, BLAKE3, WOTS+,
+    /// SLH-DSA, Rabin, Merkle, BN254, BabyBear or KoalaBear codegen shipped an
+    /// empty source map.
+    ///
+    /// Deliberately does NOT call `track_depth()`: these modules manage the
+    /// stack model themselves around the delegated block, and adding depth
+    /// tracking here would change `maxStackDepth`. The op stream is untouched,
+    /// so this is byte-neutral — only the location vector grows.
+    fn push_delegated_op(&mut self, op: StackOp) {
+        self.ops.push(op);
+        self.source_locs.push(self.current_source_loc.clone());
     }
 
     /// Emit a Bitcoin varint encoding of the length on top of the stack.
@@ -1125,6 +1214,74 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    /// W3 / BoolBamboozle — enforce the `boolean` ABI domain on-chain.
+    ///
+    /// The source type `boolean` denotes `{true, false}`, but a witness item is
+    /// arbitrary bytes. Nothing used to check the domain, and comparisons lower
+    /// to `OP_NUMEQUAL`, so a raw spender pushing `OP_2` matched neither
+    /// `=== true` nor `=== false`: an exhaustive-looking two-arm split took
+    /// NEITHER arm and every guard inside both arms was skipped.
+    ///
+    /// Emitted once per `boolean` parameter of a PUBLIC method, at the
+    /// unlocking boundary, before any of the method body runs. Private helpers
+    /// inherit the guarantee because their arguments come from an already-gated
+    /// caller.
+    ///
+    /// ```text
+    /// <copy of param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+    ///                  OP_BOOLOR OP_VERIFY
+    /// ```
+    ///
+    /// `OP_EQUAL` (bytewise), not `OP_NUMEQUAL`: the ABI encoding is exactly
+    /// the empty item or `{0x01}`, so non-minimal spellings of 0/1 are rejected
+    /// too, and an over-long witness item fails cleanly instead of overflowing
+    /// the script-number decoder.
+    ///
+    /// Deliberately NOT `OP_0NOTEQUAL`: canonicalising to truthiness would map
+    /// `2` onto `true` and silently run an arm the author never authorised.
+    ///
+    /// Net stack effect is zero.
+    fn emit_boolean_param_gate(&mut self, name: &str) {
+        let slot = self
+            .renamed_params
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string());
+
+        // Copy of the witness value on top; the original stays in its slot.
+        self.bring_to_top(&slot, false);
+
+        self.emit_op(StackOp::Dup);
+        self.sm.dup();
+
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // isFalse
+
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // isTrue
+
+        self.emit_op(StackOp::Opcode("OP_BOOLOR".to_string()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
+        self.sm.pop();
+
+        self.track_depth();
+    }
+
     /// Drain branch-private residue from below TOS at the end of a branch
     /// body, so both branches converge to a layout the parent stack model can
     /// faithfully describe before OP_ENDIF (issue #36).
@@ -1254,6 +1411,19 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
+        // R-138: publish where we are, so a refusal raised anywhere below —
+        // there are 34 panic sites in this file — reports the contract line it
+        // died on rather than nothing at all.
+        // `ir::SourceLocation` and `ast::SourceLocation` are the same three
+        // fields declared twice (the AST/IR split this repo carries); the
+        // diagnostic channel speaks the AST one.
+        crate::refusal::set_refusal_location(binding.source_loc.as_ref().map(|l| {
+            crate::frontend::ast::SourceLocation {
+                file: l.file.clone(),
+                line: l.line,
+                column: l.column,
+            }
+        }));
         let name = &binding.name;
         match &binding.value {
             ANFValue::LoadParam {
@@ -1465,20 +1635,29 @@ impl LoweringContext {
         }
     }
 
+    /// Push a property `initialValue` straight from its IR JSON encoding.
+    ///
+    /// The encoding is the cross-tier one documented on
+    /// [`crate::ir::parse_const_value`], so decoding goes through that single
+    /// reader rather than being re-derived here. In particular an oversize
+    /// integer arrives EITHER as a decimal string with a trailing `n` (what
+    /// `frontend::anf_lower::bigint_to_json` writes) OR as an
+    /// arbitrary-precision JSON number (what the Go tier writes) — never as
+    /// hex. Only a plain string that is not a decimal-BigInt literal is hex
+    /// `ByteString` bytes.
     fn push_json_value(&mut self, val: &serde_json::Value) {
-        match val {
-            serde_json::Value::Bool(b) => {
-                self.emit_op(StackOp::Push(PushValue::Bool(*b)));
+        match crate::ir::parse_const_value(val) {
+            Some(ConstValue::Bool(b)) => {
+                self.emit_op(StackOp::Push(PushValue::Bool(b)));
             }
-            serde_json::Value::Number(n) => {
-                let i = n.as_i64().map(|v| v as i128).unwrap_or(0);
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(i))));
+            Some(ConstValue::Int(bi)) => {
+                self.emit_op(StackOp::Push(PushValue::Int(bi)));
             }
-            serde_json::Value::String(s) => {
-                let bytes = hex_to_bytes(s);
+            Some(ConstValue::Str(s)) => {
+                let bytes = hex_to_bytes(&s);
                 self.emit_op(StackOp::Push(PushValue::Bytes(bytes)));
             }
-            _ => {
+            None => {
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
             }
         }
@@ -1870,14 +2049,50 @@ impl LoweringContext {
                 self.emit_op(StackOp::Opcode(code.to_string()));
             }
         } else {
-            // Unknown function -- push a placeholder
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
-            self.sm.push(binding_name);
-            return;
+            // Unknown function. The previous behaviour here was to push a
+            // constant-0 placeholder and carry on, which had two consequences,
+            // both silent: the call's semantics became the literal `0` (a
+            // `hash160` guarding a P2PKH compiled away to `OP_0`, leaving
+            // `OP_0 OP_0 OP_EQUALVERIFY` — a check that always passes), and the
+            // arguments brought to the top of the stack above were removed from
+            // the MODEL by the loop just before this `if` without any opcode
+            // consuming them, so every later ROLL/PICK depth in the method was
+            // computed against a model short by `args.len()`.
+            //
+            // Refuse instead, the way the sibling name-resolution failures in
+            // this file already do. Pass 5 runs under `crate::refusal::
+            // catch_refusal`, so this surfaces to the caller as a diagnostic.
+            let loc = self
+                .current_source_loc
+                .as_ref()
+                .map(|l| format!(" at {}:{}:{}", l.file, l.line, l.column))
+                .unwrap_or_default();
+            panic!(
+                "Stack lowering: unknown function '{}'{} — the name resolves to \
+                 no builtin opcode sequence, intrinsic, crypto builtin, or \
+                 inlinable private method. Refusing to emit a constant-0 \
+                 placeholder: that would silently replace the call's result with \
+                 `0` and leave its {} argument(s) on the stack that the stack \
+                 model believes were consumed.",
+                func_name,
+                loc,
+                args.len()
+            );
         }
 
+        // Some builtins leave more on the runtime stack than the binding names.
         if func_name == "split" {
-            self.sm.push("");
+            // OP_SPLIT leaves [left, right]. `split(data, index)` is single-valued -- it
+            // binds the RIGHT half (spec/grammar.md, spec/type-system.md, and all seven
+            // typecheckers) -- so the left half is dropped here, exactly as `substr`,
+            // `right` and `__array_access` already drop the halves they do not bind.
+            //
+            // It used to be recorded as an anonymous empty-named slot instead. Nothing
+            // ever consumed that slot -- it is unnameable, because no surface parser
+            // accepts array destructuring -- so every later bringToTop had to step over
+            // it and any read after a split resolved to the wrong slot.
+            // conformance/split_residue_execution_test.go spends the result.
+            self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
             self.sm.push(binding_name);
         } else if func_name == "len" {
             // OP_SIZE leaves original on stack and pushes length on top.
@@ -1938,6 +2153,47 @@ impl LoweringContext {
         // the existing entry to avoid duplicate names which break Set-based
         // branch reconciliation in lower_if.
         let mut shadowed: Vec<(String, String)> = Vec::new();
+
+        // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
+        // checks its own -- checking in the lowerer rather than the typechecker also
+        // covers the `--ir` input path, which never runs a typecheck.
+        //
+        // The binding loop below skips every argument past the last parameter. Skipped
+        // is not the same as ignored: a surplus argument never reaches
+        // operandConsume/bringToTop, so a ref that would otherwise have been CONSUMED
+        // at this call site stays live on the stack and every later depth shifts under
+        // it. The emitted script changes, with no diagnostic.
+        //
+        // Measured on the checked-in `multi-method` golden, whose `computeThreshold`
+        // takes two parameters:
+        //
+        //   args ["t0","t1"]        76009c637552958b5aa06900ac67519d00ac68
+        //   args ["t0","t1","t0"]   76009c637552787c958b5aa0697c00ac7767519d00ac68
+        //
+        // All seven tiers agreed on BOTH, which is why no parity gate saw it -- the
+        // tiers were identical and identically wrong. A surplus ref naming a binding
+        // that does not exist at all (`tZZZ`) was likewise accepted silently.
+        //
+        // Only the surplus side is checked. Too FEW arguments already fails, naming
+        // the unbound parameter ("method parameter 'b' is not on the stack at a
+        // post-consumption reference"); that path works and is pinned by existing
+        // tests.
+        if args.len() > method.params.len() {
+            // `panic!` is this lowerer's idiom for an invariant violation --
+            // the same one `lower_check_multi_sig` uses a few hundred lines
+            // down; `inline_method_call` returns `()`, and the CLI turns the
+            // panic into `Compilation error: stack lowering: ...`.
+            panic!(
+                "method_call to '{}' passes {} arguments but '{}' declares {} parameter{}: \
+                 surplus arguments are not bound to any parameter, and leaving them \
+                 unconsumed on the stack silently changes the emitted script",
+                method.name,
+                args.len(),
+                method.name,
+                method.params.len(),
+                if method.params.len() == 1 { "" } else { "s" }
+            );
+        }
 
         // Bind call arguments to private method params.
         for (i, arg) in args.iter().enumerate() {
@@ -2143,6 +2399,21 @@ impl LoweringContext {
         let mut then_ctx = LoweringContext::new(&[], &self.properties);
         then_ctx.sm = self.sm.clone();
         then_ctx.outer_protected_refs = Some(protected_refs.clone());
+        // R-010: branch arms lower in a FRESH context, so the contract-level
+        // OP_CODESEPARATOR decision has to be carried in explicitly. Without
+        // this a `checkPreimage` inside an if-branch emits a stray per-method
+        // separator, which executes AFTER the script-level one and re-narrows
+        // `scriptCode`.
+        then_ctx.script_level_code_separator = self.script_level_code_separator;
+        // N-051: same reason as R-010 above. `LoweringContext::new` starts with
+        // an EMPTY `private_methods` map, so a `MethodCall` inside an arm found
+        // no callee and `lower_method_call` fell through to `lower_call`, which
+        // refused the unknown name. Rust rejected a program the spec allows
+        // (`spec/semantics.md` §6.3 — private helpers are source-level
+        // substitution, which stack lowering performs); Go and Python, lacking
+        // that guard, silently emitted a constant-0 placeholder instead. An arm
+        // is not a different scope for inlining.
+        then_ctx.private_methods = self.private_methods.clone();
         then_ctx.inside_branch = true;
         then_ctx.lower_bindings(then_bindings, terminal_assert);
 
@@ -2160,6 +2431,8 @@ impl LoweringContext {
         let mut else_ctx = LoweringContext::new(&[], &self.properties);
         else_ctx.sm = self.sm.clone();
         else_ctx.outer_protected_refs = Some(protected_refs);
+        else_ctx.script_level_code_separator = self.script_level_code_separator;
+        else_ctx.private_methods = self.private_methods.clone(); // N-051, see then_ctx above
         else_ctx.inside_branch = true;
         else_ctx.lower_bindings(else_bindings, terminal_assert);
 
@@ -2791,11 +3064,37 @@ impl LoweringContext {
 
             // Clean up the iteration variable if it was not consumed by the body.
             // The body may not reference iter_var at all, leaving it on the stack.
+            //
+            // R-186 / R-292: it is not always on TOP when that happens. A body
+            // whose last binding LEAVES a value — the accumulator
+            // `sum = sum + x`, which rebinds `sum` in place and ends holding it
+            // — buries the iteration variable one slot down. Dropping only at
+            // depth 0 left one slot behind per iteration, until the leak alone
+            // crossed MAX_STACK_DEPTH and the compiler refused a contract with a
+            // working set of three. Removing it wherever it sits is the same
+            // operation `drain_branch_private_residue` performs, spelled the
+            // same way.
             if self.sm.has(iter_var) {
-                let depth = self.sm.find_depth(iter_var);
-                if let Some(0) = depth {
-                    self.emit_op(StackOp::Drop);
-                    self.sm.pop();
+                match self.sm.find_depth(iter_var) {
+                    Some(0) => {
+                        self.emit_op(StackOp::Drop);
+                        self.sm.pop();
+                    }
+                    Some(1) => {
+                        self.emit_op(StackOp::Nip);
+                        self.sm.remove_at_depth(1);
+                    }
+                    Some(depth) => {
+                        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(depth as i128))));
+                        self.sm.push("");
+                        self.emit_op(StackOp::Roll { depth });
+                        self.sm.pop();
+                        let rolled = self.sm.remove_at_depth(depth);
+                        self.sm.push(&rolled);
+                        self.emit_op(StackOp::Drop);
+                        self.sm.pop();
+                    }
+                    None => {}
                 }
             }
         }
@@ -2893,22 +3192,25 @@ impl LoweringContext {
                 self.sm.push("");
             }
 
-            // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
-            if prop.prop_type == "bigint" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(8))));
+            // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+            // The width MUST come from `numeric_state_type_width` — the same
+            // table the reader splits on — or this continuation cannot be
+            // re-read.
+            let numeric_width = numeric_state_type_width(&prop.prop_type);
+            if numeric_width > 0 {
+                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(numeric_width))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop(); // pop the width
-            } else if prop.prop_type == "boolean" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
-                self.sm.push("");
-                self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
-                self.sm.pop(); // pop the width
-            } else if prop.prop_type == "ByteString" {
-                // Prepend push-data length prefix (matching SDK format)
+            } else if is_variable_length_state_type(&prop.prop_type) {
+                // Prepend push-data length prefix (matching SDK format).
+                // MUST classify exactly what `lower_deserialize_state` decodes,
+                // or the continuation this method builds cannot be read by the
+                // next spend: the reader would take the value's own first byte
+                // (a DER 0x30, say) as a push length.
                 self.emit_push_data_encode();
             }
-            // Other byte types (PubKey, Sig, Sha256, etc.) need no conversion
+            // Fixed-width byte types (PubKey, Sha256, Addr, ...) need no conversion
 
             if !first {
                 self.sm.pop();
@@ -3207,14 +3509,20 @@ impl LoweringContext {
         self.bring_to_top("_codePart", false);
         // --- Stack: [..., codePart] ---
 
-        // Step 2: Append OP_RETURN byte (0x6a).
-        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_CAT".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        // --- Stack: [..., codePart+OP_RETURN] ---
+        // Step 2: Append OP_RETURN byte (0x6a) — but ONLY when there is a state
+        // section for it to separate. R-010: with zero mutable properties the
+        // SDK's `get_locking_script` emits the bare code and stops, so a
+        // separator here would make the continuation output one byte longer
+        // than the script the SDK deploys.
+        if !state_props.is_empty() {
+            self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_CAT".into()));
+            self.sm.pop();
+            self.sm.pop();
+            self.sm.push("");
+        }
+        // --- Stack: [..., codePart(+OP_RETURN when stateful)] ---
 
         // Step 3: Serialize each state value and concatenate.
         for (i, value_ref) in state_values.iter().enumerate() {
@@ -3226,18 +3534,16 @@ impl LoweringContext {
             let consume = self.operand_consume(value_ref, &output_operands, binding_index, last_uses);
             self.bring_to_top(value_ref, consume);
 
-            if prop.prop_type == "bigint" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(8))));
+            // Same table as the reader — see `numeric_state_type_width`.
+            let numeric_width = numeric_state_type_width(&prop.prop_type);
+            if numeric_width > 0 {
+                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(numeric_width))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop();
-            } else if prop.prop_type == "boolean" {
-                self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
-                self.sm.push("");
-                self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
-                self.sm.pop();
-            } else if prop.prop_type == "ByteString" {
-                // Prepend push-data length prefix (matching SDK format)
+            } else if is_variable_length_state_type(&prop.prop_type) {
+                // Prepend push-data length prefix (matching SDK format).
+                // MUST classify exactly what `lower_deserialize_state` decodes.
                 self.emit_push_data_encode();
             }
 
@@ -3432,6 +3738,30 @@ impl LoweringContext {
             .cloned()
             .unwrap_or_else(|| panic!("checkMultiSig: array_literal metadata missing for pks={}", pks_ref));
 
+        // Degenerate thresholds are rejected here, not defended against with
+        // extra opcodes — emitting a runtime guard would move bytes for every
+        // existing valid contract. Checking in the lowerer (rather than the
+        // typechecker) also covers the `--ir` input path, which never runs a
+        // typecheck.
+        if sig_elems.is_empty() {
+            panic!(
+                "checkMultiSig requires at least one signature: the signature array is \
+                 empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts \
+                 unconditionally (anyone-can-spend)"
+            );
+        }
+        if pk_elems.is_empty() {
+            panic!("checkMultiSig requires at least one public key: the public key array is empty");
+        }
+        if sig_elems.len() > pk_elems.len() {
+            panic!(
+                "checkMultiSig signature count ({}) cannot exceed public key count ({}): \
+                 the resulting script is unspendable",
+                sig_elems.len(),
+                pk_elems.len()
+            );
+        }
+
         // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
         self.sm.push("");
@@ -3475,6 +3805,348 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    /// Convert the 4-byte little-endian field on top of the stack to an
+    /// UNSIGNED script number.
+    ///
+    /// `nVersion`, `nSequence`, `nLockTime` and the trailing sighash type are
+    /// unsigned 32-bit wire fields, but a Bitcoin script number is
+    /// sign-magnitude: the high bit of the LAST byte is the sign. A bare
+    /// `OP_BIN2NUM` therefore reads `feffffff` (`0xfffffffe`, the SDK's
+    /// non-final default) as -2147483646 and `ffffffff` (the finality
+    /// sentinel) as -2147483647, which makes `extractSequence(p) < 0xffffffff`
+    /// true for the exact value it exists to exclude (W1 / FinalCountdown).
+    /// Appending a zero byte first makes the value a five-byte non-negative
+    /// number, so the whole 0..2^32-1 range reads as itself. Same trick
+    /// `emit_strip_script_code_varint` already uses for `0xfd`/`0xfe`/`0xff`.
+    fn emit_unsigned_bin2num(&mut self) {
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+    }
+
+    /// Strip the BIP-143 scriptCode varint length prefix.
+    ///
+    ///   `[..., varint || scriptCode]` -> `[..., scriptCode]`
+    ///
+    /// All four varint shapes must be handled; stripping only the 1- and
+    /// 3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+    /// 65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+    /// `Invalid OP_SPLIT range` on regtest.
+    fn emit_strip_script_code_varint(&mut self) {
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); // firstByte
+        self.sm.push(""); // rest
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        // as negative script numbers.
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        // Stack: [..., rest, fb_num]
+
+        // emit_drop_more_varint_bytes drops `n` additional varint bytes
+        // from the top-of-stack `rest`. Stack in: [..., rest], stack out:
+        // [..., rest_minus_n].
+        fn emit_drop_more_varint_bytes(ctx: &mut LoweringContext, n: i128) {
+            ctx.emit_op(StackOp::Push(PushValue::Int(BigInt::from(n))));
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            ctx.sm.pop();
+            ctx.sm.pop();
+            ctx.sm.push("");
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Nip);
+            ctx.sm.pop();
+            ctx.sm.pop();
+            ctx.sm.push("");
+        }
+
+        // IF fb_num < 253: 1-byte varint, drop fb_num.
+        self.emit_op(StackOp::Dup);
+        let top0 = self.sm.peek_at_depth(0).to_string();
+        self.sm.push(&top0);
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(253))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_at_1_byte_if = self.sm.clone();
+        // THEN: 1-byte varint
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_1_byte_if.clone();
+        // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        self.emit_op(StackOp::Dup);
+        let top1 = self.sm.peek_at_depth(0).to_string();
+        self.sm.push(&top1);
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(254))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_at_fe_if = self.sm.clone();
+        // THEN: 5-byte varint (0xfe + 4 bytes LE).
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        emit_drop_more_varint_bytes(self, 4);
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_fe_if.clone();
+        // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        self.emit_op(StackOp::Dup);
+        let top2 = self.sm.peek_at_depth(0).to_string();
+        self.sm.push(&top2);
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(255))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_at_ff_if = self.sm.clone();
+        // THEN: 9-byte varint (0xff + 8 bytes LE).
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        emit_drop_more_varint_bytes(self, 8);
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_ff_if.clone();
+        // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+        emit_drop_more_varint_bytes(self, 2);
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+    }
+
+    /// Whether the deployed locking script carries a trailing
+    /// `OP_RETURN || state` section at all (R-010).
+    ///
+    /// NOT the same question as "is the state section empty". A
+    /// `StatefulSmartContract` with zero mutable properties compiles to an
+    /// artifact with no state fields, and the SDK's `get_locking_script`
+    /// appends neither the separator nor any payload — the deployed script IS
+    /// the code part. `fixed_state_section_length` answers `Some(0)` for that
+    /// shape, which reads as "a fixed section of length zero" and made clause
+    /// 8a pin `SIZE(rest) == 1` for a remainder that is always empty, locking
+    /// the contract's funds.
+    fn has_state_section(&self) -> bool {
+        self.properties.iter().any(|p| !p.readonly)
+    }
+
+    /// Byte length of the serialized state section (excluding the OP_RETURN
+    /// separator) when every mutable property is fixed-size, else `None`.
+    ///
+    /// Mirrors the size table in `lower_deserialize_state`; a ByteString
+    /// property makes the section variable-length and its exact length
+    /// un-pinnable at compile time.
+    ///
+    /// Only meaningful when `has_state_section()` is true: with no mutable
+    /// properties the sum is vacuously 0, which means "no section", not "an
+    /// empty section".
+    fn fixed_state_section_length(&self) -> Option<usize> {
+        let mut total = 0usize;
+        for prop in &self.properties {
+            if prop.readonly {
+                continue;
+            }
+            total += match prop.prop_type.as_str() {
+                "bigint" | "RabinSig" | "RabinPubKey" => 8,
+                "boolean" => 1,
+                "PubKey" => 33,
+                "Addr" | "Ripemd160" => 20,
+                "Sha256" => 32,
+                "Point" | "P256Point" => 64,
+                "P384Point" => 96,
+                _ => return None,
+            };
+        }
+        Some(total)
+    }
+
+    /// Bind the spender-supplied `_codePart` witness to the script that is
+    /// actually executing (R-010 / CL-BUG-091).
+    ///
+    /// `_codePart` is the locking script minus the trailing
+    /// `OP_RETURN || state` section. It is pushed by the spender and OP_CAT'd
+    /// verbatim as the script prefix of every reconstructed state-continuation
+    /// output, so an unauthenticated `_codePart` is a complete break: the
+    /// spender picks the script the contract's own funds move to.
+    ///
+    /// With the OP_CODESEPARATOR hoisted to offset 1 of the locking script,
+    /// the BIP-143 scriptCode carried in the (already tx-bound) preimage is
+    ///
+    ///   `scriptCode = lockingScript[2..] = codePart[2..] || 0x6a || state`
+    ///
+    /// so the whole of `_codePart` is recoverable from it:
+    ///
+    ///   `codePart == 0x61ab || scriptCode[0 .. SIZE(codePart) - 2]`
+    ///
+    /// plus a pin on the split point, without which a spender could claim a
+    /// SHORTER code part whose bytes are a genuine prefix — in the degenerate
+    /// case just the two prologue bytes, which turns the continuation output
+    /// into a bare OP_RETURN that anyone can spend.
+    ///
+    /// Consumes nothing: `[..., preimage]` in, `[..., preimage]` out, aborting
+    /// the script via OP_EQUALVERIFY when the witness does not match.
+    fn emit_code_part_authentication(&mut self) {
+        // 1. Work on a copy — the caller still needs the preimage.
+        self.emit_op(StackOp::Dup);
+        self.sm.dup();
+
+        // 2. Drop the fixed 104-byte BIP-143 header.
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(104))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Nip);
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        // 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+        //    hashOutputs 32 + nLocktime 4 + sighashType 4).
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(52))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+
+        // 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+        self.emit_strip_script_code_varint();
+
+        // 5. Copy the witness code part up.
+        self.bring_to_top("_codePart", false);
+        self.sm.rename_at_depth(0, "");
+
+        // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+
+        // 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state
+        //     path.
+        //
+        //     Clause 8a below pins the split point through the REMAINDER's
+        //     length, which only works while the state section is a
+        //     compile-time constant. With a ByteString state field it is not,
+        //     8a is skipped, and the only surviving constraint on where the
+        //     code part ENDS is 8b's `rest[0] == 0x6a` — which a genuine PREFIX
+        //     of the executing script satisfies at any offset whose byte
+        //     happens to be 0x6a.
+        //
+        //     The state's length is unknown at compile time; the CODE's is not.
+        //     The emitted template's byte length is fixed once emit finishes,
+        //     and the only thing deployment adds is the growth of the OP_0
+        //     placeholders. So the emitter back-patches `emittedLength + delta`
+        //     and pins SIZE(codePart) against it directly, which no truncation
+        //     can satisfy. Net stack effect is zero.
+        //
+        //     Cost: 9 bytes per authenticating method, and only on this path —
+        //     fixed-size-state contracts keep clause 8a untouched.
+        if self.has_state_section() && self.fixed_state_section_length().is_none() {
+            // delta / exact are refined by `pin_code_part_length` once every
+            // method has been lowered and the full placeholder set is known.
+            // The defaults here are the SOUND ones: a lower bound of
+            // `emittedLength + 0` holds for any deployment.
+            self.emit_op(StackOp::VerifyCodePartLen { delta: 0, exact: false });
+        }
+
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(2))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        // 7. Reorder to [..., codePart, scriptCode, n].
+        self.emit_op(StackOp::Rot);
+        let rotated = self.sm.remove_at_depth(2);
+        self.sm.push(&rotated);
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+
+        // 8. Split scriptCode at n into the claimed code tail and the rest.
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+
+        // 8a. Pin the split point. Variable-length state layouts are pinned by
+        //     clause 6a instead, from the CODE side. R-010: with no mutable
+        //     properties there is no state section and no separator, so the
+        //     remainder must be EMPTY.
+        let has_state = self.has_state_section();
+        let fixed_state_len = if has_state {
+            self.fixed_state_section_length()
+        } else {
+            Some(0)
+        };
+        if let Some(fixed_state_len) = fixed_state_len {
+            let rest_len = if has_state { 1 + fixed_state_len } else { 0 };
+            self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+            self.sm.push("");
+            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(rest_len))));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+            self.sm.pop(); self.sm.pop();
+        }
+        // 8b. When a state section exists, the byte immediately after the code
+        //     part must be the OP_RETURN separator. With no state section
+        //     clause 8a has already pinned the remainder to zero bytes, which
+        //     is strictly stronger than any byte test.
+        if has_state {
+            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push(""); self.sm.push("");
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+            self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
+            self.sm.pop(); self.sm.pop();
+        } else {
+            // Clause 8a consumed the remainder's SIZE but not the remainder;
+            // with 8b skipped it is dead and must still be dropped so the
+            // stack shape matches the state-bearing path.
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        }
+
+        // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x61, 0xab])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        // 10. Byte-for-byte or the script dies here.
+        self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
+        self.sm.pop(); self.sm.pop();
+    }
+
     fn lower_check_preimage(
         &mut self,
         binding_name: &str,
@@ -3491,9 +4163,20 @@ impl LoweringContext {
         // The unlocking script pushes ONLY <preimage> (no witness signature).
         // See emit_check_preimage_binding (oppushtx.rs) for the construction.
 
-        // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
-        // the code after this point (smaller preimage; required for large scripts).
-        self.emit_op(StackOp::Opcode("OP_CODESEPARATOR".to_string()));
+        // R-010 / CL-BUG-091: OP_CODESEPARATOR placement. The separator used to
+        // sit at each method's entry, so the BIP-143 scriptCode covered only
+        // the code AFTER it — leaving the dispatch preamble and every preceding
+        // method body invisible to the running script, and those are exactly
+        // the bytes the spender-supplied `_codePart` claims to reproduce. When
+        // any method of this contract carries `_codePart`, the separator is
+        // emitted ONCE at offset 1 of the locking script instead.
+        if !self.script_level_code_separator {
+            // No `_codePart` anywhere in this contract, so nothing needs
+            // authenticating: keep the pre-R-010 layout — a separator right
+            // here, at the method's entry, which keeps `scriptCode` (and the
+            // preimage) small.
+            self.emit_op(StackOp::Opcode("OP_CODESEPARATOR".to_string()));
+        }
 
         // Bring the preimage to the top (kept for field extractors below).
         let is_last = self.is_last_use(preimage, binding_index, last_uses);
@@ -3505,6 +4188,13 @@ impl LoweringContext {
         // method declare a different mode, which only changes the appended
         // sighash flag byte. Net stack effect is zero.
         self.emit_check_preimage_binding(sighash_flag);
+
+        // R-010: the preimage is now proven to be THIS transaction's preimage,
+        // so its scriptCode field is authentic. Pin the spender-supplied
+        // `_codePart` to it before any continuation output is built from it.
+        if self.sm.has("_codePart") {
+            self.emit_code_part_authentication();
+        }
 
         // The preimage is now on top. Rename to binding name so field extractors
         // can reference it.
@@ -3658,101 +4348,7 @@ impl LoweringContext {
             // strip too few varint bytes and corrupt the subsequent
             // state-extraction OP_SPLITs (this is the bug fixed here — see
             // `integration/go/contracts/RollupBug.runar.go`).
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push(""); // firstByte
-            self.sm.push(""); // rest
-            self.emit_op(StackOp::Swap);
-            self.sm.swap();
-            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-            // as negative script numbers.
-            self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_CAT".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
-            // Stack: [..., rest, fb_num]
-
-            // emit_drop_more_varint_bytes drops `n` additional varint bytes
-            // from the top-of-stack `rest`. Stack in: [..., rest], stack out:
-            // [..., rest_minus_n].
-            fn emit_drop_more_varint_bytes(ctx: &mut LoweringContext, n: i128) {
-                ctx.emit_op(StackOp::Push(PushValue::Int(BigInt::from(n))));
-                ctx.sm.push("");
-                ctx.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-                ctx.sm.pop();
-                ctx.sm.pop();
-                ctx.sm.push("");
-                ctx.sm.push("");
-                ctx.emit_op(StackOp::Nip);
-                ctx.sm.pop();
-                ctx.sm.pop();
-                ctx.sm.push("");
-            }
-
-            // IF fb_num < 253: 1-byte varint, drop fb_num.
-            self.emit_op(StackOp::Dup);
-            let top0 = self.sm.peek_at_depth(0).to_string();
-            self.sm.push(&top0);
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(253))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_IF".into()));
-            self.sm.pop();
-            let sm_at_1_byte_if = self.sm.clone();
-            // THEN: 1-byte varint
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-            self.sm = sm_at_1_byte_if.clone();
-            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-            self.emit_op(StackOp::Dup);
-            let top1 = self.sm.peek_at_depth(0).to_string();
-            self.sm.push(&top1);
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(254))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_IF".into()));
-            self.sm.pop();
-            let sm_at_fe_if = self.sm.clone();
-            // THEN: 5-byte varint (0xfe + 4 bytes LE).
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            emit_drop_more_varint_bytes(self, 4);
-            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-            self.sm = sm_at_fe_if.clone();
-            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-            self.emit_op(StackOp::Dup);
-            let top2 = self.sm.peek_at_depth(0).to_string();
-            self.sm.push(&top2);
-            self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(255))));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_IF".into()));
-            self.sm.pop();
-            let sm_at_ff_if = self.sm.clone();
-            // THEN: 9-byte varint (0xff + 8 bytes LE).
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            emit_drop_more_varint_bytes(self, 8);
-            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-            self.sm = sm_at_ff_if.clone();
-            // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-            self.emit_op(StackOp::Drop);
-            self.sm.pop();
-            emit_drop_more_varint_bytes(self, 2);
-            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
-            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
-            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+            self.emit_strip_script_code_varint();
 
             // Compute skip = SIZE(_codePart) - codeSepIdx
             self.bring_to_top("_codePart", false);
@@ -3906,7 +4502,12 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "{} requires 1 argument", func_name);
+        assert!(
+            args.len() == 1,
+            "{} requires exactly 1 argument, got {}",
+            func_name,
+            args.len()
+        );
         let is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], is_last);
 
@@ -3915,7 +4516,7 @@ impl LoweringContext {
 
         match func_name {
             "extractVersion" => {
-                // <preimage> 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // <preimage> 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
@@ -3924,7 +4525,7 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
                 self.sm.pop();
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractHashPrevouts" => {
                 // <preimage> 4 OP_SPLIT OP_NIP 32 OP_SPLIT OP_DROP
@@ -3994,7 +4595,7 @@ impl LoweringContext {
             }
             "extractSigHashType" => {
                 // End-relative: last 4 bytes, converted to number.
-                // <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM
+                // <preimage> OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4013,11 +4614,11 @@ impl LoweringContext {
                 self.sm.pop();
                 self.sm.pop();
                 self.sm.push("");
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractLocktime" => {
                 // End-relative: 4 bytes before the last 4 (sighashType).
-                // <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // <preimage> OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4045,7 +4646,7 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
                 self.sm.pop();
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractOutputHash" | "extractOutputs" => {
                 // End-relative: 32 bytes before the last 8 (nLocktime 4 + sighashType 4).
@@ -4081,6 +4682,9 @@ impl LoweringContext {
             "extractAmount" => {
                 // End-relative: 8 bytes at offset -(52) from end.
                 // <preimage> OP_SIZE 52 OP_SUB OP_SPLIT OP_NIP 8 OP_SPLIT OP_DROP OP_BIN2NUM
+                // NOT zero-padded, unlike the four 32-bit extractors: satoshis is 8 bytes
+                // and a value large enough to set the sign bit would be 2^63 satoshis, far
+                // beyond the 21e14 ever minted.
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4112,7 +4716,7 @@ impl LoweringContext {
             }
             "extractSequence" => {
                 // End-relative: 4 bytes (nSequence) at offset -(44) from end.
-                // <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // <preimage> OP_SIZE 44 OP_SUB OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP <0x00> OP_CAT OP_BIN2NUM
                 self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
                 self.sm.push("");
                 self.sm.push("");
@@ -4140,7 +4744,7 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
                 self.sm.pop();
-                self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
+                self.emit_unsigned_bin2num(); // UNSIGNED 32-bit wire field (W1)
             }
             "extractScriptCode" => {
                 // Variable-length field at offset 104. End-relative tail = 52 bytes.
@@ -4174,6 +4778,9 @@ impl LoweringContext {
             "extractInputIndex" => {
                 // Input index = vout field of outpoint, at offset 100, 4 bytes.
                 // <preimage> 100 OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
+                // NOT zero-padded: an input index is bounded far below 2^31, so the sign bit
+                // is unreachable. See emitUnsignedBin2Num for the four fields that DO need
+                // it.
                 self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(100))));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
@@ -4224,7 +4831,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "__array_access requires 2 arguments (object, index)");
+        assert!(
+            args.len() == 2,
+            "__array_access requires exactly 2 arguments (object, index), got {}",
+            args.len()
+        );
 
         let obj = &args[0];
         let index = &args[1];
@@ -4282,7 +4893,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "reverseBytes requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "reverseBytes requires exactly 1 argument, got {}",
+            args.len()
+        );
         let is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], is_last);
 
@@ -4328,7 +4943,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "substr requires 3 arguments");
+        assert!(
+            args.len() == 3,
+            "substr requires exactly 3 arguments, got {}",
+            args.len()
+        );
 
         let data = &args[0];
         let start = &args[1];
@@ -4379,7 +4998,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 4, "verifyRabinSig requires 4 arguments");
+        assert!(
+            args.len() == 4,
+            "verifyRabinSig requires exactly 4 arguments, got {}",
+            args.len()
+        );
 
         // Bring all 4 args to the top in argument order: msg sig padding pubKey
         for arg in args {
@@ -4393,7 +5016,7 @@ impl LoweringContext {
         self.sm.pop();
         self.sm.pop();
 
-        super::rabin::emit_verify_rabin_sig(&mut |op| self.ops.push(op));
+        super::rabin::emit_verify_rabin_sig(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4408,7 +5031,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "sign requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "sign requires exactly 1 argument, got {}",
+            args.len()
+        );
         let x = &args[0];
 
         let x_is_last = self.is_last_use(x, binding_index, last_uses);
@@ -4439,7 +5066,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "right requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "right requires exactly 2 arguments, got {}",
+            args.len()
+        );
         let data = &args[0];
         let length = &args[1];
 
@@ -4473,7 +5104,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "verifyWOTS requires 3 arguments: msg, sig, pubkey");
+        assert!(
+            args.len() == 3,
+            "verifyWOTS requires exactly 3 arguments (msg, sig, pubkey), got {}",
+            args.len()
+        );
 
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4482,7 +5117,7 @@ impl LoweringContext {
         for _ in 0..3 { self.sm.pop(); }
 
         // Delegate to wots module
-        super::wots::emit_verify_wots(&mut |op| self.ops.push(op));
+        super::wots::emit_verify_wots(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4500,8 +5135,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 3,
-            "verifySLHDSA requires 3 arguments: msg, sig, pubkey"
+            args.len() == 3,
+            "verifySLHDSA requires exactly 3 arguments (msg, sig, pubkey), got {}",
+            args.len()
         );
 
         // Bring args to top in order: msg, sig, pubkey
@@ -4514,7 +5150,7 @@ impl LoweringContext {
         }
 
         // Delegate to slh_dsa module
-        super::slh_dsa::emit_verify_slh_dsa(&mut |op| self.ops.push(op), param_key);
+        super::slh_dsa::emit_verify_slh_dsa(&mut |op| self.push_delegated_op(op), param_key);
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4532,8 +5168,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 2,
-            "sha256Compress requires 2 arguments: state, block"
+            args.len() == 2,
+            "sha256Compress requires exactly 2 arguments (state, block), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4543,7 +5180,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::sha256::emit_sha256_compress(&mut |op| self.ops.push(op));
+        super::sha256::emit_sha256_compress(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4557,8 +5194,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 3,
-            "sha256Finalize requires 3 arguments: state, remaining, msgBitLen"
+            args.len() == 3,
+            "sha256Finalize requires exactly 3 arguments (state, remaining, msgBitLen), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4568,7 +5206,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::sha256::emit_sha256_finalize(&mut |op| self.ops.push(op));
+        super::sha256::emit_sha256_finalize(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4582,8 +5220,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 2,
-            "blake3Compress requires 2 arguments: chainingValue, block"
+            args.len() == 2,
+            "blake3Compress requires exactly 2 arguments (chainingValue, block), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4593,7 +5232,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::blake3::emit_blake3_compress(&mut |op| self.ops.push(op));
+        super::blake3::emit_blake3_compress(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4607,8 +5246,9 @@ impl LoweringContext {
         last_uses: &HashMap<String, usize>,
     ) {
         assert!(
-            args.len() >= 1,
-            "blake3Hash requires 1 argument: message"
+            args.len() == 1,
+            "blake3Hash requires exactly 1 argument (message), got {}",
+            args.len()
         );
         for arg in args.iter() {
             let consume = self.operand_consume(arg, args, binding_index, last_uses);
@@ -4618,7 +5258,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        super::blake3::emit_blake3_hash(&mut |op| self.ops.push(op));
+        super::blake3::emit_blake3_hash(&mut |op| self.push_delegated_op(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4641,7 +5281,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "ecAdd" => super::ec::emit_ec_add(emit),
@@ -4682,7 +5322,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "p256Add" => super::p256_p384::emit_p256_add(emit),
@@ -4730,7 +5370,7 @@ impl LoweringContext {
         self.sm.pop(); // sig
         self.sm.pop(); // msg
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         if func_name == "verifyECDSA_P256" {
             super::p256_p384::emit_verify_ecdsa_p256(emit);
@@ -4763,7 +5403,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "bbFieldAdd" => super::babybear::emit_bb_field_add(emit),
@@ -4806,7 +5446,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "kbFieldAdd" => super::koalabear::emit_kb_field_add(emit),
@@ -4849,7 +5489,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "bn254FieldAdd" => super::bn254::emit_bn254_field_add(emit),
@@ -4928,7 +5568,7 @@ impl LoweringContext {
             self.sm.pop();
         }
 
-        let emit = &mut |op: StackOp| self.ops.push(op);
+        let emit = &mut |op: StackOp| self.push_delegated_op(op);
 
         match func_name {
             "merkleRootSha256" => super::merkle::emit_merkle_root_sha256(emit, depth),
@@ -4950,7 +5590,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "safediv requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "safediv requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -4979,7 +5623,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "safemod requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "safemod requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5008,7 +5656,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "clamp requires 3 arguments");
+        assert!(
+            args.len() == 3,
+            "clamp requires exactly 3 arguments, got {}",
+            args.len()
+        );
 
         let val_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], val_consume);
@@ -5043,7 +5695,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "pow requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "pow requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let base_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], base_consume);
@@ -5055,10 +5711,26 @@ impl LoweringContext {
         self.sm.pop();
 
         // Stack: base exp
+        // THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the `pow` half).
+        // The 32 rounds below compute base^min(exp, 32). Before this guard an
+        // exponent outside 0..32 returned that CLAMPED value with no error,
+        // while `frontend/constant_fold.rs` computed the true power for
+        // exp <= 256 — so for 33 <= exp <= 256 the fold-ON and fold-OFF
+        // scripts accepted mutually exclusive inputs. A negative exponent was
+        // a third disagreement: script returned 1, interpreter threw, folder
+        // declined. Six bytes per callsite refuse the whole outside.
+        self.emit_op(StackOp::Opcode("OP_DUP".to_string()));          // base exp exp
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));  // base exp exp 0
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(
+            POW_EXPONENT_LIMIT + 1,
+        ))));                                                         // ... 33
+        self.emit_op(StackOp::Opcode("OP_WITHIN".to_string()));        // base exp (0<=exp<33)
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));        // base exp
+
         self.emit_op(StackOp::Swap);                                  // exp base
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));               // exp base 1(acc)
 
-        for i in 0..32 {
+        for i in 0..POW_EXPONENT_LIMIT {
             // Stack: exp base acc
             self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(2))));
             self.emit_op(StackOp::Opcode("OP_PICK".to_string()));     // exp base acc exp
@@ -5089,7 +5761,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 3, "mulDiv requires 3 arguments");
+        assert!(
+            args.len() == 3,
+            "mulDiv requires exactly 3 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5122,7 +5798,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "percentOf requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "percentOf requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let amount_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], amount_consume);
@@ -5141,9 +5821,60 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// sqrt(n): integer square root via Newton's method, 16 iterations.
-    /// Uses: guess = n, then 16x: guess = (guess + n/guess) / 2
-    /// Guards against n == 0 to avoid division by zero.
+    /// sqrt(n): integer square root via Newton's method, 256 iterations.
+    ///
+    /// Algorithm, identical to the constant folder and the reference
+    /// interpreter so that all three agree at every input (R-169):
+    ///
+    /// ```text
+    /// guess = n
+    /// repeat 256 times:
+    ///   next  = (guess + n / guess) / 2
+    ///   guess = min(guess, next)        // the convergence break
+    /// ```
+    ///
+    /// `OP_MIN` IS the break. Bitcoin Script has no loops, so the rounds are
+    /// unrolled and unconditional; what stops them changing the answer is that
+    /// the Newton sequence seeded at `guess = n` is strictly DECREASING while
+    /// `guess > isqrt(n)` and non-decreasing once `guess == isqrt(n)`. Clamping
+    /// each round to the running minimum makes `isqrt(n)` a fixed point and
+    /// every post-convergence round a no-op. Without the clamp the iteration
+    /// reaches `isqrt(n)` and then OSCILLATES between it and `isqrt(n)+1`, so a
+    /// fixed round count returns whichever side the parity lands on —
+    /// `sqrt(8)` = 3, `sqrt(63)` = 8.
+    ///
+    /// 256 matches the folder's bound, because seeded at `guess = n` the
+    /// iterate only halves per round until it nears sqrt(n): a correct answer
+    /// needs ~log2(n)/2 rounds (20 for 32-bit, 37 for 64-bit, 135 for 256-bit).
+    /// The previous 16 was not short by a tuning margin, it was short by an
+    /// unbounded one — `sqrt(10^12)` came out as 15280627.
+    ///
+    /// DOMAIN: exact for every `0 <= n < 2^497` (measured against
+    /// `s*s <= n < (s+1)^2`, not against a peer implementation; the narrowest
+    /// input the 256 rounds get wrong is 498 bits). Both ends are ENFORCED,
+    /// because outside them the iteration returns a wrong number rather than
+    /// failing, and a silently wrong number is the whole defect:
+    ///
+    /// ```text
+    /// OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+    /// OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n encodes in <= 62 bytes
+    /// ```
+    ///
+    /// Nine bytes, and the second is a size test rather than a comparison
+    /// against a 63-byte constant so that no tier has to agree on the encoding
+    /// of a bignum push. A minimally-encoded script number of at most 62 bytes
+    /// is at most `2^495 - 1`, so the enforced domain is `0 <= n < 2^495`,
+    /// inside the proven-exact `2^497`. The upper guard is not theoretical: a
+    /// 500-byte `n` ran to completion on the real ScriptVM and returned a wrong
+    /// root with no error.
+    ///
+    /// Guards against `n == 0` to avoid division by zero. A negative `n` in
+    /// particular is a fixed point of the min-clamped recurrence, so without
+    /// the first guard the iteration would return `n` itself. Before this the
+    /// three implementations of one builtin disagreed three ways on a negative
+    /// input: script returned `n`, interpreter threw, folder declined to fold.
+    /// Refusing is the only one of the three that is not a wrong answer, so all
+    /// three now refuse.
     fn lower_sqrt(
         &mut self,
         binding_name: &str,
@@ -5151,7 +5882,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "sqrt requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "sqrt requires exactly 1 argument, got {}",
+            args.len()
+        );
 
         let n_is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], n_is_last);
@@ -5159,6 +5894,17 @@ impl LoweringContext {
         self.sm.pop();
 
         // Stack: n
+        // Guard: refuse anything outside the exact domain (see the doc
+        // comment). Both leave n on the stack.
+        self.emit_op(StackOp::Opcode("OP_DUP".to_string())); // n n
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0)))); // n n 0
+        self.emit_op(StackOp::Opcode("OP_GREATERTHANOREQUAL".to_string())); // n (n>=0)
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string())); // n
+        self.emit_op(StackOp::Opcode("OP_SIZE".to_string())); // n size(n)
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(63)))); // n size(n) 63
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".to_string())); // n (size<63)
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string())); // n
+
         // Guard: if n == 0, skip Newton iteration entirely (result is 0).
         self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
         // Stack: n n
@@ -5170,15 +5916,17 @@ impl LoweringContext {
         newton_ops.push(StackOp::Opcode("OP_DUP".to_string()));
         // Stack: n guess
 
-        // 16 iterations of Newton's method: guess = (guess + n/guess) / 2
-        for _ in 0..16 {
+        // guess = min(guess, (guess + n/guess) / 2), 256 times.
+        for _ in 0..256 {
             // Stack: n guess
             newton_ops.push(StackOp::Over);                               // n guess n
             newton_ops.push(StackOp::Over);                               // n guess n guess
             newton_ops.push(StackOp::Opcode("OP_DIV".to_string()));      // n guess (n/guess)
-            newton_ops.push(StackOp::Opcode("OP_ADD".to_string()));      // n (guess + n/guess)
-            newton_ops.push(StackOp::Push(PushValue::Int(BigInt::from(2))));            // n (guess + n/guess) 2
-            newton_ops.push(StackOp::Opcode("OP_DIV".to_string()));      // n new_guess
+            newton_ops.push(StackOp::Over);                               // n guess (n/guess) guess
+            newton_ops.push(StackOp::Opcode("OP_ADD".to_string()));      // n guess (guess + n/guess)
+            newton_ops.push(StackOp::Push(PushValue::Int(BigInt::from(2))));            // n guess (guess + n/guess) 2
+            newton_ops.push(StackOp::Opcode("OP_DIV".to_string()));      // n guess next
+            newton_ops.push(StackOp::Opcode("OP_MIN".to_string()));      // n min(guess, next)
         }
 
         // Stack: n guess
@@ -5203,7 +5951,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "gcd requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "gcd requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5259,7 +6011,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(args.len() >= 2, "divmod requires 2 arguments");
+        assert!(
+            args.len() == 2,
+            "divmod requires exactly 2 arguments, got {}",
+            args.len()
+        );
 
         let a_consume = self.operand_consume(&args[0], args, binding_index, last_uses);
         self.bring_to_top(&args[0], a_consume);
@@ -5301,7 +6057,11 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        assert!(!args.is_empty(), "log2 requires 1 argument");
+        assert!(
+            args.len() == 1,
+            "log2 requires exactly 1 argument, got {}",
+            args.len()
+        );
 
         let n_is_last = self.is_last_use(&args[0], binding_index, last_uses);
         self.bring_to_top(&args[0], n_is_last);
@@ -5350,13 +6110,23 @@ impl LoweringContext {
 /// Lower an ANF program to Stack IR.
 /// Private methods are inlined at call sites rather than compiled separately.
 /// The constructor is skipped since it's not emitted to Bitcoin Script.
-pub fn lower_to_stack(program: &ANFProgram) -> Result<Vec<StackMethod>, String> {
+pub fn lower_to_stack(program: &ANFProgram) -> Result<Vec<StackMethod>, crate::refusal::Refusal> {
     // Convert any panic (stack underflow, unknown operator, type mismatch, or a
     // deliberate refusal) into an error return instead of crashing the process
     // — and without the default panic hook printing a crash report first. See
     // `crate::refusal`.
-    crate::refusal::catch_refusal("stack lowering", || lower_to_stack_inner(program))
-        .and_then(|inner| inner)
+    //
+    // R-138: the error carries the location `lower_binding` published for the
+    // binding it died on, so the caller can build a located Diagnostic instead
+    // of passing `None`.
+    crate::refusal::catch_refusal("stack lowering", || lower_to_stack_inner(program)).and_then(
+        |inner| {
+            inner.map_err(|message| crate::refusal::Refusal {
+                message,
+                loc: None,
+            })
+        },
+    )
 }
 
 fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String> {
@@ -5370,16 +6140,187 @@ fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String
 
     let mut methods = Vec::new();
 
+    // R-010 / CL-BUG-091: OP_CODESEPARATOR placement is a CONTRACT-level
+    // decision, taken before any method is lowered.
+    //
+    //   * If any method authenticates a `_codePart` witness, the contract gets a
+    //     single separator at offset 1 of the locking script (emitted by `emit`)
+    //     and NO per-method ones, so `scriptCode` spans the whole script and
+    //     every byte of `_codePart` is recoverable from it.
+    //   * Otherwise nothing needs authenticating, and each `checkPreimage` keeps
+    //     its own separator at the method's entry — the pre-R-010 layout, which
+    //     keeps the preimage small and, for a stateless contract, keeps a user
+    //     `checkSig` on the near side of the separator where the SDK's signing
+    //     path expects it.
+    //
+    // The two schemes are never mixed: a per-method separator emitted after the
+    // script-level one would win and re-narrow `scriptCode`.
+    let script_level_code_separator = program.methods.iter().any(|m| {
+        (m.name == "constructor" || m.is_public)
+            && compute_uses_code_part(m, &program.properties, &private_methods)
+    });
+
     for method in &program.methods {
         // Skip constructor and private methods
         if method.name == "constructor" || (!method.is_public && method.name != "constructor") {
             continue;
         }
-        let sm = lower_method_with_private_methods(method, &program.properties, &private_methods)?;
+        let sm = lower_method_with_private_methods(
+            method,
+            &program.properties,
+            &private_methods,
+            script_level_code_separator,
+        )?;
         methods.push(sm);
     }
 
+    pin_code_part_length(&mut methods, &program.properties);
+
     Ok(methods)
+}
+
+/// Baked value width, in bytes, of every fixed-size constructor-arg type.
+/// Mirrors the `raw`-encoded entries of the shared `STATE_FIELD_WIDTHS` table.
+fn constructor_slot_value_bytes(prop_type: &str) -> Option<i64> {
+    match prop_type {
+        "PubKey" => Some(33),
+        "Sha256" => Some(32),
+        "Addr" | "Ripemd160" => Some(20),
+        "Point" | "P256Point" => Some(64),
+        "P384Point" => Some(96),
+        _ => None,
+    }
+}
+
+/// Byte length of the push header `encodePushData` puts in front of an N-byte
+/// payload: the length byte itself up to 75, then OP_PUSHDATA1 / 2 / 4.
+fn push_header_len(value_bytes: i64) -> i64 {
+    if value_bytes <= 75 {
+        1
+    } else if value_bytes <= 0xff {
+        2
+    } else if value_bytes <= 0xffff {
+        3
+    } else {
+        5
+    }
+}
+
+/// Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot of
+/// this type occupies in the template, or `None` when the type has no
+/// compile-time width.
+///
+/// Mirrors the SDK's `encodeArg`: a fixed-size data type bakes as
+/// `<push header><N value bytes>` over a 1-byte placeholder, so it grows the
+/// script by `push_header_len(N) + N - 1`.
+///
+/// The header is NOT always one byte, and this function used to assume it was.
+/// `P384Point` is 96 bytes — past the 75-byte direct-push ceiling — so the SDK
+/// bakes it through OP_PUSHDATA1 as `4c 60 || <96>` and it grows the script by
+/// 97, not 96. Under-counting by one emits an `exact` pin one byte short, and
+/// every honest spend of such a contract fails OP_VERIFY with the funds already
+/// locked. Deriving the header from the width keeps the next type above 75
+/// bytes from repeating that silently.
+///
+/// A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
+/// placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
+/// Script number) and `ByteString` (arbitrary-length data push) depend on the
+/// VALUE, which the compiler never sees — those return `None` and demote the
+/// pin to a lower bound.
+fn constructor_slot_growth(prop_type: &str) -> Option<i64> {
+    if prop_type == "boolean" {
+        return Some(0);
+    }
+    let value_bytes = constructor_slot_value_bytes(prop_type)?;
+    Some(push_header_len(value_bytes) + value_bytes - 1)
+}
+
+/// Collect every `Placeholder` param index and note whether any
+/// `VerifyCodePartLen` pin is present, recursing into if/else branches.
+fn collect_code_part_len_inputs(ops: &[StackOp], placeholders: &mut Vec<usize>, has_pin: &mut bool) {
+    for op in ops {
+        match op {
+            StackOp::If { then_ops, else_ops } => {
+                collect_code_part_len_inputs(then_ops, placeholders, has_pin);
+                collect_code_part_len_inputs(else_ops, placeholders, has_pin);
+            }
+            StackOp::Placeholder { param_index, .. } => placeholders.push(*param_index),
+            StackOp::VerifyCodePartLen { .. } => *has_pin = true,
+            _ => {}
+        }
+    }
+}
+
+/// Write the resolved `delta` / `exact` onto every `VerifyCodePartLen` op.
+fn assign_code_part_len(ops: &mut [StackOp], new_delta: i64, new_exact: bool) {
+    for op in ops.iter_mut() {
+        match op {
+            StackOp::If { then_ops, else_ops } => {
+                assign_code_part_len(then_ops, new_delta, new_exact);
+                assign_code_part_len(else_ops, new_delta, new_exact);
+            }
+            StackOp::VerifyCodePartLen { delta, exact } => {
+                *delta = new_delta;
+                *exact = new_exact;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// R-095 — resolve `delta` / `exact` on every `VerifyCodePartLen` op.
+///
+/// A constructor slot exists only where a property is actually LOADED, and a
+/// method is lowered before the methods after it, so no single method knows the
+/// contract's full placeholder set. This runs once the whole program is lowered
+/// and counts the placeholders that were really emitted, so an unused readonly
+/// property contributes nothing — over-counting would inflate the pin and make
+/// every honest spend unspendable.
+///
+/// The `constructor` StackMethod is skipped because `emit` never writes it, so
+/// the placeholders it carries never become deploy-time slots. (Rust's
+/// `lower_to_stack_inner` already drops the constructor before this point; the
+/// filter mirrors `emit`'s own so the two can never drift.)
+fn pin_code_part_length(methods: &mut [StackMethod], properties: &[ANFProperty]) {
+    let mut placeholders: Vec<usize> = Vec::new();
+    let mut has_pin = false;
+    for m in methods.iter() {
+        if m.name == "constructor" {
+            continue;
+        }
+        collect_code_part_len_inputs(&m.ops, &mut placeholders, &mut has_pin);
+    }
+    if !has_pin {
+        return;
+    }
+
+    // Matches the paramIndex space `ctor_param_index_or_panic` assigns.
+    let ctor_props: Vec<&ANFProperty> = properties
+        .iter()
+        .filter(|p| p.initial_value.is_none())
+        .collect();
+
+    let mut delta: i64 = 0;
+    let mut exact = true;
+    for param_index in placeholders {
+        let prop_type = ctor_props
+            .get(param_index)
+            .map(|p| p.prop_type.as_str())
+            .unwrap_or("");
+        match constructor_slot_growth(prop_type) {
+            // No compile-time width. Growth is never negative, so the running
+            // sum stays a sound lower bound — just not an exact one.
+            None => exact = false,
+            Some(growth) => delta += growth,
+        }
+    }
+
+    for m in methods.iter_mut() {
+        if m.name == "constructor" {
+            continue;
+        }
+        assign_code_part_len(&mut m.ops, delta, exact);
+    }
 }
 
 /// Check whether a method's body contains a CheckPreimage binding,
@@ -5439,7 +6380,16 @@ fn method_uses_check_preimage_rec(
 /// continuation outputs need the _codePart implicit parameter.
 fn method_uses_code_part(bindings: &[ANFBinding]) -> bool {
     bindings.iter().any(|b| match &b.value {
-        ANFValue::AddOutput { .. } | ANFValue::AddRawOutput { .. } => true,
+        // R-287: `AddDataOutput` belongs here too. The five non-TS/Rust tiers
+        // already listed it; from source the omission was invisible because
+        // `continuation_shape` makes `has_data_output` imply a continuation,
+        // so the `computeStateOutput` arm below always fired first. The `--ir`
+        // front door carries no such coupling, and an ANF program whose only
+        // trigger is a data output compiled to a different script here than in
+        // Go / Python / Ruby / Java / Zig.
+        ANFValue::AddOutput { .. }
+        | ANFValue::AddRawOutput { .. }
+        | ANFValue::AddDataOutput { .. } => true,
         ANFValue::Call { func, .. } if func == "computeStateOutput" || func == "computeStateOutputHash" => true,
         ANFValue::If { then, else_branch, .. } => method_uses_code_part(then) || method_uses_code_part(else_branch),
         ANFValue::Loop { body, .. } => method_uses_code_part(body),
@@ -5474,7 +6424,7 @@ fn method_reads_var_len_state_rec(
 ) -> bool {
     for b in bindings {
         match &b.value {
-            ANFValue::LoadProp { name } => {
+            ANFValue::LoadProp { name, .. } => {
                 if var_len_props.contains(name) {
                     return true;
                 }
@@ -5516,10 +6466,61 @@ fn method_reads_var_len_state_rec(
     false
 }
 
+/// Whether a method's unlocking script carries the `_codePart` implicit
+/// parameter: it verifies a preimage AND either builds a continuation output or
+/// reads variable-length state (issue #100).
+///
+/// Hoisted out of `lower_method_with_private_methods` because R-010 needs the
+/// answer for EVERY method before lowering ANY of them — OP_CODESEPARATOR
+/// placement is a contract-level decision (see `lower_to_stack_inner`).
+fn compute_uses_code_part(
+    method: &ANFMethod,
+    properties: &[ANFProperty],
+    private_methods: &HashMap<String, ANFMethod>,
+) -> bool {
+    if !method_uses_check_preimage(&method.body, Some(private_methods)) {
+        return false;
+    }
+    // This predicate MUST agree with the branch `lower_deserialize_state`
+    // actually takes, and that branch keys off a CONTRACT-level fact:
+    // `has_variable_length` — does ANY mutable property carry a push-data
+    // length prefix. When one does, the state section can only be located via
+    // the `_codePart`-relative offset, so the WHOLE deserialization is gated on
+    // `_codePart`; without it the pass hits its `!self.sm.has("_codePart")`
+    // shortcut, pushes NO mutable property, and every `load_prop` falls through
+    // to the DEPLOY-TIME constructor placeholder instead of the live on-chain
+    // value.
+    //
+    // Two narrower versions of this question have already been wrong here:
+    //   R-015 (CL-BUG-138) asked the wrong TYPE question — "is it literally
+    //   ByteString" rather than what `is_variable_length_state_type` says.
+    //   R-074 asked the wrong SCOPE question — "does this method read a
+    //   var-length property", when reading the fixed-size SIBLING of one is
+    //   just as gated. A terminal read of a `bigint` next to a `ByteString`
+    //   authorised against the deploy-time value forever.
+    // So ask the deserializer's own question: if the contract has var-length
+    // state, EVERY mutable-property read needs `_codePart`.
+    let has_var_len = properties
+        .iter()
+        .any(|p| !p.readonly && is_variable_length_state_type(&p.prop_type));
+    let reads_need_code_part: HashSet<String> = if has_var_len {
+        properties
+            .iter()
+            .filter(|p| !p.readonly)
+            .map(|p| p.name.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    method_uses_code_part(&method.body)
+        || method_reads_var_len_state(&method.body, &reads_need_code_part, Some(private_methods))
+}
+
 fn lower_method_with_private_methods(
     method: &ANFMethod,
     properties: &[ANFProperty],
     private_methods: &HashMap<String, ANFMethod>,
+    script_level_code_separator: bool,
 ) -> Result<StackMethod, String> {
     let mut param_names: Vec<String> = method.params.iter().map(|p| p.name.clone()).collect();
 
@@ -5533,20 +6534,36 @@ fn lower_method_with_private_methods(
     // OR when the method reads a mutable variable-length (ByteString) state
     // field — the deserialization needs it for the preimage-relative offset
     // (issue #100).
-    let var_len_props: std::collections::HashSet<String> = properties
-        .iter()
-        .filter(|p| !p.readonly && p.prop_type == "ByteString")
-        .map(|p| p.name.clone())
-        .collect();
-    let uses_code_part = method_uses_check_preimage(&method.body, Some(private_methods))
-        && (method_uses_code_part(&method.body)
-            || method_reads_var_len_state(&method.body, &var_len_props, Some(private_methods)));
+    // (The var-length property set itself lives in `compute_uses_code_part`,
+    // which R-010 hoisted out of this function; the copy that used to sit here
+    // was dead and, being a second hand-maintained copy of the type list, was
+    // the R-015 divergence waiting to happen again.)
+    let uses_code_part = compute_uses_code_part(method, properties, private_methods);
     if uses_code_part {
         param_names.insert(0, "_codePart".to_string());
     }
 
     let mut ctx = LoweringContext::new(&param_names, properties);
     ctx.private_methods = private_methods.clone();
+    // R-010: when `emit` places the script-level separator, `lower_check_preimage`
+    // must NOT emit a per-method one — a later separator would win and re-narrow
+    // `scriptCode`, undoing the `_codePart` authentication.
+    ctx.script_level_code_separator = script_level_code_separator;
+
+    // W3 / BoolBamboozle: a public method's `boolean` parameters arrive from
+    // the unlocking script as arbitrary bytes. Pin each of them to the ABI
+    // domain {empty, 0x01} before a single body opcode runs — see
+    // `emit_boolean_param_gate`. Constructor args are baked into the locking
+    // script by the assembler, never pushed by a spender, so only public
+    // methods need the gate.
+    if method.is_public {
+        for p in &method.params {
+            if p.param_type == "boolean" {
+                ctx.emit_boolean_param_gate(&p.name);
+            }
+        }
+    }
+
     // Pass terminal_assert=true for public methods so the last assert leaves
     // its value on the stack (Bitcoin Script requires a truthy top-of-stack).
     ctx.lower_bindings(&method.body, method.is_public);
@@ -5577,6 +6594,7 @@ fn lower_method_with_private_methods(
         ops: ctx.ops,
         max_stack_depth: ctx.max_depth,
         uses_code_part,
+        needs_code_separator: script_level_code_separator,
     })
 }
 
@@ -5584,6 +6602,22 @@ fn lower_method_with_private_methods(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Decode a hex string into bytes, STRICTLY.
+///
+/// N-132: the length check was already here, but each pair was then decoded
+/// with `u8::from_str_radix(..).unwrap_or(0)` — so a pair that is not hex
+/// became `0x00` and the function could not fail. Measured on a property's
+/// `initialValue`, where the two callers are: `"zz"` pushed `0x00` and
+/// `"1.5n"` pushed `0x0000`, while go, python, zig and java all refused both.
+/// Bytes in a locking script that the IR did not contain, arrived at by a
+/// decoder with no failure mode — the same shape as the float boundary
+/// (N-131), in the one decoder nobody audited because a bad hex string looks
+/// obviously bad.
+///
+/// Panicking rather than returning `Result` matches the length check directly
+/// above and the rest of this pass: `compile_from_ir_str` wraps stack lowering
+/// in `catch_unwind`, so the refusal reaches the CLI as `Compilation error:
+/// stack lowering: …` and exit 1, exactly as the odd-length case already did.
 fn hex_to_bytes(hex_str: &str) -> Vec<u8> {
     if hex_str.is_empty() {
         return Vec::new();
@@ -5595,7 +6629,10 @@ fn hex_to_bytes(hex_str: &str) -> Vec<u8> {
     );
     (0..hex_str.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap_or(0))
+        .map(|i| {
+            u8::from_str_radix(&hex_str[i..i + 2], 16)
+                .unwrap_or_else(|_| panic!("invalid hex string: {hex_str}"))
+        })
         .collect()
 }
 
@@ -5651,6 +6688,7 @@ mod tests {
                         name: "t2".to_string(),
                         value: ANFValue::LoadProp {
                             name: "pubKeyHash".to_string(),
+                            preserve: false,
                         },
                         source_loc: None,
                     },
@@ -6807,7 +7845,7 @@ mod tests {
                     },
                     ANFBinding {
                         name: "t3".to_string(),
-                        value: ANFValue::LoadProp { name: "target".to_string() },
+                        value: ANFValue::LoadProp { name: "target".to_string(), preserve: false },
                         source_loc: None,
                     },
                     ANFBinding {

@@ -31,10 +31,11 @@ import type {
   BinOp,
   ANFUnaryOp,
 } from '../ir/index.js';
-import { MERGED_LOCAL_TEMP_PREFIX } from '../ir/index.js';
+import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.js';
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
+import { isByteStringFamilyType } from './03-typecheck.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
 
@@ -76,6 +77,21 @@ function lowerProperties(contract: ContractNode): ANFProperty[] {
       type: typeNodeToString(prop.type),
       readonly: prop.readonly,
     };
+
+    // N-103: carry the expand-fixed-arrays marker into the ANF. The assembler
+    // regroups the synthetic leaves back into one FixedArray state/ABI entry
+    // from this chain, and the other six tiers all write it (N-095), so an ANF
+    // without it is both a 1-vs-6 divergence against `expected-ir.json` and an
+    // artifact whose `state.grid` accessor degrades into N raw scalars. Omitted
+    // — not emitted empty — on ordinary properties, which is what keeps every
+    // non-FixedArray contract's ANF bytes unchanged.
+    if (prop.__syntheticArrayChain && prop.__syntheticArrayChain.length > 0) {
+      anfProp.syntheticArrayChain = prop.__syntheticArrayChain.map(level => ({
+        base: level.base,
+        index: level.index,
+        length: level.length,
+      }));
+    }
 
     // Extract literal value from property initializer. A property the
     // constructor assigns a PARAMETER to carries no compile-time value: the
@@ -215,6 +231,21 @@ function extractLiteralValue(expr: Expression): string | bigint | boolean | unde
     case 'unary_expr':
       if (expr.op === '-' && expr.operand.kind === 'bigint_literal') {
         return -expr.operand.value;
+      }
+      return undefined;
+    case 'call_expr':
+      // `toByteString('<hex>')` IS the ByteStringLiteral production (see
+      // spec/grammar.md section 11 and the peer check in 02-validate.ts).
+      // UNWRAP it so `initialValue` holds the bare value, byte-identical to
+      // what the bare `'<hex>'` spelling produces. Without this the validator
+      // would accept the property and this function would return `undefined`
+      // for it -- silently DROPPING the default rather than storing a call
+      // node. Literal argument only.
+      if (
+        expr.callee.kind === 'identifier' && expr.callee.name === 'toByteString'
+        && expr.args.length === 1 && expr.args[0]!.kind === 'bytestring_literal'
+      ) {
+        return expr.args[0]!.value;
       }
       return undefined;
     default:
@@ -528,24 +559,26 @@ function lowerParams(params: ParamNode[]): ANFParam[] {
 }
 
 /**
- * Issue #109: emit the DCE-surviving preservation pair for each
+ * Issue #109: emit the DCE-surviving preservation `load_prop` for each
  * `@embedAlways` readonly field, into the given (public) method context.
  *
- * Reproduces exactly what a hand-written `const _bind = this.field;` lowers
- * to: a `load_prop` followed by a `load_const("@ref:<t>")` alias. The alias
- * marks the `load_prop` as referenced (see `collectRefsFromValue` in
- * `optimizer/dce.ts`), so dead-binding DCE keeps it; stack lowering then
- * emits the field's constructor-slot placeholder and NIPs the unused value
- * off the stack at method end. The field's bytes therefore remain in the
- * deployed locking script for downstream recovery.
+ * The injected `load_prop` carries `[PRESERVE]: true`, so `hasSideEffect` in
+ * `optimizer/dce.ts` keeps it even though nothing references it; stack
+ * lowering then emits the field's constructor-slot placeholder and NIPs the
+ * unused value off the stack at method end. The field's bytes therefore
+ * remain in the deployed locking script for downstream recovery.
+ *
+ * This used to emit an alias pair instead — the `load_prop` plus a
+ * `load_const("@ref:<t>")` whose only job was to make the `load_prop` look
+ * referenced. That survives ONE DCE sweep but not the fixed-point loop in
+ * `optimizer/dce.ts`: sweep 1 drops the now-unreferenced alias, sweep 2 then
+ * drops the `load_prop` it was protecting, and both halves vanish. Marking the
+ * node itself does not depend on a referencing binding surviving. Mirrors the
+ * Zig reference (`compilers/zig/src/passes/anf_lower.zig`).
  */
 function emitEmbedAlwaysPreservation(ctx: LoweringContext, fields: PropertyNode[]): void {
   for (const field of fields) {
-    const loadRef = ctx.emit({ kind: 'load_prop', name: field.name });
-    ctx.emitNamed(`__embedAlways_${field.name}`, {
-      kind: 'load_const',
-      value: `@ref:${loadRef}`,
-    });
+    ctx.emit({ kind: 'load_prop', name: field.name, [PRESERVE]: true });
   }
 }
 
@@ -567,12 +600,6 @@ class MethodScope {
   readonly autoInjectedParams: ANFParam[] = [];
   /** Dedup set keyed by param name. */
   private readonly autoInjectedSet: Set<string> = new Set();
-  /**
-   * Idempotency flag: requireOutputP2PKH emits its
-   * `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
-   * check at most once per method body, even if called multiple times.
-   */
-  didEmitHashOutputsCheck = false;
 
   /** Idempotent — second call with the same name is a no-op. */
   recordAutoInjectedParam(name: string, type: string): void {
@@ -647,6 +674,23 @@ class LoweringContext {
    * which leaves it with no correct lowering at all.
    */
   nested = false;
+
+  /**
+   * R-072. `requireOutputP2PKH` emits its
+   * `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)` commitment
+   * at most once per CONTROL-FLOW PATH — deliberately NOT on `methodScope`.
+   *
+   * A sub-context inherits the flag from its parent, because a commitment on a
+   * dominating path really has been established by the time the nested block
+   * runs. Its WRITES stay local, so an `if`'s two arms cannot latch the flag for
+   * each other. Exactly one arm executes on chain, and the arm-local per-output
+   * assertion only compares a substring of the spender-supplied
+   * `_serialisedOutputs` witness: an arm without its own commitment constrains
+   * nothing about the transaction's real outputs, and the bond it claims to
+   * enforce can be satisfied by bytes the spender invented. Mirrors the Python
+   * reference (`compilers/python/runar_compiler/frontend/anf_lower.py`).
+   */
+  didEmitHashOutputsCheck = false;
 
   constructor(contract: ContractNode, sideEffects: SideEffectSummary | null = null) {
     this.contract = contract;
@@ -741,6 +785,38 @@ class LoweringContext {
   /** Look up a private method by name. */
   getPrivateMethod(name: string): MethodNode | undefined {
     return this.contract.methods.find(m => m.name === name && m.visibility === 'private');
+  }
+
+  /**
+   * Refuse a call to a private method whose argument count does not match
+   * that method's parameter count.
+   *
+   * R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+   * table first, while ANF lowering resolves it against the contract's
+   * private methods first. A private method that shadows a builtin name with
+   * a different arity — `private min(a, b, c)` called as `min(x, y)` —
+   * therefore passes the arity check for `min` the BUILTIN and then lowers as
+   * `min` the METHOD. Nothing forbids the shadowing.
+   *
+   * Downstream, params and args were zipped with `i < params.length && i <
+   * args.length`, so the surplus was dropped on the floor: the extra argument
+   * was evaluated and discarded, or the unbound parameter compiled to a
+   * dangling reference. When the unbound parameter happened to be UNUSED the
+   * contract compiled clean — an arity mismatch silently accepted. When it was
+   * used, it surfaced two passes later as "method parameter 'c' is not on the
+   * stack", naming a pass the author never wrote in.
+   *
+   * Refused here, where both counts are known, on every call form (`m(x)`,
+   * `this.m(x)`, member `this.m(x)`) and for both the inlined and the
+   * `method_call` lowering path.
+   */
+  checkPrivateCallArity(name: string, argRefs: string[]): void {
+    const method = this.getPrivateMethod(name);
+    if (!method) return;
+    if (method.params.length === argRefs.length) return;
+    throw new Error(
+      `private method '${name}' expects ${method.params.length} argument(s), got ${argRefs.length}.`,
+    );
   }
 
   /**
@@ -842,7 +918,15 @@ class LoweringContext {
 
   /** Create a sub-context for nested blocks (if/else, loops). */
   subContext(): LoweringContext {
-    const sub = new LoweringContext(this.contract);
+    // Forward the side-effect summary. Without it `shouldInlinePrivate`
+    // short-circuits on `!this.sideEffects` in every nested context, so a
+    // `this.helper(...)` that emits an output stays a `method_call` inside an
+    // `if` arm / loop body: the arm registers no output refs (so
+    // `branchOutputRejectionReason` never runs), the method's continuation
+    // hash omits the output — and stack lowering splices the output bytes in
+    // anyway. The script then builds an output `hashOutputs` does not commit
+    // to, which a spending tx is free to drop.
+    const sub = new LoweringContext(this.contract, this.sideEffects);
     sub.counter = this.counter;
     // Share the parameter, local name sets, and aliases
     for (const p of this.paramNames) sub.paramNames.add(p);
@@ -850,9 +934,37 @@ class LoweringContext {
     for (const l of this.localNames) sub.localNames.add(l);
     for (const b of this.localByteVars) sub.localByteVars.add(b);
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
+    // Deep-copy the inlined-param alias stack. `inlinePrivateMethodCall`
+    // pushes the caller's argument refs onto the CURRENT context before
+    // lowering the private body; without this, an if arm / loop body /
+    // ternary arm inside that body lowers with no aliases and falls through
+    // to `load_param` naming the PRIVATE's own parameter — which resolves to
+    // the CALLER's same-named parameter instead of the argument that was
+    // passed in. `spec/semantics.md` §6.3 makes inlining substitution, so the
+    // helper form and the hand-inlined form must compile to the same script.
+    // Copied (not shared) because push/pop inside the nested block are
+    // balanced there and must not disturb the parent's frames.
+    for (const [k, v] of this.paramAliasStack) sub.paramAliasStack.set(k, [...v]);
+    // Issue #123 / R-082: carry the method's declared @sighash mode. A manual
+    // `checkPreimage(pre)` inside an if arm, a loop body or a ternary arm is
+    // still a call in THIS method, so it must bind under THIS method's mode.
+    // Without this the nested call lowered with `sighashFlag: undefined` and
+    // `lowerCheckPreimage` appended the default ALL|FORKID flag byte to the
+    // OP_PUSH_TX binding blob — while `abi.methods[].sigHashType`, which reads
+    // `method.sighashType` directly, still advertised the declared mode. One
+    // compile produced an artifact that contradicted itself: the SDK signs the
+    // preimage under the ABI's mode, the script derives its sighash under the
+    // blob's, OP_CHECKSIGVERIFY aborts, and the branch is unspendable.
+    // Go's subContext already carried it; this matches it.
+    sub.sighashFlag = this.sighashFlag;
     // Share the method scope so auto-injection from intrinsics called
     // inside the nested block bubbles up to the parent's ABI list.
     sub.methodScope = this.methodScope;
+    // R-072: inherit the per-path hashOutputs commitment flag by VALUE. The
+    // parent's commitment dominates this block, so it need not be repeated —
+    // but a commitment emitted inside this block does not flow back out, so a
+    // sibling arm cannot inherit a commitment that never runs on its path.
+    sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
     sub.nested = true;
     return sub;
   }
@@ -1623,6 +1735,24 @@ function extractLoopShape(
   if (stmt.condition.kind !== 'binary_expr') {
     throw new Error('Cannot determine loop bound at compile time. For-loop bounds must be integer literals.');
   }
+  // W4 backstop. The user-facing refusal lives in `02-validate.ts`, which is
+  // where a diagnostic with a source location belongs -- but `lowerToANF` is a
+  // public export, so `parse()` -> `lowerToANF()` reaches here having run no
+  // validator at all. Without this the count would come from `bound - start`
+  // while the condition tested something else entirely, and the loop would
+  // unroll more times than the source says: `i + 1n < 2n` runs once in the
+  // source language and twice here. R-012 is this repo's standing lesson about
+  // a check that lives in exactly one pass.
+  if (
+    stmt.condition.left.kind !== 'identifier' ||
+    stmt.condition.left.name !== stmt.init.name
+  ) {
+    throw new Error(
+      `For loop condition must compare the loop variable '${stmt.init.name}' to a ` +
+      'compile-time constant; the left-hand side is not the iterator, so the unrolled ' +
+      'trip count would not be the one the source asks for.',
+    );
+  }
   const op = stmt.condition.op;
   const bound = extractBigIntValue(stmt.condition.right);
   if (bound === null) {
@@ -1651,7 +1781,18 @@ function extractLoopShape(
     }
   }
 
-  return { start, step, count: Math.max(0, Number(count)) };
+  // Range-check the arbitrary-precision count BEFORE narrowing it.
+  // `Number(count)` silently loses precision above 2^53 and becomes `Infinity`
+  // above ~1.8e308, so the unroll loop downstream used to run an astronomically
+  // large — or literally infinite — number of iterations, exhausting the heap
+  // rather than reporting anything. The ceiling is what actually stops it:
+  // 10001 fits every machine integer there is. CL-BUG-088.
+  if (count > BigInt(MAX_LOOP_COUNT)) {
+    throw new Error(
+      `For loop unrolls to ${count} iterations, exceeding the maximum loop count of ${MAX_LOOP_COUNT}.`,
+    );
+  }
+  return { start, step, count: count > 0n ? Number(count) : 0 };
 }
 
 /**
@@ -1946,6 +2087,29 @@ function lowerCallExpr(
   const callee = expr.callee;
   const normalizedAddOutputArgs = flattenAddOutputArgs(expr.args);
 
+  // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+  // spec/grammar.md section 11:
+  //
+  //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+  //
+  // so it must reach the IR as a literal, indistinguishable from the bare
+  // `'<hex>'` spelling the other surfaces use. Lowering it to a `toByteString`
+  // call node instead made the `.runar.rs` surface -- where a bare literal is
+  // not valid Rust and this wrapper is the ONLY spelling that is both valid
+  // Rust and valid Rúnar -- unable to match the one `expected-ir.json` every
+  // format is compared against.
+  //
+  // Literal argument only. `toByteString(x)` for a non-literal `x` is not this
+  // production; it stays an identity-cast call node (the typechecker types it
+  // ByteString -> ByteString and stack lowering already treats it as a no-op),
+  // so its behaviour is unchanged.
+  if (
+    callee.kind === 'identifier' && callee.name === 'toByteString'
+    && expr.args.length === 1 && expr.args[0]!.kind === 'bytestring_literal'
+  ) {
+    return lowerExprToRef(expr.args[0]!, ctx);
+  }
+
   // super(...) call -- emit property initializations
   if (callee.kind === 'identifier' && callee.name === 'super') {
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
@@ -2042,15 +2206,17 @@ function lowerCallExpr(
   // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
   // (once per method) and emits hash256(serialisedOutputs) ==
   // extractOutputHash(txPreimage) the first time the intrinsic is called
-  // in a method body. Subsequent calls in the same method skip the
-  // hashOutputs check (already established) and emit only the per-output
-  // substring assertion.
+  // on a given CONTROL-FLOW PATH. A later call on the same path skips the
+  // commitment (already established there) and emits only the per-output
+  // substring assertion; a call on a path the commitment does not dominate
+  // emits its own (R-072 — the substring assertion alone only constrains the
+  // spender-supplied witness, not the transaction).
   //
-  // v1 assumes all outputs in the serialised set are exactly 34 bytes
-  // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
-  // of output i is i*34. If the method also calls this.addDataOutput(...)
-  // the assumption breaks (variable-length OP_RETURN) — typecheck
-  // rejects that mix; see checkMethod in 03-typecheck.ts (Crit-3).
+  // Byte offset of output i is i*34, which is only an output BOUNDARY when
+  // every earlier output is exactly 34 bytes — and nothing in a transaction
+  // makes that true. v1 therefore accepts index 0 ONLY (W2 / OutputInception);
+  // see the refusal in 03-typecheck.ts for the full reasoning and the backstop
+  // below for why it is stated twice.
   if (callee.kind === 'identifier' && callee.name === 'requireOutputP2PKH') {
     if (expr.args.length !== 3) {
       return ctx.emit({ kind: 'load_const', value: '' });
@@ -2060,13 +2226,29 @@ function lowerCallExpr(
       return ctx.emit({ kind: 'load_const', value: '' });
     }
     const idx = idxArg.value;
+    // W2 backstop. The user-facing refusal lives in `03-typecheck.ts`, where a
+    // diagnostic carries a source location — but `lowerToANF` is a PUBLIC
+    // export, so `parse()` -> `lowerToANF()` arrives here having type-checked
+    // nothing, and that is the path this repo's own intent tests take. R-012 is
+    // the standing lesson about a security check that lives in exactly one
+    // pass. Throws rather than returning a diagnostic: in the normal pipeline
+    // typecheck answers first and this is unreachable.
+    if (idx !== 0n) {
+      throw new Error(
+        `requireOutputP2PKH: outputIndex must be 0; got ${idx.toString()}. The emitted ` +
+        'assertion reads output i at byte offset i*34, which is an output boundary only ' +
+        'if every earlier output is exactly 34 bytes — an attacker sizes output 0 freely ' +
+        "and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset.",
+      );
+    }
 
     ctx.methodScope.recordAutoInjectedParam('_serialisedOutputs', 'ByteString');
     ctx.addParam('_serialisedOutputs');
 
-    // Emit the hashOutputs(preimage) check exactly once per method.
-    if (!ctx.methodScope.didEmitHashOutputsCheck) {
-      ctx.methodScope.didEmitHashOutputsCheck = true;
+    // Emit the hashOutputs(preimage) commitment once per control-flow path
+    // (R-072 — see LoweringContext.didEmitHashOutputsCheck).
+    if (!ctx.didEmitHashOutputsCheck) {
+      ctx.didEmitHashOutputsCheck = true;
       const serialisedRef = ctx.emit({ kind: 'load_param', name: '_serialisedOutputs' });
       const actualOutHashRef = ctx.emit({ kind: 'call', func: 'hash256', args: [serialisedRef] });
       const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
@@ -2210,6 +2392,7 @@ function lowerCallExpr(
   // private method with continuation-relevant side effects).
   if (callee.kind === 'property_access') {
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    ctx.checkPrivateCallArity(callee.property, argRefs);
     if (ctx.shouldInlinePrivate(callee.property)) {
       return inlinePrivateMethodCall(callee.property, argRefs, ctx);
     }
@@ -2224,6 +2407,7 @@ function lowerCallExpr(
       callee.object.kind === 'identifier' &&
       callee.object.name === 'this') {
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    ctx.checkPrivateCallArity(callee.property, argRefs);
     if (ctx.shouldInlinePrivate(callee.property)) {
       return inlinePrivateMethodCall(callee.property, argRefs, ctx);
     }
@@ -2243,6 +2427,7 @@ function lowerCallExpr(
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
     const isPrivateMethod = ctx.isPrivateMethod(callee.name);
     if (isPrivateMethod) {
+      ctx.checkPrivateCallArity(callee.name, argRefs);
       if (ctx.shouldInlinePrivate(callee.name)) {
         return inlinePrivateMethodCall(callee.name, argRefs, ctx);
       }
@@ -2324,8 +2509,28 @@ function inlinePrivateMethodCall(
   if (endIndex > startIndex) {
     return ctx.bindings[endIndex - 1]!.name;
   }
-  // Empty body — emit a load_const placeholder so the caller has a ref.
-  return ctx.emit({ kind: 'load_const', value: '@void' });
+  // R-290: the body emitted nothing, so there is no value for the caller
+  // to reference.
+  //
+  // Refuse it. The alternative is what was here before: a `load_const "@void"`
+  // sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+  // special-cased). It survived pass 4 and died in pass 6's hex decoder —
+  // "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+  // messages that name neither the method nor the problem, and that only fire
+  // because the string happens to be odd-length and non-hex. An even-length
+  // sentinel would decode to zeros in the Rust decoder's
+  // `from_str_radix(..).unwrap_or(0)` and reach the script.
+  //
+  // Reachable from source that parses, validates and type-checks: declare a public
+  // method BEFORE two same-named privates. The side-effect summary resolves the
+  // name through a last-wins map and caches the OUTPUT-EMITTING one, so
+  // `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+  // whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+  // IR, `--hex` exit 1 with the hex-decoder message.
+  throw new Error(
+    `private method '${methodName}' was inlined but produced no bindings, so the ` +
+      `call site has no value to reference.`,
+  );
 }
 
 function flattenAddOutputArgs(args: Expression[]): Expression[] {
@@ -2477,21 +2682,56 @@ function lowerDecrementExpr(
 // Type inference helpers for equality semantics
 // ---------------------------------------------------------------------------
 
-/** Byte-typed primitive names — values that are already byte sequences. */
-const BYTE_TYPES = new Set([
-  'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160', 'Addr', 'SigHashPreimage', 'Point',
-  'P256Point', 'P384Point',
-]);
+/**
+ * Byte-typed primitive names — values that are already byte sequences.
+ *
+ * N-076: there is deliberately no list here. The type checker's
+ * `BYTESTRING_SUBTYPES` is the authority and `isByteStringFamilyType` exposes
+ * it; a second, hand-maintained copy is how `RabinSig` / `RabinPubKey` ended
+ * up annotated `bytes` in six of seven tiers while every one of those tiers'
+ * own type checkers filed them under `BIGINT_SUBTYPES` — which made `===` on a
+ * Rabin value emit OP_EQUAL and, far worse, `+` on one emit OP_CAT.
+ */
+
+/**
+ * Preimage field extractors that return BYTES (`ByteString` / `Sha256`).
+ *
+ * N-054: this list is the ONLY correct one, and it is not a judgement call —
+ * it is a transcription of the `returnType` the type checker already records
+ * for these builtins in `03-typecheck.ts`, and the stack lowerer agrees with
+ * it byte for byte: `lowerExtractor` ends the split sequence with OP_BIN2NUM
+ * for exactly the SIX extractors that are NOT in this set, and for none of
+ * the ones that are.
+ *
+ * So an extractor in this set leaves a byte string on the stack and must be
+ * compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+ * leaves a minimally-encoded script NUMBER and must be compared with
+ * OP_NUMEQUAL and added with OP_ADD.
+ *
+ * Getting it backwards is a correctness defect in both directions. OP_EQUAL
+ * on a number is over-strict — it rejects a witness that encodes the same
+ * value with different bytes (`0400` for 4), i.e. it refuses a valid spend.
+ * OP_NUMEQUAL on a hash or a scriptCode is under-strict — trailing high-order
+ * zero bytes and negative zero compare equal to values they are not
+ * byte-equal to, i.e. a covenant bypass.
+ *
+ * Do NOT re-derive this from a `name.startsWith('extract')` prefix test: five
+ * tiers did exactly that and swept the six numeric extractors in with it.
+ */
+const BYTE_RETURNING_EXTRACTORS = [
+  'extractHashPrevouts', 'extractHashSequence', 'extractOutpoint',
+  'extractScriptCode', 'extractOutputHash', 'extractOutputs',
+  'extractPrevOutputScript',
+] as const;
 
 /** Builtin functions that return byte-typed values. */
-const BYTE_RETURNING_FUNCTIONS = new Set([
+const BYTE_RETURNING_FUNCTIONS = new Set<string>([
   'sha256', 'ripemd160', 'hash160', 'hash256', 'cat', 'num2bin', 'int2str',
   'reverseBytes', 'substr', 'left', 'right',
   'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
   'p256Add', 'p256Mul', 'p256MulGen', 'p256Negate', 'p256EncodeCompressed',
   'p384Add', 'p384Mul', 'p384MulGen', 'p384Negate', 'p384EncodeCompressed',
-  'extractOutpoint', 'extractHashPrevouts', 'extractHashSequence', 'extractOutputHash',
-  'extractVersion', 'extractLocktime', 'extractSigHashType',
+  ...BYTE_RETURNING_EXTRACTORS,
   'blake3Compress', 'blake3Hash',
 ]);
 
@@ -2507,9 +2747,9 @@ function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
     case 'identifier': {
       // Check if it's a parameter or property with a byte type
       const paramType = ctx.getParamType(expr.name);
-      if (paramType && BYTE_TYPES.has(paramType)) return true;
+      if (paramType && isByteStringFamilyType(paramType)) return true;
       const propType = ctx.getPropertyType(expr.name);
-      if (propType && BYTE_TYPES.has(propType)) return true;
+      if (propType && isByteStringFamilyType(propType)) return true;
       // Check if it's a local variable known to be byte-typed
       if (ctx.isLocalByteVar(expr.name)) return true;
       return false;
@@ -2518,14 +2758,14 @@ function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
     case 'property_access': {
       // this.x — check the property type
       const propType = ctx.getPropertyType(expr.property);
-      if (propType && BYTE_TYPES.has(propType)) return true;
+      if (propType && isByteStringFamilyType(propType)) return true;
       return false;
     }
 
     case 'member_expr': {
       if (expr.object.kind === 'identifier' && expr.object.name === 'this') {
         const propType = ctx.getPropertyType(expr.property);
-        if (propType && BYTE_TYPES.has(propType)) return true;
+        if (propType && isByteStringFamilyType(propType)) return true;
       }
       return false;
     }
@@ -2954,6 +3194,29 @@ function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
         thenBindings.push({
           name: newName,
           value: remapValueRefs(vb.value, branchMap),
+        });
+      }
+
+      // An arm's VALUE is its LAST binding. `valueBindings` is everything
+      // before the original `update_prop`, which ends on the assigned value
+      // only when that value was computed INSIDE the arm. When the arm assigns
+      // something bound outside it — a local, or anything hoisted before the
+      // chain — `valueBindings` does not contain it and is usually empty, so
+      // the arm was emitted EMPTY and stack lowering padded it with a zero
+      // push: `if (p == 0n) { this.c0 = someLocal; }` compiled to
+      // `this.c0 = 0`, silently corrupting state on the MATCHED branch.
+      // (TicTacToe's `this.cN = this.turn` escapes only because its
+      // `load_prop` lands inside the arm.)
+      //
+      // Materialise the value explicitly whenever the arm does not already end
+      // on it. When it does — every shape that compiled correctly before —
+      // this is a no-op and no bytes move.
+      const mappedValueRef = branchMap[branch.valueRef] ?? branch.valueRef;
+      const thenLast = thenBindings[thenBindings.length - 1];
+      if (!thenLast || thenLast.name !== mappedValueRef) {
+        thenBindings.push({
+          name: fresh(),
+          value: { kind: 'load_const', value: `@ref:${mappedValueRef}` },
         });
       }
 

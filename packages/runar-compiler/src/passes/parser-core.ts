@@ -38,11 +38,17 @@ export abstract class ParserCore<T extends Token = Token> {
   protected tokens: T[];
   protected pos = 0;
   protected file: string;
-  protected errors: CompilerDiagnostic[] = [];
+  protected errors: CompilerDiagnostic[];
 
-  constructor(tokens: T[], file: string) {
+  /**
+   * `errors` is passed in (rather than created here) so a tokenizer can seed
+   * lexical diagnostics — an unrecognized character, say — that the parser
+   * then carries through to `ParseResult.errors`.
+   */
+  constructor(tokens: T[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
+    this.errors = errors;
   }
 
   // -----------------------------------------------------------------------
@@ -99,91 +105,101 @@ export abstract class ParserCore<T extends Token = Token> {
   }
 
   private parseOr(): Expression {
+    const start = this.loc();
     let left = this.parseAnd();
     while (this.current().type === '||') {
       this.advance();
-      left = { kind: 'binary_expr', op: '||', left, right: this.parseAnd() };
+      left = { kind: 'binary_expr', op: '||', left, right: this.parseAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseAnd(): Expression {
+    const start = this.loc();
     let left = this.parseBitOr();
     while (this.current().type === '&&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr() };
+      left = { kind: 'binary_expr', op: '&&', left, right: this.parseBitOr(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitOr(): Expression {
+    const start = this.loc();
     let left = this.parseBitXor();
     while (this.current().type === '|' && this.tokens[this.pos + 1]?.type !== '|') {
       this.advance();
-      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor() };
+      left = { kind: 'binary_expr', op: '|', left, right: this.parseBitXor(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitXor(): Expression {
+    const start = this.loc();
     let left = this.parseBitAnd();
     while (this.current().type === '^') {
       this.advance();
-      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd() };
+      left = { kind: 'binary_expr', op: '^', left, right: this.parseBitAnd(), sourceLocation: start };
     }
     return left;
   }
 
   private parseBitAnd(): Expression {
+    const start = this.loc();
     let left = this.parseEquality();
     while (this.current().type === '&' && this.tokens[this.pos + 1]?.type !== '&') {
       this.advance();
-      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality() };
+      left = { kind: 'binary_expr', op: '&', left, right: this.parseEquality(), sourceLocation: start };
     }
     return left;
   }
 
   private parseEquality(): Expression {
+    const start = this.loc();
     let left = this.parseComparison();
     while (this.current().type === '==' || this.current().type === '!=') {
       const op: BinaryOp = this.advance().type === '==' ? '===' : '!==';
-      left = { kind: 'binary_expr', op, left, right: this.parseComparison() };
+      left = { kind: 'binary_expr', op, left, right: this.parseComparison(), sourceLocation: start };
     }
     return left;
   }
 
   private parseComparison(): Expression {
+    const start = this.loc();
     let left = this.parseShift();
     while (['<', '<=', '>', '>='].includes(this.current().type)) {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseShift() };
+      left = { kind: 'binary_expr', op, left, right: this.parseShift(), sourceLocation: start };
     }
     return left;
   }
 
   private parseShift(): Expression {
+    const start = this.loc();
     let left = this.parseAddSub();
     while (this.current().type === '<<' || this.current().type === '>>') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseAddSub() };
+      left = { kind: 'binary_expr', op, left, right: this.parseAddSub(), sourceLocation: start };
     }
     return left;
   }
 
   private parseAddSub(): Expression {
+    const start = this.loc();
     let left = this.parseMulDiv();
     while (this.current().type === '+' || this.current().type === '-') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv() };
+      left = { kind: 'binary_expr', op, left, right: this.parseMulDiv(), sourceLocation: start };
     }
     return left;
   }
 
   private parseMulDiv(): Expression {
+    const start = this.loc();
     let left = this.parseUnary();
     while (this.current().type === '*' || this.current().type === '/' || this.current().type === '%') {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseUnary() };
+      left = { kind: 'binary_expr', op, left, right: this.parseUnary(), sourceLocation: start };
     }
     return left;
   }
@@ -220,7 +236,14 @@ export abstract class ParserCore<T extends Token = Token> {
    * `property_access` node instead of a `member_expr`.
    */
   protected parsePostfixChain(expr: Expression, selfNames: Set<string>): Expression {
+    // R-142: every node built here carries a location. This method builds the
+    // call / member / index nodes for the Solidity, Move, Go, Rust, Python, Zig
+    // and Java surface parsers, so the one missing field left the typechecker's
+    // fifteen `expr.sourceLocation` reads unlocated on seven surfaces at once.
+    // The location is the postfix operator's own token, which is the closest
+    // thing to "where the call is" that a chain like `a.b(c)[d]` has.
     while (true) {
+      const at = this.loc();
       if (this.current().type === '(') {
         // Function call
         this.advance();
@@ -230,22 +253,22 @@ export abstract class ParserCore<T extends Token = Token> {
           if (this.current().type === ',') this.advance();
         }
         this.expect(')');
-        expr = { kind: 'call_expr', callee: expr, args };
+        expr = { kind: 'call_expr', callee: expr, args, sourceLocation: at };
       } else if (this.current().type === '.') {
         this.advance();
         const prop = this.current().value;
         this.advance();
         // self.property -> PropertyAccessExpr
         if (expr.kind === 'identifier' && selfNames.has(expr.name)) {
-          expr = { kind: 'property_access', property: prop };
+          expr = { kind: 'property_access', property: prop, sourceLocation: at };
         } else {
-          expr = { kind: 'member_expr', object: expr, property: prop };
+          expr = { kind: 'member_expr', object: expr, property: prop, sourceLocation: at };
         }
       } else if (this.current().type === '[') {
         this.advance();
         const index = this.parseExpression();
         this.expect(']');
-        expr = { kind: 'index_access', object: expr, index };
+        expr = { kind: 'index_access', object: expr, index, sourceLocation: at };
       } else {
         break;
       }

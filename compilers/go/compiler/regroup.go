@@ -50,7 +50,7 @@ type regroupEntry struct {
 // and collapses each into a single entry wrapping the type in one more
 // FixedArray layer. Returns `changed=true` if at least one group was
 // formed.
-func regroupOnePass(entries []regroupEntry) ([]regroupEntry, bool) {
+func regroupOnePass(entries []regroupEntry) ([]regroupEntry, bool, error) {
 	var out []regroupEntry
 	changed := false
 	i := 0
@@ -64,9 +64,14 @@ func regroupOnePass(entries []regroupEntry) ([]regroupEntry, bool) {
 		}
 		marker := entry.chain[chainLen-1]
 		if marker.Index != 0 {
-			out = append(out, entry)
-			i++
-			continue
+			// R-289: a sibling reaching the head of the loop has no run head
+			// before it — the head consumes its whole run and advances past
+			// it, so Index != 0 here means the chain was not written by pass
+			// 3b. Emitting it as a scalar publishes an ABI the SDK reads as N
+			// independent fields instead of one array, with no diagnostic.
+			return nil, false, fmt.Errorf(
+				"malformed synthetic-array chain on %q: element %d of %q appears without the element 0 that starts its run. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+				entry.name, marker.Index, marker.Base)
 		}
 
 		// Greedily extend: every follower must share the same innermost
@@ -91,12 +96,14 @@ func regroupOnePass(entries []regroupEntry) ([]regroupEntry, bool) {
 		}
 
 		if len(runEntries) != marker.Length {
-			// Partial or broken run — defensive. A well-formed expansion
-			// always emits all N siblings contiguously, so this only
-			// fires on bugs/malformed inputs.
-			out = append(out, entry)
-			i++
-			continue
+			// R-289: a well-formed expansion always emits all N siblings
+			// contiguously, so a short run means the chain was not written by
+			// pass 3b. Leaving them ungrouped published an ABI the SDK reads
+			// as N independent fields instead of one array — a wrong state
+			// layout from an artifact the compiler called valid.
+			return nil, false, fmt.Errorf(
+				"malformed synthetic-array chain on %q: %q declares %d elements but the contiguous run has %d. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+				entry.name, marker.Base, marker.Length, len(runEntries))
 		}
 
 		// Collapse this run into one intermediate entry.
@@ -148,19 +155,23 @@ func regroupOnePass(entries []regroupEntry) ([]regroupEntry, bool) {
 		i = j
 		changed = true
 	}
-	return out, changed
+	return out, changed, nil
 }
 
 // regroupSyntheticRuns iteratively regroups entries until no entry has
 // any remaining chain. Each pass consumes one nesting level, innermost
-// first. Panics if the iteration cap is exceeded (pathological nesting).
-func regroupSyntheticRuns(entries []regroupEntry) []regroupEntry {
+// first. Returns an error for a malformed chain (R-289) and panics if the
+// iteration cap is exceeded (pathological nesting).
+func regroupSyntheticRuns(entries []regroupEntry) ([]regroupEntry, error) {
 	current := entries
 	for iter := 0; iter < 1024; iter++ {
-		next, changed := regroupOnePass(current)
+		next, changed, err := regroupOnePass(current)
+		if err != nil {
+			return nil, err
+		}
 		current = next
 		if !changed {
-			return current
+			return current, nil
 		}
 	}
 	panic("regroupSyntheticRuns: exceeded iteration cap (pathological chain nesting?)")

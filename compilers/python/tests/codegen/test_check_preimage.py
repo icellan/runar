@@ -8,20 +8,28 @@ BUG-100 fix: the ECDSA signature is now DERIVED FROM THE PREIMAGE ON CHAIN
 G. The derivation compiles to a FIXED opcode blob (identical across all seven
 tiers) emitted as a single opaque ``raw_bytes`` op. So the lowering is:
 
-  1. OP_CODESEPARATOR (so the scriptCode in the preimage is short)
-  2. bring the preimage to the top (kept for field extractors)
-  3. one ``raw_bytes`` op carrying the canonical binding construction — this
+  1. bring the preimage to the top (kept for field extractors)
+  2. one ``raw_bytes`` op carrying the canonical binding construction — this
      internally re-derives the signature from hash256(preimage) and runs
      OP_CHECKSIGVERIFY against G. There is NO discrete compressed-G push and NO
      discrete OP_CHECKSIGVERIFY opcode any more; both live inside the blob.
+  3. the R-010 ``_codePart`` authentication (only when the method carries the
+     ``_codePart`` witness), which rebuilds the code part from the now-authentic
+     ``scriptCode`` and OP_EQUALVERIFYs it against the spender's copy.
+
+R-010 removed the OP_CODESEPARATOR that used to head this sequence: a
+per-method separator hid the dispatch preamble and every preceding method body
+from ``scriptCode``, and those are exactly the bytes ``_codePart`` claims to
+reproduce. The emitter now places one separator at offset 1 of the whole
+locking script instead.
 
 For ``StatefulSmartContract`` subclasses the ANF lower auto-injects a
 checkPreimage call at every public method entry. This test verifies both:
 
-  * Auto-injection: a stateful contract's increment method emits the
-    OP_CODESEPARATOR + canonical binding ``raw_bytes`` blob.
+  * Auto-injection: a stateful contract's increment method emits the canonical
+    binding ``raw_bytes`` blob.
   * No injection: a stateless contract's method does NOT carry the same
-    pattern (no OP_CODESEPARATOR, no binding blob).
+    pattern (no binding blob).
 
 The probes drive the lowering through real Python source so the auto-
 injection flow is exercised end-to-end.
@@ -89,17 +97,26 @@ def _is_binding_blob(op: StackOp) -> bool:
 # Auto-injection: stateful contract MUST emit the checkPreimage sequence
 # ---------------------------------------------------------------------------
 
-def test_stateful_increment_emits_op_codeseparator():
-    """Stateful contracts auto-inject OP_CODESEPARATOR at the start of the
-    OP_PUSH_TX flow. This is the load-bearing first opcode.
+def test_stateful_increment_emits_no_per_method_codeseparator():
+    """R-010: no OP_CODESEPARATOR inside a method's ops.
+
+    The separator is emitted once by the emitter, at offset 1 of the whole
+    locking script, so that ``scriptCode`` covers the dispatch preamble and
+    every method body — which is what makes the spender-supplied ``_codePart``
+    authenticatable at all. ``lower_to_stack`` sets ``needs_code_separator`` to
+    tell the emitter a separator is needed.
     """
     methods = _lower_source(COUNTER_SRC)
     inc = next(m for m in methods if m.name == "increment")
     flat = _flatten_ops(inc.ops)
     code_seps = [op for op in flat if _is_opcode(op, "OP_CODESEPARATOR")]
-    assert len(code_seps) == 1, (
-        f"stateful increment must auto-inject exactly 1 OP_CODESEPARATOR; "
+    assert len(code_seps) == 0, (
+        f"stateful increment must not carry a per-method OP_CODESEPARATOR; "
         f"got {len(code_seps)}"
+    )
+    assert inc.needs_code_separator, (
+        "stateful increment must flag needs_code_separator so the emitter "
+        "places the script-level separator"
     )
 
 
@@ -142,24 +159,32 @@ def test_stateful_decrement_also_auto_injects():
     methods = _lower_source(COUNTER_SRC)
     dec = next(m for m in methods if m.name == "decrement")
     flat = _flatten_ops(dec.ops)
-    assert any(_is_opcode(op, "OP_CODESEPARATOR") for op in flat)
+    assert not any(_is_opcode(op, "OP_CODESEPARATOR") for op in flat)
+    assert dec.needs_code_separator
     assert any(_is_binding_blob(op) for op in flat)
 
 
-def test_stateful_increment_check_preimage_pair_in_order():
-    """Verify the canonical ordering: OP_CODESEPARATOR precedes the binding
-    blob. Indices must be monotonic.
+def test_stateful_increment_authenticates_code_part_after_binding():
+    """R-010 ordering: the ``_codePart`` authentication must come AFTER the
+    binding blob.
+
+    The authentication reads ``scriptCode`` out of the preimage, so it is only
+    sound once the blob has proven that preimage belongs to this transaction.
+    The authentication's tail is ``push <61ab>``, the prologue-byte pin.
     """
     methods = _lower_source(COUNTER_SRC)
     inc = next(m for m in methods if m.name == "increment")
     flat = _flatten_ops(inc.ops)
 
-    cs_idx = next(i for i, op in enumerate(flat) if _is_opcode(op, "OP_CODESEPARATOR"))
     blob_idx = next(i for i, op in enumerate(flat) if _is_binding_blob(op))
+    pin_idx = next(
+        i for i, op in enumerate(flat)
+        if op.op == "push" and getattr(op.value, "bytes_val", None) == bytes([0x61, 0xAB])
+    )
 
-    assert cs_idx < blob_idx, (
-        f"checkPreimage sequence out of order: "
-        f"OP_CODESEPARATOR={cs_idx}, binding_blob={blob_idx}"
+    assert blob_idx < pin_idx, (
+        f"_codePart authentication must follow the binding blob: "
+        f"binding_blob={blob_idx}, prologue_pin={pin_idx}"
     )
 
 
@@ -170,7 +195,7 @@ def test_stateful_increment_check_preimage_pair_in_order():
 def test_stateless_p2pkh_does_not_auto_inject_check_preimage():
     """SmartContract subclasses (no state) do not auto-inject checkPreimage.
     The classical P2PKH unlock must therefore not contain the OP_PUSH_TX
-    pattern (no OP_CODESEPARATOR + no binding blob).
+    pattern (no binding blob).
     """
     methods = _lower_source(P2PKH_SRC)
     unlock = next(m for m in methods if m.name == "unlock")

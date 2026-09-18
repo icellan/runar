@@ -11,6 +11,7 @@ require "set"
 
 require_relative "ir/types"
 require_relative "frontend/sighash_directive"
+require_relative "frontend/embed_always_dce"
 
 module RunarCompiler
   # -------------------------------------------------------------------------
@@ -104,6 +105,25 @@ module RunarCompiler
     )
       super
     end
+  end
+
+  # The artifact build time, as an ISO-8601 second-resolution UTC string.
+  #
+  # Honours SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/):
+  # when it holds a Unix seconds value that instant is stamped instead of the
+  # clock, so two builds of the same source produce byte-identical artifacts.
+  # Without it, the wall clock, exactly as before.
+  #
+  # R-212: the Go tier honoured this and the other six did not, so six of seven
+  # artifacts could not be reproduced -- and reproducing the artifact is how
+  # someone other than the author checks that a published locking script is what
+  # the published source compiles to. A malformed value is ignored rather than
+  # failing the build: the variable is an environment convention, not input.
+  def self.build_timestamp
+    raw = ENV.fetch("SOURCE_DATE_EPOCH", "").strip
+    return Time.at(raw.to_i).utc.strftime("%Y-%m-%dT%H:%M:%SZ") if raw.match?(/\A\d+\z/)
+
+    Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
   end
 
   SCHEMA_VERSION = "runar-v1.0.0-rc.1"
@@ -219,8 +239,10 @@ module RunarCompiler
   # Public parse-only entry point used by the conformance runner's
   # +--parser-only+ universal-frontend coverage check. Reads the source
   # file, dispatches to the format parser, and runs +Validate+. Raises
-  # +CompilationError+ on parse / validate failures; returns +nil+ on
-  # success (the caller treats nil as "parser ok").
+  # +CompilationError+ on parse / validate failures; on success returns the
+  # validator's warning strings (CL-BUG-104 -- the CLI had no way to reach
+  # them, so +--parse-only+ ran the validator and discarded everything it had
+  # to say). An empty array means "parser ok, nothing to report".
   def self.parse_and_validate_only(source_path)
     source = File.read(source_path)
     parse_result = _parse_source(source, source_path)
@@ -234,7 +256,7 @@ module RunarCompiler
     if valid.errors && !valid.errors.empty?
       raise CompilationError, "validation errors:\n  " + valid.error_strings.join("\n  ")
     end
-    nil
+    valid.warning_strings
   end
 
   # Run type checking on a parsed ContractNode.
@@ -523,7 +545,29 @@ module RunarCompiler
   # @param disable_constant_folding [Boolean] skip constant folding pass
   # @param constructor_args [Hash, nil] constructor argument overrides
   # @return [Artifact]
+  #
+  # Warning-severity validator diagnostics are discarded: a single return
+  # value has nowhere to put them. A caller that wants to surface them --
+  # the CLI does -- must use .compile_from_source_collecting_warnings.
   def self.compile_from_source(source_path, disable_constant_folding: false, constructor_args: nil)
+    artifact, = compile_from_source_collecting_warnings(
+      source_path,
+      disable_constant_folding: disable_constant_folding,
+      constructor_args: constructor_args
+    )
+    artifact
+  end
+
+  # .compile_from_source plus the validator warnings it would discard.
+  #
+  # CL-BUG-104: cli.rb called .compile_from_source, so every warning the
+  # validator produced died inside the compile call and the contract author
+  # got silence. Error handling is unchanged -- same CompilationError
+  # messages, same stop-at-first-failure ordering.
+  #
+  # @return [Array(Artifact, Array<String>)]
+  def self.compile_from_source_collecting_warnings(source_path, disable_constant_folding: false,
+                                                   constructor_args: nil)
     source = _read_file(source_path)
 
     # Pass 1: Parse
@@ -540,6 +584,7 @@ module RunarCompiler
     if valid_result.errors.any?
       raise CompilationError, "validation errors:\n  #{valid_result.error_strings.join("\n  ")}"
     end
+    warnings = valid_result.warning_strings
 
     # Pass 3: Type check
     tc_result = _type_check(parse_result.contract)
@@ -560,8 +605,15 @@ module RunarCompiler
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
 
+    # R-237: the issue-#109 notice for a readonly field DCE drops. Four tiers
+    # already emitted it and this one did not, so an author whose field
+    # silently vanished from the locking script heard about it from ts, go,
+    # zig and java and not from here.
+    warnings += Frontend::EmbedAlwaysDCE.collect_warnings(expanded_contract, program)
+
     # Feed into existing compilation pipeline (passes 4.25-6)
-    compile_from_program(program, disable_constant_folding: disable_constant_folding)
+    artifact = compile_from_program(program, disable_constant_folding: disable_constant_folding)
+    [artifact, warnings]
   end
 
   # Run passes 1-4 on a source file and return the ANF program.
@@ -661,9 +713,16 @@ module RunarCompiler
 
       marker = chain[-1]
       if marker[:index] != 0
-        out << entry
-        i += 1
-        next
+        # R-289: a sibling reaching the head of the loop has no run head before
+        # it -- the head consumes its whole run and advances past it, so an
+        # index != 0 here means the chain was not written by pass 3b. Emitting
+        # it as a scalar publishes an ABI the SDK reads as N independent fields
+        # instead of one array, with no diagnostic.
+        raise ArgumentError,
+              "malformed synthetic-array chain on #{entry[:name].inspect}: element " \
+              "#{marker[:index]} of #{marker[:base].inspect} appears without the " \
+              "element 0 that starts its run. Synthetic-array chains are written by " \
+              "the expand-fixed-arrays pass; this IR did not come from it"
       end
 
       # Greedily extend the run: every follower must share innermost
@@ -689,9 +748,17 @@ module RunarCompiler
       end
 
       if run.length != marker[:length]
-        out << entry
-        i += 1
-        next
+        # R-289: a well-formed expansion always emits all N siblings
+        # contiguously, so a short run means the chain was not written by pass
+        # 3b. Leaving them ungrouped published an ABI the SDK reads as N
+        # independent fields instead of one array -- a wrong state layout from
+        # an artifact the compiler called valid.
+        raise ArgumentError,
+              "malformed synthetic-array chain on #{entry[:name].inspect}: " \
+              "#{marker[:base].inspect} declares #{marker[:length]} elements but the " \
+              "contiguous run has #{run.length}. " \
+              "Synthetic-array chains are written by the expand-fixed-arrays pass; " \
+              "this IR did not come from it"
       end
 
       inner_type = entry[:type]
@@ -918,7 +985,7 @@ module RunarCompiler
       code_separator_index: cs_index,
       code_separator_indices: cs_indices,
       raw_script_spans: (raw_script_spans && !raw_script_spans.empty? ? raw_script_spans : nil),
-      build_timestamp: Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+      build_timestamp: build_timestamp
     )
 
     # Always include ANF IR for stateful contracts -- the SDK uses it
@@ -1110,6 +1177,12 @@ module RunarCompiler
       d["satoshis"] = v.satoshis unless v.satoshis.nil?
       d["stateValues"] = v.state_values unless v.state_values.nil?
       d["scriptBytes"] = v.script_bytes unless v.script_bytes.nil?
+      # N-094 follow-on: array_literal's element refs. This serializer fills the
+      # +anf+ field every STATEFUL artifact carries to the SDK ANF interpreters,
+      # and it had no line for +elements+ -- so a stateful contract using
+      # checkMultiSig shipped {"kind":"array_literal"} with the array gone,
+      # where the Go reference emits {"kind":"array_literal","elements":[...]}.
+      d["elements"] = v.elements unless v.elements.nil?
       if v.kind == "raw_script"
         # Opaque opcode-byte span -- emit bytes + arities explicitly so
         # in_arity 0 / out_arity 0 survive the round-trip.

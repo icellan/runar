@@ -1,6 +1,6 @@
 # Rúnar ANF IR Specification
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the Administrative Normal Form (ANF) Intermediate Representation used by Rúnar. The ANF IR is the **canonical conformance boundary**: all Rúnar compilers MUST produce byte-identical ANF IR for the same input program. This enables interoperability, testing, and verification across implementations.
@@ -290,7 +290,7 @@ Branch temporary names continue the global sequence. If the `if` node is at posi
 
 ### 4.9 `loop`
 
-Bounded loop with a count and body. The loop body is a sequence of bindings executed `count` times with an iteration variable.
+Bounded loop with a count and body. The loop body is a sequence of bindings executed `count` times with an iteration variable. On iteration `i` (0-based) that variable holds `start + i * step`.
 
 ```json
 {
@@ -299,7 +299,9 @@ Bounded loop with a count and body. The loop body is a sequence of bindings exec
     "body": [
         { "name": "t10", "value": { "kind": "load_const", "value": "0" } }
     ],
-    "iterVar": "i"
+    "iterVar": "i",
+    "start": 3,
+    "step": 1
 }
 ```
 
@@ -309,6 +311,10 @@ Bounded loop with a count and body. The loop body is a sequence of bindings exec
 | `count` | `number` | Number of iterations |
 | `body` | `ANFBinding[]` | Bindings executed each iteration |
 | `iterVar` | `string` | Name of the iteration variable |
+| `start` | `integer \| "<decimal>n"` | Value the iteration variable takes on iteration 0. Serialized as a bare integer when it fits, or as the `"<decimal>n"` bigint form otherwise |
+| `step` | `1 \| -1` | `1` for `i++` with a `<` bound, `-1` for `i--` with a `>` bound |
+
+> **`start` and `step` are REQUIRED.** Both are always serialized, including the `start: 0`, `step: 1` case. An earlier revision of this section omitted them, and the consequence is worse than an incomplete document: the Go and Rust loaders default a missing `start` to `0` and a missing `step` to `1` (`compilers/go/ir/types.go`, `compilers/rust/src/ir/loader.rs`), so an IR produced from the shorter spec loads WITHOUT a schema error and unrolls a `for (let i = 3n; ...)` loop as if it began at zero. Under §1's requirement that two conforming compilers produce identical output, that is a silent cross-tier divergence in emitted script bytes.
 
 ### 4.10 `assert`
 
@@ -407,6 +413,84 @@ Deserialize contract state fields from a verified preimage (used by stateful con
 | `preimage` | `string` | Name of binding holding the verified preimage (from `check_preimage`) |
 
 After this node executes, the compiler creates bindings for each mutable property's current value, extracted from the preimage's output script.
+
+### 4.16 `add_raw_output`
+
+Add an output whose locking script is caller-supplied bytes rather than the contract's own code part. Emitted by `this.addRawOutput(satoshis, scriptBytes)`.
+
+```json
+{
+    "kind": "add_raw_output",
+    "satoshis": "t10",
+    "scriptBytes": "t11"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"add_raw_output"` | Node discriminator |
+| `satoshis` | `string` | Name of binding holding the satoshis amount |
+| `scriptBytes` | `string` | Name of binding holding the verbatim locking-script bytes |
+
+Unlike `add_output`, this node carries no state continuation: the emitted output is not required to be spendable by the same contract.
+
+### 4.17 `add_data_output`
+
+Add a data-carrying output. Same shape as `add_raw_output`; the two are distinct node kinds because they lower differently — a data output is not a value-bearing continuation and the two have separate side-effect and arity rules.
+
+```json
+{
+    "kind": "add_data_output",
+    "satoshis": "t10",
+    "scriptBytes": "t11"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"add_data_output"` | Node discriminator |
+| `satoshis` | `string` | Name of binding holding the satoshis amount |
+| `scriptBytes` | `string` | Name of binding holding the output's script bytes |
+
+### 4.18 `array_literal`
+
+An array literal, produced by a `FixedArray` property initializer or an array-literal expression. The elements are binding references, in declaration order.
+
+```json
+{
+    "kind": "array_literal",
+    "elements": ["t3", "t4", "t5"]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"array_literal"` | Node discriminator |
+| `elements` | `string[]` | Names of the element bindings, in order |
+
+`FixedArray` properties are expanded into scalar siblings by the expand-fixed-arrays pass (pass 3b) before ANF lowering, so a well-formed program's array literals appear only where the pass leaves them.
+
+### 4.19 `raw_script`
+
+A verbatim span of opcode bytes, emitted by the `asm()` escape hatch on an `UnsafeSmartContract`. The compiler does not interpret the bytes; it splices them in and trusts the declared stack effect.
+
+```json
+{
+    "kind": "raw_script",
+    "bytes": "76a914",
+    "in_arity": 1,
+    "out_arity": 2
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"raw_script"` | Node discriminator |
+| `bytes` | `string` | Hex string of the verbatim opcode bytes |
+| `in_arity` | `number` | Stack elements consumed |
+| `out_arity` | `number` | Stack elements produced |
+
+**This node is opaque to every analysis.** Dead-code elimination must never remove it, the stack model cannot verify its declared arity, and no type information crosses it. See `spec/grammar.md` for the `UnsafeSmartContract` base class that admits it.
 
 ---
 

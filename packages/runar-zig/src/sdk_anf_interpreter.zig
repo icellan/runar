@@ -1597,11 +1597,20 @@ fn evalCall(
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "split")) {
-        // split returns the first part; in ANF the second result is in a separate binding
+        // `split(data, index)` binds the RIGHT half -- the bytes from `index`
+        // onwards. OP_SPLIT leaves both halves on the stack, but the builtin is
+        // single-valued and the compiler NIPs the left half away
+        // (`OP_SPLIT OP_NIP`); `left(data, index)` is the other side of the cut.
+        //
+        // This returned the LEFT half, under a comment claiming the second
+        // result lives "in a separate binding". No such binding exists and no
+        // surface can name one, so an artifact run here and then spent on-chain
+        // took two different branches for every contract that splits.
+        // `sdk_anf_interpreter_split_test.zig` is the guard.
         const hex = asHex(getArg(arg_names, 0, env));
         const pos: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
         const hex_pos = @min(pos * 2, hex.len);
-        const result = allocator.dupe(u8, hex[0..hex_pos]) catch return .{ .bytes = "" };
+        const result = allocator.dupe(u8, hex[hex_pos..]) catch return .{ .bytes = "" };
         return .{ .bytes = result };
     }
     if (std.mem.eql(u8, func, "left")) {

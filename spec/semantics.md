@@ -1,6 +1,6 @@
 # Rúnar Operational Semantics
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document defines the operational semantics of Rúnar programs. It specifies how Rúnar expressions and statements evaluate, how they relate to Bitcoin Script execution, and the formal rules governing contract behavior.
@@ -322,17 +322,18 @@ If there is no `else` clause and the condition is false, the environment and sto
 
 ### 4.4 For Loop (Bounded, Unrolled)
 
-For loops are unrolled at compile time. The ANF IR `loop` node stores only a `count` (number of iterations) and an `iterVar` name -- it does not store the original start value. The stack lowerer always assigns iteration variable values starting from `0`:
+For loops are unrolled at compile time. The ANF IR `loop` node stores a `count` (number of iterations), an `iterVar` name, a `start` value and a `step` direction. On iteration `i` (0-based) the iteration variable holds `start + i * step`:
 
 ```
+    start = evaluate_const(e_init)
     bound = evaluate_const(e_bound)
-    init = evaluate_const(e_init)
-    count = bound - init                        /* for i < bound, ++ */
+    step  = +1 for i++ / i < bound,  -1 for i-- / i > bound
+    count = |bound - start|
 
-    <S_body[i := 0], env, sigma> ==> <env_1, sigma_1>
-    <S_body[i := 1], env_1, sigma_1> ==> <env_2, sigma_2>
+    <S_body[i := start + 0*step], env, sigma> ==> <env_1, sigma_1>
+    <S_body[i := start + 1*step], env_1, sigma_1> ==> <env_2, sigma_2>
     ...
-    <S_body[i := count-1], env_{k}, sigma_{k}> ==> <env_final, sigma_final>
+    <S_body[i := start + (count-1)*step], env_{k}, sigma_{k}> ==> <env_final, sigma_final>
     ──────────────────────────────────────────────────────────────────────────────
     <for (let i = e_init; i < e_bound; i++) S_body, env, sigma>
         ==>  <env_final, sigma_final>
@@ -340,7 +341,13 @@ For loops are unrolled at compile time. The ANF IR `loop` node stores only a `co
 
 The loop variable `i` is substituted with the concrete iteration value in each unrolled copy of the body. This means the loop variable is effectively a compile-time constant within each iteration.
 
-> **Limitation:** Although the compiler correctly computes the iteration *count* for non-zero start values (e.g., `for (let i = 3n; i < 8n; i++)` produces `count = 5`), the iteration variable is always assigned values `[0, 1, ..., count-1]` rather than `[init, init+1, ..., bound-1]`. If the loop body depends on the iteration variable's absolute value (not just the iteration index), developers must use a 0-based loop and add the start offset manually (e.g., `const j = i + 3n`).
+**Counting up.** `for (let i = 3n; i < 6n; i++)` unrolls to three copies with `i` bound to `3`, `4`, `5` — the emitted script pushes `OP_3 OP_4 OP_5`. A zero-start loop carries `start = 0`, `step = 1`, which is the historical lowering, byte for byte.
+
+**Counting down.** `i--` with a `>` bound carries `step = -1`. `for (let i = 5n; i > 2n; i--)` unrolls to `i` bound to `5`, `4`, `3`, in that order.
+
+> **Do not add the start offset yourself.** An earlier revision of this section claimed the iteration variable was always `[0 .. count-1]` regardless of the initializer, and told authors to write a 0-based loop and add the offset by hand (`const j = i + 3n`). That is now double counting: the lowerer already substitutes the absolute value, so the workaround produces `2*start` and a script that is silently wrong rather than one that fails to compile. If you are carrying that idiom forward from older code, remove it.
+
+> **Implementers:** `start` and `step` are on-the-wire fields of the `loop` node, not optional decorations — see `ir-format.md` §4.9. Both are always serialized, including `start: 0` and `step: 1`.
 
 ### 4.5 Expression Statement
 
@@ -605,12 +612,12 @@ All intermediate arithmetic in EC operations uses modular arithmetic over `F_p`:
     <ecAdd(a, a), env, sigma>  -->  VBytes(encode_point(rx, ry))    /* point doubling */
 
     Point(x, y) = decode_point(p)    k = ((VInt(scalar) % n) + n) % n
-    result = double_and_add(x, y, k, 256 iterations)
+    result = double_and_add(x, y, k + 3n, 257 iterations)
     ──────────────────────────────────────────────────────────────
     <ecMul(p, k), env, sigma>  -->  VBytes(encode_point(result))
 
     k = ((VInt(scalar) % n) + n) % n
-    result = double_and_add(Gx, Gy, k, 256 iterations)
+    result = double_and_add(Gx, Gy, k + 3n, 257 iterations)
     ──────────────────────────────────────────────────────────────
     <ecMulGen(k), env, sigma>  -->  VBytes(encode_point(result))
 
@@ -629,11 +636,15 @@ All intermediate arithmetic in EC operations uses modular arithmetic over `F_p`:
     <ecModReduce(v, m), env, sigma>  -->  VInt(((value % mod) + mod) % mod)
 ```
 
-### 8.5 Jacobian Coordinate Optimization
+### 8.5 The ladder: 257 iterations over `k + 3n`
 
-The `ecMul` and `ecMulGen` implementations use Jacobian projective coordinates `(X, Y, Z)` internally, where the affine point `(x, y)` corresponds to `(X/Z^2, Y/Z^3)`. This avoids expensive modular inversions during the 256-iteration double-and-add loop. A single conversion from Jacobian to affine (requiring one modular inverse) is performed at the end.
+The `ecMul` and `ecMulGen` implementations use Jacobian projective coordinates `(X, Y, Z)` internally, where the affine point `(x, y)` corresponds to `(X/Z^2, Y/Z^3)`. This avoids expensive modular inversions during the double-and-add loop. A single conversion from Jacobian to affine (requiring one modular inverse) is performed at the end.
 
-The double-and-add algorithm iterates over the 256 bits of the scalar from most significant to least significant. For each bit: double the accumulator; if the bit is 1, add the base point. This produces a fixed 256-iteration loop regardless of the scalar value.
+The ladder does **not** multiply `k`. After reducing the scalar to `[0, n-1]` (§8.6) it multiplies `k' = k + 3n`, which is congruent to `k` modulo `n` and therefore denotes the same point, but has a high bit that is set for every valid `k`: `k' ∈ [3n, 4n-1]` and `3n > 2^257`, so **bit 257 of `k'` is always 1**. That fixed bit is what lets the accumulator be initialised to `P` instead of to the point at infinity, which the affine `x‖y` encoding cannot represent.
+
+The loop therefore runs **257 iterations**, over bits 256 down to 0, MSB-first: double the accumulator; if the bit is 1, add the base point. The count is fixed regardless of the scalar value.
+
+> **Implementers: 256 is wrong and fails silently.** A 256-iteration loop over `k + 3n` never reaches the top set bit, so it computes a *different* multiple of `P` rather than raising an error — for roughly half of all scalar values. All seven tiers use 257 (`packages/runar-compiler/src/passes/ec-codegen.ts`, `compilers/go/codegen/ec.go` and peers), and an earlier 256-iteration version of this ladder is the historical bug the comment at `ec-codegen.ts` records. The iteration count, the `+3n` offset and the accumulator's initial value are one design: changing any of them in isolation breaks the other two.
 
 ### 8.6 Scalar domain and coordinate canonicity
 
@@ -673,7 +684,7 @@ Bitcoin Script is a stack-based language. Rúnar compilation targets this stack 
 BSV (post-Genesis) has removed most script size limits, but Rúnar still enforces:
 
 - **Stack depth**: Maximum 800 items (enforced at compile time via static analysis).
-- **Script size**: No hard limit, but the compiler will warn if the generated script exceeds 100 KB.
+- **Script size**: No hard limit, and **no warning at any size**. The compiler emits no size diagnostic: a contract with a single `ecMul` compiles to ~425 KB with `diagnostics.length === 0`. Post-Genesis BSV has no consensus script-size cap, so there is nothing for the compiler to enforce — but do not read the absence of a diagnostic as the compiler having checked. Size is measured, not gated: see `tests/measure-script-size.test.ts` and the per-primitive table in `opcodes.md` §12.2.
 
 ### 9.4 Deterministic Execution
 

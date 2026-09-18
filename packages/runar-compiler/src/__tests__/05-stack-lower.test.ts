@@ -999,10 +999,13 @@ describe('Pass 5: Stack Lower', () => {
 
       // The two operands for CHECKSIGVERIFY should be pushed just before it
       // via ROLL or PICK operations. Collect the ROLL/PICK ops in the window
-      // before CHECKSIGVERIFY (after OP_CODESEPARATOR).
-      const codesepIdx = allOps.findIndex(
-        o => o.op === 'opcode' && (o as { code: string }).code === 'OP_CODESEPARATOR',
-      );
+      // before CHECKSIGVERIFY, starting at the OP_PUSH_TX binding blob.
+      //
+      // R-010: OP_CODESEPARATOR is no longer part of a method's ops — the
+      // emitter places a single one at offset 1 of the whole locking script —
+      // so the window is anchored on the raw_bytes preimage-binding blob that
+      // check_preimage lowers to, which sits at the same point in the method.
+      const codesepIdx = allOps.findIndex(o => o.op === 'raw_bytes');
       expect(codesepIdx).toBeGreaterThan(-1);
 
       // After OP_CODESEPARATOR, the stack should be (BUG-100 fix: no _opPushTxSig

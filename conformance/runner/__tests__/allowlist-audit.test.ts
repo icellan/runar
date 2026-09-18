@@ -163,15 +163,46 @@ describe('conformance allowlist audit', () => {
   // land silently and erode frontend parity. (The runner also requires a
   // non-empty parserSkipReason at runtime, but a self-written reason string is
   // not review-gated; this audit pin is.)
-  const APPROVED_PARSER_SKIPS: Record<string, string[]> = {};
+  //
+  // R-094 added the first two users. Both skip `.runar.java` for the same
+  // reason, and it is a decision rather than a deferral: `FixedArray<T, N>`
+  // has no spelling the Java surface can express — an integer literal in a
+  // Java type-argument list is a javac PARSE error, so nothing survives
+  // javax.tools.JavaCompiler — and `runar.lang.types.FixedArray` was withdrawn
+  // under N-122 rather than left as a trap. The Java COMPILER is still a full
+  // parity target for these fixtures' other eight surfaces.
+  const APPROVED_PARSER_SKIPS: Record<string, string[]> = {
+    'fixed-array-index': ['.runar.java'],
+    'fixed-array-write': ['.runar.java'],
+  };
   it('no fixture opts a format out of parser coverage unless approved (parserSkip stays governed)', () => {
     const offenders: string[] = [];
     for (const fixture of listFixtureDirs()) {
       const sj = readSourceJson(fixture);
       const ps = sj?.parserSkip;
       if (!Array.isArray(ps) || ps.length === 0) continue;
-      if (!(fixture in APPROVED_PARSER_SKIPS)) {
+      const approved = APPROVED_PARSER_SKIPS[fixture];
+      if (approved === undefined) {
         offenders.push(`  - ${fixture}: parserSkip=${JSON.stringify(ps)} not in APPROVED_PARSER_SKIPS`);
+        continue;
+      }
+      // Approval is per-FORMAT, not per-fixture. Key membership alone would let
+      // an approved fixture widen its skip list later — approve `.runar.java`
+      // once and `.runar.py` rides in free — which is the shape of erosion this
+      // pin exists to stop.
+      const extra = [...ps].sort().filter((ext) => !approved.includes(ext));
+      const stale = [...approved].sort().filter((ext) => !ps.includes(ext));
+      if (extra.length > 0) {
+        offenders.push(
+          `  - ${fixture}: parserSkip contains ${JSON.stringify(extra)}, approved for ` +
+            `${JSON.stringify(approved)} only`,
+        );
+      }
+      if (stale.length > 0) {
+        offenders.push(
+          `  - ${fixture}: APPROVED_PARSER_SKIPS lists ${JSON.stringify(stale)} which the ` +
+            `fixture no longer skips — drop the stale approval`,
+        );
       }
     }
     expect(

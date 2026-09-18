@@ -4,16 +4,30 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-p3-air = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-challenger = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-commit = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-dft = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-field = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-fri = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-matrix = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
-p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", branch = "main" }
+# Plonky3 is pinned to an EXACT rev, not `branch = "main"`. These crates
+# regenerate `../proof.postcard` + `../public_values.hex`, which the repo
+# treats as ground truth: `packages/runar-go/sp1fri` asserts against them
+# (`TestVerifyEvmGuest`) and `compilers/go/codegen/sp1_fri_test.go` runs the
+# emitted locking script over them. A floating branch means a rebuild on a
+# later day silently produces DIFFERENT vectors, so a regression in the
+# on-chain verifier would be absorbed by regenerated "ground truth" instead
+# of failing. This rev is the one the checked-in fixture was generated from
+# (recorded in ../README.md "Upstream version pinning").
+#
+# To bump deliberately: change the rev below, `cargo update`, regenerate the
+# fixture per ../README.md "Regeneration", re-run the Go off-chain and
+# on-chain acceptance tests, and update the version table in ../README.md in
+# the SAME commit.
+p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "7a6895887780ef4e5ee0eecd73078a2b06f8f3ad" }
 postcard = { version = "1", features = ["alloc"] }
 rand = "0.10"

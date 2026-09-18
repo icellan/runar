@@ -5,10 +5,11 @@
 // Uses a BN254Tracker (mirrors ECTracker) for named stack state tracking.
 //
 // BN254 parameters:
-//   Field prime: p = 21888242871839275222246405745257275088696311157297823662689037894645226208583
-//   Curve order: r = 21888242871839275222246405745257275088548364400416034343698204186575808495617
-//   Curve:       y^2 = x^3 + 3
-//   Generator:   G1 = (1, 2)
+//
+//	Field prime: p = 21888242871839275222246405745257275088696311157297823662689037894645226208583
+//	Curve order: r = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+//	Curve:       y^2 = x^3 + 3
+//	Generator:   G1 = (1, 2)
 //
 // Point representation: 64 bytes (x[32] || y[32], big-endian unsigned).
 // Internal arithmetic uses Jacobian coordinates for scalar multiplication.
@@ -38,6 +39,19 @@ var bn254GenX *big.Int
 // bn254GenY is the BN254 G1 generator y-coordinate.
 var bn254GenY *big.Int
 
+// BN254 (alt_bn128) domain parameters.
+//
+// Source: EIP-196 and EIP-197, which fix the curve Ethereum's precompiles use —
+// https://eips.ethereum.org/EIPS/eip-197 — a Barreto-Naehrig curve at
+// u = 4965661367192848881.
+//
+// bn254FieldP is the base-field prime, bn254CurveR the group order, and the G1
+// generator is (1, 2). SP1's Groth16 proofs are over this curve, which is why
+// the verifier here must be on exactly it.
+//
+// R-239: same reasoning as the secp256k1 block in codegen/ec.go — these were
+// bare literals in a package whose Poseidon2 and SLH-DSA constants cite their
+// upstream.
 func init() {
 	var ok bool
 	bn254FieldP, ok = new(big.Int).SetString("30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47", 16)
@@ -59,8 +73,8 @@ func init() {
 
 // BN254Tracker tracks named stack positions and emits StackOps for BN254 codegen.
 type BN254Tracker struct {
-	nm             []string // stack names ("" for anonymous)
-	e              func(StackOp)
+	nm               []string // stack names ("" for anonymous)
+	e                func(StackOp)
 	primeCacheActive bool // true when the field prime is cached on the alt-stack
 	// qAtBottom indicates the field modulus is stored at the bottom of the main stack.
 	// When true, fetchPrime uses OP_DEPTH OP_1SUB OP_PICK instead of alt-stack.
@@ -349,6 +363,7 @@ func bn254PushFieldP(t *BN254Tracker, name string) {
 // When primeCacheActive is true, the field prime is fetched from a cache:
 //   - qAtBottom: uses OP_DEPTH OP_1SUB OP_PICK (3 bytes, prime at stack bottom)
 //   - otherwise: uses OP_FROMALTSTACK/DUP/OP_TOALTSTACK (3 bytes, alt-stack)
+//
 // Both save ~93 bytes per mod reduction vs pushing a fresh 34-byte literal.
 // At ~70,000 Fp operations in a Groth16 verifier, this totals ~6.5 MB saved.
 func bn254FieldMod(t *BN254Tracker, aName, resultName string) {
@@ -637,8 +652,19 @@ func bn254FieldInv(t *BN254Tracker, aName, resultName string) {
 // Consumes pointName, produces xName and yName.
 func bn254DecomposePoint(t *BN254Tracker, pointName, xName, yName string) {
 	t.toTop(pointName)
-	// OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+	// R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+	// Point inherits the check -- the same placement CL-BUG-095 chose for
+	// ecDecomposePoint, and for the same reason. Without it OP_SPLIT at 32
+	// simply discards whatever follows byte 64, so `bn254G1OnCurve(G || 0xff)`
+	// returned TRUE (measured on the go-sdk interpreter), and every value
+	// builtin silently accepted a longer blob as the point it prefixes.
+	//
+	// ABORTING form. EmitBN254G1OnCurve must stay TOTAL, so it clamps and flags
+	// the length BEFORE calling this, exactly as EmitEcOnCurve does; by the
+	// time it reaches here the value is already exactly 64 bytes and this
+	// verify cannot fire for it.
 	t.rawBlock([]string{pointName}, "", func(e func(StackOp)) {
+		ecEmitPointLenVerify(e, 64)
 		e(StackOp{Op: "push", Value: bigIntPush(32)})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
@@ -784,13 +810,14 @@ func bn254G1AffineAdd(t *BN254Tracker) {
 // Expects jx, jy, jz on tracker. Replaces with updated values.
 //
 // Formulas (a=0 since y^2 = x^3 + b):
-//   A  = Y^2
-//   B  = 4*X*A
-//   C  = 8*A^2
-//   D  = 3*X^2  (a=0, so 3*X^2 + a*Z^4 simplifies to 3*X^2)
-//   X' = D^2 - 2*B
-//   Y' = D*(B - X') - C
-//   Z' = 2*Y*Z
+//
+//	A  = Y^2
+//	B  = 4*X*A
+//	C  = 8*A^2
+//	D  = 3*X^2  (a=0, so 3*X^2 + a*Z^4 simplifies to 3*X^2)
+//	X' = D^2 - 2*B
+//	Y' = D*(B - X') - C
+//	Z' = 2*Y*Z
 func bn254G1JacobianDouble(t *BN254Tracker) {
 	// Save copies of jx, jy, jz for later use
 	t.copyToTop("jy", "_jy_save")
@@ -1065,12 +1092,98 @@ func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker, strict 
 }
 
 // ===========================================================================
+// Point at infinity for the bn254G1Add builtin
+// ===========================================================================
+
+// bn254G1InfinityFlag computes `_notinf`, 0 exactly when P == -Q and 1
+// otherwise, from px/py/qx/qy WITHOUT consuming them. Call it before
+// bn254G1AffineAdd; apply the result with bn254G1MaskInfinity afterwards.
+//
+// P + (-P) is the point at infinity, which affine x||y cannot represent. This
+// codegen already has an encoding for O -- the ALL-ZERO blob, which is what
+// bn254G1ScalarMul returns for k = 0 mod r (see
+// TestBN254G1ScalarMul_ScalarDomain) and what secp256k1 (ecAffineAdd) and both
+// NIST curves (cAffineAdd) return for their own P + (-P). bn254G1Add is a
+// general contract-callable builtin, so it owes callers the same answer rather
+// than the off-curve blob the unified slope produces there (py + qy == 0 and
+// bn254FieldInv is Fermat, so inv(0) = 0). O is not on the curve
+// (0^2 != 0^3 + 3), so the documented assert(bn254G1OnCurve(r)) idiom still
+// rejects the result, and nothing here adds a failure channel to what is a
+// pure value-producing expression.
+//
+// THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254 has
+// j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root of unity
+// w and Q = (w*px, -py) is an ordinary point that also zeroes py + qy while
+// P + Q is an ordinary point, not O. Masking on the denominator would answer
+// "infinity" there: on-curve-looking, plausible, and wrong -- the exact failure
+// mode 03f50d48 introduced on the NIST curves and f16790a9 had to undo. That
+// case keeps its fail-closed off-curve answer
+// (TestBN254G1AffineAdd_NegatedOperandStaysOffCurve). Testing px == qx ALONE
+// would be wrong for the same reason in the other direction: it would swallow
+// the doubling case.
+//
+// This is deliberately NOT inside bn254G1AffineAdd. The Groth16 MSM bind
+// (emitG1AffineAddNamed) shares that helper to accumulate vk_x against a
+// witness-supplied point, where an accumulator that collapses to the all-zero
+// blob would feed an encoding a pairing may read as the identity into the
+// verification equation. That path keeps its fail-closed behaviour and its
+// bytes unchanged.
+func bn254G1InfinityFlag(t *BN254Tracker) {
+	t.copyToTop("px", "_inf_px")
+	t.copyToTop("qx", "_inf_qx")
+	t.rawBlock([]string{"_inf_px", "_inf_qx"}, "_xeq", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.copyToTop("py", "_inf_py")
+	t.copyToTop("qy", "_inf_qy")
+	t.rawBlock([]string{"_inf_py", "_inf_qy"}, "_yeq", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	// cond = xeq AND yeq: 1 when doubling.
+	t.copyToTop("_xeq", "_xeq_c")
+	t.toTop("_yeq")
+	t.rawBlock([]string{"_xeq_c", "_yeq"}, "_cond", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	// notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and the
+	// points are not equal, i.e. exactly the P == -Q case.
+	t.toTop("_xeq")
+	t.toTop("_cond")
+	t.rawBlock([]string{"_xeq", "_cond"}, "_notinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_SUB"})
+		e(StackOp{Op: "opcode", Code: "OP_NOT"})
+	})
+}
+
+// bn254G1MaskInfinity zeroes rx and ry when `_notinf` is 0, consuming it.
+//
+// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
+// and notinf is 0 or 1, so the product is canonical either way.
+func bn254G1MaskInfinity(t *BN254Tracker) {
+	t.toTop("rx")
+	t.copyToTop("_notinf", "_notinf_x")
+	t.rawBlock([]string{"rx", "_notinf_x"}, "rx", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.toTop("ry")
+	t.toTop("_notinf")
+	t.rawBlock([]string{"ry", "_notinf"}, "ry", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+}
+
+// ===========================================================================
 // G1 point negation
 // ===========================================================================
 
 // bn254G1Negate negates a point: (x, p - y).
 func bn254G1Negate(t *BN254Tracker, pointName, resultName string) {
 	bn254DecomposePoint(t, pointName, "_nx", "_ny")
+	// R-141: bn254ComposePoint below is documented as requiring [0, p-1] and
+	// does not check, so without this the negation of a non-canonical point
+	// re-emitted its x half verbatim -- a value builtin PRODUCING a blob that
+	// is not a point.
+	bn254EmitCoordCanonVerify(t, "_nx", "_ny")
 	// Use bn254FieldNeg which already handles prime caching
 	bn254FieldNeg(t, "_ny", "_neg_y")
 	bn254ComposePoint(t, "_nx", "_neg_y", resultName)
@@ -1130,6 +1243,83 @@ func EmitBN254FieldNeg(emit func(StackOp)) {
 	t.PopPrimeCache()
 }
 
+// bn254EmitPointLengthGate -- R-141, CLAMPING form, the BN254 twin of
+// ecEmitPointLengthGate in ec.go. Leaves [flag, clamped] on the tracker, where
+// clamped is the value forced to exactly `want` bytes and flag is
+// OP_SIZE(v) == want. Used by EmitBN254G1OnCurve, whose whole job is to answer
+// "is this an acceptable point?" over untrusted bytes: for a wrong-length blob
+// the correct answer is FALSE, not an aborted script.
+func bn254EmitPointLengthGate(t *BN254Tracker, name string, want int, flagName string) {
+	t.toTop(name)
+	t.rawBlock([]string{name}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_SIZE"})
+		e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+		e(StackOp{Op: "swap"})
+		e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: make([]byte, want)}})
+		e(StackOp{Op: "opcode", Code: "OP_CAT"})
+		e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		e(StackOp{Op: "drop"})
+	})
+	t.nm = append(t.nm, flagName)
+	t.nm = append(t.nm, name)
+}
+
+// bn254EmitCoordCanonVerify -- R-141: a BN254 G1 Point's two coordinates must
+// be FIELD ELEMENTS, aborting form. The direct analogue of
+// ecEmitCoordCanonVerify (R-117), and the placement decision is the same one,
+// re-derived for this curve rather than copied.
+//
+// bn254DecomposePoint BIN2NUMs each half as an UNSIGNED integer, so any value
+// that fits 32 bytes is accepted. On BN254 that is wider than on secp256k1:
+// p is ~2^253.6, so x + p < 2^256 for EVERY x < p -- the alias exists for every
+// point on the curve, not just the small-x ones. Measured on the go-sdk
+// interpreter before this gate, with G = (1, 2):
+//
+//	bn254G1OnCurve(G)            -> 1
+//	bn254G1OnCurve((1+p) || 2)   -> 1      <- the bug
+//	bn254G1OnCurve(1 || (2+p))   -> 1      <- the bug
+//	bn254G1OnCurve(G || 0xff)    -> 1      <- the width bug, same call
+//
+// WHY THE VALUE BUILTINS ABORT AND THE PREDICATE DOES NOT. Unlike secp256k1's
+// affineAdd, BN254's adder is NOT fooled into a wrong answer by the alias --
+// measured, bn254G1Add(G, (1+p)||2) returns the correct 2G, because
+// bn254G1InfinityFlag reduces before it compares. So the argument for gating
+// the value builtins here is not "it computes the wrong point"; it is that
+// bn254ComposePoint's own contract says "Callers must ensure x and y are valid
+// field elements in [0, p-1]. This function does not validate input range", and
+// bn254G1Negate hands it the RAW decomposed x. Before this gate,
+// bn254G1Negate((1+p) || 2) returned a 64-byte blob whose x half is x + p: a
+// value builtin PRODUCING a non-canonical point, which then flows into the next
+// builtin as if it were one. Rejecting keeps the predicate and the value
+// builtins agreeing about what a point is -- the split-brain this branch keeps
+// finding -- and matches the policy CL-BUG-095 set for the width.
+//
+// DELIBERATELY NOT folded into bn254DecomposePoint, for R-117's reason: that
+// helper also runs inside EmitBN254G1OnCurve, which must return FALSE for a
+// non-canonical blob rather than abort, and inside the Groth16 / pairing
+// preambles, whose input-validation policy is decided in
+// bn254_point_validation.go and is not this commit's to change.
+//
+// x and y are unsigned by construction, so "< p" is the whole check.
+func bn254EmitCoordCanonVerify(t *BN254Tracker, xName, yName string) {
+	t.copyToTop(xName, "_cc_x")
+	bn254PushFieldP(t, "_cc_px")
+	t.rawBlock([]string{"_cc_x", "_cc_px"}, "_cc_xok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.copyToTop(yName, "_cc_y")
+	bn254PushFieldP(t, "_cc_py")
+	t.rawBlock([]string{"_cc_y", "_cc_py"}, "_cc_yok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.rawBlock([]string{"_cc_xok", "_cc_yok"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+}
+
 // EmitBN254G1Add adds two BN254 G1 points.
 // Stack in: [point_a, point_b] (b on top)
 // Stack out: [result_point]
@@ -1138,7 +1328,14 @@ func EmitBN254G1Add(emit func(StackOp)) {
 	t.PushPrimeCache()
 	bn254DecomposePoint(t, "_pa", "px", "py")
 	bn254DecomposePoint(t, "_pb", "qx", "qy")
+	// R-141: both points must be canonical before anything consumes them.
+	bn254EmitCoordCanonVerify(t, "px", "py")
+	bn254EmitCoordCanonVerify(t, "qx", "qy")
+	// The flag must be computed BEFORE the add: bn254G1AffineAdd consumes
+	// px/py/qx/qy.
+	bn254G1InfinityFlag(t)
 	bn254G1AffineAdd(t)
+	bn254G1MaskInfinity(t)
 	bn254ComposePoint(t, "rx", "ry", "_result")
 	t.PopPrimeCache()
 }
@@ -1197,6 +1394,8 @@ func EmitBN254G1ScalarMul(emit func(StackOp)) {
 	t.PushPrimeCache()
 	// Decompose to affine base point
 	bn254DecomposePoint(t, "_pt", "ax", "ay")
+	// R-141: the ladder's base point must be canonical.
+	bn254EmitCoordCanonVerify(t, "ax", "ay")
 
 	// Reduce first: the +3r trick below is only sound for k in [0, r-1], and
 	// the scalar is caller input.
@@ -1296,7 +1495,40 @@ func EmitBN254G1Negate(emit func(StackOp)) {
 func EmitBN254G1OnCurve(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"_pt"}, emit)
 	t.PushPrimeCache()
+
+	// R-141: width. `bn254G1OnCurve(G || 0xff)` returned TRUE -- the OP_SPLIT
+	// at 32 inside the decomposer discarded the surplus byte. Clamp and
+	// remember the width rather than abort, because this predicate must stay
+	// TOTAL; the flag is ANDed into the result at the end. Same shape as
+	// EmitEcOnCurve's CL-BUG-095 gate. Clamping here also means the aborting
+	// verify now inside bn254DecomposePoint can never fire on this path.
+	bn254EmitPointLengthGate(t, "_pt", 64, "_len_ok")
+
 	bn254DecomposePoint(t, "_pt", "_x", "_y")
+
+	// R-141: coordinate canonicity. The decomposer BIN2NUMs each coordinate as
+	// an unsigned value that may be >= p, and every field operation below
+	// silently reduces mod p, so a non-canonical ENCODING of a real point
+	// passed. p is ~2^253.6 here, so x + p < 2^256 for EVERY x < p: unlike
+	// secp256k1, the alias exists for every point on the curve. Measured with
+	// G = (1, 2), before this gate: onCurve((1+p) || 2) and onCurve(1 || (2+p))
+	// both returned 1. Reject it -- require x < p AND y < p -- and AND the
+	// result in at the end so the predicate still returns a boolean.
+	t.copyToTop("_x", "_x_lt")
+	bn254PushFieldP(t, "_p_for_x")
+	t.rawBlock([]string{"_x_lt", "_p_for_x"}, "_x_canon", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.copyToTop("_y", "_y_lt")
+	bn254PushFieldP(t, "_p_for_y")
+	t.rawBlock([]string{"_y_lt", "_p_for_y"}, "_y_canon", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.toTop("_x_canon")
+	t.toTop("_y_canon")
+	t.rawBlock([]string{"_x_canon", "_y_canon"}, "_canon", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
 
 	// lhs = y^2
 	bn254FieldSqr(t, "_y", "_y2")
@@ -1311,8 +1543,20 @@ func EmitBN254G1OnCurve(emit func(StackOp)) {
 	// Compare
 	t.toTop("_y2")
 	t.toTop("_rhs")
-	t.rawBlock([]string{"_y2", "_rhs"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_y2", "_rhs"}, "_curve_eq", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	})
+
+	// on-curve = right width AND canonical AND curve-equation
+	t.toTop("_canon")
+	t.toTop("_curve_eq")
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_eq_ok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	t.toTop("_len_ok")
+	t.toTop("_eq_ok")
+	t.rawBlock([]string{"_len_ok", "_eq_ok"}, "_result", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 	t.PopPrimeCache()
 }

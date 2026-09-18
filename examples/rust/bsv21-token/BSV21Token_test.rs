@@ -87,7 +87,8 @@ fn test_deploy_mint_inscription_with_all_fields() {
         Some("b61b0172d95e266c18aea0c624db987e971a5d6d4ebc2aaed85da4642d635735_0"),
     );
     let mut contract = RunarContract::new(artifact, constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script)
@@ -110,7 +111,8 @@ fn test_deploy_mint_inscription_minimal() {
     let artifact = compile_artifact();
     let inscription = bsv21_deploy_mint("500", None, None, None);
     let mut contract = RunarContract::new(artifact, constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script).unwrap();
@@ -134,7 +136,8 @@ fn test_transfer_inscription_with_token_id() {
     let token_id = "3b313338fa0555aebeaf91d8db1ffebd74773c67c8ad5181ff3d3f51e21e0000_1";
     let inscription = bsv21_transfer(token_id, "100");
     let mut contract = RunarContract::new(artifact, constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
     let parsed = parse_inscription_envelope(&locking_script).unwrap();
@@ -156,7 +159,8 @@ fn test_deploy_mint_survives_from_utxo_round_trip() {
     let artifact = compile_artifact();
     let inscription = bsv21_deploy_mint("1000000", None, Some("RNR"), None);
     let mut contract = RunarContract::new(artifact.clone(), constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
 
@@ -168,7 +172,8 @@ fn test_deploy_mint_survives_from_utxo_round_trip() {
             satoshis: 1,
             script: locking_script,
         },
-    );
+    )
+    .expect("from_utxo");
 
     let insc = reconnected
         .inscription()
@@ -188,7 +193,8 @@ fn test_transfer_survives_from_utxo_round_trip() {
     let token_id = "abc123_0";
     let inscription = bsv21_transfer(token_id, "50");
     let mut contract = RunarContract::new(artifact.clone(), constructor_args());
-    contract.with_inscription(inscription);
+    contract.with_inscription(inscription)
+        .expect("with_inscription");
 
     let locking_script = contract.get_locking_script();
 
@@ -200,7 +206,8 @@ fn test_transfer_survives_from_utxo_round_trip() {
             satoshis: 1,
             script: locking_script,
         },
-    );
+    )
+    .expect("from_utxo");
 
     let insc = reconnected
         .inscription()

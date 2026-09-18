@@ -384,7 +384,15 @@ public final class ConstantFold {
     // ---------------------------------------------------------------
 
     private static final BigInteger TEN_THOUSAND = BigInteger.valueOf(10_000);
-    private static final BigInteger TWO_FIFTY_SIX = BigInteger.valueOf(256);
+    /**
+     * Upper end of the domain {@code pow} is exact on, shared with the emitted
+     * script ({@code StackLower#lowerPow} unrolls exactly this many conditional
+     * multiplies and enforces the bound with
+     * {@code OP_DUP <0> <33> OP_WITHIN OP_VERIFY}) and with the reference
+     * interpreter.
+     */
+    private static final BigInteger POW_FOLD_EXPONENT_LIMIT =
+            BigInteger.valueOf(StackLower.POW_EXPONENT_LIMIT);
 
     private static ConstSlot evalBuiltinCall(String funcName, List<ConstSlot> args) {
         // All math builtins require integer args.
@@ -430,8 +438,14 @@ public final class ConstantFold {
                 if (ints.size() != 2) return null;
                 BigInteger base = ints.get(0);
                 BigInteger exp = ints.get(1);
+                // Decline outside the domain the emitted script GUARANTEES
+                // and ENFORCES (StackLower#lowerPow: 0 <= exp <= 32, the number
+                // of unrolled conditional multiplies). The old bound was 256,
+                // which folded exponents the script CLAMPED to 32 — so for
+                // 33 <= exp <= 256 the fold-ON and fold-OFF scripts accepted
+                // mutually exclusive inputs (R-169, the pow half).
                 if (exp.signum() < 0) return null;
-                if (exp.compareTo(TWO_FIFTY_SIX) > 0) return null;
+                if (exp.compareTo(POW_FOLD_EXPONENT_LIMIT) > 0) return null;
                 BigInteger result = BigInteger.ONE;
                 int e = exp.intValue();
                 for (int i = 0; i < e; i++) {
@@ -453,6 +467,13 @@ public final class ConstantFold {
                 if (ints.size() != 1) return null;
                 BigInteger n = ints.get(0);
                 if (n.signum() < 0) return null;
+                // Decline outside the domain the emitted script GUARANTEES and
+                // ENFORCES (StackLower#lowerSqrt): n >= 0 and n encodable in
+                // <= 62 script bytes, i.e. n < 2^495. Outside it the compiled
+                // script aborts, so folding to a value here would make sqrt(k)
+                // mean one thing folded and another executed — R-169 at the
+                // other end of the domain.
+                if (n.bitLength() > 495) return null;
                 if (n.signum() == 0) return ConstSlot.ofInt(BigInteger.ZERO);
                 return ConstSlot.ofInt(n.sqrt());
             }

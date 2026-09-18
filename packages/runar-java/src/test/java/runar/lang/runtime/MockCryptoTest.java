@@ -133,9 +133,12 @@ class MockCryptoTest {
         assertEquals("030201", MockCrypto.reverseBytes(a).toHex());
         assertEquals("01", MockCrypto.left(a, BigInteger.ONE).toHex());
         assertEquals("03", MockCrypto.right(a, BigInteger.ONE).toHex());
-        ByteString[] parts = MockCrypto.split(a, BigInteger.ONE);
-        assertEquals("01", parts[0].toHex());
-        assertEquals("0203", parts[1].toHex());
+        // `split` binds the RIGHT half, `left` the LEFT one -- the two sides of
+        // the same cut. Asserting both is what makes this row able to fail: a
+        // `split` that returned the left half would still be a plausible
+        // single-valued function, and only the pair rules it out.
+        assertEquals("0203", MockCrypto.split(a, BigInteger.ONE).toHex());
+        assertEquals("01", MockCrypto.left(a, BigInteger.ONE).toHex());
     }
 
     @Test

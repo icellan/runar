@@ -21,8 +21,13 @@ test "parseANFProgram accepts minimal program (size guard does not trip)" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // N-113: this fixture used to be `"methods":[]`, which R-081 established
+    // is not a minimal VALID program at all — it is the anyone-can-spend shape
+    // (no public method => empty locking script => spendable with OP_1). This
+    // test's subject is the DoS caps, not the schema, so the fix is a fixture
+    // that is genuinely minimal AND valid rather than a weaker assertion.
     const minimal =
-        \\{"contractName":"X","properties":[],"methods":[]}
+        \\{"contractName":"X","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]}
     ;
     const program = try json.parseANFProgram(allocator, minimal);
     try testing.expectEqualStrings("X", program.contract_name);
@@ -69,7 +74,12 @@ test "depth walk ignores braces inside JSON strings" {
     const allocator = arena.allocator();
 
     // 1000 `{` inside a JSON string MUST NOT count toward depth.
-    const head = "{\"contractName\":\"X\",\"properties\":[],\"methods\":[],\"_note\":\"";
+    // N-113: the method list carries a public method because R-081 made
+    // `"methods":[]` an invalid program (no spending entry point => an empty,
+    // anyone-can-spend locking script). The subject here is the depth walk,
+    // not the schema, so the fixture is made valid rather than the assertion
+    // weakened.
+    const head = "{\"contractName\":\"X\",\"properties\":[],\"methods\":[{\"name\":\"unlock\",\"params\":[],\"isPublic\":true,\"body\":[]}],\"_note\":\"";
     const tail = "\"}";
     const inner_count: usize = 1000;
     const buf = try allocator.alloc(u8, head.len + inner_count + tail.len);

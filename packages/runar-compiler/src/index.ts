@@ -55,6 +55,33 @@ export {
   // `decompressPubKey` shipped without a square-check on the recovered y.
   emitVerifyECDSA_P256, emitVerifyECDSA_P384,
 } from './passes/p256-p384-codegen.js';
+// BN254 G1 emitters, exported for the same reason as the EC ones above: the
+// `bn254G1ScalarMul` ladder is a contract-callable builtin in every tier, and
+// nothing outside the Go tier had ever EXECUTED its emitted script — which is
+// how the missing mod-r reduction on the scalar survived in five compilers.
+export {
+  emitBn254G1Add, emitBn254G1ScalarMul, emitBn254G1Negate, emitBn254G1OnCurve,
+} from './passes/bn254-codegen.js';
+// Merkle emitters, exported for the same reason as the EC and BN254 ones: the
+// `merkleRootSha256` / `merkleRootHash256` builtins ship in six tiers and
+// NOTHING outside the Go tier had ever executed their emitted script — which is
+// how an index that is never bounded and a proof remainder that is never read
+// survived (R-120).
+export {
+  emitMerkleRootSha256, emitMerkleRootHash256,
+} from './passes/merkle-codegen.js';
+// BabyBear / KoalaBear field emitters, exported for the same reason: six tiers
+// ship them, the TS unit tests only ever checked opcode SHAPES, and nothing
+// outside the Go tier had ever EXECUTED the emitted script — which is how a
+// negative witness operand walked out of the field unchallenged (R-119).
+export {
+  emitBBFieldAdd, emitBBFieldSub, emitBBFieldMul, emitBBFieldInv,
+  emitBBExt4Mul0, emitBBExt4Inv0,
+} from './passes/babybear-codegen.js';
+export {
+  emitKBFieldAdd, emitKBFieldSub, emitKBFieldMul, emitKBFieldInv,
+  emitKBExt4Mul0, emitKBExt4Inv0,
+} from './passes/koalabear-codegen.js';
 export {
   emitCheckPreimageBinding,
   emitCheckPreimageBindingRaw,
@@ -647,8 +674,10 @@ export function compileFromANF(
  * both shapes so a TS `--from-ir` invocation can consume IR produced by
  * any peer compiler.
  *
- * Throws on malformed JSON. Does NOT perform deep schema validation —
- * downstream stack-lowering will reject malformed IR with an explicit error.
+ * Throws on malformed JSON. Does NOT perform deep schema validation, with one
+ * exception: `add_output` state-value arity is checked here (R-126), because
+ * downstream stack lowering does NOT reject a mismatch — it silently
+ * serializes the min() of the two lists. See `assertAddOutputArity`.
  */
 export function loadANFFromJSON(json: string): ANFProgram {
   // Input-bytes guard: reject obviously oversized IR before JSON.parse.
@@ -693,7 +722,191 @@ export function loadANFFromJSON(json: string): ANFProgram {
   if (!Array.isArray(program.methods)) {
     throw new Error('loadANFFromJSON: missing array field "methods"');
   }
+  coerceNumericBigInts(program as ANFProgram);
+  assertAddOutputArity(program as ANFProgram);
+  assertSuperOnlyInConstructor(program as ANFProgram);
   return program as ANFProgram;
+}
+
+/**
+ * Turn the JSON numbers that stand for `bigint` fields into actual BigInts.
+ *
+ * `loadANFFromJSON`'s reviver already handles the TS emitter's own `"42n"`
+ * strings, and the six native emitters use that same quoted form for anything
+ * past int64. What they use for ordinary values is a plain JSON number, and
+ * those arrived here as JS `number`s: they matched neither the `bigint` nor
+ * the `boolean` arm of `pushValue`, fell through to the hex-string arm, and
+ * threw `Invalid hex string length: undefined`. 52 of the 78 checked-in
+ * `expected-ir.json` goldens were unloadable for that reason, which is why
+ * the TS tier was never wired into `conformance --ir-parity` and why a
+ * `_codePart` divergence (R-287) could sit in its Stack-IR path unnoticed.
+ *
+ * Only the three positions the ANF types declare as `bigint` are touched —
+ * `LoadConst.value`, `Loop.start`, `ANFProperty.initialValue`. Every other
+ * numeric field (`Loop.count`, `Loop.step`, array indices) is a JS number by
+ * declaration and is left alone.
+ *
+ * A string value is NOT converted here. `LoadConst.value` carries hex
+ * ByteStrings and `@ref:`/`@this` markers in that slot, and the canonical
+ * rule the native loaders implement (`isDecimalBigIntLiteral` in
+ * `compilers/go/ir/types.go`) is that only a digit string with a trailing
+ * `n` is a BigInt — which the reviver has already converted.
+ */
+function coerceNumericBigInts(program: ANFProgram): void {
+  const toBigInt = (n: number, where: string): bigint => {
+    if (!Number.isInteger(n)) {
+      throw new Error(`loadANFFromJSON: ${where} must be an integer, got ${n}`);
+    }
+    if (!Number.isSafeInteger(n)) {
+      // JSON.parse has already rounded this value, so the exact integer the
+      // producer wrote is gone. Compiling the rounded one would be a wrong
+      // locking script with no diagnostic. Peer emitters encode anything this
+      // large as a quoted `"…n"` decimal string for exactly this reason.
+      throw new Error(
+        `loadANFFromJSON: ${where} exceeds JSON safe-integer precision (${n}); ` +
+        `encode it as a decimal string with an 'n' suffix instead`,
+      );
+    }
+    return BigInt(n);
+  };
+
+  const visitBindings = (bindings: ANFBinding[], where: string): void => {
+    for (const binding of bindings) {
+      const value = binding.value as Record<string, unknown> & { kind: string };
+      if (value.kind === 'load_const' && typeof value.value === 'number') {
+        value.value = toBigInt(value.value, `${where}.${binding.name}.value`);
+      }
+      if (value.kind === 'loop') {
+        if (typeof value.start === 'number') {
+          value.start = toBigInt(value.start, `${where}.${binding.name}.start`);
+        }
+        visitBindings((value.body ?? []) as ANFBinding[], where);
+      }
+      if (value.kind === 'if') {
+        visitBindings((value.then ?? []) as ANFBinding[], where);
+        visitBindings((value.else ?? []) as ANFBinding[], where);
+      }
+    }
+  };
+
+  for (const property of program.properties) {
+    if (typeof property.initialValue === 'number') {
+      property.initialValue = toBigInt(
+        property.initialValue,
+        `property '${property.name}' initialValue`,
+      );
+    }
+  }
+  for (const method of program.methods) {
+    visitBindings(method.body ?? [], `method '${method.name}'`);
+  }
+}
+
+/**
+ * R-164 / CL-BUG-134 — `super` is only valid in a constructor.
+ *
+ * `super` emits no opcodes (the constructor args are already on the stack) but
+ * stack lowering pushes a stackMap slot for it anyway: +1 model, +0 physical.
+ * On the SOURCE path that is invisible, because the constructor is never
+ * lowered to script. Via `--from-ir` it is reachable, and every subsequent
+ * PICK/ROLL depth in the method is off by one. Measured against the same IR
+ * with the binding deleted:
+ *
+ *     with super     0000 53 7a 53 7a a0 7777    PUSH 3; OP_ROLL, twice
+ *     without super  0000 7b 7b a0 77            OP_ROT, twice
+ *
+ * Three physical items are on the stack at that point, so a depth-3 roll
+ * addresses a fourth that does not exist.
+ *
+ * Refusing beats inventing a physical push for a call with no runtime meaning:
+ * a scan of all 114 checked-in IR files found 110 `super` calls and every one
+ * of them is inside a constructor. Message shared with the six native loaders.
+ */
+function assertSuperOnlyInConstructor(program: ANFProgram): void {
+  const walk = (bindings: readonly ANFBinding[], methodName: string): void => {
+    for (const binding of bindings) {
+      const value = binding.value as { kind?: string; func?: string } & Record<string, unknown>;
+      if (value?.kind === 'call' && value.func === 'super') {
+        throw new Error(
+          `loadANFFromJSON: super() is only valid in a constructor; method ` +
+            `'${methodName}' calls it. It emits no opcodes — the constructor args are ` +
+            `already on the stack — so stack lowering pushes a model slot with no ` +
+            `physical value, and every later PICK/ROLL depth in the method is off by one.`,
+        );
+      }
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = (value as Record<string, unknown>)[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName);
+      }
+    }
+  };
+
+  for (const method of program.methods) {
+    if (method.name === 'constructor') continue;
+    walk(method.body ?? [], method.name);
+  }
+}
+
+/**
+ * R-126 / CL-BUG-164 — every `add_output` must name exactly one state value
+ * per MUTABLE property.
+ *
+ * The source pipeline counts addOutput arity in the typechecker (N20 / N23 /
+ * N26 in the negatives corpus). `--from-ir` runs no frontend, so such a node
+ * reaches stack lowering directly, and every tier's `lowerAddOutput`
+ * serializes the OP_RETURN payload with the MIN of the two lists:
+ *
+ *     for i := 0; i < len(stateValues) && i < len(stateProps); i++
+ *
+ * Under-arity therefore emits an output carrying fewer state fields than the
+ * contract has; over-arity silently drops the surplus. Measured through each
+ * tier's own `--ir` CLI on a two-mutable-field contract (correct arity = 1394
+ * hexchars): go, rust, zig, ruby, python and java ALL accepted, emitting 1388
+ * and 1396 hexchars respectively.
+ *
+ * CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL mutable
+ * fields, so a short-payload continuation is spendable only by a hand-crafted
+ * transaction, and the successor it produces is permanently unspendable —
+ * the next call's `deserialize_state` slices at fixed offsets.
+ *
+ * Enforced at load rather than in stack lowering because the loader is the
+ * trust boundary: it is where IR from outside the compiler enters. Safe to
+ * enforce — across all 101 checked-in IR files in the repo, all 19
+ * `add_output` nodes already satisfy it exactly.
+ *
+ * The message is shared verbatim with the six native tiers.
+ */
+function assertAddOutputArity(program: ANFProgram): void {
+  const mutableCount = program.properties.filter((p) => !p.readonly).length;
+
+  const walk = (bindings: readonly ANFBinding[], methodName: string): void => {
+    for (const binding of bindings) {
+      const value = binding.value as { kind?: string } & Record<string, unknown>;
+      if (value?.kind === 'add_output') {
+        const stateValues = Array.isArray(value.stateValues) ? value.stateValues : [];
+        if (stateValues.length !== mutableCount) {
+          throw new Error(
+            `loadANFFromJSON: add_output in method '${methodName}' carries ` +
+              `${stateValues.length} state values, but the contract declares ` +
+              `${mutableCount} mutable properties. The output's OP_RETURN payload is ` +
+              `serialized from this list while deserialize_state slices the declared ` +
+              `properties at fixed offsets, so any other count commits to a state payload ` +
+              `no SDK-built transaction can produce and a successor that cannot be spent.`,
+          );
+        }
+      }
+      // add_output can sit inside an if-arm or a loop body, not only at the
+      // method's top level.
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = (value as Record<string, unknown>)[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName);
+      }
+    }
+  };
+
+  for (const method of program.methods) {
+    walk(method.body ?? [], method.name);
+  }
 }
 
 /**

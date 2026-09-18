@@ -17,6 +17,7 @@ package runar
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/big"
 
@@ -50,9 +51,11 @@ import (
 // Int is a Rúnar integer (maps to Bitcoin Script numbers).
 type Int = int64
 
-// Bigint is an alias for Int. See the package comment above for why this
-// is int64 rather than *big.Int; the compiler pipeline itself uses
-// arbitrary precision regardless of how the runtime types are declared.
+// Bigint is an alias for Int. See the note above for why this is int64 rather
+// than *big.Int — the short version is that Go has no operator overloading, so
+// a wide alias would take `+` away from contract source and quietly turn `==`
+// into pointer identity. Use BigintBig for values that can exceed it; both
+// names lower to the same `bigint` primitive and emit the same Script.
 type Bigint = int64
 
 // BigintBig is an arbitrary-precision integer for cases where Bigint (int64)
@@ -737,16 +740,33 @@ func ExtractAmount(p SigHashPreimage) int64 { return 10000 }
 // ExtractVersion returns 1 in test mode.
 func ExtractVersion(p SigHashPreimage) int64 { return 1 }
 
-// ExtractSequence returns 0xffffffff in test mode.
-func ExtractSequence(p SigHashPreimage) int64 { return 0xffffffff }
+// ExtractSequence returns 0xfffffffe in test mode. That is
+// the SDK's own non-final default (`resolveInputSequence`), the value the
+// TypeScript TestContract interpreter returns, and the value all the SDK ANF
+// interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+// one value that makes a #131 finality guard fail off-chain and makes
+// nLockTime a consensus no-op on-chain (W7).
+func ExtractSequence(p SigHashPreimage) int64 { return 0xfffffffe }
 
 // ExtractHashPrevouts returns Hash256(72 zero bytes) in test mode.
 // This is consistent with passing allPrevouts = 72 zero bytes in tests,
 // since ExtractOutpoint also returns 36 zero bytes.
-func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest { return Hash256(ByteString(make([]byte, 72))) }
+func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest {
+	return Hash256(ByteString(make([]byte, 72)))
+}
+
+// ExtractHashSequence returns Hash256 of a single 0xfffffffe nSequence
+// (the SDK non-final default) in test mode, matching ExtractSequence.
+func ExtractHashSequence(p SigHashPreimage) Sha256Digest {
+	return Hash256(ByteString([]byte{0xfe, 0xff, 0xff, 0xff}))
+}
 
 // ExtractOutpoint returns 36 zero bytes in test mode.
 func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
+
+// ExtractScriptCode returns empty bytes in test mode. Honest merge is pinned
+// by Spend, not native mocks.
+func ExtractScriptCode(p SigHashPreimage) ByteString { return ByteString("") }
 
 // ExtractPrevOutputScript is the test-mode stub for the cross-input
 // previous-output script witness-bridge intrinsic. The compiler emits
@@ -780,16 +800,30 @@ func CurrentBlockHeight() int64 { return 0 }
 
 // Num2Bin converts an integer to a byte string of the specified length
 // using Bitcoin Script's little-endian signed magnitude encoding.
-// Uses big.Int internally so that all valid int64 inputs (including
-// math.MinInt64) round-trip correctly through Bin2Num.
+//
+// `length` must be wide enough for the value INCLUDING its sign bit, or this
+// panics, exactly as OP_NUM2BIN fails. math.MinInt64 therefore needs nine
+// bytes, not eight: in eight the sign bit and the top magnitude bit are the
+// same bit, and the result decodes as 0. This comment used to claim the
+// opposite.
 func Num2Bin(v int64, length int64) ByteString {
 	return Num2BinBig(big.NewInt(v), length)
 }
 
 // Num2BinBig is the arbitrary-precision form of Num2Bin. Accepts any
-// *big.Int; the result is the little-endian sign-magnitude encoding
-// padded/truncated to `length` bytes.
+// *big.Int; the result is the little-endian sign-magnitude encoding padded to
+// `length` bytes.
+//
+// A value the requested size cannot hold PANICS. It used to truncate to the
+// low `length` bytes, documented as "matches int64 wrap-around semantics" —
+// OP_NUM2BIN has no wrap-around semantics, it FAILS when the number does not
+// fit the size, so the truncated bytes were a value the emitted script never
+// produces and nothing told the caller. The sign occupies a bit, so 255 needs
+// two bytes and 127 needs one.
 func Num2BinBig(v *big.Int, length int64) ByteString {
+	if length < 0 {
+		panic(fmt.Sprintf("runar: Num2Bin length %d is negative", length))
+	}
 	buf := make([]byte, length)
 	if v == nil || v.Sign() == 0 {
 		return ByteString(buf)
@@ -797,10 +831,16 @@ func Num2BinBig(v *big.Int, length int64) ByteString {
 	abs := new(big.Int).Abs(v)
 	// abs.Bytes() is big-endian; fill buf little-endian.
 	be := abs.Bytes()
-	if int64(len(be)) > length {
-		// Caller requested a narrower field than the value occupies.
-		// Truncate to fit (matches int64 wrap-around semantics).
-		be = be[len(be)-int(length):]
+	// Minimal sign-magnitude width: the magnitude bytes, plus one more when
+	// the top magnitude byte already uses the bit the sign needs.
+	need := int64(len(be))
+	if be[0]&0x80 != 0 {
+		need++
+	}
+	if need > length {
+		panic(fmt.Sprintf("runar: Num2Bin cannot encode %s in %d byte(s) — it needs %d; "+
+			"OP_NUM2BIN fails on a size too small for the number, it does not wrap",
+			v, length, need))
 	}
 	for i, b := range be {
 		j := len(be) - 1 - i
@@ -815,24 +855,29 @@ func Num2BinBig(v *big.Int, length int64) ByteString {
 }
 
 // Bin2Num converts a byte string (Bitcoin Script LE signed-magnitude) back to
-// an integer. Inverse of Num2Bin. If the decoded value does not fit in int64,
-// the result is truncated (use Bin2NumBig for arbitrary precision).
+// an integer. Inverse of Num2Bin.
+//
+// A decoded value outside int64 PANICS. It used to return the low 64 bits —
+// "graceful truncation", which handed the caller a number that was simply the
+// wrong one: Bin2Num of 123456789012345678901234567890 encoded in 16 bytes
+// returned -4362896299872285998 while OP_BIN2NUM left the whole value on the
+// stack. Use Bin2NumBig for the wide answer; the .runar.go parser maps both
+// mocks to the same `bin2num` builtin, so reaching for it costs no script
+// bytes.
+//
+// The boundary is the VALUE, not the push width: a 16-byte push of 1000 is
+// 1000, and the emitted opcodes accept it.
 func Bin2Num(data ByteString) int64 {
 	r := Bin2NumBig(data)
 	if r == nil {
 		return 0
 	}
-	if r.IsInt64() {
-		return r.Int64()
+	if !r.IsInt64() {
+		panic(fmt.Sprintf("runar: Bin2Num decoded %s, which does not fit int64 — "+
+			"OP_BIN2NUM has no such limit; use Bin2NumBig, which the .runar.go "+
+			"parser lowers to the same bin2num builtin", r))
 	}
-	// Graceful truncation for out-of-range values: return the low 64 bits.
-	mask := new(big.Int).Lsh(big.NewInt(1), 64)
-	trunc := new(big.Int).Mod(new(big.Int).Abs(r), mask)
-	out := trunc.Int64()
-	if r.Sign() < 0 {
-		out = -out
-	}
-	return out
+	return r.Int64()
 }
 
 // Bin2NumBig is the arbitrary-precision form of Bin2Num. Decodes a
@@ -1013,6 +1058,99 @@ func Substr(data ByteString, start, length int64) ByteString {
 	return data[start : start+length]
 }
 
+// Split returns the bytes of `data` from `index` onwards -- the RIGHT half of
+// the cut. It is single-valued: `spec/grammar.md` gives
+// `split(data: ByteString, index: bigint): ByteString`, and the compiler emits
+// `OP_SPLIT OP_NIP`, dropping the left half at the split site. A Go mock that
+// returned a (left, right) pair would contradict the language and reintroduce
+// the stack-desync defect closed by commit 2ea3b737; see
+// conformance/split_residue_execution_test.go for the spend that pins it.
+//
+// Out-of-range indices panic, matching Substr above: at script level OP_SPLIT
+// aborts the whole evaluation, so there is no in-band error value to return.
+func Split(data ByteString, index int64) ByteString {
+	if index < 0 || index > int64(len(data)) {
+		panic("runar.Split: index out of range")
+	}
+	return data[index:]
+}
+
+// Left returns the leftmost `length` bytes of `data` -- the other side of the
+// same cut Split makes. Compiles to `OP_SPLIT OP_DROP`.
+func Left(data ByteString, length int64) ByteString {
+	if length < 0 || length > int64(len(data)) {
+		panic("runar.Left: length out of range")
+	}
+	return data[:length]
+}
+
+// Right returns the rightmost `length` bytes of `data`. Compiles to
+// `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` (05-stack-lower.ts#lowerRight):
+// `length` is already an operand on the stack, and the two shuffles put it under
+// the size so OP_SUB computes `size - length`. The split offset is therefore
+// measured from the END, which is why Right(d, n) is NOT Split(d, n) -- Split
+// counts from the start.
+//
+// All three keep only one half of the cut, by three different routes: `left` is
+// a plain table entry (`left: ['OP_SPLIT', 'OP_DROP']`), `split` is the table
+// entry `['OP_SPLIT']` with an OP_NIP appended in the same pass, and `right`
+// needs the operand shuffle above and so has its own lowering.
+func Right(data ByteString, length int64) ByteString {
+	if length < 0 || length > int64(len(data)) {
+		panic("runar.Right: length out of range")
+	}
+	return data[int64(len(data))-length:]
+}
+
+// Int2Str converts an integer to a fixed-width byte string. It is the alias
+// spelling docs/formats/go.md documents for the `int2str` builtin, which every
+// tier lowers to OP_NUM2BIN -- the same opcode as num2bin -- so this delegates
+// to Num2Bin rather than reimplementing the encoding. One implementation is
+// what stops the two from drifting apart.
+func Int2Str(value int64, byteLen int64) ByteString {
+	return Num2Bin(value, byteLen)
+}
+
+// Int2str is the lower-cased-`s` spelling. Both resolve to the `int2str`
+// builtin in the Go surface parser -- `Int2Str` through an explicit entry in
+// mapGoBuiltin, `Int2str` through the default leading-character rule -- so the
+// SDK has to accept both or a contract that compiles fails to build as Go.
+func Int2str(value int64, byteLen int64) ByteString {
+	return Num2Bin(value, byteLen)
+}
+
+// Ripemd160 computes a RIPEMD-160 hash.
+//
+// `Ripemd160` is BOTH a Rúnar type name and a Rúnar builtin name in the
+// `.runar.go` surface: compilers/go/frontend/parser_gocontract.go maps it in
+// mapGoType AND in mapGoBuiltin. Go cannot bind one identifier to both, so the
+// SDK has to pick one, and it picks the FUNCTION deliberately:
+//
+//   - As a function, writing `runar.Ripemd160` in type position is a loud
+//     compile error.
+//   - As a type, `runar.Ripemd160(x)` would silently compile as a conversion
+//     returning x unchanged -- dropping the hash entirely. That is exactly the
+//     defect two of the seven tiers shipped, which made the baked digest the
+//     spending key; see
+//     conformance/go_surface_hash_spelling_execution_test.go.
+//
+// Fail loud over fail open. The digest TYPE is spelled Ripemd160Hash here, and
+// all seven `.runar.go` type tables now map that spelling onto the Ripemd160
+// primitive, exactly as they map `Sha256Digest` onto Sha256. They did not until
+// R-Ripemd160Hash: the surface accepted the bare name `Ripemd160` in type
+// position -- which this package does not declare as a type at all -- and
+// refused the one it does, which is what held examples/go/state-ripemd160 and
+// examples/go/byte-builtins out of the Go build. conformance/subtype-parity/
+// GoDigestTypeSpellings.runar.go is the gate that keeps the two spellings
+// resolving to the same primitive.
+//
+// Ripemd160Func is the same function under its original name; this is a
+// one-line delegation to it, not a second implementation, and
+// conformance/go_sdk_byte_builtins_execution_test.go asserts the two agree.
+func Ripemd160(data ByteString) Ripemd160Hash {
+	return Ripemd160Func(data)
+}
+
 // ReverseBytes returns a reversed copy of a byte string.
 func ReverseBytes(data ByteString) ByteString {
 	b := []byte(data)
@@ -1022,19 +1160,22 @@ func ReverseBytes(data ByteString) ByteString {
 	return ByteString(b)
 }
 
-// Abs returns the absolute value of n. Uses big.Int internally so that
-// Abs(math.MinInt64) returns math.MaxInt64 + 1 ... well, since int64 can't
-// hold that, it wraps to math.MinInt64 itself (the mathematical |MinInt64|
-// is 2^63 which is exactly 1 past int64 range). Use AbsBig for a correct
-// arbitrary-precision result.
+// Abs returns the absolute value of n. Panics on math.MinInt64, whose absolute
+// value is 2^63 — exactly one past int64 — rather than returning a narrowed
+// answer; use AbsBig, which the .runar.go parser lowers to the same abs builtin.
 func Abs(n int64) int64 {
 	if n == math.MinInt64 {
-		// 2^63 is not representable as int64. Return the wrapped value
-		// (MinInt64 itself) rather than panic; this preserves Bitcoin
-		// Script semantics for values whose magnitude fits in int64 and
-		// documents the overflow behavior for those that don't. For
-		// arbitrary precision callers should use AbsBig.
-		return math.MinInt64
+		// This used to return MinInt64 — a NEGATIVE absolute value — under a
+		// comment claiming it "preserves Bitcoin Script semantics". It does the
+		// opposite. Script numbers are arbitrary-width after Genesis, so the
+		// emitted OP_ABS leaves +2^63 and the mock left -2^63: a contract
+		// guarding `assert(abs(x) > 0)` was refused off-chain and SPENT on
+		// chain. The agreement table missed it because its only row was
+		// Abs(-7), which fits int64 — the same shape as the bin2num row that
+		// tested 1000.
+		panic("runar: Abs(math.MinInt64) is 2^63, which does not fit int64 — " +
+			"OP_ABS has no such limit; use AbsBig, which the .runar.go parser " +
+			"lowers to the same abs builtin")
 	}
 	if n < 0 {
 		return -n
@@ -1117,7 +1258,7 @@ func Pow(base, exp int64) int64 {
 	}
 	r := PowBig(big.NewInt(base), big.NewInt(exp))
 	if !r.IsInt64() {
-		panic("pow: int64 overflow — use PowBig for arbitrary precision")
+		panic("pow: int64 overflow — PowBig is a native Go *big.Int helper only; it is not a .runar.go builtin")
 	}
 	return r.Int64()
 }
@@ -1142,7 +1283,7 @@ func MulDiv(a, b, c int64) int64 {
 	}
 	r := MulDivBig(big.NewInt(a), big.NewInt(b), big.NewInt(c))
 	if !r.IsInt64() {
-		panic("mulDiv: int64 overflow in quotient — use MulDivBig for arbitrary precision")
+		panic("mulDiv: int64 overflow in quotient — MulDivBig is a native Go *big.Int helper only; it is not a .runar.go builtin")
 	}
 	return r.Int64()
 }
@@ -1161,7 +1302,7 @@ func MulDivBig(a, b, c *big.Int) *big.Int {
 func PercentOf(amount, bps int64) int64 {
 	r := PercentOfBig(big.NewInt(amount), big.NewInt(bps))
 	if !r.IsInt64() {
-		panic("percentOf: int64 overflow — use PercentOfBig for arbitrary precision")
+		panic("percentOf: int64 overflow — PercentOfBig is a native Go *big.Int helper only; it is not a .runar.go builtin")
 	}
 	return r.Int64()
 }
@@ -1197,9 +1338,13 @@ func SqrtBig(n *big.Int) *big.Int {
 func Gcd(a, b int64) int64 {
 	r := GcdBig(big.NewInt(a), big.NewInt(b))
 	if !r.IsInt64() {
-		// GCD(MinInt64, 0) = 2^63, which doesn't fit. Return MaxInt64 as
-		// a documented overflow sentinel; correct callers should use GcdBig.
-		return math.MaxInt64
+		// This used to return MaxInt64 as an "overflow sentinel", which is a
+		// wrong ANSWER rather than an error: Gcd(MinInt64, 0) is 2^63 and the
+		// emitted script computes exactly that. A sentinel the caller does not
+		// check is indistinguishable from a result.
+		panic(fmt.Sprintf("runar: Gcd(%d, %d) = %s, which does not fit int64 — "+
+			"the emitted script has no such limit; use GcdBig, which the "+
+			".runar.go parser lowers to the same gcd builtin", a, b, r))
 	}
 	return r.Int64()
 }
@@ -1258,7 +1403,7 @@ func BbFieldAdd(a, b int64) int64 {
 
 // BbFieldSub returns (a - b + p) mod p.
 func BbFieldSub(a, b int64) int64 {
-	return ((a - b) % bbP + bbP) % bbP
+	return ((a-b)%bbP + bbP) % bbP
 }
 
 // BbFieldMul returns (a * b) mod p.
@@ -1387,7 +1532,7 @@ func KbFieldAdd(a, b int64) int64 {
 
 // KbFieldSub returns (a - b + p) mod p.
 func KbFieldSub(a, b int64) int64 {
-	return ((a - b) % kbP + kbP) % kbP
+	return ((a-b)%kbP + kbP) % kbP
 }
 
 // KbFieldMul returns (a * b) mod p.
@@ -1536,7 +1681,8 @@ func poseidon2KBExternalMDS4(a, b, c, d int64) (int64, int64, int64, int64) {
 // For internal rounds (4-23), only element [0] is used (rest are zero).
 //
 // From Plonky3 p3-koala-bear 0.5.2:
-//   KOALABEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, _INTERNAL, _EXTERNAL_FINAL
+//
+//	KOALABEAR_POSEIDON2_RC_16_EXTERNAL_INITIAL, _INTERNAL, _EXTERNAL_FINAL
 var poseidon2KBRoundConstants = [28][poseidon2KBWidth]int64{
 	// External initial rounds (0-3)
 	{2128964168, 288780357, 316938561, 2126233899, 426817493, 1714118888, 1045008582, 1738510837, 889721787, 8866516, 681576474, 419059826, 1596305521, 1583176088, 1584387047, 1529751136},
@@ -1680,11 +1826,53 @@ func poseidon2KBCompress(left, right [8]int64) [8]int64 {
 	return digest
 }
 
+// poseidon2RootPackBase is the radix the emitter packs the root in. It MUST
+// stay equal to codegen.poseidon2RootPackBase (compilers/go/codegen/
+// poseidon2_merkle.go) — that constant is unexported, so the two are kept in
+// step by execution instead: TestMerkleRootPoseidon2KBv_AgreesWithEmittedScript
+// runs the compiled script against this function's output.
+var poseidon2RootPackBase = new(big.Int).Lsh(big.NewInt(1), 32)
+
+// PackPoseidon2KBRoot folds an 8-element KoalaBear Poseidon2 digest into the
+// single arbitrary-precision integer that `merkleRootPoseidon2KB` returns:
+//
+//	packed = Σ root_i · (2^32)^i        (root_7 most significant)
+//
+// This mirrors codegen.EmitPoseidon2RootPack. Every limb is < p < 2^32, so the
+// packing is injective — equality on the packed value is equality on all eight
+// limbs.
+func PackPoseidon2KBRoot(root [8]int64) *big.Int {
+	acc := new(big.Int)
+	for i := 7; i >= 0; i-- {
+		acc.Mul(acc, poseidon2RootPackBase)
+		acc.Add(acc, big.NewInt(root[i]))
+	}
+	return acc
+}
+
 // MerkleRootPoseidon2KBv is a variadic wrapper for contract compatibility.
 // Takes individual int64 arguments: leaf[0..7], proof[0..depth*8-1], index, depth.
-// Returns the first element of the 8-element Poseidon2 digest (matching the
-// contract type system's single bigint return).
-func MerkleRootPoseidon2KBv(args ...int64) int64 {
+//
+// It returns the SAME value the compiled script leaves on the stack: the
+// base-2^32 packing of all eight root limbs (see PackPoseidon2KBRoot and
+// codegen.EmitPoseidon2RootPack).
+//
+// Why *big.Int and not runar.Bigint (N-090). The packed root occupies up to
+// 256 bits. `runar.Bigint` is int64 — it cannot hold the answer for any root
+// with a nonzero top limb, which is essentially all of them, so a Bigint
+// return is a guarantee of disagreement with the script rather than an
+// approximation of it. This function used to return result[0], one ~31-bit
+// limb of eight, and nothing caught it: BasefoldVerifier.runar.go, its only
+// caller, had a compile test and no execution test, and a compile test cannot
+// observe a value mismatch. The Rúnar-side type is arbitrary-precision
+// `bigint`, so the compiled script and the deployment SDK were always fine;
+// only this mock was narrow.
+//
+// Contracts written in the `.runar.go` DSL must therefore type the field they
+// compare against as `runar.BigintBig` and compare with
+// `runar.BigintBigEqual` — the same shape the BN254 `*Big` wrappers already
+// use for 254-bit field elements, and it compiles to the identical `===`.
+func MerkleRootPoseidon2KBv(args ...int64) *big.Int {
 	if len(args) < 10 {
 		panic("MerkleRootPoseidon2KBv: need at least 10 args (8 leaf + index + depth)")
 	}
@@ -1693,8 +1881,7 @@ func MerkleRootPoseidon2KBv(args ...int64) int64 {
 	var leaf [8]int64
 	copy(leaf[:], args[0:8])
 	proof := args[8 : len(args)-2]
-	result := MerkleRootPoseidon2KB(leaf, proof, index, depth)
-	return result[0]
+	return PackPoseidon2KBRoot(MerkleRootPoseidon2KB(leaf, proof, index, depth))
 }
 
 // MerkleRootPoseidon2KB computes a Poseidon2 KoalaBear Merkle root.

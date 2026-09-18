@@ -76,6 +76,35 @@ export interface InterpreterResult {
 // Internal exceptions for control flow
 // ---------------------------------------------------------------------------
 
+
+/**
+ * R-119 — the reference interpreter must refuse exactly what the emitted script
+ * refuses.
+ *
+ * `bbEmitCanonVerify` (compilers/go/codegen/babybear.go and its five ports)
+ * gates every witness operand of the BabyBear builtins to [0, p-1] with
+ * `OP_WITHIN OP_VERIFY`. Without the same bound here the source-vs-script
+ * differential oracle disagrees on every non-canonical witness, and
+ * `TestContract` keeps telling an author a spend works that the chain rejects.
+ * Same three-places rule as `pow` (R-169), minus the folder — the constant
+ * folder does not fold these builtins.
+ *
+ * The bound is on the INPUT, not a fix-up of the output, for the reason the
+ * emitter records: reducing would leave `v` and `v + p` as two accepted
+ * spellings of one element, which is the aliasing the finding is about.
+ */
+const BB_FIELD_P = 2013265921n;
+
+function assertBBFieldElement(funcName: string, v: bigint, argIndex: number): bigint {
+  if (v < 0n || v >= BB_FIELD_P) {
+    throw new Error(
+      `${funcName}: argument ${argIndex} is ${v}, which is not a BabyBear field ` +
+      `element — the emitted script requires 0 <= x < ${BB_FIELD_P}`,
+    );
+  }
+  return v;
+}
+
 class AssertionError extends Error {
   constructor(message?: string) {
     super(message ?? 'assert failed');
@@ -231,6 +260,80 @@ function checkNum2BinWidth(minimalWidth: number, byteLen: bigint): void {
 // ---------------------------------------------------------------------------
 // RunarInterpreter
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Partial SHA-256 (FIPS 180-4 §6.2.2), for the `sha256Compress` /
+// `sha256Finalize` builtins. Pure byte functions, mirroring the reference in
+// `packages/runar-py/runar/builtins.py` (R-226).
+// ---------------------------------------------------------------------------
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+const rotr32 = (x: number, n: number): number => ((x >>> n) | (x << (32 - n))) >>> 0;
+
+/** One SHA-256 block compression: 32-byte state + 64-byte block -> 32-byte state. */
+function sha256Compress(state: Uint8Array, block: Uint8Array): Uint8Array {
+  const h = new Uint32Array(8);
+  const sv = new DataView(state.buffer, state.byteOffset, state.byteLength);
+  for (let i = 0; i < 8; i++) h[i] = sv.getUint32(i * 4, false);
+
+  const w = new Uint32Array(64);
+  const bv = new DataView(block.buffer, block.byteOffset, block.byteLength);
+  for (let i = 0; i < 16; i++) w[i] = bv.getUint32(i * 4, false);
+  for (let t = 16; t < 64; t++) {
+    const s0 = (rotr32(w[t - 15]!, 7) ^ rotr32(w[t - 15]!, 18) ^ (w[t - 15]! >>> 3)) >>> 0;
+    const s1 = (rotr32(w[t - 2]!, 17) ^ rotr32(w[t - 2]!, 19) ^ (w[t - 2]! >>> 10)) >>> 0;
+    w[t] = (s1 + w[t - 7]! + s0 + w[t - 16]!) >>> 0;
+  }
+
+  let [a, b, c, d, e, f, g, hh] = [h[0]!, h[1]!, h[2]!, h[3]!, h[4]!, h[5]!, h[6]!, h[7]!];
+  for (let t = 0; t < 64; t++) {
+    const S1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) >>> 0;
+    const ch = ((e & f) ^ (~e & g)) >>> 0;
+    const temp1 = (hh + S1 + ch + SHA256_K[t]! + w[t]!) >>> 0;
+    const S0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) >>> 0;
+    const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+    const temp2 = (S0 + maj) >>> 0;
+    hh = g; g = f; f = e;
+    e = (d + temp1) >>> 0;
+    d = c; c = b; b = a;
+    a = (temp1 + temp2) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const ov = new DataView(out.buffer);
+  const next = [a, b, c, d, e, f, g, hh];
+  for (let i = 0; i < 8; i++) ov.setUint32(i * 4, (h[i]! + next[i]!) >>> 0, false);
+  return out;
+}
+
+/** SHA-256 padding + the final one or two compressions. */
+function sha256Finalize(state: Uint8Array, remaining: Uint8Array, msgBitLen: bigint): Uint8Array {
+  const withMarker = new Uint8Array(remaining.length + 1);
+  withMarker.set(remaining);
+  withMarker[remaining.length] = 0x80;
+
+  const blocks = withMarker.length + 8 <= 64 ? 1 : 2;
+  const padded = new Uint8Array(blocks * 64);
+  padded.set(withMarker);
+  new DataView(padded.buffer).setBigUint64(padded.length - 8, msgBitLen, false);
+
+  let s = state;
+  for (let i = 0; i < blocks; i++) {
+    s = sha256Compress(s, padded.subarray(i * 64, (i + 1) * 64));
+  }
+  return s;
+}
+
 
 export class RunarInterpreter {
   private readonly props: Map<string, RunarValue>;
@@ -833,6 +936,51 @@ export class RunarInterpreter {
         return { kind: 'bytes', value: new Uint8Array(hash) };
       }
 
+      // R-226: the partial-SHA-256 pair. Without these the interpreter threw
+      // "Unknown function", so the two contracts that use them
+      // (examples/ts/sha256-compress, sha256-finalize — both also conformance
+      // fixtures) could only ever be executed by the ScriptVM. That leaves the
+      // differential oracle with ONE engine for this codegen family: a
+      // miscompile of the partial-SHA-256 emitter would have had nothing to
+      // disagree with it.
+      //
+      // FIPS 180-4 §6.2.2, mirroring packages/runar-py/runar/builtins.py.
+      case 'sha256Compress': {
+        const state = this.toBytes(args[0]!);
+        const block = this.toBytes(args[1]!);
+        if (state.length !== 32) {
+          throw new Error(`sha256Compress: state must be 32 bytes, got ${state.length}`);
+        }
+        if (block.length !== 64) {
+          throw new Error(`sha256Compress: block must be 64 bytes, got ${block.length}`);
+        }
+        return { kind: 'bytes', value: sha256Compress(state, block) };
+      }
+
+      case 'sha256Finalize': {
+        const state = this.toBytes(args[0]!);
+        const remaining = this.toBytes(args[1]!);
+        const bitLenVal = args[2]!;
+        if (bitLenVal.kind !== 'bigint') {
+          throw new Error('sha256Finalize: msgBitLen must be a bigint');
+        }
+        if (state.length !== 32) {
+          throw new Error(`sha256Finalize: state must be 32 bytes, got ${state.length}`);
+        }
+        if (remaining.length > 119) {
+          // Past 119 the padding needs a third block, which neither the codegen
+          // nor this function emits. Refusing beats returning a digest that no
+          // engine agrees with.
+          throw new Error(
+            `sha256Finalize: remaining must be 0-119 bytes, got ${remaining.length}`,
+          );
+        }
+        return {
+          kind: 'bytes',
+          value: sha256Finalize(state, remaining, bitLenVal.value),
+        };
+      }
+
       case 'ripemd160': {
         const data = this.toBytes(args[0]!);
         const hash = createHash('ripemd160').update(data).digest();
@@ -861,10 +1009,25 @@ export class RunarInterpreter {
       }
 
       case 'checkMultiSig': {
-        // checkMultiSig is not currently used in any contracts.
-        // When array types are added to the interpreter, this should
-        // verify each sig against the pubkeys using verifyTestMessageSig.
-        return { kind: 'boolean', value: false };
+        // R-112: this used to `return false`, silently.
+        //
+        // A stub that answers is worse than one that refuses. Every
+        // `TestContract` test of a multisig contract was asserting against a
+        // hardcoded failure — the spend could not have succeeded whatever the
+        // signatures were, so the test proved nothing and would not have
+        // noticed a broken contract. The three example suites that call it all
+        // asserted `typeof result.success === 'boolean'`, which is true of any
+        // outcome.
+        //
+        // Verifying properly needs array values, which the interpreter does
+        // not have (see the `array_literal` refusal above). Until it does, say
+        // so: a caller who needs a real answer has ScriptVM, which runs the
+        // compiled OP_CHECKMULTISIG against real secp256k1.
+        throw new Error(
+          'checkMultiSig is not implemented in the interpreter (it cannot verify a ' +
+          'signature set without array values, and must not answer as though it had). ' +
+          'Use ScriptVM — it executes the compiled OP_CHECKMULTISIG against real secp256k1.',
+        );
       }
 
       case 'len': {
@@ -1034,6 +1197,13 @@ export class RunarInterpreter {
         const base = this.toBigInt(args[0]!);
         const exp = this.toBigInt(args[1]!);
         if (exp < 0n) throw new Error('pow: negative exponent');
+        // Refuse outside the domain the compiled script enforces
+        // (`05-stack-lower.ts#lowerPow`: 32 unrolled conditional multiplies,
+        // guarded by `OP_DUP <0> <33> OP_WITHIN OP_VERIFY`). The script ABORTS
+        // out here rather than returning base^32, so computing the true power
+        // would put this interpreter and the deployed script back into
+        // disagreement — R-169, the `pow` half.
+        if (exp > 32n) throw new Error('pow: exponent outside the supported domain (exp > 32)');
         let result = 1n;
         for (let i = 0n; i < exp; i++) result *= base;
         return { kind: 'bigint', value: result };
@@ -1056,6 +1226,12 @@ export class RunarInterpreter {
       case 'sqrt': {
         const n = this.toBigInt(args[0]!);
         if (n < 0n) throw new Error('sqrt: negative input');
+        // Refuse outside the domain the compiled script enforces
+        // (`05-stack-lower.ts#lowerSqrt`: n >= 0 and n encodable in <= 62
+        // script bytes, i.e. n < 2^495). The script ABORTS out here rather
+        // than returning a wrong root, so computing one would put this
+        // interpreter and the deployed script back into disagreement.
+        if (n >= 1n << 495n) throw new Error('sqrt: input outside the supported domain (n >= 2^495)');
         if (n === 0n) return { kind: 'bigint', value: 0n };
         let guess = n;
         for (let i = 0; i < 256; i++) {
@@ -1213,6 +1389,20 @@ export class RunarInterpreter {
         expected.set([0x19, 0x76, 0xa9, 0x14], 8);
         expected.set(pubkeyHash, 12);
         expected.set([0x88, 0xac], 32);
+        // W2 backstop. `idx * 34` is the START of output idx only when every
+        // earlier output is exactly 34 bytes, and nothing makes that true --
+        // an attacker sizes output 0 freely and can hide the expected P2PKH
+        // bytes inside its OP_RETURN payload at that offset. The compiler
+        // refuses a literal index above 0 (typecheck plus an ANF-lowering
+        // backstop); refuse it here too, or this interpreter would ACCEPT
+        // spends the compiled script cannot even be built for, and would have
+        // been a second implementation agreeing with the bug.
+        if (idx !== 0n) {
+          throw new AssertionError(
+            `requireOutputP2PKH(${idx}): outputIndex must be 0 — byte offset ` +
+            'idx*34 is an output boundary only at 0 (W2)',
+          );
+        }
         const offset = Number(idx * 34n);
         const slice = serialised.slice(offset, offset + 34);
         if (!bytesEqual(slice, expected)) {
@@ -1253,7 +1443,7 @@ export class RunarInterpreter {
         return { kind: 'bigint', value: 0n };
 
       case 'extractScriptCode':
-        return { kind: 'bytes', value: new Uint8Array(0) };
+        return { kind: 'bytes', value: this._mockPreimageBytes['scriptCode'] ?? new Uint8Array(0) };
 
       case 'extractSigHashType':
         return { kind: 'bigint', value: 0x41n };
@@ -1384,22 +1574,22 @@ export class RunarInterpreter {
 
       // Baby Bear field arithmetic (p = 2013265921)
       case 'bbFieldAdd': {
-        const a = this.toBigInt(args[0]!);
-        const b = this.toBigInt(args[1]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
+        const b = assertBBFieldElement(funcName, this.toBigInt(args[1]!), 1);
         return { kind: 'bigint', value: (a + b) % 2013265921n };
       }
       case 'bbFieldSub': {
-        const a = this.toBigInt(args[0]!);
-        const b = this.toBigInt(args[1]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
+        const b = assertBBFieldElement(funcName, this.toBigInt(args[1]!), 1);
         return { kind: 'bigint', value: ((a - b) % 2013265921n + 2013265921n) % 2013265921n };
       }
       case 'bbFieldMul': {
-        const a = this.toBigInt(args[0]!);
-        const b = this.toBigInt(args[1]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
+        const b = assertBBFieldElement(funcName, this.toBigInt(args[1]!), 1);
         return { kind: 'bigint', value: (a * b) % 2013265921n };
       }
       case 'bbFieldInv': {
-        const a = this.toBigInt(args[0]!);
+        const a = assertBBFieldElement(funcName, this.toBigInt(args[0]!), 0);
         const p = 2013265921n;
         let result = 1n, base = ((a % p) + p) % p, exp = p - 2n;
         while (exp > 0n) {
@@ -1414,10 +1604,9 @@ export class RunarInterpreter {
       case 'bbExt4Mul0': case 'bbExt4Mul1': case 'bbExt4Mul2': case 'bbExt4Mul3': {
         const p = 2013265921n;
         const W = 11n;
-        const a0 = this.toBigInt(args[0]!), a1 = this.toBigInt(args[1]!);
-        const a2 = this.toBigInt(args[2]!), a3 = this.toBigInt(args[3]!);
-        const b0 = this.toBigInt(args[4]!), b1 = this.toBigInt(args[5]!);
-        const b2 = this.toBigInt(args[6]!), b3 = this.toBigInt(args[7]!);
+        const g = (i: number) => assertBBFieldElement(funcName, this.toBigInt(args[i]!), i);
+        const a0 = g(0), a1 = g(1), a2 = g(2), a3 = g(3);
+        const b0 = g(4), b1 = g(5), b2 = g(6), b3 = g(7);
         const fm = (x: bigint, y: bigint) => (x * y) % p;
         const fa = (x: bigint, y: bigint) => (x + y) % p;
         const r0 = fa(fm(a0, b0), fm(W, fa(fa(fm(a1, b3), fm(a2, b2)), fm(a3, b1))));
@@ -1431,8 +1620,8 @@ export class RunarInterpreter {
       case 'bbExt4Inv0': case 'bbExt4Inv1': case 'bbExt4Inv2': case 'bbExt4Inv3': {
         const p = 2013265921n;
         const W = 11n;
-        const a0 = this.toBigInt(args[0]!), a1 = this.toBigInt(args[1]!);
-        const a2 = this.toBigInt(args[2]!), a3 = this.toBigInt(args[3]!);
+        const g = (i: number) => assertBBFieldElement(funcName, this.toBigInt(args[i]!), i);
+        const a0 = g(0), a1 = g(1), a2 = g(2), a3 = g(3);
         const fm = (x: bigint, y: bigint) => (x * y) % p;
         const fa = (x: bigint, y: bigint) => (x + y) % p;
         const fs = (x: bigint, y: bigint) => ((x - y) % p + p) % p;
@@ -1475,6 +1664,33 @@ export class RunarInterpreter {
         const index = this.toBigInt(args[2]!);
         const depth = Number(this.toBigInt(args[3]!));
         const useSha256 = funcName === 'merkleRootSha256';
+
+        // R-120: refuse exactly what the emitted script refuses.
+        //
+        // The script reads bit i of the index at level i and never looks
+        // above bit depth-1, then drops the index; and it OP_SPLITs the proof
+        // 32 bytes at a time and used to drop the remainder unread. Both are
+        // now OP_VERIFY gates in stack lowering, so the reference interpreter
+        // has to refuse on the SAME bound — otherwise the source-vs-script
+        // differential oracle disagrees on every out-of-domain witness, and
+        // `TestContract` would keep telling an author that a spend works
+        // which the chain rejects. (Same three-places rule as `pow`, R-169:
+        // guard, folder and interpreter refuse together. The folder does not
+        // fold these builtins, so there are two places here, not three.)
+        if (index < 0n || index >= 1n << BigInt(depth)) {
+          throw new Error(
+            `${funcName}: index ${index} is outside [0, 2^${depth}) — ` +
+            `the emitted script bounds it, because bits at or above ${depth} ` +
+            `are never consulted and would silently alias another leaf`,
+          );
+        }
+        if (proof.length !== 32 * depth) {
+          throw new Error(
+            `${funcName}: proof is ${proof.length} bytes, expected exactly ` +
+            `${32 * depth} (32 * depth) — the emitted script requires the ` +
+            `blob to be fully consumed`,
+          );
+        }
 
         let current = leaf;
         for (let i = 0; i < depth; i++) {

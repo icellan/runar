@@ -214,6 +214,104 @@ func flattenFixedArrayCtorArgs(args []interface{}, abiParams []ABIParam) []inter
 	return out
 }
 
+// flattenFixedArrayState spreads every grouped FixedArray entry of a state
+// record (`table` holding a possibly-nested slice of length N) over the
+// SYNTHETIC scalar names the leaves are really called (`table__0`..`table__3`,
+// `grid__0__0`..`grid__1__1`, ...). The grouped entries are kept as well, for
+// callers that read them afterwards.
+//
+// This is the ANF-interpreter boundary. Pass `03b-expand-fixed-arrays` runs
+// BEFORE ANF lowering, so the ANF program has no property called `table` at
+// all -- every `load_prop` / `update_prop` in the method body names one of the
+// synthetic leaves. Handing the interpreter the grouped map left it evaluating
+// `this.table[i]++` against an ABSENT property, falling back to the property's
+// initialValue (or its constructor arg), and a runtime-index write rewrites
+// every leaf -- so a call on a contract restored from chain silently rewound
+// the whole array to its deploy-time contents and committed that to the
+// continuation output.
+//
+// Mirrors `flattenFixedArrayState` in packages/runar-sdk/src/contract.ts and
+// `_flatten_fixed_array_state` in packages/runar-py/runar/sdk/contract.py,
+// including their two rules: a non-slice value is NOT spread over N leaves
+// (nothing sensible to spread), and an explicitly-supplied scalar wins over the
+// grouped slice it is also spelled inside.
+func flattenFixedArrayState(state map[string]interface{}, fields []StateField) map[string]interface{} {
+	out := make(map[string]interface{}, len(state))
+	for k, v := range state {
+		out[k] = v
+	}
+	for _, field := range fields {
+		if field.FixedArray == nil {
+			continue
+		}
+		value, ok := state[field.Name]
+		if !ok || asInterfaceSlice(value) == nil {
+			continue
+		}
+		flat := flattenNestedValue(value, parseFixedArrayDims(field.Type))
+		for i, name := range field.FixedArray.SyntheticNames {
+			if _, exists := out[name]; exists {
+				continue
+			}
+			if i < len(flat) {
+				out[name] = flat[i]
+			}
+		}
+	}
+	return out
+}
+
+// regroupFixedArrayState rebuilds each grouped FixedArray entry of a state
+// record from the synthetic scalar leaves the ANF interpreter writes, so the
+// user-facing `GetState()["table"]` and the serializer's grouped fallback both
+// see the post-call value rather than the pre-call one. Synthetic entries are
+// left in place; non-FixedArray fields pass through untouched.
+//
+// A field whose leaves are entirely absent from the map is left alone: the
+// method did not touch that array, so there is nothing to reconstruct. A leaf
+// the method did not write falls back to its pre-call value from `state`'s
+// grouped entry, so a partial write keeps the untouched slots instead of
+// zeroing them.
+//
+// Mirrors `regroupFixedArrayState` in packages/runar-sdk/src/contract.ts and
+// `_regroup_fixed_array_state` in packages/runar-py/runar/sdk/contract.py.
+func regroupFixedArrayState(state map[string]interface{}, fields []StateField) map[string]interface{} {
+	out := make(map[string]interface{}, len(state))
+	for k, v := range state {
+		out[k] = v
+	}
+	for _, field := range fields {
+		if field.FixedArray == nil {
+			continue
+		}
+		names := field.FixedArray.SyntheticNames
+		flat := make([]interface{}, len(names))
+		written := make([]bool, len(names))
+		sawAny := false
+		for i, name := range names {
+			if v, ok := out[name]; ok {
+				flat[i] = v
+				written[i] = true
+				sawAny = true
+			}
+		}
+		if !sawAny {
+			continue
+		}
+		dims := parseFixedArrayDims(field.Type)
+		if prior, ok := state[field.Name]; ok && asInterfaceSlice(prior) != nil {
+			priorFlat := flattenNestedValue(prior, dims)
+			for i := range flat {
+				if !written[i] && i < len(priorFlat) {
+					flat[i] = priorFlat[i]
+				}
+			}
+		}
+		out[field.Name] = regroupNestedValue(flat, dims)
+	}
+	return out
+}
+
 // Connect stores a provider and signer on this contract so they don't need
 // to be passed to every Deploy() and Call() invocation.
 func (c *RunarContract) Connect(provider Provider, signer Signer) {
@@ -323,13 +421,104 @@ func normalizeWitnessBytes(s string) (string, error) {
 	return strings.ToLower(h), nil
 }
 
+// decodeExactCodePartLenPins decodes the value of every EQUALITY
+// `verify_code_part_len` pin in a compiled script.
+//
+// The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+//
+//	76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+//	OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+//
+// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
+// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+// satisfy, so it is deliberately not returned here.
+//
+// Read from the emitted TEMPLATE rather than from a built code script: the
+// template holds OP_0 placeholders where constructor args go, so no
+// caller-supplied byte string can be mistaken for a pin.
+func decodeExactCodePartLenPins(scriptHex string) []int {
+	var values []int
+	for i := 0; i+18 <= len(scriptHex); i += 2 {
+		seq := scriptHex[i : i+18]
+		if seq[0:4] != "7604" {
+			continue
+		}
+		if seq[12:14] != "81" {
+			continue
+		}
+		if seq[14:16] != "9c" {
+			continue
+		}
+		if seq[16:18] != "69" {
+			continue
+		}
+		raw, err := hex.DecodeString(seq[4:12])
+		if err != nil {
+			continue
+		}
+		value := 0
+		for b := 3; b >= 0; b-- { // little-endian
+			value = value<<8 | int(raw[b])
+		}
+		values = append(values, value)
+	}
+	return values
+}
+
+// assertCodePartLengthPinHonoured verifies that every equality
+// `verify_code_part_len` pin the compiler baked into this artifact still
+// describes the code part this contract produces.
+//
+// The check is the invariant itself, not a restatement of the compiler's
+// derivation: it decodes the pinned number straight out of the emitted template
+// and compares it to getCodePartHex(). So it permits every combination that
+// actually works -- a stateless contract or a fixed-size state layout carries
+// no pin at all, and a lower-bound pin is satisfied by a longer code part --
+// and rejects only the shape that would lock funds.
+func (c *RunarContract) assertCodePartLengthPinHonoured() error {
+	pinned := decodeExactCodePartLenPins(c.Artifact.Script)
+	if len(pinned) == 0 {
+		return nil
+	}
+	actual := len(c.getCodePartHex()) / 2
+	for _, value := range pinned {
+		if value == actual {
+			continue
+		}
+		return fmt.Errorf(
+			"RunarContract.WithInscription: %s pins SIZE(_codePart) == %d, but with "+
+				"this inscription attached the code part is %d bytes. Deploying it would "+
+				"make every spend fail OP_VERIFY and lock the contract's funds permanently. "+
+				"An inscription cannot be attached to a stateful contract with a "+
+				"variable-length state section: the envelope is part of the code part, and "+
+				"its length is not known when the pin is compiled",
+			c.Artifact.ContractName, value, actual,
+		)
+	}
+	return nil
+}
+
 // WithInscription attaches a 1sat ordinals inscription to this contract. The
 // inscription envelope is injected into the locking script between the compiled
 // code and the state section (if any). Once deployed, the inscription is
 // immutable -- it persists identically across all state transitions.
-func (c *RunarContract) WithInscription(inscription *Inscription) *RunarContract {
+//
+// N-043 -- returns an error when the envelope would break the contract's own
+// `SIZE(_codePart)` pin. A stateful contract with a variable-length state
+// section carries an equality pin on the deployed code-part length, and the
+// envelope lands INSIDE the code part (see getCodePartHex). The compiler bakes
+// that number before any inscription exists, so the pinned length and the real
+// one differ by the envelope's size and every honest spend aborts at OP_VERIFY
+// -- with the funds already committed. Refusing here turns a permanent, silent
+// lock into a loud error before a single satoshi moves.
+func (c *RunarContract) WithInscription(inscription *Inscription) (*RunarContract, error) {
+	previous := c.inscription
 	c.inscription = inscription
-	return c
+	if err := c.assertCodePartLengthPinHonoured(); err != nil {
+		c.inscription = previous
+		return nil, err
+	}
+	return c, nil
 }
 
 // GetInscription returns the current inscription, if any.
@@ -367,6 +556,16 @@ func (c *RunarContract) Deploy(
 	// DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
 	if guardErr := assertScriptHexUnderLimit(
 		lockingScript, MaxScriptBytes,
+		fmt.Sprintf("%s.Deploy", c.Artifact.ContractName),
+	); guardErr != nil {
+		return "", nil, guardErr
+	}
+
+	// R-062: and refuse to fund a script reaching a builtin the compiler does
+	// not claim is sound unless the caller says so here, in the same breath as
+	// the money.
+	if guardErr := assertUnsoundPrimitivesAcknowledged(
+		c.Artifact, options.AcknowledgeUnsound,
 		fmt.Sprintf("%s.Deploy", c.Artifact.ContractName),
 	); guardErr != nil {
 		return "", nil, guardErr
@@ -773,8 +972,13 @@ func (c *RunarContract) PrepareCall(
 	var anfOrderedOutputs []OrderedOutput
 	if isStateful && c.Artifact.ANF != nil {
 		namedArgs := buildNamedArgs(userParams, resolvedArgs)
+		// The interpreter knows only the EXPANDED scalar property names, so a
+		// grouped FixedArray entry has to be spread over its synthetic leaves
+		// first -- see flattenFixedArrayState. c.constructorArgs is already
+		// flat (NewRunarContract runs flattenFixedArrayCtorArgs).
+		flatState := flattenFixedArrayState(c.state, c.Artifact.StateFields)
 		state, dataOuts, _, ordered, err := ComputeNewStateAndDataOutputs(
-			c.Artifact.ANF, methodName, c.state, namedArgs, c.constructorArgs,
+			c.Artifact.ANF, methodName, flatState, namedArgs, c.constructorArgs,
 		)
 		if err != nil {
 			// FAIL CLOSED (NEW-006). Swallowing this built the stateful
@@ -789,7 +993,18 @@ func (c *RunarContract) PrepareCall(
 					"commit cannot be derived. Refusing to build a transaction from the "+
 					"pre-call state: %w", methodName, err)
 		}
-		autoComputedState = state
+		// ...and the post-state comes back under those same synthetic names, so
+		// regroup before it reaches c.state. Without this the grouped entry
+		// keeps its pre-call value and only SerializeState's synthetic-key
+		// preference kept the continuation bytes honest.
+		merged := make(map[string]interface{}, len(flatState)+len(state))
+		for k, v := range flatState {
+			merged[k] = v
+		}
+		for k, v := range state {
+			merged[k] = v
+		}
+		autoComputedState = regroupFixedArrayState(merged, c.Artifact.StateFields)
 		resolvedDataOutputs = dataOuts
 		anfOrderedOutputs = ordered
 	}
@@ -1565,7 +1780,15 @@ func restoreConstructorArgs(artifact *RunarArtifact, scriptHex string) []interfa
 	return out
 }
 
-func FromUtxo(artifact *RunarArtifact, utxo UTXO) *RunarContract {
+// FromUtxo reconnects to a deployed contract from a known UTXO.
+//
+// Returns an error when the artifact declares state fields and utxo.Script's
+// state section does not decode exactly as those fields describe (C2). The
+// alternative is a contract that silently presents constructor-initial values
+// as live on-chain state and then signs a continuation output committing to
+// them. FromTxId already returned that decode error; this entry point now
+// uses the same channel instead of a nil contract with no reason.
+func FromUtxo(artifact *RunarArtifact, utxo UTXO) (*RunarContract, error) {
 	// Recover the real baked-in constructor args from the deployed script so a
 	// restored contract operates on the true values rather than 0 placeholders
 	// (issue #119). readonly ctor params feed the state-continuation formula and
@@ -1602,15 +1825,25 @@ func FromUtxo(artifact *RunarArtifact, utxo UTXO) *RunarContract {
 		Script:      utxo.Script,
 	}
 
-	// Extract state if this is a stateful contract
+	// Extract state if this is a stateful contract.
+	//
+	// FAILS CLOSED (C2). utxo.Script is a locking script any third party can
+	// construct, and the state decoded from it is what the next Call commits
+	// to in the continuation output. If it does not decode EXACTLY as the
+	// artifact's StateFields describe, return the decode error rather than a
+	// contract carrying constructor-initial values dressed up as live
+	// on-chain state.
 	if len(artifact.StateFields) > 0 {
-		state := ExtractStateFromScript(artifact, utxo.Script)
+		state, err := ExtractStateFromScript(artifact, utxo.Script)
+		if err != nil {
+			return nil, fmt.Errorf("RunarContract.FromUtxo: %w", err)
+		}
 		if state != nil {
 			contract.state = state
 		}
 	}
 
-	return contract
+	return contract, nil
 }
 
 // FromTxId reconnects to an existing deployed contract from its deployment
@@ -1673,9 +1906,14 @@ func FromTxId(
 		Script:      output.Script,
 	}
 
-	// Extract state if this is a stateful contract
+	// Extract state if this is a stateful contract. FAILS CLOSED (C2) — see
+	// FromUtxo. This entry point has an error channel, so the refusal carries
+	// its reason.
 	if len(artifact.StateFields) > 0 {
-		state := ExtractStateFromScript(artifact, output.Script)
+		state, err := ExtractStateFromScript(artifact, output.Script)
+		if err != nil {
+			return nil, fmt.Errorf("RunarContract.FromTxId: %w", err)
+		}
 		if state != nil {
 			contract.state = state
 		}

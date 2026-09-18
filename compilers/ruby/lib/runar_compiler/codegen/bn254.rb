@@ -597,8 +597,14 @@ module RunarCompiler
       # @param y_name [String]
       def self.bn254_decompose_point(t, point_name, x_name, y_name)
         t.to_top(point_name)
-        # OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+        # R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+        # Point inherits the check -- the same placement CL-BUG-095 chose for
+        # ec.rb's decompose. Without it OP_SPLIT at 32 discards whatever follows
+        # byte 64, so bn254G1OnCurve(G || 0xff) returned TRUE. ABORTING form:
+        # emit_bn254_g1_on_curve must stay TOTAL, so it clamps and flags the
+        # length BEFORE calling this.
         split_fn = ->(e) {
+          EC.emit_point_len_verify(e, 64)
           e.call(make_stack_op(op: "push", value: big_int_push(32)))
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         }
@@ -700,9 +706,84 @@ module RunarCompiler
       # collapses to 3*px^2/(2*py) when P == Q, which is the correct doubling
       # slope.
       #
-      # The only input that still fails is P == -Q (py + qy == 0, group
-      # identity), which is out of scope for Groth16 verifier usage.
+      # The remaining zero-denominator input (py + qy == 0) is handled by the
+      # caller: emit_bn254_g1_add masks P == -Q to the all-zero point at
+      # infinity (see bn254_g1_infinity_flag); the Groth16 MSM path shares
+      # this helper unmasked and stays fail-closed.
       #
+      # Compute `_notinf`, 0 exactly when P == -Q and 1 otherwise, reading
+      # px/py/qx/qy WITHOUT consuming them. Call it before
+      # bn254_g1_affine_add; apply the result with bn254_g1_mask_infinity.
+      #
+      # P + (-P) is the point at infinity, which affine x||y cannot represent.
+      # This codegen already has an encoding for O -- the ALL-ZERO blob, which
+      # is what bn254G1ScalarMul returns for k = 0 mod r and what secp256k1
+      # and both NIST curves return for their own P + (-P). bn254G1Add is a
+      # general contract-callable builtin, so it owes callers the same answer
+      # rather than the off-curve blob the unified slope produces there
+      # (py + qy == 0 and the field inverse is Fermat, so inv(0) = 0). O is
+      # not on the curve (0^2 != 0^3 + 3), so the documented
+      # assert(bn254G1OnCurve(r)) idiom still rejects the result.
+      #
+      # THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254
+      # has j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root
+      # of unity w and Q = (w*px, -py) is an ordinary point that also zeroes
+      # py + qy while P + Q is an ordinary point, not O. Masking on the
+      # denominator would answer "infinity" there: plausible and wrong -- the
+      # exact failure mode 03f50d48 introduced on the NIST curves and f16790a9
+      # had to undo. Testing px == qx ALONE would be wrong in the other
+      # direction: it would swallow doubling.
+      #
+      # Deliberately NOT inside bn254_g1_affine_add: the Groth16 MSM bind
+      # shares that helper and keeps its fail-closed behaviour and its bytes
+      # unchanged.
+      #
+      # Byte-identical to `bn254G1InfinityFlag` in
+      # compilers/go/codegen/bn254.go.
+      #
+      # @param t [BN254Tracker]
+      def self.bn254_g1_infinity_flag(t)
+        t.copy_to_top("px", "_inf_px")
+        t.copy_to_top("qx", "_inf_qx")
+        t.raw_block(%w[_inf_px _inf_qx], "_xeq",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL")) })
+        t.copy_to_top("py", "_inf_py")
+        t.copy_to_top("qy", "_inf_qy")
+        t.raw_block(%w[_inf_py _inf_qy], "_yeq",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL")) })
+        # cond = xeq AND yeq: 1 when doubling.
+        t.copy_to_top("_xeq", "_xeq_c")
+        t.to_top("_yeq")
+        t.raw_block(%w[_xeq_c _yeq], "_cond",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        # notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and
+        # the points are not equal, i.e. exactly the P == -Q case.
+        t.to_top("_xeq")
+        t.to_top("_cond")
+        fn = lambda { |e|
+          e.call(make_stack_op(op: "opcode", code: "OP_SUB"))
+          e.call(make_stack_op(op: "opcode", code: "OP_NOT"))
+        }
+        t.raw_block(%w[_xeq _cond], "_notinf", fn)
+      end
+
+      # Zero rx and ry when `_notinf` is 0, consuming it.
+      #
+      # The mask is a bare OP_MUL with no reduction: rx, ry are already in
+      # [0, p) and notinf is 0 or 1, so the product is canonical either way.
+      #
+      # @param t [BN254Tracker]
+      def self.bn254_g1_mask_infinity(t)
+        t.to_top("rx")
+        t.copy_to_top("_notinf", "_notinf_x")
+        t.raw_block(%w[rx _notinf_x], "rx",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MUL")) })
+        t.to_top("ry")
+        t.to_top("_notinf")
+        t.raw_block(%w[ry _notinf], "ry",
+                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MUL")) })
+      end
+
       # @param t [BN254Tracker]
       def self.bn254_g1_affine_add(t)
         # s_num = px^2 + px*qx + qx^2
@@ -952,7 +1033,7 @@ module RunarCompiler
       #
       # @param e [Proc] emit callback
       # @param t [BN254Tracker]
-      def self.bn254_build_jacobian_add_affine_inline(e, t)
+      def self.bn254_build_jacobian_add_affine_inline(e, t, strict)
         # Create inner tracker with cloned stack state
         it = BN254Tracker.new(t.nm.dup, e)
         # Propagate prime cache state: the cached prime on the alt-stack is
@@ -967,6 +1048,10 @@ module RunarCompiler
         # compare against a fresh copy of jx. Consumes only the copies.
         it.copy_to_top("jz", "_jz_chk_in")
         bn254_field_sqr(it, "_jz_chk_in", "_jz_chk_sq")
+        if strict
+          # Z1sq is consumed by U2 below; keep a copy for Z1cu.
+          it.copy_to_top("_jz_chk_sq", "_jz_chk_sq_keep")
+        end
         it.copy_to_top("ax", "_ax_chk_copy")
         bn254_field_mul(it, "_ax_chk_copy", "_jz_chk_sq", "_u2_chk")
         it.copy_to_top("jx", "_jx_chk_copy")
@@ -975,8 +1060,30 @@ module RunarCompiler
         }
         it.raw_block(["_u2_chk", "_jx_chk_copy"], "_h_is_zero", eq_fn)
 
-        # Move _h_is_zero to top so OP_IF can consume it.
-        it.to_top("_h_is_zero")
+        cond_name = "_h_is_zero"
+        if strict
+          # R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two
+          # operands are the SAME point; H == 0 with R != 0 means they are
+          # negatives, whose sum is O -- and the standard mixed-add already
+          # answers that correctly, with Z3 = jz*H = 0 flowing through the
+          # Fermat inverse to the all-zero point.
+          it.copy_to_top("jz", "_jz_chk_for_cu")
+          bn254_field_mul(it, "_jz_chk_for_cu", "_jz_chk_sq_keep", "_z1cu_chk")
+          it.copy_to_top("ay", "_ay_chk_copy")
+          bn254_field_mul(it, "_ay_chk_copy", "_z1cu_chk", "_s2_chk")
+          it.copy_to_top("jy", "_jy_chk_copy")
+          it.raw_block(["_s2_chk", "_jy_chk_copy"], "_r_is_zero", eq_fn)
+          it.to_top("_h_is_zero")
+          it.to_top("_r_is_zero")
+          booland_fn = ->(ee) {
+            ee.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+          }
+          it.raw_block(["_h_is_zero", "_r_is_zero"], "_dbl_cond", booland_fn)
+          cond_name = "_dbl_cond"
+        end
+
+        # Move the condition to top so OP_IF can consume it.
+        it.to_top(cond_name)
         it.nm.pop # consumed by IF
 
         # ------------------------------------------------------------------
@@ -1014,6 +1121,10 @@ module RunarCompiler
       # @param result_name [String]
       def self.bn254_g1_negate(t, point_name, result_name)
         bn254_decompose_point(t, point_name, "_nx", "_ny")
+        # R-141: bn254_compose_point below is documented as requiring [0, p-1]
+        # and does not check, so without this the negation of a non-canonical
+        # point re-emitted its x half verbatim.
+        bn254_emit_coord_canon_verify(t, "_nx", "_ny")
         # Use bn254_field_neg which already handles prime caching
         bn254_field_neg(t, "_ny", "_neg_y")
         bn254_compose_point(t, "_nx", "_neg_y", result_name)
@@ -1083,6 +1194,64 @@ module RunarCompiler
         t.pop_prime_cache
       end
 
+      # R-141, CLAMPING form -- the BN254 twin of ec.rb's point length gate.
+      # Leaves [flag, clamped] on the tracker. Used by emit_bn254_g1_on_curve,
+      # whose job is to answer "is this an acceptable point?" over untrusted
+      # bytes: for a wrong-length blob the correct answer is FALSE, not an
+      # aborted script.
+      def self.bn254_emit_point_length_gate(t, name, want, flag_name)
+        t.to_top(name)
+        gate_fn = ->(e) {
+          e.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
+          e.call(make_stack_op(op: "push", value: big_int_push(want)))
+          e.call(make_stack_op(op: "opcode", code: "OP_NUMEQUAL"))
+          e.call(make_stack_op(op: "swap"))
+          e.call(make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: ("\x00".b * want))))
+          e.call(make_stack_op(op: "opcode", code: "OP_CAT"))
+          e.call(make_stack_op(op: "push", value: big_int_push(want)))
+          e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
+          e.call(make_stack_op(op: "drop"))
+        }
+        t.raw_block([name], "", gate_fn)
+        t.nm.push(flag_name)
+        t.nm.push(name)
+      end
+
+      # R-141 -- a BN254 G1 Point's two coordinates must be FIELD ELEMENTS,
+      # aborting form. The direct analogue of ec.rb's R-117 gate, with the
+      # placement re-derived for this curve.
+      #
+      # bn254_decompose_point BIN2NUMs each half as an UNSIGNED integer, so any
+      # value fitting 32 bytes is accepted; p is ~2^253.6, so x + p < 2^256 for
+      # EVERY x < p -- unlike secp256k1, the alias exists for every point on the
+      # curve. Measured before this gate, with G = (1, 2):
+      # bn254G1OnCurve((1+p)||2), bn254G1OnCurve(1||(2+p)) and
+      # bn254G1OnCurve(G||0xff) all returned 1.
+      #
+      # The value builtins abort for a DIFFERENT reason than secp256k1's did:
+      # BN254's adder is not fooled into a wrong answer (bn254G1Add(G, (1+p)||2)
+      # returns the correct 2G, because the infinity flag reduces before it
+      # compares), but bn254_compose_point is documented as requiring [0, p-1]
+      # and not checking, and bn254_g1_negate handed it the raw decomposed x --
+      # a value builtin PRODUCING something that is not a point.
+      #
+      # Deliberately NOT folded into bn254_decompose_point: that helper also
+      # runs inside emit_bn254_g1_on_curve, which must return FALSE not abort.
+      def self.bn254_emit_coord_canon_verify(t, x_name, y_name)
+        lt_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) }
+        t.copy_to_top(x_name, "_cc_x")
+        bn254_push_field_p(t, "_cc_px")
+        t.raw_block(%w[_cc_x _cc_px], "_cc_xok", lt_fn)
+        t.copy_to_top(y_name, "_cc_y")
+        bn254_push_field_p(t, "_cc_py")
+        t.raw_block(%w[_cc_y _cc_py], "_cc_yok", lt_fn)
+        and_verify = ->(e) {
+          e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+          e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+        }
+        t.raw_block(%w[_cc_xok _cc_yok], "", and_verify)
+      end
+
       # Add two BN254 G1 points.
       # Stack in: [point_a, point_b] (b on top)
       # Stack out: [result_point]
@@ -1093,7 +1262,14 @@ module RunarCompiler
         t.push_prime_cache
         bn254_decompose_point(t, "_pa", "px", "py")
         bn254_decompose_point(t, "_pb", "qx", "qy")
+        # R-141: both points must be canonical before anything consumes them.
+        bn254_emit_coord_canon_verify(t, "px", "py")
+        bn254_emit_coord_canon_verify(t, "qx", "qy")
+        # The flag must be computed BEFORE the add: bn254_g1_affine_add
+        # consumes px/py/qx/qy.
+        bn254_g1_infinity_flag(t)
         bn254_g1_affine_add(t)
+        bn254_g1_mask_infinity(t)
         bn254_compose_point(t, "rx", "ry", "_result")
         t.pop_prime_cache
       end
@@ -1106,14 +1282,52 @@ module RunarCompiler
       # k' = k + 3*r guarantees bit 255 is set (r is the curve order).
       #
       # @param emit [Proc] callback receiving a StackOp hash
+      # Reduce a scalar to [0, r-1]: ((k mod r) + r) mod r.
+      #
+      # OP_MOD takes the sign of the DIVIDEND, so `k mod r` alone lands in
+      # (-r, r); the `+ r, mod r` normalises the negative half. One push of r
+      # covers both reductions -- the same shape as emit_scalar_reduce in
+      # ec.rb, whose numbers do NOT carry here (see emit_bn254_g1_scalar_mul
+      # for the BN254 interval bounds).
+      #
+      # Without it the ladder below is correct only while
+      # 2^255 <= k + 3r < 2^256. A scalar >= 2^256 - 3r (about 2.2902*r) sets
+      # bit 256, which the loop never reads, and one <= 2^255 - 3r drops k'
+      # under 2^255, invalidating the accumulator seed; either way the ladder
+      # returns a DIFFERENT multiple of P rather than failing. In Groth16 the
+      # scalars are the caller-supplied PUBLIC INPUTS of
+      # vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is attacker-chosen.
+      def self.bn254_emit_scalar_reduce(t, k_name, result_name)
+        t.push_big_int("_r_red", BN254_R)
+        red_fn = ->(e) {
+          e.call(make_stack_op(op: "opcode", code: "OP_2DUP"))
+          e.call(make_stack_op(op: "opcode", code: "OP_MOD"))
+          e.call(make_stack_op(op: "rot"))
+          e.call(make_stack_op(op: "drop"))
+          e.call(make_stack_op(op: "over"))
+          e.call(make_stack_op(op: "opcode", code: "OP_ADD"))
+          e.call(make_stack_op(op: "swap"))
+          e.call(make_stack_op(op: "opcode", code: "OP_MOD"))
+        }
+        t.raw_block([k_name, "_r_red"], result_name, red_fn)
+      end
+
       def self.emit_bn254_g1_scalar_mul(emit)
         t = BN254Tracker.new(%w[_pt _k], emit)
         t.push_prime_cache
         # Decompose to affine base point
         bn254_decompose_point(t, "_pt", "ax", "ay")
+        # R-141: the ladder's base point must be canonical.
+        bn254_emit_coord_canon_verify(t, "ax", "ay")
+
+        # Reduce first: the +3r trick below is only sound for k in [0, r-1],
+        # and the scalar is caller input.
+        t.to_top("_k")
+        bn254_emit_scalar_reduce(t, "_k", "_kr")
+        t.rename("_k")
 
         # k' = k + 3r: guarantees bit 255 is set.
-        # k in [1, r-1], so k+3r in [3r+1, 4r-1]. Since 3r > 2^255, bit 255
+        # k in [0, r-1], so k+3r in [3r, 4r-1]. Since 3r >= 2^255, bit 255
         # is always 1. Adding 3r (= 0 mod r) preserves the EC point:
         # k*G = (k+3r)*G.
         t.to_top("_k")
@@ -1161,7 +1375,10 @@ module RunarCompiler
           t.nm.pop # _bit consumed by IF
           add_ops = []
           add_emit = ->(op) { add_ops.push(op) }
-          bn254_build_jacobian_add_affine_inline(add_emit, t)
+          # Only the LAST step can be handed accumulator == -base
+          # (k = 0 mod r); see bn254_build_jacobian_add_affine_inline for why
+          # the strict H == 0 AND R == 0 test is paid there and nowhere else.
+          bn254_build_jacobian_add_affine_inline(add_emit, t, bit.zero?)
           emit.call(make_stack_op(op: "if", then: add_ops, else_ops: []))
         end
 
@@ -1201,7 +1418,27 @@ module RunarCompiler
       def self.emit_bn254_g1_on_curve(emit)
         t = BN254Tracker.new(["_pt"], emit)
         t.push_prime_cache
+
+        # R-141: width. bn254G1OnCurve(G || 0xff) returned TRUE -- the OP_SPLIT
+        # at 32 inside the decomposer discarded the surplus byte. Clamp and
+        # remember the width rather than abort: this predicate must stay TOTAL.
+        bn254_emit_point_length_gate(t, "_pt", 64, "_len_ok")
+
         bn254_decompose_point(t, "_pt", "_x", "_y")
+
+        # R-141: coordinate canonicity. Reject x >= p or y >= p and AND the
+        # result in at the end, so the predicate still returns a boolean.
+        lt_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) }
+        booland_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) }
+        t.copy_to_top("_x", "_x_lt")
+        bn254_push_field_p(t, "_p_for_x")
+        t.raw_block(%w[_x_lt _p_for_x], "_x_canon", lt_fn)
+        t.copy_to_top("_y", "_y_lt")
+        bn254_push_field_p(t, "_p_for_y")
+        t.raw_block(%w[_y_lt _p_for_y], "_y_canon", lt_fn)
+        t.to_top("_x_canon")
+        t.to_top("_y_canon")
+        t.raw_block(%w[_x_canon _y_canon], "_canon", booland_fn)
 
         # lhs = y^2
         bn254_field_sqr(t, "_y", "_y2")
@@ -1217,7 +1454,15 @@ module RunarCompiler
         t.to_top("_y2")
         t.to_top("_rhs")
         eq_fn = ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) }
-        t.raw_block(%w[_y2 _rhs], "_result", eq_fn)
+        t.raw_block(%w[_y2 _rhs], "_curve_eq", eq_fn)
+
+        # on-curve = right width AND canonical AND curve-equation
+        t.to_top("_canon")
+        t.to_top("_curve_eq")
+        t.raw_block(%w[_canon _curve_eq], "_eq_ok", booland_fn)
+        t.to_top("_len_ok")
+        t.to_top("_eq_ok")
+        t.raw_block(%w[_len_ok _eq_ok], "_result", booland_fn)
         t.pop_prime_cache
       end
 

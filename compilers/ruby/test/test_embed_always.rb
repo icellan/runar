@@ -133,4 +133,83 @@ class TestEmbedAlways < Minitest::Test
     assert r.errors.any?, 'expected fail-closed error for @embedAlways on .runar.rb'
     assert(r.error_strings.any? { |m| m.include?('@embedAlways') && m.include?('#109') })
   end
+
+  # -------------------------------------------------------------------------
+  # Regression: @embedAlways must survive a FIXED-POINT DCE.
+  #
+  # The preservation used to be an alias pair: the injected +load_prop+ plus a
+  # +load_const("@ref:<t>")+ binding whose only job was to make the +load_prop+
+  # look referenced. That survives ONE DCE sweep but not the fixed-point loop:
+  # sweep 1 drops the now-unreferenced alias, sweep 2 then drops the +load_prop+
+  # it was protecting, and BOTH halves vanish.
+  #
+  # DCE only runs from inside the EC optimizer's changed-gate, so the probe has
+  # to arm it: +ecMulGen(1n)+ folds to the generator constant, which flips
+  # +changed+ and lets dead-binding elimination run.
+  #
+  # Zig marks the injected +load_prop+ itself with +preserve = true+ and reads
+  # that flag in +has_side_effect+; this tier now does the same.
+  # -------------------------------------------------------------------------
+
+  # EC-armed probe. +metadataId+ (param 1) carries DIRECTIVE; +droppedField+
+  # (param 2) is an un-annotated, unreferenced control that MUST still be
+  # eliminated, so a passing test cannot be satisfied by "retain everything".
+  def ec_source(directive)
+    <<~TS
+      import { SmartContract, assert, Addr, PubKey, Sig, ByteString, hash160, checkSig, ecMulGen, ecPointX } from 'runar-lang';
+
+      class EcMeta extends SmartContract {
+        readonly pubKeyHash: Addr;
+        #{directive}
+        readonly metadataId: ByteString;
+        readonly droppedField: ByteString;
+
+        constructor(pubKeyHash: Addr, metadataId: ByteString, droppedField: ByteString) {
+          super(pubKeyHash, metadataId, droppedField);
+          this.pubKeyHash = pubKeyHash;
+          this.metadataId = metadataId;
+          this.droppedField = droppedField;
+        }
+
+        public unlock(sig: Sig, pubKey: PubKey) {
+          const g = ecMulGen(1n);
+          assert(ecPointX(g) > 0n);
+          assert(hash160(pubKey) === this.pubKeyHash);
+          assert(checkSig(sig, pubKey));
+        }
+      }
+    TS
+  end
+
+  def compile_ec(directive)
+    tf = Tempfile.new(['EcMeta', '.runar.ts'])
+    tf.write(ec_source(directive))
+    tf.close
+    RunarCompiler.compile_from_source(tf.path, disable_constant_folding: true)
+  ensure
+    tf.unlink
+  end
+
+  def test_ec_armed_annotated_field_survives_fixed_point_dce
+    art = compile_ec('/** @embedAlways */')
+    idx = art.constructor_slots.map(&:param_index).sort
+    assert_includes idx, 1, "@embedAlways metadataId dropped by fixed-point DCE (slots: #{idx})"
+  end
+
+  def test_ec_armed_unannotated_dead_field_still_eliminated
+    # Control: the fix must not degenerate into "keep every load_prop".
+    ['', '/** @embedAlways */'].each do |directive|
+      art = compile_ec(directive)
+      idx = art.constructor_slots.map(&:param_index).sort
+      refute_includes idx, 2, "droppedField must stay eliminated (directive=#{directive.inspect})"
+    end
+  end
+
+  def test_ec_armed_annotated_hex_carries_more_bytes
+    off = compile_ec('')
+    on = compile_ec('/** @embedAlways */')
+    refute_equal on.script, off.script
+    assert on.script.length > off.script.length,
+           "annotated hex (#{on.script.length}) should exceed un-annotated (#{off.script.length})"
+  end
 end

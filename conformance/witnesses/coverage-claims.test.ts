@@ -60,8 +60,24 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..');
 const TESTS_DIR = join(__dirname, '..', 'tests');
-const GO_SCRIPT_EXEC_PATH = join(__dirname, '..', 'script_execution_test.go');
-const GO_SCRIPT_EXEC_SRC = readFileSync(GO_SCRIPT_EXEC_PATH, 'utf-8');
+// Every Go file in conformance/ that compiles a fixture and spends it on the
+// go-sdk consensus interpreter. This used to be script_execution_test.go alone,
+// which meant a fixture executed by one of the newer per-finding execution
+// tests could not honestly claim `go-script-exec` — the claim would be TRUE and
+// the checker would call it false, pushing the entry toward a weaker kind or
+// toward UNCOVERED. Scanning all of them makes the check match the claim.
+const GO_EXEC_DIR = join(__dirname, '..');
+const GO_EXEC_PATHS = readdirSync(GO_EXEC_DIR)
+  .filter((f) => f === 'script_execution_test.go' || f.endsWith('_execution_test.go'))
+  .sort()
+  .map((f) => join(GO_EXEC_DIR, f));
+if (GO_EXEC_PATHS.length === 0) {
+  throw new Error(
+    'no Go execution tests found in conformance/ — every go-script-exec claim ' +
+    'would pass vacuously. Did the files move?',
+  );
+}
+const GO_SCRIPT_EXEC_SRC = GO_EXEC_PATHS.map((f) => readFileSync(f, 'utf-8')).join('\n');
 
 interface CoveredBy {
   kind: string;

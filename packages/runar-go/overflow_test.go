@@ -1,8 +1,10 @@
 package runar
 
 import (
+	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -64,20 +66,33 @@ func TestCheckedAdd_NegativeOverflow(t *testing.T) {
 // surfaces a panic; the *Big siblings never overflow.
 // ---------------------------------------------------------------------------
 
-func TestAbs_MinInt64_DoesNotPanic(t *testing.T) {
-	// Abs(MinInt64) now wraps to MinInt64 itself (int64 cannot hold 2^63).
-	// Previously it panicked.
+func TestAbs_MinInt64_Refuses(t *testing.T) {
+	// This test used to be TestAbs_MinInt64_DoesNotPanic, and it asserted that
+	// Abs(MinInt64) returns MinInt64 — a NEGATIVE absolute value — describing
+	// that as the fix. It was the defect, pinned as intended behaviour.
+	//
+	// "Does not panic" is only an improvement when the value returned instead is
+	// right. Here there is no right int64 to return: |MinInt64| is 2^63, one
+	// past the type. Script numbers are arbitrary-width after Genesis, so the
+	// emitted OP_ABS computes 2^63 exactly, and the wrapped mock disagreed with
+	// it in the direction that spends outputs — `assert(abs(x) > 0)` held on
+	// chain and failed under `go test`.
+	//
+	// Same shape as TestNum2Bin_MinInt64_NeedsNineBytes below, which pinned the
+	// wrong bytes for the same reason.
 	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Abs(MinInt64) should not panic anymore; got: %v", r)
+		r := recover()
+		if r == nil {
+			t.Fatal("Abs(MinInt64) returned a value instead of panicking; there is " +
+				"no correct int64 to return, and a wrapped answer silently " +
+				"disagrees with the emitted OP_ABS")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "AbsBig") {
+			t.Fatalf("Abs(MinInt64) panicked without naming AbsBig, so the caller "+
+				"is not told what to use instead: %s", msg)
 		}
 	}()
-	got := Abs(math.MinInt64)
-	// The wrapped return is MinInt64 because 2^63 is not representable.
-	// Users who need the true magnitude must use AbsBig.
-	if got != math.MinInt64 {
-		t.Fatalf("Abs(MinInt64) expected wrap to MinInt64, got %d", got)
-	}
+	_ = Abs(math.MinInt64)
 }
 
 func TestAbsBig_MinInt64(t *testing.T) {
@@ -90,9 +105,17 @@ func TestAbsBig_MinInt64(t *testing.T) {
 }
 
 func TestPow_Overflow(t *testing.T) {
+	// PowBig is a native Go *big.Int helper, not a .runar.go builtin. Abs
+	// names AbsBig because the parser now lowers it; PowBig does not. A panic
+	// that says "use PowBig for arbitrary precision" is the absBig defect
+	// again — all seven tiers answer `unknown function 'powBig'`.
 	defer func() {
-		if r := recover(); r == nil {
+		r := recover()
+		if r == nil {
 			t.Fatal("expected Pow overflow panic when result doesn't fit int64")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "not a .runar.go builtin") {
+			t.Fatalf("Pow overflow panic advertised a contract spelling: %s", msg)
 		}
 	}()
 	Pow(math.MaxInt64, 2)
@@ -118,8 +141,12 @@ func TestPowBig_LargeResult(t *testing.T) {
 
 func TestMulDiv_Overflow(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
+		r := recover()
+		if r == nil {
 			t.Fatal("expected MulDiv overflow panic")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "not a .runar.go builtin") {
+			t.Fatalf("MulDiv overflow panic advertised a contract spelling: %s", msg)
 		}
 	}()
 	MulDiv(math.MaxInt64, 2, 1)
@@ -152,8 +179,12 @@ func TestMulDivBig_LargeValues(t *testing.T) {
 
 func TestPercentOf_Overflow(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
+		r := recover()
+		if r == nil {
 			t.Fatal("expected PercentOf overflow panic when result doesn't fit int64")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "not a .runar.go builtin") {
+			t.Fatalf("PercentOf overflow panic advertised a contract spelling: %s", msg)
 		}
 	}()
 	// The final result MaxInt64 * 5000 / 10000 = MaxInt64/2 still fits;
@@ -206,20 +237,31 @@ func TestGcd_SmallValues(t *testing.T) {
 	}
 }
 
-func TestNum2Bin_MinInt64_DoesNotPanic(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Num2Bin(MinInt64, 8) should not panic anymore; got: %v", r)
-		}
+// Num2Bin(MinInt64, 8) used to return 0000000000000080 and this test pinned
+// those bytes, with a comment observing that "the final 0x80 overlaps with the
+// sign bit" and treating the overlap as harmless. It is not harmless: clearing
+// the sign bit to read the magnitude leaves zero, so that push decodes as 0,
+// and the round-trip claim in the Num2Bin doc comment was false. -2^63 needs
+// nine bytes under sign-magnitude, and OP_NUM2BIN refuses eight — which
+// TestNum2Bin_MinInt64_TheScriptRefusesEightBytesAndAcceptsNine proves against
+// the interpreter rather than against a second reading of the rule.
+func TestNum2Bin_MinInt64_NeedsNineBytes(t *testing.T) {
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Num2Bin(MinInt64, 8) returned bytes; 0000000000000080 is 0, not -2^63")
+			}
+		}()
+		_ = Num2Bin(math.MinInt64, 8)
 	}()
-	// The encoding is 8 bytes LE sign-magnitude; |MinInt64| magnitude is 2^63
-	// which is the byte sequence 00 00 00 00 00 00 00 80 in LE — the final
-	// 0x80 overlaps with the sign bit. With length=8 the encoding is
-	// 0000000000000080 and the sign bit happens to be set.
-	got := Num2Bin(math.MinInt64, 8)
-	want := ByteString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80})
+
+	got := Num2Bin(math.MinInt64, 9)
+	want := ByteString([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80})
 	if string(got) != string(want) {
-		t.Fatalf("Num2Bin(MinInt64, 8): want %x, got %x", want, got)
+		t.Fatalf("Num2Bin(MinInt64, 9): want %x, got %x", want, got)
+	}
+	if back := Bin2Num(got); back != math.MinInt64 {
+		t.Fatalf("Bin2Num(Num2Bin(MinInt64, 9)) = %d, want %d", back, int64(math.MinInt64))
 	}
 }
 

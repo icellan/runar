@@ -105,6 +105,17 @@ struct EmitContext {
     /// Pending source location to attach to the next emitted opcode.
     pending_source_loc: Option<crate::ir::SourceLocation>,
     raw_script_spans: Vec<RawScriptSpan>,
+    /// R-095 — `verify_code_part_len` length fields awaiting back-patch.
+    code_part_len_fixups: Vec<CodePartLenFixup>,
+}
+
+/// One fixed-width length field reserved by `VerifyCodePartLen`, to be filled
+/// in once the whole script exists.
+#[derive(Debug, Clone)]
+struct CodePartLenFixup {
+    value_byte_offset: usize,
+    asm_index: usize,
+    delta: i64,
 }
 
 impl EmitContext {
@@ -121,6 +132,7 @@ impl EmitContext {
             source_map: Vec::new(),
             pending_source_loc: None,
             raw_script_spans: Vec::new(),
+            code_part_len_fixups: Vec::new(),
         }
     }
 
@@ -210,12 +222,113 @@ impl EmitContext {
         });
     }
 
-    fn get_hex(&self) -> String {
-        self.hex_parts.join("")
+    /// R-095 — emit the 9-byte `SIZE(_codePart)` pin and register its length
+    /// field for back-patching.
+    ///
+    /// ```text
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// ```
+    ///
+    /// `LL LL LL LL` is a fixed-width little-endian field, not a minimal Script
+    /// number push: the value being patched IS the length of the script that
+    /// contains it, so a width that varied with the value would be
+    /// self-referential. `OP_BIN2NUM` normalises the fixed-width field back to a
+    /// minimal Script number so the comparison is numeric.
+    ///
+    /// `exact` is known here (the stack lowerer resolved it once every method
+    /// had been lowered), so only the four length bytes need patching.
+    fn emit_verify_code_part_len(&mut self, delta: i64, exact: bool) -> Result<(), String> {
+        self.emit_opcode("OP_DUP")?;
+        // +1 skips the single-byte push header the 4-byte data push carries.
+        let value_byte_offset = self.byte_length + 1;
+        let asm_index = self.asm_parts.len();
+        self.emit_push(&PushValue::Bytes(vec![0u8; 4]));
+        self.emit_opcode("OP_BIN2NUM")?;
+        self.emit_opcode(if exact { "OP_NUMEQUAL" } else { "OP_GREATERTHANOREQUAL" })?;
+        self.emit_opcode("OP_VERIFY")?;
+        self.code_part_len_fixups.push(CodePartLenFixup {
+            value_byte_offset,
+            asm_index,
+            delta,
+        });
+        Ok(())
     }
 
-    fn get_asm(&self) -> String {
-        self.asm_parts.join(" ")
+    /// Deploy-time byte growth contributed by the codeSepIndex placeholders.
+    ///
+    /// Each is a 1-byte OP_0 in the template that the SDK replaces with a push
+    /// of the adjusted separator index. Post-R-010 that index is always 1 (the
+    /// separator sits at offset 1 and no constructor slot precedes it), which
+    /// bakes as the single opcode byte OP_1 — zero growth. The guard is not
+    /// decoration: if the separator ever moves, the pin's arithmetic goes
+    /// silently wrong and every honest spend of a variable-length-state
+    /// contract becomes unspendable, so fail loudly instead.
+    fn code_sep_index_growth(&self) -> Result<i64, String> {
+        for slot in &self.code_sep_index_slots {
+            if slot.code_sep_index != 1 {
+                return Err(format!(
+                    "emit: codeSepIndex placeholder resolves to {}, not 1; the \
+                     verify_code_part_len pin assumes the post-R-010 layout (a single \
+                     OP_CODESEPARATOR at offset 1, so the placeholder bakes as OP_1 and \
+                     adds no bytes). Recompute the placeholder growth before moving the \
+                     separator.",
+                    slot.code_sep_index
+                ));
+            }
+        }
+        Ok(0)
+    }
+
+    /// R-095 — resolve every `verify_code_part_len` length field.
+    ///
+    /// Runs once the whole script has been emitted, because the value each
+    /// field carries is the DEPLOYED length of the very script it sits in:
+    ///
+    /// ```text
+    /// deployedCodeLen = emitted template length
+    ///                 + growth of the constructor-arg placeholders (`delta`)
+    ///                 + growth of the codeSepIndex placeholders (0)
+    /// ```
+    ///
+    /// Idempotent: it overwrites a fixed-width field rather than splicing, so
+    /// the script's length never changes and re-running produces the same bytes.
+    fn apply_code_part_len_fixups(&mut self) -> Result<(), String> {
+        if self.code_part_len_fixups.is_empty() {
+            return Ok(());
+        }
+        let code_sep_growth = self.code_sep_index_growth()?;
+        let mut hex = self.hex_parts.join("");
+        let fixups = self.code_part_len_fixups.clone();
+        for fixup in &fixups {
+            let deployed_len = self.byte_length as i64 + fixup.delta + code_sep_growth;
+            if deployed_len < 0 || deployed_len > 0x7fff_ffff {
+                return Err(format!(
+                    "emit: code part length {} does not fit the 4-byte pin field",
+                    deployed_len
+                ));
+            }
+            let mut le = String::new();
+            for i in 0..4 {
+                le.push_str(&format!("{:02x}", (deployed_len >> (8 * i)) & 0xff));
+            }
+            let start = fixup.value_byte_offset * 2;
+            hex = format!("{}{}{}", &hex[..start], le, &hex[start + 8..]);
+            if fixup.asm_index < self.asm_parts.len() {
+                self.asm_parts[fixup.asm_index] = format!("<{}>", le);
+            }
+        }
+        self.hex_parts = vec![hex];
+        Ok(())
+    }
+
+    fn get_hex(&mut self) -> Result<String, String> {
+        self.apply_code_part_len_fixups()?;
+        Ok(self.hex_parts.join(""))
+    }
+
+    fn get_asm(&mut self) -> Result<String, String> {
+        self.apply_code_part_len_fixups()?;
+        Ok(self.asm_parts.join(" "))
     }
 }
 
@@ -301,6 +414,61 @@ pub fn encode_push_data(data: &[u8]) -> Vec<u8> {
     ];
     result.extend_from_slice(data);
     result
+}
+
+/// Inverse of [`encode_push_data`]. SDKs emit OP_PUSHDATA4 (`0x4e`) for
+/// payloads ≥ 65536 bytes (R-168).
+pub fn decode_push_data(bytes: &[u8], offset: usize) -> Result<(Vec<u8>, usize), String> {
+    if offset >= bytes.len() {
+        return Err("decode_push_data: truncated opcode".into());
+    }
+    let opcode = bytes[offset];
+    if opcode <= 75 {
+        let end = offset + 1 + opcode as usize;
+        if end > bytes.len() {
+            return Err(format!("decode_push_data: truncated {opcode}-byte push"));
+        }
+        return Ok((bytes[offset + 1..end].to_vec(), end));
+    }
+    if opcode == 0x4c {
+        if offset + 2 > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA1 length".into());
+        }
+        let n = bytes[offset + 1] as usize;
+        let end = offset + 2 + n;
+        if end > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA1 payload".into());
+        }
+        return Ok((bytes[offset + 2..end].to_vec(), end));
+    }
+    if opcode == 0x4d {
+        if offset + 3 > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA2 length".into());
+        }
+        let n = bytes[offset + 1] as usize | (bytes[offset + 2] as usize) << 8;
+        let end = offset + 3 + n;
+        if end > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA2 payload".into());
+        }
+        return Ok((bytes[offset + 3..end].to_vec(), end));
+    }
+    if opcode == 0x4e {
+        if offset + 5 > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA4 length".into());
+        }
+        let n = bytes[offset + 1] as usize
+            | (bytes[offset + 2] as usize) << 8
+            | (bytes[offset + 3] as usize) << 16
+            | (bytes[offset + 4] as usize) << 24;
+        let end = offset + 5 + n;
+        if end > bytes.len() {
+            return Err("decode_push_data: truncated OP_PUSHDATA4 payload".into());
+        }
+        return Ok((bytes[offset + 5..end].to_vec(), end));
+    }
+    Err(format!(
+        "decode_push_data: byte 0x{opcode:02x} is not a push opcode"
+    ))
 }
 
 /// Encode a push value to hex and asm strings.
@@ -395,6 +563,12 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
             ctx.emit_raw_bytes(bytes, *in_arity, *out_arity);
             Ok(())
         }
+        StackOp::VerifyCodePartLen { delta, exact } => {
+            // R-095: pin SIZE(_codePart) against the code part's own deployed
+            // byte length. Fixed-width field, back-patched after the whole
+            // script exists.
+            ctx.emit_verify_code_part_len(*delta, *exact)
+        }
         StackOp::PushCodeSepIndex => {
             // Emit an OP_0 placeholder that the SDK will replace with the
             // adjusted codeSeparatorIndex at runtime.
@@ -476,6 +650,23 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         });
     }
 
+    // R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness
+    // gets ONE OP_CODESEPARATOR, at offset 1 of the locking script, behind a
+    // single OP_NOP. Contracts with no `_codePart` keep the pre-R-010
+    // per-method separators (emitted by lower_check_preimage) instead. Emitting it per method (at the method's entry) hid the dispatch
+    // preamble and every preceding method body from scriptCode — exactly the
+    // bytes the spender-supplied `_codePart` witness claims to reproduce.
+    //
+    // Offset 1, not 0: implementations that store "index of the last executed
+    // OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+    // offset 0" from "no separator seen" and fall back to the whole script (the
+    // BSV go-sdk interpreter does exactly this). Offset 1 keeps every
+    // implementation on the same side of that guard, and costs one byte.
+    if public_methods.iter().any(|m| m.needs_code_separator) {
+        ctx.emit_opcode("OP_NOP")?;
+        ctx.emit_opcode("OP_CODESEPARATOR")?;
+    }
+
     if public_methods.len() == 1 {
         let m = &public_methods[0];
         for (idx, op) in m.ops.iter().enumerate() {
@@ -487,9 +678,11 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         emit_method_dispatch(&refs, &mut ctx)?;
     }
 
+    let script_hex = ctx.get_hex()?;
+    let script_asm = ctx.get_asm()?;
     Ok(EmitResult {
-        script_hex: ctx.get_hex(),
-        script_asm: ctx.get_asm(),
+        script_hex,
+        script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
         code_separator_index: ctx.code_separator_index,
@@ -543,9 +736,11 @@ pub fn emit_method(method: &StackMethod) -> Result<EmitResult, String> {
         ctx.pending_source_loc = method.source_locs.get(idx).cloned().flatten();
         emit_stack_op(op, &mut ctx)?;
     }
+    let script_hex = ctx.get_hex()?;
+    let script_asm = ctx.get_asm()?;
     Ok(EmitResult {
-        script_hex: ctx.get_hex(),
-        script_asm: ctx.get_asm(),
+        script_hex,
+        script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
         code_separator_index: ctx.code_separator_index,
@@ -574,6 +769,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -603,6 +799,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -641,6 +838,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -672,6 +870,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         // Apply peephole optimization before emit (as the compiler pipeline does)
@@ -681,6 +880,7 @@ mod tests {
             max_stack_depth: method.max_stack_depth,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit(&[optimized_method]).expect("emit should succeed");
@@ -717,6 +917,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -756,6 +957,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -789,6 +991,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -821,6 +1024,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -950,6 +1154,7 @@ mod tests {
                 max_stack_depth: m.max_stack_depth,
                 source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
             })
             .collect();
 
@@ -997,6 +1202,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
 
         let result = emit_method(&method).expect("emit should succeed");
@@ -1053,7 +1259,7 @@ mod tests {
                     },
                     ANFBinding {
                         name: "t2".to_string(),
-                        value: ANFValue::LoadProp { name: "pubKeyHash".to_string() },
+                        value: ANFValue::LoadProp { name: "pubKeyHash".to_string(), preserve: false },
                         source_loc: None,
                     },
                     ANFBinding {
@@ -1125,6 +1331,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         // OP_17 would be 0x61. A push-data encoded 17 would be "0111" (length 1, value 0x11).
@@ -1155,6 +1362,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         // OP_PUSHDATA2 = 0x4d, followed by length in 2 bytes LE: 256 = 0x0001 LE = 00 01
@@ -1230,6 +1438,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         assert_eq!(
@@ -1251,6 +1460,7 @@ mod tests {
             max_stack_depth: 2,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         assert_eq!(
@@ -1275,6 +1485,7 @@ mod tests {
             max_stack_depth: 1,
             source_locs: vec![],
                 uses_code_part: false,
+                needs_code_separator: false,
         };
         let result = emit_method(&method).expect("emit should succeed");
         assert!(
@@ -1334,7 +1545,7 @@ mod tests {
                         },
                         ANFBinding {
                             name: "t1".to_string(),
-                            value: ANFValue::LoadProp { name: "x".to_string() },
+                            value: ANFValue::LoadProp { name: "x".to_string(), preserve: false },
                             source_loc: None,
                         },
                         ANFBinding {
@@ -1516,6 +1727,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_decode_push_data_pushdata4_roundtrip() {
+        let payload = vec![0x5au8; 65536];
+        let encoded = encode_push_data(&payload);
+        assert_eq!(encoded[0], 0x4e, "encode must use OP_PUSHDATA4");
+        let (got, next) = decode_push_data(&encoded, 0).expect("decode");
+        assert_eq!(next, encoded.len());
+        assert_eq!(got, payload);
+    }
+
     // -----------------------------------------------------------------------
     // Exact-byte goldens (T-10 from
     // audits/cross-language-completeness-20260514.md §5.2).
@@ -1582,8 +1803,11 @@ mod tests {
     #[test]
     fn test_stateful_counter_exact_byte_golden() {
         // Stateful contract with implicit txPreimage + state-continuation +
-        // change-output plumbing. The asserted hex covers OP_CODESEPARATOR
-        // injection (0xab at position 2), the BIP-143 generator pubkey
+        // change-output plumbing. The asserted hex covers the R-010 script
+        // prologue (OP_NOP OP_CODESEPARATOR — `61ab` — at offsets 0 and 1, one
+        // separator for the whole locking script rather than one per method)
+        // and the `_codePart` authentication it enables, the BIP-143 generator
+        // pubkey
         // (0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798),
         // the GAP-302 sighash-type pin (OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP
         // OP_BIN2NUM <0x41> OP_NUMEQUALVERIFY, right after checkPreimage), and
@@ -1612,22 +1836,24 @@ mod tests {
         // byte-identical to the post-#116 TS reference.
         let hex = compile_to_fold_off_hex(source, "Counter.runar.ts");
         let expected = concat!(
-            "76ab76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f",
-            "517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e",
-            "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e",
-            "7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048af",
-            "e6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776",
-            "927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f",
+            "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f51",
+            "7f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c",
+            "7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c",
+            "7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048",
+            "afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d94959377",
             "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692",
-            "7f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e",
-            "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e",
-            "7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8",
-            "1798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d13",
-            "82a2bf66a71ae74a1e83b0ad69768254947f778101419d7601687f7782012c947f758258947f",
-            "758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280517f75677603",
-            "0000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f",
-            "7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58",
-            "807c7e67007b7577687eaa7b820128947f7701207f75877777",
+            "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76",
+            "927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c",
+            "7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c",
+            "7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16",
+            "f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d",
+            "1382a2bf66a71ae74a1e83b0ad7601687f77820134947f75517f7c01007e817602fd009f6375",
+            "677602fe009c6375547f77677602ff009c6375587f776775527f7768686855798252947b7c7f",
+            "82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c94",
+            "7f758258947f758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280",
+            "517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c",
+            "7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e",
+            "0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777",
         );
         assert_eq!(hex, expected);
     }

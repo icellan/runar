@@ -29,6 +29,14 @@ from runar_compiler.ir.types import (
 
 MAX_STACK_DEPTH = 800
 
+# The largest exponent pow(base, exp) computes, and therefore the largest one
+# the emitted script ACCEPTS — _lower_pow unrolls exactly this many conditional
+# multiplies and refuses anything outside 0 <= exp <= POW_EXPONENT_LIMIT. The
+# same number lives in frontend/constant_fold.py (which must decline to fold
+# outside it); they have to move together or pow means different things folded
+# and executed (R-169).
+POW_EXPONENT_LIMIT = 32
+
 
 # ---------------------------------------------------------------------------
 # State-field type classification helpers.
@@ -44,14 +52,22 @@ MAX_STACK_DEPTH = 800
 #   * Fixed-length byte strings: extracted with a plain fixed-size OP_SPLIT.
 # ---------------------------------------------------------------------------
 
-_NUMERIC_STATE_TYPES: frozenset[str] = frozenset({
-    "bigint",
-    "boolean",
+# Fixed byte width each numeric state type occupies in the state section. This
+# is the single source of truth for BOTH sides of the section: the READER
+# (``is_numeric_state_type``) and the two state SERIALIZERS in
+# ``_lower_get_state_script`` / ``_lower_add_output``. Those serializers used to
+# carry their own literal ``prop.type == "bigint"`` test and drifted from this
+# table when the reader alone was widened for RabinSig / RabinPubKey -- a writer
+# that emits a value's minimal script-number encoding into a section the reader
+# splits at a fixed width builds a continuation its own script cannot re-read.
+_NUMERIC_STATE_TYPE_WIDTHS: dict[str, int] = {
+    "bigint": 8,
     # RabinSig / RabinPubKey are bigint aliases -- same 8-byte script-number
     # layout in state.
-    "RabinSig",
-    "RabinPubKey",
-})
+    "RabinSig": 8,
+    "RabinPubKey": 8,
+    "boolean": 1,
+}
 
 _VARIABLE_LENGTH_STATE_TYPES: frozenset[str] = frozenset({
     "ByteString",
@@ -60,9 +76,14 @@ _VARIABLE_LENGTH_STATE_TYPES: frozenset[str] = frozenset({
 })
 
 
+def numeric_state_type_width(t: str) -> int:
+    """Fixed byte width of a numeric state type, or 0 if it is not numeric."""
+    return _NUMERIC_STATE_TYPE_WIDTHS.get(t, 0)
+
+
 def is_numeric_state_type(t: str) -> bool:
     """State types that are stored as script numbers (need OP_BIN2NUM)."""
-    return t in _NUMERIC_STATE_TYPES
+    return t in _NUMERIC_STATE_TYPE_WIDTHS
 
 
 def is_variable_length_state_type(t: str) -> bool:
@@ -108,6 +129,15 @@ class StackOp:
     in_arity: int = 0
     out_arity: int = 0
 
+    # verify_code_part_len (R-095) -- pin SIZE(_codePart) against the code
+    # part's own DEPLOYED byte length. code_part_len_delta is the deploy-time
+    # byte growth of the template's OP_0 placeholders; code_part_len_exact says
+    # whether that growth is fully type-determined (equality pin) or only a
+    # lower bound. Both are resolved by _pin_code_part_length once every method
+    # has been lowered; the emitter back-patches the length itself.
+    code_part_len_delta: int = 0
+    code_part_len_exact: bool = False
+
 
 @dataclass
 class StackMethod:
@@ -120,6 +150,11 @@ class StackMethod:
     # continuation builders OR terminal methods that read variable-length
     # (ByteString) state (issue #100). Propagated to ABIMethod.usesCodePart.
     uses_code_part: bool = False
+    # True if this method's lowering needs the script-level OP_CODESEPARATOR
+    # the emitter places at offset 1 of the locking script (R-010).
+    # Contract-level: true for every method of a contract in which ANY method
+    # authenticates a `_codePart` witness.
+    needs_code_separator: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +652,9 @@ class _LoweringContext:
         self.max_depth: int = 0
         self.properties: list[ANFProperty] = properties
         self.private_methods: dict[str, ANFMethod] = {}
+        # R-010: True when the emitter supplies the script-level
+        # OP_CODESEPARATOR, so _lower_check_preimage must not emit its own.
+        self.script_level_code_separator: bool = False
         self.local_bindings: dict[str, bool] = {}
         self.outer_protected_refs: Optional[set[str]] = None
         self.inside_branch: bool = False
@@ -1006,6 +1044,70 @@ class _LoweringContext:
                 self.sm.pop()  # remove depth literal
                 picked = self.sm.peek_at_depth(depth)
                 self.sm.push(picked)
+
+        self._track_depth()
+
+    def emit_boolean_param_gate(self, name: str) -> None:
+        """W3 / BoolBamboozle — enforce the ``boolean`` ABI domain on-chain.
+
+        The source type ``boolean`` denotes ``{true, false}``, but a witness
+        item is arbitrary bytes.  Nothing used to check the domain, and
+        comparisons lower to ``OP_NUMEQUAL``, so a raw spender pushing ``OP_2``
+        matched neither ``=== true`` nor ``=== false``: an exhaustive-looking
+        two-arm split took NEITHER arm and every guard inside both arms was
+        skipped.
+
+        Emitted once per ``boolean`` parameter of a PUBLIC method, at the
+        unlocking boundary, before any of the method body runs.  Private helpers
+        inherit the guarantee because their arguments come from an already-gated
+        caller::
+
+            <copy of param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+                             OP_BOOLOR OP_VERIFY
+
+        ``OP_EQUAL`` (bytewise), not ``OP_NUMEQUAL``: the ABI encoding is
+        exactly the empty item or ``{0x01}``, so non-minimal spellings of 0/1
+        are rejected too, and an over-long witness item fails cleanly instead of
+        overflowing the script-number decoder.
+
+        Deliberately NOT ``OP_0NOTEQUAL``: canonicalising to truthiness would
+        map ``2`` onto ``true`` and silently run an arm the author never
+        authorised for it.
+
+        Net stack effect is zero.
+        """
+        slot = self.renamed_params.get(name, name)
+
+        # Copy of the witness value on top; the original stays in its slot.
+        self.bring_to_top(slot, False)
+
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+
+        self.emit_op(StackOp(op="push", value=big_int_push(0)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_EQUAL"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # isFalse
+
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_EQUAL"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # isTrue
+
+        self.emit_op(StackOp(op="opcode", code="OP_BOOLOR"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
+        self.sm.pop()
 
         self._track_depth()
 
@@ -1613,18 +1715,40 @@ class _LoweringContext:
 
         opcodes = BUILTIN_OPCODES.get(func_name)
         if opcodes is None:
-            # Unknown function -- push placeholder
-            self.emit_op(StackOp(op="push", value=big_int_push(0)))
-            self.sm.push(binding_name)
-            return
+            # R-124 / R-128. This used to push OP_0 and carry on. The
+            # placeholder does not stay unused: it is pushed where the call's
+            # result belongs, so it becomes the value the contract asserts on,
+            # and a name this tier does not know compiled into an
+            # unconditionally FALSE spend rather than a rejected program.
+            #
+            # Unreachable from source (the typechecker rejects unknown
+            # functions first), reachable from `--ir`, which runs no frontend.
+            # Measured on one IR file: go / rust / zig / java refused it, ruby
+            # and python emitted the placeholder.
+            raise RuntimeError(
+                f"Stack lowering: call to unknown function {func_name!r} "
+                f"(binding {binding_name!r}). Refusing to emit a silent OP_0 placeholder -- "
+                f"the value would become the contract's assert operand, making the spend "
+                f"unconditionally false rather than rejecting the program."
+            )
 
         for code in opcodes:
             self.emit_op(StackOp(op="opcode", code=code))
 
-        # Some builtins produce two outputs
+        # Some builtins leave more on the runtime stack than the binding names.
         if func_name == "split":
-            self.sm.push("")            # left part
-            self.sm.push(binding_name)  # right part (top)
+            # OP_SPLIT leaves [left, right]. `split(data, index)` is single-valued -- it
+            # binds the RIGHT half (spec/grammar.md, spec/type-system.md, and all seven
+            # typecheckers) -- so the left half is dropped here, exactly as `substr`,
+            # `right` and `__array_access` already drop the halves they do not bind.
+            #
+            # It used to be recorded as an anonymous empty-named slot instead. Nothing
+            # ever consumed that slot -- it is unnameable, because no surface parser
+            # accepts array destructuring -- so every later bringToTop had to step over
+            # it and any read after a split resolved to the wrong slot.
+            # conformance/split_residue_execution_test.go spends the result.
+            self.emit_op(StackOp(op="opcode", code="OP_NIP"))
+            self.sm.push(binding_name)
         elif func_name == "len":
             self.emit_op(StackOp(op="opcode", code="OP_NIP"))  # remove original value, keep only size
             self.sm.push(binding_name)
@@ -1670,6 +1794,39 @@ class _LoweringContext:
         # the existing entry to avoid duplicate names which break Set-based
         # branch reconciliation in lower_if.
         shadowed: list[dict[str, object]] = []
+
+        # N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
+        # checks its own -- checking in the lowerer rather than the typechecker also
+        # covers the `--ir` input path, which never runs a typecheck.
+        #
+        # The binding loop below skips every argument past the last parameter. Skipped
+        # is not the same as ignored: a surplus argument never reaches
+        # operandConsume/bringToTop, so a ref that would otherwise have been CONSUMED
+        # at this call site stays live on the stack and every later depth shifts under
+        # it. The emitted script changes, with no diagnostic.
+        #
+        # Measured on the checked-in `multi-method` golden, whose `computeThreshold`
+        # takes two parameters:
+        #
+        #   args ["t0","t1"]        76009c637552958b5aa06900ac67519d00ac68
+        #   args ["t0","t1","t0"]   76009c637552787c958b5aa0697c00ac7767519d00ac68
+        #
+        # All seven tiers agreed on BOTH, which is why no parity gate saw it -- the
+        # tiers were identical and identically wrong. A surplus ref naming a binding
+        # that does not exist at all (`tZZZ`) was likewise accepted silently.
+        #
+        # Only the surplus side is checked. Too FEW arguments already fails, naming
+        # the unbound parameter ("method parameter 'b' is not on the stack at a
+        # post-consumption reference"); that path works and is pinned by existing
+        # tests.
+        if len(args) > len(method.params):
+            plural = "" if len(method.params) == 1 else "s"
+            raise RuntimeError(
+                f"method_call to '{method.name}' passes {len(args)} arguments but "
+                f"'{method.name}' declares {len(method.params)} parameter{plural}: "
+                "surplus arguments are not bound to any parameter, and leaving them "
+                "unconsumed on the stack silently changes the emitted script"
+            )
 
         # Bring all args to top and rename them to the method param names
         for i, arg in enumerate(args):
@@ -1848,6 +2005,21 @@ class _LoweringContext:
         then_ctx = _LoweringContext(None, self.properties)
         then_ctx.sm = self.sm.clone()
         then_ctx.outer_protected_refs = protected_refs
+        # R-010: branch arms lower in a FRESH context, so the contract-level
+        # OP_CODESEPARATOR decision has to be carried in explicitly. Without
+        # this a checkPreimage inside an if-branch emits a stray per-method
+        # separator, which executes AFTER the script-level one and re-narrows
+        # scriptCode.
+        then_ctx.script_level_code_separator = self.script_level_code_separator
+        # N-051: same reason as R-010 above. A fresh _LoweringContext starts
+        # with an EMPTY private_methods map, so a method_call inside an arm
+        # found no callee, _lower_method_call fell through to _lower_call, and
+        # the helper lowered to a bare push — the arm silently computed a value
+        # the source never asked for, and the callee body made no difference to
+        # the bytes. Private helpers are source-level substitution
+        # (spec/semantics.md §6.3), which stack lowering performs; an arm is not
+        # a different scope for that.
+        then_ctx.private_methods = self.private_methods
         then_ctx.inside_branch = True
         then_ctx.lower_bindings(then_bindings, terminal_assert)
 
@@ -1863,6 +2035,8 @@ class _LoweringContext:
         else_ctx = _LoweringContext(None, self.properties)
         else_ctx.sm = self.sm.clone()
         else_ctx.outer_protected_refs = protected_refs
+        else_ctx.script_level_code_separator = self.script_level_code_separator
+        else_ctx.private_methods = self.private_methods  # N-051, see then_ctx above
         else_ctx.inside_branch = True
         else_ctx.lower_bindings(else_bindings, terminal_assert)
 
@@ -2425,9 +2599,31 @@ class _LoweringContext:
                 self._lower_binding(binding, j, last_uses)
 
             # Clean up the iteration variable if it was not consumed
+            #
+            # R-186 / R-292: it is not always on TOP when that happens. A body
+            # whose last binding LEAVES a value -- the accumulator
+            # `sum = sum + x`, which rebinds `sum` in place and ends holding it
+            # -- buries the iteration variable one slot down. Dropping only at
+            # depth 0 left one slot behind per iteration, until the leak alone
+            # crossed MAX_STACK_DEPTH and the compiler refused a contract with a
+            # working set of three. Removing it wherever it sits is the same
+            # operation drain_branch_private_residue performs, spelled the same
+            # way.
             if self.sm.has(iter_var):
                 depth = self.sm.find_depth(iter_var)
                 if depth == 0:
+                    self.emit_op(StackOp(op="drop"))
+                    self.sm.pop()
+                elif depth == 1:
+                    self.emit_op(StackOp(op="nip"))
+                    self.sm.remove_at_depth(1)
+                else:
+                    self.emit_op(StackOp(op="push", value=big_int_push(depth)))
+                    self.sm.push("")
+                    self.emit_op(StackOp(op="roll", depth=depth))
+                    self.sm.pop()
+                    rolled = self.sm.remove_at_depth(depth)
+                    self.sm.push(rolled)
                     self.emit_op(StackOp(op="drop"))
                     self.sm.pop()
 
@@ -2515,19 +2711,22 @@ class _LoweringContext:
                 self.emit_op(StackOp(op="push", value=big_int_push(0)))
                 self.sm.push("")
 
-            # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
-            if prop.type == "bigint":
-                self.emit_op(StackOp(op="push", value=big_int_push(8)))
+            # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+            # The width MUST come from ``numeric_state_type_width`` -- the same
+            # table the reader splits on -- or this continuation cannot be
+            # re-read.
+            numeric_width = numeric_state_type_width(prop.type)
+            if numeric_width:
+                self.emit_op(StackOp(op="push", value=big_int_push(numeric_width)))
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()  # pop the width
-            elif prop.type == "boolean":
-                self.emit_op(StackOp(op="push", value=big_int_push(1)))
-                self.sm.push("")
-                self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
-                self.sm.pop()  # pop the width
-            elif prop.type == "ByteString":
-                # Prepend push-data length prefix (matching SDK format)
+            elif is_variable_length_state_type(prop.type):
+                # Prepend push-data length prefix (matching SDK format).
+                # MUST classify exactly what ``_lower_deserialize_state``
+                # decodes, or the continuation this method builds cannot be
+                # read by the next spend: the reader would take the value's own
+                # first byte (a DER 0x30, say) as a push length.
                 self.emit_push_data_encode()
 
             if not first:
@@ -2920,93 +3119,7 @@ class _LoweringContext:
             # strip too few varint bytes and corrupt the subsequent
             # state-extraction OP_SPLITs (this is the bug fixed here — see
             # `integration/go/contracts/RollupBug.runar.go`).
-            self.emit_op(StackOp(op="push", value=big_int_push(1)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")  # firstByte
-            self.sm.push("")  # rest
-            self.emit_op(StackOp(op="swap"))
-            self.sm.swap()
-            # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-            # as negative script numbers.
-            self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
-            # Stack: [..., rest, fb_num]
-
-            # emit_drop_more_varint_bytes drops `n` additional varint bytes
-            # from the top-of-stack `rest`. [..., rest] -> [..., rest_minus_n].
-            def emit_drop_more_varint_bytes(n: int) -> None:
-                self.emit_op(StackOp(op="push", value=big_int_push(n)))
-                self.sm.push("")
-                self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-                self.sm.pop(); self.sm.pop()
-                self.sm.push(""); self.sm.push("")
-                self.emit_op(StackOp(op="nip"))
-                self.sm.pop(); self.sm.pop()
-                self.sm.push("")
-
-            # IF fb_num < 253: 1-byte varint, drop fb_num.
-            self.emit_op(StackOp(op="dup"))
-            self.sm.dup()
-            self.emit_op(StackOp(op="push", value=big_int_push(253)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_IF"))
-            self.sm.pop()
-            sm_at_1_byte_if = self.sm.clone()
-            # THEN: 1-byte varint.
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_1_byte_if.clone()
-            # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-            self.emit_op(StackOp(op="dup"))
-            self.sm.dup()
-            self.emit_op(StackOp(op="push", value=big_int_push(254)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_IF"))
-            self.sm.pop()
-            sm_at_fe_if = self.sm.clone()
-            # THEN: 5-byte varint (0xfe + 4 bytes LE).
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            emit_drop_more_varint_bytes(4)
-            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_fe_if.clone()
-            # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-            self.emit_op(StackOp(op="dup"))
-            self.sm.dup()
-            self.emit_op(StackOp(op="push", value=big_int_push(255)))
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_IF"))
-            self.sm.pop()
-            sm_at_ff_if = self.sm.clone()
-            # THEN: 9-byte varint (0xff + 8 bytes LE).
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            emit_drop_more_varint_bytes(8)
-            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_ff_if.clone()
-            # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-            self.emit_op(StackOp(op="drop"))
-            self.sm.pop()
-            emit_drop_more_varint_bytes(2)
-            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
-            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
-            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+            self._emit_strip_script_code_varint()
 
             # Compute skip = SIZE(_codePart) - codeSepIdx
             self.bring_to_top("_codePart", False)
@@ -3131,14 +3244,19 @@ class _LoweringContext:
         self.bring_to_top("_codePart", False)
         # --- Stack: [..., codePart] ---
 
-        # Step 2: Append OP_RETURN byte (0x6a).
-        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6A]))))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        # --- Stack: [..., codePart+OP_RETURN] ---
+        # Step 2: Append OP_RETURN byte (0x6a) -- but ONLY when there is a state
+        # section for it to separate. R-010: with zero mutable properties the
+        # SDK's get_locking_script emits the bare code and stops, so a separator
+        # here would make the continuation output one byte longer than the
+        # script the SDK deploys.
+        if state_props:
+            self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6A]))))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+            self.sm.pop()
+            self.sm.pop()
+            self.sm.push("")
+        # --- Stack: [..., codePart(+OP_RETURN when stateful)] ---
 
         # Step 3: Serialize each state value and concatenate.
         for i in range(min(len(state_values), len(state_props))):
@@ -3148,21 +3266,19 @@ class _LoweringContext:
             consume = self._operand_consume(value_ref, output_operands, binding_index, last_uses)
             self.bring_to_top(value_ref, consume)
 
-            # Convert numeric/boolean values to fixed-width bytes
-            if prop.type == "bigint":
-                self.emit_op(StackOp(op="push", value=big_int_push(8)))
+            # Convert numeric/boolean values to fixed-width bytes. Same table as
+            # the reader -- see ``numeric_state_type_width``.
+            numeric_width = numeric_state_type_width(prop.type)
+            if numeric_width:
+                self.emit_op(StackOp(op="push", value=big_int_push(numeric_width)))
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()
-            elif prop.type == "boolean":
-                self.emit_op(StackOp(op="push", value=big_int_push(1)))
-                self.sm.push("")
-                self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
-                self.sm.pop()
-            elif prop.type == "ByteString":
-                # Prepend push-data length prefix (matching SDK format)
+            elif is_variable_length_state_type(prop.type):
+                # Prepend push-data length prefix (matching SDK format).
+                # MUST classify exactly what ``_lower_deserialize_state`` decodes.
                 self.emit_push_data_encode()
-            # Other byte types used as-is
+            # Fixed-width byte types are used as-is
 
             # Concatenate with accumulator
             self.sm.pop()
@@ -3343,6 +3459,27 @@ class _LoweringContext:
                 f"checkMultiSig: array_literal metadata missing (sigs={sigs_ref!r}, pks={pks_ref!r})"
             )
 
+        # Degenerate thresholds are rejected here, not defended against with
+        # extra opcodes -- emitting a runtime guard would move bytes for every
+        # existing valid contract. Checking in the lowerer (rather than the
+        # typechecker) also covers the --ir input path, which never runs a
+        # typecheck.
+        if len(sig_elems) == 0:
+            raise RuntimeError(
+                "checkMultiSig requires at least one signature: the signature array is "
+                "empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts "
+                "unconditionally (anyone-can-spend)"
+            )
+        if len(pk_elems) == 0:
+            raise RuntimeError(
+                "checkMultiSig requires at least one public key: the public key array is empty"
+            )
+        if len(sig_elems) > len(pk_elems):
+            raise RuntimeError(
+                f"checkMultiSig signature count ({len(sig_elems)}) cannot exceed public "
+                f"key count ({len(pk_elems)}): the resulting script is unspendable"
+            )
+
         # Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         self.emit_op(StackOp(op="push", value=big_int_push(0)))
         self.sm.push("")
@@ -3382,6 +3519,328 @@ class _LoweringContext:
     # check_preimage (OP_PUSH_TX)
     # -----------------------------------------------------------------
 
+    def _emit_unsigned_bin2num(self) -> None:
+        """Convert the 4-byte little-endian field on top of the stack to an
+        UNSIGNED script number.
+
+        nVersion, nSequence, nLockTime and the trailing sighash type are
+        unsigned 32-bit wire fields, but a Bitcoin script number is
+        sign-magnitude: the high bit of the LAST byte is the sign. A bare
+        OP_BIN2NUM therefore reads ``feffffff`` (0xfffffffe, the SDK's
+        non-final default) as -2147483646 and ``ffffffff`` (the finality
+        sentinel) as -2147483647, which makes ``extractSequence(p) <
+        0xffffffff`` true for the exact value it exists to exclude
+        (W1 / FinalCountdown). Appending a zero byte first makes the value a
+        five-byte non-negative number, so the whole 0..2**32-1 range reads as
+        itself. Same trick _emit_strip_script_code_varint already uses for
+        0xfd/0xfe/0xff.
+        """
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+
+    def _emit_strip_script_code_varint(self) -> None:
+        """Strip the BIP-143 scriptCode varint length prefix.
+
+        ``[..., varint || scriptCode]`` -> ``[..., scriptCode]``
+
+        All four varint shapes must be handled; stripping only the 1- and
+        3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+        65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+        ``Invalid OP_SPLIT range`` on regtest.
+        """
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")  # firstByte
+        self.sm.push("")  # rest
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        # as negative script numbers.
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        # Stack: [..., rest, fb_num]
+
+        # emit_drop_more_varint_bytes drops `n` additional varint bytes
+        # from the top-of-stack `rest`. [..., rest] -> [..., rest_minus_n].
+        def emit_drop_more_varint_bytes(n: int) -> None:
+            self.emit_op(StackOp(op="push", value=big_int_push(n)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push(""); self.sm.push("")
+            self.emit_op(StackOp(op="nip"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+
+        # IF fb_num < 253: 1-byte varint, drop fb_num.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(253)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_1_byte_if = self.sm.clone()
+        # THEN: 1-byte varint.
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_1_byte_if.clone()
+        # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(254)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_fe_if = self.sm.clone()
+        # THEN: 5-byte varint (0xfe + 4 bytes LE).
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        emit_drop_more_varint_bytes(4)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_fe_if.clone()
+        # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(255)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_ff_if = self.sm.clone()
+        # THEN: 9-byte varint (0xff + 8 bytes LE).
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        emit_drop_more_varint_bytes(8)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_ff_if.clone()
+        # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        emit_drop_more_varint_bytes(2)
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+
+    def _has_state_section(self) -> bool:
+        """Whether the deployed locking script carries a trailing
+        ``OP_RETURN || state`` section at all (R-010).
+
+        NOT the same question as "is the state section empty". A
+        ``StatefulSmartContract`` with zero mutable properties compiles to an
+        artifact with no state fields, and the SDK's ``get_locking_script``
+        appends neither the separator nor any payload -- the deployed script IS
+        the code part. ``_fixed_state_section_length`` answers 0 for that shape,
+        which reads as "a fixed section of length zero" and made clause 8a pin
+        ``SIZE(rest) == 1`` for a remainder that is always empty, locking the
+        contract's funds.
+        """
+        return any(not prop.readonly for prop in self.properties)
+
+    def _fixed_state_section_length(self) -> int | None:
+        """Byte length of the serialized state section (excluding the OP_RETURN
+        separator) when every mutable property is fixed-size, else ``None``.
+
+        Mirrors the size table in ``_lower_deserialize_state``; a ByteString
+        property makes the section variable-length and its exact length
+        un-pinnable at compile time.
+
+        Only meaningful when ``_has_state_section()`` is true: with no mutable
+        properties the sum is vacuously 0, which means "no section", not "an
+        empty section".
+        """
+        sizes = {
+            "bigint": 8, "RabinSig": 8, "RabinPubKey": 8,
+            "boolean": 1, "PubKey": 33, "Addr": 20, "Ripemd160": 20,
+            "Sha256": 32, "Point": 64, "P256Point": 64, "P384Point": 96,
+        }
+        total = 0
+        for prop in self.properties:
+            if prop.readonly:
+                continue
+            size = sizes.get(prop.type)
+            if size is None:
+                return None
+            total += size
+        return total
+
+    def _emit_code_part_authentication(self) -> None:
+        """Bind the spender-supplied ``_codePart`` witness to the executing script.
+
+        R-010 / CL-BUG-091. ``_codePart`` is the locking script minus the
+        trailing ``OP_RETURN || state`` section. It is pushed by the spender and
+        OP_CAT'd verbatim as the script prefix of every reconstructed
+        state-continuation output, so an unauthenticated ``_codePart`` is a
+        complete break: the spender picks the script the contract's own funds
+        move to.
+
+        With the OP_CODESEPARATOR hoisted to offset 1 of the locking script, the
+        BIP-143 scriptCode carried in the (already tx-bound) preimage is
+
+            scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state
+
+        so the whole of ``_codePart`` is recoverable from it::
+
+            codePart == 0x61ab || scriptCode[0 : SIZE(codePart) - 2]
+
+        plus a pin on the split point, without which a spender could claim a
+        SHORTER code part whose bytes are a genuine prefix — in the degenerate
+        case just the two prologue bytes, which turns the continuation output
+        into a bare OP_RETURN that anyone can spend.
+
+        Consumes nothing: ``[..., preimage]`` in, ``[..., preimage]`` out,
+        aborting the script via OP_EQUALVERIFY when the witness does not match.
+        """
+        # 1. Work on a copy — the caller still needs the preimage.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+
+        # 2. Drop the fixed 104-byte BIP-143 header.
+        self.emit_op(StackOp(op="push", value=big_int_push(104)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="nip"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        # 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+        #    hashOutputs 32 + nLocktime 4 + sighashType 4).
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(52)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+
+        # 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+        self._emit_strip_script_code_varint()
+
+        # 5. Copy the witness code part up.
+        self.bring_to_top("_codePart", False)
+        self.sm.rename_at_depth(0, "")
+
+        # 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+
+        # 6a. R-095 -- pin SIZE(codePart) itself on the VARIABLE-length-state
+        #     path.
+        #
+        #     Clause 8a below pins the split point through the REMAINDER's
+        #     length, which only works while the state section is a
+        #     compile-time constant. With a ByteString state field it is not,
+        #     8a is skipped, and the only surviving constraint on where the code
+        #     part ENDS is 8b's ``rest[0] == 0x6a`` -- which a genuine PREFIX of
+        #     the executing script satisfies at any offset whose byte happens to
+        #     be 0x6a. The state's length is unknown at compile time; the CODE's
+        #     is not, so pin that instead. See the TypeScript tier for the full
+        #     argument.
+        #
+        #     Stack effect is NET ZERO: the pin consumes nothing and leaves
+        #     SIZE(codePart) where it found it, so the stack map is untouched.
+        if self._has_state_section() and self._fixed_state_section_length() is None:
+            # delta / exact are refined by _pin_code_part_length once every
+            # method has been lowered; the defaults are the sound ones (a lower
+            # bound of emitted_length + 0 holds for any deployment).
+            self.emit_op(StackOp(
+                op="verify_code_part_len",
+                code_part_len_delta=0,
+                code_part_len_exact=False,
+            ))
+
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        # 7. Reorder to [..., codePart, scriptCode, n].
+        self.emit_op(StackOp(op="rot"))
+        rotated = self.sm.remove_at_depth(2)
+        self.sm.push(rotated)
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+
+        # 8. Split scriptCode at n into the claimed code tail and the rest.
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+
+        # 8a. Pin the split point. R-010: with no mutable properties there is
+        #     no state section and no separator -- the deployed script is
+        #     exactly the code part, so the remainder must be EMPTY.
+        has_state = self._has_state_section()
+        fixed_state_len = self._fixed_state_section_length() if has_state else 0
+        if fixed_state_len is not None:
+            rest_len = 1 + fixed_state_len if has_state else 0
+            self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+            self.sm.push("")
+            self.emit_op(StackOp(op="push", value=big_int_push(rest_len)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUALVERIFY"))
+            self.sm.pop(); self.sm.pop()
+        # 8b. When a state section exists, the byte immediately after the code
+        #     part must be the OP_RETURN separator. With no state section
+        #     clause 8a has already pinned the remainder to zero bytes, which
+        #     is strictly stronger than any byte test.
+        if has_state:
+            self.emit_op(StackOp(op="push", value=big_int_push(1)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push(""); self.sm.push("")
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+            self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6a]))))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_EQUALVERIFY"))
+            self.sm.pop(); self.sm.pop()
+        else:
+            # Clause 8a consumed the remainder's SIZE but not the remainder;
+            # with 8b skipped it is dead and must still be dropped so the stack
+            # shape matches the state-bearing path.
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+
+        # 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x61, 0xab]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        # 10. Byte-for-byte or the script dies here.
+        self.emit_op(StackOp(op="opcode", code="OP_EQUALVERIFY"))
+        self.sm.pop(); self.sm.pop()
+
     def _lower_check_preimage(self, binding_name: str, preimage: str,
                               sighash_flag: int | None,
                               binding_index: int, last_uses: dict[str, int]) -> None:
@@ -3394,10 +3853,19 @@ class _LoweringContext:
         # witness signature). See _emit_check_preimage_binding for the
         # construction.
 
-        # Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
-        # preimage is only the code after this point. This reduces preimage size
-        # for large scripts and is required for scripts > ~32KB.
-        self.emit_op(StackOp(op="opcode", code="OP_CODESEPARATOR"))
+        # R-010 / CL-BUG-091: OP_CODESEPARATOR placement. The separator used to
+        # sit at each method's entry, so the BIP-143 scriptCode covered only the
+        # code AFTER it — leaving the dispatch preamble and every preceding
+        # method body invisible to the running script, and those are exactly the
+        # bytes the spender-supplied `_codePart` claims to reproduce. When any
+        # method of this contract carries `_codePart`, the separator is emitted
+        # ONCE at offset 1 of the locking script instead.
+        if not self.script_level_code_separator:
+            # No `_codePart` anywhere in this contract, so nothing needs
+            # authenticating: keep the pre-R-010 layout — a separator right
+            # here, at the method's entry, which keeps scriptCode (and the
+            # preimage) small.
+            self.emit_op(StackOp(op="opcode", code="OP_CODESEPARATOR"))
 
         # Step 1: Bring preimage to top (non-consuming; kept for field extractors)
         is_last = self._is_last_use(preimage, binding_index, last_uses)
@@ -3409,6 +3877,12 @@ class _LoweringContext:
         # method declare a different mode, which only changes the appended
         # sighash flag byte. Net stack effect is zero.
         self._emit_check_preimage_binding(sighash_flag)
+
+        # R-010: the preimage is now proven to be THIS transaction's preimage,
+        # so its scriptCode field is authentic. Pin the spender-supplied
+        # `_codePart` to it before any continuation output is built from it.
+        if self.sm.has("_codePart"):
+            self._emit_code_part_authentication()
 
         # Preimage remains on top.  Rename for field extractors.
         self.sm.pop()
@@ -3465,7 +3939,7 @@ class _LoweringContext:
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name == "extractHashPrevouts":
             self.emit_op(StackOp(op="push", value=big_int_push(4)))
@@ -3550,7 +4024,7 @@ class _LoweringContext:
             self.sm.pop()
             self.sm.pop()
             self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name == "extractLocktime":
             self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
@@ -3580,7 +4054,7 @@ class _LoweringContext:
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name in ("extractOutputHash", "extractOutputs"):
             self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
@@ -3669,7 +4143,7 @@ class _LoweringContext:
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self._emit_unsigned_bin2num()  # UNSIGNED 32-bit wire field (W1)
 
         elif func_name == "extractScriptCode":
             self.emit_op(StackOp(op="push", value=big_int_push(104)))
@@ -4031,11 +4505,25 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.pop()
 
+        # THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the `pow` half).
+        # The 32 rounds below compute base^min(exp, 32). Before this guard an
+        # exponent outside 0..32 returned that CLAMPED value with no error,
+        # while frontend/constant_fold.py computed the true power for
+        # exp <= 256 — so for 33 <= exp <= 256 the fold-ON and fold-OFF scripts
+        # accepted mutually exclusive inputs. A negative exponent was a third
+        # disagreement: script returned 1, interpreter threw, folder declined.
+        # Six bytes per callsite refuse the whole outside.
+        self.emit_op(StackOp(op="opcode", code="OP_DUP"))          # base exp exp
+        self.emit_op(StackOp(op="push", value=big_int_push(0)))    # base exp exp 0
+        self.emit_op(StackOp(op="push",
+                             value=big_int_push(POW_EXPONENT_LIMIT + 1)))  # ... 33
+        self.emit_op(StackOp(op="opcode", code="OP_WITHIN"))       # base exp (0<=exp<33)
+        self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))       # base exp
+
         self.emit_op(StackOp(op="swap"))                          # exp base
         self.emit_op(StackOp(op="push", value=big_int_push(1)))   # exp base 1(acc)
 
-        MAX_POW_ITERATIONS = 32
-        for i in range(MAX_POW_ITERATIONS):
+        for i in range(POW_EXPONENT_LIMIT):
             self.emit_op(StackOp(op="push", value=big_int_push(2)))
             self.emit_op(StackOp(op="opcode", code="OP_PICK"))
             self.emit_op(StackOp(op="push", value=big_int_push(i)))
@@ -4108,6 +4596,44 @@ class _LoweringContext:
 
     def _lower_sqrt(self, binding_name: str, args: list[str],
                     binding_index: int, last_uses: dict[str, int]) -> None:
+        """sqrt(n) — integer square root via Newton's method, 256 rounds.
+
+        Algorithm, identical to the constant folder and the reference interpreter so
+        that all three agree at every input (R-169):
+
+            guess = n
+            repeat 256 times:
+              next  = (guess + n / guess) / 2
+              guess = min(guess, next)        # the convergence break
+
+        OP_MIN IS the break. Bitcoin Script has no loops, so the rounds are unrolled
+        and unconditional; what stops them changing the answer is that the Newton
+        sequence seeded at guess = n is strictly DECREASING while guess > isqrt(n)
+        and non-decreasing once guess == isqrt(n). Clamping each round to the running
+        minimum makes isqrt(n) a fixed point and every post-convergence round a
+        no-op. Without the clamp the iteration reaches isqrt(n) and then OSCILLATES
+        between it and isqrt(n)+1, so a fixed round count returns whichever side the
+        parity lands on — sqrt(8) = 3, sqrt(63) = 8.
+
+        256 matches the folder's bound, because seeded at guess = n the iterate only
+        halves per round until it nears sqrt(n): a correct answer needs ~log2(n)/2
+        rounds (20 for 32-bit, 37 for 64-bit, 135 for 256-bit). The previous 16 was
+        short by an unbounded margin, not a tuning margin — sqrt(10^12) came out as
+        15280627.
+
+        DOMAIN: exact for every 0 <= n < 2^497, and both ends are ENFORCED, because
+        outside them the iteration returns a wrong number rather than failing:
+
+            OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+            OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n fits in 62 bytes
+
+        A minimally-encoded script number of at most 62 bytes is at most 2^495 - 1,
+        so the enforced domain is 0 <= n < 2^495. The upper guard is not theoretical:
+        a 500-byte n ran to completion on the real ScriptVM and returned a wrong root
+        with no error. A negative n is a fixed point of the min-clamped recurrence
+        and would come back as n itself, so it is refused too — the folder declines
+        and the interpreter throws on the same bound, leaving all three in agreement.
+        """
         if not args:
             raise RuntimeError("sqrt requires 1 argument")
         n = args[0]
@@ -4116,20 +4642,32 @@ class _LoweringContext:
         self.bring_to_top(n, n_is_last)
         self.sm.pop()
 
+        # Domain guards; both leave n on the stack.
+        self.emit_op(StackOp(op="opcode", code="OP_DUP"))
+        self.emit_op(StackOp(op="push", value=big_int_push(0)))
+        self.emit_op(StackOp(op="opcode", code="OP_GREATERTHANOREQUAL"))
+        self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.emit_op(StackOp(op="push", value=big_int_push(63)))
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
+
         self.emit_op(StackOp(op="opcode", code="OP_DUP"))
 
         # Build Newton iteration ops for the then-branch
         newton_ops: list[StackOp] = []
         newton_ops.append(StackOp(op="opcode", code="OP_DUP"))  # n guess(=n)
 
-        SQRT_ITERATIONS = 16
+        SQRT_ITERATIONS = 256
         for _ in range(SQRT_ITERATIONS):
             newton_ops.append(StackOp(op="over"))
             newton_ops.append(StackOp(op="over"))
             newton_ops.append(StackOp(op="opcode", code="OP_DIV"))
+            newton_ops.append(StackOp(op="over"))
             newton_ops.append(StackOp(op="opcode", code="OP_ADD"))
             newton_ops.append(StackOp(op="push", value=big_int_push(2)))
             newton_ops.append(StackOp(op="opcode", code="OP_DIV"))
+            newton_ops.append(StackOp(op="opcode", code="OP_MIN"))
 
         newton_ops.append(StackOp(op="nip"))  # result (drop n)
 
@@ -4275,15 +4813,24 @@ class _LoweringContext:
         for _ in range(3):
             self.sm.pop()
 
-        # Delegate to the SLH-DSA codegen module
+        # Delegate to the SLH-DSA codegen module.
+        #
+        # The try covers the IMPORT ONLY (R-299). It used to cover the call as
+        # well, so an ImportError raised from inside the codegen module — a
+        # missing transitive dependency, a typo'd import in that module — was
+        # reported as "module not available. Please implement
+        # runar_compiler.codegen.slh_dsa", sending the author to write a module
+        # that is right there, with the real cause discarded. The `from exc`
+        # keeps the cause attached for the case the message IS about.
+        # The EC handler below has always been written this way.
         try:
             from runar_compiler.codegen.slh_dsa import emit_verify_slh_dsa
-            emit_verify_slh_dsa(lambda op: self.emit_op(op), param_key)
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "SLH-DSA codegen module not available. "
                 "Please implement runar_compiler.codegen.slh_dsa."
-            )
+            ) from exc
+        emit_verify_slh_dsa(lambda op: self.emit_op(op), param_key)
 
         self.sm.push(binding_name)
         self._track_depth()
@@ -4807,11 +5354,15 @@ def _method_reads_var_len_state(
     private_methods: dict | None = None,
     seen: set[str] | None = None,
 ) -> bool:
-    """Whether a method READS a mutable variable-length (ByteString) state
-    field's value (via load_prop). Issue #100: such a terminal method needs
-    _codePart for the preimage-relative state offset. Narrowed to the live
-    var-length read so methods that only read readonly fields (baked into the
-    locking script) or fixed-size fields keep their original terminal codegen.
+    """Whether a method READS (via load_prop) any property in ``var_len_props``.
+
+    Issue #100: such a terminal method needs _codePart for the preimage-relative
+    state offset. The caller decides which properties qualify -- see
+    ``_compute_uses_code_part``, which passes EVERY mutable property once the
+    contract carries variable-length state (R-074), and the empty set otherwise
+    so that contracts with only fixed-size state, and methods that read only
+    readonly fields baked into the locking script, keep their original terminal
+    codegen.
 
     Deep-review finding C18: private methods are INLINED into the caller's
     stack context, so a read that happens inside a private helper is a read by
@@ -4883,20 +5434,205 @@ def _lower_to_stack_inner(program: ANFProgram) -> list[StackMethod]:
 
     methods: list[StackMethod] = []
 
+    # R-010 / CL-BUG-091: OP_CODESEPARATOR placement is a CONTRACT-level
+    # decision, taken before any method is lowered.
+    #
+    #   * If any method authenticates a `_codePart` witness, the contract gets a
+    #     single separator at offset 1 of the locking script (emitted by `emit`)
+    #     and NO per-method ones, so scriptCode spans the whole script and every
+    #     byte of `_codePart` is recoverable from it.
+    #   * Otherwise nothing needs authenticating, and each checkPreimage keeps
+    #     its own separator at the method's entry — the pre-R-010 layout, which
+    #     keeps the preimage small and, for a stateless contract, keeps a user
+    #     checkSig on the near side of the separator where the SDK's signing
+    #     path expects it.
+    #
+    # The two schemes are never mixed: a per-method separator emitted after the
+    # script-level one would win and re-narrow scriptCode.
+    script_level_code_separator = any(
+        (m.name == "constructor" or m.is_public)
+        and _compute_uses_code_part(m, program.properties, private_methods)
+        for m in program.methods
+    )
+
     for method in program.methods:
         # Skip constructor and private methods
         if method.name == "constructor" or (not method.is_public and method.name != "constructor"):
             continue
-        sm = _lower_method_with_private_methods(method, program.properties, private_methods)
+        sm = _lower_method_with_private_methods(
+            method, program.properties, private_methods, script_level_code_separator,
+        )
         methods.append(sm)
 
+    _pin_code_part_length(methods, program.properties)
+
     return methods
+
+
+#: Baked value width, in bytes, of every fixed-size constructor-arg type.
+#: Mirrors the ``raw``-encoded entries of the shared ``STATE_FIELD_WIDTHS``
+#: table.
+_CONSTRUCTOR_SLOT_VALUE_BYTES = {
+    "PubKey": 33,
+    "Sha256": 32,
+    "Addr": 20,
+    "Ripemd160": 20,
+    "Point": 64,
+    "P256Point": 64,
+    "P384Point": 96,
+}
+
+
+def _push_header_len(value_bytes: int) -> int:
+    """Byte length of the push header ``encodePushData`` puts in front of an
+    N-byte payload: the length byte itself up to 75, then OP_PUSHDATA1 / 2 / 4.
+    """
+    if value_bytes <= 75:
+        return 1
+    if value_bytes <= 0xFF:
+        return 2
+    if value_bytes <= 0xFFFF:
+        return 3
+    return 5
+
+
+def _constructor_slot_growth(typ: str) -> tuple[int, bool]:
+    """Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot
+    of this type occupies in the template, and whether that growth is known at
+    compile time at all.
+
+    Mirrors the SDK's ``encodeArg``: a fixed-size data type bakes as
+    ``<push header><N value bytes>`` over a 1-byte placeholder, so it grows the
+    script by ``_push_header_len(N) + N - 1``.
+
+    The header is NOT always one byte, and this function used to assume it was.
+    ``P384Point`` is 96 bytes -- past the 75-byte direct-push ceiling -- so the
+    SDK bakes it through OP_PUSHDATA1 as ``4c 60 || <96>`` and it grows the
+    script by 97, not 96. Under-counting by one emits an ``exact`` pin one byte
+    short, and every honest spend of such a contract fails OP_VERIFY with the
+    funds already locked. Deriving the header from the width keeps the next type
+    above 75 bytes from repeating that silently.
+
+    A boolean bakes as one OP_TRUE/OP_0 opcode byte, the same width as the
+    placeholder, so it grows the script by nothing. ``bigint``
+    (minimally-encoded Script number) and ``ByteString`` (arbitrary-length data
+    push) depend on the VALUE, which the compiler never sees.
+    """
+    if typ == "boolean":
+        return 0, True
+    value_bytes = _CONSTRUCTOR_SLOT_VALUE_BYTES.get(typ)
+    if value_bytes is None:
+        return 0, False
+    return _push_header_len(value_bytes) + value_bytes - 1, True
+
+
+def _pin_code_part_length(
+    methods: list[StackMethod], properties: list[ANFProperty]
+) -> None:
+    """R-095 -- resolve ``code_part_len_delta`` / ``code_part_len_exact`` on
+    every ``verify_code_part_len`` op.
+
+    A constructor slot exists only where a property is actually LOADED, and a
+    method is lowered before the methods after it, so no single method knows the
+    contract's full placeholder set. This runs once the whole program is lowered
+    and counts the placeholders that were really emitted -- over-counting would
+    inflate the pin and make every honest spend unspendable. Methods that
+    ``emit`` never writes (the constructor) must not be counted; this tier
+    already drops the constructor before lowering, and the guard below keeps the
+    filter explicit and identical to the TS / Go tiers.
+    """
+    pins: list[StackOp] = []
+    placeholders: list[int] = []
+
+    def walk(ops: list[StackOp]) -> None:
+        for op in ops:
+            if op.op == "if":
+                walk(op.then)
+                walk(op.else_ops)
+            elif op.op == "placeholder":
+                placeholders.append(op.param_index)
+            elif op.op == "verify_code_part_len":
+                pins.append(op)
+
+    for m in methods:
+        if m.name == "constructor":
+            continue
+        walk(m.ops)
+    if not pins:
+        return
+
+    # Matches the paramIndex space _lower_load_prop assigns.
+    ctor_props = [p for p in properties if p.initial_value is None]
+
+    delta = 0
+    exact = True
+    for param_index in placeholders:
+        typ = ""
+        if 0 <= param_index < len(ctor_props):
+            typ = ctor_props[param_index].type
+        growth, known = _constructor_slot_growth(typ)
+        if not known:
+            # No compile-time width. Growth is never negative, so the running
+            # sum stays a sound lower bound -- just not an exact one.
+            exact = False
+        else:
+            delta += growth
+
+    for pin in pins:
+        pin.code_part_len_delta = delta
+        pin.code_part_len_exact = exact
+
+
+def _compute_uses_code_part(
+    method: ANFMethod,
+    properties: list[ANFProperty],
+    private_methods: dict[str, ANFMethod],
+) -> bool:
+    """Whether a method's unlocking script carries the ``_codePart`` implicit
+    parameter: it verifies a preimage AND either builds a continuation output or
+    reads variable-length state (issue #100).
+
+    Hoisted out of ``_lower_method_with_private_methods`` because R-010 needs the
+    answer for EVERY method before lowering ANY of them — OP_CODESEPARATOR
+    placement is a contract-level decision (see ``_lower_to_stack_inner``).
+    """
+    if not _method_uses_check_preimage(method.body, private_methods):
+        return False
+    # This predicate MUST agree with the branch ``_lower_deserialize_state``
+    # actually takes, and that branch keys off a CONTRACT-level fact:
+    # ``has_variable_length`` -- does ANY mutable property carry a push-data
+    # length prefix. When one does, the state section can only be located via
+    # the ``_codePart``-relative offset, so the WHOLE deserialization is gated
+    # on ``_codePart``; without it the pass takes its ``OP_DROP`` shortcut,
+    # pushes NO mutable property, and every ``load_prop`` falls through to the
+    # DEPLOY-TIME constructor placeholder instead of the live on-chain value.
+    #
+    # Two narrower versions of this question have already been wrong here:
+    #   R-015 (CL-BUG-138) asked the wrong TYPE question -- "is it literally
+    #   ByteString" rather than what ``is_variable_length_state_type`` says.
+    #   R-074 asked the wrong SCOPE question -- "does this method read a
+    #   var-length property", when reading the fixed-size SIBLING of one is
+    #   just as gated. A terminal read of a `bigint` next to a `ByteString`
+    #   authorised against the deploy-time value forever.
+    # So ask the deserializer's own question: if the contract has var-length
+    # state, EVERY mutable-property read needs ``_codePart``.
+    mutable_props = [p for p in properties if not p.readonly]
+    reads_need_code_part = (
+        {p.name for p in mutable_props}
+        if any(is_variable_length_state_type(p.type) for p in mutable_props)
+        else set()
+    )
+    return (
+        _method_uses_code_part(method.body)
+        or _method_reads_var_len_state(method.body, reads_need_code_part, private_methods)
+    )
 
 
 def _lower_method_with_private_methods(
     method: ANFMethod,
     properties: list[ANFProperty],
     private_methods: dict[str, ANFMethod],
+    script_level_code_separator: bool = False,
 ) -> StackMethod:
     param_names = [p.name for p in method.params]
 
@@ -4907,22 +5643,34 @@ def _lower_method_with_private_methods(
     # preimage — see _lower_check_preimage — so NO _opPushTxSig witness item is
     # pushed. The unlocking script provides only the preimage.)
     # _codePart is needed for continuation builders (add_output/add_raw_output)
-    # OR when the method reads a mutable variable-length (ByteString) state
-    # field — the deserialization needs it for the preimage-relative offset
-    # (issue #100).
-    var_len_props = {
-        p.name for p in properties if not p.readonly and p.type == "ByteString"
-    }
-    uses_code_part = (
-        _method_uses_check_preimage(method.body, private_methods)
-        and (_method_uses_code_part(method.body)
-             or _method_reads_var_len_state(method.body, var_len_props, private_methods))
-    )
-    if _method_uses_check_preimage(method.body, private_methods) and uses_code_part:
+    # OR when the method reads a mutable variable-length state field — the
+    # deserialization needs it for the preimage-relative offset (issue #100).
+    # (The var-length property set itself lives in ``_compute_uses_code_part``,
+    # which R-010 hoisted out of this function; the copy that used to sit here
+    # was dead and, being a second hand-maintained copy of the type list, was
+    # the R-015 divergence waiting to happen again.)
+    uses_code_part = _compute_uses_code_part(method, properties, private_methods)
+    if uses_code_part:
         param_names = ["_codePart"] + param_names
 
     ctx = _LoweringContext(param_names, properties)
     ctx.private_methods = private_methods
+    # R-010: when the emitter places the script-level separator,
+    # _lower_check_preimage must NOT emit a per-method one — a later separator
+    # would win and re-narrow scriptCode, undoing the `_codePart` authentication.
+    ctx.script_level_code_separator = script_level_code_separator
+
+    # W3 / BoolBamboozle: a public method's ``boolean`` parameters arrive from
+    # the unlocking script as arbitrary bytes. Pin each of them to the ABI
+    # domain {empty, 0x01} before a single body opcode runs — see
+    # ``emit_boolean_param_gate``. Constructor args are baked into the locking
+    # script by the assembler, never pushed by a spender, so only public methods
+    # need the gate.
+    if method.is_public:
+        for p in method.params:
+            if p.type == "boolean":
+                ctx.emit_boolean_param_gate(p.name)
+
     # Pass terminalAssert=true for public methods
     ctx.lower_bindings(method.body, method.is_public)
 
@@ -4948,37 +5696,16 @@ def _lower_method_with_private_methods(
         ops=ctx.ops,
         max_stack_depth=ctx.max_depth,
         uses_code_part=uses_code_part,
+        needs_code_separator=script_level_code_separator,
     )
 
 
-def _lower_method(
-    method: ANFMethod,
-    properties: list[ANFProperty],
-) -> StackMethod:
-    param_names = [p.name for p in method.params]
-
-    ctx = _LoweringContext(param_names, properties)
-    ctx.lower_bindings(method.body, method.is_public)
-
-    # Clean up excess stack items below the top-of-stack boolean (CLEANSTACK).
-    # Excess items can come from deserialize_state (stateful methods reading
-    # mutable fields) or from readonly-field-binding patterns in all-readonly
-    # terminal methods. The depth>1 guard keeps this a no-op for already-clean
-    # methods.
-    if method.is_public and ctx.sm.depth() > 1:
-        excess = ctx.sm.depth() - 1
-        for _ in range(excess):
-            ctx.emit_op(StackOp(op="nip"))
-            ctx.sm.remove_at_depth(1)
-
-    if ctx.max_depth > MAX_STACK_DEPTH:
-        raise RuntimeError(
-            f"method '{method.name}' exceeds maximum stack depth of {MAX_STACK_DEPTH} "
-            f"(actual: {ctx.max_depth}). Simplify the contract logic"
-        )
-
-    return StackMethod(
-        name=method.name,
-        ops=ctx.ops,
-        max_stack_depth=ctx.max_depth,
-    )
+# R-291: a dead `_lower_method` used to live here, running to the end of the
+# file — a second, uncalled copy of the per-method lowering entry point, with no
+# reference anywhere in the package. The live entry is
+# `_lower_method_with_private_methods` above.
+#
+# It had already drifted, which is the reason this matters rather than being
+# tidiness: the dead copy built `StackMethod(name, ops, max_stack_depth)` while
+# the live one also passes `uses_code_part` and `needs_code_separator`. Anyone
+# who fixed the wrong copy would have seen every test pass.

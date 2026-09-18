@@ -47,7 +47,14 @@ describe('MultiSig2of3 (Solidity)', () => {
   it('compiles a 2-of-3 multisig to Bitcoin Script with OP_CHECKMULTISIG', () => {
     const contract = TestContract.fromSource(source, { pk1: PK1, pk2: PK2, pk3: PK3 }, FILE_NAME);
     const result = contract.call('unlock', { sig1: SIG1, sig2: SIG2 });
-    expect(typeof result.success).toBe('boolean');
+    // R-112: this used to assert `typeof result.success === 'boolean'`, which is
+    // true of every possible outcome — and the outcome was fixed anyway, because
+    // the interpreter's checkMultiSig answered a hardcoded `false`. It refuses
+    // now, and the surface path dies earlier still on the array literal; either
+    // way the interpreter has no opinion about this contract, and the assertion
+    // says so. Real spendability is the ScriptVM block below.
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toMatch(/not supported|checkMultiSig/i);
   });
 
   it('exposes all three pubkeys as readonly state', () => {

@@ -42,7 +42,7 @@ class TestIntentIntrinsicsBounds < Minitest::Test
       \trunar.RequireOutputP2PKH(2000, c.PKH, c.A)
       }
     GO
-    expect_typecheck_error(source, "bound to <= 1000")
+    expect_typecheck_error(source, "must be 0 in v1")
   end
 
   # R-2: requireOutputP2PKH negative outputIndex rejected.

@@ -14,6 +14,7 @@ import {
   buildP2PKHScript,
 } from '../index.js';
 import type { SignedEnvelope, EnvelopeSigner } from '../envelope.js';
+import { MAX_ENVELOPE_PAYLOAD_DEPTH } from '../envelope.js';
 import type { RunarArtifact } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -275,5 +276,251 @@ describe('verifyEnvelope reason parity with the six non-TS tiers (C16)', () => {
     const r = verifyEnvelope({ envelope: vector!.envelope });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('missing-fields');
+  });
+
+  // R-115 / CL-BUG-066. The fixture's `v23-lone-surrogate-payload-bad-json`
+  // vector covers the six tiers whose verify takes an injectable clock; the TS
+  // verify reads `Date.now()` directly, so it gets the same envelope built
+  // around a live clock instead.
+  it('rejects a payload containing an unpaired surrogate with bad-json', () => {
+    const now = Date.now();
+    const payload = `{"expiresAt":${now + 60_000},"msg":"x\\ud800y","nonce":${now}}`;
+    const r = verifyEnvelope({
+      envelope: {
+        payload,
+        sig: '30'.repeat(36),
+        pubkey: `02${'ab'.repeat(32)}`,
+        nonce: now,
+        expiresAt: now + 60_000,
+      },
+    });
+    expect(r.ok).toBe(false);
+    // Before the fix this was 'bad-sig': JSON.parse accepted the unpaired
+    // surrogate and the run fell through to the signature check, while rust,
+    // ruby and zig had already rejected the same bytes as bad JSON.
+    expect(r.reason).toBe('bad-json');
+  });
+
+  it('still accepts a payload whose surrogates are correctly PAIRED', () => {
+    const now = Date.now();
+    // U+1F600, spelled as the surrogate pair \ud83d\ude00 — legal JSON, legal
+    // Unicode, and it must not be caught by the lone-surrogate guard.
+    const payload = `{"expiresAt":${now + 60_000},"msg":"\\ud83d\\ude00","nonce":${now}}`;
+    const r = verifyEnvelope({
+      envelope: {
+        payload,
+        sig: '30'.repeat(36),
+        pubkey: `02${'ab'.repeat(32)}`,
+        nonce: now,
+        expiresAt: now + 60_000,
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad-sig');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-260 — shared payload nesting bound.
+//
+// `verifyEnvelope` parses the payload with each tier's stock JSON library and
+// used to inherit that library's recursion cap. Measured on ONE envelope
+// (priv=1, live clock, payload `{"deep":<N-deep array>,…}`):
+//
+//   ts / go / python / zig   accepted every depth probed (zig to 100001)
+//   ruby                     bad-json from total depth 101 (JSON.parse
+//                            max_nesting: 100)
+//   rust                     bad-json from total depth 128 (serde_json
+//                            RECURSION_LIMIT)
+//   java                     StackOverflowError thrown OUT of verify at ~5000
+//                            deep on a default JVM stack and ~1000 under
+//                            -Xss512k — i.e. a contract escape on
+//                            unauthenticated input, at a threshold set by a
+//                            JVM launch flag rather than by the protocol
+//
+// Every tier now enforces MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT with
+// a NON-RECURSIVE bracket scan run before the stock parser, so the answer is
+// the same everywhere and the guard itself cannot overflow. TS's verify reads
+// `Date.now()` directly rather than taking an injectable clock, so — as with
+// the R-115 lone-surrogate vector — it replays the fixture's SHAPE around a
+// live clock instead of the fixture's frozen envelope.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope payload depth bound (R-260)', () => {
+  const signer = new TestSigner(ALICE);
+
+  /** An N-deep array: nest(3) === [[[0]]]. */
+  function nest(n: number): unknown {
+    let v: unknown = 0;
+    for (let i = 0; i < n; i++) v = [v];
+    return v;
+  }
+
+  async function signAtArrayDepth(arrays: number): Promise<SignedEnvelope> {
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    // canonicalJson's own nesting cap is 512, well clear of these depths.
+    const payload = canonicalJson({ deep: nest(arrays), nonce, expiresAt });
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    return {
+      payload,
+      sig: await signer.signHash(digest),
+      pubkey: await signer.getPublicKey(),
+      nonce,
+      expiresAt,
+    };
+  }
+
+  it('accepts a payload exactly at the limit', async () => {
+    // 1 outer object + 63 arrays = MAX_ENVELOPE_PAYLOAD_DEPTH. This is the
+    // control with teeth: an over-strict or off-by-one guard reddens here.
+    const env = await signAtArrayDepth(MAX_ENVELOPE_PAYLOAD_DEPTH - 1);
+    const r = verifyEnvelope({ envelope: env });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it('rejects a payload one level past the limit with bad-json', async () => {
+    // Built as TEXT rather than through canonicalJson, because canonicalJson
+    // enforces the SAME bound on the emit side and refuses to produce this —
+    // which is the round-trip property working: no tier can sign a payload no
+    // tier can verify. An over-limit envelope can therefore only come from an
+    // attacker, so the test constructs one directly. It is still signed
+    // VALIDLY, so a tier that fails to enforce the bound returns ok:true
+    // rather than falling through to bad-sig.
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    const arrays = MAX_ENVELOPE_PAYLOAD_DEPTH; // + 1 outer object = limit + 1
+    const payload =
+      `{"deep":${'['.repeat(arrays)}0${']'.repeat(arrays)},` +
+      `"expiresAt":${expiresAt},"nonce":${nonce}}`;
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    const env: SignedEnvelope = {
+      payload,
+      sig: await signer.signHash(digest),
+      pubkey: await signer.getPublicKey(),
+      nonce,
+      expiresAt,
+    };
+    const r = verifyEnvelope({ envelope: env });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad-json');
+  });
+
+  it('canonicalJson refuses to EMIT a payload verify would refuse to parse', async () => {
+    // The round-trip property stated directly: the emit bound and the parse
+    // bound are the same number, so a correctly-signed envelope that one tier
+    // can produce is always one every tier can read.
+    const nonce = Date.now();
+    expect(() =>
+      canonicalJson({ deep: nest(MAX_ENVELOPE_PAYLOAD_DEPTH), nonce, expiresAt: nonce + 60_000 }),
+    ).toThrow();
+    expect(() =>
+      canonicalJson({ deep: nest(MAX_ENVELOPE_PAYLOAD_DEPTH - 1), nonce, expiresAt: nonce + 60_000 }),
+    ).not.toThrow();
+  });
+
+  it('rejects a payload deep enough to overflow a recursive parser', () => {
+    // ~10 KB of brackets — the shape that threw StackOverflowError out of the
+    // Java tier's verify. The guard is a flat scan, so no tier recurses here.
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    const payload = `{"deep":${'['.repeat(5000)}0${']'.repeat(5000)},"expiresAt":${expiresAt},"nonce":${nonce}}`;
+    const r = verifyEnvelope({
+      envelope: { payload, sig: '30'.repeat(36), pubkey: `02${'ab'.repeat(32)}`, nonce, expiresAt },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('bad-json');
+  });
+
+  it('still accepts a brace or bracket that only appears inside a string', async () => {
+    // The scan must skip string contents, or an ordinary message value like
+    // "{{{{…" would be counted as nesting and rejected.
+    const nonce = Date.now();
+    const expiresAt = nonce + 60_000;
+    const payload = canonicalJson({ msg: '['.repeat(200) + '{'.repeat(200), nonce, expiresAt });
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    const r = verifyEnvelope({
+      envelope: {
+        payload,
+        sig: await signer.signHash(digest),
+        pubkey: await signer.getPublicKey(),
+        nonce,
+        expiresAt,
+      },
+    });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it('pins MAX_ENVELOPE_PAYLOAD_DEPTH to the cross-tier fixture', () => {
+    const fixturePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../conformance/sdk-envelope/fixtures.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as { payload_depth_limit: number };
+    expect(fixture.payload_depth_limit).toBe(MAX_ENVELOPE_PAYLOAD_DEPTH);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-261 — an explicit clockSkewMs of 0 must mean 0, not "not supplied".
+//
+// Six of the seven tiers distinguish the two: TS `?? 5_000` (this file's
+// subject), Rust `Option::unwrap_or`, Python default arg, Ruby kwarg (0 is
+// truthy in Ruby), Zig struct default, Java field default. Go conflated them —
+// `ClockSkewMs int64 // defaults to 5_000 when zero` — so a caller asking for
+// strict expiry silently got a five-second replay window. Measured on the
+// cross-tier valid envelope, 2000 ms past expiry with clockSkewMs explicitly
+// 0: go ok:true, rust/python/ruby/zig/java all expired.
+//
+// TS's verify reads Date.now() directly rather than taking an injectable
+// clock, so it cannot replay the fixture's frozen clock_skew_vectors the way
+// the six other tiers do; it covers the same shape against a live clock. TS
+// was already correct here, so these are REGRESSION guards, not a fix.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope clockSkewMs (R-261)', () => {
+  const signer = new TestSigner(ALICE);
+
+  /** A validly signed envelope that expired `lateMs` ago. */
+  async function signExpired(lateMs: number): Promise<SignedEnvelope> {
+    const expiresAt = Date.now() - lateMs;
+    const nonce = expiresAt - 30_000;
+    const payload = canonicalJson({ ok: 1, nonce, expiresAt });
+    const digest = Hash.sha256(Utils.toArray(payload, 'utf8'));
+    return {
+      payload,
+      sig: await signer.signHash(digest),
+      pubkey: await signer.getPublicKey(),
+      nonce,
+      expiresAt,
+    };
+  }
+
+  it('treats an explicit 0 as zero tolerance', async () => {
+    const env = await signExpired(2_000);
+    const r = verifyEnvelope({ envelope: env, clockSkewMs: 0 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('expired');
+  });
+
+  it('still applies the 5000 ms default when no skew is supplied', async () => {
+    // CONTROL. Same envelope, same lateness — a fix that made explicit zero
+    // strict by dropping the default would redden here.
+    const env = await signExpired(2_000);
+    const r = verifyEnvelope({ envelope: env });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it('uses an explicit non-default skew rather than the default', async () => {
+    // CONTROL in the other direction: 8 s late is past the 5000 ms default, so
+    // this can only pass if the caller's 10_000 is the value actually used.
+    const env = await signExpired(8_000);
+    expect(verifyEnvelope({ envelope: env }).reason).toBe('expired');
+    const r = verifyEnvelope({ envelope: env, clockSkewMs: 10_000 });
+    expect(r.reason).toBeUndefined();
+    expect(r.ok).toBe(true);
   });
 });

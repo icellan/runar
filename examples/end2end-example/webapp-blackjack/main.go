@@ -113,8 +113,6 @@ type GameState struct {
 	LastAudit *AuditData  `json:"-"`
 }
 
-var game = &GameState{Phase: "welcome"}
-
 func main() {
 	mux := http.NewServeMux()
 
@@ -173,7 +171,9 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-func stateResponse() map[string]any {
+// R-152: the caller passes the visitor's game rather than reaching for a
+// package-level singleton.
+func stateResponse(game *GameState) map[string]any {
 	players := make([]map[string]any, len(game.Players))
 	for i, p := range game.Players {
 		players[i] = map[string]any{
@@ -208,13 +208,14 @@ func stateResponse() map[string]any {
 		"houseAddr":      game.HouseAddr,
 		"houseBalance":   game.HouseBal,
 		"oraclePubKey":   game.OraclePub,
-		"deckCommitHash": commitHash(),
+		"deckCommitHash": commitHash(game),
 		"deckCommitTxid": game.CommitTxid,
 		"log":            game.Log,
 	}
 }
 
-func commitHash() string {
+// R-152: see stateResponse.
+func commitHash(game *GameState) string {
 	if game.DeckCommit != nil {
 		return game.DeckCommit.Hash
 	}
@@ -222,6 +223,9 @@ func commitHash() string {
 }
 
 func handleNewGame(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -331,16 +335,22 @@ func handleNewGame(w http.ResponseWriter, r *http.Request) {
 	game.Phase = "ready"
 	game.Log = append(game.Log, LogEntry{Message: "Game initialized. Ready to deal.", Type: "info"})
 
-	jsonResponse(w, stateResponse())
+	jsonResponse(w, stateResponse(game))
 }
 
-func handleState(w http.ResponseWriter, _ *http.Request) {
+func handleState(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	game.mu.Lock()
 	defer game.mu.Unlock()
-	jsonResponse(w, stateResponse())
+	jsonResponse(w, stateResponse(game))
 }
 
 func handleDeal(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -466,7 +476,7 @@ func handleDeal(w http.ResponseWriter, r *http.Request) {
 	}
 	game.DeckPosition += 2
 
-	game.ActivePlayer = findNextActivePlayer(-1)
+	game.ActivePlayer = findNextActivePlayer(game, -1)
 	if game.ActivePlayer == -1 {
 		game.Phase = "dealer-turn"
 	} else {
@@ -478,10 +488,11 @@ func handleDeal(w http.ResponseWriter, r *http.Request) {
 		Type:    "deal",
 	})
 
-	jsonResponse(w, stateResponse())
+	jsonResponse(w, stateResponse(game))
 }
 
-func findNextActivePlayer(current int) int {
+// R-152: see stateResponse.
+func findNextActivePlayer(game *GameState, current int) int {
 	for i := current + 1; i < game.NumPlayers; i++ {
 		if !game.Players[i].IsBlackjack && !game.Players[i].IsBust && !game.Players[i].IsStanding {
 			return i
@@ -491,6 +502,9 @@ func findNextActivePlayer(current int) int {
 }
 
 func handleAction(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -551,16 +565,19 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if p.IsBust || p.IsStanding {
-		game.ActivePlayer = findNextActivePlayer(game.ActivePlayer)
+		game.ActivePlayer = findNextActivePlayer(game, game.ActivePlayer)
 		if game.ActivePlayer == -1 {
 			game.Phase = "dealer-turn"
 		}
 	}
 
-	jsonResponse(w, stateResponse())
+	jsonResponse(w, stateResponse(game))
 }
 
 func handleDealer(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -764,7 +781,7 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	game.LastAudit = buildAuditData()
+	game.LastAudit = buildAuditData(game)
 
 	if len(game.HouseUTXOs) > 0 {
 		auditJSON, _ := json.Marshal(game.LastAudit)
@@ -798,10 +815,11 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 
 	game.Phase = "settlement"
 
-	jsonResponse(w, stateResponse())
+	jsonResponse(w, stateResponse(game))
 }
 
-func buildAuditData() *AuditData {
+// R-152: see stateResponse.
+func buildAuditData(game *GameState) *AuditData {
 	audit := &AuditData{
 		RoundId:        game.Round,
 		DealerHand:     game.Dealer.Hand,
@@ -830,7 +848,10 @@ func buildAuditData() *AuditData {
 	return audit
 }
 
-func handleAudit(w http.ResponseWriter, _ *http.Request) {
+func handleAudit(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	game.mu.Lock()
 	defer game.mu.Unlock()
 
@@ -862,6 +883,9 @@ func handleTx(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleNewRound(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -898,5 +922,5 @@ func handleNewRound(w http.ResponseWriter, r *http.Request) {
 		Type:    "info",
 	})
 
-	jsonResponse(w, stateResponse())
+	jsonResponse(w, stateResponse(game))
 }

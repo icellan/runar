@@ -52,6 +52,22 @@ fn emitRoll(ops: *std.ArrayListUnmanaged(StackOp), allocator: Allocator, d: u32)
 ///
 /// depth is a compile-time constant (unrolled loop). Must be in [1, 32].
 /// Higher depths produce quadratically larger scripts due to roll operations.
+/// R-120: the `2^depth` operand of the index-domain gate.
+///
+/// `depth` runs to 64 for the SHA-256 Merkle builtins, and 2^63 / 2^64 do not
+/// fit the `integer: i64` push variant, so those two land on
+/// `big_int_decimal` — which `emitScriptNumberFromDecimal` encodes to the same
+/// minimal script number the other six tiers produce from their bignums.
+/// Everything at or below 2^62 stays on the integer variant, so the fixtures
+/// that exist today are byte-identical by the ordinary path.
+fn indexBoundPush(depth: u32) StackOp {
+    return switch (depth) {
+        63 => .{ .push = .{ .big_int_decimal = "9223372036854775808" } },
+        64 => .{ .push = .{ .big_int_decimal = "18446744073709551616" } },
+        else => .{ .push = .{ .integer = @as(i64, 1) << @as(u6, @intCast(depth)) } },
+    };
+}
+
 pub fn buildPoseidon2MerkleRootOps(allocator: Allocator, depth: u32) !EcOpBundle {
     if (depth < 1 or depth > 32) return error.InvalidDepth;
 
@@ -73,6 +89,15 @@ pub fn buildPoseidon2MerkleRootOps(allocator: Allocator, depth: u32) !EcOpBundle
     // 5. Poseidon2 compress (top 16 → top 8).
     // 6. Roll new_current(8) back below future_sibs.
     // 7. Restore index from alt.
+
+    // R-120: bound the index BEFORE walking the tree — the same hole and the same
+    // gate as merkle_emitters.zig. No proof-remainder twin here: the siblings
+    // are separate stack items, not one splittable blob.
+    try ops.append(allocator, .{ .opcode = "OP_DUP" });
+    try ops.append(allocator, .{ .push = .{ .integer = 0 } });
+    try ops.append(allocator, indexBoundPush(depth));
+    try ops.append(allocator, .{ .opcode = "OP_WITHIN" });
+    try ops.append(allocator, .{ .opcode = "OP_VERIFY" });
 
     for (0..depth) |i| {
         // Stack: [..., current(8), sib_i(8), future_sibs(F*8), index]

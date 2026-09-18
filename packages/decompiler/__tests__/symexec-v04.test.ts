@@ -29,7 +29,13 @@ describe('symexec-lift v0.4 — OP_IF / OP_ELSE / OP_ENDIF', () => {
   it('simple if-then-else with literal branches lifts via symexec and round-trips byte-identically', () => {
     // OP_IF OP_TRUE OP_ELSE OP_FALSE OP_ENDIF
     // Logically: assert(cond ? true : false).
-    const hex = '6351670068';
+    //
+    // W3 / BoolBamboozle: the single `boolean` param is preceded by the
+    // compiler's ABI-domain prologue (OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP
+    // OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY), which the lifter strips and the
+    // re-compile puts back. Without it the pin would describe a script no
+    // Rúnar compiler emits any more.
+    const hex = '767600877c51879b696351670068';
     const bytes = hexToBytes(hex);
 
     const out = liftStraightLine(disassemble(bytes));
@@ -86,9 +92,11 @@ describe('symexec-lift v0.4 — OP_IF / OP_ELSE / OP_ENDIF', () => {
     //   public unlock(a: boolean, b: boolean) {
     //     assert(a ? (b ? true : false) : false);
     //   }
-    // The Rúnar emitter produces OP_SWAP then the nested OP_IFs with an
-    // OP_NIP in the outer-ELSE branch to balance the stack.
-    const hex = '7c63635167006867007768';
+    // The Rúnar emitter produces the two W3 boolean ABI-domain prologues
+    // (OP_OVER-copy for `a` at depth 1, OP_DUP-copy for `b` at depth 0), then
+    // OP_SWAP and the nested OP_IFs with an OP_NIP in the outer-ELSE branch to
+    // balance the stack. Measured from a real compile of that source.
+    const hex = '787600877c51879b69767600877c51879b697c63635167006867007768';
     const bytes = hexToBytes(hex);
 
     const out = liftStraightLine(disassemble(bytes));

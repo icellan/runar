@@ -100,17 +100,69 @@ class TestEcCodegen < Minitest::Test
   # in-process localized-regression gate.
   # ---------------------------------------------------------------------------
 
+  # R-052 / CL-BUG-095, the Point WIDTH gate, moved these goldens. A `Point` is
+  # 64 bytes by definition and nothing checked it, so a surplus byte was split
+  # off and silently dropped: `ecOnCurve(G || 0xff)` returned TRUE and
+  # `ecEncodeCompressed` took its parity bit from the caller's extra byte. The
+  # deltas are structural, which is why they match the six other tiers
+  # byte-for-byte:
+  #
+  #   * +3 per `ec_decompose_point` call site -- OP_SIZE, push 64,
+  #     OP_NUMEQUALVERIFY. `ecAdd` decomposes TWICE, hence +6; `ecMul` /
+  #     `ecMulGen` / `ecNegate` once.
+  #   * +15 `ecOnCurve` -- 9 for the clamp-and-flag gate (it must stay a
+  #     PREDICATE and answer `false`, not abort, or `if (ecOnCurve(p))` stops
+  #     being writable), +3 for the decompose gate, +1 for the extra OP_BOOLAND
+  #     folding `_len_ok` in, +2 for rolling the two flags up.
+  #   * +3 `ecPointX` / `ecPointY`.
+  #
+  # `ecEncodeCompressed` stays at 16 ops and that is NOT an oversight: the gate
+  # adds 3 ops while the fixed-offset parity read (push 31, OP_SPLIT, OP_NIP)
+  # replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence with 3.
   EC_OP_COUNT_GOLDENS = {
-    "ecAdd"              =>  8223,
-    "ecMul"              => 130515,
-    "ecMulGen"           => 130517,
-    "ecNegate"           =>   945,
-    "ecOnCurve"          =>   533,
+    # R-117, the COORDINATE-CANONICITY gate. ecAdd 8279 -> 8297 (+18), ecMul
+    # 130518 -> 131073 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
+    # is 8 ops per gated point -- copy x (pick), push p, OP_LESSTHAN, copy y (pick),
+    # push p, OP_LESSTHAN, OP_BOOLAND, OP_VERIFY -- and ecAdd gates TWO points, so
+    # +18 there rather than +16. The extra two are pick DEPTH, not extra work: this
+    # tracker emits OP_DUP / OP_OVER for depth 0 / 1 and `push <n>, OP_PICK` for
+    # anything deeper, and in ecAdd's FIRST gate the stack is [px, py, qx, qy], so
+    # both of that gate's picks reach depth 3 and cost two ops each. Its second gate
+    # sees [px, py, qx, qy] with qx / qy at depth 1, so both are a one-op OP_OVER.
+    # 10 + 8 = 18, and ecMul / ecNegate gate a single point off a two-deep stack for
+    # a flat 8. ecOnCurve / ecModReduce /
+    # ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY are all +0. The
+    # predicates must stay TOTAL (they clamp and flag, they do not abort), and the
+    # byte accessors have no selector to fool -- each returns a value derived
+    # injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT
+    # number rather than a colliding one.
+    "ecAdd"              =>  8297,
+    # R-157, the ecMul ON-CURVE-OR-INFINITY gate: ecMul 130526 -> 131073 (+547),
+    # ecMulGen +547. The gate is the whole ecOnCurve body plus a copy/compare against
+    # the all-zero blob and an OP_BOOLOR/OP_VERIFY, run once before the ladder. ecAdd
+    # / ecNegate / ecOnCurve / ecMakePoint / ecPointX / ecPointY are all +0 — this
+    # gate is on the SCALAR LADDER only, because it is the +3n construction inside
+    # ecMul whose soundness needs ord(P) | n. affineAdd has no n-dependent trick and
+    # is correct on whatever curve its operand lies on, so gating it would cost bytes
+    # and break ecAdd(P, O), which R-053 requires.
+    # ecMulGen pays the gate too even though its operand is the compiler-pushed
+    # generator: it is emitted as `push G; swap; ecMul`, and exempting it would mean a
+    # second ecMul spelling whose only difference is a check that can never fail.
+    "ecMul"              => 131073,
+    "ecMulGen"           => 131075,
+    "ecNegate"           =>   956,
+    "ecOnCurve"          =>   548,
     "ecModReduce"        =>     8,
     "ecEncodeCompressed" =>     16,
-    "ecMakePoint"        =>   467,
-    "ecPointX"           =>   233,
-    "ecPointY"           =>   234,
+    # R-156, the ecMakePoint FIELD-ELEMENT gate: 467 -> 477 (+10). Five ops per
+    # coordinate -- OP_DUP, OP_0, push p, OP_WITHIN, OP_VERIFY -- and ecMakePoint has
+    # two. Nothing else moves: this gate is on the two BIGINT arguments of the point
+    # CONSTRUCTOR, which is a different surface from R-117's gate on the coordinates
+    # of an existing Point. ecMakePoint is secp256k1-only; there is no p256MakePoint
+    # or p384MakePoint to move.
+    "ecMakePoint"        =>   477,
+    "ecPointX"           =>   236,
+    "ecPointY"           =>   237,
   }.freeze
 
   EC_EMITTERS = {

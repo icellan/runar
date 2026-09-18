@@ -123,7 +123,7 @@ func TestSp1Fri_CompileFromSource_DefaultParams(t *testing.T) {
 	const proofBlobBindingMarker = "a86b" // OP_SHA256 (0xa8) OP_TOALTSTACK (0x6b)
 	idx := strings.Index(artifact.Script, proofBlobBindingMarker)
 	if idx < 0 {
-		t.Errorf("proof-blob binding marker (OP_SHA256+OP_TOALTSTACK = 0xa86b) "+
+		t.Errorf("proof-blob binding marker (OP_SHA256+OP_TOALTSTACK = 0xa86b) " +
 			"not found in artifact.Script — Step-1 binding emission missing")
 	} else {
 		t.Logf("proof-blob binding marker found at byte offset %d", idx/2)

@@ -455,6 +455,39 @@ func isGOrOneMulGen(name string, lookup map[string]*ir.ANFValue) bool {
 // Replace
 // ---------------------------------------------------------------------------
 
+// opOperandsAreConst reports whether every {"op": ...} argument in the rule's
+// replace template has BOTH operands resolving to a compile-time load_const
+// bigint — i.e. whether the scalar arithmetic the rewrite introduces can be
+// folded away entirely rather than emitted as a runtime bin_op.
+//
+// This is the guard that keeps the Go engine in step with the other six
+// tiers. TS, Rust, Python, Zig, Ruby and Java all implement the scalar-fusing
+// rules (ec-mulgen-linear, ec-mul-associative, ec-mul-distributive) with a
+// constant-operand precondition; the Go engine, being data-driven, used to
+// fire them on runtime scalars as well. The resulting script was valid — the
+// unreduced sum is put back into [0, n-1] by emitEcMulGen's scalar reduce
+// before the ladder sees it — but it was a DIFFERENT script from every other
+// tier for the same source, which conformance invariant 2 forbids. Rather
+// than let a byte-level divergence hide behind "both are correct", the
+// engine now declines the rewrite exactly where the other tiers decline it.
+func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANFValue) bool {
+	if rule.Replace.Call == nil {
+		return true
+	}
+	for _, a := range rule.Replace.Call.Args {
+		if a.Op == nil {
+			continue
+		}
+		if resolveConstBigInt(binds[a.Op.Lhs], lookup) == nil {
+			return false
+		}
+		if resolveConstBigInt(binds[a.Op.Rhs], lookup) == nil {
+			return false
+		}
+	}
+	return true
+}
+
 // applyReplace mutates b.Value according to the rule's replace template.
 // Returns any extra bindings to insert before b.
 func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[string]*ir.ANFValue) []ir.ANFBinding {
@@ -498,12 +531,14 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 	return nil
 }
 
-// buildOpHelper emits a helper binding implementing a scalar +/* (modulo the
-// curve order for +; plain multiplication for * — matching the existing Go
-// behavior where Rule 10 mods by N).
+// buildOpHelper emits a helper binding holding a scalar +/*, folded at compile
+// time modulo the curve order.
 //
-// Compile-time folding is used when both operands are load_const bigints.
-// Otherwise a runtime bin_op binding is emitted.
+// Both operands are guaranteed to be load_const bigints: applyECRules refuses
+// the rule outright when they are not (opOperandsAreConst). That is what keeps
+// the fold — and therefore the mod-n reduction — unconditional here, and what
+// keeps this engine byte-compatible with the six hand-written tiers, none of
+// which fires a scalar-fusing rule on runtime operands.
 func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue) (string, ir.ANFBinding) {
 	lhsName := binds[op.Lhs]
 	rhsName := binds[op.Rhs]
@@ -511,41 +546,28 @@ func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings,
 
 	lhsVal := resolveConstBigInt(lhsName, lookup)
 	rhsVal := resolveConstBigInt(rhsName, lookup)
-
-	if lhsVal != nil && rhsVal != nil {
-		var folded *big.Int
-		switch op.Op {
-		case "+":
-			folded = new(big.Int).Add(lhsVal, rhsVal)
-			folded.Mod(folded, curveN)
-		case "*":
-			folded = new(big.Int).Mul(lhsVal, rhsVal)
-			folded.Mod(folded, curveN)
-		}
-		raw, _ := json.Marshal(folded.String())
-		binding := ir.ANFBinding{
-			Name: helperName,
-			Value: ir.ANFValue{
-				Kind:        "load_const",
-				RawValue:    raw,
-				ConstBigInt: folded,
-			},
-		}
-		return helperName, binding
+	if lhsVal == nil || rhsVal == nil {
+		panic(fmt.Sprintf("ec rule %q: buildOpHelper reached with non-constant operands (%q, %q) — opOperandsAreConst should have declined the rule", rule.Name, lhsName, rhsName))
 	}
 
-	// Runtime case: bin_op binding. Use the JSON op ("+" or "*") directly —
-	// matches the ANF bin_op convention.
-	binding := ir.ANFBinding{
+	var folded *big.Int
+	switch op.Op {
+	case "+":
+		folded = new(big.Int).Add(lhsVal, rhsVal)
+		folded.Mod(folded, curveN)
+	case "*":
+		folded = new(big.Int).Mul(lhsVal, rhsVal)
+		folded.Mod(folded, curveN)
+	}
+	raw, _ := json.Marshal(folded.String())
+	return helperName, ir.ANFBinding{
 		Name: helperName,
 		Value: ir.ANFValue{
-			Kind:  "bin_op",
-			Op:    op.Op,
-			Left:  lhsName,
-			Right: rhsName,
+			Kind:        "load_const",
+			RawValue:    raw,
+			ConstBigInt: folded,
 		},
 	}
-	return helperName, binding
 }
 
 // ---------------------------------------------------------------------------
@@ -561,6 +583,12 @@ func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBin
 		}
 		binds, ok := matchRule(rule, b, lookup)
 		if !ok {
+			continue
+		}
+		// Checked BEFORE applyReplace: applyReplace mutates b.Value and
+		// registers helper bindings in lookup, so there is no way to back out
+		// of it once started.
+		if !opOperandsAreConst(rule, binds, lookup) {
 			continue
 		}
 		extra := applyReplace(rule, b, binds, lookup)

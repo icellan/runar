@@ -155,27 +155,42 @@ def fieldInv (t : Tracker) (aName resultName : String) : Tracker :=
 
 /-! ## Public entry points (mirror `babybear-codegen.ts:243-277`) -/
 
+/-- R-119 — abort unless each named witness is in `[0, p)`. Copy, push
+`0` and `p`, `OP_WITHIN`, `OP_VERIFY`. Public entry points only. -/
+def emitCanonVerify (t : Tracker) (p : Int) : List String → Tracker
+  | [] => t
+  | n :: rest =>
+      let t := t.copyToTop n "_cv"
+      let t := t.rawBlock 1 none
+        [ .push (.bigint 0), .push (.bigint p)
+        , .opcode "OP_WITHIN", .opcode "OP_VERIFY" ]
+      emitCanonVerify t p rest
+
 /-- `bbFieldAdd`: stack in `[..., a, b]` → out `[..., (a+b) mod p]`. -/
 def emitBBFieldAdd : List StackOp :=
   let t : Tracker := Tracker.init [some "a", some "b"]
+  let t := emitCanonVerify t fieldP ["a", "b"]
   let t := fieldAdd t "a" "b" "result"
   t.ops.toList
 
 /-- `bbFieldSub`: stack in `[..., a, b]` → out `[..., (a-b) mod p]`. -/
 def emitBBFieldSub : List StackOp :=
   let t : Tracker := Tracker.init [some "a", some "b"]
+  let t := emitCanonVerify t fieldP ["a", "b"]
   let t := fieldSub t "a" "b" "result"
   t.ops.toList
 
 /-- `bbFieldMul`: stack in `[..., a, b]` → out `[..., (a*b) mod p]`. -/
 def emitBBFieldMul : List StackOp :=
   let t : Tracker := Tracker.init [some "a", some "b"]
+  let t := emitCanonVerify t fieldP ["a", "b"]
   let t := fieldMul t "a" "b" "result"
   t.ops.toList
 
 /-- `bbFieldInv`: stack in `[..., a]` → out `[..., a^(p-2) mod p]`. -/
 def emitBBFieldInv : List StackOp :=
   let t : Tracker := Tracker.init [some "a"]
+  let t := emitCanonVerify t fieldP ["a"]
   let t := fieldInv t "a" "result"
   t.ops.toList
 

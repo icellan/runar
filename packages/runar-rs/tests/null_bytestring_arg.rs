@@ -60,6 +60,7 @@ fn make_artifact(byte_string_param_name: &str) -> RunarArtifact {
         code_separator_index: Some(0),
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn deploy_helper(artifact: RunarArtifact) -> (RunarContract, MockProvider, MockS
         satoshis: 50_000,
         change_address: None,
         funding_signer: None,
+        acknowledge_unsound: vec![],
     }).unwrap();
     provider.add_utxo(&address, Utxo {
         txid: "bb".repeat(32),

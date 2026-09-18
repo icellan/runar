@@ -58,6 +58,15 @@ import runar.compiler.ir.ast.VariableDeclStatement;
  * reads/writes replaced by direct property access (literal index) or
  * dispatch (runtime index).
  *
+ * <p>{@code this.board[idx]++} / {@code --} in statement position is desugared
+ * to {@code this.board[idx] = this.board[idx] +/- 1} before the index rewrite,
+ * so the write goes through the dispatch chain. Downstream, both
+ * {@link AnfLower}'s increment lowering and its mutates-state recursion only
+ * recognise an increment as a state mutation when its operand is a bare
+ * property access, so without this the mutation is silently discarded AND the
+ * method is classified terminal (no continuation assertion at all). The same
+ * shape in expression position is a compile error.
+ *
  * <p>Cross-compiler conformance requires byte-identical output from
  * identical input, so synthetic names ({@code __0}, {@code __1}, &hellip;),
  * traversal order, and dispatch shape must match every other compiler
@@ -324,6 +333,31 @@ public final class ExpandFixedArrays {
             return new ExtractResult(false, arr.elements());
         }
 
+        /**
+         * Which literal family a FixedArray element type demands: "bigint",
+         * "boolean", "ByteString", or null when the type is not one this pass
+         * can judge (it then declines to complain). N-133.
+         *
+         * <p>The two predicates are Typecheck's, not copies -- a second list is
+         * how the ByteString family drifted once already.
+         */
+        private static String familyOfElementType(TypeNode type) {
+            if (!(type instanceof PrimitiveType prim)) return null;
+            String name = prim.name().canonical();
+            if ("boolean".equals(name)) return "boolean";
+            if (Typecheck.isBigintFamily(name)) return "bigint";
+            if (Typecheck.isByteStringFamily(name)) return "ByteString";
+            return null;
+        }
+
+        /** The literal family of an initializer element, or null. N-133. */
+        private static String familyOfLiteral(Expression expr) {
+            if (expr instanceof BigIntLiteral) return "bigint";
+            if (expr instanceof BoolLiteral) return "boolean";
+            if (expr instanceof ByteStringLiteral) return "ByteString";
+            return null;
+        }
+
         List<PropertyNode> expandArrayMeta(
             ArrayMeta meta,
             boolean readonly,
@@ -363,6 +397,28 @@ public final class ExpandFixedArrays {
                     }
                     out.addAll(expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere));
                 } else {
+                    // N-133: the element-type check. Typecheck's array-literal
+                    // branch never sees a property initializer -- it is
+                    // consumed here -- so before this every tier accepted
+                    // `FixedArray<bigint, 2> = [1n, true]` and emitted a
+                    // DIFFERENT program (the boolean became the number 1, a hex
+                    // literal became a byte string under OP_ADD).
+                    if (slotInit != null) {
+                        String want = familyOfElementType(meta.elementType);
+                        String got = familyOfLiteral(slotInit);
+                        if (want != null && got != null && !want.equals(got)) {
+                            String declared = (meta.elementType instanceof PrimitiveType p)
+                                ? p.name().canonical()
+                                : "FixedArray";
+                            error(
+                                "Property '" + meta.rootName + "' initializer element " + i
+                                    + " is a " + got + " literal, but the FixedArray element type is '"
+                                    + declared + "'",
+                                loc
+                            );
+                        }
+                    }
+
                     out.add(new PropertyNode(
                         slot,
                         meta.elementType,
@@ -388,7 +444,13 @@ public final class ExpandFixedArrays {
                 method.params(),
                 newBody,
                 method.visibility(),
-                method.sourceLocation()
+                method.sourceLocation(),
+                // R-025: the 5-arg convenience constructor defaults sighashType
+                // to null, i.e. the default ALL|FORKID. Validate has already
+                // ACCEPTED a non-default @sighash by the time this pass runs,
+                // so dropping it here silently compiles a different
+                // signature-hash commitment than the author declared.
+                method.sighashType()
             );
         }
 
@@ -577,12 +639,89 @@ public final class ExpandFixedArrays {
 
         List<Statement> rewriteExpressionStmt(ExpressionStatement stmt) {
             List<Statement> prelude = new ArrayList<>();
+
+            // `this.board[idx]++` / `--` in statement position. The generic
+            // expression rewrite below turns `this.board[idx]` into a read
+            // dispatch ternary, and both ANF lowering and the mutates-state
+            // recursion only recognise an increment as a state mutation when
+            // its operand is a bare PropertyAccessExpr. Left alone, the new
+            // value is computed and DISCARDED: no update_prop, the method is
+            // classified terminal, and NO continuation assertion is injected
+            // for a method that does mutate state. Desugar to the assignment
+            // form, which already routes through rewriteArrayWrite. Statement
+            // position discards the expression's value, so prefix and postfix
+            // are equivalent here.
+            Expression incOperand = null;
+            Expression.BinaryOp incOp = null;
+            if (stmt.expression() instanceof IncrementExpr ie) {
+                incOperand = ie.operand();
+                incOp = Expression.BinaryOp.ADD;
+            } else if (stmt.expression() instanceof DecrementExpr de) {
+                incOperand = de.operand();
+                incOp = Expression.BinaryOp.SUB;
+            }
+            if (incOperand instanceof IndexAccessExpr) {
+                // Bind every impure index to a `const` first: the desugar names
+                // the element twice (read + write) and each index must be
+                // evaluated exactly once.
+                Expression target =
+                    stabilizeIndexChain(incOperand, prelude, stmt.sourceLocation());
+                AssignmentStatement assignment = new AssignmentStatement(
+                    target,
+                    new BinaryExpr(incOp, cloneExpression(target), new BigIntLiteral(BigInteger.ONE)),
+                    stmt.sourceLocation()
+                );
+                List<Statement> outAll = new ArrayList<>(prelude);
+                outAll.addAll(rewriteAssignment(assignment));
+                return outAll;
+            }
+
             Expression newExpr = stmt.expression() != null
                 ? rewriteExpression(stmt.expression(), prelude)
                 : null;
             List<Statement> outAll = new ArrayList<>(prelude);
             outAll.add(new ExpressionStatement(newExpr, stmt.sourceLocation()));
             return outAll;
+        }
+
+        /**
+         * {@code this.board[idx]++} used for its VALUE (not in statement
+         * position) cannot be desugared to an assignment, and the increment
+         * lowering has no way to write back through a dispatch chain. Silently
+         * dropping the write is the dangerous outcome — reject it instead.
+         */
+        void rejectArrayElementMutationInExpression(Expression operand, String op) {
+            if (!(operand instanceof IndexAccessExpr)) return;
+            Expression base = operand;
+            while (base instanceof IndexAccessExpr idx) {
+                base = idx.object();
+            }
+            if (tryResolveArrayBase(base) != null) {
+                error(
+                    "`" + op + "` on a FixedArray element is only supported as a statement; "
+                        + "assign the result explicitly instead",
+                    null
+                );
+            }
+        }
+
+        /**
+         * Rewrite every index in an index-access chain so the chain can be
+         * safely duplicated: impure indices are hoisted to a fresh
+         * {@code __idx_K} binding, pure ones are left in place. The base object
+         * is returned untouched — {@code rewriteAssignment} resolves it.
+         */
+        Expression stabilizeIndexChain(
+            Expression expr,
+            List<Statement> prelude,
+            SourceLocation loc
+        ) {
+            if (!(expr instanceof IndexAccessExpr idx)) return cloneExpression(expr);
+            Expression newObject = stabilizeIndexChain(idx.object(), prelude, loc);
+            Expression newIndex = isPureReference(idx.index())
+                ? cloneExpression(idx.index())
+                : hoistIfImpure(rewriteExpression(idx.index(), prelude), prelude, loc, "idx");
+            return new IndexAccessExpr(newObject, newIndex);
         }
 
         // --------------------------------------------------------------
@@ -609,7 +748,11 @@ public final class ExpandFixedArrays {
                 for (Expression a : ce.args()) {
                     args.add(rewriteExpression(a, prelude));
                 }
-                return new CallExpr(callee, args);
+                // R-026: the 2-arg convenience constructor defaults
+                // asmReturnType to null. It carries the captured return type of
+                // an expression-form `asm<T>()`, without which the call is
+                // treated as void.
+                return new CallExpr(callee, args, ce.asmReturnType());
             }
             if (expr instanceof MemberExpr me) {
                 Expression obj = rewriteExpression(me.object(), prelude);
@@ -622,10 +765,12 @@ public final class ExpandFixedArrays {
                 return new TernaryExpr(cond, cons, alt);
             }
             if (expr instanceof IncrementExpr ie) {
+                rejectArrayElementMutationInExpression(ie.operand(), "++");
                 Expression operand = rewriteExpression(ie.operand(), prelude);
                 return new IncrementExpr(operand, ie.prefix());
             }
             if (expr instanceof DecrementExpr de) {
+                rejectArrayElementMutationInExpression(de.operand(), "--");
                 Expression operand = rewriteExpression(de.operand(), prelude);
                 return new DecrementExpr(operand, de.prefix());
             }
@@ -997,7 +1142,7 @@ public final class ExpandFixedArrays {
         if (expr instanceof CallExpr ce) {
             List<Expression> args = new ArrayList<>(ce.args().size());
             for (Expression a : ce.args()) args.add(cloneExpression(a));
-            return new CallExpr(cloneExpression(ce.callee()), args);
+            return new CallExpr(cloneExpression(ce.callee()), args, ce.asmReturnType());
         }
         if (expr instanceof MemberExpr me) {
             return new MemberExpr(cloneExpression(me.object()), me.property());

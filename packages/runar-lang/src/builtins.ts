@@ -196,12 +196,21 @@ export function right(_data: ByteString, _len: bigint): ByteString {
 }
 
 /**
- * Split a byte string at position `index` into two parts.
- * Compiles to: `OP_SPLIT`
+ * Returns the bytes of `data` from `index` onwards — the RIGHT half of the
+ * split at `index`. Aborts if `index` is negative or past the end.
+ * Compiles to: `OP_SPLIT OP_NIP`
  *
- * @returns A tuple [left, right].
+ * `OP_SPLIT` leaves two items on the stack, but `split` is single-valued and
+ * the left half is dropped. Rúnar has no tuple type and no surface parser
+ * accepts array destructuring, so a pair return would be unnameable in all
+ * nine surfaces. Use `left(data, index)` for the other half —
+ * `left(d, i)` and `split(d, i)` are the two sides of the same cut.
+ *
+ * This used to be declared as `[ByteString, ByteString]`, which disagreed with
+ * the language: `spec/grammar.md` and every one of the seven typecheckers gives
+ * `split` a single `ByteString` return.
  */
-export function split(_data: ByteString, _index: bigint): [ByteString, ByteString] {
+export function split(_data: ByteString, _index: bigint): ByteString {
   return compilerStub('split');
 }
 
@@ -329,9 +338,14 @@ export function sign(_value: bigint): bigint {
 }
 
 /**
- * Exponentiation.
- * For constant exponents, the compiler unrolls to repeated `OP_MUL`.
- * For runtime exponents, a bounded iteration is emitted.
+ * Exponentiation, `base ** exp`, for `0 <= exp <= 32`.
+ *
+ * The compiler unrolls 32 conditional `OP_MUL`s, so 32 is the largest exponent
+ * it can compute. That bound is ENFORCED, not documented: an exponent outside
+ * `0 <= exp <= 32` makes the script FAIL (`OP_VERIFY`) rather than silently
+ * return `base ** 32`. A constant exponent outside the range is left unfolded
+ * for the same reason, so it fails identically whether or not the constant
+ * folder ran.
  */
 export function pow(_base: bigint, _exp: bigint): bigint {
   return compilerStub('pow');
@@ -424,7 +438,7 @@ export function verifyRabinSig(
  * key.
  *
  * Signature size: 2,144 bytes (67 chains x 32 bytes).
- * Public key size: 32 bytes.
+ * Public key size: 64 bytes — `pubSeed(32) || pkRoot(32)`.
  * Estimated script size: ~12 KB.
  *
  * One-time use: each keypair can securely sign only one message.
@@ -433,7 +447,13 @@ export function verifyRabinSig(
  *
  * @param msg    - The message to verify.
  * @param sig    - WOTS+ signature (2,144 bytes).
- * @param pubkey - WOTS+ public key (32 bytes).
+ * @param pubkey - WOTS+ public key (64 bytes: `pubSeed(32) || pkRoot(32)`).
+ *                 R-248: this said 32 bytes. The codegen splits the argument
+ *                 into two 32-byte halves (`wots-codegen.ts`: "Split 64-byte
+ *                 pubkey into pubSeed(32) and pkRoot(32)") and the interpreter
+ *                 rejects a 32-byte key outright — see the "rejects
+ *                 wrong-length public key (32 bytes)" case in
+ *                 `runar-testing/src/crypto/__tests__/wots.test.ts`.
  */
 export function verifyWOTS(
   _msg: ByteString,

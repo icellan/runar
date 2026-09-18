@@ -27,6 +27,14 @@
 #   * Runtime index write (+this.board[idx] = v+) rewrites to an +if / else if+
 #     statement chain, one branch per legal index, with a final
 #     +else { assert(false); }+ bounds-check.
+#   * +this.board[idx]++ / --+ in statement position is desugared to
+#     +this.board[idx] = this.board[idx] +/- 1+ before the index rewrite, so
+#     the write goes through the dispatch chain above.  Downstream, both
+#     +anf_lower+'s increment lowering and its mutates-state recursion only
+#     recognise an increment as a state mutation when its operand is a bare
+#     property access, so without this the mutation is silently discarded AND
+#     the method is classified terminal (no continuation assertion at all).
+#     The same shape in expression position is a compile error.
 #   * Side-effectful index and value expressions are hoisted to fresh
 #     +__idx_K+ / +__val_K+ +const+ declarations before the dispatch so each
 #     branch reads the value exactly once.
@@ -36,6 +44,7 @@
 
 require_relative "ast_nodes"
 require_relative "diagnostic"
+require_relative "typecheck"
 
 module RunarCompiler
   module Frontend
@@ -264,6 +273,30 @@ module RunarCompiler
         nil
       end
 
+      # Which literal family a FixedArray element type demands: "bigint",
+      # "boolean", "ByteString", or +nil+ when the type is not one this pass
+      # can judge (it then declines to complain).  N-133.
+      #
+      # The two predicates are typecheck's, not copies -- a second list is how
+      # the ByteString family drifted once already.
+      def family_of_element_type(type_node)
+        return nil unless type_node.is_a?(PrimitiveType)
+        return "boolean" if type_node.name == "boolean"
+        return "bigint" if Frontend.bigint_family?(type_node.name)
+        return "ByteString" if Frontend.byte_family?(type_node.name)
+
+        nil
+      end
+
+      # The literal family of an initializer element, or +nil+.  N-133.
+      def family_of_literal(expr)
+        return "bigint" if expr.is_a?(BigIntLiteral)
+        return "boolean" if expr.is_a?(BoolLiteral)
+        return "ByteString" if expr.is_a?(ByteStringLiteral)
+
+        nil
+      end
+
       # Recursively emit scalar leaf properties.  Nested arrays descend; a
       # non-array-literal element at a nested level is a compile error.  Each
       # leaf PropertyNode receives the full +synthetic_array_chain+,
@@ -301,6 +334,25 @@ module RunarCompiler
             end
             out.concat(expand_array_meta(nested_meta, readonly, loc, nested_init, chain_here))
           else
+            # N-133: the element-type check. typecheck's array-literal branch
+            # never sees a property initializer -- it is consumed here -- so
+            # before this every tier accepted
+            # +FixedArray<bigint, 2> = [1n, true]+ and emitted a DIFFERENT
+            # program (the boolean became the number 1, a hex literal became a
+            # byte string under OP_ADD).
+            unless slot_init.nil?
+              want = family_of_element_type(meta.element_type)
+              got = family_of_literal(slot_init)
+              if !want.nil? && !got.nil? && want != got
+                declared = meta.element_type.is_a?(PrimitiveType) ? meta.element_type.name : "FixedArray"
+                add_error(
+                  "Property '#{meta.root_name}' initializer element #{i} is a #{got} literal, " \
+                  "but the FixedArray element type is '#{declared}'",
+                  loc: loc
+                )
+              end
+            end
+
             out << PropertyNode.new(
               name: slot,
               type: meta.element_type,
@@ -523,8 +575,70 @@ module RunarCompiler
 
       def rewrite_expression_statement(stmt)
         prelude = []
+
+        # `this.board[idx]++` / `--` in statement position.  The generic
+        # expression rewrite below turns `this.board[idx]` into a read dispatch
+        # ternary, and both ANF lowering and the mutates-state recursion only
+        # recognise an increment as a state mutation when its operand is a bare
+        # PropertyAccessExpr.  Left alone, the new value is computed and
+        # DISCARDED: no update_prop, the method is classified terminal, and NO
+        # continuation assertion is injected for a method that does mutate
+        # state.  Desugar to the assignment form, which already routes through
+        # `rewrite_array_write`.  Statement position discards the expression's
+        # value, so prefix and postfix are equivalent here.
+        expr = stmt.expr
+        if (expr.is_a?(IncrementExpr) || expr.is_a?(DecrementExpr)) &&
+           expr.operand.is_a?(IndexAccessExpr)
+          # Bind every impure index to a `const` first: the desugar names the
+          # element twice (read + write) and each index must be evaluated once.
+          target = stabilize_index_chain(expr.operand, prelude, stmt.source_location)
+          assignment = AssignmentStmt.new(
+            target: target,
+            value: BinaryExpr.new(
+              op: expr.is_a?(IncrementExpr) ? "+" : "-",
+              left: clone_expr(target),
+              right: BigIntLiteral.new(value: 1)
+            ),
+            source_location: stmt.source_location
+          )
+          return prelude + rewrite_assignment(assignment)
+        end
+
         new_expr = rewrite_expression(stmt.expr, prelude)
         prelude + [ExpressionStmt.new(expr: new_expr, source_location: stmt.source_location)]
+      end
+
+      # `this.board[idx]++` used for its VALUE (not in statement position)
+      # cannot be desugared to an assignment, and the increment lowering has no
+      # way to write back through a dispatch chain.  Silently dropping the write
+      # is the dangerous outcome -- reject it instead.
+      def reject_array_element_mutation_in_expression(operand, op)
+        return unless operand.is_a?(IndexAccessExpr)
+
+        base = operand
+        base = base.object while base.is_a?(IndexAccessExpr)
+        return if try_resolve_array_base(base).nil?
+
+        add_error(
+          "`#{op}` on a FixedArray element is only supported as a statement; " \
+          "assign the result explicitly instead"
+        )
+      end
+
+      # Rewrite every index in an index-access chain so the chain can be safely
+      # duplicated: impure indices are hoisted to a fresh `__idx_K` binding,
+      # pure ones are left in place.  The base object is returned untouched --
+      # `rewrite_assignment` resolves it.
+      def stabilize_index_chain(expr, prelude, loc)
+        return clone_expr(expr) unless expr.is_a?(IndexAccessExpr)
+
+        new_object = stabilize_index_chain(expr.object, prelude, loc)
+        new_index = if pure_reference?(expr.index)
+                      clone_expr(expr.index)
+                    else
+                      hoist_if_impure(rewrite_expression(expr.index, prelude), prelude, loc, :idx)
+                    end
+        IndexAccessExpr.new(object: new_object, index: new_index)
       end
 
       # -----------------------------------------------------------------
@@ -548,7 +662,12 @@ module RunarCompiler
         when CallExpr
           CallExpr.new(
             callee: rewrite_expression(expr.callee, prelude),
-            args: expr.args.map { |a| rewrite_expression(a, prelude) }
+            args: expr.args.map { |a| rewrite_expression(a, prelude) },
+            # R-026: the captured return type of an expression-form `asm<T>()`
+            # decides whether `+` lowers to OP_CAT or OP_ADD. Dropping it here
+            # turned a byte concat into a numeric add for any contract that
+            # also declares a FixedArray property.
+            asm_return_type: expr.asm_return_type
           )
         when MethodCallExpr
           MethodCallExpr.new(
@@ -565,8 +684,10 @@ module RunarCompiler
             alternate: rewrite_expression(expr.alternate, prelude)
           )
         when IncrementExpr
+          reject_array_element_mutation_in_expression(expr.operand, "++")
           IncrementExpr.new(operand: rewrite_expression(expr.operand, prelude), prefix: expr.prefix)
         when DecrementExpr
+          reject_array_element_mutation_in_expression(expr.operand, "--")
           DecrementExpr.new(operand: rewrite_expression(expr.operand, prelude), prefix: expr.prefix)
         when ArrayLiteralExpr
           ArrayLiteralExpr.new(elements: expr.elements.map { |e| rewrite_expression(e, prelude) })
@@ -904,7 +1025,8 @@ module RunarCompiler
         when UnaryExpr
           UnaryExpr.new(op: expr.op, operand: clone_expr(expr.operand))
         when CallExpr
-          CallExpr.new(callee: clone_expr(expr.callee), args: expr.args.map { |a| clone_expr(a) })
+          CallExpr.new(callee: clone_expr(expr.callee), args: expr.args.map { |a| clone_expr(a) },
+                       asm_return_type: expr.asm_return_type)
         when MethodCallExpr
           MethodCallExpr.new(
             object: clone_expr(expr.object),

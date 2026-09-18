@@ -9,6 +9,7 @@
 import type {
   ContractNode,
   MethodNode,
+  PropertyNode,
   Statement,
   Expression,
   TypeNode,
@@ -251,6 +252,37 @@ const BIGINT_SUBTYPES = new Set<TType>([
   'bigint', 'RabinSig', 'RabinPubKey',
 ]);
 
+/**
+ * Is `t` a member of the ByteString family — i.e. does a value of this type
+ * sit on the stack as a BYTE STRING rather than as a script NUMBER?
+ *
+ * N-076: this predicate is the single source of truth for that question, and
+ * `04-anf-lower.ts` consults it rather than keeping a second copy of the list.
+ * The two lists had already drifted: the lowerer's copy carried `RabinSig` and
+ * `RabinPubKey`, which are `BIGINT_SUBTYPES` here, so `===` on a Rabin value
+ * was annotated `bytes` and `+` on one lowered to OP_CAT.
+ *
+ * Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+ * with OP_ADD. Getting it backwards is a correctness defect in both
+ * directions — OP_EQUAL on a number is over-strict (rejects a valid witness
+ * that encodes the same value with different bytes), OP_NUMEQUAL on a hash is
+ * under-strict (a trailing high-order zero compares equal), and OP_CAT where
+ * OP_ADD belongs is a plain miscompile.
+ */
+export function isByteStringFamilyType(t: string): boolean {
+  return BYTESTRING_SUBTYPES.has(t as TType);
+}
+
+/**
+ * Is `t` a member of the bigint family — a value that sits on the stack as a
+ * script NUMBER? The counterpart of `isByteStringFamilyType`, exported for the
+ * same reason: 03b-expand-fixed-arrays needs the question answered and must
+ * not keep a second copy of the list (N-133).
+ */
+export function isBigintFamilyType(t: string): boolean {
+  return BIGINT_SUBTYPES.has(t as TType);
+}
+
 function isSubtype(actual: TType, expected: TType): boolean {
   if (actual === expected) return true;
 
@@ -290,6 +322,55 @@ function isByteFamily(t: TType): boolean {
 
 function isStatefulContextType(t: TType): boolean {
   return t === STATEFUL_CONTEXT;
+}
+
+/** One emitted state slot: what the continuation actually carries. */
+interface StateSlot {
+  name: string;
+  type: TypeNode;
+}
+
+/**
+ * The mutable state as `addOutput` sees it: one slot per value the state
+ * continuation carries, which is NOT one per declared property.
+ *
+ * N-107. `expandFixedArrays` (pass 3b) runs immediately after this one and
+ * splits `board: FixedArray<bigint, 3>` into `board__0 .. board__2`, so a
+ * contract declaring `board` and `n` emits FOUR state values, not two.
+ * `addOutput(satoshis, ...values)` is positional against the EMITTED values,
+ * so counting declared properties answers the wrong question: the reference
+ * rule refused `addOutput(1000n, board[0], board[1], board[2], n)` — the only
+ * shape that lowers — with "expects 3 argument(s) ... got 5", and demanded
+ * `addOutput(1000n, board, n)` instead, which type-checked and then died in
+ * stack lowering because `board` has no stack slot of its own. There was no
+ * accepted way to call addOutput from a contract with FixedArray state.
+ *
+ * Five of the six ports dodged this by scoping the rule out of FixedArray
+ * contracts entirely, which meant they ACCEPTED a wrong-arity call and emitted
+ * a continuation that disagreed with the contract's own state. Java got the
+ * count right only because it ran the expansion BEFORE the typechecker
+ * (N-106) — the same root cause, seen from the other side.
+ *
+ * The flattening mirrors `03b-expand-fixed-arrays.ts`'s `buildArrayMeta`
+ * exactly, nesting and `__<i>` naming included, so the slot names in a
+ * diagnostic are the synthetic property names the next pass will create.
+ */
+function expandedStateSlots(properties: PropertyNode[]): StateSlot[] {
+  const slots: StateSlot[] = [];
+  const push = (name: string, type: TypeNode): void => {
+    // `length <= 0` is already a parse/validate error; keeping the property
+    // whole here means the arity diagnostic never fires on a contract that is
+    // going to be rejected anyway for a better reason.
+    if (type.kind === 'fixed_array_type' && type.length > 0) {
+      for (let i = 0; i < type.length; i++) push(`${name}__${i}`, type.element);
+      return;
+    }
+    slots.push({ name, type });
+  };
+  for (const p of properties) {
+    if (!p.readonly) push(p.name, p.type);
+  }
+  return slots;
 }
 
 function flattenAddOutputArgs(args: Expression[]): Expression[] {
@@ -706,13 +787,39 @@ class TypeChecker {
     // 0 to also be a 34-byte P2PKH is impossible (codePart >= 253 bytes forces a
     // 3-byte CompactSize length prefix, never the P2PKH template's 0x19), so the
     // contract is PERMANENTLY unspendable. The terminal case (no state mutation
-    // -> no continuation) stays valid, and addOutput/addRawOutput layouts are
-    // left to the developer.
+    // -> no continuation) stays valid.
+    //
+    // R-300: "addOutput/addRawOutput layouts are left to the developer" used to
+    // finish that sentence, and it was wrong — there is no layout the developer
+    // can choose that makes the offsets work. `this.addOutput(...)` writes the
+    // contract's continuation (codePart plus serialised state, hundreds of
+    // bytes) at output 0, so `outputIndex * 34` lands INSIDE that script for
+    // every index, and the assertion compares bytes from the middle of the
+    // contract's own locking script against a P2PKH serialisation. No honest
+    // spend satisfies it. `addRawOutput` is no better: its script length is a
+    // runtime value, so the compiler cannot prove the stride either. Measured
+    // before this guard existed — ts `success = true`, go `exit = 0` — see
+    // conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
     if (this.contract.parentClass === 'StatefulSmartContract') {
       const mutableProps = new Set(
         this.contract.properties.filter(p => !p.readonly).map(p => p.name),
       );
       const sig = analyzeMethodOutputSignals(method.body, mutableProps);
+      if (hasRequireP2PKH && sig.hasStateOutput) {
+        this.errors.push(makeDiagnostic(
+          `method '${method.name}' mixes requireOutputP2PKH() with ` +
+            `this.addOutput()/addRawOutput() — the intrinsic reads output i at byte ` +
+            `offset i*34, which is only correct when every earlier output is exactly ` +
+            `34 bytes, and a state-continuation output never is (codePart plus ` +
+            `serialised state). The assertion would read bytes from the middle of the ` +
+            `contract's own locking script, so the contract would be permanently ` +
+            `unspendable. Assert the payment from a separate method that emits no ` +
+            `output of its own`,
+          'error',
+          method.sourceLocation,
+        ));
+      }
+
       if (sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput) {
         this.errors.push(makeDiagnostic(
           `method '${method.name}' calls requireOutputP2PKH(0, ...) but also mutates state ` +
@@ -738,7 +845,22 @@ class TypeChecker {
     }
   }
 
+  /**
+   * Location of the statement currently being checked (R-143).
+   *
+   * Expression nodes do not carry a `sourceLocation` in this tier — the
+   * parsers never set one on `call_expr` / `binary_expr` / `member_expr` and
+   * friends, which is R-142 — so a diagnostic raised from inside an expression
+   * has nothing of its own to report. The enclosing STATEMENT does have one,
+   * and statement granularity is the difference between "somewhere in your
+   * contract" and "line 14". Closing R-142 sharpens these to the exact operand
+   * without any change here, because every site reads
+   * `<expr>.sourceLocation ?? this.currentStmtLoc`.
+   */
+  private currentStmtLoc: SourceLocation | undefined;
+
   private checkStatement(stmt: Statement, env: TypeEnv): void {
+    this.currentStmtLoc = stmt.sourceLocation ?? this.currentStmtLoc;
     switch (stmt.kind) {
       case 'variable_decl': {
         const initType = this.inferExprType(stmt.init, env);
@@ -816,6 +938,13 @@ class TypeChecker {
             stmt.sourceLocation,
           ));
         }
+        // R-065: the update clause used to be skipped entirely, so
+        // `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole in
+        // the rule that only Rúnar builtins and contract methods are callable
+        // (CLAUDE.md names `console.log` explicitly). `02-validate.ts`
+        // separately restricts the clause to a unit-step advance; this is the
+        // type-level half of the same guard.
+        this.checkStatement(stmt.update, env);
         // Check body
         this.checkStatements(stmt.body, env, stmt.sourceLocation);
         env.popScope();
@@ -852,6 +981,17 @@ class TypeChecker {
         if (expr.name === 'this') return '<this>';
         if (expr.name === 'super') return '<super>';
         if (expr.name === 'true' || expr.name === 'false') return BOOLEAN;
+        // The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+        // the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+        // identifier arm as a name to be typed. It is a discard, not a reference:
+        // nothing is being looked up, so `undefined` is the wrong word for it.
+        // Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+        // `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+        // "Undefined variable '_'" — invariant 1 (all seven parse all nine
+        // surfaces) already broken for this shape. Listing it here rather than
+        // letting the new fall-through reject it keeps the six tiers' bytes and
+        // brings the seventh into line.
+        if (expr.name === '_') return '<unknown>';
 
         const t = env.lookup(expr.name);
         if (t !== undefined) return t;
@@ -859,14 +999,25 @@ class TypeChecker {
         // Check if it's a builtin function name (used as a reference)
         if (BUILTIN_FUNCTIONS.has(expr.name)) return '<builtin>';
 
+        // Check if it's a contract property used as a bare identifier
+        // (some frontends like Solidity and Java emit `pubKeyHash` instead of
+        // `this.pubKeyHash`).
+        //
+        // This is deliberately checked BEFORE KNOWN_GLOBALS: a property named
+        // `EC_P` / `EC_N` / `EC_G` / `SigHash` shadows the global, which is
+        // what the other six tiers do and what lexical scoping implies. With
+        // the two the other way round, a Java-surface contract declaring
+        // `Bigint EC_G` and calling `ecMul(EC_G, k)` typed the bigint property
+        // as the global `Point` and compiled a 424 KB EC scalar multiply over
+        // a value that is not a point — while go, rust, python, zig, ruby and
+        // java all rejected the same source with "argument 1 of ecMul():
+        // expected 'Point', got 'bigint'".
+        const propType = this.propTypes.get(expr.name);
+        if (propType !== undefined) return propType;
+
         // Check if it's a known global constant
         const globalType = KNOWN_GLOBALS.get(expr.name);
         if (globalType !== undefined) return globalType;
-
-        // Check if it's a contract property used as a bare identifier
-        // (some frontends like Solidity emit `pubKeyHash` instead of `this.pubKeyHash`)
-        const propType = this.propTypes.get(expr.name);
-        if (propType !== undefined) return propType;
 
         // Undeclared variable -- emit error
         this.errors.push(makeDiagnostic(
@@ -913,7 +1064,14 @@ class TypeChecker {
           return '<unknown>';
         }
 
-        if (isStatefulContextType(objType)) {
+        // R-143: every diagnostic in this branch passes a location. They are the
+      // `ctx: runar.StatefulContext` calling convention — the shape the
+      // `.runar.zig` surface uses — and all thirteen of them used to omit it,
+      // while the sibling `this.<intrinsic>` branch a hundred lines below
+      // passed it for the identical checks. Same mistake, reported as
+      // `Counter.runar.ts:14:4: addOutput() expects …` on one surface and as a
+      // bare sentence with no file, line or column on the other.
+      if (isStatefulContextType(objType)) {
           if (expr.property === 'txPreimage') return 'SigHashPreimage';
           if (expr.property === 'getStateScript' || expr.property === 'addOutput' || expr.property === 'addRawOutput' || expr.property === 'addDataOutput') {
             return '<method>';
@@ -1007,7 +1165,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `Array element type mismatch: expected '${elemType}', got '${et}'`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1269,7 +1427,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `getStateScript() takes no arguments`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         return BYTESTRING;
@@ -1281,17 +1439,17 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addOutput() is only available in StatefulSmartContract`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
           return VOID;
         }
-        const mutableProps = this.contract.properties.filter(p => !p.readonly);
+        const mutableProps = expandedStateSlots(this.contract.properties);
         const expectedArgCount = 1 + mutableProps.length;
         if (normalizedArgs.length !== expectedArgCount) {
           this.errors.push(makeDiagnostic(
             `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         // Type-check: first arg = bigint (satoshis)
@@ -1301,7 +1459,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
-              args[0]!.sourceLocation,
+              args[0]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1313,7 +1471,13 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
               'error',
-              args[i + 1]!.sourceLocation,
+              // R-126: the NORMALIZED list, not the raw one. A tuple-form call —
+              // `addOutput(sats, [a, b, c])` — arrives here with args.length === 2
+              // while the loop runs over normalizedArgs, so args[i + 1] is
+              // undefined for every i >= 1 and reading .sourceLocation off it
+              // threw a TypeError out of the typechecker. Same expression the
+              // StatefulContext copy already uses.
+              normalizedArgs[i + 1]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1329,7 +1493,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addRawOutput() is only available in StatefulSmartContract`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
           return VOID;
         }
@@ -1337,7 +1501,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         if (args.length >= 1) {
@@ -1346,7 +1510,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
-              args[0]!.sourceLocation,
+              args[0]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1356,7 +1520,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
               'error',
-              args[1]!.sourceLocation,
+              args[1]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1368,7 +1532,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addDataOutput() is only available in StatefulSmartContract`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
           return VOID;
         }
@@ -1376,7 +1540,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
             'error',
-            expr.sourceLocation,
+            expr.sourceLocation ?? this.currentStmtLoc,
           ));
         }
         if (args.length >= 1) {
@@ -1385,7 +1549,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
-              args[0]!.sourceLocation,
+              args[0]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1395,7 +1559,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
               'error',
-              args[1]!.sourceLocation,
+              args[1]!.sourceLocation ?? this.currentStmtLoc,
             ));
           }
         }
@@ -1431,6 +1595,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `getStateScript() takes no arguments`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           return BYTESTRING;
@@ -1442,15 +1607,17 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() is only available in StatefulSmartContract`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
-          const mutableProps = this.contract.properties.filter(p => !p.readonly);
+          const mutableProps = expandedStateSlots(this.contract.properties);
           const expectedArgCount = 1 + mutableProps.length;
           if (normalizedArgs.length !== expectedArgCount) {
             this.errors.push(makeDiagnostic(
               `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (normalizedArgs.length >= 1) {
@@ -1459,6 +1626,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
+                normalizedArgs[0]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1469,6 +1637,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
                 'error',
+                normalizedArgs[i + 1]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1483,6 +1652,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() is only available in StatefulSmartContract`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1490,6 +1660,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1498,6 +1669,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
+                args[0]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1507,6 +1679,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
+                args[1]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1518,6 +1691,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() is only available in StatefulSmartContract`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1525,6 +1699,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1533,6 +1708,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
+                args[0]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1542,6 +1718,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
+                args[1]!.sourceLocation ?? expr.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1565,17 +1742,17 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() is only available in StatefulSmartContract`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
-          const mutableProps = this.contract.properties.filter(p => !p.readonly);
+          const mutableProps = expandedStateSlots(this.contract.properties);
           const expectedArgCount = 1 + mutableProps.length;
           if (normalizedArgs.length !== expectedArgCount) {
             this.errors.push(makeDiagnostic(
               `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (normalizedArgs.length >= 1) {
@@ -1584,7 +1761,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
-                args[0]!.sourceLocation,
+                args[0]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1595,7 +1772,13 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
                 'error',
-                args[i + 1]!.sourceLocation,
+                // R-126: the NORMALIZED list, not the raw one. A tuple-form call —
+                // `addOutput(sats, [a, b, c])` — arrives here with args.length === 2
+                // while the loop runs over normalizedArgs, so args[i + 1] is
+                // undefined for every i >= 1 and reading .sourceLocation off it
+                // threw a TypeError out of the typechecker. Same expression the
+                // StatefulContext copy already uses.
+                normalizedArgs[i + 1]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1610,7 +1793,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() is only available in StatefulSmartContract`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1618,7 +1801,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1627,7 +1810,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
-                args[0]!.sourceLocation,
+                args[0]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1637,7 +1820,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
-                args[1]!.sourceLocation,
+                args[1]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1649,7 +1832,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() is only available in StatefulSmartContract`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
             return VOID;
           }
@@ -1657,7 +1840,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
               'error',
-              expr.sourceLocation,
+              expr.sourceLocation ?? this.currentStmtLoc,
             ));
           }
           if (args.length >= 1) {
@@ -1666,7 +1849,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
                 'error',
-                args[0]!.sourceLocation,
+                args[0]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1676,7 +1859,7 @@ class TypeChecker {
               this.errors.push(makeDiagnostic(
                 `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
-                args[1]!.sourceLocation,
+                args[1]!.sourceLocation ?? this.currentStmtLoc,
               ));
             }
           }
@@ -1777,7 +1960,15 @@ class TypeChecker {
         } else if (
           args[0]!.kind === 'unary_expr' &&
           (args[0] as { op: string }).op === '-' &&
-          (args[0] as { operand: { kind: string } }).operand.kind === 'bigint_literal'
+          (args[0] as { operand: { kind: string } }).operand.kind === 'bigint_literal' &&
+          // N-060: this arm exists ONLY to reach the "must be >= 0" message
+          // below, so it must surrender anything that is not actually
+          // negative. `-0n` negates to 0n and would sail past that bound
+          // check, but ANF lowering matches on a bare bigint_literal: on a
+          // unary_expr it falls through to `load_const ''` and the covenant
+          // the intrinsic was supposed to install is silently absent. Let it
+          // fall to the non-literal-index diagnostic instead.
+          -(args[0] as { operand: { value: bigint } }).operand.value < 0n
         ) {
           // Accept `-N` (UnaryExpr "-" over BigIntLiteral) so the bounds
           // check below produces a clear "must be >= 0" rather than the
@@ -1813,9 +2004,9 @@ class TypeChecker {
                 args[0]!.sourceLocation,
               ));
             }
-            if (funcName === 'requireOutputP2PKH' && litValue > 1000n) {
+            if (funcName === 'requireOutputP2PKH' && litValue > 0n) {
               this.errors.push(makeDiagnostic(
-                `requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got ${litValue.toString()} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)`,
+                `requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got ${litValue.toString()}. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit`,
                 'error',
                 args[0]!.sourceLocation,
               ));

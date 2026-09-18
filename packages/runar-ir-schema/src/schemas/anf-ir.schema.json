@@ -35,7 +35,23 @@
             { "type": "integer" },
             { "type": "boolean" }
           ]
+        },
+        "syntheticArrayChain": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Present only on a scalar leaf minted by the expand-fixed-arrays pass. One entry per FixedArray nesting level, outermost first. The artifact assembler consumes one level per pass to regroup the synthetic siblings back into a single FixedArray state/ABI entry, so dropping this field silently degrades the SDK's accessor into N raw scalars.",
+          "items": { "$ref": "#/$defs/ANFSyntheticArrayLevel" }
         }
+      }
+    },
+    "ANFSyntheticArrayLevel": {
+      "type": "object",
+      "required": ["base", "index", "length"],
+      "additionalProperties": false,
+      "properties": {
+        "base": { "type": "string", "minLength": 1 },
+        "index": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 1 }
       }
     },
     "ANFMethod": {
@@ -275,7 +291,13 @@
       "additionalProperties": false,
       "properties": {
         "kind": { "const": "check_preimage" },
-        "preimage": { "type": "string", "minLength": 1 }
+        "preimage": { "type": "string", "minLength": 1 },
+        "sighashFlag": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "description": "Issue #123: BIP-143 sighash byte the on-chain OP_PUSH_TX binding appends to the derived signature. Emitted by every tier for a method declaring a non-default `@sighash` mode; ABSENT means the default ALL|FORKID (0x41), which keeps every pre-existing golden byte-identical."
+        }
       }
     },
     "DeserializeState": {
@@ -304,8 +326,7 @@
         },
         "preimage": {
           "type": "string",
-          "minLength": 1,
-          "description": "Reference to a temp holding the verified preimage (for codePart extraction)"
+          "description": "Reference to a temp holding the verified preimage (for codePart extraction). The EMPTY STRING is the wire-format sentinel for \"no preimage temp\" — emitted by all seven tiers for an explicit `this.addOutput(...)`, and read as \"no ref\" by stack lowering. The key itself is always present."
         }
       }
     },

@@ -24,6 +24,7 @@
 //!   - `var name Type = value` for variable declarations
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -71,14 +72,6 @@ pub fn parseGo(allocator: Allocator, source: []const u8, file_name: []const u8) 
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -405,6 +398,7 @@ fn mapGoType(name: []const u8) RunarType {
         .{ "Sha256", .sha256 },
         .{ "Sha256Digest", .sha256 },
         .{ "Ripemd160", .ripemd160 },
+        .{ "Ripemd160Hash", .ripemd160 },
         .{ "Addr", .addr },
         .{ "SigHashPreimage", .sig_hash_preimage },
         .{ "RabinSig", .rabin_sig },
@@ -420,6 +414,24 @@ fn mapGoType(name: []const u8) RunarType {
 /// Map a Go builtin name (PascalCase from runar.FuncName) to the Runar camelCase equivalent.
 fn mapGoBuiltin(name: []const u8) []const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{
+        // the *Big peers of num2bin / bin2num. They lower to the SAME builtins as
+        // Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix
+        // names a different Go RUNTIME type (*big.Int, so the Go-side mock does not
+        // truncate), not a different Script operation. Six tiers fell through to the
+        // default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin
+        // registry has (R-Bigint).
+        .{ "Num2BinBig", "num2bin" },
+        .{ "Bin2NumBig", "bin2num" },
+
+        // the *Big peers of abs / gcd. Same rule as Num2BinBig / Bin2NumBig above: the
+        // suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does
+        // not narrow at MinInt64), not a different Script operation -- OP_ABS and the
+        // gcd builtin are arbitrary-width after Genesis. These were mapped in ZERO
+        // tiers while `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` in
+        // packages/runar-go panic telling the author to use them, naming the .runar.go
+        // parser as the thing that lowers them.
+        .{ "AbsBig", "abs" },
+        .{ "GcdBig", "gcd" },
         .{ "Assert", "assert" },
         .{ "Hash160", "hash160" },
         .{ "Hash256", "hash256" },
@@ -588,6 +600,35 @@ fn decodeGoEscapesAndHex(allocator: Allocator, raw: []const u8) ![]const u8 {
         hex[idx * 2 + 1] = digits[b & 0xf];
     }
     return hex;
+}
+
+/// The Rúnar binary operator each `BigintBig` helper stands for.
+///
+/// `runar.BigintBig` is *big.Int in packages/runar-go and Go has no operator
+/// overloading, so a .runar.go contract carrying arbitrary-precision values
+/// spells `a === b` as `runar.BigintBigEqual(a, b)` -- and it has to emit the
+/// script the operator emits. Mirrors bigintBigOpFor in
+/// compilers/go/frontend/parser_gocontract.go, GO_BIGINTBIG_OPS in
+/// packages/runar-compiler/src/passes/01-parse-go.ts, go_bigintbig_op in
+/// compilers/rust/src/frontend/parser_gocontract.rs, _GO_BIGINTBIG_OPS in
+/// compilers/python, and the eleven helpers in packages/runar-go/runar.go.
+/// The rewrite lived only in compilers/go until R-Bigint, although all seven
+/// tiers parse .runar.go.
+fn bigintBigOp(name: []const u8) ?BinOperator {
+    const map = std.StaticStringMap(BinOperator).initComptime(.{
+        .{ "BigintBigLess", .lt },
+        .{ "BigintBigLessEq", .lte },
+        .{ "BigintBigGreater", .gt },
+        .{ "BigintBigGreaterEq", .gte },
+        .{ "BigintBigEqual", .eq },
+        .{ "BigintBigNotEqual", .neq },
+        .{ "BigintBigAdd", .add },
+        .{ "BigintBigSub", .sub },
+        .{ "BigintBigMul", .mul },
+        .{ "BigintBigMod", .mod },
+        .{ "BigintBigDiv", .div },
+    });
+    return map.get(name);
 }
 
 /// Check if a Go type name is a type conversion (not a function call).
@@ -916,6 +957,10 @@ const Parser = struct {
                 .name = field_name,
                 .type_info = parsed_type.type_info,
                 .readonly = readonly,
+                // N-109: spelled type name + field-name token, for the
+                // validator's unsupported-type diagnostic. Diagnostics only.
+                .type_name = parsed_type.type_name,
+                .source_loc = self.tokenSourceLoc(field_name_tok),
                 .fixed_array_length = parsed_type.fixed_array_length,
                 .fixed_array_element = parsed_type.fixed_array_element,
                 .fixed_array_nested_length = parsed_type.fixed_array_nested_length,
@@ -958,6 +1003,9 @@ const Parser = struct {
 
     const ParsedGoType = struct {
         type_info: RunarType,
+        /// The type name as the author spelled it (`runar.PubKey` spells as
+        /// `PubKey`, `[N]T` as `FixedArray`). Diagnostics only — N-109.
+        type_name: []const u8 = "",
         fixed_array_length: u32 = 0,
         fixed_array_element: RunarType = .unknown,
         fixed_array_nested_length: u32 = 0,
@@ -1004,22 +1052,35 @@ const Parser = struct {
             }
             return .{
                 .type_info = .fixed_array,
+                .type_name = "FixedArray",
                 .fixed_array_length = size,
                 .fixed_array_element = inner.type_info,
                 .fixed_array_nested_length = nested,
             };
         }
 
-        return .{ .type_info = self.parseGoType() };
+        var spelled: []const u8 = "";
+        const info = self.parseGoTypeNamed(&spelled);
+        return .{ .type_info = info, .type_name = spelled };
     }
 
     fn parseGoType(self: *Parser) RunarType {
+        var discard: []const u8 = "";
+        return self.parseGoTypeNamed(&discard);
+    }
+
+    /// `parseGoType`, additionally reporting the type name as the author
+    /// spelled it. `parseGoType` collapses every unrecognised name to
+    /// `.unknown`, so the name is the only thing a diagnostic can quote back
+    /// (N-109). Left empty on the shapes that have no single spelled name.
+    fn parseGoTypeNamed(self: *Parser, out_name: *[]const u8) RunarType {
         // runar.TypeName
         if (self.checkIdent("runar") and self.tokenizer.peek() == '.') {
             _ = self.bump(); // consume 'runar'
             _ = self.expect(.dot); // consume '.'
             if (self.current.kind == .ident) {
                 const type_name = self.bump().text;
+                out_name.* = type_name;
                 return mapGoType(type_name);
             }
             return .unknown;
@@ -1046,6 +1107,7 @@ const Parser = struct {
         // Plain type name: int64, bool, etc.
         if (self.current.kind == .ident) {
             const type_name = self.bump().text;
+            out_name.* = type_name;
             if (std.mem.eql(u8, type_name, "int64") or std.mem.eql(u8, type_name, "int")) return .bigint;
             if (std.mem.eql(u8, type_name, "bool")) return .boolean;
             return mapGoType(type_name);
@@ -1054,7 +1116,7 @@ const Parser = struct {
         // Star pointer: *Type (skip the star, parse the type)
         if (self.current.kind == .star) {
             _ = self.bump();
-            return self.parseGoType();
+            return self.parseGoTypeNamed(out_name);
         }
 
         return .unknown;
@@ -1336,6 +1398,15 @@ const Parser = struct {
         return .{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1343,9 +1414,23 @@ const Parser = struct {
         // Go for loop: for i := 0; i < n; i++ { ... }
         var var_name: []const u8 = "_i";
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // It used to be thrown away, so `i + 1n < 2n` unrolled twice for a loop
+        // the source runs once. Rejected by passes/validate.zig.
+        var cond_tests_iter: bool = true;
+        var update: ?*const Statement = null;
+        // R-065: did we actually parse a C-style three-part header? Everything
+        // below depends on it — `bound` comes from the condition and `update`
+        // from the post clause, and neither has a meaningful default. The flag
+        // is what lets the refusal below distinguish "a header we read" from
+        // "a header we gave up on", which is precisely the distinction the
+        // pre-fix code erased.
+        var three_part: bool = false;
 
         // Check if we have an initializer (look for :=)
         // Parse: varname := expr
@@ -1360,17 +1445,37 @@ const Parser = struct {
 
             if (self.current.kind == .colon_assign) {
                 // for i := expr; ...
+                three_part = true;
                 var_name = goToCamelCase(self.allocator, name_tok.text);
                 _ = self.bump(); // consume ':='
 
-                // Parse init expression -- try to extract int literal
-                if (self.current.kind == .ident and std.mem.eql(u8, self.current.text, "runar")) {
-                    // runar.Int(0) type conversion
-                    _ = self.parseExpression();
-                } else if (self.current.kind == .number) {
+                // Parse init expression -- try to extract int literal.
+                //
+                // N-129: the `runar.Int(N)` arm used to DISCARD the parsed
+                // expression, leaving init_value at 0. `for i := runar.Int(3)`
+                // — the idiomatic Go-DSL spelling, and the one every checked-in
+                // example would use for a non-zero start — therefore became a
+                // loop starting at 0, and since the count is derived from the
+                // bound, `i := runar.Int(3); i < 7` unrolled as 0..6 instead of
+                // 3..6. Seven iterations of the wrong values: the contract
+                // compiled to a script computing a DIFFERENT NUMBER than the
+                // source says, in this tier only.
+                //
+                // `parseExpression` already folds `runar.Int(<literal>)` to a
+                // literal, so the fix is to look at what it returned instead of
+                // throwing it away.
+                if (self.current.kind == .number) {
                     init_value = std.fmt.parseInt(i64, self.bump().text, 0) catch 0;
                 } else {
-                    _ = self.parseExpression();
+                    const init_expr = self.parseExpression();
+                    if (init_expr) |e| {
+                        // N-138: `.literal_int` alone missed a negated literal.
+                        if (loopStartLiteral(e)) |v| init_value = v else {
+                            init_is_const = false;
+                        }
+                    } else {
+                        init_is_const = false;
+                    }
                 }
 
                 _ = self.expect(.semicolon);
@@ -1384,6 +1489,10 @@ const Parser = struct {
                                 descending = bop.op == .gt or bop.op == .gte;
                                 // Issue #121: record inclusivity (`<=`/`>=`).
                                 inclusive = bop.op == .lte or bop.op == .gte;
+                                cond_tests_iter = switch (bop.left) {
+                                    .identifier => |n| std.mem.eql(u8, n, var_name),
+                                    else => false,
+                                };
                                 switch (bop.right) {
                                     .literal_int => |v| {
                                         bound = v;
@@ -1391,36 +1500,107 @@ const Parser = struct {
                                     else => {},
                                 }
                             },
-                            else => {},
+                            else => cond_tests_iter = false,
                         }
                     }
                 }
                 _ = self.expect(.semicolon);
 
-                // Parse update: i++, i += 1, etc.
+                // Parse update: i++, i += 1, etc. N-061: the clause used to
+                // be parsed and discarded, so anything the unrolled loop model
+                // cannot represent was silently coerced to a unit step. Record
+                // it for validate.zig.
                 if (self.current.kind != .lbrace) {
-                    _ = self.parseExpression();
+                    const operand = self.parseExpression();
                     // Consume postfix ++ / -- (Go: i++ is a statement, not part of expression)
                     if (self.current.kind == .plus_plus or self.current.kind == .minus_minus) {
+                        const is_inc = self.current.kind == .plus_plus;
                         _ = self.bump();
+                        if (operand) |o| {
+                            if (is_inc) {
+                                const inc = self.allocator.create(types.IncrementExpr) catch null;
+                                if (inc) |ptr| {
+                                    ptr.* = .{ .operand = o, .prefix = false };
+                                    update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .increment = ptr } } });
+                                }
+                            } else {
+                                const dec = self.allocator.create(types.DecrementExpr) catch null;
+                                if (dec) |ptr| {
+                                    ptr.* = .{ .operand = o, .prefix = false };
+                                    update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .decrement = ptr } } });
+                                }
+                            }
+                        }
+                    } else if (operand) |o| {
+                        update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = o } });
                     }
                 }
             } else {
-                // Not a three-part for; restore and try as condition-only
+                // Not a three-part for. Restore so the refusal below reports
+                // the header's real first token rather than the one we peeked
+                // past.
                 self.tokenizer.pos = saved_pos;
                 self.tokenizer.line = saved_line;
                 self.tokenizer.col = saved_col;
                 self.current = saved_current;
-
-                // For condition-only or range loops, just parse condition before '{'
-                while (self.current.kind != .lbrace and self.current.kind != .eof) {
-                    _ = self.bump();
-                }
             }
         }
 
+        // R-065 — refuse any `for` header this parser could not read as the
+        // three-part form.
+        //
+        // This branch used to DISCARD the header outright:
+        //
+        //     while (self.current.kind != .lbrace and ...) { _ = self.bump(); }
+        //
+        // and then fall through to the shared `return .{ .for_stmt = ... }`
+        // below with every field at its declaration default. `bound` stayed 0,
+        // so `anf_lower.lowerForStatement` computed `base = bound - start = 0`
+        // and unrolled the loop ZERO times; `update` was null only as a side
+        // effect, which is why validate.zig's R-065 rule never had anything to
+        // inspect. Measured on the three shapes a developer can actually write:
+        //
+        //     for i < 5 { sum = sum + start + i; i++ }
+        //         16 hexchars, `0000007b7c9c7777` — body gone. `sum` never
+        //         accumulates, so the guard degrades to `0 == expectedSum`:
+        //         anyone-can-spend if that constant is 0, permanently
+        //         unspendable if it is not. Fund loss either way.
+        //     for { sum = sum + start }
+        //         8 hexchars, `00009c77` — same shape from a bare Go infinite
+        //         loop. Go's tier rejects it.
+        //     for i := runar.Int(0); i < 5; { ... }
+        //         reaches validate.zig instead; see the R-065 rule there.
+        //
+        // The unrolled loop model carries `{count, iterVar, start, step, body}`
+        // and synthesises iteration k as `start + k*step`. A header with no
+        // update clause puts the advance (if any) in the BODY, where nothing
+        // proves it runs unconditionally, runs once per iteration, or advances
+        // by one — so no count is derivable. spec/grammar.md:420 already says
+        // so: "The loop variable MUST use simple increment (`++`) or decrement
+        // (`--`)". Six peer tiers refuse these programs; the Rust tier used to
+        // guess a count from the condition alone, which is unsound for a body
+        // whose update is conditional, and has been fixed to refuse too.
+        //
+        // The statement is DROPPED rather than returned with a default bound:
+        // a loop whose shape the parser could not derive has no honest AST,
+        // and handing one downstream is the defect itself. The body is still
+        // consumed so the rest of the file parses and the user sees every
+        // diagnostic, not just this one.
+        if (!three_part) {
+            self.addError("For loop header must be the three-part form `for i := <literal>; i < <bound>; i++`. " ++
+                "A `for <cond> { }` or bare `for { }` loop carries no update clause, so the unrolled " ++
+                "loop model -- which synthesises iteration k as `start + k*step` -- has no iteration " ++
+                "count to derive; an update written in the body is not guaranteed to run, to run once " ++
+                "per iteration, or to advance by one");
+            while (self.current.kind != .lbrace and self.current.kind != .eof) {
+                _ = self.bump();
+            }
+            _ = self.parseBlock();
+            return null;
+        }
+
         const body = self.parseBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc, .header_requires_update = true } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
@@ -1731,6 +1911,9 @@ const Parser = struct {
                                 // Check for type conversions: runar.Int(0), runar.Bigint(x), runar.BigintBig(x), runar.Bool(true)
                                 if (isTypeConversion(member) and args.len == 1) {
                                     expr = args[0];
+                                } else if (args.len == 2 and bigintBigOp(member) != null) {
+                                    // runar.BigintBigEqual(a, b) -> a === b.
+                                    expr = self.makeBinaryExpr(bigintBigOp(member).?, args[0], args[1]) orelse return null;
                                 } else if (std.mem.eql(u8, member, "ByteString") and args.len == 1) {
                                     // runar.ByteString("literal") -> literal_bytes (hex-encoded);
                                     // runar.ByteString(variable) -> unwrap.
@@ -1843,8 +2026,11 @@ const Parser = struct {
                     // Oversize decimal literal — carry the canonical decimal
                     // text on a `literal_bigint` node so codegen emits the
                     // correct push bytes (matches TS / Go / Python).
-                    if (isAllAsciiDigits(stripped)) {
-                        const decimal = self.allocator.dupe(u8, stripped) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
@@ -2397,4 +2583,26 @@ test "parse IfElse contract (Go)" {
     try std.testing.expectEqual(@as(usize, 1), c.methods.len);
     // Body: short var decl + if-else + assert = 3 statements
     try std.testing.expectEqual(@as(usize, 3), c.methods[0].body.len);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser recognised a bare `.number` (or a
+/// folded `.literal_int`) and let `-1` fall through to the discard path, so a
+/// loop written `for (… i = -1; …)` unrolled from 0 — a different program from
+/// the one the source describes, and byte-divergent from the other six tiers
+/// with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

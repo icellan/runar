@@ -52,6 +52,12 @@ export interface DeployOptions {
    * connected signer (zero behaviour change).
    */
   fundingSigner?: Signer;
+  /**
+   * Builtins the caller accepts despite the compiler not claiming they are
+   * sound (R-062). Required — naming each one — when the artifact declares
+   * `unsoundPrimitives`; ignored otherwise. See `unsound-primitives.ts`.
+   */
+  acknowledgeUnsound?: string[];
 }
 
 /**
@@ -63,7 +69,11 @@ export interface DeployOptions {
  * internals consumed by `finalizeCall()`.
  */
 export interface PreparedCall {
-  /** BIP-143 sighash (hex) — what external signers ECDSA-sign. */
+  /**
+   * BIP-143 sighash (hex) — `hash256(preimage)`, i.e. `sha256(sha256(...))`.
+   * External signers ECDSA-sign these 32 bytes DIRECTLY, with no further
+   * hashing (see `WalletSigner.signHash`).
+   */
   sighash: string;
   /** Full BIP-143 preimage (hex). */
   preimage: string;

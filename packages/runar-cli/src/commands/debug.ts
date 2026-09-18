@@ -4,6 +4,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { InputLimits } from 'runar-ir-schema';
+import { readBoundedFile } from '../input-bounds.js';
 import * as readline from 'node:readline';
 
 interface DebugOptions {
@@ -44,7 +46,7 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
 
   let artifact: ArtifactLike;
   try {
-    const json = fs.readFileSync(resolvedPath, 'utf8');
+    const json = readBoundedFile(resolvedPath, InputLimits.MAX_IR_BYTES);
     artifact = JSON.parse(json, (_key, value) => {
       if (typeof value === 'string' && value.endsWith('n') && /^\d+n$/.test(value)) {
         return BigInt(value.slice(0, -1));

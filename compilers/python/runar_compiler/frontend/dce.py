@@ -6,14 +6,41 @@ check_preimage, add_output, add_raw_output, add_data_output, call,
 method_call, raw_script). Iterates to a fixed point so transitively
 dead bindings are also removed.
 
-This module is the canonical, standalone DCE pass for the Python
-compiler. It mirrors the Zig reference implementation in
-``compilers/zig/src/passes/dce.zig``. The earlier inline implementation
-in ``anf_optimize.py`` has been surgically extracted here.
+"Results" is plural on purpose (N-140). A binding does not only define
+its own ``name``: an ``if`` that merges branch locals also defines every
+name in ``results``, and both an ``if`` and a ``loop`` define the names
+their nested bindings bind. Liveness used to test ``binding.name in
+used`` alone, so an ``if`` named ``t9`` carrying ``results ["a","b"]`` —
+a name nothing ever references, because callers reference ``a`` and
+``b`` — was deleted whenever its arms happened to be pure, and the
+merged locals kept their pre-branch values. See
+``conformance/dce/live-if.test.ts``.
 
-Behaviour: byte-for-byte identical to the previous inline DCE in
-``anf_optimize.py``. Verified by the conformance suite (cross-tier hex
-parity) and the unknown-kind exhaustiveness tests.
+R-240: this used to say "the canonical, standalone DCE pass for the
+Python compiler". It is canonical — every dead-binding sweep in this
+tier comes from here — but it is NOT standalone. Its only pipeline
+caller is ``anf_optimize.optimize_ec``, which runs it after the
+``if not any_changed: return program`` gate, so a program containing no
+EC calls is never swept. ``eliminate_dead_code`` has one other caller,
+``compiler._collect_referenced_props``, and that one runs on a
+deep-copied probe purely to compute the @embedAlways warning.
+
+The gate is load-bearing. Moving the sweep ahead of it makes this tier
+fail to compile 11 of the 78 conformance fixtures (the same 11 the TS
+tier fails under the same probe, R-194) — DCE as written removes
+bindings stack lowering still needs. That is N-140, and it is a defect
+to fix inside DCE before it is a wiring change.
+
+The earlier inline implementation in ``anf_optimize.py`` has been
+surgically extracted here.
+
+Behaviour: byte-for-byte identical, at the time of that extraction, to
+the previous inline DCE in ``anf_optimize.py``. Verified by the
+conformance suite (cross-tier hex parity) and the unknown-kind
+exhaustiveness tests.
+
+N-140 is the one deliberate behaviour change since: liveness considers
+the names a binding DEFINES, not only its own ``name``.
 """
 
 from __future__ import annotations
@@ -74,13 +101,20 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
 
     while changed:
         changed = False
-        used: set[str] = set()
+        own_refs: list[set[str]] = []
+        ref_count: dict[str, int] = {}
         for binding in current:
-            collect_refs(binding.value, used)
+            own: set[str] = set()
+            collect_refs(binding.value, own)
+            own_refs.append(own)
+            for name in own:
+                ref_count[name] = ref_count.get(name, 0) + 1
 
         filtered: list[ANFBinding] = []
-        for binding in current:
-            if binding.name in used or has_side_effect(binding.value):
+        for i, binding in enumerate(current):
+            if is_referenced_externally(binding, own_refs[i], ref_count) or has_side_effect(
+                binding.value
+            ):
                 filtered.append(binding)
             else:
                 changed = True
@@ -88,6 +122,55 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
         current = filtered
 
     method.body = current
+
+
+def collect_defined_names(binding: ANFBinding, out: set[str]) -> None:
+    """Collect every SSA name a binding brings into scope.
+
+    Its own ``name``, plus -- for the two nesting kinds -- an ``if``'s
+    declared ``results`` (the merged branch locals / property slots both
+    arms leave behind) and the names bound inside ``then``, ``else_`` and a
+    ``loop`` body, recursively.
+
+    ``iter_var`` is deliberately absent: it is the loop's own induction
+    variable, referenced only from inside the body, so counting it as
+    defined would make every non-trivial loop unconditionally live.
+    """
+    out.add(binding.name)
+    v = binding.value
+    if v.kind == "if":
+        if v.results is not None:
+            out.update(v.results)
+        for b in v.then or []:
+            collect_defined_names(b, out)
+        for b in v.else_ or []:
+            collect_defined_names(b, out)
+    elif v.kind == "loop":
+        for b in v.body or []:
+            collect_defined_names(b, out)
+
+
+def is_referenced_externally(
+    binding: ANFBinding, own_refs: set[str], ref_count: dict[str, int]
+) -> bool:
+    """Is any name this binding defines referenced by some OTHER binding?
+
+    ``ref_count`` maps a name to the number of DISTINCT bindings referencing
+    it; ``own_refs`` is this binding's own contribution. Subtracting it is
+    what keeps the rule from degenerating into "never delete an ``if`` or a
+    ``loop``": an arm's bindings almost always reference each other, and
+    counting those self-references would make every nesting node immortal.
+
+    For a non-nesting binding this is exactly the old ``binding.name in
+    used``: ANF has no self-reference, so ``own_refs`` never holds the
+    binding's own name.
+    """
+    defined: set[str] = set()
+    collect_defined_names(binding, defined)
+    for name in defined:
+        if ref_count.get(name, 0) - (1 if name in own_refs else 0) > 0:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +249,37 @@ def has_side_effect(v: ANFValue) -> bool:
     if v.kind not in _DCE_KNOWN_KINDS:
         raise UnknownANFKindError(v.kind, "constant-fold.hasSideEffect")
 
+    # Issue #109 (``@embedAlways``): a ``load_prop`` injected to force a readonly
+    # field into the deployed locking script carries ``preserve=True``, so DCE
+    # must keep it even though nothing references it. Ordinary load_props
+    # (``preserve=False``) remain freely eliminable. Mirrors
+    # ``compilers/zig/src/passes/dce.zig``.
+    if v.kind == "load_prop":
+        return v.preserve
+
+    # R-140: ``if`` / ``loop`` are effectful IFF some NESTED binding is.
+    #
+    # They used to sit in the flat list below, so an unreferenced branch or loop
+    # whose bodies are entirely pure was kept here and deleted by the Go, Java,
+    # Rust and TypeScript tiers -- three tiers against four on the same
+    # predicate. Measured directly, since no shipped path reaches DCE with that
+    # shape today and the conformance suite therefore cannot see it:
+    #
+    #     go  HasSideEffect(pure if)   = false     zig hasSideEffect(pure if)   = true
+    #     go  HasSideEffect(pure loop) = false     zig hasSideEffect(pure loop) = true
+    #
+    # Recursion is what makes retention both safe and precise: nested bindings
+    # live inside the parent node rather than flattened into the method body, so
+    # dropping an effectful ``if`` would take every nested ``assert`` /
+    # ``check_preimage`` / ``add_output`` with it -- retention is all-or-nothing.
+    # Mirrors ``packages/runar-compiler/src/optimizer/dce.ts``.
+    if v.kind == "if":
+        return any(has_side_effect(b.value) for b in (v.then or [])) or any(
+            has_side_effect(b.value) for b in (v.else_ or [])
+        )
+    if v.kind == "loop":
+        return any(has_side_effect(b.value) for b in (v.body or []))
+
     return v.kind in (
         "assert",
         "update_prop",
@@ -174,8 +288,6 @@ def has_side_effect(v: ANFValue) -> bool:
         "add_output",
         "add_raw_output",
         "add_data_output",
-        "if",
-        "loop",
         "call",
         "method_call",
         # Opaque byte span -- DCE must never eliminate it.

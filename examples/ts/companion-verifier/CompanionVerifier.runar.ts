@@ -161,14 +161,22 @@ class CompanionVerifier extends StatefulSmartContract {
       }
     }
     // outputs section starts at off
-    const outCount = bin2num(cat(substr(companionParentTx, off, 1n), this.pad00));
+    const outCountPrefix = bin2num(cat(substr(companionParentTx, off, 1n), this.pad00));
+    assert(outCountPrefix !== 254n);
+    assert(outCountPrefix !== 255n);
+    let outHdr = 1n;
+    let outCount = outCountPrefix;
+    if (outCountPrefix === 253n) {
+      outCount = bin2num(cat(substr(companionParentTx, off + 1n, 2n), this.pad00));
+      outHdr = 3n;
+    }
     assert(outCount >= 1n);
     // output 0 = value(8) + scriptLen(varint) + script. Companion scripts are
     // >252B -> the varint MUST be 0xfd + LE16 (also rejects short scripts like P2PKH).
-    const marker = bin2num(cat(substr(companionParentTx, off + 9n, 1n), this.pad00));
+    const marker = bin2num(cat(substr(companionParentTx, off + outHdr + 8n, 1n), this.pad00));
     assert(marker === 253n);
-    const scriptLen = bin2num(cat(substr(companionParentTx, off + 10n, 2n), this.pad00));
-    const scriptStart = off + 12n;
+    const scriptLen = bin2num(cat(substr(companionParentTx, off + outHdr + 9n, 2n), this.pad00));
+    const scriptStart = off + outHdr + 11n;
     assert(len(companionParentTx) >= scriptStart + scriptLen);
     const companionScript = substr(companionParentTx, scriptStart, scriptLen);
 

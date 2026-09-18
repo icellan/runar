@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-08-18T15:18:10.643Z",
+  "generatedAt": "2026-09-18T01:18:35.419Z",
   "summary": {
-    "byte-match": 77,
+    "byte-match": 87,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
-    "skipped": 5
+    "skipped": 6
   },
   "pathBreakdown": {
-    "template": 72,
+    "template": 82,
     "assert-recognizer": 1,
     "symexec": 0,
     "raw_script": 4
@@ -95,12 +95,22 @@
       "recoveryPath": "template"
     },
     {
+      "id": "byte-builtins/ByteBuiltins",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "companion-verifier/AttributedToken",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
     {
       "id": "companion-verifier/CompanionVerifier",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "compiler-directives/Directives",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -116,6 +126,11 @@
     },
     {
       "id": "convergence-proof/ConvergenceProof",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "countdown-loop/CountdownLoop",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -150,7 +165,17 @@
       "recoveryPath": "template"
     },
     {
+      "id": "fixed-array-index/ArrayIndex",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "fixed-array-nested/Grid2x2.v2",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "fixed-array-write/ArrayWrite",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -180,6 +205,11 @@
       "recoveryPath": "template"
     },
     {
+      "id": "integer-boundary/IntegerBoundary",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "intent-current-block-height/IntentCurrentBlockHeight",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -191,6 +221,11 @@
     },
     {
       "id": "intent-prev-output-script/IntentPrevOutputScript",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "loop-shapes/LoopShapes",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -235,6 +270,11 @@
       "recoveryPath": "template"
     },
     {
+      "id": "p256-encode-negate/P256EncodeNegate",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "p256-primitives/P256Primitives",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -251,6 +291,11 @@
     },
     {
       "id": "p2pkh/P2PKH",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p384-encode-negate/P384EncodeNegate",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -320,6 +365,11 @@
       "recoveryPath": "template"
     },
     {
+      "id": "r1-k1-wallet/R1K1Wallet",
+      "outcome": "skipped",
+      "detail": "pathological symexec runtime — see roundtrip.test.ts PATHOLOGICAL_DECOMPILE"
+    },
+    {
       "id": "schnorr-zkp/SchnorrZKP",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -346,6 +396,11 @@
     },
     {
       "id": "sphincs-wallet/SPHINCSWallet",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "state-covenant-mechanics/StateCovenantMechanics",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

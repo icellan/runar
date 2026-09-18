@@ -137,7 +137,7 @@
         "note": "script_execution_test.go also has func TestBlake3Hash_* real-execution tests; both run inline blake3Compress/blake3Hash contracts through the real Go BSV SDK Spend, not the literal 'blake3' fixture file."
       }
     },
-    {
+        {
       "fixture": "convergence-proof",
       "cause": "crypto-witness-infeasible",
       "reason": "secp256k1 EC ops (ecAdd/ecMulGen/ecNegate) — EC point witness, not a checkSig",
@@ -203,17 +203,16 @@
       "coveredBy": {
         "kind": "integration",
         "path": "integration/zig/src/merkle_proof_test.zig",
-        "note": "real deploy + spend on a live regtest node: MerkleProof_Sha256_LeafIndex0 (accept) and MerkleProof_Sha256_WrongLeaf_Rejected (reject). Compiled output verified byte-identical to expected-script.hex (201 bytes); fixture is compilers:[go] yet the Zig port matches the Go golden exactly."
+        "note": "real deploy + spend on a live regtest node: MerkleProof_Sha256_LeafIndex0 (accept) and MerkleProof_Sha256_WrongLeaf_Rejected (reject). Compiled output verified byte-identical to expected-script.hex (219 bytes since R-120 added the index-domain and proof-length gates; re-verified here by compiling examples/zig/merkle-proof/MerkleProofDemo.runar.zig with the Zig tier and comparing against the regenerated golden); fixture is compilers:[go] yet the Zig port matches the Go golden exactly."
       }
     },
     {
-      "fixture": "oracle-price",
+      "fixture": "p256-encode-negate",
       "cause": "crypto-witness-infeasible",
-      "reason": "Rabin signature (verifyRabinSig) + ECDSA checkSig — Rabin witness is not secp256k1; real signatures required",
+      "reason": "Stateless codegen-coverage fixture for p256Negate / p256EncodeCompressed -- same shape as byte-builtins: no mockable crypto for a differential witness, no state continuation for a real-crypto one. conformance/p256_p384_encode_negate_execution_test.go spends its compiled script on the go-sdk consensus interpreter against P-256 arithmetic reimplemented from the NIST parameters in math/big: negate on G and a derived point, the involution negate(negate(P)) == P, y == 0 reducing to 0 rather than to p, non-canonical x == p and y == p refused, over- and under-length blobs refused, compression in BOTH parities with the flipped prefix refused, and the CL-BUG-095 appended-byte attack refused.",
       "coveredBy": {
-        "kind": "integration",
-        "path": "integration/zig/src/oracle_price_test.zig",
-        "note": "real deploy + spend on a live regtest node: OraclePriceFeed_SpendValidPrice (accept) and OraclePriceFeed_BelowThresholdRejected (reject). Compiled output verified byte-identical to expected-script.hex (44 bytes)."
+        "kind": "go-script-exec",
+        "fixture": "p256-encode-negate"
       }
     },
     {
@@ -227,6 +226,15 @@
       "coveredBy": {
         "kind": "codegen-golden",
         "family": "p256"
+      }
+    },
+    {
+      "fixture": "p384-encode-negate",
+      "cause": "crypto-witness-infeasible",
+      "reason": "The P-384 half of the same codegen unit, run through the identical battery by conformance/p256_p384_encode_negate_execution_test.go so the 48-byte coordinate widths are exercised too. The two curves share one codegen path at different widths, which is why both are executed rather than one.",
+      "coveredBy": {
+        "kind": "go-script-exec",
+        "fixture": "p384-encode-negate"
       }
     },
     {

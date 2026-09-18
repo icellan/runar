@@ -46,6 +46,7 @@ fn trivial_artifact() -> RunarArtifact {
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 
@@ -107,6 +108,7 @@ fn deploy() -> (RunarContract, MockProvider, LocalSigner) {
             satoshis: CONTRACT_SATS,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         })
         .unwrap();
     (contract, provider, method_signer)

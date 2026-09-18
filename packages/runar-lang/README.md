@@ -175,7 +175,7 @@ Supported lengths: 0-16 have direct tuple definitions. Lengths >16 use a recursi
 | `substr` | `(data: ByteString, start: bigint, len: bigint) => ByteString` | Extract a substring |
 | `left` | `(data: ByteString, len: bigint) => ByteString` | Take the leftmost `len` bytes |
 | `right` | `(data: ByteString, len: bigint) => ByteString` | Take the rightmost `len` bytes |
-| `split` | `(data: ByteString, index: bigint) => [ByteString, ByteString]` | Split at position into two parts |
+| `split` | `(data: ByteString, index: bigint) => ByteString` | Bytes from `index` onwards — the RIGHT half; `left` is the other side |
 | `reverseBytes` | `(data: ByteString) => ByteString` | Reverse byte order |
 | `num2bin` | `(n: bigint, size: bigint) => ByteString` | Encode integer with fixed byte width |
 | `bin2num` | `(data: ByteString) => bigint` | Decode byte string to script number |

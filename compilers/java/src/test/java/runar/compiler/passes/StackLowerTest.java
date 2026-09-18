@@ -226,12 +226,8 @@ class StackLowerTest {
     void statefulCounterIncludesCodeSeparator() {
         StackProgram p = compile(COUNTER_SRC, "Counter.runar.java");
         StackMethod inc = findMethod(p, "increment");
-        boolean sawCodeSep = false;
         boolean sawPreimageBinding = false;
         for (StackOp op : inc.ops()) {
-            if (op instanceof OpcodeOp o) {
-                if ("OP_CODESEPARATOR".equals(o.code())) sawCodeSep = true;
-            }
             // BUG-100: checkPreimage now derives AND verifies the OP_PUSH_TX
             // signature on-chain as one fixed 428-byte opaque raw_bytes blob.
             // OP_CHECKSIG is INSIDE the blob (a peephole barrier), so it is no
@@ -239,7 +235,13 @@ class StackLowerTest {
             // byte-identical across all seven tiers.
             if (op instanceof RawBytesOp rb && rb.bytes().length == 428) sawPreimageBinding = true;
         }
-        assertTrue(sawCodeSep, "stateful method must emit OP_CODESEPARATOR via checkPreimage");
+        // R-010: the separator is no longer emitted per method — it is hoisted
+        // to offset 1 of the locking script by the emitter. What the method
+        // carries is the needsCodeSeparator marker the emitter keys off.
+        assertEquals(0, countOpcode(inc.ops(), "OP_CODESEPARATOR"),
+            "R-010: checkPreimage lowering must NOT emit a per-method OP_CODESEPARATOR");
+        assertTrue(inc.needsCodeSeparator(),
+            "stateful method must be marked needsCodeSeparator for the hoisted separator");
         assertTrue(sawPreimageBinding,
             "checkPreimage must emit the 428-byte OP_PUSH_TX sig-derivation raw_bytes blob");
     }
@@ -367,13 +369,15 @@ class StackLowerTest {
         assertTrue(doubleNum2bin > singleNum2bin,
             "addOutput(2 props) must emit MORE NUM2BIN than addOutput(1 prop): "
                 + doubleNum2bin + " vs " + singleNum2bin);
-        // 0x6a OP_RETURN prefix appears exactly once per addOutput call.
+        // 0x6a OP_RETURN prefix appears exactly once per addOutput call, plus
+        // once more for R-010's `_codePart` authentication, which pins the byte
+        // straight after the claimed code part to the OP_RETURN separator.
         int returnPushes = 0;
         for (StackOp op : ops) {
             if (op instanceof PushOp pu && pu.value() instanceof ByteStringPushValue bs && "6a".equals(bs.hex())) returnPushes++;
         }
-        assertEquals(1, returnPushes,
-            "exactly one 0x6a (OP_RETURN) byte should be pushed per addOutput");
+        assertEquals(2, returnPushes,
+            "one 0x6a (OP_RETURN) push per addOutput + one for the R-010 code-part authentication");
     }
 
     /**
@@ -842,24 +846,30 @@ class StackLowerTest {
     /* ================================================================== */
 
     /**
-     * A stateful contract must emit {@code OP_CODESEPARATOR} exactly
-     * once per public method (it's auto-inserted at method entry by the
-     * checkPreimage lowering). This exercises that single-method shape.
+     * R-010: a stateful contract emits exactly ONE {@code OP_CODESEPARATOR}
+     * for the whole locking script, at offset 1 behind an OP_NOP, and the
+     * per-method Stack IR carries none. This exercises the single-method
+     * shape.
      */
     @Test
     void statefulSingleMethodEmitsOneCodeSeparator() {
         StackProgram p = compile(COUNTER_SRC, "Counter.runar.java");
         StackMethod inc = findMethod(p, "increment");
-        assertEquals(1, countOpcode(inc.ops(), "OP_CODESEPARATOR"),
-            "stateful single-method contract must emit exactly 1 OP_CODESEPARATOR");
+        assertEquals(0, countOpcode(inc.ops(), "OP_CODESEPARATOR"),
+            "R-010: the method body must carry no OP_CODESEPARATOR of its own");
+        Emit.EmitResultFull r = Emit.runResultFull(Peephole.run(p));
+        assertEquals(List.of(1), r.codeSeparatorIndices(),
+            "the hoisted separator must sit at offset 1 of the locking script");
+        assertTrue(r.scriptHex().startsWith("61ab"),
+            "locking script must open with OP_NOP OP_CODESEPARATOR: " + r.scriptHex().substring(0, 8));
     }
 
     /**
-     * A stateful contract with two public methods produces two
-     * {@code StackMethod}s; each carries its own auto-injected
-     * OP_CODESEPARATOR. This is the multi-method codeseparator-slot
-     * shape that the deploy-side artifact records via
-     * {@code codeSeparatorIndices}.
+     * R-010: a stateful contract with two public methods produces two
+     * {@code StackMethod}s, neither carrying its own OP_CODESEPARATOR — the
+     * single hoisted separator in front of the dispatch table covers both, so
+     * the deploy-side artifact records exactly one {@code codeSeparatorIndices}
+     * entry.
      */
     @Test
     void statefulMultiMethodEachEmitsCodeSeparator() {
@@ -880,9 +890,13 @@ class StackLowerTest {
         StackProgram p = compile(src, "Q.runar.java");
         assertEquals(2, p.methods().size());
         for (StackMethod m : p.methods()) {
-            assertEquals(1, countOpcode(m.ops(), "OP_CODESEPARATOR"),
-                "each stateful method must emit exactly 1 OP_CODESEPARATOR");
+            assertEquals(0, countOpcode(m.ops(), "OP_CODESEPARATOR"),
+                "R-010: no stateful method carries its own OP_CODESEPARATOR");
+            assertTrue(m.needsCodeSeparator(), "each stateful method must be marked needsCodeSeparator");
         }
+        Emit.EmitResultFull r = Emit.runResultFull(Peephole.run(p));
+        assertEquals(List.of(1), r.codeSeparatorIndices(),
+            "the dispatch table is preceded by exactly one hoisted separator, at offset 1");
     }
 
     /* ================================================================== */
@@ -1378,7 +1392,7 @@ class StackLowerTest {
               }
             }
             """;
-        assertEquals("000000537953797c937b789351557a53797c937b7c93009c77777777",
+        assertEquals("000000537953797c937b78937b7551547a53797c937b7c9377009c7777",
             PipelineTestSupport.hex(src, "LoopCarriedRebind.runar.ts"));
     }
 
@@ -1387,6 +1401,11 @@ class StackLowerTest {
      * carrier — no read after the rebinding. Its bytes must NOT move, or the
      * carried-rebind fix has been written too wide and every shipped
      * {@code BoundedLoop}-shaped contract pays.
+     * R-186 / R-292 re-stamped this pin on 2026-09-14: the accumulator body leaves
+     * the carried local on top, so the iteration variable sat one slot down and
+     * `lowerLoop`'s `depth == 0` cleanup never fired. The control still says what it
+     * was written to say about the carried-rebind fix; it no longer pins the bytes
+     * that predate it.
      */
     @Test
     void plainAccumulatorLoopIsUntouchedByTheCarriedRebindFix() throws Exception {
@@ -1410,7 +1429,7 @@ class StackLowerTest {
               }
             }
             """;
-        assertEquals("000052797b7c9351537a7b7c93009c7777",
+        assertEquals("000052797b7c9377517b7b7c9377009c",
             PipelineTestSupport.hex(src, "LoopPlainAccumulator.runar.ts"));
     }
 
@@ -1451,8 +1470,8 @@ class StackLowerTest {
             }
             """;
         assertEquals(
-            "00000000547954797c93537a789351567953797c937b78935100597954797c93537a7893"
-                + "515b7a53797c937b7c93009c77777777777777777777",
+            "00000000547954797c93537a78937b7551557953797c937b78937b75537a755100567954"
+                + "797c93537a78937b7551577a53797c937b7c93777b75009c77777777",
             PipelineTestSupport.hex(src, "LoopNestedCarriedRebind.runar.ts"));
     }
 
@@ -1461,6 +1480,8 @@ class StackLowerTest {
      * carrier. The flatten step fires here (the body does contain a nested
      * loop) but the predicate still says "not carried", so the bytes must NOT
      * move — that is what keeps nesting itself from costing anything.
+     * R-186 / R-292 re-stamped this pin on 2026-09-14 as well. Nesting still costs
+     * nothing — the single-level accumulator moved by exactly the same change.
      */
     @Test
     void nestedPlainAccumulatorLoopIsUntouchedByTheNestedFix() throws Exception {
@@ -1487,7 +1508,7 @@ class StackLowerTest {
             }
             """;
         assertEquals(
-            "0000005379537a7c935154797b7c9351005679537a7c9351577a7b7c93009c777777777777",
+            "0000005379537a7c93775153797b7c93777751005379537a7c937751537a7b7c937777009c",
             PipelineTestSupport.hex(src, "LoopNestedPlainAccumulator.runar.ts"));
     }
 

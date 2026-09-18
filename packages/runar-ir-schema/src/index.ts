@@ -46,6 +46,7 @@ export type {
 export type {
   ANFProgram,
   ANFProperty,
+  ANFSyntheticArrayLevel,
   ANFMethod,
   ANFParam,
   ANFBinding,
@@ -63,6 +64,13 @@ export type {
   GetStateScript,
   CheckPreimage,
   AddOutput,
+  // R-251: members of the ANFValue union that the barrel did not re-export, so
+  // a consumer could import ANFValue and not name the member to narrow it to.
+  AddRawOutput,
+  AddDataOutput,
+  DeserializeState,
+  ArrayLiteral,
+  RawScript,
   ANFValue,
 } from './anf-ir.js';
 
@@ -86,6 +94,10 @@ export type {
   RotOp,
   TuckOp,
   PlaceholderOp,
+  // R-251: members of the StackOp union, same omission.
+  PushCodeSepIndexOp,
+  VerifyCodePartLenOp,
+  RawBytesOp,
   StackOp,
 } from './stack-ir.js';
 
@@ -112,6 +124,10 @@ export {
   totalStateByteLength,
 } from './state-layout.js';
 export type { StateFieldEncoding } from './state-layout.js';
+
+// Constructor-slot value encoding (shared classification: compiler + CLI + SDKs)
+export { ABI_VALUE_ENCODINGS, abiValueEncoding } from './abi-type-encoding.js';
+export type { AbiValueEncoding } from './abi-type-encoding.js';
 
 // Validators
 export {

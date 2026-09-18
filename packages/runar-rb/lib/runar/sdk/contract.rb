@@ -131,10 +131,29 @@ module Runar
       # compiled code and the state section (if any). Once deployed, the inscription
       # is immutable -- it persists identically across all state transitions.
       #
+      # N-043 -- RAISES when the envelope would break the contract's own
+      # +SIZE(_codePart)+ pin. A stateful contract with a variable-length state
+      # section carries an equality pin on the deployed code-part length, and
+      # the envelope lands INSIDE the code part (see #get_code_part_hex). The
+      # compiler bakes that number before any inscription exists, so the pinned
+      # length and the real one differ by the envelope's size and every honest
+      # spend aborts at OP_VERIFY -- with the funds already committed. Refusing
+      # here turns a permanent, silent lock into a loud error before a single
+      # satoshi moves.
+      #
       # @param insc [Inscription] inscription data (content_type + hex data)
       # @return [self] for chaining
+      # @raise [ArgumentError] when the envelope would break an exact code-part
+      #   length pin
       def with_inscription(insc)
+        previous = @inscription
         @inscription = insc
+        begin
+          assert_code_part_length_pin_honoured
+        rescue ArgumentError
+          @inscription = previous
+          raise
+        end
         self
       end
 
@@ -176,6 +195,14 @@ module Runar
         # DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
         SDK.assert_script_hex_under_limit(
           locking_script, SDK::MAX_SCRIPT_BYTES,
+          "#{@artifact.contract_name}.deploy"
+        )
+
+        # R-062: and refuse to fund a script reaching a builtin the compiler
+        # does not claim is sound unless the caller says so here, in the same
+        # breath as the money.
+        SDK.assert_unsound_primitives_acknowledged(
+          @artifact, opts.acknowledge_unsound,
           "#{@artifact.contract_name}.deploy"
         )
 
@@ -232,8 +259,12 @@ module Runar
       #
       # @param satoshis    [Integer]     satoshis to lock in the contract output (default: 1)
       # @param description [String, nil] human-readable description for the wallet action
+      # @param acknowledge_unsound [Array<String>] builtins the caller accepts despite
+      #   the compiler not claiming they are sound (R-062). Required — naming each one —
+      #   when the artifact declares +unsound_primitives+; ignored otherwise. Same
+      #   mechanism and same error as +DeployOptions#acknowledge_unsound+ on +deploy+.
       # @return [Hash] { txid: String, output_index: Integer }
-      def deploy_with_wallet(satoshis: 1, description: nil)
+      def deploy_with_wallet(satoshis: 1, description: nil, acknowledge_unsound: [])
         unless @provider.is_a?(WalletProvider)
           raise 'deploy_with_wallet requires a connected WalletProvider. ' \
                 'Call connect(wallet_provider, signer) first.'
@@ -247,6 +278,14 @@ module Runar
         # DoS-bound: reject pathological scripts BEFORE involving the wallet.
         SDK.assert_script_hex_under_limit(
           locking_script, SDK::MAX_SCRIPT_BYTES,
+          "#{@artifact.contract_name}.deploy_with_wallet"
+        )
+
+        # R-062: the wallet is a SECOND funding path, and it must make the same
+        # decision +deploy+ makes. Before +create_action+, so no wallet is ever
+        # asked for the coins.
+        SDK.assert_unsound_primitives_acknowledged(
+          @artifact, acknowledge_unsound,
           "#{@artifact.contract_name}.deploy_with_wallet"
         )
 
@@ -462,14 +501,22 @@ module Runar
         anf_ordered_outputs = []
         if is_stateful && @artifact.anf
           named_args = build_named_args(user_params, resolved_args)
+          # The interpreter knows only the EXPANDED scalar property names, so a
+          # grouped FixedArray entry has to be spread over its synthetic leaves
+          # first — see flatten_fixed_array_state.
+          flat_state = flatten_fixed_array_state(@state, @artifact.state_fields)
           computed_state, anf_data_outputs, _anf_raw_outputs, anf_ordered_outputs =
             ANFInterpreter.compute_new_state_and_data_outputs(
-              @artifact.anf, method_name, @state, named_args,
+              @artifact.anf, method_name, flat_state, named_args,
               constructor_args: @constructor_args
             )
           if opts.new_state.nil?
             opts = opts.dup
-            opts.new_state = computed_state
+            # ...and the post-state comes back under those same synthetic names.
+            # serialize_state reads a FixedArray field from its GROUPED entry
+            # ONLY, so without regrouping the continuation commits the pre-call
+            # array and the covenant's hashOutputs binding rejects the spend.
+            opts.new_state = regroup_fixed_array_state(computed_state, @artifact.state_fields)
           end
           if resolved_data_outputs.empty? && anf_data_outputs.any?
             resolved_data_outputs = anf_data_outputs.map do |d|
@@ -753,7 +800,7 @@ module Runar
             method_uses_code_part: method_uses_code_part
           )
 
-        sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
+        sighash = compute_bip143_sighash(final_preimage)
 
         build_prepared_call(
           sighash, final_preimage, final_op_push_tx_sig, signed_tx,
@@ -1047,6 +1094,30 @@ module Runar
 
       private
 
+      # Compute the BIP-143 sighash digest -- +hash256(preimage)+, i.e.
+      # +sha256(sha256(preimage))+ -- that is ACTUALLY ECDSA-signed by
+      # +OP_CHECKSIG+ on-chain. Returns +''+ for an empty preimage.
+      #
+      # Deep-review finding C19: +PreparedCall#sighash+ previously stored only
+      # +sha256(preimage)+ (a SINGLE hash). The default +call+ path never reads
+      # that field -- it re-derives the digest inside +LocalSigner#sign+
+      # (BIP143.bip143_sighash -> double SHA-256) -- so the bug stayed invisible
+      # there. But the documented multi-signer path hands +PreparedCall#sighash+
+      # to an EXTERNAL signer (a BRC-100-style +WalletSigner#sign_hash(digest)+
+      # wallet / hardware device) that ECDSA-signs those 32 bytes DIRECTLY with
+      # no further hashing. Handed the single-hashed value, such a signer signs
+      # the wrong message and the node's real +OP_CHECKSIG+ rejects the spend.
+      # Mirrors +computeBip143Sighash+ in packages/runar-sdk/src/contract.ts.
+      #
+      # @param preimage_hex [String] hex-encoded BIP-143 preimage
+      # @return [String] 64-char hex digest, or +''+ for an empty preimage
+      def compute_bip143_sighash(preimage_hex)
+        return '' if preimage_hex.nil? || preimage_hex.empty?
+
+        bytes = [preimage_hex].pack('H*')
+        Digest::SHA256.hexdigest(Digest::SHA256.digest(bytes))
+      end
+
       # ---------------------------------------------------------------------------
       # Initialisation helpers
       # ---------------------------------------------------------------------------
@@ -1247,7 +1318,7 @@ module Runar
           term_tx    = SDK.insert_unlocking_script(term_tx, 1, fee_unlock)
         end
 
-        sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
+        sighash = compute_bip143_sighash(final_preimage)
 
         PreparedCall.new(
           sighash: sighash,
@@ -1279,6 +1350,85 @@ module Runar
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
+
+      # Spread every grouped FixedArray entry of a state record (+table+ holding
+      # a possibly-nested array of length N) over the SYNTHETIC scalar names the
+      # leaves are really called (+table__0+..+table__3+, +grid__0__0+..). The
+      # grouped entries are kept as well, for callers that read them afterwards.
+      #
+      # This is the ANF-interpreter boundary. Pass +03b-expand-fixed-arrays+ runs
+      # BEFORE ANF lowering, so the ANF program has no property called +table+ at
+      # all — every +load_prop+ / +update_prop+ in the method body names one of
+      # the synthetic leaves. Handing the interpreter the grouped map left it
+      # evaluating +@table[i] += 1+ against an ABSENT property and falling back to
+      # the property's initialValue; because a runtime-index write lowers to a
+      # per-leaf select it rewrites EVERY leaf, so a call on a contract restored
+      # from chain rewound the whole array to its deploy-time contents.
+      #
+      # Mirrors +flattenFixedArrayState+ in packages/runar-sdk/src/contract.ts,
+      # +_flatten_fixed_array_state+ in packages/runar-py/runar/sdk/contract.py
+      # and +flattenFixedArrayState+ in packages/runar-go/sdk_contract.go,
+      # including their two rules: a non-array value is NOT spread over N leaves
+      # (nothing sensible to spread), and an explicitly-supplied scalar wins over
+      # the grouped array it is also spelled inside.
+      #
+      # @param state        [Hash]
+      # @param state_fields [Array<StateField>]
+      # @return [Hash]
+      def flatten_fixed_array_state(state, state_fields)
+        out = state.dup
+        Array(state_fields).each do |field|
+          next unless field.respond_to?(:fixed_array) && field.fixed_array
+
+          value = state[field.name]
+          next unless value.is_a?(Array)
+
+          flat = State.flatten_nested_value(value, State.parse_fixed_array_dims(field.type))
+          field.fixed_array[:synthetic_names].each_with_index do |synth, i|
+            out[synth] = flat[i] unless out.key?(synth)
+          end
+        end
+        out
+      end
+
+      # Rebuild each grouped FixedArray entry of a state record from the
+      # synthetic scalar leaves the ANF interpreter writes, so +get_state+ and
+      # +State.serialize_state+ — which reads a FixedArray field from its GROUPED
+      # entry only — both see the post-call value rather than the pre-call one.
+      # Synthetic entries are left in place; non-FixedArray fields pass through.
+      #
+      # A field whose leaves are entirely absent from the map is left alone: the
+      # method did not touch that array, so there is nothing to reconstruct. A
+      # leaf the method did not write falls back to its pre-call value from the
+      # grouped entry, so a partial write keeps the untouched slots instead of
+      # zeroing them.
+      #
+      # Mirrors +regroupFixedArrayState+ / +_regroup_fixed_array_state+ in the
+      # TS, Python and Go SDKs.
+      #
+      # @param state        [Hash]
+      # @param state_fields [Array<StateField>]
+      # @return [Hash]
+      def regroup_fixed_array_state(state, state_fields)
+        out = state.dup
+        Array(state_fields).each do |field|
+          next unless field.respond_to?(:fixed_array) && field.fixed_array
+
+          names = field.fixed_array[:synthetic_names]
+          written = names.map { |synth| out.key?(synth) }
+          next unless written.any?
+
+          flat = names.each_with_index.map { |synth, i| written[i] ? out[synth] : nil }
+          dims = State.parse_fixed_array_dims(field.type)
+          prior = state[field.name]
+          if prior.is_a?(Array)
+            prior_flat = State.flatten_nested_value(prior, dims)
+            flat.each_index { |i| flat[i] = prior_flat[i] unless written[i] }
+          end
+          out[field.name] = State.regroup_flat_value(flat, dims)
+        end
+        out
+      end
 
       # Map positional resolved_args to a Hash keyed by parameter name.
       #
@@ -1803,6 +1953,65 @@ module Runar
           code += Ordinals.build_inscription_envelope(@inscription.content_type, @inscription.data)
         end
         code
+      end
+
+      # Decode the value of every EQUALITY +verify_code_part_len+ pin in a
+      # compiled script.
+      #
+      # The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+      #
+      #     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+      #     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+      #
+      # +9c+ is OP_NUMEQUAL -- an exact pin, the only variant a longer code part
+      # can violate. +a2+ is OP_GREATERTHANOREQUAL, a lower bound that extra
+      # bytes satisfy, so it is deliberately not returned here.
+      #
+      # Read from the emitted TEMPLATE rather than from a built code script: the
+      # template holds OP_0 placeholders where constructor args go, so no
+      # caller-supplied byte string can be mistaken for a pin.
+      def decode_exact_code_part_len_pins(script_hex)
+        values = []
+        i = 0
+        while i + 18 <= script_hex.length
+          seq = script_hex[i, 18]
+          i += 2
+          next unless seq.start_with?('7604')
+          next unless seq[12, 2] == '81'
+          next unless seq[14, 2] == '9c'
+          next unless seq[16, 2] == '69'
+
+          values << [seq[4, 8]].pack('H*').unpack1('V')
+        end
+        values
+      end
+
+      # Verify that every equality +verify_code_part_len+ pin the compiler baked
+      # into this artifact still describes the code part this contract produces.
+      #
+      # The check is the invariant itself, not a restatement of the compiler's
+      # derivation: it decodes the pinned number straight out of the emitted
+      # template and compares it to #get_code_part_hex. So it permits every
+      # combination that actually works -- a stateless contract or a fixed-size
+      # state layout carries no pin at all, and a lower-bound pin is satisfied by
+      # a longer code part -- and rejects only the shape that would lock funds.
+      def assert_code_part_length_pin_honoured
+        pinned = decode_exact_code_part_len_pins(@artifact.script)
+        return if pinned.empty?
+
+        actual = get_code_part_hex.length / 2
+        pinned.each do |value|
+          next if value == actual
+
+          raise ArgumentError,
+                "RunarContract#with_inscription: #{@artifact.contract_name} pins " \
+                "SIZE(_codePart) == #{value}, but with this inscription attached the " \
+                "code part is #{actual} bytes. Deploying it would make every spend " \
+                'fail OP_VERIFY and lock the contract\'s funds permanently. An ' \
+                'inscription cannot be attached to a stateful contract with a ' \
+                'variable-length state section: the envelope is part of the code ' \
+                'part, and its length is not known when the pin is compiled'
+        end
       end
 
       def adjust_code_sep_offset(base_offset)

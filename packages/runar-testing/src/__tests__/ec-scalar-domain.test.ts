@@ -253,13 +253,18 @@ for (const [name, c] of Object.entries(CURVES) as Array<[string, Curve]>) {
 // ---------------------------------------------------------------------------
 //
 // optimizer/ec-rules.json rewrites ecAdd(ecMulGen(k1), ecMulGen(k2)) into
-// ecMulGen(k1 + k2). For CONSTANT operands the sum is folded mod n at rewrite
-// time; for runtime operands the Go rule engine (the only tier that fires this
-// rule on non-constants — see buildOpHelper in compilers/go/frontend/
-// ec_rules_engine.go) emits a plain `bin_op "+"` with NO mod-n. So the
-// rewritten spelling is correct only because the reduce above puts k1 + k2 back
-// into [0, n−1] inside the ladder. Before that reduce existed this rule was a
-// live miscompilation for every k1 + k2 ≥ n.
+// ecMulGen(k1 + k2) when BOTH operands are compile-time constants, folding the
+// sum mod n at rewrite time. Runtime operands are left alone in every tier —
+// the Go rule engine used to fire on them too, emitting a plain `bin_op "+"`
+// with NO mod-n, and was brought into line with the other six because it made
+// the same source compile to a different script (see opOperandsAreConst in
+// compilers/go/frontend/ec_rules_engine.go). That divergence was never a
+// miscompilation precisely because the reduce above puts k1 + k2 back into
+// [0, n−1] inside the ladder; remove the reduce and the runtime spelling of
+// this rule becomes wrong the moment anyone re-enables it.
+//
+// The reduce is load-bearing for the plain builtin regardless: unlock-argument
+// scalars are attacker-chosen and may be ≥ n or negative.
 //
 // Both spellings are pinned here, at the two scalars where they could differ,
 // so that removing the reduce as "redundant" fails loudly.

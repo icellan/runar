@@ -44,8 +44,13 @@ class WhatsOnChainProviderTest {
     }
 
     @Test
-    void emptyNetworkDefaultsToMainnet() {
-        assertEquals("mainnet", new WhatsOnChainProvider("").getNetwork());
+    void emptyOrNullNetworkIsRejectedNotDefaultedToMainnet() {
+        // R-051: an unparseable network is a programming error, not a default.
+        assertThrows(IllegalArgumentException.class, () -> new WhatsOnChainProvider(""));
+        assertThrows(IllegalArgumentException.class, () -> new WhatsOnChainProvider((String) null));
+        assertThrows(IllegalArgumentException.class, () -> new WhatsOnChainProvider("mainnett"));
+        // The no-arg constructor still selects mainnet — that is an explicit
+        // choice at the call site, not an unvalidated string.
         assertEquals("mainnet", new WhatsOnChainProvider().getNetwork());
     }
 

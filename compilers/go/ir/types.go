@@ -4,6 +4,7 @@
 package ir
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -113,6 +114,15 @@ type ANFValue struct {
 
 	// load_param, load_prop, update_prop
 	Name string `json:"name,omitempty"`
+
+	// load_prop only. Issue #109 (`@embedAlways`): when true, dead-binding DCE
+	// must NOT remove this binding even though nothing references it. Set only
+	// on the load_prop that ANF lowering injects for an `@embedAlways` readonly
+	// field (frontend.emitEmbedAlwaysPreservation). In-memory only — `json:"-"`
+	// keeps it out of the emitted ANF IR JSON, so cross-tier IR stays
+	// byte-identical (matches the Zig reference in compilers/zig/src/ir/types.zig
+	// and Rust's `#[serde(skip)]`).
+	Preserve bool `json:"-"`
 
 	// load_const — the raw JSON value is decoded separately
 	RawValue json.RawMessage `json:"value,omitempty"`
@@ -370,12 +380,50 @@ func (v ANFValue) MarshalJSON() ([]byte, error) {
 // DecodeConstants walks the program and decodes the RawValue fields in
 // load_const bindings into their typed Go representations, and extracts
 // the value reference string for assert/update_prop kinds.
+//
+// N-132: it also decodes PROPERTY initial values, which it never used to walk
+// at all. `ANFProperty.InitialValue` has the same two-armed string encoding as
+// `load_const.value` — a `"…n"` decimal BigInt or a hex ByteString — but only
+// the load_const half of the rule was ever applied, so a `"42n"` initialValue
+// reached pushPropertyValue's hex arm and died on `invalid byte: U+006E 'n'`.
+// The TS reference compiler emits that shape for every bigint initializer it
+// writes, so Go could not consume TS-produced IR for any contract with one.
 func DecodeConstants(program *ANFProgram) error {
+	for pi := range program.Properties {
+		if err := decodePropertyInitialValue(&program.Properties[pi]); err != nil {
+			return fmt.Errorf("property %s: %w", program.Properties[pi].Name, err)
+		}
+	}
 	for mi := range program.Methods {
 		if err := decodeBindings(program.Methods[mi].Body); err != nil {
 			return fmt.Errorf("method %s: %w", program.Methods[mi].Name, err)
 		}
 	}
+	return nil
+}
+
+// decodePropertyInitialValue turns a `"<decimal>n"` InitialValue into a
+// *big.Int, which pushPropertyValue already handles. Every other shape is left
+// exactly as json.Unmarshal produced it: a string without the suffix is a hex
+// ByteString (and `"3030"` must stay two bytes rather than becoming the number
+// 3030), a bool is a bool, a number is a number.
+//
+// isDecimalBigIntLiteral is the same discriminator decodeConstValue uses, so a
+// value means the same thing in both positions by construction rather than by
+// two implementations agreeing.
+func decodePropertyInitialValue(p *ANFProperty) error {
+	s, ok := p.InitialValue.(string)
+	if !ok || !isDecimalBigIntLiteral(s) {
+		return nil
+	}
+	bi := new(big.Int)
+	if _, ok := bi.SetString(s[:len(s)-1], 10); !ok {
+		// Unreachable via isDecimalBigIntLiteral (it has already checked the
+		// body is all ASCII digits), but a decoder that cannot fail is how the
+		// wrong number gets into a locking script — so it fails.
+		return fmt.Errorf("initialValue %q: not a decimal integer", s)
+	}
+	p.InitialValue = bi
 	return nil
 }
 
@@ -575,23 +623,47 @@ func BigIntToRawJSON(val *big.Int) json.RawMessage {
 }
 
 // decodeBigIntFromRaw decodes a loop iterator start value from its raw JSON
-// form — a bare number or a decimal `Nn` string (issue #121).
+// form — a bare number, or the sanctioned decimal `Nn` string for a start too
+// wide for a tier's native integer (issue #121).
+//
+// N-133: the string arm REQUIRES the `n` suffix, and the two arms are now
+// dispatched on the JSON token rather than tried in turn. Both halves of that
+// mattered:
+//
+//   - `encoding/json` unmarshals a JSON STRING into a `json.Number` (it is a
+//     string type), so `"5"` never reached the string branch at all — it was
+//     read as the number 5 by the number branch, while Rust read the same
+//     input as 0. Two tiers, two different loops, both exit 0.
+//   - the string branch then stripped a trailing `n` only IF one was there and
+//     parsed the rest as decimal either way, so the suffix carried no meaning.
+//
+// The suffix is what makes the string arm unambiguous — it is the same
+// discriminator `load_const.value` and `ANFProperty.initialValue` use — no
+// producer writes the bare form, and Java already required it. Stripping
+// exactly one `n` and then demanding a plain decimal keeps `"5nn"`, `"n"` and
+// the float-shaped `"1.5n"` refused.
 func decodeBigIntFromRaw(raw json.RawMessage) (*big.Int, error) {
-	var num json.Number
-	if err := json.Unmarshal(raw, &num); err == nil {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var str string
+		if err := json.Unmarshal(trimmed, &str); err != nil {
+			return nil, fmt.Errorf("unable to decode loop start value: %s", string(raw))
+		}
+		if !isDecimalBigIntLiteral(str) {
+			return nil, fmt.Errorf(
+				"a string start must be the `<decimal>n` form, got %q", str)
+		}
 		bi := new(big.Int)
-		if _, ok := bi.SetString(num.String(), 10); ok {
+		if _, ok := bi.SetString(str[:len(str)-1], 10); ok {
 			return bi, nil
 		}
+		return nil, fmt.Errorf(
+			"expected a decimal integer before the `n` suffix, got %q", str)
 	}
-	var str string
-	if err := json.Unmarshal(raw, &str); err == nil {
-		text := str
-		if len(text) > 0 && text[len(text)-1] == 'n' {
-			text = text[:len(text)-1]
-		}
+	var num json.Number
+	if err := json.Unmarshal(trimmed, &num); err == nil {
 		bi := new(big.Int)
-		if _, ok := bi.SetString(text, 10); ok {
+		if _, ok := bi.SetString(num.String(), 10); ok {
 			return bi, nil
 		}
 	}

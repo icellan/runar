@@ -66,6 +66,15 @@ class AnfLoaderTest {
         }
         """;
 
+    /**
+     * N-098: the satoshis argument used to read {@code this.addOutput(preimage,
+     * this.count)}. That is not valid Rúnar and never was — the TypeScript
+     * reference refuses it with "addOutput() first argument (satoshis) must be
+     * bigint, got 'SigHashPreimage'", and so do Go, Rust, Python, Zig and Ruby.
+     * It only compiled here because this tier had no check on that argument at
+     * all, which is the finding itself. Corrected to a literal amount, matching
+     * every checked-in Java example ({@code examples/java/.../RawOutputTest}).
+     */
     private static final String COUNTER_SRC = """
         package runar.examples.counter;
 
@@ -82,7 +91,7 @@ class AnfLoaderTest {
             @Public
             public void increment(SigHashPreimage preimage) {
                 this.count = this.count + 1;
-                this.addOutput(preimage, this.count);
+                this.addOutput(0L, this.count);
             }
         }
         """;
@@ -312,9 +321,27 @@ class AnfLoaderTest {
 
     @Test
     void parsesAddOutputNode() {
-        AnfBinding b = firstBinding(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"add_output\","
-                + "\"satoshis\":\"sats\",\"stateValues\":[\"a\",\"b\"],\"preimage\":\"p\"}}");
+        // R-126: this case cannot use EMPTY_SHELL. That shell declares
+        // "properties":[] while this node names two state values — exactly the
+        // mismatch AnfLoader.checkAddOutputArity now refuses, sitting in the
+        // loader's own unit test. A two-mutable-property shell makes the
+        // program well-formed; the assertions below are unchanged.
+        AnfProgram program = AnfLoader.parse("""
+            {
+              "contractName":"X",
+              "properties":[
+                {"name":"a","type":"bigint","readonly":false},
+                {"name":"b","type":"bigint","readonly":false}
+              ],
+              "methods":[
+                {"name":"m","isPublic":true,"params":[],"body":[%s]}
+              ]
+            }
+            """.formatted(
+                "{\"name\":\"t0\",\"value\":{\"kind\":\"add_output\","
+                    + "\"satoshis\":\"sats\",\"stateValues\":[\"a\",\"b\"],"
+                    + "\"preimage\":\"p\"}}"));
+        AnfBinding b = program.methods().get(0).body().get(0);
         assertTrue(b.value() instanceof AddOutput ao
             && "sats".equals(ao.satoshis())
             && ao.stateValues().size() == 2

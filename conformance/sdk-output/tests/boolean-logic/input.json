@@ -34,18 +34,18 @@
         }
       ]
     },
-    "script": "7b00a07b00a07863766700687b6351677868537a917b63517b75677c6376670068687777",
+    "script": "767600877c51879b697b00a07b00a07863766700687b6351677868537a917b63517b75677c6376670068687777",
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 1,
+        "byteOffset": 10,
         "name": "threshold",
         "type": "bigint",
         "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 4,
+        "byteOffset": 13,
         "name": "threshold",
         "type": "bigint",
         "valueEncoding": "scriptnum"
@@ -59,7 +59,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 1,
+          "byteOffset": 10,
           "slot": "threshold"
         },
         {
@@ -67,7 +67,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 4,
+          "byteOffset": 13,
           "slot": "threshold"
         },
         {

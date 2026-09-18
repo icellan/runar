@@ -170,7 +170,12 @@ check_versions() {
   )
   local sdk_inputs=()
   while IFS= read -r line; do sdk_inputs+=("$line"); done < <(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null)
-  for f in "${java_files[@]}" "${sdk_inputs[@]}"; do
+  # `"${sdk_inputs[@]}"` on an EMPTY array is an unbound-variable error under
+  # `set -u` in bash 3.2 (macOS), which aborted --check with a bash diagnostic
+  # instead of a version report. It never fired in this repo because the find
+  # always matches; it fires in any tree where conformance/sdk-output/tests has
+  # no input.json yet. R-211.
+  for f in "${java_files[@]}" ${sdk_inputs[@]+"${sdk_inputs[@]}"}; do
     [ -f "$f" ] || continue
     # Match version-shaped tokens that are NOT $expected. Skip historical refs in CHANGELOG-style content.
     while IFS=: read -r ln content; do
@@ -181,6 +186,48 @@ check_versions() {
       | grep -E '0\.[0-9]+\.[0-9]+' \
       | grep -v "$expected" \
       | grep -vE '0\.0\.0|0\.1\.|0\.2\.|0\.3\.' || true)
+  done
+
+  # Zig package manifest, Ruby gemspec, and the embedded compiler-version
+  # strings (R-211). bump_version rewrites all eight of these files; until now
+  # check_versions read none of them, so a partial bump or a bad merge that left
+  # one behind passed the gate. The compiler-version strings are the ones that
+  # bite: they are stamped into every artifact as schemaVersion / compilerVersion,
+  # so a tier left behind emits artifacts labelled with a version that was never
+  # released, on a field the conformance suite compares across tiers.
+  if [ -f "$ZIG_ZON" ]; then
+    local zv
+    zv=$(grep '\.version' "$ZIG_ZON" | head -1 | sed 's/.*\.version = "\([^"]*\)".*/\1/')
+    if [ -n "$zv" ] && [ "$zv" != "$expected" ]; then
+      echo "  ✗ packages/runar-zig/build.zig.zon: $zv"
+      ok=false
+    fi
+  fi
+
+  if [ -f "$RUBY_GEMSPEC" ]; then
+    local gv
+    gv=$(grep 'spec\.version' "$RUBY_GEMSPEC" | head -1 | sed "s/.*'\([^']*\)'.*/\1/")
+    if [ -n "$gv" ] && [ "$gv" != "$expected" ]; then
+      echo "  ✗ packages/runar-rb/runar.gemspec: $gv"
+      ok=false
+    fi
+  fi
+
+  # Every `runar-v<semver>` and `<semver>-<tier>` token in the six files must be
+  # $expected. Matching the tokens rather than each tier's syntax keeps this
+  # working when a tier renames its constant.
+  for f in "${COMPILER_VERSION_FILES[@]}"; do
+    [ -f "$f" ] || continue
+    while IFS= read -r bad; do
+      [ -z "$bad" ] && continue
+      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): $bad"
+      ok=false
+    # Comment lines are excluded: assembler.ts documents the field with
+    # `e.g. "runar-v0.1.0"`, which is an illustration and not a stamped version.
+    # Flagging it would make the gate cry wolf at every release.
+    done < <(grep -vE '^[[:space:]]*(//|#|\*|/\*)' "$f" 2>/dev/null \
+      | grep -oE '(runar-v[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*|[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.]*-(go|rust|zig|ruby|python|ts))' \
+      | grep -vE "^(runar-v)?${expected}(-(go|rust|zig|ruby|python|ts))?$" | sort -u || true)
   done
 
   if $ok; then

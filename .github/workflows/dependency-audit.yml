@@ -1,16 +1,46 @@
 name: Dependency Audit
 
-# Per-tier dependency vulnerability scanning. TS is already covered by
-# `pnpm audit` in the repo's main lifecycle; this workflow adds equivalent
-# coverage for the 6 non-TS tiers (Go, Rust, Python, Java, Ruby, Zig).
+# Per-tier dependency vulnerability scanning, all seven tiers.
 #
-# Policy (matches audits/remediation-plan §6):
-#   * HIGH / CRITICAL severity advisories  -> fail the job (block merge).
-#   * MEDIUM / LOW severity advisories     -> annotate / warn, do not fail.
-#   * Zig has no canonical dependency vuln scanner today (no equivalent of
-#     govulncheck / cargo-audit / pip-audit / bundler-audit). We still ship a
-#     visible job that lists declared deps from every build.zig.zon so this
-#     gap stays surfaced for future Zig tooling to replace.
+# R-108: this header used to say TypeScript was "already covered by `pnpm audit`
+# in the repo's main lifecycle". That command existed nowhere in the repository,
+# so the tier with the largest third-party surface had no scanning at all. The
+# `ts-audit` job below closes that.
+#
+# Policy, as ENFORCED (R-241).
+#
+# This section used to say "HIGH / CRITICAL -> fail the job; MEDIUM / LOW ->
+# annotate / warn, do not fail", matching audits/remediation-plan §6. No job
+# here has ever filtered by severity, and each one's own comment says so
+# ("we accept the default exit policy", "exits non-zero on any finding by
+# default"). A reader of the old text learned a rule the repository does not
+# follow, and would file a bug the first time a MEDIUM advisory blocked a merge.
+#
+# What every scanner job actually does is FAIL ON ANY ADVISORY it reports.
+# That is stricter than the old text, not looser, and it is deliberate per
+# ecosystem:
+#
+#   * go-audit      govulncheck reports only vulnerabilities REACHABLE from the
+#                   code it analyses, so a report is already a call to act.
+#   * rust-audit    cargo-audit's RustSec DB carries advisories triaged at
+#                   warning level or above upstream.
+#   * python-audit  pip-audit exits non-zero on any finding; the manifests here
+#                   are intentionally minimal, with no dev-only deps that
+#                   routinely carry low-severity advisories.
+#   * ruby-audit    bundler-audit's ruby-advisory-db ships HIGH-or-worse
+#                   criticality for the gems depended on here.
+#   * ts-audit      pnpm audit, with the standing-advisory list documented at
+#                   that job: a listed advisory that is no longer reported ALSO
+#                   fails, so the list cannot quietly rot.
+#   * java-audit    dependency locking, not an advisory scanner — see the job.
+#   * zig-audit     Zig has no canonical dependency vuln scanner today (no
+#                   equivalent of govulncheck / cargo-audit / pip-audit /
+#                   bundler-audit). The job lists declared deps from every
+#                   build.zig.zon so the gap stays visible for future tooling.
+#
+# If a low-severity advisory ever does block a merge unreasonably, the fix is to
+# add severity filtering to THAT job and update this list — not to leave the two
+# describing different repositories.
 #
 # Triggers: PRs into main / release branches, pushes to main, and a weekly
 # cron so newly-published advisories against unchanged deps still fail CI
@@ -128,7 +158,17 @@ jobs:
   # Advisory Database's Maven ecosystem — the primary advisory source for
   # JVM dependencies) headlessly, with no API key required.
   #
-  # Both Gradle projects enable dependencyLocking and commit gradle.lockfile.
+  # R-210: EVERY Gradle project in the repo enables dependencyLocking and commits
+  # a gradle.lockfile, and every one of those lockfiles is scanned below. This
+  # comment used to say there were two of them, written when that was true;
+  # there are seven, and the other five had no lock state, so the audit was
+  # scanning 2/7 while describing itself as complete. The exposure was narrower
+  # than that ratio suggests — the five add JUnit on top of a `runar-java` graph
+  # that was already scanned — but a new third-party dependency in any of them
+  # would have been invisible. `tests/r210-gradle-dependency-locking.test.ts`
+  # asserts the invariant, so a project added later is caught rather than
+  # silently unscanned.
+  #
   # With lock state present, Gradle fails any normal build (compile/test in
   # ci.yml) if build.gradle.kts dependency versions change without
   # regenerating the lockfile (`gradle dependencies --write-locks`), so the
@@ -152,6 +192,16 @@ jobs:
         run: osv-scanner scan --lockfile compilers/java/gradle.lockfile
       - name: Scan packages/runar-java
         run: osv-scanner scan --lockfile packages/runar-java/gradle.lockfile
+      - name: Scan integration/java
+        run: osv-scanner scan --lockfile integration/java/gradle.lockfile
+      - name: Scan examples/java
+        run: osv-scanner scan --lockfile examples/java/gradle.lockfile
+      - name: Scan examples/end2end-example/java
+        run: osv-scanner scan --lockfile examples/end2end-example/java/gradle.lockfile
+      - name: Scan conformance/anf-interpreter/drivers/java
+        run: osv-scanner scan --lockfile conformance/anf-interpreter/drivers/java/gradle.lockfile
+      - name: Scan conformance/sdk-output/tools/java-driver
+        run: osv-scanner scan --lockfile conformance/sdk-output/tools/java-driver/gradle.lockfile
 
   # ---------------------------------------------------------------------------
   # Ruby - bundler-audit (rubysec). Runs against every Gemfile in the repo
@@ -223,3 +273,33 @@ jobs:
           echo "replace this job with a real scanner invocation."
           # Intentional success exit - the gap is the point of the job.
           exit 0
+
+  # ---------------------------------------------------------------------------
+  # TypeScript / JS - pnpm audit, gated by a reviewed baseline (R-108).
+  #
+  # `pnpm audit` alone is not usable as a merge gate here: 21 distinct
+  # HIGH/CRITICAL advisories were already present when this job was written, all
+  # of them in test, release or compile-time tooling (vitest, @changesets/cli,
+  # ts-morph, ajv). Failing on the total would have blocked every merge on day
+  # one without making anything safer.
+  #
+  # So the gate is differential. `audits/ts-dependency-advisories.json` lists
+  # exactly those 21, each with the direct dependent that pulls it in and the
+  # surface it is reachable from; advisory number 22 fails the build. A listed
+  # advisory that is no longer reported ALSO fails, so the list cannot quietly
+  # stop describing reality.
+  # ---------------------------------------------------------------------------
+  ts-audit:
+    name: TypeScript - pnpm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+      - name: Audit TS/JS dependencies against the reviewed baseline
+        run: node scripts/check-ts-advisories.mjs

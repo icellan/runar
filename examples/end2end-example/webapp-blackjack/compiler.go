@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/icellan/runar/compilers/go/codegen"
+	gocompiler "github.com/icellan/runar/compilers/go/compiler"
 	"github.com/icellan/runar/compilers/go/frontend"
 )
 
@@ -32,8 +32,16 @@ func compileBlackjackBet(playerPubKeyHex, housePubKeyHex string, oraclePubKey *b
 		return "", "", fmt.Errorf("typecheck: %v", tcResult.Errors)
 	}
 
-	program := frontend.LowerToANF(parseResult.Contract)
+	// R-091: pass 3b, missing here as it was in the sibling webapp.
+	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	if len(expandResult.Errors) > 0 {
+		return "", "", fmt.Errorf("expand fixed arrays: %v", expandResult.Errors)
+	}
 
+	program := frontend.LowerToANF(expandResult.Contract)
+
+	// The demo bakes these seven values in; that patch is the one deliberate
+	// difference from a plain CLI compile and it stays.
 	for i := range program.Properties {
 		switch program.Properties[i].Name {
 		case "playerPubKey":
@@ -53,17 +61,16 @@ func compileBlackjackBet(playerPubKeyHex, housePubKeyHex string, oraclePubKey *b
 		}
 	}
 
-	stackMethods, err := codegen.LowerToStack(program)
+	// R-091: everything after the patch goes through the official entry point,
+	// so this demo gets constant folding, the EC optimizer, dead-binding
+	// elimination and the peephole pass — the passes a hand-rolled
+	// LowerToStack + Emit skips.
+	artifact, err := gocompiler.CompileFromProgram(program)
 	if err != nil {
-		return "", "", fmt.Errorf("stack lower: %w", err)
+		return "", "", fmt.Errorf("compile: %w", err)
 	}
 
-	emitResult, err := codegen.Emit(stackMethods)
-	if err != nil {
-		return "", "", fmt.Errorf("emit: %w", err)
-	}
-
-	return emitResult.ScriptHex, emitResult.ScriptAsm, nil
+	return artifact.Script, artifact.ASM, nil
 }
 
 func readContractSource() ([]byte, error) {

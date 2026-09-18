@@ -285,9 +285,19 @@ class TestStackOpcodes < Minitest::Test
     # folding if/else-chain guard conditions, whose operands are already-bound
     # comparison results that cannot abort. Only the SOURCE-level operator
     # changed; do not "fix" those call sites back.
+    #
+    # W3 / BoolBamboozle: `check` takes two `boolean` parameters, so the stack
+    # lowerer opens the method with one ABI-domain gate per parameter (`a` at
+    # depth 1 via OP_OVER, `b` at depth 0 via OP_DUP). Those gates are compiler
+    # preamble, not the `&&` lowering — strip them so this assertion keeps
+    # discriminating what it was written for.
+    gate = 'OP_OVER OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY ' \
+           'OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY '
     artifact = compile_ts_source(source, 'B.runar.ts')
-    assert_equal 'OP_SWAP OP_IF OP_ELSE OP_FALSE OP_NIP OP_ENDIF', artifact.asm
-    refute_includes artifact.asm, 'OP_BOOLAND', 'source-level `&&` must not be eager'
+    assert artifact.asm.start_with?(gate), artifact.asm
+    body = artifact.asm.delete_prefix(gate)
+    assert_equal 'OP_SWAP OP_IF OP_ELSE OP_FALSE OP_NIP OP_ENDIF', body
+    refute_includes body, 'OP_BOOLAND', 'source-level `&&` must not be eager'
   end
 
   def test_boolean_or_emits_op_boolor
@@ -312,9 +322,19 @@ class TestStackOpcodes < Minitest::Test
     # folding if/else-chain guard conditions, whose operands are already-bound
     # comparison results that cannot abort. Only the SOURCE-level operator
     # changed; do not "fix" those call sites back.
+    #
+    # W3 / BoolBamboozle: `check` takes two `boolean` parameters, so the stack
+    # lowerer opens the method with one ABI-domain gate per parameter (`a` at
+    # depth 1 via OP_OVER, `b` at depth 0 via OP_DUP). Those gates are compiler
+    # preamble, not the `||` lowering — strip them so this assertion keeps
+    # discriminating what it was written for.
+    gate = 'OP_OVER OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY ' \
+           'OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY '
     artifact = compile_ts_source(source, 'B.runar.ts')
-    assert_equal 'OP_SWAP OP_IF OP_TRUE OP_NIP OP_ENDIF', artifact.asm
-    refute_includes artifact.asm, 'OP_BOOLOR', 'source-level `||` must not be eager'
+    assert artifact.asm.start_with?(gate), artifact.asm
+    body = artifact.asm.delete_prefix(gate)
+    assert_equal 'OP_SWAP OP_IF OP_TRUE OP_NIP OP_ENDIF', body
+    refute_includes body, 'OP_BOOLOR', 'source-level `||` must not be eager'
   end
 
   # ---------------------------------------------------------------------------

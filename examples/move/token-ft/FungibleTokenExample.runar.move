@@ -12,15 +12,11 @@
 // Operations:
 //   transfer -- Split: 1 UTXO -> 2 UTXOs (recipient + change back to sender)
 //   send     -- Simple send: 1 UTXO -> 1 UTXO (full balance to new owner)
-//   merge    -- Secure merge: 2 UTXOs -> 1 UTXO (consolidate two token UTXOs)
+//   merge    -- Merge: 2 UTXOs -> 1 UTXO. Companion-parent merge (W8).
 //
-// Secure merge design:
-// The merge uses position-dependent output construction verified via hash_prevouts.
-// Each input reads its own balance from its locking script (verified by OP_PUSH_TX)
-// and writes it to a specific slot in the output based on its position in the transaction.
-// Since hash_outputs forces both inputs to agree on the exact same output, each input's
-// claimed other_balance must equal the other input's real verified balance.
-// This prevents the inflation attack where an attacker lies about other_balance.
+// Companion-parent merge (W8 / SoloMerge): authenticates the companion via
+// other_parent_tx. Input count is not identity. Pin:
+// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
 //
 // The output stores both individual balances (balance and merge_balance) so they can
 // be independently verified. Subsequent operations use the sum as the available balance.
@@ -28,7 +24,7 @@
 // Authorization: All operations require the current owner's ECDSA signature via check_sig.
 module FungibleToken {
     use runar::types::{PubKey, Sig, ByteString};
-    use runar::crypto::{check_sig, hash256, extract_hash_prevouts, extract_outpoint, substr};
+    use runar::crypto::{check_sig, hash256, extract_hash_prevouts, extract_outpoint, extract_script_code, substr, cat, bin2num, num2bin, len};
 
     resource struct FungibleToken {
         owner: &mut PubKey,           // Current owner's public key. Mutable -- updated on ownership transfer.
@@ -79,55 +75,85 @@ module FungibleToken {
         contract.add_output(output_satoshis, to, contract.balance + contract.merge_balance, 0);
     }
 
-    // Secure merge: 2 UTXOs -> 1 UTXO. Consolidates two token UTXOs.
-    //
-    // Why this is secure (anti-inflation proof):
-    //
-    // Each input reads its own balance from its locking script (contract.balance), which is
-    // verified by OP_PUSH_TX — it cannot be faked. Each input writes its verified balance
-    // to a specific output slot based on its position in the transaction.
-    //
-    // Position is derived from all_prevouts (verified against hash_prevouts in the
-    // preimage, so it reflects the real transaction) and the input's own outpoint.
-    //
-    // The output has two balance slots: balance (slot 0) and merge_balance (slot 1).
-    // Each input places its own verified balance in its slot, and the claimed other_balance
-    // in the other slot:
-    //
-    //   Input 0 (balance=400): add_output(sats, owner, 400, other_balance_0)
-    //   Input 1 (balance=600): add_output(sats, owner, other_balance_1, 600)
-    //
-    // Both inputs must produce byte-identical outputs (enforced by hash_outputs in BIP-143).
-    // This forces:
-    //   - slot 0: 400 == other_balance_1  ->  input 1 MUST pass 400
-    //   - slot 1: other_balance_0 == 600  ->  input 0 MUST pass 600
-    //
-    // Any lie causes a hash_outputs mismatch and the transaction is rejected on-chain.
-    // The inputs can be in any order — each self-discovers its position from the preimage.
-    //
-    // Parameters:
-    //   sig: current owner's signature (authorization)
-    //   other_balance: claimed balance of the other merging input
-    //   all_prevouts: concatenated outpoints of all tx inputs (verified via hash_prevouts)
-    //   output_satoshis: satoshis to fund the merged output UTXO
-    public fun merge(contract: &mut FungibleToken, sig: Sig, other_balance: bigint, all_prevouts: ByteString, output_satoshis: bigint) {
+    // Merge: 2 UTXOs -> 1 UTXO. Companion-parent merge (W8).
+    public fun merge(contract: &mut FungibleToken, sig: Sig, other_balance: bigint, all_prevouts: ByteString, other_parent_tx: ByteString, output_satoshis: bigint) {
         assert!(check_sig(sig, contract.owner), 0);
         assert!(output_satoshis >= 1, 0);
         assert!(other_balance >= 0, 0);
+        assert!(len(contract.token_id) > 0, 0);
 
-        // Verify all_prevouts is authentic (matches the actual transaction inputs)
+        let pad00: ByteString = num2bin(0, 1);
         assert!(hash256(all_prevouts) == extract_hash_prevouts(contract.tx_preimage), 0);
+        assert!(len(all_prevouts) >= 72, 0);
 
-        // Determine position: am I the first contract input?
         let my_outpoint: ByteString = extract_outpoint(contract.tx_preimage);
         let first_outpoint: ByteString = substr(all_prevouts, 0, 36);
-        let my_balance: bigint = contract.balance + contract.merge_balance;
-
+        let second_outpoint: ByteString = substr(all_prevouts, 36, 36);
+        let mut companion_outpoint: ByteString = first_outpoint;
         if (my_outpoint == first_outpoint) {
-            // I'm input 0: my verified balance goes to slot 0
+            companion_outpoint = second_outpoint;
+        } else {
+            assert!(my_outpoint == second_outpoint, 0);
+        };
+        let companion_txid: ByteString = substr(companion_outpoint, 0, 32);
+        let companion_vout: bigint = bin2num(cat(substr(companion_outpoint, 32, 4), pad00));
+        assert!(companion_vout == 0, 0);
+        assert!(hash256(other_parent_tx) == companion_txid, 0);
+
+        let in_count: bigint = bin2num(cat(substr(other_parent_tx, 4, 1), pad00));
+        assert!(in_count >= 1, 0);
+        assert!(in_count <= 3, 0);
+        let mut off: bigint = 5;
+        if (0 < in_count) {
+            let sl: bigint = bin2num(cat(substr(other_parent_tx, off + 36, 1), pad00));
+            assert!(sl < 253, 0);
+            off = off + 36 + 1 + sl + 4;
+        };
+        if (1 < in_count) {
+            let sl: bigint = bin2num(cat(substr(other_parent_tx, off + 36, 1), pad00));
+            assert!(sl < 253, 0);
+            off = off + 36 + 1 + sl + 4;
+        };
+        if (2 < in_count) {
+            let sl: bigint = bin2num(cat(substr(other_parent_tx, off + 36, 1), pad00));
+            assert!(sl < 253, 0);
+            off = off + 36 + 1 + sl + 4;
+        };
+        let out_count_prefix: bigint = bin2num(cat(substr(other_parent_tx, off, 1), pad00));
+        assert!(out_count_prefix != 254, 0);
+        assert!(out_count_prefix != 255, 0);
+        let mut out_hdr: bigint = 1;
+        let mut out_count: bigint = out_count_prefix;
+        if (out_count_prefix == 253) {
+            out_count = bin2num(cat(substr(other_parent_tx, off + 1, 2), pad00));
+            out_hdr = 3;
+        };
+        assert!(out_count >= 1, 0);
+        let marker: bigint = bin2num(cat(substr(other_parent_tx, off + out_hdr + 8, 1), pad00));
+        assert!(marker == 253, 0);
+        let script_len: bigint = bin2num(cat(substr(other_parent_tx, off + out_hdr + 9, 2), pad00));
+        let script_start: bigint = off + out_hdr + 11;
+        assert!(len(other_parent_tx) >= script_start + script_len, 0);
+        let companion_script: ByteString = substr(other_parent_tx, script_start, script_len);
+        assert!(script_len > 49, 0);
+
+        let sc: ByteString = extract_script_code(contract.tx_preimage);
+        let sc_marker: bigint = bin2num(cat(substr(sc, 0, 1), pad00));
+        assert!(sc_marker == 253, 0);
+        let my_body: ByteString = substr(sc, 3, len(sc) - 3);
+        let companion_body: ByteString = substr(companion_script, 2, script_len - 2);
+        assert!(len(my_body) == len(companion_body), 0);
+        assert!(len(my_body) > 49, 0);
+        assert!(substr(my_body, 0, len(my_body) - 49) == substr(companion_body, 0, len(companion_body) - 49), 0);
+
+        let other_primary: bigint = bin2num(cat(substr(companion_script, script_len - 16, 8), pad00));
+        let other_merge: bigint = bin2num(cat(substr(companion_script, script_len - 8, 8), pad00));
+        assert!(other_primary + other_merge == other_balance, 0);
+
+        let my_balance: bigint = contract.balance + contract.merge_balance;
+        if (my_outpoint == first_outpoint) {
             contract.add_output(output_satoshis, contract.owner, my_balance, other_balance);
         } else {
-            // I'm input 1: my verified balance goes to slot 1
             contract.add_output(output_satoshis, contract.owner, other_balance, my_balance);
         }
     }

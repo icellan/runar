@@ -70,7 +70,11 @@ pub struct ANFProperty {
     /// expand-fixed-arrays pass. Outermost level first. Used by the
     /// assembler to re-group these back into a single (possibly nested)
     /// FixedArray ABI/state entry.
-    #[serde(rename = "__syntheticArrayChain", skip_serializing_if = "Option::is_none", default)]
+    /// N-095: the wire spelling is `syntheticArrayChain`, matching the Go
+    /// reference and `$defs.ANFProperty` in the shared JSON Schema. The
+    /// `__`-prefixed form this used to emit is a TypeScript *AST* convention
+    /// for compiler-internal annotations and has no business on the ANF wire.
+    #[serde(rename = "syntheticArrayChain", skip_serializing_if = "Option::is_none", default)]
     pub synthetic_array_chain: Option<Vec<ANFSyntheticArrayLevel>>,
 }
 
@@ -139,7 +143,17 @@ pub enum ANFValue {
     LoadParam { name: String },
 
     #[serde(rename = "load_prop")]
-    LoadProp { name: String },
+    LoadProp {
+        name: String,
+        /// Issue #109 (`@embedAlways`): when true, dead-binding DCE must NOT
+        /// remove this binding even though nothing references it. Set only on
+        /// the `load_prop` that ANF lowering injects for an `@embedAlways`
+        /// readonly field. In-memory only — never serialized, so the cross-tier
+        /// ANF IR JSON stays byte-identical (matches the Zig reference in
+        /// `compilers/zig/src/ir/types.zig`).
+        #[serde(default, skip)]
+        preserve: bool,
+    },
 
     #[serde(rename = "load_const")]
     LoadConst { value: serde_json::Value },

@@ -68,7 +68,18 @@ export function computeOpPushTx(
   let scriptCode = subscript;
   if (codeSeparatorIndex !== undefined) {
     // Each byte is 2 hex chars. Skip past the separator byte (+1 byte = +2 hex chars).
-    scriptCode = subscript.slice((codeSeparatorIndex + 1) * 2);
+    // R-178: String.slice() past the end returns '', so an out-of-range index
+    // used to sign an EMPTY scriptCode — silently, from a fund-moving
+    // primitive. There is no correct signature for a separator offset that is
+    // not in the script.
+    const trimPos = (codeSeparatorIndex + 1) * 2;
+    if (trimPos > subscript.length) {
+      throw new Error(
+        `computeOpPushTx: codeSeparatorIndex ${codeSeparatorIndex} is past the end of ` +
+          `the subscript (${subscript.length / 2} bytes)`,
+      );
+    }
+    scriptCode = subscript.slice(trimPos);
   }
 
   // Compute BIP-143 preimage

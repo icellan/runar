@@ -24,19 +24,112 @@ module Runar
       MAX_ENVELOPE_PAYLOAD_BYTES = 16 * 1024 * 1024  # 16 MiB
       MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024     # 4 MiB
 
+      # Maximum payload nesting +verify_envelope+ will parse: the number of containers
+      # enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+      # R-260.
+      #
+      # Without an explicit bound the limit was whatever each tier's stock JSON library
+      # imposed, and those differ. Measured on ONE envelope, payload
+      # {"deep":<N-deep array>,...}: ruby flipped to bad-json at total depth 101
+      # (JSON.parse default max_nesting: 100) and rust at 128 (serde_json
+      # RECURSION_LIMIT); ts, go, python and zig accepted every depth probed (zig's
+      # iterative scanner took 100001 without complaint); and java threw
+      # StackOverflowError straight OUT of verify -- its hand-written parser is
+      # recursive with no cap and verify catches Exception, not Error -- at ~5000 deep
+      # on a default JVM stack and ~1000 deep under -Xss512k, i.e. a contract escape on
+      # unauthenticated input whose threshold was a JVM launch flag rather than a
+      # protocol property.
+      #
+      # 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
+      # so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
+      # also far above what the wire needs: the deepest of the 165 checked-in
+      # conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
+      # tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
+      # bound: if parse were the smaller of the two, a tier could emit a legal,
+      # correctly-signed envelope that another tier is physically unable to parse.
+      #
+      # The guard runs on the payload TEXT, immediately before the stock parser, and is
+      # a flat non-recursive bracket scan so the guard itself cannot overflow.
+      MAX_ENVELOPE_PAYLOAD_DEPTH = 100
+
+      # Does the payload text nest deeper than MAX_ENVELOPE_PAYLOAD_DEPTH?
+      #
+      # Counts the maximum number of simultaneously-open {/[ containers, skipping
+      # anything inside a JSON string (so a value of "[[[[..." is not nesting). The
+      # scan is FLAT -- no recursion -- which is the point: a guard that recursed
+      # would overflow on exactly the input it exists to reject. It bails out the
+      # instant the bound is passed, so a 200 KB bracket bomb costs a few hundred
+      # bytes of scanning.
+      #
+      # This does not validate JSON; malformed input still falls through to the real
+      # parser and its own bad-json rejection.
+      def self.payload_exceeds_max_depth?(payload)
+        depth = 0
+        in_string = false
+        escaped = false
+        payload.each_byte do |b|
+          if in_string
+            if escaped
+              escaped = false
+            elsif b == 0x5c # backslash
+              escaped = true
+            elsif b == 0x22 # quote
+              in_string = false
+            end
+            next
+          end
+          case b
+          when 0x22 # quote
+            in_string = true
+          when 0x7b, 0x5b # { [
+            depth += 1
+            return true if depth > MAX_ENVELOPE_PAYLOAD_DEPTH
+          when 0x7d, 0x5d # } ]
+            depth -= 1 if depth.positive?
+          end
+        end
+        false
+      end
+
       # ---------------------------------------------------------------------
       # CanonicalJSON
       # ---------------------------------------------------------------------
 
       # Serialise +value+ to RFC 8785 / JCS canonical JSON. Sorted object keys
       # (UTF-16 code-unit order), no whitespace, ES-style number formatting.
+      # Bounds the nesting +canonical_json+ will EMIT: the number of containers
+      # enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 rejected.
+      #
+      # Deliberately the same number +verify_envelope+ enforces on the parse
+      # side (MAX_ENVELOPE_PAYLOAD_DEPTH) -- if emit allowed more than parse,
+      # this tier could produce a legal, correctly-signed envelope another tier
+      # is physically unable to read. It is NOT the compiler's IR nesting bound
+      # (512): that serves the --ir loader, which reads a trusted local file
+      # rather than unauthenticated wire input. R-260.
+      #
+      # canonical_json's byte guards reuse the envelope caps rather than
+      # restating the numbers, so emit and parse cannot drift apart: a single
+      # string field is bounded by MAX_ENVELOPE_FIELD_BYTES (4 MiB) and the
+      # finished document by MAX_ENVELOPE_PAYLOAD_BYTES (16 MiB).
+      MAX_WIRE_NESTING = 100
+
+      # Raises ArgumentError if nesting exceeds MAX_WIRE_NESTING, a single
+      # string exceeds MAX_ENVELOPE_FIELD_BYTES, or the finished document
+      # exceeds MAX_ENVELOPE_PAYLOAD_BYTES.
       def self.canonical_json(value)
         out = String.new
-        canonical_append(out, value)
+        canonical_append(out, value, 1)
+        # G3: total output guard, on the finished document's byte length.
+        if out.bytesize > MAX_ENVELOPE_PAYLOAD_BYTES
+          raise ArgumentError,
+                "canonical JSON: output exceeds #{MAX_ENVELOPE_PAYLOAD_BYTES} bytes (actual #{out.bytesize})"
+        end
         out
       end
 
-      def self.canonical_append(out, value)
+      # +depth+ is the 1-based nesting level of the container being written
+      # (outermost = 1); scalars ignore it.
+      def self.canonical_append(out, value, depth)
         case value
         when nil
           out << 'null'
@@ -59,13 +152,19 @@ module Runar
         when String
           append_json_string(out, value)
         when Array
+          # G1: depth guard on entry to the container, before children.
+          raise ArgumentError, "canonical JSON: nesting exceeds #{MAX_WIRE_NESTING}" if depth > MAX_WIRE_NESTING
+
           out << '['
           value.each_with_index do |e, i|
             out << ',' unless i.zero?
-            canonical_append(out, e)
+            canonical_append(out, e, depth + 1)
           end
           out << ']'
         when Hash
+          # G1: depth guard on entry to the container, before children.
+          raise ArgumentError, "canonical JSON: nesting exceeds #{MAX_WIRE_NESTING}" if depth > MAX_WIRE_NESTING
+
           # Sort keys (must be strings) by UTF-16 code-unit order.
           # Dedup the stringified-key list — a Hash with both "k" and :k
           # collapses to one entry; the string-key form takes precedence.
@@ -87,7 +186,7 @@ module Runar
             first = false
             append_json_string(out, k)
             out << ':'
-            canonical_append(out, v)
+            canonical_append(out, v, depth + 1)
           end
           out << '}'
         else
@@ -96,6 +195,15 @@ module Runar
       end
 
       def self.append_json_string(out, str)
+        # G2: string-byte guard on the RAW input, before escaping, so the bound
+        # is about the caller's data rather than about how much the escaper
+        # inflated it. Object KEYS route through here too, so an oversized key
+        # is rejected the same way an oversized value is.
+        if str.bytesize > MAX_ENVELOPE_FIELD_BYTES
+          raise ArgumentError,
+                "canonical JSON: string exceeds #{MAX_ENVELOPE_FIELD_BYTES} bytes (actual #{str.bytesize})"
+        end
+
         out << '"'
         # Normalise to UTF-8 so each_char yields scalar values. UTF-16BE /
         # ASCII-8BIT inputs are valid Ruby strings but each_char on them
@@ -272,6 +380,14 @@ module Runar
         return { ok: false, reason: 'expired', data: nil } if envelope.expiresAt < (now - clock_skew_ms)
 
         # 3. Parse payload.
+        #
+        # R-260: bound nesting on the TEXT, before JSON.parse, so the answer is
+        # an explicit protocol rule rather than this tier's library DEFAULT
+        # (max_nesting: 100) — which happens to agree today but is a default a
+        # caller or a gem upgrade can move. Same bound and same reason in all
+        # seven tiers.
+        return { ok: false, reason: 'bad-json', data: nil } if payload_exceeds_max_depth?(envelope.payload)
+
         parsed = nil
         begin
           parsed = JSON.parse(envelope.payload)

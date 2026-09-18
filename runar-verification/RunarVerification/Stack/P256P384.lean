@@ -334,14 +334,22 @@ def cGroupInv (t : Tracker) (aName resultName : String) (g : GroupParams) :
 
 /-! ## Point decompose / compose (parameterized). -/
 
+/-- CL-BUG-095 abort-form width pin: `OP_SIZE <want> OP_NUMEQUALVERIFY`.
+TS `emitPointLenVerify` (`ec-codegen.ts:355-359`). -/
+def emitPointLenVerify (want : Nat) : List StackOp :=
+  [ .opcode "OP_SIZE"
+  , .push (.bigint (Int.ofNat want))
+  , .opcode "OP_NUMEQUALVERIFY" ]
+
 /-- Decompose `coordBytes*2`-byte point → `(x_num, y_num)` on tracker.
-Mirrors TS `cDecomposePoint` (`p256-p384-codegen.ts:293-321`). -/
+Mirrors TS `cDecomposePoint` (`p256-p384-codegen.ts:321-354`). -/
 def cDecomposePoint (t : Tracker) (pointName xName yName : String)
     (c : CurveParams) : Tracker :=
   let t := t.toTop pointName
   -- OP_SPLIT at coordBytes produces x_bytes (bottom) and y_bytes (top).
   let t := t.rawBlock 1 none
-              [.push (.bigint (Int.ofNat c.coordBytes)), .opcode "OP_SPLIT"]
+              (emitPointLenVerify (c.coordBytes * 2)
+                ++ [.push (.bigint (Int.ofNat c.coordBytes)), .opcode "OP_SPLIT"])
   -- Manually push two new slots.
   let t : Tracker :=
     { t with nm := (t.nm.push (some "_dp_xb")).push (some "_dp_yb") }
@@ -416,6 +424,20 @@ def cEmitCanonicityGuard (t : Tracker) (xName yName : String)
   let t := t.toTop "_y_canon"
   t.rawBlock 2 (some "_canon") [.opcode "OP_BOOLAND"]
 
+/-- R-117 abort-form coordinate canonicity: `x < p AND y < p`, then VERIFY.
+Called from `pNNNAdd` / `pNNNMul` / `pNNNNegate`. Mirrors TS
+`cEmitCoordCanonVerify` (`p256-p384-codegen.ts:439-454`). -/
+def cEmitCoordCanonVerify (t : Tracker) (xName yName : String)
+    (c : CurveParams) : Tracker :=
+  let t := t.copyToTop xName "_cc_x"
+  let t := cPushFieldP t "_cc_px" c
+  let t := t.rawBlock 2 (some "_cc_xok") [.opcode "OP_LESSTHAN"]
+  let t := t.copyToTop yName "_cc_y"
+  let t := cPushFieldP t "_cc_py" c
+  let t := t.rawBlock 2 (some "_cc_yok") [.opcode "OP_LESSTHAN"]
+  let t := t.toTop "_cc_xok"
+  let t := t.toTop "_cc_yok"
+  t.rawBlock 2 none [.opcode "OP_BOOLAND", .opcode "OP_VERIFY"]
 
 def cAffineAdd (t : Tracker) (c : CurveParams) : Tracker :=
   -- The chord slope `s = (qy - py) / (qx - px)` is UNDEFINED when P == Q: the
@@ -1177,6 +1199,7 @@ def emitP256MulGen : List StackOp :=
 def emitP256Negate : List StackOp :=
   let t : Tracker := Tracker.init [some "_pt"]
   let t := cDecomposePoint t "_pt" "_nx" "_ny" p256Params
+  let t := cEmitCoordCanonVerify t "_nx" "_ny" p256Params
   let t := cPushFieldP t "_fp" p256Params
   let t := cFieldSub t "_fp" "_ny" "_neg_y" p256Params
   let t := cComposePoint t "_nx" "_neg_y" "_result" p256Params
@@ -1207,17 +1230,15 @@ def emitP256OnCurve : List StackOp :=
 
 /-- P-256 compressed encoding: 64-byte point → 33-byte compressed pubkey. -/
 def emitP256EncodeCompressed : List StackOp :=
+  emitPointLenVerify 64 ++
   [ .push (.bigint 32)
   , .opcode "OP_SPLIT"
-  , .opcode "OP_SIZE"
-  , .push (.bigint 1)
-  , .opcode "OP_SUB"
+  , .push (.bigint 31)
   , .opcode "OP_SPLIT"
+  , .nip
   , .opcode "OP_BIN2NUM"
   , .push (.bigint 2)
   , .opcode "OP_MOD"
-  , .swap
-  , .drop
   , .ifOp [.push (.bytes (ByteArray.mk #[0x03]))]
           (some [.push (.bytes (ByteArray.mk #[0x02]))])
   , .swap
@@ -1253,6 +1274,7 @@ def emitP384MulGen : List StackOp :=
 def emitP384Negate : List StackOp :=
   let t : Tracker := Tracker.init [some "_pt"]
   let t := cDecomposePoint t "_pt" "_nx" "_ny" p384Params
+  let t := cEmitCoordCanonVerify t "_nx" "_ny" p384Params
   let t := cPushFieldP t "_fp" p384Params
   let t := cFieldSub t "_fp" "_ny" "_neg_y" p384Params
   let t := cComposePoint t "_nx" "_neg_y" "_result" p384Params
@@ -1283,17 +1305,15 @@ def emitP384OnCurve : List StackOp :=
 
 /-- P-384 compressed encoding: 96-byte point → 49-byte compressed pubkey. -/
 def emitP384EncodeCompressed : List StackOp :=
+  emitPointLenVerify 96 ++
   [ .push (.bigint 48)
   , .opcode "OP_SPLIT"
-  , .opcode "OP_SIZE"
-  , .push (.bigint 1)
-  , .opcode "OP_SUB"
+  , .push (.bigint 47)
   , .opcode "OP_SPLIT"
+  , .nip
   , .opcode "OP_BIN2NUM"
   , .push (.bigint 2)
   , .opcode "OP_MOD"
-  , .swap
-  , .drop
   , .ifOp [.push (.bytes (ByteArray.mk #[0x03]))]
           (some [.push (.bytes (ByteArray.mk #[0x02]))])
   , .swap

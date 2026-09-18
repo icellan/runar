@@ -70,6 +70,27 @@ export function emitMerkleRootHash256(emit: (op: StackOp) => void, depth: number
 function emitMerkleRoot(emit: (op: StackOp) => void, depth: number, hashOp: string): void {
   // Stack: [leaf, proof, index]
 
+  // R-120: bound the index BEFORE walking the tree.
+  //
+  // The loop below reads bit i of the index at level i and never looks above
+  // bit depth-1, then drops the index unexamined. So `index`,
+  // `index + 2**depth`, `index + 2**40` and any NEGATIVE index walk the same
+  // path and produce the same root: measured at depth 2 on a real script
+  // interpreter, indices 1, 5, 9, 1025 and -1 all returned
+  // 5306f72f...6ee0f336. A contract asserting "leaf L sits at position i of
+  // the tree rooted at R" therefore constrained nothing about i beyond its low
+  // `depth` bits.
+  //
+  // ABORT rather than clamp: merkleRootSha256 / merkleRootHash256 are VALUE
+  // builtins, and CL-BUG-095 set the policy that predicates clamp and flag
+  // while value producers OP_VERIFY. OP_WITHIN is half-open, so this is
+  // exactly 0 <= index < 2**depth; the lower bound rejects a negative index.
+  emit({ op: 'opcode', code: 'OP_DUP' });
+  emit({ op: 'push', value: 0n });
+  emit({ op: 'push', value: 1n << BigInt(depth) });
+  emit({ op: 'opcode', code: 'OP_WITHIN' });
+  emit({ op: 'opcode', code: 'OP_VERIFY' });
+
   for (let i = 0; i < depth; i++) {
     // Stack: [current, proof, index]
 
@@ -164,8 +185,20 @@ function emitMerkleRoot(emit: (op: StackOp) => void, depth: number, hashOp: stri
   }
 
   // Final stack: [root, empty_proof, index]
-  // Clean up: drop index and empty proof
   emit({ op: 'drop' });          // drop index
-  emit({ op: 'drop' });          // drop empty proof
+  // Stack: [root, rest_proof]
+
+  // R-120: the proof remainder must be EMPTY.
+  //
+  // Each level OP_SPLITs 32 bytes off the front of the blob; what was left
+  // after the last level used to be dropped without ever being looked at, so a
+  // proof of 32*depth + k bytes verified for every k >= 0 and produced the
+  // same root as the correctly-sized one (measured at depth 2: blobs of 64,
+  // 65, 96 and 128 bytes all returned 5306f72f...6ee0f336). The SHORT
+  // direction was already closed -- OP_SPLIT aborts when the blob runs out.
+  emit({ op: 'opcode', code: 'OP_SIZE' });
+  emit({ op: 'push', value: 0n });
+  emit({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' });
+  emit({ op: 'drop' });          // drop the (now proved empty) proof
   // Stack: [root]
 }

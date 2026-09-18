@@ -26,9 +26,11 @@ pub struct TicTacToe {
 
 impl TicTacToe {
     pub fn init(&mut self) {
-        self.p2pkh_prefix = "1976a914";
-        self.p2pkh_suffix = "88ac";
-        self.player_o = "000000000000000000000000000000000000000000000000000000000000000000";
+        self.p2pkh_prefix = to_byte_string("1976a914");
+        self.p2pkh_suffix = to_byte_string("88ac");
+        self.player_o = to_byte_string(
+            "000000000000000000000000000000000000000000000000000000000000000000",
+        );
         self.board = [0, 0, 0, 0, 0, 0, 0, 0, 0];
         self.turn = 0;
         self.status = 0;

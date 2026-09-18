@@ -13,6 +13,20 @@
 //	      Build the object {key: <string built from UTF-16 code units>} where
 //	      lone surrogates are emitted as their WTF-8 3-byte pattern (mirrors
 //	      packages/runar-go/sdk_envelope_interop_test.go), run CanonicalJSON.
+//	  {"mode":"deep","depth":<int>,"shape":"array"|"object"}
+//	      Build `depth` nested containers around the integer leaf 1, NATIVELY.
+//	  {"mode":"bigstring","bytes":<int>,"where":"value"|"key"}
+//	      Build a one-entry map whose value (or key) is `bytes` ASCII 'a',
+//	      NATIVELY, and respond with the SHA-256 of the canonical bytes rather
+//	      than the bytes themselves.
+//
+//	Why `deep` / `bigstring` describe the value rather than carrying it: a deep
+//	or huge value delivered as JSON would have to survive THIS shim's own
+//	decoder before reaching CanonicalJSON, so the transport would be imposing a
+//	limit on the thing under test. Building natively keeps the request ~50 bytes
+//	and takes the request parser out of the measurement. Hashing the bigstring
+//	response keeps a ~4 MiB canonical output off the pipe while still detecting
+//	a single divergent byte.
 //
 //	On a typed canonicalJson rejection (lone surrogate, non-finite number,
 //	etc.) the shim prints "RUNAR_CANON_ERR:<message>" to stdout and exits 3.
@@ -22,10 +36,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	runar "github.com/icellan/runar/packages/runar-go"
 )
@@ -43,6 +59,10 @@ func main() {
 		Value json.RawMessage `json:"value"`
 		Key   string          `json:"key"`
 		Units []int64         `json:"units"`
+		Depth int             `json:"depth"`
+		Shape string          `json:"shape"`
+		Bytes int             `json:"bytes"`
+		Where string          `json:"where"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		fmt.Fprintf(os.Stderr, "parse request: %v\n", err)
@@ -62,6 +82,10 @@ func main() {
 		input = normalize(v)
 	case "utf16":
 		input = map[string]any{envelope.Key: utf16UnitsToString(envelope.Units)}
+	case "deep":
+		input = buildDeep(envelope.Depth, envelope.Shape)
+	case "bigstring":
+		input = buildBigString(envelope.Bytes, envelope.Where)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown mode %q\n", envelope.Mode)
 		os.Exit(1)
@@ -75,7 +99,35 @@ func main() {
 		fmt.Printf("RUNAR_CANON_ERR:%s", err.Error())
 		os.Exit(3)
 	}
+	if envelope.Mode == "bigstring" {
+		fmt.Printf("%s%x", digestPrefix, sha256.Sum256([]byte(out)))
+		return
+	}
 	fmt.Print(out)
+}
+
+const digestPrefix = "RUNAR_CANON_SHA256:"
+
+// buildDeep nests `depth` containers around the integer leaf 1, iteratively.
+func buildDeep(depth int, shape string) any {
+	var v any = int64(1)
+	for i := 0; i < depth; i++ {
+		if shape == "array" {
+			v = []any{v}
+		} else {
+			v = map[string]any{"k": v}
+		}
+	}
+	return v
+}
+
+// buildBigString makes a one-entry map whose value (or key) is `n` ASCII 'a'.
+func buildBigString(n int, where string) any {
+	s := strings.Repeat("a", n)
+	if where == "value" {
+		return map[string]any{"s": s}
+	}
+	return map[string]any{s: int64(1)}
 }
 
 // normalize converts json.Number leaves into int64 (when exact) or float64 so

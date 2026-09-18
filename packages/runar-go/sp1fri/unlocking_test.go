@@ -178,7 +178,7 @@ func TestEncodeUnlockingScript_AcceptsMinimalGuestFixture(t *testing.T) {
 	}
 	var vkeyHash []byte // PoC fixture: SP1VKeyHashByteSize == 0 ⇒ no push.
 
-	unlockingBytes, err := EncodeUnlockingScript(proof, bs, pubVals, vkeyHash, params)
+	unlockingBytes, err := EncodeUnlockingScript(proof, nil, pubVals, vkeyHash, params)
 	if err != nil {
 		t.Fatalf("EncodeUnlockingScript: %v", err)
 	}
@@ -230,22 +230,26 @@ func TestEncodeUnlockingScript_AcceptsMinimalGuestFixture(t *testing.T) {
 		t.Fatalf("script VM rejected canonical fixture: %v", err)
 	}
 
-	// Sanity: the chunks we encoded reconstruct the proofBlob.
-	chunks := chunkProofBytes(bs, params.NumChunks)
-	var rebuilt []byte
-	for _, c := range chunks {
-		rebuilt = append(rebuilt, c...)
+	// R-059 sanity: the blob the encoder pushed IS the canonical serialisation
+	// of the transcript inputs, and it is NOT the raw SP1 proof bytes. Both
+	// halves matter — the first is what Step 1 now binds, the second is the
+	// change in meaning this finding forced.
+	canon, err := CanonicalProofBlob(proof, pubVals, params)
+	if err != nil {
+		t.Fatalf("CanonicalProofBlob: %v", err)
 	}
-	got := sha256.Sum256(rebuilt)
-	want := sha256.Sum256(bs)
-	if hex.EncodeToString(got[:]) != hex.EncodeToString(want[:]) {
-		t.Fatalf("chunkProofBytes scaffold bug: rebuilt sha256=%x, proofBlob sha256=%x",
-			got, want)
+	if len(canon) == 0 {
+		t.Fatal("canonical proof blob is empty")
 	}
+	if hex.EncodeToString(canon) == hex.EncodeToString(bs) {
+		t.Fatal("scaffold bug: the canonical blob equals the raw bincode proof")
+	}
+	canonHash := sha256.Sum256(canon)
 
-	t.Logf("encoded unlocking script accepted by script VM; |unlocking|=%d B, |locking|=%d B (%d KB), |proofBlob|=%d B, |chunks|=%d",
+	t.Logf("encoded unlocking script accepted by script VM; |unlocking|=%d B, |locking|=%d B (%d KB), "+
+		"|canonical proofBlob|=%d B (sha256 %x), |raw bincode proof|=%d B",
 		len(unlockingBytes), len(lockingScriptHex)/2, len(lockingScriptHex)/2/1024,
-		len(bs), len(chunks))
+		len(canon), canonHash[:8], len(bs))
 }
 
 // TestEncodeUnlockingScript_RejectsTamperedUnlocking exercises the
@@ -279,7 +283,7 @@ func TestEncodeUnlockingScript_RejectsTamperedUnlocking(t *testing.T) {
 	params := MinimalGuestParams()
 	pubVals := publicValuesPoCBytes()
 
-	good, err := EncodeUnlockingScript(proof, bs, pubVals, nil, params)
+	good, err := EncodeUnlockingScript(proof, nil, pubVals, nil, params)
 	if err != nil {
 		t.Fatalf("encode (good): %v", err)
 	}
@@ -334,28 +338,35 @@ func TestEncodeUnlockingScript_ParamValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("empty_blob", func(t *testing.T) {
-		_, err := EncodeUnlockingScript(proof, nil, pubVals, nil, MinimalGuestParams())
-		if err == nil {
-			t.Fatal("want error for empty proof blob")
+	// R-059: an omitted blob is no longer an error — the encoder derives the
+	// canonical serialisation of the transcript inputs, which is what the
+	// Step 1 binding checks.
+	t.Run("omitted_blob_is_derived", func(t *testing.T) {
+		enc, err := EncodeUnlockingScript(proof, nil, pubVals, nil, MinimalGuestParams())
+		if err != nil {
+			t.Fatalf("omitted blob must be derived, not refused: %v", err)
+		}
+		if len(enc) == 0 {
+			t.Fatal("derived-blob encoding produced an empty script")
 		}
 	})
 
-	t.Run("zero_chunks", func(t *testing.T) {
-		p := MinimalGuestParams()
-		p.NumChunks = 0
-		_, err := EncodeUnlockingScript(proof, bs, pubVals, nil, p)
+	// ...and a blob that is NOT that serialisation is refused here rather than
+	// emitted into a script that can only die in the VM.
+	t.Run("non_canonical_blob", func(t *testing.T) {
+		_, err := EncodeUnlockingScript(proof, bs, pubVals, nil, MinimalGuestParams())
 		if err == nil {
-			t.Fatal("want error for NumChunks=0")
+			t.Fatal("want error for a proofBlob that is not the canonical serialisation")
 		}
 	})
 
-	t.Run("chunks_exceed_blob", func(t *testing.T) {
-		p := MinimalGuestParams()
-		p.NumChunks = len(bs) + 1
-		_, err := EncodeUnlockingScript(proof, bs, pubVals, nil, p)
-		if err == nil {
-			t.Fatal("want error for NumChunks > |proofBlob|")
+	t.Run("canonical_blob_round_trips", func(t *testing.T) {
+		canon, err := CanonicalProofBlob(proof, pubVals, MinimalGuestParams())
+		if err != nil {
+			t.Fatalf("CanonicalProofBlob: %v", err)
+		}
+		if _, err := EncodeUnlockingScript(proof, canon, pubVals, nil, MinimalGuestParams()); err != nil {
+			t.Fatalf("the encoder must accept the blob it derives: %v", err)
 		}
 	})
 

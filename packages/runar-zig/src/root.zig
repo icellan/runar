@@ -156,8 +156,10 @@ pub const signTestMessage = builtins.signTestMessage;
 pub const mockPreimage = builtins.mockPreimage;
 pub const extractHashPrevouts = builtins.extractHashPrevouts;
 pub const extractOutpoint = builtins.extractOutpoint;
+pub const extractScriptCode = builtins.extractScriptCode;
 pub const extractOutputHash = builtins.extractOutputHash;
 pub const extractLocktime = builtins.extractLocktime;
+pub const extractSequence = builtins.extractSequence;
 pub const buildChangeOutput = builtins.buildChangeOutput;
 pub const buildChangeOutputChecked = builtins.buildChangeOutputChecked;
 pub const BuildChangeOutputError = builtins.BuildChangeOutputError;
@@ -166,6 +168,7 @@ pub const MockPreimageError = builtins.MockPreimageError;
 pub const signTestMessageChecked = builtins.signTestMessageChecked;
 pub const SignTestMessageError = builtins.SignTestMessageError;
 pub const cat = builtins.cat;
+pub const len = builtins.byteStringLen;
 pub const substr = builtins.substr;
 pub const num2bin = builtins.num2bin;
 pub const bin2num = builtins.bin2num;
@@ -232,6 +235,7 @@ test {
     _ = @import("testing_helpers.zig");
     _ = @import("sdk_types.zig");
     _ = @import("sdk_state.zig");
+    _ = @import("sdk_c2_state_strict_test.zig");
     _ = @import("sdk_provider.zig");
     _ = @import("sdk_signer.zig");
     _ = @import("sdk_deploy.zig");
@@ -245,9 +249,17 @@ test {
     _ = @import("sdk_woc_provider.zig");
     _ = @import("sdk_script_utils.zig");
     _ = @import("sdk_c9_s1_minimaldata_roundtrip_test.zig");
+    _ = @import("sdk_n070_slot_types_test.zig");
+    _ = @import("sdk_n074_script_number_width_test.zig");
     _ = @import("sdk_state_range_guard_test.zig");
+    _ = @import("sdk_state_curve_point_test.zig");
+    _ = @import("sdk_state_boolean_spelling_test.zig");
+    _ = @import("sdk_state_fixed_array_test.zig");
+    _ = @import("sdk_fixed_array_call_continuation_test.zig");
+    _ = @import("sdk_artifact_fixed_array_trust_test.zig");
     _ = @import("sdk_anf_interpreter.zig");
     _ = @import("sdk_anf_interpreter_intent_test.zig");
+    _ = @import("sdk_anf_interpreter_split_test.zig");
     _ = @import("sdk_anf_parse_failclosed_test.zig");
     _ = @import("sdk_g1_raw_outputs_test.zig");
     _ = @import("sdk_null_bytestring_arg_test.zig");
@@ -258,6 +270,8 @@ test {
     _ = @import("sdk_envelope_sign.zig");
     _ = @import("sdk_envelope_interop_test.zig");
     _ = @import("sdk_bip143_interop_test.zig");
+    _ = @import("sdk_unsound_primitives_test.zig");
+    _ = @import("sdk_r062_wallet_deploy_gate_test.zig");
     _ = @import("sdk_sighash_emptysig_test.zig");
     _ = @import("sdk_rpc_provider.zig");
     _ = @import("sdk_token_wallet.zig");
@@ -273,6 +287,7 @@ test {
     _ = @import("analyzer_opcode_concerns.zig");
     _ = @import("analyzer_conformance_test.zig");
     _ = @import("runtime_vectors_test.zig");
+    _ = @import("leak_detector_probe_test.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");
     }

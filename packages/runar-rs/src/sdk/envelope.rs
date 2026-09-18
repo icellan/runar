@@ -27,11 +27,20 @@ use sha2::{Digest, Sha256};
 /// code-unit order), no whitespace, ES-style number formatting.
 pub fn canonical_json(value: &Value) -> Result<String, String> {
     let mut out = String::new();
-    canonical_append(&mut out, value)?;
+    canonical_append(&mut out, value, 1)?;
+    // G3: total output guard, on the finished buffer's UTF-8 byte length.
+    if out.len() > MAX_ENVELOPE_PAYLOAD_BYTES {
+        return Err(format!(
+            "canonical JSON: output exceeds {MAX_ENVELOPE_PAYLOAD_BYTES} bytes (actual {})",
+            out.len()
+        ));
+    }
     Ok(out)
 }
 
-fn canonical_append(out: &mut String, value: &Value) -> Result<(), String> {
+/// `depth` is the 1-based nesting level of the container being written
+/// (outermost = 1); scalars ignore it.
+fn canonical_append(out: &mut String, value: &Value, depth: usize) -> Result<(), String> {
     match value {
         Value::Null => {
             out.push_str("null");
@@ -62,21 +71,29 @@ fn canonical_append(out: &mut String, value: &Value) -> Result<(), String> {
             Ok(())
         }
         Value::String(s) => {
-            append_json_string(out, s);
+            append_json_string(out, s)?;
             Ok(())
         }
         Value::Array(arr) => {
+            // G1: depth guard on entry to the container, before children.
+            if depth > MAX_WIRE_NESTING {
+                return Err(format!("canonical JSON: nesting exceeds {MAX_WIRE_NESTING}"));
+            }
             out.push('[');
             for (i, e) in arr.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                canonical_append(out, e)?;
+                canonical_append(out, e, depth + 1)?;
             }
             out.push(']');
             Ok(())
         }
         Value::Object(obj) => {
+            // G1: depth guard on entry to the container, before children.
+            if depth > MAX_WIRE_NESTING {
+                return Err(format!("canonical JSON: nesting exceeds {MAX_WIRE_NESTING}"));
+            }
             // Sort keys by UTF-16 code-unit order to match the ES default.
             let mut sorted: BTreeMap<Vec<u16>, &String> = BTreeMap::new();
             for k in obj.keys() {
@@ -90,9 +107,9 @@ fn canonical_append(out: &mut String, value: &Value) -> Result<(), String> {
                     out.push(',');
                 }
                 first = false;
-                append_json_string(out, k);
+                append_json_string(out, k)?;
                 out.push(':');
-                canonical_append(out, v)?;
+                canonical_append(out, v, depth + 1)?;
             }
             out.push('}');
             Ok(())
@@ -191,7 +208,17 @@ fn format_ecma262_double(x: f64) -> String {
     }
 }
 
-fn append_json_string(out: &mut String, s: &str) {
+fn append_json_string(out: &mut String, s: &str) -> Result<(), String> {
+    // G2: string-byte guard on the RAW input, before escaping, so the bound is
+    // about the caller's data rather than about how much the escaper inflated
+    // it. Object KEYS route through here too, so an oversized key is rejected
+    // the same way an oversized value is.
+    if s.len() > MAX_ENVELOPE_FIELD_BYTES {
+        return Err(format!(
+            "canonical JSON: string exceeds {MAX_ENVELOPE_FIELD_BYTES} bytes (actual {})",
+            s.len()
+        ));
+    }
     out.push('"');
     for c in s.chars() {
         match c {
@@ -209,6 +236,7 @@ fn append_json_string(out: &mut String, s: &str) {
         }
     }
     out.push('"');
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +326,93 @@ impl VerifyEnvelopeReason {
 pub const MAX_ENVELOPE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ENVELOPE_FIELD_BYTES: usize = 4 * 1024 * 1024;
 
+/// Maximum payload nesting `verify_envelope` will parse: the number of containers
+/// enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+/// R-260.
+///
+/// Without an explicit bound the limit was whatever each tier's stock JSON library
+/// imposed, and those differ. Measured on ONE envelope, payload
+/// {"deep":<N-deep array>,...}: ruby flipped to bad-json at total depth 101
+/// (JSON.parse default max_nesting: 100) and rust at 128 (serde_json
+/// RECURSION_LIMIT); ts, go, python and zig accepted every depth probed (zig's
+/// iterative scanner took 100001 without complaint); and java threw
+/// StackOverflowError straight OUT of verify -- its hand-written parser is
+/// recursive with no cap and verify catches Exception, not Error -- at ~5000 deep
+/// on a default JVM stack and ~1000 deep under -Xss512k, i.e. a contract escape on
+/// unauthenticated input whose threshold was a JVM launch flag rather than a
+/// protocol property.
+///
+/// 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
+/// so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
+/// also far above what the wire needs: the deepest of the 165 checked-in
+/// conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
+/// tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
+/// bound: if parse were the smaller of the two, a tier could emit a legal,
+/// correctly-signed envelope that another tier is physically unable to parse.
+///
+/// The guard runs on the payload TEXT, immediately before the stock parser, and is
+/// a flat non-recursive bracket scan so the guard itself cannot overflow.
+pub const MAX_ENVELOPE_PAYLOAD_DEPTH: usize = 100;
+
+/// Bounds the nesting `canonical_json` will EMIT: the number of containers
+/// enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+///
+/// Deliberately the same number `verify_envelope` enforces on the parse side
+/// (`MAX_ENVELOPE_PAYLOAD_DEPTH`) — if emit allowed more than parse, this tier
+/// could produce a legal, correctly-signed envelope another tier is physically
+/// unable to read. It is NOT the compiler's IR nesting bound (512): that
+/// serves the `--ir` loader, which reads a trusted local file rather than
+/// unauthenticated wire input. R-260.
+///
+/// `canonical_json`'s byte guards reuse the envelope caps rather than
+/// restating the numbers, so emit and parse cannot drift apart: a single
+/// string field is bounded by `MAX_ENVELOPE_FIELD_BYTES` (4 MiB) and the
+/// finished document by `MAX_ENVELOPE_PAYLOAD_BYTES` (16 MiB).
+pub const MAX_WIRE_NESTING: usize = 100;
+
+/// Does the payload text nest deeper than MAX_ENVELOPE_PAYLOAD_DEPTH?
+///
+/// Counts the maximum number of simultaneously-open {/[ containers, skipping
+/// anything inside a JSON string (so a value of "[[[[..." is not nesting). The
+/// scan is FLAT -- no recursion -- which is the point: a guard that recursed
+/// would overflow on exactly the input it exists to reject. It bails out the
+/// instant the bound is passed, so a 200 KB bracket bomb costs a few hundred
+/// bytes of scanning.
+///
+/// This does not validate JSON; malformed input still falls through to the real
+/// parser and its own bad-json rejection.
+fn payload_exceeds_max_depth(payload: &str) -> bool {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &b in payload.as_bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_ENVELOPE_PAYLOAD_DEPTH {
+                    return true;
+                }
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub struct VerifyEnvelopeOpts<'a> {
     pub envelope: &'a SignedEnvelope,
     pub expected_keys: Option<&'a [String]>,
@@ -345,6 +460,13 @@ pub fn verify_envelope(opts: VerifyEnvelopeOpts<'_>) -> VerifyEnvelopeResult {
     }
 
     // 3. Parse payload.
+    //
+    // R-260: bound nesting on the TEXT, before serde_json, so the answer does
+    // not depend on its RECURSION_LIMIT (127 here, but 100 in ruby and absent
+    // in four other tiers). Same bound and same reason in all seven tiers.
+    if payload_exceeds_max_depth(&env.payload) {
+        return reject(VerifyEnvelopeReason::BadJson, None);
+    }
     let parsed: Map<String, Value> = match serde_json::from_str::<Value>(&env.payload) {
         Ok(Value::Object(m)) => m,
         _ => return reject(VerifyEnvelopeReason::BadJson, None),

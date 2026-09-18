@@ -62,7 +62,9 @@ func TestOrdinalNFT_DeployTextInscriptionAt1Sat(t *testing.T) {
 	textHex := utf8ToHex("Hello, 1sat ordinals!")
 
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: textHex})
+	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: textHex}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	txid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {
@@ -104,7 +106,9 @@ func TestOrdinalNFT_RoundTripViaFromTxId(t *testing.T) {
 
 	imageData := strings.Repeat("ff", 64)
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(&runar.Inscription{ContentType: "image/png", Data: imageData})
+	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "image/png", Data: imageData}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	txid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {
@@ -147,7 +151,9 @@ func TestOrdinalNFT_TransferSpend(t *testing.T) {
 
 	textHex := utf8ToHex("Transferable NFT")
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: textHex})
+	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: textHex}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	if _, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1}); err != nil {
 		t.Fatalf("deploy: %v", err)
@@ -182,7 +188,9 @@ func TestOrdinalNFT_LargeInscriptionPushdata2(t *testing.T) {
 	// 500 bytes — large enough to force OP_PUSHDATA2 encoding.
 	largeData := strings.Repeat("ab", 500)
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(&runar.Inscription{ContentType: "image/jpeg", Data: largeData})
+	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "image/jpeg", Data: largeData}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	txid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {

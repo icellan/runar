@@ -10,10 +10,17 @@
 
 require "json"
 require_relative "../ir/types"
+require_relative "dce"
 
 module RunarCompiler
   module Frontend
     module ConstantFold
+      # Upper end of the domain pow is exact on, shared with the emitted script
+      # (codegen/stack.rb#_lower_pow unrolls exactly this many conditional
+      # multiplies and enforces the bound with
+      # OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
+      POW_FOLD_EXPONENT_LIMIT = 32
+
       # -----------------------------------------------------------------
       # Constant environment
       # -----------------------------------------------------------------
@@ -197,7 +204,13 @@ module RunarCompiler
         when "pow"
           return nil unless int_args.size == 2
           base, exp = int_args[0], int_args[1]
-          return nil if exp < 0 || exp > 256
+          # Decline outside the domain the emitted script GUARANTEES and
+          # ENFORCES (codegen/stack.rb#_lower_pow: 0 <= exp <= 32, the number of
+          # unrolled conditional multiplies). The old bound was 256, which
+          # folded exponents the script CLAMPED to 32 — so for 33 <= exp <= 256
+          # the fold-ON and fold-OFF scripts accepted mutually exclusive inputs
+          # (R-169, the pow half).
+          return nil if exp < 0 || exp > POW_FOLD_EXPONENT_LIMIT
           result = 1
           exp.times { result *= base }
           return ["int", result]
@@ -216,6 +229,12 @@ module RunarCompiler
           return nil unless int_args.size == 1
           n = int_args[0]
           return nil if n < 0
+          # Decline outside the domain the emitted script GUARANTEES and
+          # ENFORCES (codegen/stack.rb _lower_sqrt): n >= 0 and n encodable in
+          # <= 62 script bytes, i.e. n < 2**495. Outside it the compiled script
+          # aborts, so folding to a value here would make sqrt(k) mean one thing
+          # folded and another executed - R-169 at the other end of the domain.
+          return nil if n.bit_length > 495
           return ["int", 0] if n == 0
           # Integer square root via Newton's method
           x = n
@@ -489,20 +508,29 @@ module RunarCompiler
       # Side-effect detection
       # -----------------------------------------------------------------
 
-      SIDE_EFFECT_KINDS = %w[
-        assert update_prop check_preimage deserialize_state
-        add_output add_raw_output add_data_output
-        if loop call method_call raw_script
-      ].freeze
+      # R-262: this list and SIDE_EFFECT_FREE_KINDS below used to be a second,
+      # hand-maintained copy of DCE's. They had already drifted: R-140 taught
+      # DCE to decide `if` and `loop` by RECURSING into their arms instead of
+      # treating them as unconditionally side-effecting, and this copy kept the
+      # old flat entries. Harmless only because nothing in lib/ calls the two
+      # functions below — the tests do, to pin the F-003 unknown-kind guard and
+      # its cross-tier location strings.
+      #
+      # Derived from DCE now, so a change there reaches here. The `if`/`loop`
+      # difference is deliberate and is the whole reason this is a superset
+      # rather than an alias: this folder does NOT recurse into arms, so a flat
+      # entry is what keeps it from raising UnknownANFKindError on a legitimate
+      # conditional.
+      SIDE_EFFECT_KINDS = (
+        ::RunarCompiler::Frontend::DCE::SIDE_EFFECT_KINDS + %w[if loop]
+      ).freeze
 
       # Kinds known to have no observable side effects.  Listed explicitly
       # so an unknown kind raises UnknownANFKindError instead of silently
       # being treated as side-effect-free (which would cause DCE to drop
       # a new side-effecting variant).
-      SIDE_EFFECT_FREE_KINDS = %w[
-        load_param load_prop load_const get_state_script
-        bin_op unary_op array_literal
-      ].freeze
+      # R-262: identical to DCE's list, so it IS DCE's list.
+      SIDE_EFFECT_FREE_KINDS = ::RunarCompiler::Frontend::DCE::SIDE_EFFECT_FREE_KINDS
 
       # Return true if this value kind has observable side effects.
       def self.has_side_effect(value)

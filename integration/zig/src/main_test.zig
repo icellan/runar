@@ -34,6 +34,7 @@ comptime {
     _ = @import("bsv20_token_test.zig");
     _ = @import("bsv21_token_test.zig");
     _ = @import("phase_a_residuals_test.zig");
+    _ = @import("negative_assertion_guard_test.zig");
 }
 
 test "integration_setup" {

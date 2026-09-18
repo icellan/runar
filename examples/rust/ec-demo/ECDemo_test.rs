@@ -53,7 +53,7 @@ fn test_check_make_point() {
     let x = ec_point_x(&pt);
     let y = ec_point_y(&pt);
     let c = ECDemo { pt };
-    c.check_make_point(x, y, x, y);
+    c.check_make_point(x.clone(), y.clone(), x, y);
 }
 
 // -------------------------------------------------------------------
@@ -90,7 +90,7 @@ fn test_check_add_wrong() {
     let sum = ec_add(&pt, &other);
     let expected_x = ec_point_x(&sum);
     let c = ECDemo { pt };
-    c.check_add(&other, expected_x, 999);
+    c.check_add(&other, expected_x, BigintBig::from(999));
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn test_check_mul_gen_wrong() {
     let result = ec_mul_gen(99);
     let expected_x = ec_point_x(&result);
     let c = ECDemo { pt };
-    c.check_mul_gen(99, expected_x, 0);
+    c.check_mul_gen(99, expected_x, BigintBig::from(0));
 }
 
 // -------------------------------------------------------------------

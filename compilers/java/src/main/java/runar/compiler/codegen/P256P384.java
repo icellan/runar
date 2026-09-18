@@ -11,6 +11,7 @@ import runar.compiler.ir.stack.IfOp;
 import runar.compiler.ir.stack.NipOp;
 import runar.compiler.ir.stack.OpcodeOp;
 import runar.compiler.ir.stack.OverOp;
+import runar.compiler.ir.stack.PickOp;
 import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.PushValue;
 import runar.compiler.ir.stack.RotOp;
@@ -300,7 +301,12 @@ public final class P256P384 {
                                         String xName, String yName,
                                         int coordBytes, ReverseBytesFn revFn) {
         t.toTop(pointName);
+        // CL-BUG-095: a P256Point/P384Point is exactly 2*coordBytes bytes and
+        // nothing checked it, so surplus bytes were split off and silently dropped.
+        // Gate the width here, where every consumer that decomposes a point picks it
+        // up. See Ec.emitPointLenVerify.
         t.rawBlock(List.of(pointName), "", e -> {
+            Ec.emitPointLenVerify(e, coordBytes * 2);
             e.accept(new PushOp(PushValue.of(coordBytes)));
             e.accept(new OpcodeOp("OP_SPLIT"));
         });
@@ -389,8 +395,12 @@ public final class P256P384 {
      * <p>selected as {@code b + cond*(a - b)}, which needs no branch and keeps the
      * emitted op sequence identical on both paths.
      *
-     * <p>NOT handled: P == -Q, whose true result is the point at infinity, which affine
-     * coordinates cannot represent.
+     * <p>P == -Q IS handled, below: {@code px == qx} with {@code py != qy}
+     * returns the ALL-ZERO blob this codegen uses for the point at infinity,
+     * which the on-curve gate then rejects. See "THE THIRD CASE, P == -Q"
+     * above {@code cAffineAdd}. (R-250: this used to say "NOT handled", left
+     * over from before that fix and contradicted a few dozen lines later in
+     * the same file.)
      */
     /**
      * GAP-301: coordinate canonicity, leaving {@code _canon} on the tracker.
@@ -524,21 +534,11 @@ public final class P256P384 {
         t.copyToTop("py", "_py2");
         cFieldSub(t, "_s_px_rx", "_py2", "ry", fieldP);
 
-        // Clean up original points
-        t.toTop("px"); t.drop();
-        t.toTop("py"); t.drop();
-        t.toTop("qx"); t.drop();
-        t.toTop("qy"); t.drop();
-
-        // P == -Q -> force the all-zero point (see the header comment).
-        t.toTop("rx");
-        t.copyToTop("_notinf", "_notinf_x");
-        t.rawBlock(List.of("rx", "_notinf_x"), "rx",
-                e -> e.accept(new OpcodeOp("OP_MUL")));
-        t.toTop("ry");
-        t.toTop("_notinf");
-        t.rawBlock(List.of("ry", "_notinf"), "ry",
-                e -> e.accept(new OpcodeOp("OP_MUL")));
+        // CL-BUG-096: `pNNNAdd(P, O)` returned an off-curve blob for the same reason
+        // secp256k1's did — the adder had no infinity-operand case, while
+        // `pNNNMul(P, 0n)` hands it exactly that value. Same branch-free select,
+        // which also subsumes the standalone `notinf` mask that used to live here.
+        Ec.emitAffineInfinitySelect(t);
     }
 
     // ===================================================================
@@ -826,6 +826,60 @@ public final class P256P384 {
     // ===================================================================
     // Scalar multiplication (generic for both P-256 and P-384)
     // ===================================================================
+
+    /**
+     * R-117 — coordinate canonicity for the VALUE builtins, aborting form.
+     *
+     * <p>The a = -3 twin of {@code Ec.emitCoordCanonVerify}; see that javadoc
+     * for the defect. {@code cAffineAdd}'s {@code cond} / {@code notinf}
+     * selectors are the same bare OP_NUMEQUAL over the raw decomposed
+     * coordinates, and {@code cDecomposePoint} accepts any width-fitting
+     * unsigned value, so {@code x + p} is a second spelling of the same point
+     * that both selectors read as "different".
+     *
+     * <p>{@code cEmitCanonicityGuard} above is the FLAG form, for the on-curve
+     * predicates. This is the abort form, called only from
+     * {@code emitPNNNAdd} / {@code emitPNNNMul} / {@code emitPNNNNegate} —
+     * never from {@code cEmitVerifyECDSA}'s path, where
+     * {@code cDecompressPubKey} and {@code cEmitSigRangeGate} have already
+     * decided that attacker-chosen bytes must make a total boolean builtin
+     * return false rather than abort the script.
+     */
+    private static void cEmitCoordCanonVerify(ECTracker t, String xName, String yName, BigInteger fieldP) {
+        t.copyToTop(xName, "_cc_x");
+        cPushFieldP(t, "_cc_px", fieldP);
+        t.rawBlock(List.of("_cc_x", "_cc_px"), "_cc_xok",
+            e -> e.accept(new OpcodeOp("OP_LESSTHAN")));
+        t.copyToTop(yName, "_cc_y");
+        cPushFieldP(t, "_cc_py", fieldP);
+        t.rawBlock(List.of("_cc_y", "_cc_py"), "_cc_yok",
+            e -> e.accept(new OpcodeOp("OP_LESSTHAN")));
+        t.rawBlock(List.of("_cc_xok", "_cc_yok"), "", e -> {
+            e.accept(new OpcodeOp("OP_BOOLAND"));
+            e.accept(new OpcodeOp("OP_VERIFY"));
+        });
+    }
+
+    /**
+     * R-157 — the a = -3 twin of {@code Ec.emitPointGate}; see that javadoc for the
+     * defect, the measurement and the boundary argument. Called from
+     * {@code emitPNNNMul} and NOT from inside {@code cEmitMul}, because
+     * {@code cEmitVerifyECDSA} shares that ladder and {@code cDecompressPubKey} /
+     * {@code cEmitSigRangeGate} have already decided that attacker-chosen bytes must
+     * make a total boolean builtin return false rather than abort the script.
+     */
+    private static void cEmitPointGate(Consumer<StackOp> emit,
+                                       Consumer<Consumer<StackOp>> emitOnCurve,
+                                       int coordBytes) {
+        emit.accept(new OverOp());
+        emit.accept(new PushOp(PushValue.ofHex(Ec.hexOf(new byte[coordBytes * 2]))));
+        emit.accept(new OpcodeOp("OP_EQUAL"));
+        emit.accept(new PushOp(PushValue.of(2)));
+        emit.accept(new PickOp(2));
+        emitOnCurve.accept(emit);
+        emit.accept(new OpcodeOp("OP_BOOLOR"));
+        emit.accept(new OpcodeOp("OP_VERIFY"));
+    }
 
     private static void cEmitMul(Consumer<StackOp> emit, int coordBytes,
                                   ReverseBytesFn revFn, BigInteger fieldP,
@@ -1413,11 +1467,16 @@ public final class P256P384 {
         ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit);
         cDecomposePoint(t, "_pa", "px", "py", 32, REV32);
         cDecomposePoint(t, "_pb", "qx", "qy", 32, REV32);
+        // R-117: cAffineAdd's selectors compare these four values RAW.
+        cEmitCoordCanonVerify(t, "px", "py", P256_P);
+        cEmitCoordCanonVerify(t, "qx", "qy", P256_P);
         cAffineAdd(t, P256_P, P256_P_MINUS_2);
         cComposePoint(t, "rx", "ry", "_result", 32, REV32);
     }
 
     public static void emitP256Mul(Consumer<StackOp> emit) {
+        // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        cEmitPointGate(emit, P256P384::emitP256OnCurve, 32);
         cEmitMul(emit, 32, REV32, P256_P, P256_P_MINUS_2, P256_N, P256_N_MINUS_2);
     }
 
@@ -1433,6 +1492,7 @@ public final class P256P384 {
     public static void emitP256Negate(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
         cDecomposePoint(t, "_pt", "_nx", "_ny", 32, REV32);
+        cEmitCoordCanonVerify(t, "_nx", "_ny", P256_P);
         cPushFieldP(t, "_fp", P256_P);
         cFieldSub(t, "_fp", "_ny", "_neg_y", P256_P);
         cComposePoint(t, "_nx", "_neg_y", "_result", 32, REV32);
@@ -1440,6 +1500,10 @@ public final class P256P384 {
 
     public static void emitP256OnCurve(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
+        // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+        // contracts are told to gate an untrusted point on, so it must stay total.
+        // The flag is ANDed into the result below.
+        Ec.emitPointLengthGate(t, "_pt", 32 * 2, "_len_ok");
         cDecomposePoint(t, "_pt", "_x", "_y", 32, REV32);
         cEmitCanonicityGuard(t, "_x", "_y", P256_P);
 
@@ -1461,28 +1525,34 @@ public final class P256P384 {
         t.rawBlock(List.of("_y2", "_rhs"), "_curve_eq",
             e -> e.accept(new OpcodeOp("OP_EQUAL")));
 
-        // on-curve = canonical AND curve-equation
+        // on-curve = right width AND canonical AND curve-equation
         t.toTop("_canon");
         t.toTop("_curve_eq");
-        t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
+        t.rawBlock(List.of("_canon", "_curve_eq"), "_eq_ok",
+            e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.toTop("_len_ok");
+        t.toTop("_eq_ok");
+        t.rawBlock(List.of("_len_ok", "_eq_ok"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
     }
 
     public static void emitP256EncodeCompressed(Consumer<StackOp> emit) {
+        // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+        // appended byte flipped the sign of the compressed encoding. Width is now
+        // verified AND the parity byte is read from a fixed offset. See
+        // Ec.emitEcEncodeCompressed for the full argument.
+        Ec.emitPointLenVerify(emit, 64);
         // Split at 32: [x_bytes, y_bytes]
         emit.accept(new PushOp(PushValue.of(32)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
-        // Last byte of y for parity
-        emit.accept(new OpcodeOp("OP_SIZE"));
-        emit.accept(new PushOp(PushValue.of(1)));
-        emit.accept(new OpcodeOp("OP_SUB"));
+        // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.accept(new PushOp(PushValue.of(31)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
+        emit.accept(new OpcodeOp("OP_NIP")); // drop y_head
+        // Stack: [x_bytes, last_byte]
         emit.accept(new OpcodeOp("OP_BIN2NUM"));
         emit.accept(new PushOp(PushValue.of(2)));
         emit.accept(new OpcodeOp("OP_MOD"));
-        // Stack: [x_bytes, y_prefix, parity]
-        emit.accept(new SwapOp());
-        emit.accept(new DropOp());
         // Stack: [x_bytes, parity]
         emit.accept(new IfOp(
             List.of(new PushOp(PushValue.ofHex("03"))),
@@ -1506,11 +1576,16 @@ public final class P256P384 {
         ECTracker t = new ECTracker(List.of("_pa", "_pb"), emit);
         cDecomposePoint(t, "_pa", "px", "py", 48, REV48);
         cDecomposePoint(t, "_pb", "qx", "qy", 48, REV48);
+        // R-117: cAffineAdd's selectors compare these four values RAW.
+        cEmitCoordCanonVerify(t, "px", "py", P384_P);
+        cEmitCoordCanonVerify(t, "qx", "qy", P384_P);
         cAffineAdd(t, P384_P, P384_P_MINUS_2);
         cComposePoint(t, "rx", "ry", "_result", 48, REV48);
     }
 
     public static void emitP384Mul(Consumer<StackOp> emit) {
+        // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        cEmitPointGate(emit, P256P384::emitP384OnCurve, 48);
         cEmitMul(emit, 48, REV48, P384_P, P384_P_MINUS_2, P384_N, P384_N_MINUS_2);
     }
 
@@ -1526,6 +1601,7 @@ public final class P256P384 {
     public static void emitP384Negate(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
         cDecomposePoint(t, "_pt", "_nx", "_ny", 48, REV48);
+        cEmitCoordCanonVerify(t, "_nx", "_ny", P384_P);
         cPushFieldP(t, "_fp", P384_P);
         cFieldSub(t, "_fp", "_ny", "_neg_y", P384_P);
         cComposePoint(t, "_nx", "_neg_y", "_result", 48, REV48);
@@ -1533,6 +1609,10 @@ public final class P256P384 {
 
     public static void emitP384OnCurve(Consumer<StackOp> emit) {
         ECTracker t = new ECTracker(List.of("_pt"), emit);
+        // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+        // contracts are told to gate an untrusted point on, so it must stay total.
+        // The flag is ANDed into the result below.
+        Ec.emitPointLengthGate(t, "_pt", 48 * 2, "_len_ok");
         cDecomposePoint(t, "_pt", "_x", "_y", 48, REV48);
         cEmitCanonicityGuard(t, "_x", "_y", P384_P);
 
@@ -1552,25 +1632,33 @@ public final class P256P384 {
         t.rawBlock(List.of("_y2", "_rhs"), "_curve_eq",
             e -> e.accept(new OpcodeOp("OP_EQUAL")));
 
-        // on-curve = canonical AND curve-equation
+        // on-curve = right width AND canonical AND curve-equation
         t.toTop("_canon");
         t.toTop("_curve_eq");
-        t.rawBlock(List.of("_canon", "_curve_eq"), "_result",
+        t.rawBlock(List.of("_canon", "_curve_eq"), "_eq_ok",
+            e -> e.accept(new OpcodeOp("OP_BOOLAND")));
+        t.toTop("_len_ok");
+        t.toTop("_eq_ok");
+        t.rawBlock(List.of("_len_ok", "_eq_ok"), "_result",
             e -> e.accept(new OpcodeOp("OP_BOOLAND")));
     }
 
     public static void emitP384EncodeCompressed(Consumer<StackOp> emit) {
+        // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+        // appended byte flipped the sign of the compressed encoding. Width is now
+        // verified AND the parity byte is read from a fixed offset. See
+        // Ec.emitEcEncodeCompressed for the full argument.
+        Ec.emitPointLenVerify(emit, 96);
         emit.accept(new PushOp(PushValue.of(48)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
-        emit.accept(new OpcodeOp("OP_SIZE"));
-        emit.accept(new PushOp(PushValue.of(1)));
-        emit.accept(new OpcodeOp("OP_SUB"));
+        // Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.accept(new PushOp(PushValue.of(47)));
         emit.accept(new OpcodeOp("OP_SPLIT"));
+        emit.accept(new OpcodeOp("OP_NIP")); // drop y_head
+        // Stack: [x_bytes, last_byte]
         emit.accept(new OpcodeOp("OP_BIN2NUM"));
         emit.accept(new PushOp(PushValue.of(2)));
         emit.accept(new OpcodeOp("OP_MOD"));
-        emit.accept(new SwapOp());
-        emit.accept(new DropOp());
         emit.accept(new IfOp(
             List.of(new PushOp(PushValue.ofHex("03"))),
             List.of(new PushOp(PushValue.ofHex("02")))));

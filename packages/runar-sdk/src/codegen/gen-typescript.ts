@@ -134,7 +134,7 @@ export function generateTypescript(artifact: RunarArtifact): string {
   blank();
 
   // deployWithWallet
-  emit('  async deployWithWallet(options: { satoshis?: number; description?: string } = {}): Promise<{ txid: string; outputIndex: number }> {');
+  emit('  async deployWithWallet(options: { satoshis?: number; description?: string; acknowledgeUnsound?: readonly string[] } = {}): Promise<{ txid: string; outputIndex: number }> {');
   emit('    return this.inner.deployWithWallet(options);');
   emit('  }');
   blank();

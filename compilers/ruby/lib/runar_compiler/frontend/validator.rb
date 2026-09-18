@@ -5,12 +5,28 @@
 # Checks the AST against language subset constraints WITHOUT modifying it.
 # Direct port of compilers/python/runar_compiler/frontend/validator.py.
 
+require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "sighash_validate"
 
 module RunarCompiler
   module Frontend
+    # Whether the expression is the `toByteString(<literal>)` ByteStringLiteral
+    # production (spec/grammar.md section 11).
+    #
+    # Literal argument ONLY -- `toByteString(x)` for a non-literal `x` is not
+    # this production and stays a non-literal initializer. Peer of the TS
+    # helper of the same name in `02-validate.ts`. Shared with `anf_lower.rb`,
+    # which must UNWRAP exactly the shape this accepts.
+    def self.to_byte_string_literal?(expr)
+      expr.is_a?(CallExpr) &&
+        expr.callee.is_a?(Identifier) &&
+        expr.callee.name == "toByteString" &&
+        expr.args.length == 1 &&
+        expr.args[0].is_a?(ByteStringLiteral)
+    end
+
     # Output of the validation pass.
     class ValidationResult
       attr_reader :errors, :warnings
@@ -187,6 +203,32 @@ module RunarCompiler
           if !assigned_props.include?(name) && !props_with_init.include?(name)
             add_error(
               "property '#{name}' must be assigned in the constructor",
+              loc: ctor.source_location
+            )
+          end
+        end
+
+        # N-092: a FixedArray may not be a constructor PARAMETER.
+        #
+        # A property's deploy-time value reaches the script through a
+        # constructor SLOT, and expand_fixed_arrays is what turns a FixedArray
+        # PROPERTY into the scalar siblings those slots can address. A
+        # constructor PARAMETER has no such expansion, so the argument has
+        # nowhere to be spliced: before this check the tier compiled such a
+        # contract to a full stateful locking script with NO constructor slots
+        # at all -- deployable, with state its own ABI claims to take an
+        # argument for (it even names xs__0 / xs__1 / xs__2) and can never
+        # receive.
+        #
+        # The rule keys on the parameter's TYPE alone, not on the parent class:
+        # ts / go / rust / python / java all refuse it on stateless contracts
+        # too. Spelled to match the ts / rust / python / java wording verbatim,
+        # since the cross-tier rejection gate compares diagnostics.
+        ctor.params.each do |param|
+          if param.type.is_a?(FixedArrayType)
+            add_error(
+              "Constructor parameter '#{param.name}' cannot be a FixedArray. " \
+              "Use initialized properties or pass each element as a separate parameter.",
               loc: ctor.source_location
             )
           end
@@ -400,7 +442,23 @@ module RunarCompiler
         return true if expr.is_a?(BigIntLiteral) || expr.is_a?(BoolLiteral) || expr.is_a?(ByteStringLiteral)
         return expr.operand.is_a?(BigIntLiteral) if expr.is_a?(UnaryExpr) && expr.op == "-"
 
-        false
+        # `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+        # spec/grammar.md section 11:
+        #
+        #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        #
+        # 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        # position. This check runs on the AST, BEFORE ANF lowering, so an
+        # initializer still arrives here as a call node and was refused -- in
+        # the one position the `.runar.rs` surface needs it, since the Rust DSL
+        # writes initializers as assignments inside `init()` that the parser
+        # LIFTS into `PropertyNode.initializer`, and a bare `"1976a914"` is a
+        # `&str` that cannot be assigned to a `ByteString` (`Vec<u8>`).
+        #
+        # Accepting it here is only half the job: `_extract_literal_value` in
+        # anf_lower.rb must UNWRAP the same shape, or the property validates
+        # and then loses its default entirely.
+        Frontend.to_byte_string_literal?(expr)
       end
 
       # Whether the expression is an array literal whose elements are all
@@ -425,6 +483,17 @@ module RunarCompiler
             if type_node.name == "void"
               add_error(
                 "property type 'void' is not valid at #{loc.file}:#{loc.line}",
+                loc: loc
+              )
+            else
+              # R-246: any other unrecognised primitive name used to fall
+              # through in silence, while the identical name arriving as a
+              # CustomType is refused below. No parser produces a PrimitiveType
+              # with an unknown name today -- they all map an unrecognised name
+              # to CustomType -- but +validate+ takes an AST, and the frontend
+              # is not the only thing that builds one.
+              add_error(
+                "unsupported type '#{type_node.name}' in property declaration at #{loc.file}:#{loc.line}",
                 loc: loc
               )
             end
@@ -491,7 +560,7 @@ module RunarCompiler
         end
 
         # #131: warn when a public method gates on extractLocktime but never
-        # asserts the spending tx is non-final (extractSequence < 0xffffffff).
+        # asserts the spending tx is non-final (extractSequence !== 0xffffffff).
         # Advisory only.
         if method.visibility == "public"
           warn_locktime_without_sequence_guard(method)
@@ -500,9 +569,13 @@ module RunarCompiler
         # Gate asm({...}) calls on UnsafeSmartContract and check the structural args.
         validate_asm_usage(method)
 
-        # FixedArray is not allowed as a method parameter type.  The SDK
-        # accepts FixedArray constructor args and flattens them on behalf of
-        # the caller, but method params carry no expansion pass.
+        # FixedArray is not allowed as a method parameter type: method params
+        # carry no expansion pass.  Neither do CONSTRUCTOR params -- this
+        # comment used to claim the SDK flattens FixedArray constructor args on
+        # the caller's behalf, which the artifact refutes (such a contract
+        # compiled with an EMPTY constructorSlots list, so nothing could be
+        # spliced).  Constructor params are refused in validate_constructor
+        # above (N-092), matching the other six tiers.
         method.params.each do |param|
           if param.type.is_a?(FixedArrayType)
             add_error(
@@ -632,8 +705,296 @@ module RunarCompiler
           end
         end
 
+        validate_for_condition_tests_iterator(stmt)
+
         validate_expression(stmt.init.init)
+        validate_for_update(stmt)
+        validate_no_output_intrinsic_in_loop(stmt)
         stmt.body.each { |s| validate_statement(s) }
+      end
+
+      # Reject a for-loop whose condition does not test the iterator (W4).
+      #
+      # The bound check above reads only `condition.right`. Nothing required
+      # `condition.left` to BE the iterator, and extract_loop_shape ignores
+      # left entirely: it computes `count = bound - start`. So
+      #
+      #   for (let i = 0n; i + 1n < 2n; i++) { ... }
+      #
+      # runs ONCE in the source language and TWICE in the emitted script
+      # (count = 2 - 0). The extra lap executes the `else` arm the source can
+      # never reach. Measured on @bsv/sdk Spend.validate() with a vault whose
+      # signature check sits in the first lap and whose second lap sets
+      # `authorized = true`: the phantom-lap loop ACCEPTED an empty signature,
+      # while the semantically identical `i < 1n` rejected it.
+      #
+      # Refusal rather than lowering: evaluating a general condition per
+      # iteration means unrolling against a real interpreter at ANF time, a
+      # language extension with no golden behind it. The diagnostic text is
+      # shared verbatim with the other six tiers.
+      def validate_for_condition_tests_iterator(stmt)
+        iter = stmt.init.name
+        cond = stmt.condition
+        return if cond.is_a?(BinaryExpr) && cond.left.is_a?(Identifier) && cond.left.name == iter
+
+        add_error(
+          "For loop condition must compare the loop variable '#{iter}' to a compile-time " \
+          "constant (`#{iter} < 10n`). The unrolled loop binds the iterator as " \
+          "`start + k*step` and takes its trip count from the bound alone, so a condition " \
+          "whose left-hand side is anything else -- a computed expression, or a different " \
+          "variable -- is not the condition the loop actually evaluates",
+          loc: stmt.source_location
+        )
+      end
+
+      # The three intrinsics that register an output ref.
+      OUTPUT_INTRINSIC_NAMES = %w[addOutput addRawOutput addDataOutput].freeze
+
+      # Build the R-127 rejection. Shared verbatim with the other six
+      # tiers.
+      def self.loop_output_intrinsic_msg(intrinsic, via)
+        via_clause = via ? " (reached through private method '#{via}')" : ""
+        "Output intrinsic '#{intrinsic}'#{via_clause} cannot be called inside a loop " \
+          "body. A loop body lowers into its own scope whose declared outputs never reach " \
+          "the method's output list, so the continuation hash would commit to fewer outputs " \
+          "than the transaction actually creates: the spend is rejected by every shipped SDK " \
+          "and any successor it produces is unspendable. Move the call out of the loop."
+      end
+
+      # Reject an output intrinsic called inside a loop body (R-127).
+      #
+      # `anf_lower` lowers a loop body into its own sub-context, which starts
+      # with a fresh empty add-output ref list, and nothing propagates that list
+      # back to the method context -- unlike the if-statement lowering, which
+      # concatenates each arm's outputs into one ref precisely so the parent
+      # sees them. The continuation hash is then built from whatever `addOutput`
+      # calls sit at the method's TOP level while the loop's outputs are still
+      # emitted into the transaction. Measured on a two-iteration loop before
+      # this check existed:
+      #
+      #   * loop only -- ts/go/rust/python blew up inside stack lowering
+      #     ("method parameter '_newAmount' is not on the stack at a
+      #     post-consumption reference"), zig/ruby emitted a covenant over the
+      #     WRONG output set, java emitted none. THIS tier was one of the two
+      #     that silently shipped the wrong covenant.
+      #   * loop + one top-level call -- compiled clean in every tier, and the
+      #     ANF continuation hashed exactly ONE leaf while three outputs were
+      #     built.
+      #
+      # A continuation committing to fewer outputs than the transaction creates
+      # is spendable only by a hand-crafted transaction, is rejected by every
+      # shipped SDK, and the successor it produces is permanently unspendable
+      # (CL-BUG-164).
+      #
+      # Refusal rather than lowering: propagating the refs cannot work by name,
+      # because the loop is unrolled at stack-lowering time and one body binding
+      # name denotes N physical slots. A correct lowering means unrolling at ANF
+      # time, a language feature with no golden behind it; refusing removes
+      # nothing that works today.
+      def validate_no_output_intrinsic_in_loop(stmt)
+        found = find_output_intrinsic(stmt.body, Set.new)
+        return if found.nil?
+
+        intrinsic, via, loc = found
+        add_error(
+          self.class.loop_output_intrinsic_msg(intrinsic, via),
+          loc: loc || stmt.source_location,
+        )
+      end
+
+      # The property/function name a call names, or nil. Distinct from the
+      # `callee_property` further down, which takes the CALLEE node itself and
+      # does not follow identifiers.
+      def output_callee_property(expr)
+        return nil unless expr.is_a?(CallExpr)
+
+        callee = expr.callee
+        return callee.property if callee.is_a?(PropertyAccessExpr)
+        return callee.property if callee.is_a?(MemberExpr)
+        return callee.name if callee.is_a?(Identifier)
+
+        nil
+      end
+
+      def private_method_named(name)
+        @contract.methods.find { |m| m.name == name && m.visibility == "private" }
+      end
+
+      # First output intrinsic reachable from `stmts`, following calls to
+      # private methods: a public method that delegates `addOutput` to a private
+      # helper has that helper INLINED at ANF time, so a helper called in a loop
+      # lands its outputs in the loop's sub-context exactly as a direct call
+      # would.
+      def find_output_intrinsic(stmts, seen)
+        stmts.each do |stmt|
+          found = find_output_intrinsic_in_statement(stmt, seen)
+          return found unless found.nil?
+        end
+        nil
+      end
+
+      def find_output_intrinsic_in_statement(stmt, seen)
+        case stmt
+        when ExpressionStmt
+          find_output_intrinsic_in_expr(stmt.expr, stmt.source_location, seen)
+        when VariableDeclStmt
+          find_output_intrinsic_in_expr(stmt.init, stmt.source_location, seen)
+        when AssignmentStmt
+          find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        when ReturnStmt
+          find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        when IfStmt
+          found = find_output_intrinsic_in_expr(stmt.condition, stmt.source_location, seen)
+          return found unless found.nil?
+
+          find_output_intrinsic((stmt.then || []) + (stmt.else_ || []), seen)
+        when ForStmt
+          find_output_intrinsic(stmt.body, seen)
+        end
+      end
+
+      def find_output_intrinsic_in_expr(expr, loc, seen)
+        return nil if expr.nil?
+
+        name = output_callee_property(expr)
+        unless name.nil?
+          return [name, nil, loc] if OUTPUT_INTRINSIC_NAMES.include?(name)
+
+          helper = private_method_named(name)
+          if helper && !seen.include?(name)
+            seen << name
+            nested = find_output_intrinsic(helper.body, seen)
+            return [nested[0], name, loc] unless nested.nil?
+          end
+        end
+
+        sub_expressions(expr).each do |child|
+          found = find_output_intrinsic_in_expr(child, loc, seen)
+          return found unless found.nil?
+        end
+        nil
+      end
+
+      # Direct sub-expressions of `expr`, for the intrinsic search above. An
+      # intrinsic can sit inside an argument list or an operand, not only as a
+      # bare expression statement.
+      def sub_expressions(expr)
+        case expr
+        when CallExpr then expr.args || []
+        when BinaryExpr then [expr.left, expr.right]
+        when UnaryExpr then [expr.operand]
+        when TernaryExpr then [expr.condition, expr.consequent, expr.alternate]
+        when IndexAccessExpr then [expr.object, expr.index]
+        else []
+        end
+      end
+
+      # Shared verbatim with the other six tiers. Per-tier diagnostic drift on
+      # the same rejection is a recurring defect in this repo, so the string is
+      # mirrored, character for character, in
+      # packages/runar-compiler/src/passes/02-validate.ts,
+      # compilers/go/frontend/validator.go,
+      # compilers/rust/src/frontend/validator.rs,
+      # compilers/python/runar_compiler/frontend/validator.py,
+      # compilers/zig/src/frontend/validator.zig and
+      # compilers/java/src/main/java/runar/compiler/passes/Validate.java.
+      LOOP_UPDATE_DIAGNOSTIC =
+        "For loop update must advance the loop variable by one (`i++`, `i--`, " \
+        "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a " \
+        "unit step, so any other update clause -- a function call, a state mutation, or a " \
+        "non-unit step such as `i += 2` -- cannot be represented and would be discarded"
+
+      # Reject any for-loop update clause the loop model cannot represent
+      # (R-065).
+      #
+      # The ANF `loop` node carries exactly `{count, iterVar, start, step, body}`
+      # and synthesizes the iterator on unrolled iteration k as
+      # `start + k*step`. There is no slot for an arbitrary update statement,
+      # and `extract_loop_step` only ever understood a unit step -- everything
+      # else was silently coerced to `+1` (or `-1` from the comparison
+      # direction) and the clause itself was discarded. That made three distinct
+      # failures indistinguishable from a correct compile:
+      #
+      #   * `for (let i = 0n; i < 3n; undefinedFn())` produced byte-identical
+      #     output. A nonexistent function name raised nothing.
+      #   * `for (let i = 0n; i < 3n; this.count++)` dropped the state write.
+      #   * `while (i < 5) : (i += 2)` unrolled 5 times over i = 0..4 instead of
+      #     3 times over i = 0,2,4.
+      #
+      # spec/grammar.md's ForStatement production admits only
+      # `Identifier ('++' | '--')`, and its Statement Restrictions say "The loop
+      # variable MUST use simple increment (`++`) or decrement (`--`)". So
+      # rejecting is the fix rather than lowering: appending the update's
+      # lowering to the loop body would re-emit `i++` as a dead binding on every
+      # loop that already compiles correctly, moving bytes across the whole
+      # corpus to express nothing.
+      #
+      # The accepted set is every shape the nine frontends actually synthesize:
+      # `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` /
+      # `i = i - 1` / `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and
+      # Java parsers; and the effect-free no-op sentinel (a literal or a bare
+      # identifier) that the while-shaped parsers synthesize when the source has
+      # no continue expression at all.
+      #
+      # The advanced variable must be the declared iterator or the identifier
+      # the condition tests. Both are needed: the Zig parser only folds
+      # `var i = 0; while (i < N) : (i += 1)` into a single ForStmt when the
+      # declaration is the immediately preceding statement, so an unfolded loop
+      # carries a placeholder init while the update advances the real `i` named
+      # in the condition.
+      def validate_for_update(stmt)
+        allowed = []
+        allowed << stmt.init.name unless stmt.init.nil?
+        if stmt.condition.is_a?(BinaryExpr) && stmt.condition.left.is_a?(Identifier)
+          allowed << stmt.condition.left.name
+        end
+
+        return if representable_for_update?(allowed, stmt.update)
+
+        add_error(LOOP_UPDATE_DIAGNOSTIC, loc: stmt.source_location)
+      end
+
+      # True when `expr` names one of the identifiers the update is allowed to
+      # advance. A property access, an index access or anything else is never
+      # accepted: those are the side effects that used to be dropped.
+      def allowed_loop_var?(allowed, expr)
+        expr.is_a?(Identifier) && allowed.include?(expr.name)
+      end
+
+      def literal_one?(expr)
+        expr.is_a?(BigIntLiteral) && expr.value == 1
+      end
+
+      def representable_for_update?(allowed, update)
+        case update
+        when ExpressionStmt
+          e = update.expr
+          return allowed_loop_var?(allowed, e.operand) if e.is_a?(IncrementExpr) || e.is_a?(DecrementExpr)
+
+          # The no-op sentinel a while-shaped frontend synthesizes when the
+          # source carries no continue expression: zig's `while (c) {}`, move's
+          # `while (c) {}`, go's `for c {}`. Reading a literal or a bare
+          # identifier has no effect, so discarding it loses nothing.
+          e.is_a?(BigIntLiteral) || e.is_a?(BoolLiteral) || e.is_a?(Identifier)
+        when AssignmentStmt
+          # `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+          return false unless allowed_loop_var?(allowed, update.target)
+
+          v = update.value
+          return false unless v.is_a?(BinaryExpr)
+
+          case v.op
+          when "+"
+            (allowed_loop_var?(allowed, v.left) && literal_one?(v.right)) ||
+              (literal_one?(v.left) && allowed_loop_var?(allowed, v.right))
+          when "-"
+            allowed_loop_var?(allowed, v.left) && literal_one?(v.right)
+          else
+            false
+          end
+        else
+          false
+        end
       end
 
       # -------------------------------------------------------------------
@@ -1008,33 +1369,62 @@ module RunarCompiler
         call_to_named?(expr, "extractLocktime") || call_to_named?(expr, "currentBlockHeight")
       end
 
-      # True when +expr+ is an +extractSequence(...) < <final>+-style comparison
-      # (the guard that makes a locktime gate consensus-enforced). Accepts the
-      # two natural spellings: +extractSequence(pre) < N+ / +<= N+, and the
-      # reversed +N > extractSequence(pre)+ / +>= ...+. +N+ must be a bigint
-      # literal no greater than the finality sentinel, so the guard genuinely
-      # forces non-finality.
+      # True when +expr+ is a comparison on +extractSequence(...)+ that
+      # genuinely EXCLUDES the finality sentinel +0xffffffff+, reading the
+      # field as the unsigned 32-bit wire value it is (see
+      # +_emit_unsigned_bin2num+ in codegen/stack.rb).
+      #
+      # Accepted:
+      #   extractSequence(pre) !== 0xffffffff   and the reversed spelling
+      #   extractSequence(pre) <  N, 0 < N <= 0xffffffff   (reversed: N > ...)
+      #   extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
+      #
+      # Deliberately NOT accepted: +<= 0xffffffff+ and +>= 0xffffffff+.
+      # nSequence cannot exceed 0xffffffff, so those are true for every
+      # transaction including the final one -- a tautology that used to silence
+      # this warning on a contract with no guard at all (W1 / FinalCountdown).
+      #
+      # Also NOT accepted: +extractSequence(pre) < 0+. Unsigned nSequence is
+      # never negative, so that comparison is vacuous.
       def sequence_finality_guard?(expr)
         return false unless expr.is_a?(BinaryExpr)
 
-        bound_ok = ->(e) { e.is_a?(BigIntLiteral) && e.value <= SEQUENCE_FINAL }
+        final_sentinel = ->(e) { e.is_a?(BigIntLiteral) && e.value == SEQUENCE_FINAL }
+        strict_bound_ok = ->(e) { e.is_a?(BigIntLiteral) && e.value > 0 && e.value <= SEQUENCE_FINAL }
+        non_strict_bound_ok = ->(e) { e.is_a?(BigIntLiteral) && e.value < SEQUENCE_FINAL }
 
-        if ["<", "<="].include?(expr.op) &&
-           call_to_named?(expr.left, "extractSequence") && bound_ok.call(expr.right)
-          return true
+        case expr.op
+        when "!=="
+          (call_to_named?(expr.left, "extractSequence") && final_sentinel.call(expr.right)) ||
+            (call_to_named?(expr.right, "extractSequence") && final_sentinel.call(expr.left))
+        when "<"
+          call_to_named?(expr.left, "extractSequence") && strict_bound_ok.call(expr.right)
+        when "<="
+          call_to_named?(expr.left, "extractSequence") && non_strict_bound_ok.call(expr.right)
+        when ">"
+          call_to_named?(expr.right, "extractSequence") && strict_bound_ok.call(expr.left)
+        when ">="
+          call_to_named?(expr.right, "extractSequence") && non_strict_bound_ok.call(expr.left)
+        else
+          false
         end
-        if [">", ">="].include?(expr.op) &&
-           call_to_named?(expr.right, "extractSequence") && bound_ok.call(expr.left)
-          return true
-        end
+      end
 
-        false
+      # True when asserting +expr+ logically implies a sequence-finality
+      # guard. A matching comparison nested under +!+ (or +||+) does not
+      # count: +assert(!(extractSequence !== 0xffffffff))+ requires a FINAL
+      # sequence. +&&+ implies each conjunct.
+      def assertion_implies_sequence_guard?(expr)
+        return true if sequence_finality_guard?(expr)
+        return false unless expr.is_a?(BinaryExpr) && expr.op == '&&'
+
+        assertion_implies_sequence_guard?(expr.left) || assertion_implies_sequence_guard?(expr.right)
       end
 
       # #131: warn when +method+ (transitively, through the private-helper call
       # graph) reads the tx locktime but never asserts the tx is non-final. A
       # locktime gate is not consensus-enforced unless
-      # +extractSequence < 0xffffffff+ is also asserted -- otherwise an
+      # +extractSequence !== 0xffffffff+ is also asserted -- otherwise an
       # all-final-sequence spend bypasses it. Advisory (warning) only -- no
       # effect on emitted bytecode.
       def warn_locktime_without_sequence_guard(method)
@@ -1052,7 +1442,11 @@ module RunarCompiler
           current = queue.shift
           walk_expressions_in_body(current.body, proc do |expr|
             reads_locktime = true if locktime_read?(expr)
-            has_sequence_guard = true if sequence_finality_guard?(expr)
+            if assert_call?(expr)
+              expr.args.each do |arg|
+                has_sequence_guard = true if assertion_implies_sequence_guard?(arg)
+              end
+            end
           end)
 
           # Follow calls into private helpers so a guard (or locktime read)
@@ -1071,9 +1465,9 @@ module RunarCompiler
 
         @warnings << Diagnostic.new(
           message: "method '#{method.name}' reads extractLocktime but does not assert " \
-                   "extractSequence < 0xffffffff; a locktime gate is not consensus-enforced " \
+                   "extractSequence is not 0xffffffff; a locktime gate is not consensus-enforced " \
                    "unless the tx is non-final — add " \
-                   "assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+                   "assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
           severity: Severity::WARNING,
           loc: method.source_location
         )

@@ -78,7 +78,8 @@ fn state_round_trips_for_every_single_byte_value() {
     for byte in 0u16..=0xff {
         let payload = format!("{:02x}", byte);
         let encoded = encode(&payload);
-        let decoded = deserialize_state(&fields, &encoded);
+        let decoded = deserialize_state(&fields, &encoded)
+            .unwrap_or_else(|e| panic!("deserialize_state refused a well-formed blob {encoded:?}: {e}"));
         match decoded.get("b") {
             Some(SdkValue::Bytes(h)) => assert_eq!(*h, payload, "roundtrip 0x{:02x}", byte),
             other => panic!("roundtrip 0x{:02x}: unexpected value {:?}", byte, other),

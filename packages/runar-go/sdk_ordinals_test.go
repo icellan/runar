@@ -235,10 +235,12 @@ func TestGetLockingScript_Stateless_WithInscription(t *testing.T) {
 
 	contract := NewRunarContract(artifact, []interface{}{})
 	data := hex.EncodeToString([]byte("hello"))
-	contract.WithInscription(&Inscription{
+	if _, err := contract.WithInscription(&Inscription{
 		ContentType: "text/plain",
 		Data:        data,
-	})
+	}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 
@@ -267,10 +269,12 @@ func TestGetLockingScript_Stateful_WithInscription(t *testing.T) {
 
 	contract := NewRunarContract(artifact, []interface{}{int64(42)})
 	data := hex.EncodeToString([]byte("token"))
-	contract.WithInscription(&Inscription{
+	if _, err := contract.WithInscription(&Inscription{
 		ContentType: "application/bsv-20",
 		Data:        data,
-	})
+	}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 
@@ -312,12 +316,15 @@ func TestFromUtxo_RoundTripsInscription(t *testing.T) {
 	envelope := BuildInscriptionEnvelope("text/plain", data)
 	onChainScript := "aabbccdd" + envelope
 
-	contract := FromUtxo(artifact, UTXO{
+	contract, err := FromUtxo(artifact, UTXO{
 		Txid:        strings.Repeat("ab", 32),
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      onChainScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 
 	insc := contract.GetInscription()
 	if insc == nil {
@@ -346,12 +353,15 @@ func TestFromUtxo_RoundTripsInscription_Stateful(t *testing.T) {
 	stateHex := SerializeState(artifact.StateFields, map[string]interface{}{"count": int64(99)})
 	onChainScript := "aabbccdd" + envelope + "6a" + stateHex
 
-	contract := FromUtxo(artifact, UTXO{
+	contract, err := FromUtxo(artifact, UTXO{
 		Txid:        strings.Repeat("ab", 32),
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      onChainScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 
 	insc := contract.GetInscription()
 	if insc == nil {
@@ -390,12 +400,15 @@ func TestFromUtxo_NoDoubleEnvelopeInjection(t *testing.T) {
 	stateHex := SerializeState(artifact.StateFields, map[string]interface{}{"count": int64(42)})
 	onChainScript := "aabbccdd" + envelope + "6a" + stateHex
 
-	contract := FromUtxo(artifact, UTXO{
+	contract, err := FromUtxo(artifact, UTXO{
 		Txid:        strings.Repeat("ab", 32),
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      onChainScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 
 	// GetLockingScript should produce the same script (using codeScript from chain)
 	lockingScript := contract.GetLockingScript()
@@ -424,7 +437,10 @@ func TestGorillaPoolProvider_ImplementsProvider(t *testing.T) {
 }
 
 func TestGorillaPoolProvider_NetworkURLs(t *testing.T) {
-	mainnet := NewGorillaPoolProvider("mainnet")
+	mainnet, err := NewGorillaPoolProvider("mainnet")
+	if err != nil {
+		t.Fatalf("mainnet: unexpected error %v", err)
+	}
 	if mainnet.baseURL != "https://ordinals.gorillapool.io/api" {
 		t.Errorf("mainnet URL: got %q", mainnet.baseURL)
 	}
@@ -432,19 +448,25 @@ func TestGorillaPoolProvider_NetworkURLs(t *testing.T) {
 		t.Errorf("mainnet network: got %q", mainnet.GetNetwork())
 	}
 
-	testnet := NewGorillaPoolProvider("testnet")
+	testnet, err := NewGorillaPoolProvider("testnet")
+	if err != nil {
+		t.Fatalf("testnet: unexpected error %v", err)
+	}
 	if testnet.baseURL != "https://testnet.ordinals.gorillapool.io/api" {
 		t.Errorf("testnet URL: got %q", testnet.baseURL)
 	}
 
-	defaultNet := NewGorillaPoolProvider("")
-	if defaultNet.GetNetwork() != "mainnet" {
-		t.Errorf("default network: got %q", defaultNet.GetNetwork())
+	// R-051: an empty network is rejected, never defaulted to mainnet.
+	if _, err := NewGorillaPoolProvider(""); err == nil {
+		t.Error("empty network: expected rejection, got a provider")
 	}
 }
 
 func TestGorillaPoolProvider_FeeRate(t *testing.T) {
-	p := NewGorillaPoolProvider("mainnet")
+	p, err := NewGorillaPoolProvider("mainnet")
+	if err != nil {
+		t.Fatalf("constructor error: %v", err)
+	}
 	rate, err := p.GetFeeRate()
 	if err != nil {
 		t.Fatalf("GetFeeRate error: %v", err)
@@ -465,7 +487,10 @@ func TestWithInscription_Chaining(t *testing.T) {
 	})
 
 	contract := NewRunarContract(artifact, []interface{}{})
-	result := contract.WithInscription(&Inscription{ContentType: "text/plain", Data: "aabb"})
+	result, err := contract.WithInscription(&Inscription{ContentType: "text/plain", Data: "aabb"})
+	if err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	// WithInscription returns the same contract for chaining
 	if result != contract {

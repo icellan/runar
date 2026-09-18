@@ -8,6 +8,44 @@ Most fixtures run on every tier. A small number opt out of one or more tiers —
 
 ---
 
+
+## Installing this directory
+
+`conformance/` is a **separate npm root**. It is not listed in
+`pnpm-workspace.yaml`, and it has its own `package.json` and
+`package-lock.json` (`tsx`, `typescript`, `fast-check`). The repo-level
+`pnpm install` does not install it:
+
+```bash
+cd conformance && npm ci
+```
+
+Every script in this directory resolves `tsx` from `conformance/node_modules`,
+so without that step they fail on startup instead of reporting a test result.
+CI runs the same command in three jobs (`ci.yml`). Running the cross-tier
+matrix additionally requires each non-TS compiler to be BUILT, not just
+installed — the runner locates `compilers/go/runar-go`,
+`compilers/rust/target/release/runar-compiler-rust`,
+`compilers/zig/zig-out/bin/runar-zig` and `compilers/java/build/libs/*.jar`.
+
+A tier whose binary cannot be located is **dropped, not failed**, unless
+`CI=true` — local devs rarely have all seven toolchains installed. A dropped
+tier is never silent, though (R-103):
+
+- the runner prints an `INCOMPLETE COVERAGE` banner to stderr before the first
+  fixture, naming every binary it could not find;
+- the end-of-run summary repeats it (`This PASS covers 6 tiers, not 7`), so a
+  local PASS cannot be mistaken for full cross-tier coverage;
+- `RUNAR_CONFORMANCE_STRICT=1` (or `=true`) makes a missing toolchain a
+  **non-zero exit locally**, exactly as `CI=true` does. Use it before claiming
+  a change is cross-tier clean.
+
+A run that evaluated **zero fixtures** is also a failure now (exit 2, the
+harness-fault code), in the golden, `--multi-format`, `--parser-only` and
+`--ir-parity` modes alike. A wrong `--tests-dir`, a wrong cwd or a mistyped
+`--filter` used to print `Summary: 0 passed, 0 failed, 0 skipped (0 total)` and
+exit 0.
+
 ## Purpose
 
 Rúnar defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce byte-identical ANF IR (serialized via RFC 8785). The conformance suite verifies this property.
@@ -112,7 +150,7 @@ The parser layer is tier-agnostic: the conformance runner's `discoverFormats()` 
 
 #### Per-tier universal parser coverage
 
-The runner's `--parser-only` mode (CI step "Run all-tier parser-only coverage") **runs every available compiler's `--parse-only` entry point against every fixture × every declared format**, ignoring the per-fixture `compilers` allowlist. The allowlist scopes Stack-IR / hex parity ONLY — the parser layer is universal, so all 7 tiers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) MUST accept all 9 formats for every fixture. Each compiler exposes `--parse-only` (Java additionally accepts `parseOnly: true` in its JSON-RPC daemon) which runs Pass 1 (parse) + Pass 2 (validate) and exits zero with `parser ok` on success or non-zero with diagnostics on failure. A non-zero exit fails the CI job.
+The runner's `--parser-only` mode (CI step "Run all-tier parser-only coverage") **runs every available compiler's `--parse-only` entry point against every fixture × every declared format**, ignoring the per-fixture `compilers` allowlist. The allowlist scopes ANF-IR / hex parity ONLY — the parser layer is universal, so all 7 tiers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) MUST accept all 9 formats for every fixture. Each compiler exposes `--parse-only` (Java additionally accepts `parseOnly: true` in its JSON-RPC daemon) which runs Pass 1 (parse) + Pass 2 (validate) and exits zero with `parser ok` on success or non-zero with diagnostics on failure. A non-zero exit fails the CI job.
 
 Run locally:
 
@@ -259,6 +297,83 @@ Tuning knobs when a loaded host trips this:
 * `RUNAR_CONFORMANCE_CONCURRENCY` (default `max(2, min(8, cpus/4))`) — outer
   fixture parallelism. Each fixture fans out to up to 7 compiler processes, so
   the default already runs ~14 children on an 8-core host.
+
+---
+
+## What the byte-identical guarantee does NOT cover
+
+"All seven compilers produce byte-identical output" is true of exactly two
+things per fixture: the canonical **ANF IR JSON** and the **script hex**. Two
+places drop fields before comparing, both deliberately, and several artifact
+fields are never compared at all. Listed here because the gap that matters is
+not the stripping — it is a reader concluding the whole artifact is gated
+(R-302).
+
+**Stripped before the ANF comparison**
+
+| field | where | why |
+| --- | --- | --- |
+| `sourceLoc` | `runner/runner.ts` `sortKeys()` | source locations legitimately differ between parser implementations; they are debug data, not wire bytes |
+
+**Stripped by the sdk-vertical generator** (`sdk-vertical/generate.ts`,
+`STRIPPED`): `ir`, `anf`, `asm`, `sourceMap`, `buildTimestamp`. Those cases test
+what an SDK does with an artifact, not how the artifact was compiled.
+
+**Never compared by the main runner**
+
+- `constructorSlots` (including each slot's `byteOffset`)
+- `codeSeparatorIndex` and `codeSeparatorIndices`
+- `sourceMap`
+- `buildTimestamp` — deliberately, it is a build time; it is pinned instead by
+  each tier honouring `SOURCE_DATE_EPOCH` (R-212)
+
+`constructorSlots[].byteOffset` is the one to keep in mind. It is where the SDKs
+splice constructor arguments into the locking script, so a tier that computed it
+wrongly while emitting identical script hex would pass this gate and produce a
+deployed contract whose arguments land in the wrong place. What covers that today
+is `conformance/sdk-output/` (all seven SDKs must produce identical DEPLOYED
+locking scripts, which is splicing applied) and `sdk-vertical/`, not this suite.
+
+## Editing a fixture source: "byte-neutral" is a seven-tier claim
+
+Fixture sources are shared. `conformance/tests/*/source.json` points at the
+files in `examples/<format>/`, so editing `examples/go/ec-primitives/
+ECPrimitives.runar.go` changes what **all seven compilers** parse. A source edit
+meant to be cosmetic — renaming a parameter's TYPE, re-spelling an expression —
+is a claim about seven frontends, and the way to check it is `--multi-format`.
+
+**Diffing `--emit-ir` from one tier before and after does NOT establish it.**
+This has now cost two separate agents in one day, in the same shape both times:
+
+* One re-spelled an expression, diffed the Go tier's ANF before and after, found
+  it identical, and generalised to seven. `--multi-format` came back 735/736.
+* One did the same for `runar.BigintBigEqual(a, b)`, again against the Go tier,
+  again identical. `--multi-format` came back 733/736: the rewrite that makes
+  that spelling equal to `a === b` existed in `compilers/go` and in no other
+  tier, so six tiers rejected the program outright.
+
+The lesson is not "be careful". A single tier's IR is evidence about that tier
+only, and the divergences that matter are exactly the ones where tiers differ.
+Two independent instances in one day is evidence about the method.
+
+What actually settles it, cheapest first:
+
+1. `npx tsx runner/index.ts --multi-format --filter <fixture>` — the whole
+   claim, all nine formats against all seven tiers, in about a minute for one
+   fixture. Do this even when the edit "obviously" cannot matter.
+2. `--parser-only` is NOT a substitute. It stops after parse + validate, so an
+   unknown-builtin — a TYPECHECK diagnostic — is invisible to it. That is
+   precisely why the `BigintBig` spellings survived the all-tier parser matrix.
+3. If the edit introduces a SPELLING that is supposed to mean something else
+   (`runar.BigintBigAdd(a, b)` for `a + b`), the cross-tier check is still not
+   enough on its own: seven tiers can agree on a wrong rewrite. Add the pair to
+   `subtype-parity/` so the spelling is compared against the thing it claims to
+   equal. See `GoBigintBigOperators.runar.go` and its `*Ref.runar.ts` peer.
+
+Note also that `sourceLoc` is stripped by the runner before comparison, so a
+line-number shift from adding or removing a comment is genuinely neutral **for
+the fixture goldens** — but not for `source-map/`, which validates absolute
+lines for the five fixtures it covers.
 
 ---
 
@@ -424,7 +539,7 @@ Goldens are **self-produced** by the very implementation under test — `pnpm ru
 
 **How a golden change is justified.** For **each** changed golden, the gate requires **one** of:
 
-- **(A) Scoped cross-check co-change** — for a fixture golden `conformance/tests/<fixture>/expected-{script.hex,ir.json}`, the same PR also modifies that fixture's independent execution oracle `conformance/witnesses/<fixture>.json`. The differential-execution oracle (`witnesses/differential.test.ts`) re-runs the declared spends through a *second* engine (ANF interpreter + `@bsv/sdk` ScriptVM), so the fixture's new bytes get an accept/reject check that does not come from the compiler that produced them. This is the ergonomic happy-path for a legitimate codegen change.
+- **(A) Scoped cross-check co-change** — for a fixture golden `conformance/tests/<fixture>/expected-{script.hex,ir.json}`, the same PR also modifies that fixture's independent execution oracle: `conformance/witnesses/<fixture>.json`, or — for a **stateful** fixture — `conformance/witnesses/real-crypto/<fixture>.json`. Either way the witness must content-pin the golden's new sha256 in `goldenHashes`; a bare co-change justifies nothing. The stateful alternative exists because the differential oracle has no stateful spend lane, which made route (A) unreachable for every stateful golden; the real-crypto oracle drives real secp256k1 spends against a real BIP-143 context with a hand-authored `expectedState` pin per accept and a `tamperOutput` rejection case, which is the not-derived-from-this-pipeline evidence the differential oracle's own docstring says its verdict agreement cannot supply. The differential-execution oracle (`witnesses/differential.test.ts`) re-runs the declared spends through a *second* engine (ANF interpreter + `@bsv/sdk` ScriptVM), so the fixture's new bytes get an accept/reject check that does not come from the compiler that produced them. This is the ergonomic happy-path for a legitimate codegen change.
 - **(B) Provenance allowlist entry** — an entry in `conformance/golden-provenance-allowlist.json` (works for **any** golden, including runtime-vectors, sdk-output, analyzer, source-map, and coverage-ledger fixtures with no witness):
 
   ```json
@@ -606,7 +721,13 @@ pnpm run wire-format-audit:self-test
 - The **self-test** (`pnpm run wire-format-audit:self-test`) runs on **every** event, so a rename on `main` that turns a glob into a permanent no-op is caught the moment it lands.
 - The **audit** step runs in **fail** mode on `pull_request`, on `merge_group`, **and on `push` to `main` / `release/*`**. The push path is not optional: the 2026-08 state-framing commit this gate exists for was pushed straight to `main`'s first-parent chain and was never a PR, so a `pull_request`-only gate would have watched it go past. Base resolution per event: `origin/<pull_request.base.ref>` → `merge_group.base_sha` → `github.event.before` → `HEAD^`. It is deliberately a **ref**, not `pull_request.base.sha`: that SHA is the base tip as of the PR's last sync, while the checkout is `refs/pull/N/merge` against the *current* base, so diffing from it sweeps in every golden other PRs merged in between — and one of those would satisfy this gate for free. The script resolves `git merge-base <ref> HEAD` at run time. Only base refs/SHAs from `github.event.*` are consumed, passed via `env:` and never interpolated into a shell command.
 
-> **Branch protection is not configurable from the repository.** For this job to actually block, `Lint — wire-format must-move-a-golden gate` must be added to the **required status checks** for `main` and `release/*` in the repository settings (and to the merge queue's required checks). Nothing in this repo can assert that; until an admin does it, the job reports but does not gate.
+> **Branch protection is not configurable from the repository.** For this job to actually block, `Lint — wire-format must-move-a-golden gate` must be added to the **required status checks** for `main` and `release/*` in the repository settings (and to the merge queue's required checks). Nothing in this repo can *configure* that — but since R-104 the repo does state the claim and check it:
+>
+> - `.github/required-checks.json` lists every `ci.yml` job that must be a required status check, under the exact name GitHub matches, with every remaining job explicitly excluded and a reason;
+> - `tests/required-checks-manifest.test.ts` keeps that list honest offline — a renamed or added job fails the test until it is accounted for;
+> - the `Required checks` workflow asks the API what `main` actually requires and fails when a claimed gate is missing. With only the default `GITHUB_TOKEN` the protection endpoint is unreadable (it needs `administration: read`), and the run then says **ENFORCEMENT UNVERIFIED** out loud instead of passing quietly. Set the `BRANCH_PROTECTION_TOKEN` secret to get a verdict.
+>
+> The residual limitation is unchanged and worth stating plainly: a green CI run does not, by itself, prove a red one would have blocked the merge.
 
 ---
 
@@ -689,7 +810,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **64 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **82 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|
@@ -700,10 +821,11 @@ The suite currently contains **64 fixtures** under `tests/` — that directory i
 | `babybear` | BabyBear prime-field arithmetic | Yes |
 | `babybear-ext4` | BabyBear Ext4 extension-field operations | Yes |
 | `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
-| `bitwise-ops` | Bitwise operators (&, \|, ^, ~, <<, >>) on bigint + ByteString | Yes |
+| `bitwise-ops` | Bitwise operators (&, \|, ^, ~, <<, >>) on **bigint** operands. The ByteString half of the language rule is NOT here — the fixture's two properties are both `bigint` (R-197); it is covered instead by `conformance/closed-findings/BitwiseBytes.runar.ts`, which requires all seven tiers to accept it and agree byte for byte | Yes |
 | `blake3` | BLAKE3 compression + full-hash builtins | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
+| `byte-builtins` | `split`, `int2str`, `reverseBytes`, `ripemd160` and the `Sha256Hash` alias — five builtins that appeared in no fixture's ANF. Four of them the fuzzer still cannot generate; `split` it now can (`SPLIT_ARM_ENABLED` in `packages/runar-testing/src/fuzzer/generator.ts`), and the arm's first seeded run found the lowering defect that left the split's unnameable left half orphaned on the stack model. Spent at each builtin's boundaries by `conformance/byte_builtins_execution_test.go`, including the two hash methods' "the digest itself must not unlock it" rows. `ripemd160` arrived last: its only `.runar.go` spelling, `runar.Ripemd160`, is both a Rúnar type name and a Rúnar builtin name, and two tiers resolved the call as a type cast until that was fixed | Yes |
 | `convergence-proof` | Convergence proof patterns | Yes |
 | `covenant-vault` | Covenant spending constraints | Yes |
 | `cross-covenant` | Cross-contract covenant validation | Yes |
@@ -719,8 +841,10 @@ The suite currently contains **64 fixtures** under `tests/` — that directory i
 | `merkle-proof` | Merkle-root verification | Yes |
 | `multi-method` | Method dispatch table generation | Yes |
 | `oracle-price` | Rabin signature oracle price feed | Yes |
+| `p256-encode-negate` | `p256Negate` and `p256EncodeCompressed` — the two P-256 builtins `p256-primitives` does not reach. Spent by `conformance/p256_p384_encode_negate_execution_test.go`, including the CL-BUG-095 appended-byte parity attack | Yes |
 | `p256-primitives` | NIST P-256 EC primitives | Yes |
 | `p256-wallet` | P-256 wallet contract | Yes |
+| `p384-encode-negate` | `p384Negate` and `p384EncodeCompressed` — the P-384 half of the same gap, run through the identical battery so the 48-byte widths are checked too | Yes |
 | `p384-primitives` | NIST P-384 EC primitives | Yes |
 | `p384-wallet` | P-384 wallet contract | Yes |
 | `post-quantum-slhdsa` | SLH-DSA (SPHINCS+) signature verification | Yes |
@@ -747,9 +871,9 @@ Gated in CI by the `Script Execution Oracle` job. It is a curated family list
 (not a completeness gate over every fixture); the TS `witnesses/differential.test.ts`
 ScriptVM also executes fold-ON bytes against a script engine.
 
-### SDK-output conformance (46 fixtures, 7 SDKs)
+### SDK-output conformance (70 fixtures, 7 SDKs)
 
-`sdk-output/tests/` contains 46 fixtures (one `input.json` + one
+`sdk-output/tests/` contains 70 fixtures (one `input.json` + one
 `expected-locking.hex` per directory). The runner in `sdk-output/runner/sdk-runner.ts`
 compiles each fixture through all seven SDK tools in `sdk-output/tools/` (TypeScript,
 Go, Python, Ruby, Rust, Zig, Java) and asserts byte-identical locking-script hex

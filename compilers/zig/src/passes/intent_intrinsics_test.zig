@@ -239,8 +239,9 @@ test "intent: requireOutputP2PKH multiple calls one _serialisedOutputs param" {
         \\}
         \\
         \\func (c *Cov) PayMulti() {
+        \\    // W2: both calls name index 0 -- any literal index above 0 is refused now.
         \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
-        \\    runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+        \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
         \\}
     ;
 
@@ -608,10 +609,12 @@ test "intent R-2: requireOutputP2PKH index over 1000 errors" {
         \\}
     ;
 
-    try expectIntrinsicTypeError(allocator, source, "bound to <= 1000");
+    try expectIntrinsicTypeError(allocator, source, "must be 0 in v1");
 }
 
-test "intent R-2: requireOutputP2PKH index 1000 is allowed" {
+// W2: the accepted index is 0, not 1000. Kept as the positive half of the
+// bound pair so the refusal above cannot pass by refusing everything.
+test "intent R-2: requireOutputP2PKH index 0 is allowed" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -628,7 +631,7 @@ test "intent R-2: requireOutputP2PKH index 1000 is allowed" {
         \\}
         \\
         \\func (c *Cov) PayBond() {
-        \\    runar.RequireOutputP2PKH(1000, c.BondPKH, c.Bond)
+        \\    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
         \\}
     ;
 
@@ -783,4 +786,134 @@ test "intent R-4: extractPrevOutputScript prefixLen = 4 MiB is allowed" {
     ;
 
     _ = try mustLowerGoSource(allocator, source);
+}
+
+// ============================================================================
+// N-060 — a `-0` index evades the literal gate and silently DELETES the
+// covenant.
+//
+// The typecheck index gate in typecheck.zig accepts `unary_op{.negate}` over a
+// `literal_int` only so that a negative index reports "must be >= 0" instead of
+// the misleading "must be an integer literal". `-0` negates to `0`, so it
+// passes that bound check — but ANF lowering matches on a BARE `.literal_int`
+// and, finding a `.unary_op`, falls through to `load_const ""`: no witness
+// param, no hash assertion, NO COVENANT, and no diagnostic. A contract whose
+// whole purpose is the covenant compiles to a script that does not carry it.
+//
+// Mirrors compilers/rust/tests/intent_intrinsics_bounds.rs (R-068).
+// ============================================================================
+
+const eps_neg_zero_src =
+    \\package x
+    \\
+    \\import runar "github.com/icellan/runar/packages/runar-go"
+    \\
+    \\type Cov struct {
+    \\    runar.StatefulSmartContract
+    \\    H     runar.ByteString
+    \\    Count runar.Bigint
+    \\}
+    \\
+    \\func (c *Cov) Bind() {
+    \\    s := runar.ExtractPrevOutputScript(-0, c.H)
+    \\    runar.Assert(runar.Len(s) > 0)
+    \\    c.Count = c.Count + 1
+    \\}
+;
+
+const rop_neg_zero_src =
+    \\package x
+    \\
+    \\import runar "github.com/icellan/runar/packages/runar-go"
+    \\
+    \\type Cov struct {
+    \\    runar.StatefulSmartContract
+    \\    PKH   runar.ByteString
+    \\    Amt   runar.Bigint
+    \\    Count runar.Bigint
+    \\}
+    \\
+    \\func (c *Cov) Pay() {
+    \\    runar.RequireOutputP2PKH(-0, c.PKH, c.Amt)
+    \\    c.Count = c.Count + 1
+    \\}
+;
+
+/// Lower to ANF, returning null when typecheck rejected the source.
+fn lowerIfAccepted(allocator: Allocator, source: []const u8) !?[]const ANFMethod {
+    const parse_result = parse_go.parseGo(allocator, source, "Test.runar.go");
+    if (parse_result.errors.len > 0) return error.UnexpectedParseErrors;
+    const contract = parse_result.contract orelse return error.NoContract;
+    const tc_result = try typecheck.typeCheck(allocator, contract);
+    if (tc_result.errors.len > 0) return null;
+    const program = try anf_lower.lowerToANF(allocator, contract);
+    return program.methods;
+}
+
+fn anyParam(methods: []const ANFMethod, prefix: []const u8) bool {
+    for (methods) |m| {
+        for (m.params) |p| {
+            if (std.mem.startsWith(u8, p.name, prefix)) return true;
+        }
+    }
+    return false;
+}
+
+test "intent N-060: extractPrevOutputScript rejects a -0 index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectIntrinsicTypeError(arena.allocator(), eps_neg_zero_src, "must be an integer literal");
+}
+
+test "intent N-060: requireOutputP2PKH rejects a -0 index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try expectIntrinsicTypeError(arena.allocator(), rop_neg_zero_src, "must be an integer literal");
+}
+
+// The funds-safety half of the pair: a `-0` index must never reach codegen,
+// because when it does the intrinsic lowers to a bare empty-string constant
+// and the covenant it was supposed to install is simply absent.
+test "intent N-060: a -0 index never silently drops the covenant" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    for ([_][]const u8{ eps_neg_zero_src, rop_neg_zero_src }) |src| {
+        const methods = (try lowerIfAccepted(allocator, src)) orelse continue;
+        std.debug.print(
+            "(-0, ...) compiled with NO diagnostic; covenant params present: _prevOutScript_={} _serialisedOutputs={}\n",
+            .{ anyParam(methods, "_prevOutScript_"), anyParam(methods, "_serialisedOutputs") },
+        );
+        return error.NegativeZeroCovenantDropped;
+    }
+}
+
+// Controls — the valid forms must keep lowering exactly as before.
+
+test "intent N-060 CONTROL: a literal 0 index still installs the covenant" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const eps = try std.mem.replaceOwned(u8, allocator, eps_neg_zero_src, "ExtractPrevOutputScript(-0,", "ExtractPrevOutputScript(0,");
+    const eps_methods = (try lowerIfAccepted(allocator, eps)) orelse return error.ValidEpsContractMustLower;
+    try std.testing.expect(anyParam(eps_methods, "_prevOutScript_0"));
+
+    // W2: 0 is the only index this intrinsic accepts. The state write also has
+    // to go: R-300 refuses `requireOutputP2PKH(0, ...)` in a state-mutating
+    // method, because the implicit continuation puts the contract's own
+    // codePart at output 0. Index 1 used to dodge that and is no longer legal.
+    const rop_idx0 = try std.mem.replaceOwned(u8, allocator, rop_neg_zero_src, "RequireOutputP2PKH(-0,", "RequireOutputP2PKH(0,");
+    const rop = try std.mem.replaceOwned(u8, allocator, rop_idx0, "\n    c.Count = c.Count + 1", "");
+    const rop_methods = (try lowerIfAccepted(allocator, rop)) orelse return error.ValidRopContractMustLower;
+    try std.testing.expect(anyParam(rop_methods, "_serialisedOutputs"));
+}
+
+test "intent N-060 CONTROL: a plain negative index still reports the bound message" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const src = try std.mem.replaceOwned(u8, allocator, eps_neg_zero_src, "ExtractPrevOutputScript(-0,", "ExtractPrevOutputScript(-3,");
+    try expectIntrinsicTypeError(allocator, src, "must be >= 0");
 }

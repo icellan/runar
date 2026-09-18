@@ -155,8 +155,42 @@ fn is_literal_expression(expr: &Expression) -> bool {
         Expression::UnaryExpr { op, operand } => {
             *op == UnaryOp::Neg && matches!(operand.as_ref(), Expression::BigIntLiteral { .. })
         }
-        _ => false,
+        // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+        // spec/grammar.md section 11:
+        //
+        //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        //
+        // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        // position. This check runs on the AST, BEFORE ANF lowering, so an
+        // initializer still arrives here as a call node and was refused -- in
+        // the one position THIS tier's surface needs it, since the Rust DSL
+        // writes initializers as assignments inside `init()` that the parser
+        // LIFTS into `PropertyNode.initializer`, and a bare `"1976a914"` is a
+        // `&str` that cannot be assigned to a `ByteString` (`Vec<u8>`).
+        //
+        // Accepting it here is only half the job: `extract_literal_value` in
+        // anf_lower.rs must UNWRAP the same shape, or the property validates
+        // and then loses its default entirely.
+        //
+        // Literal argument ONLY. `toByteString(x)` for a non-literal `x` is
+        // not this production and stays a non-literal initializer.
+        _ => is_to_byte_string_literal(expr),
     }
+}
+
+/// Reports whether the expression is the `toByteString(<literal>)`
+/// ByteStringLiteral production. Peer of the TS helper of the same name in
+/// `02-validate.ts`.
+pub(crate) fn is_to_byte_string_literal(expr: &Expression) -> bool {
+    let Expression::CallExpr { callee, args, .. } = expr else {
+        return false;
+    };
+    let Expression::Identifier { name } = callee.as_ref() else {
+        return false;
+    };
+    name == "toByteString"
+        && args.len() == 1
+        && matches!(args[0], Expression::ByteStringLiteral { .. })
 }
 
 /// Reports whether the expression is an array literal whose elements are all
@@ -261,7 +295,7 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
 
     // Validate statements in constructor body
     for stmt in &ctor.body {
-        validate_statement(stmt, errors);
+        validate_statement(stmt, contract, errors);
     }
 
     validate_constructor_slot_bijection(contract, errors);
@@ -479,7 +513,7 @@ fn validate_methods(contract: &ContractNode, errors: &mut Vec<Diagnostic>, warni
         }
 
         // #131: warn when a public method gates on extractLocktime but never
-        // asserts the spending tx is non-final (extractSequence < 0xffffffff).
+        // asserts the spending tx is non-final (extractSequence !== 0xffffffff).
         // Advisory only.
         if method.visibility == Visibility::Public {
             warn_locktime_without_sequence_guard(method, contract, warnings);
@@ -545,7 +579,7 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
 
     // Validate all statements in method body
     for stmt in &method.body {
-        validate_statement(stmt, errors);
+        validate_statement(stmt, contract, errors);
     }
 }
 
@@ -960,7 +994,189 @@ fn is_assert_call(expr: &Expression) -> bool {
 // Statement validation
 // ---------------------------------------------------------------------------
 
-fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
+// ---------------------------------------------------------------------------
+// R-127 -- output intrinsics inside a loop body
+// ---------------------------------------------------------------------------
+
+/// The three intrinsics that register an output ref.
+const OUTPUT_INTRINSIC_NAMES: [&str; 3] = ["addOutput", "addRawOutput", "addDataOutput"];
+
+/// Build the R-127 rejection. Shared verbatim with the other six tiers.
+fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
+    let via_clause = match via {
+        Some(v) => format!(" (reached through private method '{}')", v),
+        None => String::new(),
+    };
+    format!(
+        "Output intrinsic '{}'{} cannot be called inside a loop body. A loop body lowers into \
+         its own scope whose declared outputs never reach the method's output list, so the \
+         continuation hash would commit to fewer outputs than the transaction actually creates: \
+         the spend is rejected by every shipped SDK and any successor it produces is unspendable. \
+         Move the call out of the loop.",
+        intrinsic, via_clause
+    )
+}
+
+/// Reject an output intrinsic called inside a loop body (R-127).
+///
+/// `anf_lower` lowers a loop body into its own sub-context, which starts with a
+/// fresh empty add-output ref list, and nothing propagates that list back to the
+/// method context -- unlike the if-statement lowering, which concatenates each
+/// arm's outputs into one ref precisely so the parent sees them. The
+/// continuation hash is then built from whatever `addOutput` calls sit at the
+/// method's TOP level while the loop's outputs are still emitted into the
+/// transaction. Measured on a two-iteration loop before this check existed:
+///
+///   * loop only -- ts/go/rust/python blew up inside stack lowering ("method
+///     parameter '_newAmount' is not on the stack at a post-consumption
+///     reference"), zig/ruby emitted a covenant over the WRONG output set, java
+///     emitted none.
+///   * loop + one top-level call -- compiled clean in every tier, and the ANF
+///     continuation hashed exactly ONE leaf while three outputs were built.
+///
+/// A continuation committing to fewer outputs than the transaction creates is
+/// spendable only by a hand-crafted transaction, is rejected by every shipped
+/// SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+///
+/// Refusal rather than lowering: propagating the refs cannot work by name,
+/// because the loop is unrolled at stack-lowering time and one body binding name
+/// denotes N physical slots. A correct lowering means unrolling at ANF time, a
+/// language feature with no golden behind it; refusing removes nothing that
+/// works today.
+fn validate_no_output_intrinsic_in_loop(
+    body: &[Statement],
+    loop_loc: &SourceLocation,
+    contract: &ContractNode,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let mut seen: Vec<String> = Vec::new();
+    if let Some((intrinsic, via, loc)) = find_output_intrinsic(body, contract, &mut seen) {
+        errors.push(Diagnostic::error(
+            loop_output_intrinsic_msg(&intrinsic, via.as_deref()),
+            Some(loc.unwrap_or_else(|| loop_loc.clone())),
+        ));
+    }
+}
+
+type IntrinsicSite = (String, Option<String>, Option<SourceLocation>);
+
+/// The property/function name a call names, if any.
+fn callee_property(expr: &Expression) -> Option<&str> {
+    match expr {
+        Expression::CallExpr { callee, .. } => match callee.as_ref() {
+            Expression::PropertyAccess { property } => Some(property.as_str()),
+            Expression::MemberExpr { property, .. } => Some(property.as_str()),
+            Expression::Identifier { name } => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// First output intrinsic reachable from `stmts`, following calls to private
+/// methods: a public method that delegates `addOutput` to a private helper has
+/// that helper INLINED at ANF time, so a helper called in a loop lands its
+/// outputs in the loop's sub-context exactly as a direct call would.
+fn find_output_intrinsic(
+    stmts: &[Statement],
+    contract: &ContractNode,
+    seen: &mut Vec<String>,
+) -> Option<IntrinsicSite> {
+    for stmt in stmts {
+        if let Some(found) = find_output_intrinsic_in_statement(stmt, contract, seen) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_output_intrinsic_in_statement(
+    stmt: &Statement,
+    contract: &ContractNode,
+    seen: &mut Vec<String>,
+) -> Option<IntrinsicSite> {
+    match stmt {
+        Statement::ExpressionStatement { expression, source_location } => {
+            find_output_intrinsic_in_expr(expression, source_location, contract, seen)
+        }
+        Statement::VariableDecl { init, source_location, .. } => {
+            find_output_intrinsic_in_expr(init, source_location, contract, seen)
+        }
+        Statement::Assignment { value, source_location, .. } => {
+            find_output_intrinsic_in_expr(value, source_location, contract, seen)
+        }
+        Statement::ReturnStatement { value, source_location } => value
+            .as_ref()
+            .and_then(|v| find_output_intrinsic_in_expr(v, source_location, contract, seen)),
+        Statement::IfStatement { condition, then_branch, else_branch, source_location } => {
+            if let Some(found) =
+                find_output_intrinsic_in_expr(condition, source_location, contract, seen)
+            {
+                return Some(found);
+            }
+            if let Some(found) = find_output_intrinsic(then_branch, contract, seen) {
+                return Some(found);
+            }
+            else_branch
+                .as_ref()
+                .and_then(|e| find_output_intrinsic(e, contract, seen))
+        }
+        Statement::ForStatement { body, .. } => find_output_intrinsic(body, contract, seen),
+    }
+}
+
+fn find_output_intrinsic_in_expr(
+    expr: &Expression,
+    loc: &SourceLocation,
+    contract: &ContractNode,
+    seen: &mut Vec<String>,
+) -> Option<IntrinsicSite> {
+    if let Some(name) = callee_property(expr) {
+        if OUTPUT_INTRINSIC_NAMES.contains(&name) {
+            return Some((name.to_string(), None, Some(loc.clone())));
+        }
+        let is_private_helper = contract
+            .methods
+            .iter()
+            .any(|m| m.name == name && m.visibility == Visibility::Private);
+        if is_private_helper && !seen.iter().any(|s| s == name) {
+            seen.push(name.to_string());
+            let helper_body: Vec<Statement> = contract
+                .methods
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| m.body.clone())
+                .unwrap_or_default();
+            if let Some((intrinsic, _, _)) = find_output_intrinsic(&helper_body, contract, seen) {
+                return Some((intrinsic, Some(name.to_string()), Some(loc.clone())));
+            }
+        }
+    }
+    for child in sub_expressions(expr) {
+        if let Some(found) = find_output_intrinsic_in_expr(child, loc, contract, seen) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Direct sub-expressions of `expr`, for the intrinsic search above. An
+/// intrinsic can sit inside an argument list or an operand, not only as a bare
+/// expression statement.
+fn sub_expressions(expr: &Expression) -> Vec<&Expression> {
+    match expr {
+        Expression::CallExpr { args, .. } => args.iter().collect(),
+        Expression::BinaryExpr { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+        Expression::UnaryExpr { operand, .. } => vec![operand.as_ref()],
+        Expression::TernaryExpr { condition, consequent, alternate } => {
+            vec![condition.as_ref(), consequent.as_ref(), alternate.as_ref()]
+        }
+        Expression::IndexAccess { object, index } => vec![object.as_ref(), index.as_ref()],
+        _ => Vec::new(),
+    }
+}
+
+fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     match stmt {
         Statement::VariableDecl { name, var_type, init, .. } => {
             if let Some(TypeNode::FixedArray { .. }) = var_type {
@@ -986,21 +1202,35 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
         } => {
             validate_expression(condition, errors);
             for s in then_branch {
-                validate_statement(s, errors);
+                validate_statement(s, contract, errors);
             }
             if let Some(else_stmts) = else_branch {
                 for s in else_stmts {
-                    validate_statement(s, errors);
+                    validate_statement(s, contract, errors);
                 }
             }
         }
         Statement::ForStatement {
             condition,
             init,
+            update,
             body,
-            ..
+            source_location,
         } => {
             validate_expression(condition, errors);
+
+            // R-029 / CL-BUG-008: constrain the update clause. Nothing used to
+            // look at it — not this pass, not the type checker, not lowering —
+            // so it was a hole in the language's central rule that only Rúnar
+            // builtins and contract methods may be called, and any side effect
+            // written there vanished from the emitted script without a
+            // diagnostic.
+            validate_for_update(init, condition, update, errors);
+
+            // R-127: an output intrinsic in the body never reaches the
+            // method's output list, so the continuation would commit to fewer
+            // outputs than the transaction creates.
+            validate_no_output_intrinsic_in_loop(body, source_location, contract, errors);
 
             // Check that the loop bound is a compile-time constant. Non-zero
             // starts and countdown loops (`i--` with `>`/`>=`) are supported:
@@ -1016,6 +1246,8 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
                 }
             }
 
+            validate_for_condition_tests_iterator(init, condition, errors);
+
             // Validate init
             if let Statement::VariableDecl { init: init_expr, .. } = init.as_ref() {
                 validate_expression(init_expr, errors);
@@ -1023,7 +1255,7 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
 
             // Validate body
             for s in body {
-                validate_statement(s, errors);
+                validate_statement(s, contract, errors);
             }
         }
         Statement::ExpressionStatement { expression, .. } => {
@@ -1034,6 +1266,172 @@ fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
                 validate_expression(v, errors);
             }
         }
+    }
+}
+
+/// Reject any for-loop whose condition does not test the iterator itself
+/// (W4 / PhantomLap).
+///
+/// The bound check above reads only `condition.right`. Nothing required
+/// `condition.left` to BE the iterator, and `extract_loop_shape` ignores left
+/// entirely: it computes `count = bound - start`. So
+///
+/// ```text
+/// for (let i = 0n; i + 1n < 2n; i++) { ... }
+/// ```
+///
+/// runs ONCE in the source language and TWICE in the emitted script
+/// (count = 2 - 0). The extra lap executes the `else` arm the source can never
+/// reach. Measured on `@bsv/sdk` `Spend.validate()` with a vault whose
+/// signature check sits in the first lap and whose second lap sets
+/// `authorized = true`: the phantom-lap loop ACCEPTED an empty signature, while
+/// the semantically identical `i < 1n` rejected it.
+///
+/// Refusal rather than lowering: evaluating a general condition per iteration
+/// means unrolling against a real interpreter at ANF time, a language extension
+/// with no golden behind it. The diagnostic text is shared verbatim with the
+/// other six tiers.
+fn validate_for_condition_tests_iterator(
+    init: &Statement,
+    condition: &Expression,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let iter = match init {
+        Statement::VariableDecl { name, .. } => name.as_str(),
+        _ => "",
+    };
+    if let Expression::BinaryExpr { left, .. } = condition {
+        if let Expression::Identifier { name } = left.as_ref() {
+            if name == iter {
+                return;
+            }
+        }
+    }
+
+    errors.push(Diagnostic::error(
+        &format!(
+            "For loop condition must compare the loop variable '{iter}' to a compile-time \
+             constant (`{iter} < 10n`). The unrolled loop binds the iterator as \
+             `start + k*step` and takes its trip count from the bound alone, so a condition \
+             whose left-hand side is anything else -- a computed expression, or a different \
+             variable -- is not the condition the loop actually evaluates"
+        ),
+        None,
+    ));
+}
+
+/// Reject any for-loop update clause the loop model cannot represent
+/// (R-029 / CL-BUG-008).
+///
+/// The ANF `loop` node carries exactly `{ count, iter_var, start, step, body }`
+/// and synthesizes the iterator on unrolled iteration `k` as
+/// `start + k * step`. There is no slot for an arbitrary update statement, and
+/// `extract_loop_step` only ever understood a unit step — everything else was
+/// silently coerced to `+1` (or `-1` from the comparison direction) and the
+/// clause itself was discarded. That made three distinct failures indis-
+/// tinguishable from a correct compile:
+///
+///   * `for (let i = 0n; i < 5n; undefinedFn())` produced byte-identical
+///     output to `i++`. A nonexistent function name raised nothing.
+///   * `for (let i = 0n; i < 5n; this.count++)` dropped the state write.
+///   * `for (int i = 0; i < 6; i += 2)` unrolled 6 times over 0..5 instead of
+///     3 times over 0,2,4 (the Go tier's CL-BUG-128, same family).
+///
+/// Rejecting is the fix rather than lowering: appending the update's lowering
+/// to the loop body would re-emit `i++` as a dead binding on every loop that
+/// already compiles correctly, moving bytes across the whole corpus to express
+/// nothing.
+///
+/// The accepted set is every shape the nine frontends actually synthesize:
+/// `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+/// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
+/// the effect-free no-op sentinel (a literal or a bare identifier) that the
+/// while-shaped parsers synthesize when the source has no continue expression
+/// at all.
+///
+/// The advanced variable must be the declared iterator or the identifier the
+/// condition tests. Both are needed: the Zig parser only folds
+/// `var i = 0; while (i < N) : (i += 1)` into a single ForStatement when the
+/// declaration is the immediately preceding statement, so an unfolded loop
+/// carries the placeholder `__while_no_init` as its init while the update
+/// advances the real `i` named in the condition.
+fn validate_for_update(
+    init: &Statement,
+    condition: &Expression,
+    update: &Statement,
+    errors: &mut Vec<Diagnostic>,
+) {
+    // Names the update is allowed to advance: the declared iterator, plus the
+    // identifier the condition tests (see the doc comment's Zig case).
+    let mut allowed: Vec<&str> = Vec::new();
+    if let Statement::VariableDecl { name, .. } = init {
+        allowed.push(name.as_str());
+    }
+    if let Expression::BinaryExpr { left, .. } = condition {
+        if let Expression::Identifier { name } = left.as_ref() {
+            allowed.push(name.as_str());
+        }
+    }
+
+    if for_update_is_representable(&allowed, update) {
+        return;
+    }
+
+    errors.push(Diagnostic::error(
+        "For loop update must advance the loop variable by one (`i++`, `i--`, \
+         `i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a \
+         unit step, so any other update clause -- a function call, a state mutation, or a \
+         non-unit step such as `i += 2` -- cannot be represented and would be discarded",
+        None,
+    ));
+}
+
+/// True when `expr` names one of the identifiers the update is allowed to
+/// advance. A property access, an index access or anything else is never
+/// accepted: those are the side effects that used to be dropped.
+fn is_allowed_loop_var(allowed: &[&str], expr: &Expression) -> bool {
+    match expr {
+        Expression::Identifier { name } => allowed.iter().any(|a| *a == name.as_str()),
+        _ => false,
+    }
+}
+
+fn is_literal_one(expr: &Expression) -> bool {
+    matches!(expr, Expression::BigIntLiteral { value } if *value == num_bigint::BigInt::from(1))
+}
+
+fn for_update_is_representable(allowed: &[&str], update: &Statement) -> bool {
+    match update {
+        Statement::ExpressionStatement { expression, .. } => match expression {
+            Expression::IncrementExpr { operand, .. }
+            | Expression::DecrementExpr { operand, .. } => is_allowed_loop_var(allowed, operand),
+            // The no-op sentinel a while-shaped frontend synthesizes when the
+            // source carries no continue expression: `zig`'s `while (c) {}`,
+            // `move`'s `while (c) {}`, `go`'s `for c {}`. Reading a literal or
+            // a bare identifier has no effect, so discarding it loses nothing.
+            Expression::BigIntLiteral { .. }
+            | Expression::BoolLiteral { .. }
+            | Expression::Identifier { .. } => true,
+            _ => false,
+        },
+        // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+        Statement::Assignment { target, value, .. } => {
+            if !is_allowed_loop_var(allowed, target) {
+                return false;
+            }
+            match value {
+                Expression::BinaryExpr { op, left, right } => match op {
+                    BinaryOp::Add => {
+                        (is_allowed_loop_var(allowed, left) && is_literal_one(right))
+                            || (is_literal_one(left) && is_allowed_loop_var(allowed, right))
+                    }
+                    BinaryOp::Sub => is_allowed_loop_var(allowed, left) && is_literal_one(right),
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -1351,33 +1749,68 @@ fn is_locktime_read(expr: &Expression) -> bool {
     is_call_to_named(expr, "extractLocktime") || is_call_to_named(expr, "currentBlockHeight")
 }
 
-/// True when `expr` is an `extractSequence(...) < <final>`-style comparison
-/// (the guard that makes a locktime gate consensus-enforced). Accepts the two
-/// natural spellings: `extractSequence(pre) < N` / `<= N`, and the reversed
-/// `N > extractSequence(pre)` / `>= ...`. `N` must be a bigint literal no
-/// greater than the finality sentinel, so the guard genuinely forces
-/// non-finality.
+/// True when `expr` is a comparison on `extractSequence(...)` that genuinely
+/// EXCLUDES the finality sentinel `0xffffffff`, reading the field as the
+/// unsigned 32-bit wire value it is (see `emit_unsigned_bin2num` in
+/// `codegen/stack.rs`).
+///
+/// Accepted:
+///   `extractSequence(pre) !== 0xffffffff`   and the reversed spelling
+///   `extractSequence(pre) <  N`, 0 < N <= 0xffffffff   (reversed: `N > ...`)
+///   `extractSequence(pre) <= N`, N <  0xffffffff   (reversed: `N >= ...`)
+///
+/// Deliberately NOT accepted: `<= 0xffffffff` and `>= 0xffffffff`. nSequence
+/// cannot exceed 0xffffffff, so those are true for every transaction including
+/// the final one — a tautology that used to silence this warning on a contract
+/// with no guard at all (W1 / FinalCountdown).
+///
+/// Also NOT accepted: `extractSequence(pre) < 0`. Unsigned nSequence is never
+/// negative, so that comparison is vacuous.
 fn is_sequence_finality_guard(expr: &Expression) -> bool {
     let Expression::BinaryExpr { op, left, right } = expr else {
         return false;
     };
-    let bound_ok = |e: &Expression| -> bool {
-        matches!(
-            e,
-            Expression::BigIntLiteral { value }
-                if *value <= num_bigint::BigInt::from(SEQUENCE_FINAL)
-        )
+    let final_sentinel = num_bigint::BigInt::from(SEQUENCE_FINAL);
+    let is_final_sentinel = |e: &Expression| -> bool {
+        matches!(e, Expression::BigIntLiteral { value } if *value == final_sentinel)
+    };
+    let zero = num_bigint::BigInt::from(0);
+    let strict_bound_ok = |e: &Expression| -> bool {
+        matches!(e, Expression::BigIntLiteral { value } if *value > zero && *value <= final_sentinel)
+    };
+    let non_strict_bound_ok = |e: &Expression| -> bool {
+        matches!(e, Expression::BigIntLiteral { value } if *value < final_sentinel)
     };
     match op {
-        BinaryOp::Lt | BinaryOp::Le => is_call_to_named(left, "extractSequence") && bound_ok(right),
-        BinaryOp::Gt | BinaryOp::Ge => is_call_to_named(right, "extractSequence") && bound_ok(left),
+        BinaryOp::StrictNe => {
+            (is_call_to_named(left, "extractSequence") && is_final_sentinel(right))
+                || (is_call_to_named(right, "extractSequence") && is_final_sentinel(left))
+        }
+        BinaryOp::Lt => is_call_to_named(left, "extractSequence") && strict_bound_ok(right),
+        BinaryOp::Le => is_call_to_named(left, "extractSequence") && non_strict_bound_ok(right),
+        BinaryOp::Gt => is_call_to_named(right, "extractSequence") && strict_bound_ok(left),
+        BinaryOp::Ge => is_call_to_named(right, "extractSequence") && non_strict_bound_ok(left),
+        _ => false,
+    }
+}
+
+/// True when asserting `expr` logically implies a sequence-finality guard.
+/// A matching comparison nested under `!` (or `||`) does not count.
+fn assertion_implies_sequence_guard(expr: &Expression) -> bool {
+    if is_sequence_finality_guard(expr) {
+        return true;
+    }
+    match expr {
+        Expression::BinaryExpr { op: BinaryOp::And, left, right, .. } => {
+            assertion_implies_sequence_guard(left) || assertion_implies_sequence_guard(right)
+        }
         _ => false,
     }
 }
 
 /// #131: warn when `method` (transitively, through the private-helper call
 /// graph) reads the tx locktime but never asserts the tx is non-final. A
-/// locktime gate is not consensus-enforced unless `extractSequence < 0xffffffff`
+/// locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
 /// is also asserted — otherwise an all-final-sequence spend bypasses it.
 /// Advisory (warning) only — no effect on emitted bytecode.
 fn warn_locktime_without_sequence_guard(
@@ -1405,8 +1838,14 @@ fn warn_locktime_without_sequence_guard(
             if is_locktime_read(expr) {
                 reads_locktime = true;
             }
-            if is_sequence_finality_guard(expr) {
-                has_sequence_guard = true;
+            if is_assert_call(expr) {
+                if let Expression::CallExpr { args, .. } = expr {
+                    for arg in args {
+                        if assertion_implies_sequence_guard(arg) {
+                            has_sequence_guard = true;
+                        }
+                    }
+                }
             }
         });
         // Follow calls into private helpers so a guard (or locktime read)
@@ -1428,9 +1867,9 @@ fn warn_locktime_without_sequence_guard(
         warnings.push(Diagnostic::warning(
             format!(
                 "method '{}' reads extractLocktime but does not assert \
-                 extractSequence < 0xffffffff; a locktime gate is not \
+                 extractSequence is not 0xffffffff; a locktime gate is not \
                  consensus-enforced unless the tx is non-final — add \
-                 assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+                 assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
                 method.name
             ),
             Some(method.source_location.clone()),

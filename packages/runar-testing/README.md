@@ -8,10 +8,13 @@ This package provides everything needed to verify that compiled Rúnar contracts
 
 ## Read this first: interpreter tests ≠ spendability
 
-`TestContract` and `RunarInterpreter` are **AST interpreters with mocked
-ECDSA**. They walk the parsed contract, not the compiled Bitcoin Script, and
-`checkSig` / `checkMultiSig` / `checkPreimage` / `verifyRabinSig` always return
-`true`.
+`TestContract` and `RunarInterpreter` are **AST interpreters**. They walk the
+parsed contract, never the compiled Bitcoin Script — so no opcode, script size
+limit or sighash is exercised by them, whatever their crypto does. And their
+crypto is a mixture, not a blanket mock: `checkSig` and `verifyRabinSig` verify
+for real, `checkPreimage` is stubbed `true`, and `checkMultiSig` refuses to
+answer at all (it throws). The per-builtin breakdown is in
+[TestContract API](#testcontract-api) below.
 
 > **An interpreter test proves business logic. It never proves the contract is
 > spendable.** A green `TestContract` suite is silent about whether the
@@ -189,9 +192,23 @@ console.log(result.success);
 ## TestContract API
 
 The fastest way to test contract **business logic**. Uses the interpreter (not
-the VM), with mocked crypto (`checkSig` always true, `checkPreimage` always
-true) — so it proves state transitions and assertion logic, and proves nothing
+the VM) — so it proves state transitions and assertion logic, and proves nothing
 about spendability. See [Read this first](#read-this-first-interpreter-tests--spendability).
+
+Its crypto is a MIXTURE, not a blanket mock (R-112 — this section used to say
+"`checkSig` always true", which is the opposite of the truth):
+
+| builtin | in the interpreter |
+| --- | --- |
+| `checkSig` | **real** ECDSA, over a fixed test message (`verifyTestMessageSig`) |
+| `verifyRabinSig` | **real** Rabin verification |
+| `checkPreimage` | stubbed `true` |
+| `checkMultiSig` | **refuses** — throws, rather than answer without array values |
+
+`checkMultiSig` threw away its old silent `false` for a reason: a test of a
+multisig contract was asserting against a hardcoded failure, so it proved
+nothing and would not have noticed a broken contract. Use `ScriptVM` for the
+real `OP_CHECKMULTISIG`.
 
 ```typescript
 import { TestContract } from 'runar-testing';

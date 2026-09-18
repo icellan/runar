@@ -28,6 +28,19 @@ module RunarCompiler
     # Signature of a function: parameter types and return type.
     FuncSig = Struct.new(:params, :return_type, keyword_init: true)
 
+    # Names that are legal without being a local, a builtin or a property: the
+    # `SigHash` namespace object and the three secp256k1 constants from
+    # runar-lang. Every frontend hands them to the typechecker as bare
+    # identifiers. They used to be carried by the "<unknown>" fall-through;
+    # once that fall-through raises they have to be listed, exactly as the TS
+    # reference tier lists them in KNOWN_GLOBALS.
+    KNOWN_GLOBALS = {
+      "SigHash" => "<namespace>",
+      "EC_P"    => "bigint",
+      "EC_N"    => "bigint",
+      "EC_G"    => "Point",
+    }.freeze
+
     # All built-in Runar function signatures.
     BUILTIN_FUNCTIONS = {
       "sha256"            => FuncSig.new(params: ["ByteString"], return_type: "Sha256"),
@@ -158,7 +171,13 @@ module RunarCompiler
       "extractLocktime"       => FuncSig.new(params: ["SigHashPreimage"], return_type: "bigint"),
       "extractSigHashType"    => FuncSig.new(params: ["SigHashPreimage"], return_type: "bigint"),
       "buildChangeOutput"     => FuncSig.new(params: ["ByteString", "bigint"], return_type: "ByteString"),
-      "computeStateOutput"    => FuncSig.new(params: ["ByteString", "bigint"], return_type: "ByteString"),
+      # R-165: three arguments, not two. The ANF lowerer has always emitted
+      # `computeStateOutput(preimage, stateScript, newAmount)` -- see
+      # anf_lower's single-output continuation, and every tier's stack lowering
+      # reads args[0..2]. Only this tier declares the builtin at all, and its
+      # entry was one argument short; the IR-path arity check added with R-165
+      # is what surfaced it, by refusing the compiler's OWN round-tripped IR.
+      "computeStateOutput"    => FuncSig.new(params: ["ByteString", "ByteString", "bigint"], return_type: "ByteString"),
       # Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
       # that compile down to standard primitives + auto-injected method params.
       # See docs/cross-covenant-pattern.md.
@@ -182,7 +201,26 @@ module RunarCompiler
       bigint RabinSig RabinPubKey
     ].to_set.freeze
 
-    # Return true if +actual+ is a subtype of +expected+.
+    # Return true if a value of type +actual+ may be used where +expected+ is
+    # required. The port of +isSubtype+ in
+    # +packages/runar-compiler/src/passes/03-typecheck.ts+; it must stay
+    # clause-for-clause identical to it.
+    #
+    # N-104: this tier used to carry only the +subtype -> base+ direction of
+    # each family, so assignment inside a family worked one way and not the
+    # other -- `const b: ByteString = pkh` compiled and `const h: Sha256 = pkh`
+    # did not, while the reference tier accepted both. Measured as a full
+    # bidirectional matrix over every ordered pair of family members in all
+    # seven tiers, 85 of 196 cells disagreed. The asymmetry was already known
+    # to be wrong at the callsites that tripped over it -- this file used to
+    # carry a private +output_state_value_matches?+ that re-added the missing
+    # clauses just for +addOutput+'s state values, and four tiers had
+    # independently grown the same patch. The general predicate carries them
+    # now, and the patches are gone.
+    #
+    # Cross-family moves (a ByteString into a bigint slot or the reverse) are
+    # still refused, in every tier; that is what conformance/negatives
+    # N02/N16/N17/N19/N21 pin.
     def self.subtype?(actual, expected)
       return true if actual == expected
 
@@ -190,8 +228,16 @@ module RunarCompiler
       return true if actual == "<inferred>" || actual == "<unknown>"
       return true if expected == "<inferred>" || expected == "<unknown>"
 
+      # ByteString subtypes. BIDIRECTIONAL, and both-in-family -- an Addr value
+      # satisfies a Ripemd160 slot and vice versa.
       return true if expected == "ByteString" && BYTESTRING_SUBTYPES.include?(actual)
+      return true if actual == "ByteString" && BYTESTRING_SUBTYPES.include?(expected)
+      return true if BYTESTRING_SUBTYPES.include?(actual) && BYTESTRING_SUBTYPES.include?(expected)
+
+      # bigint subtypes -- same shape.
       return true if expected == "bigint" && BIGINT_SUBTYPES.include?(actual)
+      return true if actual == "bigint" && BIGINT_SUBTYPES.include?(expected)
+      return true if BIGINT_SUBTYPES.include?(actual) && BIGINT_SUBTYPES.include?(expected)
 
       if expected.end_with?("[]") && actual.end_with?("[]")
         return subtype?(actual[0..-3], expected[0..-3])
@@ -365,14 +411,35 @@ module RunarCompiler
         # (codePart >= 253 bytes forces a 3-byte CompactSize length prefix,
         # never the P2PKH template's 0x19), so the contract is PERMANENTLY
         # unspendable. The terminal case (no state mutation -> no continuation)
-        # stays valid, and addOutput/addRawOutput layouts are left to the
-        # developer. Mirrors the TS reference guard in 03-typecheck.ts.
+        # stays valid.
+        #
+        # R-300: "addOutput/addRawOutput layouts are left to the developer" used
+        # to finish that sentence, and it was wrong -- no layout the developer
+        # can pick makes the offsets work. this.addOutput(...) writes the
+        # continuation (codePart plus serialised state, hundreds of bytes) at
+        # output 0, so outputIndex*34 lands INSIDE that script for every index.
+        # addRawOutput's length is a runtime value, so the stride cannot be
+        # proven there either. See
+        # conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
+        # Mirrors the TS reference guard in 03-typecheck.ts.
         if @contract.parent_class == "StatefulSmartContract"
           mutable_props = {}
           @contract.properties.each do |prop|
             mutable_props[prop.name] = true unless prop.readonly
           end
           sig = TypeChecker.analyze_method_output_signals(method.body, mutable_props)
+          if has_require_p2pkh && sig[:has_state_output]
+            add_error(
+              "method '#{method.name}' mixes requireOutputP2PKH() with " \
+              "this.addOutput()/addRawOutput() -- the intrinsic reads output i at byte " \
+              "offset i*34, which is only correct when every earlier output is exactly " \
+              "34 bytes, and a state-continuation output never is (codePart plus " \
+              "serialised state). The assertion would read bytes from the middle of the " \
+              "contract's own locking script, so the contract would be permanently " \
+              "unspendable. Assert the payment from a separate method that emits no " \
+              "output of its own"
+            )
+          end
           if sig[:requires_output_p2pkh_zero] && sig[:mutates_state] && !sig[:has_state_output]
             add_error(
               "method '#{method.name}' calls requireOutputP2PKH(0, ...) but also mutates state " \
@@ -675,6 +742,169 @@ module RunarCompiler
 
       private
 
+      # The three output intrinsics, which share one argument contract.
+      OUTPUT_INTRINSIC_NAMES = %w[addOutput addRawOutput addDataOutput].freeze
+
+      # Type-check the arguments of the three output intrinsics --
+      # `this.addOutput` / `this.addRawOutput` / `this.addDataOutput` -- and
+      # return their result type.
+      #
+      # N-098: the first argument is the output's SATOSHI AMOUNT, and this tier
+      # used to accept any type there. That is not a missing lint.
+      # `lower_add_output` prepends the operand as `OP_8 OP_NUM2BIN`, so a
+      # ByteString in that slot is reinterpreted as a script number with no
+      # conversion and becomes the amount the covenant commits to:
+      # `blob: ByteString` and `blob: bigint` compiled to the SAME script, byte
+      # for byte. On the real @bsv/sdk Spend engine with `blob = 0x2a` only a
+      # 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+      # OP_NUM2BIN, making the UTXO unspendable.
+      #
+      # N-105: the SECOND argument of addRawOutput / addDataOutput is the
+      # created output's LOCKING SCRIPT, and this tier used to accept any type
+      # there too. `lower_add_raw_output` takes OP_SIZE of the operand,
+      # varint-prefixes it and concatenates it after the amount -- no conversion
+      # -- so `n: bigint` and `n: ByteString` compiled to the SAME script, byte
+      # for byte. A script number on the stack is its minimal little-endian
+      # encoding, so the covenant commits to an output whose locking script IS
+      # those bytes. Executed on the real @bsv/sdk Spend engine against the
+      # exact opcode window this tier emits: n=0 gives an EMPTY locking script,
+      # n=81 gives OP_1 and n=118 gives OP_DUP -- all three anyone-can-spend --
+      # while n=1000 gives 0xe8 0x03, an invalid opcode, and the output is
+      # unspendable.
+      #
+      # N-105 (2/2): the remaining three checks TS performs and this tier did
+      # not -- the StatefulSmartContract gate, the arity of all three
+      # intrinsics, and the types of addOutput's state values. Each had an
+      # executed consequence: `addOutput(1000n)` dropped the state value from
+      # the continuation entirely, a surplus value was appended to a state
+      # serialization the next spend deserializes by fixed offsets, a ByteString
+      # state value was serialized where an 8-byte LE number belongs, and
+      # addRawOutput in a stateless SmartContract emitted a "continuation" for a
+      # contract with no state.
+      #
+      # Ported from the TypeScript reference, wording included.
+      #
+      # `<unknown>` is escaped exactly as TS escapes it -- a private helper's
+      # declared return type is discarded at parse time in every tier, so
+      # `this.sats()` infers as `<unknown>` and must keep compiling.
+      def check_output_intrinsic_args(name, args, env)
+        # N-105: all three intrinsics build an OUTPUT, and an output only exists
+        # in a stateful contract. TS refuses the call outright and checks
+        # nothing else, so the early return is part of the ported behaviour.
+        if @contract.nil? || @contract.parent_class != "StatefulSmartContract"
+          add_error("#{name}() is only available in StatefulSmartContract")
+          return "void"
+        end
+
+        return check_add_output_args(args, env) if name == "addOutput"
+
+        # addRawOutput / addDataOutput -- (satoshis, scriptBytes).
+        if args.length != 2
+          add_error("#{name}() expects 2 arguments (satoshis, scriptBytes), got #{args.length}")
+        end
+        if args.length >= 1
+          sat_type = infer_expr_type(args[0], env)
+          unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
+            add_error("#{name}() first argument (satoshis) must be bigint, got '#{sat_type}'")
+          end
+        end
+        if args.length >= 2
+          # TS uses subtype? against ByteString, not equality, so every
+          # ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+          script_type = infer_expr_type(args[1], env)
+          unless Frontend.subtype?(script_type, "ByteString") || script_type == "<unknown>"
+            add_error(
+              "#{name}() second argument (scriptBytes) must be ByteString, got '#{script_type}'"
+            )
+          end
+        end
+        "void"
+      end
+
+      # addOutput(satoshis, ...state values) -- arity against the contract's
+      # mutable properties, and one type check per state value.
+      def check_add_output_args(args, env)
+        # The surface form `this.addOutput(satoshis, .{ v1, v2, ... })` that Zig
+        # and Move tuple syntax produce carries the state values in a trailing
+        # array literal. anf_lower unwraps it the same way, so the arity checked
+        # here is the arity codegen will see.
+        normalized =
+          if args.length == 2 && args[1].is_a?(ArrayLiteralExpr)
+            [args[0], *args[1].elements]
+          else
+            args
+          end
+        # N-107: count the state slots the continuation will actually carry,
+        # not the DECLARED mutable properties. expand_fixed_arrays runs right
+        # after this pass and splits `board: FixedArray<bigint, 3>` into
+        # `board__0 .. board__2`, so a contract declaring `board` and `n` emits
+        # FOUR state values. addOutput is positional against the emitted values,
+        # which is why the declared count answers the wrong question.
+        #
+        # This used to be a `shape_checkable` flag that scoped the rule OUT of
+        # every contract with FixedArray state, because porting it verbatim
+        # would have rejected Boardy (in
+        # compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py)
+        # the way the reference tier did. The cost of that opt-out was silent: a
+        # wrong-arity addOutput on a FixedArray contract was ACCEPTED here and
+        # emitted a state continuation that disagreed with the contract's own
+        # state. Gate: conformance/negatives/N26-addoutput-arity-fixedarray.
+        mutable_props = expanded_state_slots(@contract.properties)
+        expected = 1 + mutable_props.length
+        if normalized.length != expected
+          add_error(
+            "addOutput() expects #{expected} argument(s): satoshis + " \
+            "#{mutable_props.length} state value(s), got #{normalized.length}"
+          )
+        end
+        if normalized.length >= 1
+          sat_type = infer_expr_type(normalized[0], env)
+          unless Frontend.bigint_family?(sat_type) || sat_type == "<unknown>"
+            add_error("addOutput() first argument (satoshis) must be bigint, got '#{sat_type}'")
+          end
+        end
+        # Every state value is inferred, surplus ones included, so a type error
+        # inside one is not swallowed by the arity diagnostic.
+        normalized[1..].to_a.each_with_index do |arg, i|
+          arg_type = infer_expr_type(arg, env)
+          slot = mutable_props[i]
+          next if slot.nil? || arg_type == "<unknown>"
+
+          prop_type = type_node_to_string(slot[1])
+          next if Frontend.subtype?(arg_type, prop_type)
+
+          add_error(
+            "addOutput() argument #{i + 2} (#{slot[0]}) must be '#{prop_type}', got '#{arg_type}'"
+          )
+        end
+        "void"
+      end
+
+      # The mutable state as +addOutput+ sees it: one [name, type] pair per
+      # value the state continuation carries.
+      #
+      # N-107: +expand_fixed_arrays+ (pass 3b) runs after the typechecker and
+      # splits a FixedArray property into one scalar sibling per element, so the
+      # DECLARED property list is not the emitted state. The flattening mirrors
+      # that pass's own naming (+<root>__<i>+, recursing through nested arrays)
+      # so a diagnostic names the synthetic property the next pass will create.
+      #
+      # A non-positive length is already a parse/validate error; the property is
+      # kept whole in that case so this rule never fires on a contract that is
+      # going to be rejected for a better reason.
+      def expanded_state_slots(properties)
+        slots = []
+        push = lambda do |name, type|
+          if type.is_a?(FixedArrayType) && type.length.to_i.positive?
+            type.length.times { |i| push.call("#{name}__#{i}", type.element) }
+            next
+          end
+          slots << [name, type]
+        end
+        properties.reject(&:readonly).each { |p| push.call(p.name, p.type) }
+        slots
+      end
+
       def add_error(msg)
         loc = @current_stmt_loc || @current_method_loc
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
@@ -757,6 +987,13 @@ module RunarCompiler
           if cond_type != "boolean"
             add_error("for loop condition must be boolean, got '#{cond_type}'")
           end
+          # R-065: the update clause used to be skipped entirely, so
+          # `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole
+          # in the rule that only Runar builtins and contract methods are
+          # callable (CLAUDE.md names `console.log` explicitly). validator.rb
+          # separately restricts the clause to a unit-step advance; this is the
+          # type-level half of the same guard.
+          check_statement(stmt.update, env) unless stmt.update.nil?
           check_statements(stmt.body, env)
           env.pop_scope
 
@@ -798,11 +1035,46 @@ module RunarCompiler
         when Identifier
           return "<this>" if expr.name == "this"
           return "<super>" if expr.name == "super"
+          return "boolean" if expr.name == "true" || expr.name == "false"
+          # The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+          # the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+          # identifier arm as a name to be typed. It is a discard, not a reference:
+          # nothing is being looked up, so `undefined` is the wrong word for it.
+          # Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+          # `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+          # "Undefined variable '_'" — invariant 1 (all seven parse all nine
+          # surfaces) already broken for this shape. Listing it here rather than
+          # letting the new fall-through reject it keeps the six tiers' bytes and
+          # brings the seventh into line.
+          return "<unknown>" if expr.name == "_"
 
           type_name, found = env.lookup(expr.name)
           return type_name if found
           return "<builtin>" if BUILTIN_FUNCTIONS.key?(expr.name)
 
+          # A contract property named without a receiver. Java lets a method say
+          # `strikePrice` for `this.strikePrice`, and the Solidity frontend emits the
+          # same shape; the TS reference tier has resolved it here since that frontend
+          # landed. Without this the identifier types as `<unknown>` and any operator
+          # that demands a type rejects valid source — a frontend parity break the
+          # `--parse-only` matrix cannot see, because the identifier PARSES fine and
+          # only fails to RESOLVE.
+          return @prop_types[expr.name] if @prop_types.key?(expr.name)
+          return KNOWN_GLOBALS[expr.name] if KNOWN_GLOBALS.key?(expr.name)
+
+          # GK-BUG-009 — a name that resolves to nothing is an error HERE, at
+          # the only pass that can see the binding environment. It used to
+          # return "<unknown>" silently, and "<unknown>" is compatible with
+          # everything under subtype? by design (R-092), so `notAThing === 1n`
+          # raised nothing. `notAThing > 1n` did raise — the bigint-family check
+          # does not admit "<unknown>" — which is why R-085's `>` pin read as
+          # closed while the `===` path was wide open. Where the reference is
+          # reachable from codegen, stack lowering later refuses to emit an OP_0
+          # placeholder and the compile still fails, but for the wrong reason;
+          # where it is NOT reachable (an uncalled private helper, a
+          # zero-iteration loop) nothing fired at all and the contract compiled
+          # to a locking script.
+          add_error("Undefined variable '#{expr.name}'")
           "<unknown>"
 
         when PropertyAccessExpr
@@ -841,6 +1113,28 @@ module RunarCompiler
           if cons_type != alt_type
             return cons_type if Frontend.subtype?(alt_type, cons_type)
             return alt_type if Frontend.subtype?(cons_type, alt_type)
+
+            # N-099: arms related in NEITHER direction used to fall through to
+            # `cons_type`, silently retyping the alternate. A ByteString and a
+            # bigint do not share a stack representation -- one is a byte string,
+            # the other a script number -- so the retyped arm leaves the wrong
+            # kind of value on the stack and everything downstream reads a type
+            # the author never wrote. ts / rust / java already refused this;
+            # go / python / zig / ruby accepted it.
+            #
+            # Ported from the TypeScript reference (Rust carries it verbatim),
+            # wording included -- hence the capital T, which differs from the
+            # lowercase house style of the condition message above. That casing
+            # divergence is pre-existing and left alone; the new message matches
+            # TS so the seven tiers agree on it.
+            #
+            # `<unknown>` never reaches here: subtype? treats it as top of the
+            # lattice, so a private helper's return type is related to
+            # everything, exactly as in TS.
+            add_error(
+              "Ternary branches have incompatible types: " \
+              "'#{cons_type}' and '#{alt_type}'"
+            )
           end
           cons_type
 
@@ -907,11 +1201,14 @@ module RunarCompiler
         end
 
         if expr.op == "===" || expr.op == "!=="
+          # Exactly the reference tier's rule: each side is tried as a subtype
+          # of the other, and nothing else. The both-in-family clauses that
+          # used to sit here were this tier's local patch for a `subtype?` that
+          # lacked them (N-104); `subtype?` carries them now, so repeating them
+          # here would be a second copy of the lattice to drift out of sync.
           compatible =
             Frontend.subtype?(left_type, right_type) ||
-            Frontend.subtype?(right_type, left_type) ||
-            (BYTESTRING_SUBTYPES.include?(left_type) && BYTESTRING_SUBTYPES.include?(right_type)) ||
-            (BIGINT_SUBTYPES.include?(left_type) && BIGINT_SUBTYPES.include?(right_type))
+            Frontend.subtype?(right_type, left_type)
           unless compatible
             if left_type != "<unknown>" && right_type != "<unknown>"
               add_error("cannot compare '#{left_type}' and '#{right_type}' with '#{expr.op}'")
@@ -1041,19 +1338,16 @@ module RunarCompiler
         if expr.callee.is_a?(PropertyAccessExpr)
           prop = expr.callee.property
           if prop == "getStateScript"
+            # R-173: the builtin takes none -- it returns the contract's own
+            # state script, a property of the contract rather than of anything a
+            # caller could pass. Five tiers used to accept arguments and DISCARD
+            # them, emitting hex byte-identical to the zero-argument spelling.
+            # Message is the reference tier's.
+            add_error("getStateScript() takes no arguments") unless expr.args.nil? || expr.args.empty?
             return "ByteString"
           end
-          if prop == "addOutput"
-            expr.args.each { |arg| infer_expr_type(arg, env) }
-            return "void"
-          end
-          if prop == "addRawOutput"
-            expr.args.each { |arg| infer_expr_type(arg, env) }
-            return "void"
-          end
-          if prop == "addDataOutput"
-            expr.args.each { |arg| infer_expr_type(arg, env) }
-            return "void"
+          if OUTPUT_INTRINSIC_NAMES.include?(prop)
+            return check_output_intrinsic_args(prop, expr.args, env)
           end
           if @method_sigs.key?(prop)
             return check_call_args(prop, @method_sigs[prop], expr.args, env)
@@ -1073,19 +1367,12 @@ module RunarCompiler
             (expr.callee.object.is_a?(Identifier) && expr.callee.object.name == "this")
           if is_this
             if expr.callee.property == "getStateScript"
+              # R-173: see the property_access branch above.
+              add_error("getStateScript() takes no arguments") unless expr.args.nil? || expr.args.empty?
               return "ByteString"
             end
-            if expr.callee.property == "addOutput"
-              expr.args.each { |arg| infer_expr_type(arg, env) }
-              return "void"
-            end
-            if expr.callee.property == "addRawOutput"
-              expr.args.each { |arg| infer_expr_type(arg, env) }
-              return "void"
-            end
-            if expr.callee.property == "addDataOutput"
-              expr.args.each { |arg| infer_expr_type(arg, env) }
-              return "void"
+            if OUTPUT_INTRINSIC_NAMES.include?(expr.callee.property)
+              return check_output_intrinsic_args(expr.callee.property, expr.args, env)
             end
             if @method_sigs.key?(expr.callee.property)
               return check_call_args(
@@ -1138,7 +1425,16 @@ module RunarCompiler
             # misleading "must be an integer literal" message.
             elsif args[0].is_a?(UnaryExpr) && args[0].op == "-" &&
                   args[0].operand.is_a?(BigIntLiteral) &&
-                  !args[0].operand.value.nil?
+                  !args[0].operand.value.nil? &&
+                  # N-060: this arm exists ONLY to reach the "must be >= 0"
+                  # message below, so it must surrender anything that is not
+                  # actually negative. `-0` negates to 0 and would sail past
+                  # that bound check, but ANF lowering matches on a bare
+                  # BigIntLiteral: on a UnaryExpr it falls through to
+                  # `load_const ""` and the covenant the intrinsic was supposed
+                  # to install is silently absent. Let it fall to the
+                  # non-literal-index diagnostic instead.
+                  -args[0].operand.value < 0
               idx_lit = BigIntLiteral.new(value: -args[0].operand.value)
             end
             if idx_lit.nil?
@@ -1153,11 +1449,9 @@ module RunarCompiler
               if idx < 0
                 add_error("#{func_name}() argument 1 (index) must be >= 0; got #{idx}")
               end
-              if func_name == "requireOutputP2PKH" && idx > 1000
+              if func_name == "requireOutputP2PKH" && idx > 0
                 add_error(
-                  "requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; " \
-                  "got #{idx} (the emitted Stack-IR computes byte-offset = idx*34; " \
-                  "unrealistic indexes indicate a programming error)"
+                  "requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got #{idx}. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit"
                 )
               end
             end

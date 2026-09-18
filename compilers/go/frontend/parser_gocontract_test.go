@@ -727,3 +727,36 @@ func (c *Coder) Unlock(data runar.ByteString, n runar.BigintBig, width runar.Big
 		}
 	}
 }
+
+// R-254 (CL-DOC-015): `goFieldToCamel` carried a comment describing behaviour
+// it did not have —
+//
+//	// Multiple uppercase: lowercase all but the last one
+//	// e.g., "HTTPServer" -> "httpServer", "PubKeyHash" -> stays as-is since P is single
+//	// Actually for Go exported names, just lowercase the first letter
+//
+// none of which matched the code below it (which lowercased the first letter),
+// the function's own doc comment ("PubKeyHash" -> "pubKeyHash"), or itself. The
+// scan it belonged to branched on the length of the leading uppercase run and
+// then did the same thing in every branch, with one branch unreachable.
+//
+// The simplification is behaviour-preserving; this pins that, including the
+// case the deleted comment got wrong.
+func TestR254_GoFieldToCamelLowercasesTheFirstLetter(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"a", "a"},
+		{"A", "a"},
+		{"PubKeyHash", "pubKeyHash"}, // the doc comment's own example
+		{"AddOutput", "addOutput"},   // the doc comment's other example
+		{"HTTPServer", "hTTPServer"}, // the deleted comment claimed "httpServer"
+		{"ABC", "aBC"},
+		{"aB", "aB"}, // already camelCase, returned untouched
+		{"_x", "_x"}, // not uppercase, returned untouched
+	}
+	for _, c := range cases {
+		if got := goFieldToCamel(c.in); got != c.want {
+			t.Errorf("goFieldToCamel(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

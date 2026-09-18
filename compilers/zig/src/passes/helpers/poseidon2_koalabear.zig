@@ -538,57 +538,16 @@ fn poseidon2KBPermute(t: *KBTracker, names: *[poseidon2KBWidth][]const u8, alloc
 // Public emit functions
 // ===========================================================================
 
-/// emitPoseidon2KBPermute emits the full Poseidon2 permutation over KoalaBear.
-///
-/// Stack in:  [..., s0, s1, ..., s15] (s15 on top)
-/// Stack out: [..., s0', s1', ..., s15'] (s15' on top)
-pub fn emitPoseidon2KBPermute(allocator: Allocator, emit_fn: *const fn (StackOp) void) !void {
-    // Build static state names
-    var name_bufs: [poseidon2KBWidth][16]u8 = undefined;
-    var name_ptrs: [poseidon2KBWidth][]const u8 = undefined;
-    for (0..poseidon2KBWidth) |i| {
-        const s = std.fmt.bufPrint(&name_bufs[i], "_p2s{d}", .{i}) catch unreachable;
-        name_ptrs[i] = s;
-    }
+// R-266: `emitPoseidon2KBPermute` used to live here — the module's
+// function-pointer entry point for the full permutation, with zero call sites
+// anywhere in the tier, not even a test. Poseidon2-KoalaBear is a Go-only
+// primitive by project policy (CLAUDE.md), so this tier's copy is a historical
+// port and this entry was the part of it nothing reached.
+//
+// `buildPermuteBundleOps` below is deliberately kept: it has no external
+// callers either, but it IS exercised by the tests in this file, so it is
+// covered code rather than dead code.
 
-    // We need a KBTracker that wraps a function pointer emitter.
-    // Use an arena-style approach: build ops into a list then replay.
-    var ops_list: std.ArrayListUnmanaged(StackOp) = .empty;
-    defer {
-        ec.deinitOpsRecursive(allocator, ops_list.items);
-        ops_list.deinit(allocator);
-    }
-
-    // Wrap emit function into a closure that appends to ops_list.
-    // We use a struct with state for the callback.
-    const emit_ctx = EmitCtx{ .list = &ops_list, .allocator = allocator };
-
-    var initial_names: [poseidon2KBWidth]?[]const u8 = undefined;
-    for (0..poseidon2KBWidth) |i| {
-        initial_names[i] = name_ptrs[i];
-    }
-
-    var tracker = try KBTracker.init(allocator, &initial_names);
-    defer tracker.deinit();
-
-    try tracker.pushPrimeCache();
-
-    var names_copy: [poseidon2KBWidth][]const u8 = name_ptrs;
-    try poseidon2KBPermute(&tracker, &names_copy, allocator);
-
-    try tracker.popPrimeCache();
-
-    // Reorder so _p2s0 is deepest and _p2s15 is on top
-    for (0..poseidon2KBWidth) |i| {
-        try tracker.toTop(names_copy[i]);
-    }
-
-    // Replay ops via emit_fn
-    _ = emit_ctx;
-    for (tracker.ops.items) |op| {
-        emit_fn(op);
-    }
-}
 
 /// EmitCtx is a placeholder (unused but kept for pattern consistency).
 const EmitCtx = struct {

@@ -542,6 +542,33 @@ fn parse_param_pat(
 // Type nodes
 // ---------------------------------------------------------------------------
 
+/// Type-name aliases recognised by the `.runar.ts` parser.
+///
+/// `Sha256Digest` is the cross-language spelling runar-lang exposes
+/// (`packages/runar-lang/src/types.ts` declares
+/// `export type Sha256Digest = Sha256`), so contracts use it in field and
+/// parameter annotations.
+///
+/// N-104: this crate resolved TypeScript type identifiers through
+/// `PrimitiveTypeName::from_str`, which had no `Sha256Digest` arm, so the name
+/// reached validate as an unsupported custom type and
+/// `readonly digest: Sha256Digest` was refused — while TypeScript, Zig,
+/// Python, Ruby and Java compiled it. Go's `.runar.ts` frontend had the
+/// identical hole.
+///
+/// Deliberately scoped to THIS parser rather than to `from_str`. The reference
+/// tier scopes it the same way: `TYPE_ALIASES` lives in
+/// `packages/runar-compiler/src/passes/01-parse.ts` and is not applied by
+/// `01-parse-sol.ts` or `01-parse-move.ts`, which refuse the alias. Putting it
+/// in `from_str` would have widened the sol / move / rust-macro surfaces too,
+/// where the reference rejects it — trading one divergence for another.
+fn resolve_type_alias(name: &str) -> &str {
+    match name {
+        "Sha256Digest" => "Sha256",
+        other => other,
+    }
+}
+
 fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<Diagnostic>) -> TypeNode {
     match ts_type {
         // Keyword types
@@ -603,8 +630,9 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<Diagnostic>) -
                 }
             }
 
-            // Check for primitive types referenced by name
-            if let Some(prim) = PrimitiveTypeName::from_str(&type_name) {
+            // Check for primitive types referenced by name, after resolving
+            // alternative spellings.
+            if let Some(prim) = PrimitiveTypeName::from_str(resolve_type_alias(&type_name)) {
                 return TypeNode::Primitive(prim);
             }
 
@@ -689,6 +717,19 @@ fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<Diagnostic>) -> Opt
     }
 }
 
+/// The W5 diagnostic for a declaration list that declares more than one
+/// variable. Shared verbatim with the other tiers that drive a full TypeScript
+/// parser and can therefore SEE a declaration list at all.
+fn extra_declarator_error(count: usize) -> String {
+    format!(
+        "Multiple variable declarations in a single statement are not supported \
+         ({count} declared). Declare one variable per statement: every declarator after \
+         the first is discarded before the AST is built, so anything it calls -- a guard, \
+         an assert reached through a private helper -- is silently absent from the \
+         emitted script."
+    )
+}
+
 fn parse_variable_statement(
     var_decl: &VarDecl,
     file: &str,
@@ -696,6 +737,39 @@ fn parse_variable_statement(
 ) -> Option<Statement> {
     if var_decl.decls.is_empty() {
         return None;
+    }
+
+    // W5: a declaration list declares exactly one variable.
+    //
+    // `decls[0]` was taken and the rest discarded, with NO diagnostic -- the
+    // reference tier at least emitted a warning in statement position, which
+    // `compile()` does not stop on, while a for-initializer emitted nothing
+    // anywhere. Both of this tier's sites route through here, since
+    // `parse_for_statement` calls `parse_variable_statement` for its init.
+    //
+    // What is lost is not always a value. Measured on the reference tier, a
+    // private helper carrying the contract's guard, called from a
+    // for-initializer's second declarator, compiled to nothing:
+    //
+    // ```text
+    // for (let i = 0n, k = this.guard(x); i < 2n; i++)   hex 008b519c77
+    // for (let i = 0n;                    i < 2n; i++)   hex 008b519c77
+    // ```
+    //
+    // Byte-identical. `guard` asserts `x > 100n` and `@bsv/sdk`
+    // `Spend.validate()` ACCEPTED `verify(5n)`. `k` is never named again, so no
+    // later pass can catch this as an undeclared variable; only the effect is
+    // lost.
+    //
+    // The subset is one declarator per statement (`spec/grammar.md`'s
+    // VariableDeclaration production), and python/zig/ruby/java already refuse
+    // the shape at the comma. The diagnostic text is shared verbatim with the
+    // other tiers that can see a declaration list.
+    if var_decl.decls.len() > 1 {
+        errors.push(Diagnostic::error(
+            &extra_declarator_error(var_decl.decls.len()),
+            None,
+        ));
     }
 
     let decl = &var_decl.decls[0];

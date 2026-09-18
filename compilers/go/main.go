@@ -9,11 +9,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/icellan/runar/compilers/go/codegen"
 	"github.com/icellan/runar/compilers/go/compiler"
+	"github.com/icellan/runar/compilers/go/frontend"
 )
 
 // GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
@@ -99,10 +102,14 @@ func main() {
 	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
 	emitSourceMap := flag.String("emit-source-map", "", "after a successful compile, write artifact.sourceMap JSON to this path")
+	ackUnsoundSP1Fri := flag.Bool("acknowledge-unsound-sp1-fri", false,
+		"compile ANF IR that reaches the known-unsound SP1 FRI verifier (the --ir path has no source "+
+			"to carry @acknowledgeUnsoundSP1FriVerifier). See docs/sp1-fri-verifier.md")
 	flag.Parse()
 
 	opts := compiler.CompileOptions{
-		DisableConstantFolding: *disableConstFold,
+		DisableConstantFolding:   *disableConstFold,
+		AcknowledgeUnsoundSP1Fri: *ackUnsoundSP1Fri,
 		// IncludeSourceMap is auto-enabled when --emit-source-map is requested
 		// so the artifact carries the mapping table the user just asked for.
 		IncludeSourceMap: *emitSourceMap != "",
@@ -137,6 +144,12 @@ func main() {
 		if parseRes.Err != nil {
 			fmt.Fprintf(os.Stderr, "parse error: %s\n", parseRes.Err.Error())
 			os.Exit(1)
+		}
+		// CL-BUG-104: warnings ride stderr here too, so both CLI paths agree
+		// about whether the compiler talks. Matches the Rust tier's
+		// `--parse-only` handler (compilers/rust/src/main.rs).
+		for _, w := range parseRes.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w.FormatMessage())
 		}
 		fmt.Println("parser ok")
 		return
@@ -179,16 +192,25 @@ func main() {
 	}
 
 	var artifact *compiler.Artifact
+	var warnings []frontend.Diagnostic
 	var err error
 
 	if *sourceFile != "" {
-		artifact, err = compiler.CompileFromSource(*sourceFile, opts)
+		artifact, warnings, err = compiler.CompileFromSourceCollectingWarnings(*sourceFile, opts)
 	} else {
 		artifact, err = compiler.CompileFromIR(*irFile, opts)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Compilation error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// CL-BUG-104: advisory validator diagnostics go to stderr, one per line,
+	// matching the Rust (`warning: {}`) and Zig (`printDiagnostics`) tiers.
+	// They are advisory: the exit code stays 0 and stdout still carries only
+	// the artifact bytes.
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w.FormatMessage())
 	}
 
 	// --emit-source-map: write the artifact's SourceMap field as
@@ -241,6 +263,28 @@ func main() {
 	}
 }
 
+// groth16PubInputFlag collects repeated --pub flags into the public-input
+// vector pinned into the emitted verifier. Values are decimal integers; the
+// range check against the BN254 scalar field happens in CompileGroth16WA.
+type groth16PubInputFlag []*big.Int
+
+func (f *groth16PubInputFlag) String() string {
+	parts := make([]string, len(*f))
+	for i, v := range *f {
+		parts[i] = v.String()
+	}
+	return strings.Join(parts, ",")
+}
+
+func (f *groth16PubInputFlag) Set(v string) error {
+	n, ok := new(big.Int).SetString(strings.TrimSpace(v), 10)
+	if !ok {
+		return fmt.Errorf("--pub %q is not a decimal integer", v)
+	}
+	*f = append(*f, n)
+	return nil
+}
+
 // runGroth16WA implements the `runarc groth16-wa` subcommand. It reads a
 // `.groth16.vk.json` verifying key file and emits a Rúnar artifact JSON
 // containing the witness-assisted BN254 Groth16 verifier locking script
@@ -260,12 +304,19 @@ func runGroth16WA() error {
 	outPath := fs.String("out", "", "output artifact JSON path (required)")
 	contractName := fs.String("name", "", "contract name in the output artifact (default \"Groth16Verifier\")")
 	moduloThreshold := fs.Int("modulo-threshold", 0, "bytes threshold for deferred mod reduction; 0 = strict (recommended, ~718 KB for SP1 v6); 2048 follows the nChain paper but is MUCH slower on today's interpreters")
+	var pubInputs groth16PubInputFlag
+	fs.Var(&pubInputs, "pub", "public-input scalar to pin into the verifier, as a decimal integer; repeat once per public input (required)")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: runar-compiler-go groth16-wa --vk <vk.json> --out <artifact.json> [--name <ContractName>] [--modulo-threshold <int>]")
+		fmt.Fprintln(fs.Output(), "Usage: runar-compiler-go groth16-wa --vk <vk.json> --out <artifact.json> --pub <scalar> [--pub <scalar> ...] [--name <ContractName>] [--modulo-threshold <int>]")
 		fmt.Fprintln(fs.Output())
 		fmt.Fprintln(fs.Output(), "Compiles a BN254 Groth16 witness-assisted verifier with a fixed verifying key")
 		fmt.Fprintln(fs.Output(), "baked in. The resulting Rúnar artifact can be deployed as a stateless contract")
 		fmt.Fprintln(fs.Output(), "via the Rúnar SDK. See spec/groth16_wa_vk.schema.json for the input format.")
+		fmt.Fprintln(fs.Output())
+		fmt.Fprintln(fs.Output(), "The public inputs are pinned into the script alongside the verifying key: the")
+		fmt.Fprintln(fs.Output(), "verifier recomputes IC[0] + sum(pub_j * IC[j+1]) on-chain and requires the")
+		fmt.Fprintln(fs.Output(), "spender's scalars to equal these. Without --pub the artifact would accept a")
+		fmt.Fprintln(fs.Output(), "proof of any statement the spender picked for themselves, so it is required.")
 		fmt.Fprintln(fs.Output())
 		fs.PrintDefaults()
 	}
@@ -285,6 +336,7 @@ func runGroth16WA() error {
 	artifact, err := compiler.CompileGroth16WA(*vkPath, compiler.Groth16WAOpts{
 		ContractName:    *contractName,
 		ModuloThreshold: *moduloThreshold,
+		PublicInputs:    pubInputs,
 	})
 	if err != nil {
 		return err

@@ -146,3 +146,6 @@ export type {
   SourceMap,
   SourceMapping,
 } from 'runar-ir-schema';
+
+// R-062: deploy-time gate on builtins the compiler does not claim are sound.
+export { assertUnsoundPrimitivesAcknowledged } from './unsound-primitives.js';

@@ -13,6 +13,10 @@
  *
  * Or with workspace deps already linked:
  *   cd conformance && npx tsx analyzer/scripts/generate-goldens.ts
+ *
+ *   --check                 re-derive reports and fail on drift (no write)
+ *   --root <dir>            treat <dir> as the repo root (tests)
+ *   --fixtures a,b          restrict to named fixtures
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -21,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { analyzeScript } from '../../../packages/runar-testing/src/analyzer/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, '..', '..', '..');
+const DEFAULT_REPO_ROOT = join(__dirname, '..', '..', '..');
 
 const FIXTURES = [
   'basic-p2pkh',
@@ -78,28 +82,104 @@ function emit(obj: unknown): string {
 // Main
 // ---------------------------------------------------------------------------
 
-function main(): void {
-  for (const name of FIXTURES) {
-    const hexPath = join(REPO_ROOT, 'conformance', 'tests', name, 'expected-script.hex');
-    const outDir = join(REPO_ROOT, 'conformance', 'analyzer', name);
-    const outPath = join(outDir, 'expected-analyzer-report.json');
+interface CliArgs {
+  checkOnly: boolean;
+  root: string;
+  fixtures: string[];
+}
 
-    if (!existsSync(hexPath)) {
-      console.error(`[generate-goldens] MISSING: ${hexPath}`);
-      process.exit(1);
+function parseArgs(argv: string[]): CliArgs {
+  let checkOnly = false;
+  let root = DEFAULT_REPO_ROOT;
+  let fixtures = [...FIXTURES];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--check') checkOnly = true;
+    else if (a === '--root' && i + 1 < argv.length) root = argv[++i]!;
+    else if (a === '--fixtures' && i + 1 < argv.length) {
+      fixtures = argv[++i]!.split(',').map((s) => s.trim()).filter(Boolean);
+    } else if (a === '--help' || a === '-h') {
+      console.log(
+        'Usage: generate-goldens.ts [--check] [--root dir] [--fixtures a,b]',
+      );
+      process.exit(0);
+    }
+  }
+  return { checkOnly, root, fixtures };
+}
+
+function deriveReport(root: string, name: string): { outPath: string; text: string; scriptSize: number; findings: number; paths: number } {
+  const hexPath = join(root, 'conformance', 'tests', name, 'expected-script.hex');
+  const outPath = join(root, 'conformance', 'analyzer', name, 'expected-analyzer-report.json');
+  if (!existsSync(hexPath)) {
+    throw new Error(`MISSING hex: ${hexPath}`);
+  }
+  const hex = readFileSync(hexPath, 'utf8').trim();
+  const result = analyzeScript(hex);
+  const report = buildReport(result);
+  return {
+    outPath,
+    text: emit(report),
+    scriptSize: result.scriptSize,
+    findings: result.findings.length,
+    paths: result.paths.length,
+  };
+}
+
+function main(): void {
+  const args = parseArgs(process.argv.slice(2));
+  const drifted: string[] = [];
+  const missing: string[] = [];
+
+  for (const name of args.fixtures) {
+    let derived: ReturnType<typeof deriveReport>;
+    try {
+      derived = deriveReport(args.root, name);
+    } catch (err: any) {
+      console.error(`[generate-goldens] ${err.message ?? err}`);
+      missing.push(name);
+      continue;
     }
 
-    const hex = readFileSync(hexPath, 'utf8').trim();
-    const result = analyzeScript(hex);
-    const report = buildReport(result);
+    if (args.checkOnly) {
+      if (!existsSync(derived.outPath)) {
+        console.error(`[generate-goldens] MISSING report: ${derived.outPath}`);
+        drifted.push(name);
+        continue;
+      }
+      const existing = readFileSync(derived.outPath, 'utf8');
+      if (existing !== derived.text) {
+        console.error(
+          `[generate-goldens] DRIFT: ${name} (report lags expected-script.hex)`,
+        );
+        drifted.push(name);
+      } else {
+        console.log(
+          `[generate-goldens] ${name}: ok (${derived.scriptSize} bytes)`,
+        );
+      }
+      continue;
+    }
 
-    mkdirSync(outDir, { recursive: true });
-    writeFileSync(outPath, emit(report));
-
+    mkdirSync(join(args.root, 'conformance', 'analyzer', name), { recursive: true });
+    writeFileSync(derived.outPath, derived.text);
     console.log(
-      `[generate-goldens] ${name}: ${result.scriptSize} bytes, ` +
-        `${result.findings.length} finding(s), ${result.paths.length} path(s) -> ${outPath}`,
+      `[generate-goldens] ${name}: ${derived.scriptSize} bytes, ` +
+        `${derived.findings} finding(s), ${derived.paths} path(s) -> ${derived.outPath}`,
     );
+  }
+
+  if (missing.length > 0 || (args.checkOnly && drifted.length > 0)) {
+    if (args.checkOnly && drifted.length > 0) {
+      console.error(
+        `\nanalyzer goldens stale: ${drifted.join(', ')}\n` +
+          'Re-run without --check, review the diff, and commit.',
+      );
+    }
+    process.exit(1);
+  }
+  if (args.checkOnly) {
+    console.log('analyzer goldens match current expected-script.hex');
   }
 }
 

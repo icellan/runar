@@ -624,6 +624,10 @@ script and is not absorbed into the Fiat-Shamir transcript by the emitted
 locking script — the compiler explicitly drops it
 (` + "`sp1_fri.go::lowerVerifySP1FRI`" + `, the ` + "`SP1VKeyHashByteSize == 0`" + ` branch).
 
+That drop is now scoped to a zero-length VK field. At ` + "`SP1VKeyHashByteSize > 0`" + `
+the verifying key IS absorbed, at the head of the transcript (R-057); see
+"What would have to land first" below.
+
 The off-chain reference verifier agrees: ` + "`sp1fri.Verify(proof, publicValues)`" + `
 takes no VK hash parameter at all.
 
@@ -636,8 +640,18 @@ directory.
 
 1. A fixture whose proof is a real SP1 outer proof with a verifying key
    (` + "`evm-guest/`" + ` is still a raw Plonky3 proof, not an SP1 wrapper).
-2. A parameter set with ` + "`SP1VKeyHashByteSize == 32`" + ` wired end-to-end, so the
-   VK hash is actually absorbed into the transcript.
+2. ~~A parameter set with ` + "`SP1VKeyHashByteSize == 32`" + ` wired end-to-end, so the
+   VK hash is actually absorbed into the transcript.~~ **DONE (R-057).**
+   ` + "`SP1VKeyHashByteSize > 0`" + ` now absorbs the contract's readonly
+   ` + "`Sp1VKeyHash`" + ` property — a LOCKING-script constant, not an unlocking-script
+   push — at the head of the Fiat-Shamir transcript per
+   ` + "`docs/sp1-fri-verifier.md`" + ` §3. Before R-057 this was dead code:
+   ` + "`sp1FriPrePushedFieldNames`" + ` never allocated the ` + "`_obs_sp1_vk_hash`" + ` slot
+   that ` + "`emitTranscriptInit`" + ` Step 2b looks up by name, so asking for 32
+   panicked the compiler and NO parameter set bound the key. Proven by
+   ` + "`compilers/go/compiler.TestSp1FriVerifier_VerifyingKeyBindsTheProgram`" + `:
+   the same proof is accepted under one verifying key and rejected under
+   another. Only item 1 is still outstanding.
 
 Until both exist, the closest runnable coverage is ` + "`../wrong_program/`" + `, which
 binds the minimal-guest proof to a different program's public values — the

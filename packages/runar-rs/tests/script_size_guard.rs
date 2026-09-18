@@ -36,6 +36,7 @@ fn make_artifact(script: &str, contract_name: &str, methods: Vec<AbiMethod>) -> 
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 
@@ -58,6 +59,7 @@ fn deploy_rejects_oversized_script() {
         satoshis: 1000,
         change_address: None,
         funding_signer: None,
+        acknowledge_unsound: vec![],
     });
     let err = result.expect_err("expected ScriptSizeExceededError");
     assert!(err.contains("OversizedContract.deploy"), "context missing: {}", err);
@@ -85,7 +87,7 @@ fn call_rejects_oversized_current_utxo_script() {
         satoshis: 50_000,
         script: oversized_script_hex(),
     };
-    let mut contract = RunarContract::from_utxo(artifact, &utxo);
+    let mut contract = RunarContract::from_utxo(artifact, &utxo).expect("from_utxo");
 
     let mut provider = MockProvider::always_ack("testnet");
     let mock_addr = "0".repeat(20);

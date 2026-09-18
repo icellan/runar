@@ -373,7 +373,7 @@ contract FungibleToken is StatefulSmartContract {
 }
 ```
 
-The `mergeBalance` property enables secure cross-input merge verification. Each input places its own verified balance in a position-dependent slot, and `hashOutputs` in BIP-143 forces both inputs to agree on the exact same output, preventing inflation attacks.
+The `mergeBalance` property is the second slot of a two-input merge. `token-ft` authenticates the companion via `otherParentTx` (companion-parent merge, W8). See `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
 
 ### SimpleNFT
 
@@ -447,6 +447,25 @@ contract SimpleNFT is StatefulSmartContract {
 | `Point` | `Point` |
 
 Both Solidity-style names (`int256`, `bool`, `bytes`, `address`) and Rúnar-native names (`bigint`, `boolean`, `ByteString`, `Addr`) are accepted. The parser normalizes to Rúnar types.
+
+### `Sha256Digest` is not a type name on this surface
+
+`Sha256Digest` is a TypeScript-ecosystem spelling: `packages/runar-lang/src/types.ts`
+declares `export type Sha256Digest = Sha256`, and every surface that borrows a real
+language's type vocabulary — `.runar.ts`, `.runar.go`, `.runar.rs`, `.runar.py`,
+`.runar.zig`, `.runar.rb`, `.runar.java` — normalizes the alias in its own frontend.
+The Solidity-like and Move-style surfaces deliberately do not. They imitate languages
+that never had the name, so their vocabulary carries only the canonical `Sha256`.
+
+Seven surfaces resolve it, two do not, and that split is a decision rather than an
+artifact of which parser file the alias table happens to live in. Widening the
+Solidity-like vocabulary would be a language change; it is not one the two imitation
+surfaces need.
+
+Write `Sha256`. All seven compilers must reject the alias here —
+`conformance/negatives/N24-sha256digest-alias-sol.runar.sol` is the gate, and
+`conformance/subtype-parity/Sha256DigestAlias.runar.ts` is the matching positive
+control for the surfaces that do resolve it.
 
 ---
 

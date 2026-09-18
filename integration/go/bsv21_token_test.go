@@ -56,7 +56,9 @@ func TestBSV21_DeployMint(t *testing.T) {
 	dec := "18"
 	sym := "RNR"
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(runar.BSV21DeployMint("1000000", &dec, &sym, nil))
+	if _, err := contract.WithInscription(runar.BSV21DeployMint("1000000", &dec, &sym, nil)); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	txid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {
@@ -107,7 +109,9 @@ func TestBSV21_TransferReferencesTokenID(t *testing.T) {
 	// Deploy+Mint to create a token ID.
 	sym := "TST"
 	deployContract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	deployContract.WithInscription(runar.BSV21DeployMint("500", nil, &sym, nil))
+	if _, err := deployContract.WithInscription(runar.BSV21DeployMint("500", nil, &sym, nil)); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 	deployTxid, _, err := deployContract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {
 		t.Fatalf("deploy mint: %v", err)
@@ -116,7 +120,9 @@ func TestBSV21_TransferReferencesTokenID(t *testing.T) {
 
 	// Inscribe a transfer referencing the token ID.
 	transferContract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	transferContract.WithInscription(runar.BSV21Transfer(tokenID, "100"))
+	if _, err := transferContract.WithInscription(runar.BSV21Transfer(tokenID, "100")); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 	transferTxid, _, err := transferContract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {
 		t.Fatalf("deploy transfer: %v", err)
@@ -153,10 +159,12 @@ func TestBSV21_SpendTransferUTXO(t *testing.T) {
 	}
 
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(runar.BSV21Transfer(
+	if _, err := contract.WithInscription(runar.BSV21Transfer(
 		"0000000000000000000000000000000000000000000000000000000000000001_0",
 		"50",
-	))
+	)); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	if _, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1}); err != nil {
 		t.Fatalf("deploy: %v", err)
@@ -189,7 +197,9 @@ func TestBSV21_RoundTripViaFromTxId(t *testing.T) {
 	sym := "ABC"
 	icon := "https://example.com/icon.png"
 	contract := runar.NewRunarContract(artifact, []interface{}{wallet.PubKeyHashHex()})
-	contract.WithInscription(runar.BSV21DeployMint("999", &dec, &sym, &icon))
+	if _, err := contract.WithInscription(runar.BSV21DeployMint("999", &dec, &sym, &icon)); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	txid, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 1})
 	if err != nil {

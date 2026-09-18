@@ -9,9 +9,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import runar.compiler.canonical.Jcs;
 import runar.compiler.frontend.ParserDispatch;
+import runar.compiler.ir.anf.AnfMethod;
 import runar.compiler.ir.anf.AnfProgram;
+import runar.compiler.ir.anf.AnfProperty;
 import runar.compiler.ir.ast.ContractNode;
 import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.passes.AnfLoader;
@@ -21,6 +24,7 @@ import runar.compiler.passes.ConstantFold;
 import runar.compiler.passes.Emit;
 import runar.compiler.passes.ExpandFixedArrays;
 import runar.compiler.passes.Peephole;
+import runar.compiler.passes.PassLocation;
 import runar.compiler.passes.StackLower;
 import runar.compiler.passes.Typecheck;
 import runar.compiler.passes.Validate;
@@ -123,7 +127,15 @@ public final class Cli {
         }
 
         try {
-            Validate.run(contract);
+            // CL-BUG-104: Validate.run returns its warnings; this used to
+            // discard them, so every advisory diagnostic the validator
+            // produced died here. They ride stderr, one per line, prefixed
+            // "warning: " — matching the Rust (`eprintln!("warning: {}", w)`)
+            // and Zig (printDiagnostics) tiers. Advisory only: the exit code
+            // stays 0 and stdout still carries nothing but the artifact bytes.
+            for (String w : Validate.run(contract)) {
+                err.println("warning: " + w);
+            }
         } catch (Validate.ValidationException e) {
             for (String msg : e.errors()) {
                 err.println("runar-java: " + msg);
@@ -138,15 +150,22 @@ public final class Cli {
             return 0;
         }
 
-        try {
-            contract = ExpandFixedArrays.run(contract);
-        } catch (ExpandFixedArrays.ExpandException e) {
-            for (String msg : e.errors()) {
-                err.println("runar-java: " + msg);
-            }
-            return 65;
-        }
-
+        // N-106: Typecheck BEFORE ExpandFixedArrays, as the other six tiers do
+        // (TS `index.ts`: parse -> validate -> typecheck -> expandFixedArrays;
+        // Go `compiler.go`, Rust `lib.rs`, Python `compiler.py`, Zig
+        // `compiler_api.zig`, Ruby `compiler.rb` all the same). This tier ran
+        // the expansion first, which made a whole class of type errors
+        // unreachable: the expansion rewrites `this.cells[expr]` into a ternary
+        // dispatch over the scalar siblings, so no `IndexAccessExpr` survived to
+        // reach the index-type guard, and Java alone ACCEPTED
+        // `this.cells[this.helperReturningPubKey()]` — a `<unknown>` array index
+        // the other six refuse with "array index must be bigint".
+        //
+        // Moving it is only safe together with N-107: Typecheck's addOutput
+        // arity rule needs the POST-expansion state slot count, which this tier
+        // used to get for free from the wrong pass order. Typecheck now computes
+        // it (`expandedStateSlots`), so the order can be corrected without the
+        // count regressing. The two findings are one root cause.
         try {
             Typecheck.run(contract);
         } catch (Typecheck.TypeCheckException e) {
@@ -156,20 +175,36 @@ public final class Cli {
             return 65;
         }
 
+        try {
+            contract = ExpandFixedArrays.run(contract);
+        } catch (ExpandFixedArrays.ExpandException e) {
+            for (String msg : e.errors()) {
+                err.println("runar-java: " + msg);
+            }
+            return 65;
+        }
+
         AnfProgram anf;
+        // R-144: clear before, read after. A pass that publishes no position
+        // reports exactly what it reported before; one that does gets the
+        // file:line:column shape Validate and Typecheck already use.
+        PassLocation.clear();
         try {
             anf = AnfLower.run(contract);
         } catch (RuntimeException e) {
-            err.println("runar-java: anf-lower error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("anf-lower error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
 
         // Pass 4.25: constant folding (gated by --disable-constant-folding).
         // Pass 4.5:  general ANF cleanup (always on, matches Python pipeline).
+        PassLocation.clear();
         try {
             anf = optimizeAnf(anf, parsed.disableConstantFolding);
         } catch (RuntimeException e) {
-            err.println("runar-java: anf-optimize error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("anf-optimize error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
 
@@ -179,6 +214,16 @@ public final class Cli {
         if (parsed.emitSourceMap != null) {
             int rc = writeSourceMap(anf, parsed.emitSourceMap);
             if (rc != 0) return rc;
+        }
+
+        // R-007: --emit-artifact writes the deployable artifact JSON (script +
+        // constructorSlots + codeSep offsets + ABI). Like --emit-source-map it
+        // runs independently of --emit-ir / --hex, so one invocation can produce
+        // several artefacts; with no other output flag it is the sole output.
+        if (parsed.emitArtifact != null) {
+            int rc = writeArtifact(anf, parentClassName(contract), parsed.emitArtifact);
+            if (rc != 0) return rc;
+            if (!parsed.emitIr && !parsed.hex) return 0;
         }
 
         if (parsed.emitIr) {
@@ -310,10 +355,12 @@ public final class Cli {
         // emits as wasteful push+drop sequences — diverging from the fold-OFF
         // goldens and from the Zig tier, whose compileFromIR never folds IR input.
         // So force folding off here regardless of the flag; peephole still folds.
+        PassLocation.clear();
         try {
             anf = optimizeAnf(anf, /* disableConstantFolding */ true);
         } catch (RuntimeException e) {
-            err.println("runar-java: anf-optimize error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("anf-optimize error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
 
@@ -321,6 +368,16 @@ public final class Cli {
         if (parsed.emitSourceMap != null) {
             int rc = writeSourceMap(anf, parsed.emitSourceMap);
             if (rc != 0) return rc;
+        }
+
+        // R-007: --emit-artifact also runs on the IR path. parentClass is not
+        // carried in the ANF IR JSON in ANY tier (it is `json:"-"` in Go), so
+        // the field is omitted here exactly as Go's CompileFromIR omits it; the
+        // SDK falls back to `stateFields non-empty` (RunarArtifact#parentStateful).
+        if (parsed.emitArtifact != null) {
+            int rc = writeArtifact(anf, null, parsed.emitArtifact);
+            if (rc != 0) return rc;
+            if (!parsed.emitIr && !parsed.hex) return 0;
         }
 
         if (parsed.emitIr) {
@@ -334,6 +391,229 @@ public final class Cli {
 
         out.println(Jcs.stringify(anf));
         return 0;
+    }
+
+    /**
+     * The base class the source contract extends, as the artifact's
+     * {@code parentClass} string ("SmartContract" | "StatefulSmartContract" |
+     * "UnsafeSmartContract"). Authoritative stateful signal for the SDK's
+     * issue-#42/#44 terminal sighash subscript trim.
+     */
+    private static String parentClassName(ContractNode contract) {
+        return contract.parentClass() == null ? null : contract.parentClass().canonical();
+    }
+
+    /**
+     * R-007: lower ANF through stack + peephole + emit and write the deployable
+     * artifact JSON to {@code path}.
+     *
+     * <p>Field names and JSON shape follow the Go reference assembler
+     * ({@code compilers/go/compiler/compiler.go#assembleArtifact}) and are what
+     * {@code packages/runar-java}'s {@code RunarArtifact.fromJson} reads.
+     *
+     * <p><b>Known gaps vs. the Go assembler</b> (each degrades gracefully — the
+     * SDK treats the field as absent):
+     * <ul>
+     *   <li>{@code asm} — the Java emitter keeps no disassembly column. The SDK
+     *       uses it only for the {@code isLikelyOrChecksig} NULLFAIL warning,
+     *       which therefore stays silent for Java-built artifacts.</li>
+     *   <li>{@code sigHashType} — Java's {@code AnfMethod} carries no
+     *       {@code @sighash} directive field (Go keeps it in-memory only), so a
+     *       non-default sighash mode is not published to the ABI.</li>
+     *   <li>{@code fixedArray} regrouping — Java's {@code AnfProperty} carries
+     *       no synthetic-array chain, so expanded FixedArray siblings appear as
+     *       individual ABI params / state fields rather than one logical entry.</li>
+     * </ul>
+     *
+     * <p>Returns 0 on success, non-zero on failure.
+     */
+    private int writeArtifact(AnfProgram anf, String parentClass, String path) {
+        PassLocation.clear();
+        try {
+            StackProgram stack = StackLower.run(anf);
+            StackProgram optimised = Peephole.run(stack);
+            Emit.EmitResultFull emit = Emit.runResultFull(optimised);
+
+            // Constructor params: every property WITHOUT a compile-time default
+            // (initialised properties are not constructor arguments).
+            List<AnfProperty> ctorProps = new ArrayList<>();
+            for (AnfProperty p : anf.properties()) {
+                if (p.initialValue() == null) ctorProps.add(p);
+            }
+            // State fields: the mutable properties. `index` is the property's
+            // position in declaration order (matching constructor arg order),
+            // NOT a sequential mutable counter — the SDK relies on that.
+            List<String> stateFieldJson = new ArrayList<>();
+            for (int i = 0; i < anf.properties().size(); i++) {
+                AnfProperty p = anf.properties().get(i);
+                if (p.readonly()) continue;
+                StringBuilder sf = new StringBuilder();
+                sf.append("{\"name\": ").append(jsonString(p.name()))
+                    .append(", \"type\": ").append(jsonString(p.type()))
+                    .append(", \"index\": ").append(i);
+                if (p.initialValue() != null) {
+                    sf.append(", \"initialValue\": ").append(Jcs.stringify(p.initialValue()));
+                }
+                sf.append('}');
+                stateFieldJson.add(sf.toString());
+            }
+            boolean isStateful = !stateFieldJson.isEmpty();
+
+            Map<String, AnfMethod> privateMethods = StackLower.privateMethodMap(anf);
+            List<String> methodJson = new ArrayList<>();
+            for (AnfMethod m : anf.methods()) {
+                if ("constructor".equals(m.name())) continue; // lives in abi.constructor
+                StringBuilder mb = new StringBuilder();
+                mb.append("{\"name\": ").append(jsonString(m.name())).append(", \"params\": [");
+                for (int i = 0; i < m.params().size(); i++) {
+                    if (i > 0) mb.append(", ");
+                    mb.append("{\"name\": ").append(jsonString(m.params().get(i).name()))
+                        .append(", \"type\": ").append(jsonString(m.params().get(i).type()))
+                        .append('}');
+                }
+                mb.append("], \"isPublic\": ").append(m.isPublic());
+                // Stateful public methods without a _changePKH param are terminal
+                // (they do not build a state continuation output).
+                if (isStateful && m.isPublic() && !hasParam(m, "_changePKH")) {
+                    mb.append(", \"isTerminal\": true");
+                }
+                // Issue #100: authoritative _codePart decision from stack lowering.
+                if (m.isPublic()
+                    && StackLower.methodRequiresCodePart(m, anf.properties(), privateMethods)) {
+                    mb.append(", \"usesCodePart\": true");
+                }
+                mb.append('}');
+                methodJson.add(mb.toString());
+            }
+
+            StringBuilder b = new StringBuilder(1024 + emit.scriptHex().length());
+            b.append("{\n");
+            b.append("  \"version\": ").append(jsonString(SCHEMA_VERSION)).append(",\n");
+            b.append("  \"compilerVersion\": ").append(jsonString(Version.VALUE + "-java")).append(",\n");
+            b.append("  \"contractName\": ").append(jsonString(anf.contractName())).append(",\n");
+            if (parentClass != null) {
+                b.append("  \"parentClass\": ").append(jsonString(parentClass)).append(",\n");
+            }
+            b.append("  \"abi\": {\n    \"constructor\": {\n      \"params\": [");
+            for (int i = 0; i < ctorProps.size(); i++) {
+                if (i > 0) b.append(", ");
+                b.append("{\"name\": ").append(jsonString(ctorProps.get(i).name()))
+                    .append(", \"type\": ").append(jsonString(ctorProps.get(i).type()))
+                    .append('}');
+            }
+            b.append("]\n    },\n    \"methods\": [");
+            appendJoined(b, methodJson);
+            b.append("]\n  },\n");
+            b.append("  \"script\": ").append(jsonString(emit.scriptHex())).append(",\n");
+            if (isStateful) {
+                b.append("  \"stateFields\": [");
+                appendJoined(b, stateFieldJson);
+                b.append("],\n");
+            }
+            if (!emit.constructorSlots().isEmpty()) {
+                List<String> slots = new ArrayList<>();
+                for (Emit.ConstructorSlot s : emit.constructorSlots()) {
+                    slots.add("{\"paramIndex\": " + s.paramIndex()
+                        + ", \"byteOffset\": " + s.byteOffset() + "}");
+                }
+                b.append("  \"constructorSlots\": [");
+                appendJoined(b, slots);
+                b.append("],\n");
+            }
+            if (!emit.codeSepIndexSlots().isEmpty()) {
+                List<String> slots = new ArrayList<>();
+                for (Emit.CodeSepIndexSlot s : emit.codeSepIndexSlots()) {
+                    slots.add("{\"byteOffset\": " + s.byteOffset()
+                        + ", \"codeSepIndex\": " + s.codeSepIndex() + "}");
+                }
+                b.append("  \"codeSepIndexSlots\": [");
+                appendJoined(b, slots);
+                b.append("],\n");
+            }
+            // -1 is the "no OP_CODESEPARATOR emitted" sentinel; omit the field.
+            if (emit.codeSeparatorIndex() >= 0) {
+                b.append("  \"codeSeparatorIndex\": ").append(emit.codeSeparatorIndex()).append(",\n");
+            }
+            if (!emit.codeSeparatorIndices().isEmpty()) {
+                b.append("  \"codeSeparatorIndices\": [");
+                for (int i = 0; i < emit.codeSeparatorIndices().size(); i++) {
+                    if (i > 0) b.append(", ");
+                    b.append(emit.codeSeparatorIndices().get(i));
+                }
+                b.append("],\n");
+            }
+            b.append("  \"buildTimestamp\": ").append(jsonString(buildTimestamp()));
+            // Stateful artifacts always carry the ANF so the SDK can auto-compute
+            // state transitions without a hand-written newState (matches Go).
+            if (isStateful) {
+                b.append(",\n  \"anf\": ").append(Jcs.stringify(anf));
+            }
+            b.append("\n}\n");
+
+            Path target = Path.of(path);
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            Files.writeString(target, b.toString());
+            return 0;
+        } catch (IOException e) {
+            err.println("runar-java: failed to write artifact to " + path + ": " + e.getMessage());
+            return 74;
+        } catch (RuntimeException e) {
+            err.println("runar-java: "
+                + PassLocation.formatAt(
+                    "artifact emit error: " + e.getMessage(), PassLocation.take()));
+            return 70;
+        }
+    }
+
+    /** Artifact schema version. Matches the Go tier's {@code schemaVersion}. */
+    private static final String SCHEMA_VERSION = "runar-v1.0.0-rc.1";
+
+    private static boolean hasParam(AnfMethod m, String name) {
+        for (var p : m.params()) {
+            if (name.equals(p.name())) return true;
+        }
+        return false;
+    }
+
+    private static void appendJoined(StringBuilder b, List<String> parts) {
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) b.append(", ");
+            b.append(parts.get(i));
+        }
+    }
+
+    /**
+     * The artifact build time, as an ISO-8601 second-resolution UTC string.
+     *
+     * <p>Honours SOURCE_DATE_EPOCH
+     * (https://reproducible-builds.org/specs/source-date-epoch/): when it holds
+     * a Unix seconds value, that instant is stamped instead of the clock, so two
+     * builds of the same source produce byte-identical artifacts. Without it,
+     * the wall clock, exactly as before.
+     *
+     * <p>R-212: the Go tier honoured this and the other six did not, so six of
+     * seven artifacts could not be reproduced — and reproducing the artifact is
+     * how someone other than the author checks that a published locking script
+     * is what the published source compiles to. A malformed value is ignored
+     * rather than failing the build: the variable is an environment convention,
+     * not input.
+     */
+    private static String buildTimestamp() {
+        java.time.Instant instant = java.time.Instant.now();
+        String raw = System.getenv("SOURCE_DATE_EPOCH");
+        if (raw != null && raw.trim().matches("\\d+")) {
+            try {
+                instant = java.time.Instant.ofEpochSecond(Long.parseLong(raw.trim()));
+            } catch (NumberFormatException | java.time.DateTimeException ignored) {
+                // Out of range for an Instant: fall through to the clock.
+            }
+        }
+        return instant
+            .truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString()
+            .replace("Z", "") + "Z";
     }
 
     /**
@@ -355,6 +635,7 @@ public final class Cli {
     }
 
     private int emitHex(AnfProgram anf) {
+        PassLocation.clear();
         try {
             StackProgram stack = StackLower.run(anf);
             StackProgram optimised = Peephole.run(stack);
@@ -362,7 +643,8 @@ public final class Cli {
             out.println(hex);
             return 0;
         } catch (RuntimeException e) {
-            err.println("runar-java: emit error: " + e.getMessage());
+            err.println("runar-java: "
+                + PassLocation.formatAt("emit error: " + e.getMessage(), PassLocation.take()));
             return 70;
         }
     }
@@ -373,11 +655,13 @@ public final class Cli {
         stream.println("Options:");
         stream.println("  --source <path>              source file (.runar.{ts,sol,move,py,go,rs,zig,rb,java})");
         stream.println("  --ir <path>                  pre-generated ANF JSON");
+        stream.println("  --parse-only                 run passes 1-2 only and print \"parser ok\"");
         stream.println("  --emit-ir                    emit canonical ANF JSON on stdout");
         stream.println("  --emit-ir-to <path>          write canonical ANF JSON to <path> and keep compiling");
         stream.println("  --hex                        emit Bitcoin Script hex on stdout");
         stream.println("  --disable-constant-folding   disable the constant-folding optimizer (required for conformance)");
         stream.println("  --emit-source-map <path>     write the artifact's sourceMap JSON to <path>");
+        stream.println("  --emit-artifact <path>       write the deployable artifact JSON to <path>");
         stream.println("  --daemon                     run in daemon mode (line-delimited JSON RPC on stdin/stdout)");
         stream.println("  --version                    print version and exit");
         stream.println("  -h, --help                   print this help and exit");
@@ -464,8 +748,12 @@ public final class Cli {
                 b.append("{\"id\":").append(req.id).append(",\"ok\":true,\"parsed\":true}");
                 return b.toString();
             }
-            contract = ExpandFixedArrays.run(contract);
+            // N-106: same order as compileSource above — Typecheck first, then
+            // the expansion. The daemon is a second entry point into the same
+            // pipeline, and a daemon that type-checks a different tree from the
+            // CLI is its own divergence.
             Typecheck.run(contract);
+            contract = ExpandFixedArrays.run(contract);
             AnfProgram anf = AnfLower.run(contract);
             anf = optimizeAnf(anf, req.disableConstantFolding);
 
@@ -636,6 +924,9 @@ public final class Cli {
         // can hand back both the IR and the script hex. Used by the
         // conformance runner's single-spawn mode.
         String emitIrTo;
+        // R-007: when non-null, write the deployable artifact JSON (script +
+        // constructorSlots + codeSep offsets + ABI) to this path.
+        String emitArtifact;
 
         static Args parse(String[] argv) {
             Args out = new Args();
@@ -650,6 +941,10 @@ public final class Cli {
                     out.emitIrTo = arg.substring("--emit-ir-to=".length());
                     continue;
                 }
+                if (arg.startsWith("--emit-artifact=")) {
+                    out.emitArtifact = arg.substring("--emit-artifact=".length());
+                    continue;
+                }
                 switch (arg) {
                     case "--source" -> out.source = requireValue(list, "--source");
                     case "--ir" -> out.ir = requireValue(list, "--ir");
@@ -659,6 +954,7 @@ public final class Cli {
                     case "--parse-only" -> out.parseOnly = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
                     case "--emit-source-map" -> out.emitSourceMap = requireValue(list, "--emit-source-map");
+                    case "--emit-artifact" -> out.emitArtifact = requireValue(list, "--emit-artifact");
                     case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;
                     case "-h", "--help" -> out.help = true;

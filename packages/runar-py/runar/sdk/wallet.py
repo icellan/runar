@@ -103,6 +103,10 @@ class WalletClient(ABC):
 # WalletProvider
 # ---------------------------------------------------------------------------
 
+MAINNET_ARC_URL = 'https://arc.gorillapool.io'
+"""The default ARC broadcaster. A MAINNET endpoint — see R-179."""
+
+
 class WalletProvider(Provider):
     """Provider implementation backed by a BRC-100 wallet.
 
@@ -116,7 +120,7 @@ class WalletProvider(Provider):
         signer: Signer,
         basket: str,
         funding_tag: str = 'funding',
-        arc_url: str = 'https://arc.gorillapool.io',
+        arc_url: str | None = None,
         overlay_url: str | None = None,
         network: str = 'mainnet',
         fee_rate: int = 100,
@@ -125,7 +129,21 @@ class WalletProvider(Provider):
         self.signer = signer
         self.basket = basket
         self.funding_tag = funding_tag
-        self.arc_url = arc_url
+        # R-179: arc_url and network used to be defaulted independently, so a
+        # provider configured for testnet reported get_network() == 'testnet'
+        # and broadcast every transaction to the MAINNET ARC. There is no
+        # canonical testnet ARC endpoint to default to, so a non-mainnet
+        # provider has to name its own instead of inheriting one that points at
+        # real money.
+        if arc_url is not None:
+            self.arc_url = arc_url
+        elif network == 'mainnet':
+            self.arc_url = MAINNET_ARC_URL
+        else:
+            raise ValueError(
+                f"WalletProvider: no default ARC endpoint for network {network!r} — "
+                f"{MAINNET_ARC_URL} is a MAINNET broadcaster. Pass arc_url explicitly."
+            )
         self.overlay_url = overlay_url
         self._network = network
         self._fee_rate = fee_rate

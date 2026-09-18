@@ -16,8 +16,9 @@ The depth parameter is a compile-time constant (the loop is unrolled
 because Bitcoin Script has no loops). The dispatch arm in
 `Stack.Lower` extracts the depth from the binding-name → constant-int
 map populated by a one-pass scan of the method body, drops the runtime
-slot for the depth literal, then splices the precomputed op list from
-this module after the runtime args have been brought to top.
+slot for the depth literal, then splices `merkleRootSha256Ops` /
+`merkleRootHash256Ops` (R-120 wrap of the historical body) after the
+runtime args have been brought to top.
 
 ## Stack convention
 
@@ -130,6 +131,23 @@ def mAllLevelsAux (hashOp : String) : Nat → Nat → List StackOp
 def mAllLevels (depth : Nat) (hashOp : String) : List StackOp :=
   mAllLevelsAux hashOp 0 depth
 
+/-- R-120: `0 ≤ index < 2^depth` before the tree walk. DUP, push 0,
+push `2^depth`, `OP_WITHIN`, `OP_VERIFY`. -/
+def merkleIndexBound (depth : Nat) : List StackOp :=
+  [ .dup
+  , mPushI 0
+  , mPushI (Int.ofNat (2 ^ depth))
+  , mOpc "OP_WITHIN"
+  , mOpc "OP_VERIFY" ]
+
+/-- R-120: drop index, then `SIZE(rest_proof) == 0`, then drop the
+empty remainder. Replaces a bare `[.drop, .drop]` that accepted any
+over-long proof blob. -/
+def merkleProofEmptyCheck : List StackOp :=
+  [ .drop
+  , mOpc "OP_SIZE", mPushI 0, mOpc "OP_NUMEQUALVERIFY"
+  , .drop ]
+
 /-- The full Merkle-root body. Stack on entry:
 `[..., leaf(32B), proof(depth*32B), index(bigint)]` (index = TOS).
 Stack on exit: `[..., root(32B)]`. Net depth: −2. -/
@@ -138,24 +156,33 @@ def merkleRootBody (depth : Nat) (hashOp : String) : List StackOp :=
   -- Cleanup: drop index, then drop empty proof.
   ++ [.drop, .drop]
 
-/-- Body for `merkleRootSha256(leaf, proof, index, depth)`. -/
-@[inline] def merkleRootSha256Ops (depth : Nat) : List StackOp :=
-  merkleRootBody depth "OP_SHA256"
+/-- Body for `merkleRootSha256(leaf, proof, index, depth)`.
+R-120 wraps the historical body with an index bound and an empty-proof
+check so over-long / out-of-range witnesses abort. -/
+def merkleRootSha256Ops (depth : Nat) : List StackOp :=
+  merkleIndexBound depth ++ mAllLevels depth "OP_SHA256" ++ merkleProofEmptyCheck
 
 /-- Body for `merkleRootHash256(leaf, proof, index, depth)`. -/
-@[inline] def merkleRootHash256Ops (depth : Nat) : List StackOp :=
-  merkleRootBody depth "OP_HASH256"
+def merkleRootHash256Ops (depth : Nat) : List StackOp :=
+  merkleIndexBound depth ++ mAllLevels depth "OP_HASH256" ++ merkleProofEmptyCheck
 
 /-! ## Phase B7 — codegen-to-spec equivalence (base case)
 
 Phase B7 of the verification roadmap demands a `runOps`-level equivalence
-between `merkleRootSha256Ops d` and the concrete tree-fold spec
+between the historical Merkle body and the concrete tree-fold spec
 `Crypto.Spec.merkleRootD`.  The compiler's Stack-IR fragment is a
 *Merkle-path verifier* (entry: `[leaf, proof(depth*32B), index]`), so
 the natural spec target is the matching path-verifier
 `Crypto.Spec.merkleVerifyPath` from `Crypto/Spec.lean`.
 
-We prove the equivalence for the base case `d = 0`, where the codegen
+The B7 theorems are stated against `merkleRootBody` (2DROP cleanup).
+`merkleRootSha256Ops` / `merkleRootHash256Ops` wrap that body with the
+R-120 index bound and empty-proof check so Gate 2 hex matches the
+reference; those wrappers are net-zero on a well-formed witness
+(`0 ≤ index < 2^d` and `proof.size = 32*d`) but the extra `runOps`
+identity is not claimed here.
+
+We prove the equivalence for the base case `d = 0`, where the body
 degenerates to a two-element cleanup (`drop` the index, then `drop` the
 empty proof) leaving the leaf as the root.  The general inductive case
 (`d > 0`) is discharged below by `runOps_merkleRootSha256Ops_eq` /
@@ -165,19 +192,17 @@ level) and `runOps_mAllLevelsAux_eq` (`d`-iteration). -/
 open RunarVerification.ANF.Eval (Value EvalResult)
 open RunarVerification.Stack.Eval
 
-/-- `merkleRootSha256Ops 0` is the cleanup tail `[.drop, .drop]`.  Pure
-reduction lemma — no induction. -/
+/-- `merkleRootSha256Ops 0` is the R-120 index bound (depth 0 ⇒
+`0 ≤ index < 1`) followed by the empty-proof check. -/
 theorem merkleRootSha256Ops_zero :
-    merkleRootSha256Ops 0 = [.drop, .drop] := by
-  show merkleRootBody 0 "OP_SHA256" = _
-  unfold merkleRootBody mAllLevels mAllLevelsAux
+    merkleRootSha256Ops 0 = merkleIndexBound 0 ++ merkleProofEmptyCheck := by
+  unfold merkleRootSha256Ops mAllLevels mAllLevelsAux
   rfl
 
 /-- Same for the Hash256 variant. -/
 theorem merkleRootHash256Ops_zero :
-    merkleRootHash256Ops 0 = [.drop, .drop] := by
-  show merkleRootBody 0 "OP_HASH256" = _
-  unfold merkleRootBody mAllLevels mAllLevelsAux
+    merkleRootHash256Ops 0 = merkleIndexBound 0 ++ merkleProofEmptyCheck := by
+  unfold merkleRootHash256Ops mAllLevels mAllLevelsAux
   rfl
 
 /-- Internal helper: pop one element from the top of the stack via
@@ -207,7 +232,7 @@ private theorem runOps_drop_two
 When `d = 0` and the stack carries the canonical path-verifier entry
 shape `[index, emptyProof, leaf, …rest]` (index = TOS, proof is the
 zero-byte string because there are no levels to climb), running
-`merkleRootSha256Ops 0` leaves the leaf bytes on top of `rest`.
+`merkleRootBody 0 "OP_SHA256"` leaves the leaf bytes on top of `rest`.
 
 The cleanup drops the index and the empty proof, leaving the leaf as
 the root.  The right-hand side matches
@@ -218,12 +243,15 @@ theorem runOps_merkleRootSha256Ops_zero_eq
     (rest : List Value) (stkSt : StackState)
     (hStk : stkSt.stack
             = .vBigint index :: .vBytes emptyProof :: .vBytes leaf :: rest) :
-    runOps (merkleRootSha256Ops 0) stkSt
+    runOps (merkleRootBody 0 "OP_SHA256") stkSt
     = .ok { stkSt with stack
               := .vBytes (Crypto.Spec.merkleVerifyPath
                             (fun b => RunarVerification.ANF.Eval.Crypto.sha256 b)
                             leaf emptyProof index 0) :: rest } := by
-  rw [merkleRootSha256Ops_zero, Crypto.Spec.merkleVerifyPath_zero]
+  have hz : merkleRootBody 0 "OP_SHA256" = [.drop, .drop] := by
+    unfold merkleRootBody mAllLevels mAllLevelsAux
+    rfl
+  rw [hz, Crypto.Spec.merkleVerifyPath_zero]
   exact runOps_drop_two (.vBigint index) (.vBytes emptyProof)
           (.vBytes leaf :: rest) stkSt hStk
 
@@ -233,12 +261,15 @@ theorem runOps_merkleRootHash256Ops_zero_eq
     (rest : List Value) (stkSt : StackState)
     (hStk : stkSt.stack
             = .vBigint index :: .vBytes emptyProof :: .vBytes leaf :: rest) :
-    runOps (merkleRootHash256Ops 0) stkSt
+    runOps (merkleRootBody 0 "OP_HASH256") stkSt
     = .ok { stkSt with stack
               := .vBytes (Crypto.Spec.merkleVerifyPath
                             (fun b => RunarVerification.ANF.Eval.Crypto.hash256 b)
                             leaf emptyProof index 0) :: rest } := by
-  rw [merkleRootHash256Ops_zero, Crypto.Spec.merkleVerifyPath_zero]
+  have hz : merkleRootBody 0 "OP_HASH256" = [.drop, .drop] := by
+    unfold merkleRootBody mAllLevels mAllLevelsAux
+    rfl
+  rw [hz, Crypto.Spec.merkleVerifyPath_zero]
   exact runOps_drop_two (.vBigint index) (.vBytes emptyProof)
           (.vBytes leaf :: rest) stkSt hStk
 
@@ -621,7 +652,7 @@ hash) match `Crypto.Spec.merkleVerifyStep`'s direction-bit dispatch via
    level at a time against `Crypto.Spec.merkleVerifyPathFrom`.
 3. Stitch with the `[.drop, .drop]` cleanup tail and conclude
    `runOps_merkleRootSha256Ops_eq` / `runOps_merkleRootHash256Ops_eq`
-   at any depth `d`.
+   (on `merkleRootBody`) at any depth `d`.
 
 Throughout we require `0 ≤ index` so that the runtime `Int` ediv/emod
 agrees with the spec's `Nat`-side natAbs/mod.
@@ -1252,7 +1283,7 @@ private theorem runOps_mAllLevelsAux_eq
       rw [← hPathSucc]
 
 /-- General-depth Phase B7 codegen-to-spec equivalence for the SHA-256
-Merkle-root variant. -/
+Merkle-root body (historical 2DROP cleanup). -/
 theorem runOps_merkleRootSha256Ops_eq
     (d : Nat) (leaf proof : ByteArray) (index : Int)
     (rest : List Value) (stkSt : StackState)
@@ -1260,12 +1291,11 @@ theorem runOps_merkleRootSha256Ops_eq
             = .vBigint index :: .vBytes proof :: .vBytes leaf :: rest)
     (hNonNeg : 0 ≤ index)
     (hSize : proof.size = 32 * d) :
-    runOps (merkleRootSha256Ops d) stkSt
+    runOps (merkleRootBody d "OP_SHA256") stkSt
     = .ok { stkSt with stack
               := .vBytes (Crypto.Spec.merkleVerifyPath
                             (fun b => ANF.Eval.Crypto.sha256 b)
                             leaf proof index d) :: rest } := by
-  show runOps (merkleRootBody d "OP_SHA256") stkSt = _
   unfold merkleRootBody mAllLevels
   rw [runOps_mAllLevelsAux_eq d stkSt index proof leaf rest
         [.drop, .drop] 0 "OP_SHA256" (Or.inl rfl) hStk hNonNeg hSize]
@@ -1276,8 +1306,6 @@ theorem runOps_merkleRootSha256Ops_eq
   rw [hExEmpty]
   -- "OP_SHA256" = "OP_HASH256" is false; the if reduces to else-branch.
   show runOps [.drop, .drop] _ = .ok _
-  -- Goal currently has `if "OP_SHA256" = "OP_HASH256" then hash256 else sha256`
-  -- which reduces.  Use simp only to do that.
   simp only [if_neg (by decide : "OP_SHA256" ≠ "OP_HASH256")]
   unfold Crypto.Spec.merkleVerifyPath
   exact runOps_drop_two
@@ -1292,7 +1320,7 @@ theorem runOps_merkleRootSha256Ops_eq
                           leaf proof index 0 d) :: rest } rfl
 
 /-- General-depth Phase B7 codegen-to-spec equivalence for the
-Hash256 (double-SHA-256) Merkle-root variant. -/
+Hash256 (double-SHA-256) Merkle-root body. -/
 theorem runOps_merkleRootHash256Ops_eq
     (d : Nat) (leaf proof : ByteArray) (index : Int)
     (rest : List Value) (stkSt : StackState)
@@ -1300,12 +1328,11 @@ theorem runOps_merkleRootHash256Ops_eq
             = .vBigint index :: .vBytes proof :: .vBytes leaf :: rest)
     (hNonNeg : 0 ≤ index)
     (hSize : proof.size = 32 * d) :
-    runOps (merkleRootHash256Ops d) stkSt
+    runOps (merkleRootBody d "OP_HASH256") stkSt
     = .ok { stkSt with stack
               := .vBytes (Crypto.Spec.merkleVerifyPath
                             (fun b => ANF.Eval.Crypto.hash256 b)
                             leaf proof index d) :: rest } := by
-  show runOps (merkleRootBody d "OP_HASH256") stkSt = _
   unfold merkleRootBody mAllLevels
   rw [runOps_mAllLevelsAux_eq d stkSt index proof leaf rest
         [.drop, .drop] 0 "OP_HASH256" (Or.inr rfl) hStk hNonNeg hSize]

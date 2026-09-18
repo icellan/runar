@@ -335,14 +335,37 @@ function encodeStateValue(value: unknown, type: string, label = '?'): string {
       // review flagged).
       return value ? '01' : '00';
     }
-    case 'PubKey':
-    case 'Addr':
-    case 'Ripemd160':
-    case 'Sha256':
-    case 'Point':
-      // Fixed-size byte types: raw hex, no framing needed.
-      return String(value);
     default: {
+      // Fixed-size byte types (PubKey 33, Addr/Ripemd160 20, Sha256 32,
+      // Point 64, P256Point 64, P384Point 96): raw hex, no framing needed.
+      //
+      // Table-driven off the SAME runar-ir-schema table `decodeStateValue`
+      // reads, so this writer and that reader cannot drift. It used to be a
+      // hand-maintained `case` list, and every type the compiler emitted raw
+      // but the list omitted deployed a framed state section the on-chain
+      // reader could not parse — the #115 `boolean` drift above, and then
+      // P256Point / P384Point, which locked funds on the first spend.
+      const rawWidth = STATE_FIELD_WIDTHS[type];
+      if (rawWidth?.encoding === 'raw') {
+        // Refuse a missing value rather than stringifying it. `String(undefined)`
+        // writes the nine characters `undefined` where the artifact declares
+        // `rawWidth.size` bytes — not hex, wrong width, and silent. The six peer
+        // SDKs refuse this (C-2); TypeScript writing garbage would make the
+        // reference implementation the only tier that does.
+        //
+        // Deliberately NOT applied to the variable-length branch below: an empty
+        // ByteString is a legitimate state value that encodes as OP_0, whereas a
+        // missing PubKey is not a value at all.
+        if (value === undefined || value === null) {
+          throw new Error(
+            `serializeState: state field "${label}" (${type}) has no value. ` +
+              `A raw fixed-width field must carry exactly ${rawWidth.size} bytes; ` +
+              `writing a placeholder here would put a state section on chain that ` +
+              `the contract's own on-chain reader cannot parse.`,
+          );
+        }
+        return String(value);
+      }
       // Variable-length types (bytes, ByteString, etc.): use push-data
       // encoding so the decoder can determine the length.
       const hex = String(value);

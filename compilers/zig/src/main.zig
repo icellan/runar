@@ -1,26 +1,11 @@
 const std = @import("std");
 const types = @import("ir/types.zig");
 const json_parser = @import("ir/json.zig");
-const parse_zig = @import("passes/parse_zig.zig");
-const parse_ts = @import("passes/parse_ts.zig");
-const parse_sol = @import("passes/parse_sol.zig");
-const parse_move = @import("passes/parse_move.zig");
-const parse_go = @import("passes/parse_go.zig");
-const parse_rust = @import("passes/parse_rust.zig");
-const parse_python = @import("passes/parse_python.zig");
-const parse_ruby = @import("passes/parse_ruby.zig");
-const parse_java = @import("passes/parse_java.zig");
-const validate_pass = @import("passes/validate.zig");
-const typecheck_pass = @import("passes/typecheck.zig");
-const expand_fixed_arrays = @import("passes/expand_fixed_arrays.zig");
-const anf_lower = @import("passes/anf_lower.zig");
-const constant_fold = @import("passes/constant_fold.zig");
-const ec_optimizer = @import("passes/ec_optimizer.zig");
 const stack_lower = @import("passes/stack_lower.zig");
 const peephole = @import("passes/peephole.zig");
+const ec_optimizer = @import("passes/ec_optimizer.zig");
 const emit = @import("codegen/emit.zig");
-const input_limits = @import("frontend/input_limits.zig");
-const embed_always_warn = @import("passes/embed_always_warn.zig");
+const compiler_api = @import("compiler_api.zig");
 
 const CompileOptions = struct {
     emit_ir: bool = false,
@@ -244,22 +229,65 @@ fn writeStdoutLn(io: std.Io, data: []const u8) !void {
 
 /// Compile from ANF IR JSON (passes 5-6 only)
 fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opts: CompileOptions) !void {
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(10 * 1024 * 1024));
-    defer allocator.free(source);
+    // N-119: run the whole IR pipeline in one arena, exactly as
+    // `compileFromSource` below already does.
+    //
+    // This path used to allocate from the process allocator and hand the graph
+    // back via `ANFProgram.deinit`. That does not work, and cannot be made to
+    // work cheaply: `deinit`/`freeBindings` (ir/types.zig) free the `if` and
+    // `loop` heap nodes and recurse into their bodies, and nothing else — not
+    // the binding ARRAYS, and none of the 43 `allocator.dupe` sites in
+    // ir/json.zig. On the 3.2 KB `bounded-loop` golden a successful run printed
+    // 55 DebugAllocator leak reports / 1145 lines to stderr.
+    //
+    // Exit status and bytes were always correct, so this was hygiene — but the
+    // noise shares a channel with real diagnostics and buries a one-line result
+    // under a kilo-line of trace, which is how a `tail -1` measurement gets
+    // read off the wrong stream.
+    //
+    // Completing `deinit` was the alternative and is the wrong trade: the
+    // parser mixes owned dupes with borrowed slices of the still-live
+    // `std.json` document across a ~25-variant union, so a uniform free turns
+    // stderr noise into a double-free. The arena sidesteps ownership entirely,
+    // which is why the source path chose it first; `compileFromIR` was the one
+    // caller that had not.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const work_allocator = arena.allocator();
 
-    const program = try json_parser.parseANFProgram(allocator, source);
-    defer program.deinit(allocator);
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(10 * 1024 * 1024));
+
+    const program = try json_parser.parseANFProgram(work_allocator, source);
 
     if (opts.emit_ir) {
-        const canonical = try json_parser.serializeCanonicalJSON(allocator, program);
-        defer allocator.free(canonical);
+        const canonical = try json_parser.serializeCanonicalJSON(work_allocator, program);
         try writeStdout(io, canonical);
         return;
     }
 
-    const stack_program = try stack_lower.lower(allocator, program);
-    defer stack_program.deinit(allocator);
-    const optimized_methods = try peephole.optimize(allocator, stack_program.methods);
+    // Pass 4.5: EC Optimize. The `--ir` path used to go straight from the
+    // parsed ANF to stack lowering, skipping the EC optimizer entirely — the
+    // ONLY tier that did. TS, Go, Rust, Python, Ruby and Java all re-run their
+    // EC optimizer over `--ir` input, so any ANF containing a rewritable EC
+    // shape compiled to a different script here than in the other six. Found by
+    // R-034: `ecAdd(x, ecNegate(x))` fed through `--ir` emitted 26141 bytes of
+    // ladder in Zig and 1808 bytes everywhere else. That is a 6-vs-1 hex
+    // divergence covering every rule in optimizer/ec-rules.json, not just the
+    // one R-034 was filed for.
+    //
+    // Byte-neutral for the conformance `--ir-parity` gate: no checked-in
+    // `expected-ir.json` contains a shape any EC rule rewrites (verified over
+    // all 5 fixtures whose IR mentions ecAdd/ecMul/ecMulGen/ecNegate), which is
+    // precisely why the divergence went unnoticed.
+    //
+    // The optimizer's output shares unmodified nodes with `program`. Both now
+    // live in the function-wide arena (N-119), so the sharing needs no separate
+    // lifetime argument — previously this call had its own nested arena and
+    // relied on `program` outliving it via a `defer program.deinit`.
+    const optimized_program = try ec_optimizer.optimize(work_allocator, program);
+
+    const stack_program = try stack_lower.lower(work_allocator, optimized_program);
+    const optimized_methods = try peephole.optimize(work_allocator, stack_program.methods);
     const optimized_stack_program = types.StackProgram{
         .methods = optimized_methods,
         .contract_name = stack_program.contract_name,
@@ -272,23 +300,32 @@ fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opt
     // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
     // locking script on its own for multi-method contracts.
     if (opts.hex_only) {
-        const artifact = try emit.emitArtifact(allocator, optimized_stack_program, program);
-        defer allocator.free(artifact);
-        const marker = "\"script\":\"";
-        const idx = std.mem.indexOf(u8, artifact, marker) orelse return error.MissingHex;
-        const after = idx + marker.len;
-        const end = std.mem.indexOfPos(u8, artifact, after, "\"") orelse return error.MissingHex;
-        const hex = artifact[after..end];
-        try writeStdoutLn(io, hex);
+        const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
+        try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
         return;
     }
 
-    const artifact = try emit.emitArtifact(allocator, optimized_stack_program, program);
-    defer allocator.free(artifact);
+    const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, optimized_program);
     try writeStdoutLn(io, artifact);
 }
 
-/// Full pipeline: source -> parse -> validate -> typecheck -> ANF -> stack -> emit
+/// Report collected pass diagnostics on stderr. Warnings first, then errors,
+/// matching the order the passes produced them in.
+fn printDiagnostics(diag: *const compiler_api.Diagnostics) void {
+    for (diag.warnings.items) |line| std.debug.print("{s}\n", .{line});
+    for (diag.errors.items) |line| std.debug.print("{s}\n", .{line});
+}
+
+/// Full pipeline: source -> parse -> validate -> typecheck -> expand -> ANF ->
+/// stack -> emit.
+///
+/// The pass sequence itself lives in `compiler_api.runPipeline`, which the
+/// library entry point also runs, so there is ONE compiler rather than two
+/// copies drifting apart (R-027: the library had lost `expand_fixed_arrays`
+/// entirely). What stays here is CLI-only: reading the file, routing the
+/// `.anf.json` / unknown extensions, printing diagnostics, and the output
+/// modes (`--parse-only`, `--emit-ir`, `--emit-ir-to`, `--hex`,
+/// `--emit-source-map`).
 fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opts: CompileOptions) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -296,110 +333,39 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(1 * 1024 * 1024));
 
-    const format = detectFormat(path);
-
-    // Pass 0.5: Fail-closed guard for the `@sighash` (#123) / `@embedAlways`
-    // (#109) comment directives. The `.runar.ts` surface parser honours them
-    // (matching the TS reference); the eight non-TS surface parsers ignore
-    // comments, so they must reject a directive rather than silently drop it.
-    // `.runar.ts` is exempt.
-    if (format != .runar_ts) {
-        if (input_limits.unsupportedDirectiveError(source)) |msg| {
-            std.debug.print("  parse error: {s}\n", .{msg});
-            return error.ParseFailed;
-        }
-    }
-
-    // Pass 1: Parse (dispatch by format, extract contract or fail)
-    const contract: types.ContractNode = switch (format) {
-        .runar_zig => blk: {
-            const r = parse_zig.parseZig(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_ts => blk: {
-            const r = parse_ts.parseTs(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_sol => blk: {
-            const r = parse_sol.parseSol(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_move => blk: {
-            const r = parse_move.parseMove(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_go => blk: {
-            const r = parse_go.parseGo(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_rs => blk: {
-            const r = parse_rust.parseRust(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_py => blk: {
-            const r = parse_python.parsePython(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_rb => blk: {
-            const r = parse_ruby.parseRuby(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        .runar_java => blk: {
-            const r = parse_java.parseJava(work_allocator, source, path);
-            if (r.errors.len > 0) {
-                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
-                return error.ParseFailed;
-            }
-            break :blk r.contract orelse return error.ParseFailed;
-        },
-        else => {
+    // Fail-closed on anything no surface parser claims. `.anf.json` is a
+    // compiler *output*, so it is a mistake here too — `--source` routes it to
+    // `compileFromIR` before this point, but the `compile` subcommand does not.
+    // The library entry point falls back to the Zig parser for an unrecognised
+    // extension; the CLI refuses, because `--source foo.txt` is a user typo
+    // rather than a Zig contract.
+    switch (detectFormat(path)) {
+        .unknown, .anf_json => {
             std.debug.print("error: unsupported format for {s}\n", .{path});
             return error.UnsupportedFormat;
         },
-    };
-
-    // Pass 2: Validate (use Zig mode for .runar.zig — relaxes super() requirement)
-    const val_result = if (format == .runar_zig)
-        try validate_pass.validateZig(work_allocator, contract)
-    else
-        try validate_pass.validate(work_allocator, contract);
-    if (val_result.errors.len > 0) {
-        for (val_result.errors) |diag| std.debug.print("  validation error: {s}\n", .{diag.message});
-        return error.ValidationFailed;
+        else => {},
     }
-    for (val_result.warnings) |diag| std.debug.print("  warning: {s}\n", .{diag.message});
+
+    // `--parse-only` stops after validate; `--emit-ir` stops after the ANF
+    // optimizers — running stack lowering for either would let a later pass
+    // fail a command that never asked for its output.
+    const stop_after: compiler_api.StopAfter = if (opts.parse_only)
+        .validate
+    else if (opts.emit_ir)
+        .anf
+    else
+        .full;
+
+    var diag: compiler_api.Diagnostics = .{};
+    const pipeline = compiler_api.runPipeline(work_allocator, source, path, .{
+        .disable_constant_folding = opts.disable_constant_folding,
+        .stop_after = stop_after,
+    }, &diag) catch |err| {
+        printDiagnostics(&diag);
+        return err;
+    };
+    printDiagnostics(&diag);
 
     // --parse-only: emit "parser ok" and stop after parse + validate. Used by
     // the conformance runner's --parser-only universal-frontend coverage check.
@@ -408,51 +374,7 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         return;
     }
 
-    // Pass 3: Typecheck
-    const tc_result = try typecheck_pass.typeCheck(work_allocator, contract);
-    if (tc_result.errors.len > 0) {
-        for (tc_result.errors) |err| std.debug.print("  type error: {s}\n", .{err});
-        return error.TypeCheckFailed;
-    }
-
-    // Pass 3b: Expand FixedArray properties into scalar siblings + dispatch
-    // chains. No-op when the contract has no FixedArray properties.
-    const expanded = try expand_fixed_arrays.expand(work_allocator, contract);
-    if (expanded.errors.len > 0) {
-        for (expanded.errors) |diag| std.debug.print("  fixed-array error: {s}\n", .{diag.message});
-        return error.ValidationFailed;
-    }
-    const expanded_contract = expanded.contract;
-
-    // Pass 4: ANF Lower
-    var lower_diag: anf_lower.LowerDiagnostic = .{};
-    var program = anf_lower.lowerToANFWithDiagnostic(work_allocator, expanded_contract, &lower_diag) catch |err| {
-        if (lower_diag.message) |message| {
-            std.debug.print("  anf lowering error: {s}\n", .{message});
-        }
-        return err;
-    };
-
-    // Pass 4.25: Constant Fold
-    if (!opts.disable_constant_folding) {
-        program = try constant_fold.foldConstants(work_allocator, program);
-    }
-
-    // Pass 4.5: EC Optimize (always-on, matches TS compiler behavior)
-    // Note: The EC optimizer has its own internal dead binding elimination
-    // that runs only when EC optimizations produce dead code. A standalone
-    // DCE pass must NOT run here because it incorrectly removes bindings
-    // from private method bodies (whose last binding is the return value,
-    // only referenced at inlining call sites in other methods).
-    program = try ec_optimizer.optimize(work_allocator, program);
-
-    // Issue #109: warn when DCE strips an un-annotated readonly field. Computed
-    // from the post-optimizer ANF (the surviving load_prop set), mirroring the
-    // TS reference's collectReferencedProps(optimizedAnf) placement.
-    {
-        const dce_warnings = try embed_always_warn.collectDceWarnings(work_allocator, expanded_contract, &program);
-        for (dce_warnings) |diag| std.debug.print("  warning: {s}\n", .{diag.message});
-    }
+    const program = pipeline.program.?;
 
     // --emit-ir: output canonical ANF IR JSON and stop
     if (opts.emit_ir) {
@@ -474,16 +396,7 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         try ir_w.interface.flush();
     }
 
-    // Pass 5: Stack Lower
-    const stack_program = try stack_lower.lower(work_allocator, program);
-    defer stack_program.deinit(work_allocator);
-    const optimized_methods = try peephole.optimize(work_allocator, stack_program.methods);
-    const optimized_stack_program = types.StackProgram{
-        .methods = optimized_methods,
-        .contract_name = stack_program.contract_name,
-        .properties = stack_program.properties,
-        .constructor_params = stack_program.constructor_params,
-    };
+    const optimized_stack_program = pipeline.stack_program.?;
 
     // --hex: output hex script only. Produces the full dispatch-table
     // locking script (same bytes that appear in the artifact's "script"
@@ -491,12 +404,7 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
     // compilers without parsing JSON.
     if (opts.hex_only) {
         const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
-        const marker = "\"script\":\"";
-        const idx = std.mem.indexOf(u8, artifact, marker) orelse return error.MissingHex;
-        const after = idx + marker.len;
-        const end = std.mem.indexOfPos(u8, artifact, after, "\"") orelse return error.MissingHex;
-        const hex = artifact[after..end];
-        try writeStdoutLn(io, hex);
+        try writeStdoutLn(io, try compiler_api.extractArtifactScript(artifact));
         return;
     }
 

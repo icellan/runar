@@ -1021,15 +1021,28 @@ class _PyParser:
 
         first = self.parse_expression()
 
-        step_expr: Expression | None = None
+        is_countdown = False
         if self.match(TOK_COMMA):
             init_expr = first
             limit_expr = self.parse_expression()
-            # Optional third range() argument: the step (issue #121). Only unit
-            # steps (+1 / -1) are supported by the loop model; a negative step
-            # is a countdown (range(3, 0, -1) -> 3, 2, 1).
+            # Optional third range() argument: the step (issue #121). A
+            # negative step is a countdown (range(5, 1, -1) -> 5, 4, 3, 2).
+            #
+            # Only +-1 is accepted: the ANF loop node synthesizes iteration k
+            # as `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+            # representation. It used to be COERCED to +1 here -- the loop ran
+            # 10 times over 0..9 instead of 5 times over 0,2,4,6,8, with no
+            # diagnostic -- which is the same silent coercion N-061 found in
+            # the for-header surfaces, in Python's spelling.
             if self.match(TOK_COMMA):
                 step_expr = self.parse_expression()
+                step = _literal_int_value(step_expr)
+                if step == 1:
+                    is_countdown = False
+                elif step == -1:
+                    is_countdown = True
+                else:
+                    self.add_error(RANGE_STEP_DIAGNOSTIC)
         else:
             init_expr = BigIntLiteral(value=0)
             limit_expr = first
@@ -1047,12 +1060,10 @@ class _PyParser:
             source_location=loc,
         )
 
-        # A negative literal step means a countdown loop: iterate while
-        # `var > stop` and decrement (issue #121). Any other step (absent, or a
-        # positive literal) counts up with `<` / `i++`, preserving the historical
-        # zero-config `range(n)` / `range(a, b)` behaviour byte-for-byte.
-        is_countdown = _is_negative_literal(step_expr)
-
+        # A step of -1 means a countdown loop: iterate while `var > stop` and
+        # decrement (issue #121). An absent step counts up with `<` / `i++`,
+        # preserving the historical zero-config `range(n)` / `range(a, b)`
+        # behaviour byte-for-byte.
         condition = BinaryExpr(
             op=">" if is_countdown else "<",
             left=Identifier(name=var_name),
@@ -1441,21 +1452,28 @@ def _parse_number(s: str) -> Expression:
     return BigIntLiteral(value=val)
 
 
-def _is_negative_literal(expr: Expression | None) -> bool:
-    """True if *expr* is a negative integer literal (``-1``), spelled either as
-    a unary-minus over a literal or a directly-negative BigIntLiteral. Used to
-    detect a countdown ``range(start, stop, -1)`` step (issue #121)."""
-    if expr is None:
-        return False
-    if isinstance(expr, UnaryExpr) and expr.op == "-":
-        return _is_positive_or_zero_literal(expr.operand)
+#: Emitted for a ``range`` step the unrolled loop model cannot represent.
+#: Shared verbatim with the other six tiers.
+RANGE_STEP_DIAGNOSTIC = (
+    "range() step must be 1 or -1. The unrolled loop carries only a start value "
+    "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be "
+    "represented and would be discarded."
+)
+
+
+def _literal_int_value(expr: Expression | None) -> int | None:
+    """The integer value of a literal expression, or None when it is not one.
+
+    A negative literal arrives either as a unary minus over a positive one or
+    as a directly-negative BigIntLiteral, so both shapes have to be walked --
+    the same walk ANF lowering does, for the same reason (N-138).
+    """
     if isinstance(expr, BigIntLiteral):
-        return expr.value < 0
-    return False
-
-
-def _is_positive_or_zero_literal(expr: Expression | None) -> bool:
-    return isinstance(expr, BigIntLiteral) and expr.value >= 0
+        return expr.value
+    if isinstance(expr, UnaryExpr) and expr.op == "-":
+        inner = _literal_int_value(expr.operand)
+        return None if inner is None else -inner
+    return None
 
 
 # ---------------------------------------------------------------------------

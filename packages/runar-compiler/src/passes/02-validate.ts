@@ -11,7 +11,6 @@ import type {
   Statement,
   Expression,
   TypeNode,
-  PrimitiveTypeName,
   SourceLocation,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
@@ -152,7 +151,39 @@ function isLiteralExpression(expr: Expression): boolean {
   if (expr.kind === 'bytestring_literal') return true;
   // Allow negative literals: -42n
   if (expr.kind === 'unary_expr' && expr.op === '-' && expr.operand.kind === 'bigint_literal') return true;
+  // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+  // spec/grammar.md section 11:
+  //
+  //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+  //
+  // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+  // position. This check runs on the AST, BEFORE ANF lowering, so an
+  // initializer still arrives here as a call node and was refused -- in the
+  // one position the `.runar.rs` surface needs it, since the Rust DSL writes
+  // initializers as assignments inside `init()` that the parser LIFTS into
+  // `PropertyNode.initializer`, and a bare `'1976a914'` is a `&str` that
+  // cannot be assigned to a `ByteString` (`Vec<u8>`).
+  //
+  // Accepting it here is only half the job: `extractLiteralValue` in
+  // 04-anf-lower.ts must UNWRAP the same shape, or the property validates and
+  // then loses its default entirely.
+  if (isToByteStringLiteral(expr)) return true;
   return false;
+}
+
+/**
+ * `toByteString(<literal>)` -- the ByteStringLiteral production.
+ *
+ * Literal argument ONLY. `toByteString(x)` for a non-literal `x` is not this
+ * production; it stays an ordinary identity-cast call and remains a
+ * non-literal initializer.
+ */
+function isToByteStringLiteral(expr: Expression): boolean {
+  return expr.kind === 'call_expr'
+    && expr.callee.kind === 'identifier'
+    && expr.callee.name === 'toByteString'
+    && expr.args.length === 1
+    && expr.args[0]!.kind === 'bytestring_literal';
 }
 
 /**
@@ -183,6 +214,18 @@ function validatePropertyType(
         if (type.name === 'void') {
           ctx.errors.push(makeDiagnostic(
             `Property type 'void' is not valid`,
+            'error',
+            loc,
+          ));
+        } else {
+          // R-246: any other unrecognised primitive name used to fall through
+          // in silence, while the identical name arriving as a `custom_type` is
+          // refused below. No parser produces a `primitive_type` with an unknown
+          // name today — they all map an unrecognised name to `custom_type` —
+          // but `validate` takes an AST, and the frontend is not the only thing
+          // that builds one.
+          ctx.errors.push(makeDiagnostic(
+            `Unsupported type '${type.name}' in property declaration. Use one of: ${[...VALID_PRIMITIVE_TYPES].join(', ')}, or FixedArray<T, N>`,
             'error',
             loc,
           ));
@@ -490,7 +533,6 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
 
     // No 'number' type
     if (param.type.kind === 'primitive_type') {
-      checkNoNumberType(param.type.name, method.sourceLocation, ctx);
     }
 
     // FixedArray not allowed as method parameter
@@ -540,7 +582,7 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
   }
 
   // #131: warn when a public method gates on extractLocktime but never asserts
-  // the spending tx is non-final (extractSequence < 0xffffffff). Advisory only.
+  // the spending tx is non-final (extractSequence !== 0xffffffff). Advisory only.
   if (method.visibility === 'public') {
     warnLocktimeWithoutSequenceGuard(method, ctx);
   }
@@ -842,7 +884,6 @@ function validateVariableDecl(
 ): void {
   // Check for disallowed 'number' type
   if (stmt.type && stmt.type.kind === 'primitive_type') {
-    checkNoNumberType(stmt.type.name, stmt.sourceLocation, ctx);
   }
   if (stmt.type && stmt.type.kind === 'fixed_array_type') {
     ctx.errors.push(makeDiagnostic(
@@ -877,13 +918,361 @@ function validateForStatement(
     }
   }
 
+  validateForConditionTestsIterator(stmt, ctx);
+
   // Validate init
   validateExpression(stmt.init.init, ctx);
+
+  validateForUpdate(stmt, ctx);
+
+  validateNoOutputIntrinsicInLoop(stmt, ctx);
 
   // Validate body
   for (const s of stmt.body) {
     validateStatement(s, ctx);
   }
+}
+
+/**
+ * Reject any for-loop whose condition does not test the iterator itself.
+ *
+ * The comment above used to say "the condition should compare the iter var to
+ * a constant" and then the code read only `stmt.condition.right`. Nothing
+ * required `condition.left` to BE the iterator, and `extractLoopShape` ignores
+ * left entirely: it computes `count = bound - start` from the right-hand side
+ * and the init value. So the source
+ *
+ *   for (let i = 0n; i + 1n < 2n; i++) { ... }
+ *
+ * runs ONCE in TypeScript (i=0: 0+1 < 2; i=1: 1+1 < 2 is false) and TWICE in
+ * the emitted script (count = 2 - 0). The extra lap executes the `else` arm
+ * the source can never reach. Measured on `@bsv/sdk` `Spend.validate()` with a
+ * vault whose signature check sits in the first lap and whose second lap sets
+ * `authorized = true`: the phantom-lap loop ACCEPTED an empty signature, while
+ * the semantically identical `i < 1n` rejected it.
+ *
+ * Refusal rather than lowering: evaluating a general condition per iteration
+ * means unrolling against a real interpreter at ANF time, which is a language
+ * extension with no golden behind it. The loop model the ANF node can carry is
+ * exactly `start + k*step` tested against a constant bound, so the condition
+ * must name the iterator on the left. Same shape as R-065's for-update
+ * rejection, and the diagnostic text is shared verbatim with the other six
+ * tiers.
+ *
+ * The direction rule (`<`/`<=` counts up, `>`/`>=` counts down) is NOT
+ * duplicated here: `extractLoopShape` already refuses a mismatch in every
+ * tier, and `conformance/negatives/N42-loop-direction-mismatch.runar.ts`
+ * gates that across all seven.
+ */
+function validateForConditionTestsIterator(
+  stmt: Extract<Statement, { kind: 'for_statement' }>,
+  ctx: ValidationContext,
+): void {
+  const iter = stmt.init.name;
+  const cond = stmt.condition;
+  if (
+    cond.kind === 'binary_expr' &&
+    cond.left.kind === 'identifier' &&
+    cond.left.name === iter
+  ) {
+    return;
+  }
+
+  ctx.errors.push(makeDiagnostic(
+    `For loop condition must compare the loop variable '${iter}' to a compile-time ` +
+    `constant (\`${iter} < 10n\`). The unrolled loop binds the iterator as ` +
+    '`start + k*step` and takes its trip count from the bound alone, so a condition ' +
+    'whose left-hand side is anything else -- a computed expression, or a different ' +
+    'variable -- is not the condition the loop actually evaluates',
+    'error',
+    stmt.sourceLocation,
+  ));
+}
+
+/**
+ * Reject any output intrinsic called inside a loop body (R-127).
+ *
+ * `lowerForStatement` lowers the body into `ctx.subContext()`, which starts
+ * with a fresh empty `_addOutputRefs`, and nothing propagates that list back to
+ * the method context -- unlike `lowerIfStatement`, which concatenates each
+ * arm's outputs into a single ref precisely so the parent sees them. The
+ * continuation hash is then built from whatever `addOutput` calls sit at the
+ * method's TOP level, while the loop's outputs are still emitted into the
+ * transaction. Measured on a two-iteration loop before this check existed:
+ *
+ *   loop only                 ts/go/rust/python blew up inside stack lowering
+ *                             ("method parameter '_newAmount' is not on the
+ *                             stack at a post-consumption reference"),
+ *                             zig/ruby emitted a covenant over the WRONG
+ *                             output set, java emitted none.
+ *   loop + one top-level call compiled clean everywhere, and the ANF
+ *                             continuation hashed exactly ONE leaf while three
+ *                             outputs were built.
+ *
+ * A continuation committing to fewer outputs than the transaction creates is
+ * spendable only by a hand-crafted transaction, is rejected by every shipped
+ * SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+ *
+ * Refusal rather than lowering: propagating the refs cannot work by name,
+ * because the loop is unrolled at stack-lowering time and one body binding name
+ * denotes N physical slots -- `findDepth` would resolve it to the last
+ * iteration alone. A correct lowering means unrolling at ANF time, a language
+ * feature with no golden behind it; refusing removes nothing that works today
+ * (no fixture or example in the repo declares an output inside a loop). Same
+ * shape as R-065's for-update rejection, and the diagnostic text is shared
+ * verbatim with the other six tiers.
+ */
+const OUTPUT_INTRINSIC_NAMES = new Set<string>([
+  'addOutput', 'addRawOutput', 'addDataOutput',
+]);
+
+function outputIntrinsicCallName(expr: Expression): string | undefined {
+  if (expr.kind !== 'call_expr') return undefined;
+  const callee = expr.callee;
+  // `this.addOutput(...)` parses as property_access in some frontends and as
+  // member_expr in others; the Go/Move surfaces additionally spell it on a
+  // StatefulContext parameter (`ctx.addOutput(...)`). Matching the property
+  // name alone covers all three, and no non-intrinsic carries these names.
+  const property =
+    callee.kind === 'property_access' ? callee.property
+      : callee.kind === 'member_expr' ? callee.property
+        : undefined;
+  if (property !== undefined && OUTPUT_INTRINSIC_NAMES.has(property)) return property;
+  return undefined;
+}
+
+/** The private method a call names, or undefined. */
+function privateMethodCallName(expr: Expression, ctx: ValidationContext): string | undefined {
+  if (expr.kind !== 'call_expr') return undefined;
+  const callee = expr.callee;
+  const property =
+    callee.kind === 'property_access' ? callee.property
+      : callee.kind === 'member_expr' ? callee.property
+        : callee.kind === 'identifier' ? callee.name
+          : undefined;
+  if (property === undefined) return undefined;
+  const m = ctx.contract.methods.find(
+    (x) => x.name === property && x.visibility === 'private',
+  );
+  return m ? property : undefined;
+}
+
+interface OutputIntrinsicSite {
+  /** The intrinsic's name, e.g. `addOutput`. */
+  intrinsic: string;
+  /** The private method it was reached through, if any. */
+  via?: string;
+  location: SourceLocation | undefined;
+}
+
+/**
+ * First output intrinsic reachable from `stmts`, following calls to private
+ * methods (a public method that delegates `addOutput` to a private helper has
+ * that helper INLINED at ANF time, so a helper called in a loop lands its
+ * outputs in the loop's sub-context exactly like a direct call would).
+ */
+function findOutputIntrinsic(
+  stmts: readonly Statement[],
+  ctx: ValidationContext,
+  seen: Set<string>,
+): OutputIntrinsicSite | undefined {
+  for (const stmt of stmts) {
+    const found = findOutputIntrinsicInStatement(stmt, ctx, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findOutputIntrinsicInStatement(
+  stmt: Statement,
+  ctx: ValidationContext,
+  seen: Set<string>,
+): OutputIntrinsicSite | undefined {
+  const fromExpr = (expr: Expression): OutputIntrinsicSite | undefined => {
+    const intrinsic = outputIntrinsicCallName(expr);
+    if (intrinsic !== undefined) {
+      return { intrinsic, location: stmt.sourceLocation };
+    }
+    const helper = privateMethodCallName(expr, ctx);
+    if (helper !== undefined && !seen.has(helper)) {
+      seen.add(helper);
+      const body = ctx.contract.methods.find((m) => m.name === helper)?.body ?? [];
+      const nested = findOutputIntrinsic(body, ctx, seen);
+      if (nested) {
+        return { intrinsic: nested.intrinsic, via: helper, location: stmt.sourceLocation };
+      }
+    }
+    // Recurse into sub-expressions: an intrinsic can sit inside an argument
+    // list or an operand, not only as a bare expression statement.
+    for (const child of subExpressions(expr)) {
+      const found = fromExpr(child);
+      if (found) return found;
+    }
+    return undefined;
+  };
+
+  switch (stmt.kind) {
+    case 'expression_statement':
+      return fromExpr(stmt.expression);
+    case 'variable_decl':
+      return fromExpr(stmt.init);
+    case 'assignment':
+      return fromExpr(stmt.value);
+    case 'return_statement':
+      return stmt.value ? fromExpr(stmt.value) : undefined;
+    case 'if_statement': {
+      const inCond = fromExpr(stmt.condition);
+      if (inCond) return inCond;
+      return findOutputIntrinsic([...stmt.then, ...(stmt.else ?? [])], ctx, seen);
+    }
+    case 'for_statement':
+      return findOutputIntrinsic(stmt.body, ctx, seen);
+    default:
+      return undefined;
+  }
+}
+
+/** Direct sub-expressions of `expr`, for the intrinsic search above. */
+function subExpressions(expr: Expression): Expression[] {
+  switch (expr.kind) {
+    case 'call_expr':
+      return [...expr.args];
+    case 'binary_expr':
+      return [expr.left, expr.right];
+    case 'unary_expr':
+      return [expr.operand];
+    case 'ternary_expr':
+      return [expr.condition, expr.consequent, expr.alternate];
+    case 'index_access':
+      return [expr.object, expr.index];
+    default:
+      return [];
+  }
+}
+
+function validateNoOutputIntrinsicInLoop(
+  stmt: Extract<Statement, { kind: 'for_statement' }>,
+  ctx: ValidationContext,
+): void {
+  const site = findOutputIntrinsic(stmt.body, ctx, new Set<string>());
+  if (site === undefined) return;
+  const via = site.via !== undefined ? ` (reached through private method '${site.via}')` : '';
+  ctx.errors.push(makeDiagnostic(
+    `Output intrinsic '${site.intrinsic}'${via} cannot be called inside a loop body. `
+    + `A loop body lowers into its own scope whose declared outputs never reach the method's `
+    + `output list, so the continuation hash would commit to fewer outputs than the transaction `
+    + `actually creates: the spend is rejected by every shipped SDK and any successor it produces `
+    + `is unspendable. Move the call out of the loop.`,
+    'error',
+    site.location ?? stmt.sourceLocation,
+  ));
+}
+
+/**
+ * Reject any for-loop update clause the loop model cannot represent (R-065).
+ *
+ * The ANF `loop` node carries exactly `{ count, iterVar, start, step, body }`
+ * and synthesizes the iterator on unrolled iteration k as `start + k*step`.
+ * There is no slot for an arbitrary update statement, and `extractLoopStep`
+ * only ever understood a unit step — everything else was silently coerced to
+ * `+1` (or `-1` from the comparison direction) and the clause itself was
+ * discarded. That made three distinct failures indistinguishable from a
+ * correct compile:
+ *
+ *   * `for (let i = 0n; i < 5n; undefinedFn())` produced byte-identical
+ *     output. A nonexistent function name raised nothing.
+ *   * `for (let i = 0n; i < 5n; this.count++)` dropped the state write.
+ *   * `while (i < 10) : (i += 2)` (Zig frontend) unrolled 10 times over
+ *     i = 0..9 instead of 5 times over i = 0,2,4,6,8.
+ *
+ * `spec/grammar.md`'s ForStatement production admits only
+ * `Identifier ('++' | '--')`, and its Statement Restrictions say "The loop
+ * variable MUST use simple increment (`++`) or decrement (`--`)". So rejecting
+ * is the fix rather than lowering: appending the update's lowering to the loop
+ * body would re-emit `i++` as a dead binding on every loop that already
+ * compiles correctly, moving bytes across the whole corpus to express nothing.
+ *
+ * The accepted set is every shape the nine frontends actually synthesize:
+ * `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+ * `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
+ * the effect-free no-op sentinel (a literal or a bare identifier) that the
+ * while-shaped parsers synthesize when the source has no continue expression
+ * at all.
+ *
+ * The advanced variable must be the declared iterator or the identifier the
+ * condition tests. Both are needed: the Zig parser only folds
+ * `var i = 0; while (i < N) : (i += 1)` into a single for_statement when the
+ * declaration is the immediately preceding statement, so an unfolded loop
+ * carries a placeholder init while the update advances the real `i` named in
+ * the condition.
+ *
+ * The diagnostic text is shared verbatim with the other six tiers.
+ */
+function validateForUpdate(
+  stmt: Extract<Statement, { kind: 'for_statement' }>,
+  ctx: ValidationContext,
+): void {
+  // Names the update is allowed to advance: the declared iterator, plus the
+  // identifier the condition tests (see the doc comment's Zig case).
+  const allowed: string[] = [stmt.init.name];
+  if (stmt.condition.kind === 'binary_expr' && stmt.condition.left.kind === 'identifier') {
+    allowed.push(stmt.condition.left.name);
+  }
+
+  if (isRepresentableForUpdate(allowed, stmt.update)) return;
+
+  ctx.errors.push(makeDiagnostic(
+    'For loop update must advance the loop variable by one (`i++`, `i--`, ' +
+    '`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a ' +
+    'unit step, so any other update clause -- a function call, a state mutation, or a ' +
+    'non-unit step such as `i += 2` -- cannot be represented and would be discarded',
+    'error',
+    stmt.sourceLocation,
+  ));
+}
+
+/**
+ * True when `expr` names one of the identifiers the update is allowed to
+ * advance. A property access, an index access or anything else is never
+ * accepted: those are the side effects that used to be dropped.
+ */
+function isAllowedLoopVar(allowed: string[], expr: Expression): boolean {
+  return expr.kind === 'identifier' && allowed.includes(expr.name);
+}
+
+function isLiteralOne(expr: Expression): boolean {
+  return expr.kind === 'bigint_literal' && expr.value === 1n;
+}
+
+function isRepresentableForUpdate(allowed: string[], update: Statement): boolean {
+  if (update.kind === 'expression_statement') {
+    const e = update.expression;
+    if (e.kind === 'increment_expr' || e.kind === 'decrement_expr') {
+      return isAllowedLoopVar(allowed, e.operand);
+    }
+    // The no-op sentinel a while-shaped frontend synthesizes when the source
+    // carries no continue expression: zig's `while (c) {}`, move's
+    // `while (c) {}`, go's `for c {}`. Reading a literal or a bare identifier
+    // has no effect, so discarding it loses nothing.
+    return e.kind === 'bigint_literal' || e.kind === 'bool_literal' || e.kind === 'identifier';
+  }
+
+  // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+  if (update.kind === 'assignment') {
+    if (!isAllowedLoopVar(allowed, update.target)) return false;
+    const v = update.value;
+    if (v.kind !== 'binary_expr') return false;
+    if (v.op === '+') {
+      return (isAllowedLoopVar(allowed, v.left) && isLiteralOne(v.right)) ||
+        (isLiteralOne(v.left) && isAllowedLoopVar(allowed, v.right));
+    }
+    if (v.op === '-') {
+      return isAllowedLoopVar(allowed, v.left) && isLiteralOne(v.right);
+    }
+    return false;
+  }
+
+  return false;
 }
 
 function isCompileTimeConstant(expr: Expression): boolean {
@@ -1227,16 +1616,6 @@ function hasCycle(
 // Helpers
 // ---------------------------------------------------------------------------
 
-function checkNoNumberType(
-  _typeName: PrimitiveTypeName,
-  _loc: SourceLocation,
-  _ctx: ValidationContext,
-): void {
-  // 'number' would not be a PrimitiveTypeName in Rúnar (it's excluded from
-  // the type union), so this is mainly a sanity check. If we ever see it
-  // via custom_type, we'd catch it elsewhere.
-}
-
 // ---------------------------------------------------------------------------
 // StatefulSmartContract: warn on manual preimage boilerplate
 // ---------------------------------------------------------------------------
@@ -1293,24 +1672,65 @@ function isLocktimeRead(expr: Expression): boolean {
 }
 
 /**
- * True when `expr` is an `extractSequence(...) < <final>`-style comparison
- * (the guard that makes a locktime gate consensus-enforced). Accepts the two
- * natural spellings: `extractSequence(pre) < N` / `<= N`, and the reversed
- * `N > extractSequence(pre)` / `>= ...`. `N` must be a bigint literal no
- * greater than the finality sentinel, so the guard genuinely forces
- * non-finality.
+ * True when `expr` is a comparison on `extractSequence(...)` that genuinely
+ * EXCLUDES the finality sentinel `0xffffffff`, reading the field as the
+ * unsigned 32-bit wire value it is (see `emitUnsignedBin2Num` in
+ * `05-stack-lower.ts`).
+ *
+ * Accepted:
+ *   `extractSequence(pre) !== 0xffffffffn`   and the reversed spelling
+ *   `extractSequence(pre) <  N`, 0 < N <= 0xffffffff   (reversed: `N > ...`)
+ *   `extractSequence(pre) <= N`, N <  0xffffffff   (reversed: `N >= ...`)
+ *
+ * Deliberately NOT accepted: `<= 0xffffffff` and `>= 0xffffffff`. nSequence
+ * cannot exceed 0xffffffff, so those are true for every transaction including
+ * the final one — a tautology that used to silence this warning on a contract
+ * with no guard at all (W1 / FinalCountdown).
+ *
+ * Also NOT accepted: `extractSequence(pre) < 0n`. Unsigned nSequence is never
+ * negative, so that comparison is vacuous (F7).
  */
 function isSequenceFinalityGuard(expr: Expression): boolean {
   if (expr.kind !== 'binary_expr') return false;
-  const boundOk = (e: Expression): boolean =>
-    e.kind === 'bigint_literal' && e.value <= SEQUENCE_FINAL;
-  if ((expr.op === '<' || expr.op === '<=') &&
-      isCallToNamed(expr.left, 'extractSequence') && boundOk(expr.right)) {
-    return true;
+  const isFinalSentinel = (e: Expression): boolean =>
+    e.kind === 'bigint_literal' && e.value === SEQUENCE_FINAL;
+  const strictBoundOk = (e: Expression): boolean =>
+    e.kind === 'bigint_literal' && e.value > 0n && e.value <= SEQUENCE_FINAL;
+  const nonStrictBoundOk = (e: Expression): boolean =>
+    e.kind === 'bigint_literal' && e.value < SEQUENCE_FINAL;
+
+  if (expr.op === '!==') {
+    return (
+      (isCallToNamed(expr.left, 'extractSequence') && isFinalSentinel(expr.right)) ||
+      (isCallToNamed(expr.right, 'extractSequence') && isFinalSentinel(expr.left))
+    );
   }
-  if ((expr.op === '>' || expr.op === '>=') &&
-      isCallToNamed(expr.right, 'extractSequence') && boundOk(expr.left)) {
-    return true;
+  if (expr.op === '<' && isCallToNamed(expr.left, 'extractSequence')) {
+    return strictBoundOk(expr.right);
+  }
+  if (expr.op === '<=' && isCallToNamed(expr.left, 'extractSequence')) {
+    return nonStrictBoundOk(expr.right);
+  }
+  if (expr.op === '>' && isCallToNamed(expr.right, 'extractSequence')) {
+    return strictBoundOk(expr.left);
+  }
+  if (expr.op === '>=' && isCallToNamed(expr.right, 'extractSequence')) {
+    return nonStrictBoundOk(expr.left);
+  }
+  return false;
+}
+
+/**
+ * True when asserting `expr` logically implies a sequence-finality guard.
+ *
+ * A matching comparison nested under `!` (or `||`) does NOT count: e.g.
+ * `assert(!(extractSequence !== 0xffffffffn))` requires a FINAL sequence.
+ * `&&` does imply each conjunct, so a guard on either side is enough.
+ */
+function assertionImpliesSequenceGuard(expr: Expression): boolean {
+  if (isSequenceFinalityGuard(expr)) return true;
+  if (expr.kind === 'binary_expr' && expr.op === '&&') {
+    return assertionImpliesSequenceGuard(expr.left) || assertionImpliesSequenceGuard(expr.right);
   }
   return false;
 }
@@ -1318,7 +1738,7 @@ function isSequenceFinalityGuard(expr: Expression): boolean {
 /**
  * #131: warn when `method` (transitively, through the private-helper call
  * graph) reads the tx locktime but never asserts the tx is non-final. A
- * locktime gate is not consensus-enforced unless `extractSequence < 0xffffffff`
+ * locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
  * is also asserted — otherwise an all-final-sequence spend bypasses it.
  * Advisory (warning) only — no effect on emitted bytecode.
  */
@@ -1338,7 +1758,11 @@ function warnLocktimeWithoutSequenceGuard(method: MethodNode, ctx: ValidationCon
     const current = queue.shift()!;
     walkExpressionsInBody(current.body, (expr) => {
       if (isLocktimeRead(expr)) readsLocktime = true;
-      if (isSequenceFinalityGuard(expr)) hasSequenceGuard = true;
+      if (isAssertCall(expr) && expr.kind === 'call_expr') {
+        for (const arg of expr.args) {
+          if (assertionImpliesSequenceGuard(arg)) hasSequenceGuard = true;
+        }
+      }
     });
     // Follow calls into private helpers so a guard (or locktime read) supplied
     // by an inlined helper is seen by the public entry point.
@@ -1355,9 +1779,9 @@ function warnLocktimeWithoutSequenceGuard(method: MethodNode, ctx: ValidationCon
   if (readsLocktime && !hasSequenceGuard) {
     ctx.warnings.push(makeDiagnostic(
       `method '${method.name}' reads extractLocktime but does not assert ` +
-        `extractSequence < 0xffffffff; a locktime gate is not consensus-enforced ` +
-        `unless the tx is non-final — add ` +
-        `assert(extractSequence(this.txPreimage) < 0xffffffffn)`,
+        `extractSequence is not 0xffffffff; a locktime gate is not ` +
+        `consensus-enforced unless the tx is non-final — add ` +
+        `assert(extractSequence(this.txPreimage) !== 0xffffffffn)`,
       'warning',
       method.sourceLocation,
     ));

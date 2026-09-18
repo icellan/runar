@@ -1,29 +1,4 @@
 {
   "documentation": "Escape hatch for the must-move-a-golden gate (conformance/scripts/wire-format-pr-audit.ts). An entry suppresses ONE exact wire-format path for the PR that adds it, when that change genuinely cannot move any pinned bytes (e.g. a comment-only touch, or a private-helper rename proven byte-identical over the state value-class matrix). Every field is required: \"path\" (exact, no globs), \"reason\" (>= 20 chars), \"date\" (ISO, when it was granted), \"expires\" (ISO, at most 180 days after \"date\" \u2014 hard failure once passed), \"sha256\" (64 hex chars: the sha256 of that file's REVIEWED content, so the entry authorises one version of the file and self-invalidates on the next edit, exactly like conformance/golden-provenance-allowlist.json), and \"reviewer\" (sign-off marker, e.g. \"gh:handle\"). Entries are printed on EVERY run of the gate and are reviewed in the diff like any other code. The entry COUNT is asserted to be zero by scripts/__tests__/wire-format-pr-audit.test.ts, so adding one is a deliberate, reviewed edit to that assertion \u2014 never a quiet JSON append. Prefer moving a golden. See conformance/README.md -> 'Encoding-change checklist'.",
-  "entries": [
-    {
-      "path": "packages/runar-py/runar/sdk/contract.py",
-      "reason": "Warning-scoping only: adds a private OR-CHECKSIG probe (isLikelyOrCheckSigMethod / is_likely_or_checksig / _is_likely_or_checksig) and gates an INFORMATIONAL console warning on it, so a genuine OP_CHECKMULTISIG unlock is no longer told to pass EMPTY_SIG. Each file has exactly two hunks: the new helper, and one added `&& <probe>` conjunct on the existing `sigIndices.length >= 2` warning guard. Neither hunk is inside the constructor-slot splicing path this file is listed for \u2014 the gate matched the FILE, not the change. The probe is read-only over artifact.asm/script and its result feeds a warn() call and nothing else, so no encoder, offset or byte-producing branch can observe it. Evidence: conformance sdk-output (cross-SDK deployed locking hex, 7 SDKs) and the 72-fixture conformance corpus are byte-unchanged on this branch, and full vitest is 9258 passed / 0 failed.",
-      "date": "2026-08-28",
-      "expires": "2026-11-26",
-      "sha256": "6da2450990caf54511aa625e1faa450b7cb5c949648d0250a39dec0aa617d497",
-      "reviewer": "gh:icellan"
-    },
-    {
-      "path": "packages/runar-rs/src/sdk/contract.rs",
-      "reason": "Warning-scoping only: adds a private OR-CHECKSIG probe (isLikelyOrCheckSigMethod / is_likely_or_checksig / _is_likely_or_checksig) and gates an INFORMATIONAL console warning on it, so a genuine OP_CHECKMULTISIG unlock is no longer told to pass EMPTY_SIG. Each file has exactly two hunks: the new helper, and one added `&& <probe>` conjunct on the existing `sigIndices.length >= 2` warning guard. Neither hunk is inside the constructor-slot splicing path this file is listed for \u2014 the gate matched the FILE, not the change. The probe is read-only over artifact.asm/script and its result feeds a warn() call and nothing else, so no encoder, offset or byte-producing branch can observe it. Evidence: conformance sdk-output (cross-SDK deployed locking hex, 7 SDKs) and the 72-fixture conformance corpus are byte-unchanged on this branch, and full vitest is 9258 passed / 0 failed.",
-      "date": "2026-08-28",
-      "expires": "2026-11-26",
-      "sha256": "3b2f897a1211672d2032d55c4c46824195d18a74aae48bbd94b0c95bafcb0aaf",
-      "reviewer": "gh:icellan"
-    },
-    {
-      "path": "packages/runar-sdk/src/contract.ts",
-      "reason": "Warning-scoping only: adds a private OR-CHECKSIG probe (isLikelyOrCheckSigMethod / is_likely_or_checksig / _is_likely_or_checksig) and gates an INFORMATIONAL console warning on it, so a genuine OP_CHECKMULTISIG unlock is no longer told to pass EMPTY_SIG. Each file has exactly two hunks: the new helper, and one added `&& <probe>` conjunct on the existing `sigIndices.length >= 2` warning guard. Neither hunk is inside the constructor-slot splicing path this file is listed for \u2014 the gate matched the FILE, not the change. The probe is read-only over artifact.asm/script and its result feeds a warn() call and nothing else, so no encoder, offset or byte-producing branch can observe it. Evidence: conformance sdk-output (cross-SDK deployed locking hex, 7 SDKs) and the 72-fixture conformance corpus are byte-unchanged on this branch, and full vitest is 9258 passed / 0 failed.",
-      "date": "2026-08-28",
-      "expires": "2026-11-26",
-      "sha256": "7019a29bebd27c7d657056adf325cc39815659fe1adc2b11b836c135afe496b8",
-      "reviewer": "gh:icellan"
-    }
-  ]
+  "entries": []
 }

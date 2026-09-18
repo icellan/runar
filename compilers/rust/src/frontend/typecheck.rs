@@ -59,6 +59,28 @@ struct FuncSig {
     return_type: &'static str,
 }
 
+/// Allowed argument counts per builtin, for validating ANF IR that never went
+/// through this pass (R-128 / R-165).
+///
+/// `--ir` runs no frontend, so a wrong-arity call used to reach stack
+/// lowering, where each dispatch family pops `args.len()` from the stack MODEL
+/// and then emits a FIXED-arity opcode blob: `cat` with one argument compiled
+/// to a bare OP_CAT, `assert` with none to an EMPTY script. Derived from the
+/// signature table below rather than copied, so the two cannot drift.
+///
+/// Two builtins accept more than one count — `assert` (1 or 2) and
+/// `extractPrevOutputScript` (2 or 3) — both special-cased in `check_call_args`
+/// for the same reason. `merkleRootPoseidon2KB` is variadic by a rule and is
+/// handled by the caller.
+pub fn builtin_allowed_arity(name: &str) -> Option<Vec<usize>> {
+    match name {
+        "assert" => return Some(vec![1, 2]),
+        "extractPrevOutputScript" => return Some(vec![2, 3]),
+        _ => {}
+    }
+    builtin_functions().get(name).map(|sig| vec![sig.params.len()])
+}
+
 fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     let mut m = HashMap::new();
 
@@ -197,6 +219,11 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("extractOutputs", FuncSig { params: vec!["SigHashPreimage"], return_type: "Sha256" });
     m.insert("extractLocktime", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });
     m.insert("extractSigHashType", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });
+    // P2PKH change-output serializer. The stateful continuation epilogue emits
+    // this call itself (frontend/anf_lower.rs), and codegen/stack.rs has always
+    // lowered it — this row is what makes it callable BY NAME, which the ts /
+    // python / zig / ruby / java tiers have always allowed (N-055).
+    m.insert("buildChangeOutput", FuncSig { params: vec!["ByteString", "bigint"], return_type: "ByteString" });
 
     // Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
     // that compile down to standard primitives + auto-injected method params.
@@ -216,7 +243,13 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
 // ---------------------------------------------------------------------------
 
 /// ByteString subtypes -- types represented as byte strings on the stack.
-fn is_bytestring_subtype(t: &str) -> bool {
+///
+/// N-076: this is the SINGLE source of truth for "is a value of this type a
+/// byte string or a script number?", and `anf_lower.rs` consults it rather
+/// than keeping a second copy. The copy it replaces carried `RabinSig` and
+/// `RabinPubKey`, which `is_bigint_subtype` right below files as NUMBERS, so
+/// `===` on a Rabin value emitted OP_EQUAL and `+` on one emitted OP_CAT.
+pub(crate) fn is_bytestring_subtype(t: &str) -> bool {
     matches!(
         t,
         "ByteString" | "PubKey" | "Sig" | "Sha256" | "Ripemd160" | "Addr" | "SigHashPreimage" | "Point" | "P256Point" | "P384Point"
@@ -224,12 +257,31 @@ fn is_bytestring_subtype(t: &str) -> bool {
 }
 
 /// Bigint subtypes -- types represented as integers on the stack.
-fn is_bigint_subtype(t: &str) -> bool {
+///
+/// `pub(crate)` for the same reason as `is_bytestring_subtype` above:
+/// `expand_fixed_arrays.rs` needs the question answered (N-133) and must not
+/// keep a second copy of the list.
+pub(crate) fn is_bigint_subtype(t: &str) -> bool {
     matches!(t, "bigint" | "RabinSig" | "RabinPubKey")
 }
 
 fn is_subtype(actual: &str, expected: &str) -> bool {
     if actual == expected {
+        return true;
+    }
+
+    // N-027: <inferred> and <unknown> are compatible with anything, in both
+    // directions. Mirrors `isSubtype` in
+    // packages/runar-compiler/src/passes/03-typecheck.ts. Private method
+    // return types are inferred by an environment-free walk
+    // (`infer_method_return_type`), so a helper that returns an identifier, a
+    // property access, an index access, or a call to another private method
+    // is typed `<unknown>` — which is a "don't know", not a type. Without this
+    // clause Rust rejected contracts that TS, Go and Python all compile.
+    if actual == "<inferred>" || actual == "<unknown>" {
+        return true;
+    }
+    if expected == "<inferred>" || expected == "<unknown>" {
         return true;
     }
 
@@ -268,6 +320,49 @@ fn is_subtype(actual: &str, expected: &str) -> bool {
     }
 
     false
+}
+
+/// The mutable state as `addOutput` sees it: one `(name, type)` entry per value
+/// the state continuation carries.
+///
+/// N-107: `expand_fixed_arrays` (pass 3b) runs after the typechecker and splits
+/// a FixedArray property into one scalar sibling per element, so the DECLARED
+/// property list is not the emitted state. The flattening mirrors that pass's
+/// own naming (`<root>__<i>`, recursing through nested arrays) so a diagnostic
+/// names the synthetic property the next pass will create.
+///
+/// A non-positive length is already a parse/validate error; the property is kept
+/// whole in that case so this rule never fires on a contract that is going to be
+/// rejected for a better reason.
+fn expanded_state_slots(properties: &[PropertyNode]) -> Vec<(String, TypeNode)> {
+    fn push(name: String, t: &TypeNode, out: &mut Vec<(String, TypeNode)>) {
+        if let TypeNode::FixedArray { element, length } = t {
+            if *length > 0 {
+                for i in 0..*length {
+                    push(format!("{}__{}", name, i), element, out);
+                }
+                return;
+            }
+        }
+        out.push((name, t.clone()));
+    }
+    let mut out = Vec::new();
+    for p in properties.iter().filter(|p| !p.readonly) {
+        push(p.name.clone(), &p.prop_type, &mut out);
+    }
+    out
+}
+
+/// Names that are legal without being a local, a builtin or a property: the
+/// `SigHash` namespace object and the three secp256k1 constants. Mirrors
+/// `KNOWN_GLOBALS` in the TS reference tier.
+fn known_global(name: &str) -> Option<&'static str> {
+    match name {
+        "SigHash" => Some("<namespace>"),
+        "EC_P" | "EC_N" => Some("bigint"),
+        "EC_G" => Some("Point"),
+        _ => None,
+    }
 }
 
 fn is_bigint_family(t: &str) -> bool {
@@ -461,8 +556,16 @@ split the addDataOutput call into a separate method",
         // 0 to also be a 34-byte P2PKH is impossible (codePart >= 253 bytes forces a
         // 3-byte CompactSize length prefix, never the P2PKH template's 0x19), so the
         // contract is PERMANENTLY unspendable. The terminal case (no state mutation
-        // -> no continuation) stays valid, and addOutput/addRawOutput layouts are
-        // left to the developer. Mirrors the TS reference in 03-typecheck.ts.
+        // -> no continuation) stays valid.
+        //
+        // R-300: "addOutput/addRawOutput layouts are left to the developer" used
+        // to finish that sentence, and it was wrong — no layout the developer can
+        // pick makes the offsets work. this.addOutput(...) writes the continuation
+        // (codePart plus serialised state, hundreds of bytes) at output 0, so
+        // outputIndex*34 lands INSIDE that script for every index. addRawOutput's
+        // length is a runtime value, so the stride cannot be proven there either.
+        // See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
+        // Mirrors the TS reference in 03-typecheck.ts.
         if self.contract.parent_class == "StatefulSmartContract" {
             let mutable_props: HashSet<String> = self
                 .contract
@@ -472,6 +575,12 @@ split the addDataOutput call into a separate method",
                 .map(|p| p.name.clone())
                 .collect();
             let sig = analyze_method_output_signals(&method.body, &mutable_props);
+            if has_require_p2pkh && sig.has_state_output {
+                self.add_error(format!(
+                    "method '{}' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — the intrinsic reads output i at byte offset i*34, which is only correct when every earlier output is exactly 34 bytes, and a state-continuation output never is (codePart plus serialised state). The assertion would read bytes from the middle of the contract's own locking script, so the contract would be permanently unspendable. Assert the payment from a separate method that emits no output of its own",
+                    method.name
+                ));
+            }
             if sig.requires_output_p2pkh_zero && sig.mutates_state && !sig.has_state_output {
                 self.add_error(format!(
                     "method '{}' calls requireOutputP2PKH(0, ...) but also mutates state \
@@ -562,6 +671,7 @@ terminal (no state mutation)",
             Statement::ForStatement {
                 init,
                 condition,
+                update,
                 body,
                 ..
             } => {
@@ -574,6 +684,16 @@ terminal (no state mutation)",
                         cond_type
                     ));
                 }
+                // R-029 / CL-BUG-008: the update clause used to fall into the
+                // rest pattern and was never checked, so `for (let i = 0n;
+                // i < 3n; undefinedFn())` compiled clean -- a hole in the rule
+                // that only Rúnar builtins and contract methods are callable
+                // (CLAUDE.md names `console.log` explicitly). The validator
+                // separately restricts the clause to a unit-step advance;
+                // this is the type-level half of the same guard, and it is
+                // what catches an unknown name on the `--ir`-adjacent paths
+                // that skip validation.
+                self.check_statement(update, env);
                 self.check_statements(body, env);
                 env.pop_scope();
             }
@@ -609,6 +729,19 @@ terminal (no state mutation)",
                 if name == "true" || name == "false" {
                     return BOOLEAN.to_string();
                 }
+                // The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+                // the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+                // identifier arm as a name to be typed. It is a discard, not a reference:
+                // nothing is being looked up, so `undefined` is the wrong word for it.
+                // Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+                // `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+                // "Undefined variable '_'" — invariant 1 (all seven parse all nine
+                // surfaces) already broken for this shape. Listing it here rather than
+                // letting the new fall-through reject it keeps the six tiers' bytes and
+                // brings the seventh into line.
+                if name == "_" {
+                    return "<unknown>".to_string();
+                }
 
                 if let Some(t) = env.lookup(name) {
                     return t.clone();
@@ -619,6 +752,42 @@ terminal (no state mutation)",
                     return "<builtin>".to_string();
                 }
 
+                // A contract property named without a receiver. Java lets a method say
+                // `strikePrice` for `this.strikePrice`, and the Solidity frontend emits the
+                // same shape; the TS reference tier has resolved it here since that frontend
+                // landed. Without this the identifier types as `<unknown>` and any operator
+                // that demands a type rejects valid source — a frontend parity break the
+                // `--parse-only` matrix cannot see, because the identifier PARSES fine and
+                // only fails to RESOLVE.
+                if let Some(t) = self.prop_types.get(name.as_str()) {
+                    return t.clone();
+                }
+
+                // Names that resolve to neither a local, a builtin nor a
+                // property, and are still legal: the `SigHash` namespace object
+                // and the three secp256k1 constants from runar-lang. Every
+                // frontend hands them to the typechecker as bare identifiers.
+                // They used to be carried by the "<unknown>" fall-through; once
+                // that fall-through raises they have to be listed, exactly as
+                // the TS reference tier lists them.
+                if let Some(t) = known_global(name.as_str()) {
+                    return t.to_string();
+                }
+
+                // GK-BUG-009 — a name that resolves to nothing is an error
+                // HERE, at the only pass that can see the binding environment.
+                // It used to return "<unknown>" silently, and "<unknown>" is
+                // compatible with everything under is_subtype by design
+                // (R-092), so `notAThing === 1n` raised nothing. `notAThing >
+                // 1n` did raise -- the bigint-family check does not admit
+                // "<unknown>" -- which is why R-085's `>` pin read as closed
+                // while the `===` path was wide open. Where the reference is
+                // reachable from codegen, stack lowering later refuses to emit
+                // an OP_0 placeholder and the compile still fails, but for the
+                // wrong reason; where it is NOT reachable (an uncalled private
+                // helper, a zero-iteration loop) nothing fired at all and the
+                // contract compiled to a locking script.
+                self.add_error(format!("Undefined variable '{name}'"));
                 "<unknown>".to_string()
             }
 
@@ -949,6 +1118,163 @@ terminal (no state mutation)",
         }
     }
 
+    /// Type-check the arguments of the three output intrinsics —
+    /// `this.addOutput` / `this.addRawOutput` / `this.addDataOutput` — and
+    /// return their result type.
+    ///
+    /// N-098: the first argument is the output's SATOSHI AMOUNT, and this tier
+    /// used to accept any type there. That is not a missing lint.
+    /// `lower_add_output` prepends the operand as `OP_8 OP_NUM2BIN`, so a
+    /// ByteString in that slot is reinterpreted as a script number with no
+    /// conversion and becomes the amount the covenant commits to:
+    /// `blob: ByteString` and `blob: bigint` compiled to the SAME script, byte
+    /// for byte. On the real `@bsv/sdk` Spend engine with `blob = 0x2a` only a
+    /// 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+    /// `OP_NUM2BIN`, making the UTXO unspendable.
+    ///
+    /// N-105 (2/2): the remaining three checks TS performs and this tier did
+    /// not — the StatefulSmartContract gate, the arity of all three intrinsics,
+    /// and the types of addOutput's state values. Each had an executed
+    /// consequence: `addOutput(1000n)` dropped the state value from the
+    /// continuation entirely, a surplus value was appended to a state
+    /// serialization the next spend deserializes by fixed offsets, a ByteString
+    /// state value was serialized where an 8-byte LE number belongs, and
+    /// addRawOutput in a stateless SmartContract emitted a "continuation" for a
+    /// contract with no state.
+    ///
+    /// Ported from the TypeScript reference, wording included.
+    ///
+    /// N-105: the SECOND argument of addRawOutput / addDataOutput is the
+    /// created output's LOCKING SCRIPT, and this tier used to accept any type
+    /// there too. `lower_add_raw_output` takes OP_SIZE of the operand,
+    /// varint-prefixes it and concatenates it after the amount — no conversion
+    /// — so `n: bigint` and `n: ByteString` compiled to the SAME script, byte
+    /// for byte. A script number on the stack is its minimal little-endian
+    /// encoding, so the covenant commits to an output whose locking script IS
+    /// those bytes. Executed on the real `@bsv/sdk` Spend engine against the
+    /// exact opcode window this tier emits: n=0 gives an EMPTY locking script,
+    /// n=81 gives OP_1 and n=118 gives OP_DUP — all three anyone-can-spend —
+    /// while n=1000 gives 0xe8 0x03, an invalid opcode, and the output is
+    /// unspendable.
+    ///
+    /// `<unknown>` is escaped exactly as TS escapes it — a private helper's
+    /// declared return type is discarded at parse time in every tier, so
+    /// `this.sats()` infers as `<unknown>` and must keep compiling.
+    fn check_output_intrinsic_args(
+        &mut self,
+        name: &str,
+        args: &[Expression],
+        env: &mut TypeEnv,
+    ) -> TType {
+        // N-105: all three intrinsics build an OUTPUT, and an output only
+        // exists in a stateful contract. TS refuses the call outright and
+        // checks nothing else, so the early return is part of the ported
+        // behaviour.
+        if self.contract.parent_class != "StatefulSmartContract" {
+            self.add_error(format!(
+                "{}() is only available in StatefulSmartContract",
+                name
+            ));
+            return VOID.to_string();
+        }
+
+        if name == "addOutput" {
+            // The surface form `this.addOutput(satoshis, .{ v1, v2, ... })`
+            // that Zig and Move tuple syntax produce carries the state values
+            // in a trailing array literal. anf_lower unwraps it with this same
+            // helper, so the arity checked here is the arity codegen will see.
+            let normalized = super::anf_lower::flatten_add_output_args(args);
+
+            // N-107: count the state slots the continuation will actually
+            // carry, not the DECLARED mutable properties. expand_fixed_arrays
+            // runs right after this pass and splits `board: FixedArray<bigint,
+            // 3>` into `board__0 .. board__2`, so a contract declaring `board`
+            // and `n` emits FOUR state values. addOutput is positional against
+            // the emitted values, which is why the declared count answers the
+            // wrong question.
+            //
+            // This used to be a `shape_checkable` flag that scoped the rule OUT
+            // of every contract with FixedArray state, because porting it
+            // verbatim would have rejected Boardy (in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py)
+            // the way the reference tier did. The cost of that opt-out was
+            // silent: a wrong-arity addOutput on a FixedArray contract was
+            // ACCEPTED and emitted a state continuation that disagreed with the
+            // contract's own state. Gate:
+            // conformance/negatives/N26-addoutput-arity-fixedarray.
+            let mutable_props = expanded_state_slots(&self.contract.properties);
+            let expected = 1 + mutable_props.len();
+            if normalized.len() != expected {
+                self.add_error(format!(
+                    "addOutput() expects {} argument(s): satoshis + {} state value(s), got {}",
+                    expected,
+                    mutable_props.len(),
+                    normalized.len()
+                ));
+            }
+            if !normalized.is_empty() {
+                let sat_type = self.infer_expr_type(&normalized[0], env);
+                if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
+                    self.add_error(format!(
+                        "addOutput() first argument (satoshis) must be bigint, got '{}'",
+                        sat_type
+                    ));
+                }
+            }
+            let mut i = 0;
+            while i < mutable_props.len() && i + 1 < normalized.len() {
+                let arg_type = self.infer_expr_type(&normalized[i + 1], env);
+                let prop_type = type_node_to_ttype(&mutable_props[i].1);
+                if !is_subtype(&arg_type, &prop_type) && arg_type != "<unknown>" {
+                    self.add_error(format!(
+                        "addOutput() argument {} ({}) must be '{}', got '{}'",
+                        i + 2,
+                        mutable_props[i].0,
+                        prop_type,
+                        arg_type
+                    ));
+                }
+                i += 1;
+            }
+            // Surplus arguments are still inferred, so a type error inside one
+            // is not swallowed by the arity diagnostic. Mirrors TS.
+            for extra in normalized.iter().skip(expected) {
+                self.infer_expr_type(extra, env);
+            }
+            return VOID.to_string();
+        }
+
+        // addRawOutput / addDataOutput — (satoshis, scriptBytes).
+        if args.len() != 2 {
+            self.add_error(format!(
+                "{}() expects 2 arguments (satoshis, scriptBytes), got {}",
+                name,
+                args.len()
+            ));
+        }
+        if !args.is_empty() {
+            let sat_type = self.infer_expr_type(&args[0], env);
+            if !is_bigint_family(&sat_type) && sat_type != "<unknown>" {
+                self.add_error(format!(
+                    "{}() first argument (satoshis) must be bigint, got '{}'",
+                    name, sat_type
+                ));
+            }
+        }
+        if args.len() >= 2 {
+            // TS uses is_subtype against ByteString, not equality, so every
+            // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+            let script_type = self.infer_expr_type(&args[1], env);
+            if !is_subtype(&script_type, "ByteString") && script_type != "<unknown>" {
+                self.add_error(format!(
+                    "{}() second argument (scriptBytes) must be ByteString, got '{}'",
+                    name, script_type
+                ));
+            }
+        }
+        VOID.to_string()
+    }
+
     fn check_call_expr(
         &mut self,
         callee: &Expression,
@@ -1026,10 +1352,7 @@ terminal (no state mutation)",
             }
 
             if property == "addOutput" || property == "addRawOutput" || property == "addDataOutput" {
-                for arg in args {
-                    self.infer_expr_type(arg, env);
-                }
-                return VOID.to_string();
+                return self.check_output_intrinsic_args(property, args, env);
             }
 
             // Check contract method signatures
@@ -1065,10 +1388,7 @@ terminal (no state mutation)",
                 }
 
                 if property == "addOutput" || property == "addRawOutput" || property == "addDataOutput" {
-                    for arg in args {
-                        self.infer_expr_type(arg, env);
-                    }
-                    return VOID.to_string();
+                    return self.check_output_intrinsic_args(property, args, env);
                 }
 
                 if let Some((params, return_type)) = self.method_sigs.get(property).cloned() {
@@ -1194,7 +1514,17 @@ terminal (no state mutation)",
                     Expression::BigIntLiteral { value } => value.to_i128(),
                     Expression::UnaryExpr { op: UnaryOp::Neg, operand } => {
                         if let Expression::BigIntLiteral { value } = operand.as_ref() {
-                            (-value).to_i128()
+                            // R-068: this arm exists ONLY to reach the
+                            // "must be >= 0" message below, so it must
+                            // surrender anything that is not actually
+                            // negative. `-0` negates to 0 and would sail
+                            // past that bound check, but ANF lowering
+                            // matches on a bare BigIntLiteral: on a
+                            // UnaryExpr it falls through to `load_const ""`
+                            // and the covenant the intrinsic was supposed
+                            // to install is silently absent. Report it as a
+                            // non-literal index instead.
+                            (-value).to_i128().filter(|v| *v < 0)
                         } else {
                             None
                         }
@@ -1218,9 +1548,9 @@ terminal (no state mutation)",
                             func_name, idx
                         ));
                     }
-                    if func_name == "requireOutputP2PKH" && idx > 1000 {
+                    if func_name == "requireOutputP2PKH" && idx > 0 {
                         self.add_error(format!(
-                            "requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got {} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)",
+                            "requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got {}. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit",
                             idx
                         ));
                     }

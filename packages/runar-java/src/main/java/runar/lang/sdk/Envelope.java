@@ -42,15 +42,56 @@ public final class Envelope {
     // canonicalJson
     // -------------------------------------------------------------------
 
-    /** Serialize {@code value} to RFC 8785 / JCS canonical JSON. */
+    /**
+     * Bounds the nesting {@link #canonicalJson} will EMIT: the number of
+     * containers enclosing a value, 1-based, outermost = 1. 100 is accepted,
+     * 101 is rejected.
+     *
+     * <p>Deliberately the same number {@link #verify} enforces on the parse
+     * side ({@link #MAX_ENVELOPE_PAYLOAD_DEPTH}) — if emit allowed more than
+     * parse, this tier could produce a legal, correctly-signed envelope another
+     * tier is physically unable to read. It is NOT the compiler's IR nesting
+     * bound (512): that serves the {@code --ir} loader, which reads a trusted
+     * local file rather than unauthenticated wire input. R-260.
+     *
+     * <p>100 also keeps this tier far from the stack limit that made the JVM
+     * crash outright on a 513-deep object, so the guard throws a typed
+     * exception instead.
+     *
+     * <p>canonicalJson's byte guards reuse the envelope caps rather than
+     * restating the numbers, so emit and parse cannot drift apart: a single
+     * string field is bounded by {@link #MAX_ENVELOPE_FIELD_BYTES} (4 MiB) and
+     * the finished document by {@link #MAX_ENVELOPE_PAYLOAD_BYTES} (16 MiB).
+     */
+    public static final int MAX_WIRE_NESTING = 100;
+
+    /**
+     * Serialize {@code value} to RFC 8785 / JCS canonical JSON.
+     *
+     * @throws IllegalArgumentException if nesting exceeds
+     *     {@link #MAX_WIRE_NESTING}, a single string exceeds
+     *     {@link #MAX_ENVELOPE_FIELD_BYTES}, or the finished document exceeds
+     *     {@link #MAX_ENVELOPE_PAYLOAD_BYTES}.
+     */
     public static String canonicalJson(Object value) {
         StringBuilder sb = new StringBuilder();
-        canonicalAppend(sb, value);
-        return sb.toString();
+        canonicalAppend(sb, value, 1);
+        String out = sb.toString();
+        // G3: total output guard, on the finished document's UTF-8 byte length.
+        int n = out.getBytes(StandardCharsets.UTF_8).length;
+        if (n > MAX_ENVELOPE_PAYLOAD_BYTES) {
+            throw new IllegalArgumentException(
+                "canonical JSON: output exceeds " + MAX_ENVELOPE_PAYLOAD_BYTES + " bytes (actual " + n + ")");
+        }
+        return out;
     }
 
+    /**
+     * {@code depth} is the 1-based nesting level of the container being written
+     * (outermost = 1); scalars ignore it.
+     */
     @SuppressWarnings("unchecked")
-    private static void canonicalAppend(StringBuilder out, Object value) {
+    private static void canonicalAppend(StringBuilder out, Object value, int depth) {
         if (value == null) {
             out.append("null");
             return;
@@ -85,16 +126,24 @@ public final class Envelope {
             return;
         }
         if (value instanceof List) {
+            // G1: depth guard on entry to the container, before children.
+            if (depth > MAX_WIRE_NESTING) {
+                throw new IllegalArgumentException("canonical JSON: nesting exceeds " + MAX_WIRE_NESTING);
+            }
             List<?> list = (List<?>) value;
             out.append('[');
             for (int i = 0; i < list.size(); i++) {
                 if (i > 0) out.append(',');
-                canonicalAppend(out, list.get(i));
+                canonicalAppend(out, list.get(i), depth + 1);
             }
             out.append(']');
             return;
         }
         if (value instanceof Map) {
+            // G1: depth guard on entry to the container, before children.
+            if (depth > MAX_WIRE_NESTING) {
+                throw new IllegalArgumentException("canonical JSON: nesting exceeds " + MAX_WIRE_NESTING);
+            }
             Map<String, Object> map = (Map<String, Object>) value;
             // Sort keys by UTF-16 code-unit order (Java strings ARE UTF-16,
             // so the default String compareTo is exactly the right thing).
@@ -108,7 +157,7 @@ public final class Envelope {
                 first = false;
                 appendJsonString(out, k);
                 out.append(':');
-                canonicalAppend(out, v);
+                canonicalAppend(out, v, depth + 1);
             }
             out.append('}');
             return;
@@ -117,6 +166,17 @@ public final class Envelope {
     }
 
     private static void appendJsonString(StringBuilder out, String s) {
+        // G2: string-byte guard on the RAW input, before escaping, so the bound
+        // is about the caller's data rather than about how much the escaper
+        // inflated it. Object KEYS route through here too, so an oversized key
+        // is rejected the same way an oversized value is. Measured in UTF-8
+        // bytes, not chars, so the bound means the same thing as in the six
+        // peer tiers.
+        int n = utf8Length(s);
+        if (n > MAX_ENVELOPE_FIELD_BYTES) {
+            throw new IllegalArgumentException(
+                "canonical JSON: string exceeds " + MAX_ENVELOPE_FIELD_BYTES + " bytes (actual " + n + ")");
+        }
         out.append('"');
         // Java strings are UTF-16, so c is a code unit. We must reject any
         // lone surrogate (high without low partner, or low without high
@@ -318,14 +378,102 @@ public final class Envelope {
     public static final int MAX_ENVELOPE_PAYLOAD_BYTES = 16 * 1024 * 1024; // 16 MiB
     public static final int MAX_ENVELOPE_FIELD_BYTES = 4 * 1024 * 1024;    // 4 MiB
 
+    /**
+     * Maximum payload nesting {@link #verify} will parse: the number of containers
+     * enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+     * R-260.
+     *
+     * Without an explicit bound the limit was whatever each tier's stock JSON library
+     * imposed, and those differ. Measured on ONE envelope, payload
+     * {"deep":<N-deep array>,...}: ruby flipped to bad-json at total depth 101
+     * (JSON.parse default max_nesting: 100) and rust at 128 (serde_json
+     * RECURSION_LIMIT); ts, go, python and zig accepted every depth probed (zig's
+     * iterative scanner took 100001 without complaint); and java threw
+     * StackOverflowError straight OUT of verify -- its hand-written parser is
+     * recursive with no cap and verify catches Exception, not Error -- at ~5000 deep
+     * on a default JVM stack and ~1000 deep under -Xss512k, i.e. a contract escape on
+     * unauthenticated input whose threshold was a JVM launch flag rather than a
+     * protocol property.
+     *
+     * 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
+     * so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
+     * also far above what the wire needs: the deepest of the 165 checked-in
+     * conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
+     * tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
+     * bound: if parse were the smaller of the two, a tier could emit a legal,
+     * correctly-signed envelope that another tier is physically unable to parse.
+     *
+     * The guard runs on the payload TEXT, immediately before the stock parser, and is
+     * a flat non-recursive bracket scan so the guard itself cannot overflow.
+     */
+    public static final int MAX_ENVELOPE_PAYLOAD_DEPTH = 100;
+
+    /**
+     * Does the payload text nest deeper than MAX_ENVELOPE_PAYLOAD_DEPTH?
+     *
+     * Counts the maximum number of simultaneously-open {/[ containers, skipping
+     * anything inside a JSON string (so a value of "[[[[..." is not nesting). The
+     * scan is FLAT -- no recursion -- which is the point: a guard that recursed
+     * would overflow on exactly the input it exists to reject. It bails out the
+     * instant the bound is passed, so a 200 KB bracket bomb costs a few hundred
+     * bytes of scanning.
+     *
+     * This does not validate JSON; malformed input still falls through to the real
+     * parser and its own bad-json rejection.
+     */
+    static boolean payloadExceedsMaxDepth(String payload) {
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = 0; i < payload.length(); i++) {
+            char c = payload.charAt(i);
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+            } else if (c == '{' || c == '[') {
+                depth++;
+                if (depth > MAX_ENVELOPE_PAYLOAD_DEPTH) {
+                    return true;
+                }
+            } else if ((c == '}' || c == ']') && depth > 0) {
+                depth--;
+            }
+        }
+        return false;
+    }
+
     public static final class VerifyEnvelopeOpts {
         public SignedEnvelope envelope;
         /** Optional pubkey allowlist (66-char hex). */
         public List<String> expectedKeys;
-        /** Defaults to 5_000. */
+        /**
+         * Allowed wall-clock skew in ms when checking expiresAt. Defaults to
+         * 5_000; an explicit 0 means zero tolerance and IS honoured.
+         */
         public long clockSkewMs = 5_000;
-        /** Override Now() for deterministic tests; 0 = wall clock. */
-        public long nowMs = 0;
+        /**
+         * Overrides the wall clock used to check expiry. NULL means the caller
+         * supplied nothing and {@code System.currentTimeMillis()} is used; a
+         * non-null value is used AS GIVEN, so an explicit 0 means the Unix
+         * epoch — under which nothing has expired yet — rather than "fall back
+         * to the wall clock".
+         *
+         * <p>R-261: this was a {@code long} defaulting to 0 and read as
+         * {@code nowMs != 0 ? nowMs : System.currentTimeMillis()}, which made
+         * an explicit 0 indistinguishable from "not supplied". Python, Ruby,
+         * Rust and Zig all treat an explicit 0 as the epoch and returned
+         * ok:true on an envelope this tier called expired.
+         */
+        public Long nowMs = null;
     }
 
     public static final class VerifyEnvelopeResult {
@@ -338,6 +486,83 @@ public final class Envelope {
             this.reason = reason;
             this.data = data;
         }
+    }
+
+    /**
+     * Unpaired-surrogate detection on an envelope payload (R-115 / CL-BUG-066).
+     *
+     * <p>{@code verify} hashes the payload string RAW — it never routes it
+     * through {@link #canonicalJson} — so canonicalJson's lone-surrogate
+     * rejection (audit D6, fixture vector v22) never sees the envelope path,
+     * and each tier fell back on whatever its JSON parser happened to do.
+     *
+     * <p>Two shapes count as unpaired: a {@code \\uD800}–{@code \\uDBFF}
+     * escape not immediately followed by a low-surrogate escape (or a lone low
+     * one), and a raw unpaired surrogate {@code char} in the text.
+     */
+    static boolean payloadHasLoneSurrogate(String text) {
+        if (text == null) {
+            return false;
+        }
+        // Raw code units first — a Java String can hold an unpaired surrogate.
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                if (i + 1 >= text.length() || !Character.isLowSurrogate(text.charAt(i + 1))) {
+                    return true;
+                }
+                i++;
+            } else if (Character.isLowSurrogate(c)) {
+                return true;
+            }
+        }
+
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) != '\\') {
+                continue;
+            }
+            int run = 0;
+            while (i + run < text.length() && text.charAt(i + run) == '\\') {
+                run++;
+            }
+            int esc = i + run - 1;
+            i = esc;
+            if (run % 2 == 0) {
+                continue;
+            }
+            int code = escapedCodeUnitAt(text, esc);
+            if (code < 0) {
+                continue;
+            }
+            if (code >= 0xD800 && code <= 0xDBFF) {
+                int low = escapedCodeUnitAt(text, esc + 6);
+                if (low < 0xDC00 || low > 0xDFFF) {
+                    return true;
+                }
+                i = esc + 11;
+            } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                return true;
+            } else {
+                i = esc + 5;
+            }
+        }
+        return false;
+    }
+
+    /** The code unit of a {@code \\uXXXX} escape starting at {@code i}, or -1. */
+    private static int escapedCodeUnitAt(String text, int i) {
+        if (i < 0 || i + 5 >= text.length() || text.charAt(i) != '\\' || text.charAt(i + 1) != 'u') {
+            return -1;
+        }
+        int code = 0;
+        for (int k = 0; k < 4; k++) {
+            int v = Character.digit(text.charAt(i + 2 + k), 16);
+            if (v < 0) {
+                return -1;
+            }
+            code = code * 16 + v;
+        }
+        return code;
     }
 
     public static VerifyEnvelopeResult verify(VerifyEnvelopeOpts opts) {
@@ -372,7 +597,7 @@ public final class Envelope {
             return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.MISSING_FIELDS, null);
         }
 
-        long now = opts.nowMs != 0 ? opts.nowMs : System.currentTimeMillis();
+        long now = opts.nowMs != null ? opts.nowMs : System.currentTimeMillis();
 
         // 2. Expiry.
         if (env.expiresAt < now - opts.clockSkewMs) {
@@ -380,6 +605,23 @@ public final class Envelope {
         }
 
         // 3. Parse payload.
+        //
+        // R-115: an unpaired surrogate makes the payload ill-formed Unicode,
+        // and the seven tiers' JSON parsers disagree about it — ts/go/python/
+        // java accepted it and fell through to bad-sig, rust/ruby/zig rejected
+        // it here. Decided on the payload TEXT so every tier answers the same.
+        if (payloadHasLoneSurrogate(env.payload)) {
+            return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.BAD_JSON, null);
+        }
+        // R-260: bound nesting on the TEXT, before Json.parse. This tier needs
+        // it most: Json's readValue/readObject/readArray are mutually recursive
+        // with no cap, and the catch below is on Exception — a StackOverflowError
+        // is an Error, so before this guard a ~10 KB deep payload escaped verify
+        // entirely instead of returning a VerifyEnvelopeResult. Same bound and
+        // same reason in all seven tiers.
+        if (payloadExceedsMaxDepth(env.payload)) {
+            return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.BAD_JSON, null);
+        }
         Map<String, Object> parsed;
         try {
             Object raw = Json.parse(env.payload);
@@ -431,6 +673,31 @@ public final class Envelope {
     // -------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------
+
+    /**
+     * UTF-8 byte length of {@code s}, counted from code units directly rather
+     * than via {@code getBytes(UTF_8)} — that call substitutes '?' for an
+     * unpaired surrogate, which would report the wrong length for exactly the
+     * strings the lone-surrogate guard below is there to reject.
+     */
+    private static int utf8Length(String s) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) {
+                n += 1;
+            } else if (c < 0x800) {
+                n += 2;
+            } else if (Character.isHighSurrogate(c) && i + 1 < s.length()
+                    && Character.isLowSurrogate(s.charAt(i + 1))) {
+                n += 4;
+                i++;
+            } else {
+                n += 3;
+            }
+        }
+        return n;
+    }
 
     private static Long readLong(Object o) {
         if (o instanceof Long) return (Long) o;

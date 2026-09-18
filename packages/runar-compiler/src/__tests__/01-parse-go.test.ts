@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseGoSource } from '../passes/01-parse-go.js';
+import { parseGoSource, GO_BUILTIN_MAP, GO_CAST_TYPES } from '../passes/01-parse-go.js';
 import type {
   BinaryExpr,
   CallExpr,
@@ -882,4 +882,154 @@ func (c *VarDemo) Check(data runar.ByteString) {
       expect(sawByteStringCall).toBe(false);
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// F1 — the Go surface spells a type conversion and a builtin call identically,
+// so a name that is in BOTH tables silently becomes whichever branch runs
+// first. `Sha256` and `Ripemd160` were in both, the cast branch ran first, and
+// `runar.Sha256(preimage)` unwrapped to its own argument: the hash opcode was
+// never emitted and `assert(sha256(x) === digest)` shipped as
+// `assert(x === digest)`.
+//
+// Resolution: in CALL position the FUNCTION wins (see the GO_CAST_TYPES
+// docstring). These tests hold the two tables disjoint and pin the resolution
+// for every builtin in the map, so the next name that is both a type and a
+// function fails here instead of on chain.
+// ---------------------------------------------------------------------------
+
+describe('Go surface: builtin names are never type casts', () => {
+  it('GO_CAST_TYPES and GO_BUILTIN_MAP are disjoint', () => {
+    const both = [...GO_CAST_TYPES].filter((n) => n in GO_BUILTIN_MAP).sort();
+    expect(
+      both,
+      `these names are BOTH a Go-surface cast type and a Go-surface builtin: ` +
+        `${both.join(', ')}. The cast branch runs first, so every call to them ` +
+        `compiles to an identity binding and its opcode disappears. Remove them ` +
+        `from GO_CAST_TYPES — a cast to a ByteString subtype is a no-op, a ` +
+        `vanished hash is a fund bug.`,
+    ).toEqual([]);
+  });
+
+  it.each(['Sha256', 'Ripemd160', 'Sha256Hash', 'Hash160', 'Hash256'])(
+    'runar.%s(x) parses as a call, not as its own argument',
+    (spelling) => {
+      const go = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type HashSpelling struct {
+\trunar.SmartContract
+\tExpected runar.ByteString \`runar:"readonly"\`
+}
+
+func (c *HashSpelling) Unlock(data runar.ByteString) {
+\th := runar.${spelling}(data)
+\trunar.Assert(h == c.Expected)
+}
+`;
+      const result = parseGoSource(go, 'HashSpelling.runar.go');
+      expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      expect(decl.kind).toBe('variable_decl');
+      expect(
+        decl.init.kind,
+        `runar.${spelling}(data) parsed as a ${decl.init.kind}, not a ` +
+          `call_expr — the call was unwrapped to its own argument and the ` +
+          `opcode will never be emitted.`,
+      ).toBe('call_expr');
+      const callee = (decl.init as CallExpr).callee as Identifier;
+      expect(callee.name).toBe(GO_BUILTIN_MAP[spelling]);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// F5 — the Go surface resolves a builtin in two steps: consult GO_BUILTIN_MAP,
+// else lower-case the leading character. Every alias whose Rúnar name is NOT
+// the default-rule form of its Go name must therefore be in the table of all
+// SEVEN tiers, or it falls through to a name registered nowhere and the call is
+// rejected as unknown. `Int2Str` was in three tables (ts, zig, ruby) and
+// missing from go / rust / python / java, which camel-cased it to `int2Str`.
+//
+// This test enumerates the at-risk class rather than the one entry that was
+// missing, so adding a new alias to the reference tier surfaces the
+// cross-tier obligation here. `conformance/subtype-parity/GoBuiltinAliasSpelling.runar.go`
+// is the cross-tier half for the five of them a small fixture can reach.
+// ---------------------------------------------------------------------------
+
+describe('Go surface: builtin aliases the default rule cannot produce', () => {
+  /** Aliases whose mapping is NOT "lower-case the leading character". */
+  const atRisk = Object.entries(GO_BUILTIN_MAP)
+    .filter(([go, runar]) => go.charAt(0).toLowerCase() + go.slice(1) !== runar)
+    .map(([go]) => go)
+    .sort();
+
+  it('is exactly the known set (a new alias must be added to all seven tiers)', () => {
+    expect(
+      atRisk,
+      `the set of Go-surface aliases that the default naming rule cannot ` +
+        `produce has changed. Each one must appear in the builtin table of ` +
+        `ALL SEVEN tiers — compilers/go/frontend/parser_gocontract.go, ` +
+        `compilers/rust/src/frontend/parser_gocontract.rs, ` +
+        `compilers/python/runar_compiler/frontend/parser_go.py, ` +
+        `compilers/zig/src/passes/parse_go.zig, ` +
+        `compilers/ruby/lib/runar_compiler/frontend/parser_go.rb and ` +
+        `compilers/java/src/main/java/runar/compiler/frontend/GoParser.java — ` +
+        `or the tiers that lack it reject the spelling as an unknown function.`,
+    ).toEqual([
+      // AbsBig / GcdBig are the *Big peers of abs / gcd, and joined the at-risk
+      // class for a reason the others did not have: packages/runar-go's
+      // `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` panic with a message
+      // telling the author to "use AbsBig, which the .runar.go parser lowers to
+      // the same abs builtin". No tier mapped them, so following that advice
+      // produced `unknown function 'absBig'` — a comment asserting a checkable
+      // fact about another file that was false.
+      'AbsBig',
+      'Bin2Num',
+      // Bin2NumBig / Num2BinBig joined the at-risk class in R-Bigint. They are
+      // the *big.Int-typed peers of bin2num / num2bin in packages/runar-go —
+      // the suffix names a different Go RUNTIME type, not a different Script
+      // operation, so both lower to the unsuffixed builtin. compilers/go had
+      // folded them since they were written; the other six fell through to the
+      // default rule, produced `bin2NumBig` / `num2BinBig`, and rejected every
+      // contract that used the documented wide spelling.
+      'Bin2NumBig',
+      'GcdBig',
+      'Int2Str',
+      'Num2Bin',
+      'Num2BinBig',
+      'Sha256Hash',
+      'ToBool',
+      'VerifyECDSAP256',
+      'VerifyECDSAP384',
+    ]);
+  });
+
+  it.each(['Int2Str', 'Int2str', 'int2str'])(
+    'runar.%s(n, width) resolves to int2str',
+    (spelling) => {
+      const go = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type AliasSpelling struct {
+	runar.SmartContract
+	Expected runar.ByteString \`runar:"readonly"\`
+}
+
+func (c *AliasSpelling) Unlock(value runar.Int, width runar.Int) {
+	s := runar.${spelling}(value, width)
+	runar.Assert(s == c.Expected)
+}
+`;
+      const result = parseGoSource(go, 'AliasSpelling.runar.go');
+      expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      expect(decl.init.kind).toBe('call_expr');
+      const callee = (decl.init as CallExpr).callee as Identifier;
+      expect(callee.name).toBe('int2str');
+    },
+  );
 });

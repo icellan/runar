@@ -108,6 +108,9 @@ module Runar
     #   )
     #   contract.connect(provider, signer)
     class WalletProvider < Provider
+      # The default ARC broadcaster. A MAINNET endpoint — see R-179.
+      MAINNET_ARC_URL = 'https://arc.gorillapool.io'
+
       DEFAULT_FEE_RATE = 100
 
       attr_reader :wallet, :basket
@@ -116,16 +119,31 @@ module Runar
       # @param signer       [Signer]         signer derived from the same wallet
       # @param basket       [String]         wallet basket name for UTXO management
       # @param funding_tag  [String]         tag for funding UTXOs (default: 'funding')
+      # @param arc_url      [String, nil]    ARC endpoint; REQUIRED unless network is 'mainnet' (R-179)
       # @param network      [String]         'mainnet' or 'testnet' (default: 'mainnet')
       # @param fee_rate     [Integer]        satoshis per kilobyte (default: 100)
       def initialize(wallet:, signer:, basket:, funding_tag: 'funding',
-                     arc_url: 'https://arc.gorillapool.io', overlay_url: nil,
+                     arc_url: nil, overlay_url: nil,
                      network: 'mainnet', fee_rate: DEFAULT_FEE_RATE)
         @wallet      = wallet
         @signer      = signer
         @basket      = basket
         @funding_tag = funding_tag
-        @arc_url     = arc_url
+        # R-179: arc_url and network used to be defaulted independently, so a
+        # provider configured for testnet reported get_network == 'testnet' and
+        # broadcast every transaction to the MAINNET ARC. There is no canonical
+        # testnet ARC endpoint to default to, so a non-mainnet provider has to
+        # name its own instead of inheriting one that points at real money.
+        @arc_url =
+          if arc_url
+            arc_url
+          elsif network == 'mainnet'
+            MAINNET_ARC_URL
+          else
+            raise ArgumentError,
+                  "WalletProvider: no default ARC endpoint for network #{network.inspect} — " \
+                  "#{MAINNET_ARC_URL} is a MAINNET broadcaster. Pass arc_url explicitly."
+          end
         @overlay_url = overlay_url
         @network     = network
         @fee_rate    = fee_rate

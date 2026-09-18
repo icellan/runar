@@ -84,6 +84,7 @@ module RunarCompiler
       "Sha256"          => "Sha256",
       "Sha256Digest"    => "Sha256",
       "Ripemd160"       => "Ripemd160",
+      "Ripemd160Hash"   => "Ripemd160",
       "Addr"            => "Addr",
       "SigHashPreimage" => "SigHashPreimage",
       "RabinSig"        => "RabinSig",
@@ -111,6 +112,19 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     GO_BUILTIN_MAP = {
+      # the *Big peers of num2bin / bin2num. They lower to the SAME builtins as Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate), not a different Script operation. Six tiers fell through to the default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has (R-Bigint)
+      "Num2BinBig" => "num2bin",
+      "Bin2NumBig" => "bin2num",
+
+      # the *Big peers of abs / gcd. Same rule as Num2BinBig / Bin2NumBig above: the
+      # suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does
+      # not narrow at MinInt64), not a different Script operation -- OP_ABS and the gcd
+      # builtin are arbitrary-width after Genesis. These were mapped in ZERO tiers
+      # while `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` in packages/runar-go
+      # panic telling the author to use them, naming the .runar.go parser as the thing
+      # that lowers them.
+      "AbsBig" => "abs",
+      "GcdBig" => "gcd",
       # Assertions
       "Assert" => "assert",
       # Hashing
@@ -172,10 +186,52 @@ module RunarCompiler
     }.freeze
 
     # Known type names used for type cast detection.
+    #
+    # MUST stay disjoint from GO_BUILTIN_MAP. `Sha256` and `Ripemd160` are both
+    # Rúnar type names and Rúnar builtin names, and the Go surface spells a cast
+    # and a call identically -- `runar.Sha256(x)`. While both names sat here the
+    # cast branch ran first and `runar.Sha256(preimage)` unwrapped to its own
+    # argument: `assert(sha256(x) == digest)` compiled to `assert(x == digest)`,
+    # with the digest in the locking script for anyone to read and push back.
+    #
+    # In call position the FUNCTION wins. docs/formats/go.md has documented
+    # `runar.Sha256(data)` -> `sha256(data)` since the surface shipped, five of
+    # the seven tiers already implemented it, and the cast reading loses nothing:
+    # both names are ByteString subtypes, so the conversion was an identity on
+    # the value and a no-op on the bytes. They still resolve as TYPES -- that is
+    # GO_TYPE_MAP, consulted from type position only.
+    #
+    # test/test_parser_go.rb asserts the disjointness; adding a name to both
+    # tables is what reintroduces the bug.
     GO_CAST_TYPES = %w[
-      Int Bigint BigintBig Bool ByteString PubKey Sig Sha256
-      Ripemd160 Addr SigHashPreimage RabinSig RabinPubKey Point
+      Int Bigint BigintBig Bool ByteString PubKey Sig
+      Addr SigHashPreimage RabinSig RabinPubKey Point
     ].to_set.freeze
+
+    # The Rúnar binary operator each `BigintBig` helper stands for.
+    #
+    # runar.BigintBig is *big.Int in packages/runar-go and Go has no operator
+    # overloading, so a .runar.go contract carrying arbitrary-precision values
+    # spells `a === b` as `runar.BigintBigEqual(a, b)` -- and it has to emit the
+    # script the operator emits. Mirrors bigintBigOpFor in
+    # compilers/go/frontend/parser_gocontract.go and its peers in the TS, Rust,
+    # Python, Zig and Java tiers, plus the eleven helpers in
+    # packages/runar-go/runar.go. The rewrite lived only in compilers/go until
+    # R-Bigint, although all seven tiers parse .runar.go -- a frontend-parity
+    # break no fixture exercised.
+    GO_BIGINTBIG_OPS = {
+      "BigintBigLess"       => "<",
+      "BigintBigLessEq"     => "<=",
+      "BigintBigGreater"    => ">",
+      "BigintBigGreaterEq"  => ">=",
+      "BigintBigEqual"      => "===",
+      "BigintBigNotEqual"   => "!==",
+      "BigintBigAdd"        => "+",
+      "BigintBigSub"        => "-",
+      "BigintBigMul"        => "*",
+      "BigintBigMod"        => "%",
+      "BigintBigDiv"        => "/"
+    }.freeze
 
     def self.go_map_builtin(name)
       return GO_BUILTIN_MAP[name] if GO_BUILTIN_MAP.key?(name)
@@ -1396,6 +1452,17 @@ module RunarCompiler
               inner = parse_expression
               expect(TOK_RPAREN)
               return inner # unwrap type cast
+            end
+
+            # BigintBig operator helper: runar.BigintBigEqual(a, b) is `a === b`.
+            big_op = GO_BIGINTBIG_OPS[member_name]
+            if big_op && check(TOK_LPAREN)
+              advance # '('
+              left = parse_expression
+              expect(TOK_COMMA)
+              right = parse_expression
+              expect(TOK_RPAREN)
+              return BinaryExpr.new(op: big_op, left: left, right: right)
             end
 
             # Map to builtin name

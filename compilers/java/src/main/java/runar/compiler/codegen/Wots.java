@@ -42,6 +42,9 @@ public final class Wots {
 
     private Wots() {}
 
+    /** Total WOTS+ signature length in bytes: len (67 chains) * n (32). */
+    private static final int WOTS_SIG_LEN = 67 * 32;
+
     /** Set of builtin names that route to {@link #emitVerifyWots}. */
     private static final Set<String> NAMES = Set.of("verifyWOTS");
 
@@ -166,7 +169,16 @@ public final class Wots {
         emit.accept(new OpcodeOp("OP_SHA256"));
 
         // Canonical layout
-        emit.accept(new SwapOp());
+        emit.accept(new SwapOp()); // pubSeed msgHash sig
+
+        // R-135: enforce the exact signature length on-chain. The chain loop consumes
+        // WOTS_SIG_LEN bytes via OP_SPLIT and then drops whatever is left, so without
+        // this gate `sig || junk` verified identically to `sig`. Short signatures already
+        // abort inside OP_SPLIT; this closes the over-long direction. Net stack effect 0.
+        emit.accept(new OpcodeOp("OP_SIZE"));
+        emit.accept(pushInt(WOTS_SIG_LEN));
+        emit.accept(new OpcodeOp("OP_EQUALVERIFY"));
+
         emit.accept(pushInt(0));
         emit.accept(new OpcodeOp("OP_0"));
         emit.accept(pushInt(3));

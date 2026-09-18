@@ -31,11 +31,19 @@ class TestIRLoaderSizeGuard < Minitest::Test
     assert_equal MAX_DEPTH, err.limit
   end
 
+  # N-113: both fixtures below used to carry `"methods":[]`, which R-081
+  # established is not a valid program at all -- it is the anyone-can-spend
+  # shape (no public method => empty locking script => spendable with OP_1).
+  # These tests' subject is the DoS caps, not the schema, so the fix is a
+  # fixture that is genuinely minimal AND valid rather than a weaker assertion.
+  MINIMAL_VALID_METHODS =
+    '"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]'
+
   def test_depth_walk_ignores_braces_inside_strings
     open_braces = "{" * 1000
     bad =
-      '{"contractName":"X","properties":[],"methods":[],"_note":"' +
-      open_braces + '"}'
+      '{"contractName":"X","properties":[],' + MINIMAL_VALID_METHODS +
+      ',"_note":"' + open_braces + '"}'
     # Neither DoS-bound guard should fire. Downstream parse should
     # succeed (X has the required shape).
     program = RunarCompiler::IR.load_ir(bad)
@@ -43,7 +51,7 @@ class TestIRLoaderSizeGuard < Minitest::Test
   end
 
   def test_load_ir_accepts_minimal_program
-    minimal = '{"contractName":"X","properties":[],"methods":[]}'
+    minimal = '{"contractName":"X","properties":[],' + MINIMAL_VALID_METHODS + "}"
     program = RunarCompiler::IR.load_ir(minimal)
     assert_equal "X", program.contract_name
   end

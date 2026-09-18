@@ -362,6 +362,7 @@ func mapGoType(name string) TypeNode {
 		"Sha256":          "Sha256",
 		"Sha256Digest":    "Sha256",
 		"Ripemd160":       "Ripemd160",
+		"Ripemd160Hash":   "Ripemd160",
 		"Addr":            "Addr",
 		"SigHashPreimage": "SigHashPreimage",
 		"RabinSig":        "RabinSig",
@@ -644,13 +645,37 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 			}
 		}
 
+		// A call target or an argument that does not convert must fail the
+		// whole call. Dropping an argument would silently change the call's
+		// arity — and for a variable-arity builtin that compiles clean as the
+		// wrong overload. Each site reports only if the recursive conversion
+		// did not already report a more precise cause, so one bad
+		// subexpression yields one diagnostic rather than a cascade.
+		before := len(p.errors)
 		callee := p.convertExpression(e.Fun)
-		var args []Expression
-		for _, arg := range e.Args {
-			a := p.convertExpression(arg)
-			if a != nil {
-				args = append(args, a)
+		if callee == nil {
+			if len(p.errors) == before {
+				pos := p.fset.Position(e.Fun.Pos())
+				p.addError(fmt.Sprintf(
+					"unsupported call target at %s:%d:%d — not valid in Rúnar contract",
+					p.fileName, pos.Line, pos.Column))
 			}
+			return nil
+		}
+		var args []Expression
+		for i, arg := range e.Args {
+			before = len(p.errors)
+			a := p.convertExpression(arg)
+			if a == nil {
+				if len(p.errors) == before {
+					pos := p.fset.Position(arg.Pos())
+					p.addError(fmt.Sprintf(
+						"unsupported expression at %s:%d:%d — argument %d of this call is not valid in Rúnar contract",
+						p.fileName, pos.Line, pos.Column, i+1))
+				}
+				return nil
+			}
+			args = append(args, a)
 		}
 		// runar.Assert(expr) -> assert(expr)
 		if ident, ok := callee.(Identifier); ok && ident.Name == "assert" {
@@ -810,8 +835,22 @@ func mapGoBuiltin(name string) string {
 		"VerifyECDSAP384":         "verifyECDSA_P384",
 		"Num2Bin":           "num2bin",
 		"Bin2Num":           "bin2num",
+		// `Int2Str` is the spelling docs/formats/go.md documents. Without it the
+		// default rule camel-cases the leading character to `int2Str`, which is
+		// registered nowhere — the call is rejected as an unknown function.
+		"Int2Str":           "int2str",
 		"Bin2NumBig":        "bin2num",
 		"Num2BinBig":        "num2bin",
+
+		// the *Big peers of abs / gcd. Same rule as Num2BinBig / Bin2NumBig above: the
+		// suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not
+		// narrow at MinInt64), not a different Script operation -- OP_ABS and the gcd
+		// builtin are arbitrary-width after Genesis. These were mapped in ZERO tiers while
+		// `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` in packages/runar-go panic
+		// telling the author to use them, naming the .runar.go parser as the thing that
+		// lowers them.
+		"AbsBig":            "abs",
+		"GcdBig":            "gcd",
 		"Cat":               "cat",
 		"Substr":            "substr",
 		"Len":               "len",
@@ -874,22 +913,18 @@ func goFieldToCamel(name string) string {
 	if !unicode.IsUpper(r[0]) {
 		return name
 	}
-	// Find the prefix of uppercase runes
-	i := 0
-	for i < len(r) && unicode.IsUpper(r[i]) {
-		i++
-	}
-	if i == 0 {
-		return name
-	}
-	if i == 1 {
-		// Simple case: just lowercase the first letter
-		r[0] = unicode.ToLower(r[0])
-		return string(r)
-	}
-	// Multiple uppercase: lowercase all but the last one
-	// e.g., "HTTPServer" -> "httpServer", "PubKeyHash" -> stays as-is since P is single
-	// Actually for Go exported names, just lowercase the first letter
+	// R-254: what used to be here scanned the leading run of uppercase runes and
+	// then branched on its length — but every branch did the same thing, and the
+	// comment above the last one ("lowercase all but the last one",
+	// "PubKeyHash -> stays as-is") described neither the code below it nor the
+	// behaviour this function's own doc comment promises. The `i == 0` branch
+	// was unreachable too: r[0] is known uppercase here, so the scan always
+	// advances at least once.
+	//
+	// Go exported names are converted by lowercasing the first letter. That is
+	// what the code did; it is now also what it says. "HTTPServer" becomes
+	// "hTTPServer" — not "httpServer" — and no caller wants otherwise, because
+	// the Rúnar side of this mapping is a field name the author wrote.
 	r[0] = unicode.ToLower(r[0])
 	return string(r)
 }

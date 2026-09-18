@@ -41,17 +41,68 @@ def _count_op_tree(ops: list[StackOp]) -> int:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,fn,expected", [
-    ("p256Add",              emit_p256_add,               6663),
-    ("p256Mul",              emit_p256_mul,             140036),
-    ("p256MulGen",           emit_p256_mul_gen,         140038),
-    ("p256Negate",           emit_p256_negate,             945),
-    ("p256OnCurve",          emit_p256_on_curve,           559),
+    # R-052 / CL-BUG-095 -- the Point WIDTH gate. A P256Point is 64 bytes and a
+    # P384Point is 96, by definition, and NOTHING checked either, so
+    # ``p256OnCurve(G || 0xff)`` returned TRUE and ``pNNNEncodeCompressed`` took
+    # its parity bit from the caller's appended byte. Every delta is curve-
+    # INDEPENDENT, which is what makes it a structural gate rather than a
+    # per-bit loop -- the two curves pay exactly the same:
+    #
+    #   pNNNAdd               +6  -- two _c_decompose_point call sites, 3 ops
+    #                                each (OP_SIZE, push 2*coord_bytes,
+    #                                OP_NUMEQUALVERIFY).
+    #   pNNNMul/MulGen/Negate +3  -- one call site.
+    #   pNNNOnCurve          +15  -- 9 for the clamp-and-flag gate, 3 for the
+    #                                decompose gate, 1 for the OP_BOOLAND
+    #                                folding ``_len_ok`` into the verdict, 2 for
+    #                                the rolls. It CLAMPS rather than aborts
+    #                                because it is the predicate contracts gate
+    #                                untrusted points on; ``false`` is the right
+    #                                answer.
+    #   verifyECDSA_PNNN     +12  -- four internal _c_decompose_point sites.
+    #
+    # pNNNEncodeCompressed stays at 16: +3 for the gate, -3 because the fixed-
+    # offset parity read (push coord_bytes-1, OP_SPLIT, OP_NIP) replaces a 6-op
+    # OP_SIZE/push/OP_SUB/OP_SPLIT/swap/drop sequence. Net zero ops, different
+    # bytes.
+    #
+    # R-053 / CL-BUG-096 -- the infinity-operand case of the affine adder,
+    # shared verbatim with secp256k1 because it is pure integer masking with no
+    # field parameter. Curve-independent again:
+    #
+    #   pNNNAdd           +50  -- emit_affine_infinity_select replaces the four
+    #                             drops and the two `notinf` OP_MULs.
+    #   verifyECDSA_PNNN  +50  -- it calls _c_affine_add exactly once.
+    #
+    # pNNNMul / pNNNMulGen / pNNNOnCurve / pNNNNegate move by 0: the ladders run
+    # in Jacobian coordinates and never reach the affine adder.
+    # R-117, the COORDINATE-CANONICITY gate. pNNNAdd +18, pNNNMul +8, pNNNMulGen +8,
+    # pNNNNegate +8 -- the same shape as secp256k1's, because cEmitCoordCanonVerify
+    # is the same 8 ops (two picks, two pushes of p, two OP_LESSTHANs, OP_BOOLAND,
+    # OP_VERIFY) and the Add gates two points. pNNNOnCurve and
+    # pNNNEncodeCompressed are +0: the predicate must stay TOTAL. verifyECDSA_*
+    # is +0 TOO, and that is the load-bearing part -- cEmitMul takes a
+    # verifyCanonical flag that is FALSE on the ECDSA path, because
+    # decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
+    # bytes must return false from a total boolean builtin rather than abort.
+    ("p256Add",              emit_p256_add,               6737),
+    # R-157, the pNNNMul ON-CURVE-OR-INFINITY gate: p256Mul 140047 -> 140620 (+573),
+    # p256MulGen +573, p384Mul 211189 -> 211986 (+797), p384MulGen +797. Same shape as
+    # secp256k1's, with each curve's own on-curve body; the two curves differ only
+    # because their on-curve bodies do. pNNNAdd / pNNNNegate / pNNNOnCurve /
+    # pNNNEncodeCompressed are +0, and so is verifyECDSA_pNNN — the gate is at the
+    # PUBLIC pNNNMul entry point, NOT inside cEmitMul, because verifyECDSA shares that
+    # ladder and must return false rather than abort on attacker-chosen bytes.
+    ("p256Mul",              emit_p256_mul,             140620),
+    ("p256MulGen",           emit_p256_mul_gen,         140622),
+    ("p256Negate",           emit_p256_negate,             956),
+    ("p256OnCurve",          emit_p256_on_curve,           574),
     ("p256EncodeCompressed", emit_p256_encode_compressed,   16),
     # 297273 -> 297331 (+58): the ECDSA verifier gained its argument-validation
     # gates -- two length gates on `_sig` / `_pk`, the 1 <= r,s <= n-1 range
     # gate, the SEC1 prefix-byte check inside decompression, and the ANDs that
     # fold all of it into one `_input_ok` flag.
-    ("verifyECDSA_P256",     emit_verify_ecdsa_p256,    297331),
+    ("verifyECDSA_P256",     emit_verify_ecdsa_p256,    297393),
 ])
 def test_p256_op_count(name, fn, expected):
     ops: list[StackOp] = []
@@ -65,10 +116,16 @@ def test_p256_op_count(name, fn, expected):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,fn,expected", [
-    ("p384Add",              emit_p384_add,              11469),
-    ("p384Mul",              emit_p384_mul,             211178),
-    ("p384MulGen",           emit_p384_mul_gen,         211180),
-    ("p384Negate",           emit_p384_negate,            1393),
+    ("p384Add",              emit_p384_add,              11543),
+    ("p384Mul",              emit_p384_mul,             211986),
+    ("p384MulGen",           emit_p384_mul_gen,         211988),
+    ("p384Negate",           emit_p384_negate,            1404),
+    # p384OnCurve / p384EncodeCompressed / verifyECDSA_P384 were missing from
+    # this list while their P-256 peers were pinned, so the P-384 half of the
+    # R-052 width gate had no golden at all. Same numbers the TS tier pins.
+    ("p384OnCurve",          emit_p384_on_curve,           798),
+    ("p384EncodeCompressed", emit_p384_encode_compressed,   16),
+    ("verifyECDSA_P384",     emit_verify_ecdsa_p384,    453369),
 ])
 def test_p384_op_count(name, fn, expected):
     ops: list[StackOp] = []

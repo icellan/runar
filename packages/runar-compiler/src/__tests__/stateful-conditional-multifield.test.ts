@@ -36,9 +36,20 @@ function netDelta(tokens: string[]): number {
 }
 
 /** Extract the first top-level OP_IF .. OP_ELSE .. OP_ENDIF region as {then, else} token lists. */
+/**
+ * First OP_IF region belonging to the CONTRACT BODY.
+ *
+ * R-010 added a compiler-injected `_codePart` authentication preamble whose
+ * scriptCode varint strip contains its own nested OP_IF chain, so the literal
+ * first OP_IF in the script is no longer the user's `if`. The preamble ends
+ * with `<61ab> OP_SWAP OP_CAT OP_EQUALVERIFY` (the prologue-byte pin); scan
+ * from there when it is present.
+ */
 function firstIfRegion(asm: string): { then: string[]; els: string[] } | null {
   const toks = asm.split(/\s+/).filter(Boolean);
-  const start = toks.indexOf('OP_IF');
+  const preambleEnd = toks.indexOf('<61ab>');
+  const searchFrom = preambleEnd < 0 ? 0 : preambleEnd;
+  const start = toks.indexOf('OP_IF', searchFrom);
   if (start < 0) return null;
   let depth = 1, i = start + 1, elseAt = -1;
   for (; i < toks.length; i++) {

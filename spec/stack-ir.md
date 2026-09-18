@@ -1,6 +1,6 @@
 # Rúnar Stack IR Specification
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the Stack IR, the low-level intermediate representation that bridges ANF IR and final Bitcoin Script output. The Stack IR makes stack positions explicit and maps named values to concrete stack manipulation sequences.
@@ -154,7 +154,7 @@ The condition is consumed from the top of the stack. If the condition is truthy,
 
 ### 3.5 Complete StackOp Union
 
-The Stack IR uses a discriminated union with exactly **13 variants**:
+The Stack IR uses a discriminated union with exactly **16 variants**:
 
 | Variant | `op` tag | Key fields | Description |
 |---|---|---|---|
@@ -171,6 +171,11 @@ The Stack IR uses a discriminated union with exactly **13 variants**:
 | `RotOp` | `'rot'` | — | Rotate top 3 |
 | `TuckOp` | `'tuck'` | — | Copy top behind second |
 | `PlaceholderOp` | `'placeholder'` | `paramIndex: number, paramName: string` | Constructor parameter slot |
+| `PushCodeSepIndexOp` | `'push_codesep_index'` | — | Push the method's OP_CODESEPARATOR byte offset; the emitter back-patches the value once offsets exist |
+| `VerifyCodePartLenOp` | `'verify_code_part_len'` | `delta: number, exact: boolean` | Pin `SIZE(_codePart)` against the code part's own deployed byte length |
+| `RawBytesOp` | `'raw_bytes'` | `bytes: Uint8Array, in_arity: number, out_arity: number` | Opaque byte span emitted verbatim; a hard barrier to every windowed optimizer |
+
+> **Not optional.** The last three variants are not an extension set a minimal implementation may skip. `raw_bytes` is how the ~428-byte `checkPreimage` transaction-binding blob reaches the script, and it is present in **every** stateful contract; a validator that does not model it either rejects every stateful artifact or drops the bytes that bind the spend to its transaction. `verify_code_part_len` and `push_codesep_index` both carry values the emitter back-patches after byte offsets exist, so neither can be reconstructed from the Stack IR alone.
 
 > **Note:** The `depth` field on `RollOp` and `PickOp` is informational only. The actual depth value is pushed as a separate `PushOp` by the stack lowerer before the `RollOp`/`PickOp`, and the emitter ignores the `depth` field when generating Bitcoin Script.
 

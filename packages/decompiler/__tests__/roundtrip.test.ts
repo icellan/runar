@@ -6,11 +6,12 @@
  *   - Decompile bytes → recovered source.
  *   - Re-compile recovered → bytes'.
  *   - Record byte-match / byte-diff / compile-error.
- *   - Fail CI only on regression vs. coverage-baseline.json.
+ *   - Fail on any deviation from coverage-baseline.json, which must cover the
+ *     live corpus exactly (see `baseline covers the live examples corpus`).
  *
  * Tier 2: every conformance fixture under conformance/sdk-codegen/fixtures/*.json.
- *   - Gated to byte-match for the current v0 in-scope set (initially empty;
- *     expands as symexec/lift mature).
+ *   - Same baseline contract as Tier 1, plus the recovery path: a fixture that
+ *     still byte-matches but fell back to a lower recovery layer is a failure.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -30,17 +31,18 @@ const BASELINE_PATH = resolve(__dirname, '..', 'coverage-baseline.json');
 
 type Outcome = 'byte-match' | 'byte-diff' | 'compile-error' | 'parse-error';
 
-interface BaselineRow { id: string; outcome: Outcome }
+interface BaselineRow { id: string; outcome: Outcome; recoveryPath?: string }
 interface Baseline { rows: BaselineRow[] }
 
-function loadBaseline(): Map<string, Outcome> {
-  const map = new Map<string, Outcome>();
+function loadBaselineRows(): Map<string, BaselineRow> {
+  const map = new Map<string, BaselineRow>();
   if (!existsSync(BASELINE_PATH)) return map;
   try {
     const parsed = JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) as Baseline;
-    for (const r of parsed.rows) map.set(r.id, r.outcome);
+    for (const r of parsed.rows) map.set(r.id, r);
   } catch {
-    // ignore — empty baseline = no expectations
+    // ignore — a missing/unparseable baseline leaves the corpus-coverage
+    // assertions to report every id as unlisted, which is the loud failure.
   }
   return map;
 }
@@ -102,7 +104,7 @@ const PATHOLOGICAL_DECOMPILE: ReadonlySet<string> = new Set([
 ]);
 
 describe('Tier 1: examples coverage matrix', () => {
-  const baseline = loadBaseline();
+  const baseline = loadBaselineRows();
   const files = listExamples();
 
   // Non-vacuity sentinel: `listExamples()` returns [] when EXAMPLES_DIR is
@@ -111,19 +113,55 @@ describe('Tier 1: examples coverage matrix', () => {
     expect(files.length).toBeGreaterThan(0);
   });
 
+  const liveIds = files
+    .map(f => relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, ''))
+    .filter(id => !PATHOLOGICAL_DECOMPILE.has(id));
+
+  // The baseline is the authority, and it has to cover the corpus.
+  //
+  // Previously an example with no baseline row fell through to
+  // `expect(outcome).toMatch(/^(byte-match|byte-diff|compile-error|parse-error)$/)`
+  // — a regex enumerating every member of `Outcome`, so no value could fail
+  // it. 20 of the 76 live examples sat on that arm, including the
+  // fund-critical construct families (branch-merged-locals,
+  // cond-write-multi-field, nested-if-multi-reassign, fixed-array-write,
+  // state-covenant-mechanics). Worse, it was one-directional: deleting a row
+  // silently downgraded that example to "always passes", and nothing checked
+  // that the baseline still covered the corpus.
+  //
+  // Both directions are now errors. A new example must be classified and
+  // pinned before it can go green; a deleted row, or a row whose example was
+  // removed, fails here instead of quietly disabling a gate.
+  it('baseline covers the live examples corpus', () => {
+    const listed = [...baseline.keys()].filter(id => !id.startsWith('fixture/'));
+    const missing = liveIds.filter(id => !baseline.has(id)).sort();
+    const stale = listed.filter(id => !liveIds.includes(id)).sort();
+    expect(
+      missing,
+      'examples with no coverage-baseline.json row — classify each and add a row ' +
+        '(an unlisted example is not gated by anything)',
+    ).toEqual([]);
+    expect(
+      stale,
+      'coverage-baseline.json rows with no live example — the contract was deleted ' +
+        'or moved to PATHOLOGICAL_DECOMPILE; drop the row',
+    ).toEqual([]);
+  });
+
   for (const f of files) {
     const id = relative(EXAMPLES_DIR, f).replace(/\.runar\.ts$/, '');
-    const expected = baseline.get(id);
+    const expected = baseline.get(id)?.outcome;
     const testFn = PATHOLOGICAL_DECOMPILE.has(id) ? it.skip : it;
-    testFn(`${id}: outcome${expected ? ` should remain ${expected}` : ' recorded for baseline'}`, () => {
+    testFn(`${id}: outcome should remain ${expected ?? '<unlisted>'}`, () => {
+      expect(
+        expected,
+        `${id} has no coverage-baseline.json row — classify it and add one`,
+      ).toBeDefined();
       const got = classifyExample(f);
-      if (expected === 'byte-match') {
-        // Regression check: a byte-match must stay byte-match.
-        expect(got.outcome, `regression on ${id}: was byte-match`).toBe('byte-match');
-      } else {
-        // Non-strict: record outcome; CI only fails on a byte-match regression.
-        expect(got.outcome).toMatch(/^(byte-match|byte-diff|compile-error|parse-error)$/);
-      }
+      // Every recorded outcome is enforced, not just byte-match: a byte-diff
+      // decaying into a compile-error is a regression too, and an improvement
+      // belongs in the baseline rather than being silently absorbed.
+      expect(got.outcome, `${id}: baseline records ${expected}`).toBe(expected);
     });
   }
 });
@@ -134,27 +172,56 @@ describe('Tier 2: conformance fixtures', () => {
     return;
   }
 
-  // Fixtures we expect to round-trip exactly. Add fixtures here as the
-  // symbolic lifter learns to recover their shapes.
-  const HARD_GATES: ReadonlySet<string> = new Set(['simple']);
-
+  // Tier 2 used a hand-maintained `HARD_GATES = new Set(['simple'])` and never
+  // read the baseline. The other 4 fixtures got `expect(result).toBeDefined()`
+  // — `decompile` returns an object or throws, so no reachable value fails it
+  // — while coverage-baseline.json claimed byte-match for all 5. Four of those
+  // five claims were enforced by nothing.
+  //
+  // All 5 do byte-match today (measured), so they are all gated now, driven by
+  // the baseline like Tier 1.
+  //
+  // `outcome` alone is a weak gate here: a 400-input sweep of parseable scripts
+  // produced 0 `ok === false` results — the raw_script floor byte-matches
+  // nearly anything that parses, so it either round-trips or throws. What is
+  // discriminating is *which layer* recovered it: `simple` comes back through
+  // `assert-recognizer`, the other 4 fall to the `raw_script` floor. A future
+  // change that drops `simple` to the floor keeps outcome=byte-match and would
+  // slip past an outcome-only check, so recoveryPath is pinned too.
+  const baseline = loadBaselineRows();
   const files = readdirSync(FIXTURES_DIR).filter(f => f.endsWith('.json')).sort();
+
+  it('baseline covers the fixtures corpus', () => {
+    const present = files.map(f => `fixture/${basename(f, '.json')}`);
+    const listed = [...baseline.keys()].filter(id => id.startsWith('fixture/'));
+    expect(
+      present.filter(id => !baseline.has(id)).sort(),
+      'fixtures with no coverage-baseline.json row — classify each and add a row',
+    ).toEqual([]);
+    expect(
+      listed.filter(id => !present.includes(id)).sort(),
+      'coverage-baseline.json fixture rows with no fixture file — drop the row',
+    ).toEqual([]);
+  });
+
   for (const f of files) {
-    const stem = basename(f, '.json');
-    const id = `fixture/${stem}`;
-    it(`${id}: round-trip${HARD_GATES.has(stem) ? ' (byte-match required)' : ' recorded'}`, () => {
+    const id = `fixture/${basename(f, '.json')}`;
+    const expected = baseline.get(id);
+    it(`${id}: round-trip should remain ${expected?.outcome ?? '<unlisted>'} via ${expected?.recoveryPath ?? '<unlisted>'}`, () => {
+      expect(expected, `${id} has no coverage-baseline.json row`).toBeDefined();
       const raw = JSON.parse(readFileSync(resolve(FIXTURES_DIR, f), 'utf8')) as { script: string };
       // An empty fixture used to `return` as "vacuously holds"; a fixture with
       // no script is a broken fixture, not a satisfied round-trip.
       expect(raw.script.length, `fixture ${id} has an empty script`).toBeGreaterThan(0);
       const result = decompile(hexToBytes(raw.script));
-      expect(result).toBeDefined();
-      if (HARD_GATES.has(stem)) {
-        expect(
-          result.ok,
-          `expected ${id} to byte-match; diff at offset ${result.diff?.divergenceOffset}`,
-        ).toBe(true);
-      }
+      expect(
+        result.ok ? 'byte-match' : 'byte-diff',
+        `${id}: baseline records ${expected!.outcome}; diff at offset ${result.diff?.divergenceOffset}`,
+      ).toBe(expected!.outcome);
+      expect(
+        result.recoveryPath,
+        `${id}: recovered by a different layer than the baseline records`,
+      ).toBe(expected!.recoveryPath);
     });
   }
 });

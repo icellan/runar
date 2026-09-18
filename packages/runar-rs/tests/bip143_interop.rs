@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
-use runar_lang::sdk::oppushtx::compute_op_push_tx;
+use runar_lang::sdk::oppushtx::compute_op_push_tx_with_code_sep_sighash;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -65,15 +65,16 @@ fn bip143_preimage_and_signature() {
         let want_digest = s["digestHex"].as_str().unwrap();
         let sig_hex = s["sigHex"].as_str().unwrap();
         let pubkey_hex = s["pubkeyHex"].as_str().unwrap();
-        assert_eq!(
-            s["sighashFlags"].as_u64().unwrap(),
-            0x41,
-            "{name}: only SIGHASH_ALL|FORKID supported"
-        );
+        let flags = s["sighashFlags"].as_u64().unwrap() as u32;
 
-        // 1. Independently recompute the BIP-143 preimage (hand-written impl).
-        let (_sig, got_preimage) =
-            compute_op_push_tx(tx, idx, sub, sats).expect("compute_op_push_tx");
+        // 1. Independently recompute the BIP-143 preimage (hand-written impl)
+        //    under the scenario's OWN sighash flags.
+        //
+        //    R-206: this used to reject anything but 0x41, and every scenario
+        //    in the fixture was ALL|FORKID — so the per-mode zeroing rules were
+        //    implemented seven times and compared zero times.
+        let (_sig, got_preimage) = compute_op_push_tx_with_code_sep_sighash(tx, idx, sub, sats, -1, flags)
+            .expect("compute_op_push_tx_with_code_sep_sighash");
         assert_eq!(
             got_preimage, want_preimage,
             "{name}: BIP-143 PREIMAGE DIVERGENCE from TS reference"

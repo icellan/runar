@@ -18,6 +18,45 @@ const ParseError = error{
     MaxRecursionDepthExceeded,
     // BUG-008 follow-up: typed DoS-bound rejection of oversized IR JSON.
     IRSizeExceeded,
+    // N-113 / R-079: a raw_script span with an empty body but a declared stack
+    // effect. Distinct from InvalidConstValue so the diagnostic names the
+    // shape — Zig's IR loader is an error-enum channel with no message
+    // payload, so the error NAME is the whole diagnostic.
+    EmptyRawScriptBody,
+    // N-113 / R-081: no public method => no spending entry point => an empty,
+    // anyone-can-spend locking script.
+    NoPublicMethods,
+    // N-115: a `loop` count above types.MAX_LOOP_COUNT. Distinct from
+    // UnexpectedValueType because the value's TYPE is fine — an integer count
+    // is exactly what the field takes; it is the MAGNITUDE that no emitter can
+    // honour. Zig's IR loader carries no message payload, so the error name is
+    // the whole diagnostic and has to say which rule fired.
+    LoopCountExceedsMaximum,
+    // R-126 / CL-BUG-164: an `add_output` whose stateValues list does not have
+    // exactly one entry per MUTABLE property. Distinct from UnexpectedValueType
+    // because the field's type is fine — it is the LENGTH that no emitter can
+    // honour. Zig's IR loader carries no message payload, so the error name is
+    // the whole diagnostic and has to say which rule fired.
+    AddOutputArityMismatch,
+    // R-164 / CL-BUG-134: a `super` call outside a constructor. `super` emits
+    // no opcodes — the constructor args are already on the stack — but stack
+    // lowering pushes a model slot for it anyway (+1 model, +0 physical), so
+    // every later PICK/ROLL depth in the method is off by one. Distinct error
+    // name because Zig's IR loader carries no message payload.
+    SuperOutsideConstructor,
+    // N-131: a number written in FLOAT SYNTAX anywhere in the document. The
+    // ANF IR has no float-typed field, so this is never a legal payload; the
+    // name says "float", not "InvalidConstValue", because the offending token
+    // is frequently nowhere near a const (loop.step and raw_script.out_arity
+    // are two of the shapes this tier used to accept) and Zig's IR loader
+    // carries no message payload, so the error name is the whole diagnostic.
+    FloatNotAllowedInIR,
+    // N-133: a `loop.start` this tier cannot read, or cannot represent. Both
+    // arms of the old decode answered 0 instead — a perfectly plausible loop
+    // start, so the wrong program compiled silently. Distinct error name
+    // because Zig's IR loader carries no message payload, so the name is the
+    // whole diagnostic.
+    InvalidLoopStart,
 };
 
 const max_parse_depth: u32 = 256;
@@ -33,6 +72,39 @@ pub const MAX_IR_BYTES: usize = 16 * 1024 * 1024;
 /// per-binding parser also enforces max_parse_depth = 256 as a defense
 /// in depth; whichever fires first wins. BUG-008 follow-up.
 pub const MAX_IR_NESTING: usize = 512;
+
+/// N-115 (second half) — total `f64` -> integer narrowing for the `--ir`
+/// trust boundary.
+///
+/// `@intFromFloat` is ILLEGAL BEHAVIOUR whenever the value's integer part does
+/// not fit the destination: a safety-checked abort in Debug/ReleaseSafe,
+/// undefined behaviour in ReleaseFast. Every float this loader sees arrived as
+/// JSON written outside the compiler, so the range check has to happen BEFORE
+/// the cast — which is exactly what the first N-115 fix got wrong. It put the
+/// loop-count magnitude guard on the line AFTER the narrowing, so
+/// `{"count":1e30}` aborted (rc=134) instead of being refused, and three other
+/// call sites had no guard anywhere near them. All six `@intFromFloat` sites
+/// in this file were reachable from ordinary IR JSON; all six now come through
+/// here.
+///
+/// The bounds are exact powers of two, so the comparison itself is exact: a
+/// signed `T` of N bits holds [-2^(N-1), 2^(N-1) - 1], and both -2^(N-1) and
+/// 2^(N-1) are representable in f64 with no rounding. `f >= -2^(N-1) and
+/// f < 2^(N-1)` therefore admits precisely the values the cast can take. NaN
+/// and the infinities fail both comparisons, so the same expression refuses
+/// them without a special case — a bounds check written as `if (f > limit)`
+/// would have let them straight through to the abort.
+///
+/// Fractional values are deliberately NOT rejected here. Truncation is what
+/// this loader already did, four tiers agree on it, and tightening it is a
+/// separate cross-tier decision; this change is about the abort class alone.
+/// Call sites that need exactness keep their own round-trip check.
+fn floatToInt(comptime T: type, f: f64) ParseError!T {
+    const bits = @typeInfo(T).int.bits;
+    const limit: f64 = @floatFromInt(@as(u128, 1) << (bits - 1));
+    if (!(f >= -limit and f < limit)) return ParseError.InvalidConstValue;
+    return @intFromFloat(f);
+}
 
 /// Walks the raw JSON bytes and returns ParseError.MaxRecursionDepthExceeded
 /// the first time the structural nesting (objects + arrays) exceeds
@@ -73,6 +145,64 @@ fn assertIRNestingUnderLimit(data: []const u8) ParseError!void {
     }
 }
 
+/// Walks a parsed JSON document and returns ParseError.FloatNotAllowedInIR the
+/// first time a number written in FLOAT SYNTAX appears. N-131.
+///
+/// # Why this is a rejection at all
+///
+/// The ANF IR has no float-typed field. The schema
+/// (`packages/runar-ir-schema/src/schemas/anf-ir.schema.json`) types
+/// `loop.count`, `loop.step` and the `raw_script` arities as `integer`, and
+/// `loop.start` / `load_const.value` as integer-or-string; a value too large
+/// for a native integer is written as a decimal string with an `n` suffix.
+/// What the six `--ir` tiers did with a float was therefore unspecified, and
+/// they disagreed in emitted BYTES rather than in diagnostics: `{"start":1e30}`
+/// produced three different answers across the tiers.
+///
+/// This tier's share of that was the quiet one. N-115 stopped the six
+/// `@intFromFloat` sites from ABORTING, and deliberately left truncation
+/// alone -- "tightening it is a separate cross-tier decision". This is that
+/// decision. Until now `{"count":3.5}` unrolled three bodies and
+/// `{"out_arity":1.0}` compiled clean, in both cases while five peers refused
+/// the same file.
+///
+/// # Why the rule is lexical, and why the walk is generic
+///
+/// `1.0` and `1e2` name integers, so a value-based rule would admit them --
+/// and a value-based rule is exactly what this tier already had, which is how
+/// `{"out_arity":1.0}` got through. Go and Java, the two tiers that were
+/// already right, refuse float syntax outright, so converging on them means
+/// taking the syntactic rule. `std.json` classifies the token, not the value:
+/// `1.0`, `1e2` and `3.5` all arrive as `.float`, `5` as `.integer`. So the
+/// parser has already applied the rule and this walk only acts on it.
+///
+/// Walking the GENERIC document rather than checking named fields is the
+/// point. The six `.float` arms in this file were each written for one field,
+/// and the two fields nobody wrote an arm for -- `loop.step` and the
+/// `raw_script` arities -- are among the ones that diverged.
+///
+/// `.number_string` is the arm `std.json` uses when a number is kept
+/// unparsed; it is refused on the same syntactic test, so the rule does not
+/// depend on which representation the parser chose.
+fn assertNoJSONFloats(value: std.json.Value) ParseError!void {
+    switch (value) {
+        .float => return ParseError.FloatNotAllowedInIR,
+        .number_string => |s| {
+            for (s) |c| {
+                if (c == '.' or c == 'e' or c == 'E') return ParseError.FloatNotAllowedInIR;
+            }
+        },
+        .object => |obj| {
+            var it = obj.iterator();
+            while (it.next()) |entry| try assertNoJSONFloats(entry.value_ptr.*);
+        },
+        .array => |arr| {
+            for (arr.items) |item| try assertNoJSONFloats(item);
+        },
+        else => {},
+    }
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -95,6 +225,9 @@ pub fn parseANFProgram(allocator: std.mem.Allocator, json_source: []const u8) !t
     defer parsed.deinit();
 
     const root = parsed.value;
+    // N-131: refuse float syntax at the door, before any field-specific
+    // decoding. See assertNoJSONFloats.
+    try assertNoJSONFloats(root);
     return try parseProgram(allocator, root);
 }
 
@@ -143,11 +276,108 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         try method_list.append(allocator, method);
     }
 
+    // N-113 / R-081: a contract with no public method has no spending entry
+    // point and emits an EMPTY locking script — which is anyone-can-spend, not
+    // merely useless. On the real @bsv/sdk `Spend` engine under full consensus
+    // rules, an empty locking script with the one-byte push-only witness OP_1
+    // (0x51) validates. Before this guard the --ir path exited 0 and handed the
+    // SDKs a well-formed artifact whose "script" was "".
+    //
+    // The source pipeline already rejects the same shape in
+    // passes/validate.zig; this parser is reached only from the IR loader, so
+    // this closes the rule's gap on externally supplied IR.
+    //
+    // Checked LAST so the structural diagnostics above keep priority — a
+    // malformed binding is the more actionable error when both are present.
+    // Mirrors compilers/go/ir/loader.go, including the ordering.
+    //
+    // N-113: the CONSTRUCTOR does not count. This mirrors passes/validate.zig,
+    // but runs over a differently-shaped list: the AST keeps the constructor
+    // in its own field while ANF lowering flattens it INTO the method list, so
+    // one `isPublic: true` on the constructor walked past the guard. It is
+    // never a spending entry point (emit and stack lowering both filter it out
+    // by NAME) and the contract emitted a bare OP_1 locking script at exit 0 —
+    // spendable with no witness at all.
+    var has_public = false;
+    for (method_list.items) |m| {
+        if (m.is_public and !std.mem.eql(u8, m.name, "constructor")) {
+            has_public = true;
+            break;
+        }
+    }
+    if (!has_public) return ParseError.NoPublicMethods;
+
+    // R-126 / CL-BUG-164: an add_output must name exactly one state value per
+    // MUTABLE property.
+    //
+    // The source pipeline counts addOutput arity in the typechecker (the
+    // N20 / N23 / N26 negatives). `--ir` runs no frontend, so such a node
+    // reached stack lowering directly, and lowerAddOutput serializes the
+    // OP_RETURN payload with the MIN of the two lists. Under-arity emitted an
+    // output carrying fewer state fields than the contract has; over-arity
+    // silently dropped the surplus. Measured through each tier's own --ir CLI
+    // on a two-mutable-field contract (correct arity = 1394 hexchars): go,
+    // rust, zig, ruby, python and java ALL accepted, emitting 1388 and 1396
+    // hexchars respectively.
+    //
+    // CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+    // mutable fields, so a short-payload continuation is spendable only by a
+    // hand-crafted transaction, and the successor it produces is permanently
+    // unspendable because the next call's deserialize_state slices at fixed
+    // offsets.
+    var mutable_count: usize = 0;
+    for (properties) |prop| {
+        if (!prop.readonly) mutable_count += 1;
+    }
+    for (method_list.items) |m| {
+        try checkAddOutputArity(m.body, mutable_count);
+        if (!std.mem.eql(u8, m.name, "constructor")) try checkNoSuperCall(m.body);
+    }
+
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),
         .properties = properties,
         .methods = try method_list.toOwnedSlice(allocator),
     };
+}
+
+/// Walk a binding list — nested `if` arms and `loop` bodies included — and
+/// refuse any `add_output` whose stateValues list is not exactly
+/// `mutable_count` long. See the call site in `parseProgram` for why.
+fn checkAddOutputArity(bindings: []const types.ANFBinding, mutable_count: usize) ParseError!void {
+    for (bindings) |binding| {
+        switch (binding.value) {
+            .add_output => |ao| {
+                if (ao.state_values.len != mutable_count) {
+                    return ParseError.AddOutputArityMismatch;
+                }
+            },
+            .@"if" => |iv| {
+                try checkAddOutputArity(iv.then, mutable_count);
+                try checkAddOutputArity(iv.@"else", mutable_count);
+            },
+            .loop => |lv| try checkAddOutputArity(lv.body, mutable_count),
+            else => {},
+        }
+    }
+}
+
+/// Refuse a `super` call anywhere in a non-constructor method body (R-164).
+/// See the `SuperOutsideConstructor` error for why.
+fn checkNoSuperCall(bindings: []const types.ANFBinding) ParseError!void {
+    for (bindings) |binding| {
+        switch (binding.value) {
+            .call => |c| {
+                if (std.mem.eql(u8, c.func, "super")) return ParseError.SuperOutsideConstructor;
+            },
+            .@"if" => |iv| {
+                try checkNoSuperCall(iv.then);
+                try checkNoSuperCall(iv.@"else");
+            },
+            .loop => |lv| try checkNoSuperCall(lv.body),
+            else => {},
+        }
+    }
 }
 
 fn parseProperties(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]types.ANFProperty {
@@ -161,7 +391,7 @@ fn parseProperties(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]typ
         const initial_value = if (prop_obj.get("initialValue")) |initial| switch (initial) {
             .integer => |v| @as(?types.ConstValue, .{ .integer = v }),
             .float => |f| blk: {
-                const int_val: i128 = @intFromFloat(f);
+                const int_val: i128 = try floatToInt(i128, f);
                 const roundtrip: f64 = @floatFromInt(int_val);
                 if (roundtrip != f) return ParseError.InvalidConstValue;
                 break :blk @as(?types.ConstValue, .{ .integer = int_val });
@@ -181,12 +411,37 @@ fn parseProperties(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]typ
             .number_string => |s| @as(?types.ConstValue, try constFromNumberString(allocator, s)),
             else => return ParseError.InvalidConstValue,
         } else null;
+        // N-095: recover the synthetic-array chain so an ANF produced by ANY
+        // tier still regroups into one FixedArray state field here. Dropping it
+        // was invisible in the script hex and only showed up as four raw
+        // `grid__i__j` entries where the SDK expects `state.grid`.
+        const chain: ?[]const types.SyntheticArrayLevel = if (prop_obj.get("syntheticArrayChain")) |raw| blk: {
+            const levels_json = switch (raw) {
+                .array => |a| a,
+                else => return ParseError.UnexpectedValueType,
+            };
+            const levels = try allocator.alloc(types.SyntheticArrayLevel, levels_json.items.len);
+            for (levels_json.items, 0..) |level_val, li| {
+                const level_obj = switch (level_val) {
+                    .object => |o| o,
+                    else => return ParseError.UnexpectedValueType,
+                };
+                levels[li] = .{
+                    .base = try allocator.dupe(u8, try getString(level_obj, "base")),
+                    .index = try getU32(level_obj, "index"),
+                    .length = try getU32(level_obj, "length"),
+                };
+            }
+            break :blk levels;
+        } else null;
+
         result[i] = .{
             .name = try allocator.dupe(u8, try getString(prop_obj, "name")),
             .type_name = try allocator.dupe(u8, type_str),
             .type_info = types.parseRunarType(type_str),
             .readonly = try getBool(prop_obj, "readonly"),
             .initial_value = initial_value,
+            .synthetic_array_chain = chain,
         };
     }
     return result;
@@ -327,6 +582,22 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
 /// `bytes` field (even length, hex-only) and rejects negative arities.
 fn parseRawScript(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
     const bytes_str = try getString(obj, "bytes");
+    // N-113 / R-079: an empty span is a claim the emitter cannot honour. Stack
+    // lowering models a raw_script purely from its declared arities (it pops
+    // in_arity and pushes out_arity) because the bytes are opaque to it, while
+    // emission writes nothing at all for a zero-length span. The stack model
+    // and the script then disagree, and every later PICK/ROLL depth derived
+    // from that model addresses the wrong slot — the span silently degrades to
+    // the identity function and a different witness spends the output than the
+    // IR declared.
+    //
+    // The source path already rejects this ("asm() body must be a non-empty
+    // hex string literal", passes/validate.zig); --ir is the same rule at the
+    // external-input trust boundary. All empty bodies are rejected, including
+    // the degenerate in=0/out=0 case, because mirroring the source validator
+    // exactly is worth more than an arity-conditional rule that would differ
+    // from the rule one pass earlier.
+    if (bytes_str.len == 0) return ParseError.EmptyRawScriptBody;
     if (bytes_str.len % 2 != 0) return ParseError.InvalidConstValue;
     for (bytes_str) |c| {
         const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
@@ -337,7 +608,7 @@ fn parseRawScript(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     const in_arity: i32 = switch (in_arity_val) {
         .integer => |i| @intCast(i),
         .float => |f| blk: {
-            const i: i64 = @intFromFloat(f);
+            const i: i64 = try floatToInt(i64, f);
             const roundtrip: f64 = @floatFromInt(i);
             if (roundtrip != f) return ParseError.InvalidConstValue;
             break :blk @intCast(i);
@@ -350,7 +621,7 @@ fn parseRawScript(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     const out_arity: i32 = switch (out_arity_val) {
         .integer => |i| @intCast(i),
         .float => |f| blk: {
-            const i: i64 = @intFromFloat(f);
+            const i: i64 = try floatToInt(i64, f);
             const roundtrip: f64 = @floatFromInt(i);
             if (roundtrip != f) return ParseError.InvalidConstValue;
             break :blk @intCast(i);
@@ -372,7 +643,7 @@ fn parseLoadConst(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.
     switch (val) {
         .integer => |i| return .{ .load_const = .{ .value = .{ .integer = i } } },
         .float => |f| {
-            const int_val: i128 = @intFromFloat(f);
+            const int_val: i128 = try floatToInt(i128, f);
             const roundtrip: f64 = @floatFromInt(int_val);
             if (roundtrip != f) return ParseError.InvalidConstValue;
             return .{ .load_const = .{ .value = .{ .integer = int_val } } };
@@ -529,11 +800,43 @@ fn parseIf(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) Bi
 
 fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) BindingError!types.ANFValue {
     const count_val = obj.get("count") orelse return ParseError.MissingField;
-    const count: u32 = switch (count_val) {
-        .integer => |i| @intCast(i),
-        .float => |f| @intFromFloat(f),
+
+    // N-115: the unroll ceiling, checked BEFORE the narrowing cast.
+    //
+    // Two defects share this line and one guard closes both.
+    //
+    // 1. The ceiling itself. types.MAX_LOOP_COUNT (10000) existed and was
+    //    applied on the SOURCE path only; nothing bounded a count arriving as
+    //    IR. This tier accepted count=10001 and emitted a 199734-hexchar
+    //    (~97 KB) script. Rust and Java accepted the same input and emitted the
+    //    SAME bytes (sha256 e2c1be39...), which is why cross-tier hex parity
+    //    never saw it — the three offenders agreed with each other.
+    //
+    // 2. The cast. `@intCast` to `u32` is a safety-checked PANIC in
+    //    Debug/ReleaseSafe and undefined behaviour in ReleaseFast — the exact
+    //    failure the doc comment on types.MAX_LOOP_COUNT predicts. Measured on
+    //    count=2^33 before this guard: `thread N panic: integer does not fit in
+    //    destination type`. A panic is not a rejection: the process dies on a
+    //    signal, so it renders no verdict at all and any caller reading only
+    //    the exit status learns nothing.
+    //
+    // Comparing the raw i64 first is what makes the cast total: everything that
+    // reaches @intCast is now in [0, 10000].
+    // N-115 second half: a float whose integer part does not fit `i64` is at
+    // least 2^63 in magnitude — six orders of magnitude past the 10000 ceiling
+    // this function is about — or is not a number at all. Refusing it under
+    // the cap's own error name is both accurate and what the peers say:
+    // python reports "loop count 1e+30 exceeding maximum 10000", ruby the
+    // same. The narrowing itself can no longer abort.
+    const raw_count: i64 = switch (count_val) {
+        .integer => |i| i,
+        .float => |f| floatToInt(i64, f) catch return ParseError.LoopCountExceedsMaximum,
         else => return ParseError.UnexpectedValueType,
     };
+    if (raw_count > types.MAX_LOOP_COUNT or raw_count < 0) {
+        return ParseError.LoopCountExceedsMaximum;
+    }
+    const count: u32 = @intCast(raw_count);
     const iter_var = try getString(obj, "iterVar");
     const body_val = obj.get("body") orelse return ParseError.MissingField;
     const body_bindings = try parseBindings(allocator, body_val.array, depth + 1);
@@ -541,14 +844,49 @@ fn parseLoop(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u32) 
     // Issue #121: decode the iterator start value (a bare number, or a decimal
     // `Nn` string for oversize starts) and step direction. Older ANF payloads
     // without start/step describe zero-start counting-up loops (start=0, step=1).
+    // N-115 second half: this site had NO bounds check of any kind, so moving
+    // the loop-count guard above its own cast would have left it open.
+    // `{"start":1e30}` aborted here.
+    // N-133: an unreadable start is an ERROR, never 0.
+    //
+    // Both arms used to answer 0 -- `parseInt(...) catch 0` for a string, and
+    // a bare `else => 0` for everything that was not a number or a string.
+    // 0 is the worst possible substitution: it is a perfectly plausible loop
+    // start, the commonest one, and the one `bounded-loop`'s own golden
+    // carries, so the wrong program compiled, emitted a well-formed locking
+    // script, and nothing looked wrong. Measured against the five peers, this
+    // tier silently produced the start-0 script for
+    // `"999999999999999999999999999999n"`, `"abc"`, `""`, `"5nn"` and `true`.
+    //
+    // The over-int64 case is a REAL SPLIT, not a bug in the peers: `start` is
+    // an `i64` here and an arbitrary-precision integer in go/rust/python/
+    // ruby/java, so 10^30 is a value this tier genuinely cannot carry.
+    // Refusing it is this tier's half of that split; widening `start` is
+    // separate work (it is an i64 through the whole codegen path). A bare
+    // JSON number past i64 arrives as `.number_string`, which the old
+    // `else => 0` swallowed as well -- and python, ruby and java all WRITE
+    // an over-int64 start in exactly that shape.
     const start: i64 = if (obj.get("start")) |v| switch (v) {
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| try floatToInt(i64, f),
+        // A JSON integer too wide for i64. std.json hands it over as text
+        // rather than rounding it, so this is the representable-check arm.
+        .number_string => |s| std.fmt.parseInt(i64, s, 10) catch
+            return ParseError.InvalidLoopStart,
         .string => |s| blk: {
-            const text = if (s.len > 0 and s[s.len - 1] == 'n') s[0 .. s.len - 1] else s;
-            break :blk std.fmt.parseInt(i64, text, 10) catch 0;
+            // The `n` suffix is REQUIRED: it is the same discriminator
+            // `load_const.value` and `ANFProperty.initialValue` use, no
+            // producer writes the bare form, and Java already required it.
+            // Stripping exactly one `n` and then demanding a plain decimal
+            // keeps "5nn", "n" and the float-shaped "1.5n" refused.
+            if (!isDecimalBigIntLiteral(s)) return ParseError.InvalidLoopStart;
+            break :blk std.fmt.parseInt(i64, s[0 .. s.len - 1], 10) catch
+                return ParseError.InvalidLoopStart;
         },
-        else => 0,
+        // A boolean, a null, an object, an array. An ABSENT `start` is a
+        // different thing and still means a zero-start counting-up loop --
+        // that is the `else 0` on the `if (obj.get(...))` below, not here.
+        else => return ParseError.InvalidLoopStart,
     } else 0;
     const step: i8 = if (obj.get("step")) |v| switch (v) {
         .integer => |i| if (i < 0) @as(i8, -1) else 1,
@@ -650,6 +988,17 @@ fn getOptionalI32(obj: std.json.ObjectMap, key: []const u8) i32 {
     return switch (val) {
         .integer => |i| @intCast(i),
         else => 0,
+    };
+}
+
+/// Read a required non-negative integer field. N-095 (`syntheticArrayChain`
+/// levels) is the only caller; `index` and `length` are `u32` in
+/// `types.SyntheticArrayLevel`.
+fn getU32(obj: std.json.ObjectMap, key: []const u8) !u32 {
+    const val = obj.get(key) orelse return ParseError.MissingField;
+    return switch (val) {
+        .integer => |i| if (i < 0) ParseError.UnexpectedValueType else @intCast(i),
+        else => ParseError.UnexpectedValueType,
     };
 }
 
@@ -826,6 +1175,40 @@ fn writePropertiesArray(writer: anytype, properties: []const types.ANFProperty, 
             try writer.writeAll("false");
         }
         try writer.writeAll(",\n");
+
+        // N-095: the synthetic-array chain is what `regroupStateFields` in
+        // codegen/emit.zig collapses the expanded FixedArray leaves by. It was
+        // threaded correctly through the AST and ANF but never written here, so
+        // `--emit-ir` dropped it and no `compile-ir` run -- this tier's own
+        // included -- could recover the regrouping. Omitted when null, matching
+        // Go's `omitempty` and Rust's `skip_serializing_if`, so a
+        // FixedArray-free contract's ANF bytes do not move.
+        if (prop.synthetic_array_chain) |chain| {
+            try writeIndent(writer, depth + 2);
+            try writeJsonString(writer, "syntheticArrayChain");
+            try writer.writeAll(": [\n");
+            for (chain, 0..) |level, li| {
+                try writeIndent(writer, depth + 3);
+                try writer.writeAll("{\n");
+                try writeIndent(writer, depth + 4);
+                try writeJsonString(writer, "base");
+                try writer.writeAll(": ");
+                try writeJsonString(writer, level.base);
+                try writer.writeAll(",\n");
+                try writeIndent(writer, depth + 4);
+                try writeJsonString(writer, "index");
+                try writer.print(": {d},\n", .{level.index});
+                try writeIndent(writer, depth + 4);
+                try writeJsonString(writer, "length");
+                try writer.print(": {d}\n", .{level.length});
+                try writeIndent(writer, depth + 3);
+                try writer.writeByte('}');
+                if (li + 1 < chain.len) try writer.writeByte(',');
+                try writer.writeByte('\n');
+            }
+            try writeIndent(writer, depth + 2);
+            try writer.writeAll("],\n");
+        }
 
         try writeIndent(writer, depth + 2);
         try writeJsonString(writer, "type");
@@ -2347,6 +2730,10 @@ test "parse stateful contract with check_preimage and get_state_script" {
     }
 }
 
+// R-126: this fixture used to declare `"properties": []` while its add_output
+// named two state values — the very mismatch `checkAddOutputArity` now refuses,
+// sitting in the parser's own unit test. Two mutable properties were added to
+// make the program well-formed; the assertions below are unchanged.
 test "parse add_output ANF IR" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2373,7 +2760,10 @@ test "parse add_output ANF IR" {
         \\      "params": []
         \\    }
         \\  ],
-        \\  "properties": []
+        \\  "properties": [
+        \\    { "name": "a", "readonly": false, "type": "bigint" },
+        \\    { "name": "b", "readonly": false, "type": "bigint" }
+        \\  ]
         \\}
     ;
 

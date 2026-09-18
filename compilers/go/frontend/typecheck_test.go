@@ -1267,6 +1267,16 @@ class HashTest extends SmartContract {
 
 // ---------------------------------------------------------------------------
 // Test T5: typecheck — checkSig: wrong first arg type rejected
+//
+// N-104: this used to pass a ByteString where a Sig is expected. That is a
+// move WITHIN the ByteString family, and the reference tier
+// (packages/runar-compiler/src/passes/03-typecheck.ts) accepts it — measured
+// directly: `checkSig(someBytes, pk)` with `someBytes: ByteString` compiles
+// under TS, rust and zig. This tier rejected it only because its `isSubtype`
+// was missing the family's other direction, so the assertion was pinning the
+// divergence rather than the language. The wrong-type case is now a
+// CROSS-family one (bigint in a Sig slot), which every tier including the
+// reference refuses.
 // ---------------------------------------------------------------------------
 
 func TestTypeCheck_CheckSigWrongFirstArgType_Error(t *testing.T) {
@@ -1286,11 +1296,11 @@ func TestTypeCheck_CheckSigWrongFirstArgType_Error(t *testing.T) {
 				Name:       "check",
 				Visibility: "public",
 				Params: []ParamNode{
-					{Name: "someBytes", Type: PrimitiveType{Name: "ByteString"}},
+					{Name: "someBytes", Type: PrimitiveType{Name: "bigint"}},
 					{Name: "pubkey", Type: PrimitiveType{Name: "PubKey"}},
 				},
 				Body: []Statement{
-					// checkSig(someBytes, pubkey) — first arg is ByteString, not Sig
+					// checkSig(someBytes, pubkey) — first arg is bigint, not Sig
 					ExpressionStmt{
 						Expr: CallExpr{
 							Callee: Identifier{Name: "assert"},
@@ -1317,12 +1327,16 @@ func TestTypeCheck_CheckSigWrongFirstArgType_Error(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected type error for checkSig(ByteString, PubKey) — first arg must be Sig, got: %v", tcResult.Errors)
+		t.Errorf("expected type error for checkSig(bigint, PubKey) — first arg must be Sig, got: %v", tcResult.Errors)
 	}
 }
 
 // ---------------------------------------------------------------------------
 // Test T6: typecheck — checkSig: second arg not PubKey rejected
+//
+// N-104: same correction as T5. A ByteString in a PubKey slot is a move within
+// the ByteString family, which the reference tier accepts; the cross-family
+// case (bigint) is what every tier refuses.
 // ---------------------------------------------------------------------------
 
 func TestTypeCheck_CheckSigWrongSecondArgType_Error(t *testing.T) {
@@ -1343,10 +1357,10 @@ func TestTypeCheck_CheckSigWrongSecondArgType_Error(t *testing.T) {
 				Visibility: "public",
 				Params: []ParamNode{
 					{Name: "sig", Type: PrimitiveType{Name: "Sig"}},
-					{Name: "bytes", Type: PrimitiveType{Name: "ByteString"}},
+					{Name: "bytes", Type: PrimitiveType{Name: "bigint"}},
 				},
 				Body: []Statement{
-					// checkSig(sig, bytes) — second arg is ByteString, not PubKey
+					// checkSig(sig, bytes) — second arg is bigint, not PubKey
 					ExpressionStmt{
 						Expr: CallExpr{
 							Callee: Identifier{Name: "assert"},
@@ -1373,7 +1387,7 @@ func TestTypeCheck_CheckSigWrongSecondArgType_Error(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected type error for checkSig(Sig, ByteString) — second arg must be PubKey, got: %v", tcResult.Errors)
+		t.Errorf("expected type error for checkSig(Sig, bigint) — second arg must be PubKey, got: %v", tcResult.Errors)
 	}
 }
 

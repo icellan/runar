@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,11 +46,17 @@ func TestCLI_Groth16WA_SP1(t *testing.T) {
 
 	// 3. Invoke the binary as `runar-compiler-go groth16-wa --vk ... --out ...`.
 	outPath := filepath.Join(tmp, "sp1.runar.json")
-	cmd = exec.Command(binPath, "groth16-wa",
+	args := []string{"groth16-wa",
 		"--vk", vkAbs,
 		"--out", outPath,
 		"--name", "SP1Verifier_CLI_Smoke",
-	)
+	}
+	// The verifier binds its public inputs, so the CLI requires one --pub
+	// per scalar. Feed the fixture's own statement.
+	for _, pub := range readSP1PublicInputs(t) {
+		args = append(args, "--pub", pub)
+	}
+	cmd = exec.Command(binPath, args...)
 	runOutput, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("CLI run failed: %v\n%s", err, string(runOutput))
@@ -95,4 +102,25 @@ func TestCLI_Groth16WA_SP1(t *testing.T) {
 
 	t.Logf("CLI produced %d byte script (%.1f KB); stderr:\n%s",
 		scriptBytes, float64(scriptBytes)/1024, string(runOutput))
+}
+
+// readSP1PublicInputs returns the SP1 v6.0.0 fixture's public-input scalars
+// as decimal strings, in file order.
+func readSP1PublicInputs(t *testing.T) []string {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("..", "..", "tests", "vectors", "sp1", "v6.0.0", "groth16_public_inputs.txt"))
+	if err != nil {
+		t.Fatalf("resolve SP1 public-inputs path: %v", err)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatalf("read SP1 public inputs at %s: %v", abs, err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }

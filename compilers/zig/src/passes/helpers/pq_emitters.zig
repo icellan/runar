@@ -1057,6 +1057,9 @@ fn appendWOTSOneChain(builder: *Builder, chain_index: usize) PqEmitterError!void
     try builder.emitOp("OP_CAT");
 }
 
+/// Total WOTS+ signature length in bytes: len (67 chains) * n (32).
+const wots_sig_len: i64 = 67 * 32;
+
 pub fn appendVerifyWOTS(
     list: *std.ArrayListUnmanaged(CryptoInstruction),
     allocator: Allocator,
@@ -1073,7 +1076,16 @@ pub fn appendVerifyWOTS(
     try builder.emitOp("OP_SWAP");
     try builder.emitOp("OP_SHA256");
 
-    try builder.emitOp("OP_SWAP");
+    try builder.emitOp("OP_SWAP"); // pubSeed msgHash sig
+
+    // R-135: enforce the exact signature length on-chain. The chain loop consumes
+    // wots_sig_len bytes via OP_SPLIT and then drops whatever is left, so without
+    // this gate `sig || junk` verified identically to `sig`. Short signatures already
+    // abort inside OP_SPLIT; this closes the over-long direction. Net stack effect 0.
+    try builder.emitOp("OP_SIZE");
+    try builder.emitPushInt(wots_sig_len);
+    try builder.emitOp("OP_EQUALVERIFY");
+
     try builder.emitPushInt(0);
     try builder.emitOp("OP_0");
     try builder.emitPushInt(3);

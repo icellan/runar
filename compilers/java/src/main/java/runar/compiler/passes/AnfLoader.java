@@ -80,7 +80,173 @@ public final class AnfLoader {
         if (ml instanceof List<?> lst) {
             for (Object m : lst) methods.add(toMethod(asObject(m)));
         }
+        // N-113 / R-081: a contract with no public method has no spending
+        // entry point and emits an EMPTY locking script — which is
+        // anyone-can-spend, not merely useless. On the real @bsv/sdk `Spend`
+        // engine under full consensus rules, an empty locking script with the
+        // one-byte push-only witness OP_1 (0x51) validates. Before this guard
+        // the --ir path exited 0 and handed the SDKs a well-formed artifact
+        // whose "script" was "".
+        //
+        // The source pipeline already rejects the same shape in Validate.java;
+        // this loader is reached only from the --ir path, so this closes the
+        // rule's gap on externally supplied IR.
+        //
+        // Checked LAST so the structural diagnostics from toMethod above keep
+        // priority — a malformed binding is the more actionable error when
+        // both are present. Mirrors compilers/go/ir/loader.go, ordering
+        // included.
+        //
+        // N-113: the CONSTRUCTOR does not count. This mirrors Validate.java,
+        // but runs over a differently-shaped list: the AST keeps the
+        // constructor in its own field while ANF lowering flattens it INTO
+        // `methods`, so one `isPublic: true` on the constructor walked past
+        // the guard. It is never a spending entry point (Emit.java and
+        // StackLower both filter it out by NAME) and the contract emitted an
+        // EMPTY locking script at exit 0.
+        boolean hasPublic = false;
+        for (AnfMethod m : methods) {
+            if (m.isPublic() && !"constructor".equals(m.name())) { hasPublic = true; break; }
+        }
+        if (!hasPublic) {
+            throw new RuntimeException(
+                "contract " + name + " has no public methods — no spending entry points;"
+                + " an empty locking script is anyone-can-spend"
+            );
+        }
+
+        // R-128 / R-165 family: builtin call arity. The source pipeline
+        // type-checks every call; this loader is the `--ir` path, which runs no
+        // frontend, so a wrong-arity call used to reach stack lowering — where
+        // each dispatch family consumes args.size() from the stack MODEL and
+        // then emits a FIXED-arity opcode blob. `cat` with one argument
+        // compiled to a bare OP_CAT; `assert` with none compiled to an EMPTY
+        // script, dropping the contract's only guard.
+        for (AnfMethod m : methods) {
+            String err = checkCallArity(m.body(), m.name());
+            if (err != null) {
+                throw new RuntimeException(err);
+            }
+        }
+        // R-126 / CL-BUG-164: an add_output must name exactly one state value
+        // per MUTABLE property.
+        //
+        // The source pipeline counts addOutput arity in the typechecker (the
+        // N20 / N23 / N26 negatives). This loader is the `--ir` path, which
+        // runs no frontend, so such a node reached stack lowering directly —
+        // where lowerAddOutput serializes the OP_RETURN payload with the MIN of
+        // the two lists. Under-arity emitted an output carrying fewer state
+        // fields than the contract has; over-arity silently dropped the
+        // surplus. Measured through each tier's own --ir CLI on a
+        // two-mutable-field contract (correct arity = 1394 hexchars): go, rust,
+        // zig, ruby, python and java ALL accepted, emitting 1388 and 1396
+        // hexchars respectively.
+        //
+        // CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+        // mutable fields, so a short-payload continuation is spendable only by
+        // a hand-crafted transaction, and the successor it produces is
+        // permanently unspendable because the next call's deserialize_state
+        // slices at fixed offsets. The message is shared verbatim with the
+        // other six tiers.
+        int mutableCount = 0;
+        for (AnfProperty p : props) {
+            if (!p.readonly()) mutableCount++;
+        }
+        for (AnfMethod m : methods) {
+            String err = checkAddOutputArity(m.body(), m.name(), mutableCount);
+            if (err == null && !"constructor".equals(m.name())) {
+                err = checkNoSuperCall(m.body(), m.name());
+            }
+            if (err != null) {
+                throw new RuntimeException(err);
+            }
+        }
         return new AnfProgram(name, props, methods);
+    }
+
+    /**
+     * Walk a binding list — nested {@code if} arms and {@code loop} bodies
+     * included — and report the first {@code add_output} whose stateValues list
+     * is not exactly {@code mutableCount} long. See the call site in
+     * {@code toProgram} for why.
+     */
+    private static String checkAddOutputArity(
+        List<AnfBinding> bindings, String methodName, int mutableCount) {
+        if (bindings == null) {
+            return null;
+        }
+        for (AnfBinding b : bindings) {
+            AnfValue v = b.value();
+            if (v instanceof runar.compiler.ir.anf.AddOutput ao) {
+                int got = ao.stateValues() == null ? 0 : ao.stateValues().size();
+                if (got != mutableCount) {
+                    return "add_output in method '" + methodName + "' carries " + got
+                        + " state values, but the contract declares " + mutableCount
+                        + " mutable properties. The output's OP_RETURN payload is serialized"
+                        + " from this list while deserialize_state slices the declared"
+                        + " properties at fixed offsets, so any other count commits to a state"
+                        + " payload no SDK-built transaction can produce and a successor that"
+                        + " cannot be spent.";
+                }
+            } else if (v instanceof runar.compiler.ir.anf.If branch) {
+                String err = checkAddOutputArity(branch.thenBranch(), methodName, mutableCount);
+                if (err == null) {
+                    err = checkAddOutputArity(branch.elseBranch(), methodName, mutableCount);
+                }
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
+                String err = checkAddOutputArity(loop.body(), methodName, mutableCount);
+                if (err != null) {
+                    return err;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Refuse a {@code super} call anywhere in a non-constructor method body
+     * (R-164).
+     *
+     * <p>{@code super} emits no opcodes — the constructor args are already on
+     * the stack — but stack lowering pushes a model slot for it anyway: +1
+     * model, +0 physical. On the source path that is invisible because the
+     * constructor is never lowered to script; via {@code --ir} it is reachable,
+     * and every subsequent PICK/ROLL depth in the method is off by one.
+     * Measured against the same IR with the binding deleted: PUSH 3; OP_ROLL
+     * where the correct lowering emits OP_ROT, addressing a fourth stack item
+     * that does not exist.
+     */
+    private static String checkNoSuperCall(List<AnfBinding> bindings, String methodName) {
+        if (bindings == null) {
+            return null;
+        }
+        for (AnfBinding b : bindings) {
+            AnfValue v = b.value();
+            if (v instanceof runar.compiler.ir.anf.Call call && "super".equals(call.func())) {
+                return "super() is only valid in a constructor; method '" + methodName
+                    + "' calls it. It emits no opcodes — the constructor args are already on the"
+                    + " stack — so stack lowering pushes a model slot with no physical value, and"
+                    + " every later PICK/ROLL depth in the method is off by one.";
+            }
+            if (v instanceof runar.compiler.ir.anf.If branch) {
+                String err = checkNoSuperCall(branch.thenBranch(), methodName);
+                if (err == null) {
+                    err = checkNoSuperCall(branch.elseBranch(), methodName);
+                }
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
+                String err = checkNoSuperCall(loop.body(), methodName);
+                if (err != null) {
+                    return err;
+                }
+            }
+        }
+        return null;
     }
 
     private static AnfProperty toProperty(Map<?, ?> obj) {
@@ -90,7 +256,106 @@ public final class AnfLoader {
         ConstValue initial = null;
         Object iv = obj.get("initialValue");
         if (iv != null) initial = toConst(iv);
-        return new AnfProperty(name, type, readonly, initial);
+        return new AnfProperty(name, type, readonly, initial, toSyntheticChain(obj.get("syntheticArrayChain")));
+    }
+
+    /**
+     * N-095: recover the expand-fixed-arrays chain. Absent (the normal case)
+     * yields null, which {@code Jcs} omits again on re-emit, so
+     * {@code --emit-ir → --ir → --emit-ir} is a fixed point.
+     */
+    private static List<AnfProperty.SyntheticArrayLevel> toSyntheticChain(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof List<?> lst)) {
+            throw new RuntimeException("syntheticArrayChain is not an array");
+        }
+        List<AnfProperty.SyntheticArrayLevel> out = new ArrayList<>(lst.size());
+        for (Object o : lst) {
+            Map<?, ?> level = asObject(o);
+            out.add(new AnfProperty.SyntheticArrayLevel(
+                asString(level.get("base")),
+                asInt(level.get("index"), "syntheticArrayChain.index"),
+                asInt(level.get("length"), "syntheticArrayChain.length")));
+        }
+        return out;
+    }
+
+    /**
+     * R-086: decode an integer-typed ANF field, REFUSING anything the field
+     * cannot represent instead of keeping its low 32 bits.
+     *
+     * <p>{@code Long.intValue()} / {@code BigInteger.intValue()} truncate
+     * silently, and this runs on the {@code --ir} path — externally supplied
+     * IR. A {@code loop} count of 2^32+5 used to compile to exactly the bytes
+     * count=5 compiles to, and a {@code loop} step of 2^32+1 used to compile to
+     * a DIFFERENT locking script than the Go tier emitted from the same input
+     * bytes. Both tiers accepted; only the scripts disagreed.
+     *
+     * <p>{@code Double} is refused outright: a JSON float is not an integer
+     * (Go's {@code encoding/json} refuses it too), and {@code Number.intValue()}
+     * would have clamped it.
+     */
+    private static int asInt(Object v, String what) {
+        BigInteger b;
+        if (v instanceof Long l) {
+            b = BigInteger.valueOf(l);
+        } else if (v instanceof Integer i) {
+            b = BigInteger.valueOf(i);
+        } else if (v instanceof BigInteger bi) {
+            b = bi;
+        } else {
+            throw new RuntimeException(what + " is not an integer: "
+                + (v == null ? "null" : v.getClass().getSimpleName()));
+        }
+        if (b.bitLength() > 31) {
+            throw new RuntimeException(what + " is out of 32-bit signed range: " + b);
+        }
+        return b.intValue();
+    }
+
+    /**
+     * N-115 — the unroll ceiling, at the external-input trust boundary.
+     *
+     * <p>{@link Loop#MAX_LOOP_COUNT} (10000) has existed in this tier all
+     * along, but the only thing that read it was {@code AnfLower} — so it
+     * bounded a loop written in SOURCE and not one arriving as IR.
+     * {@code asInt} keeps the count inside 32-bit signed range (R-086), which
+     * is a different and much weaker claim: 10001 is a perfectly good
+     * {@code int}. This tier accepted it and emitted a 199734-hexchar (~97 KB)
+     * locking script.
+     *
+     * <p>Cross-tier hex parity could not have caught it. Rust, Zig and Java all
+     * accepted the same over-cap IR and all three emitted the SAME bytes
+     * (sha256 {@code e2c1be39...}); only Go, Python and Ruby refused. Three
+     * agreeing tiers look exactly like three correct ones to a comparison that
+     * only diffs output.
+     *
+     * <p>The sentence is Go's, word for word ({@code compilers/go/ir/loader.go}),
+     * minus the method / binding names this loader does not have in scope here.
+     */
+    private static int loopCount(Object v) {
+        int count = asInt(v, "loop count");
+        // N-117 — the OTHER half of the same bound. `asInt` only rejects a
+        // count whose bitLength exceeds 31, which -3 passes cleanly, and the
+        // ceiling check below is a `>` so it never looks downward. StackLower's
+        // `for (int i = 0; i < count; i++)` then runs zero iterations and the
+        // loop body is silently DELETED from the emitted script — this tier
+        // answered 00009c77 (OP_0 OP_0 OP_NUMEQUAL OP_NIP) for IR whose other
+        // six tiers all refuse it, comparing a constant 0 against a constructor
+        // slot: anyone-can-spend when that slot is 0, unspendable otherwise.
+        //
+        // Go (`compilers/go/ir/loader.go`) checks both bounds and its sentence
+        // is reused here, minus the method / binding names this loader does not
+        // have in scope.
+        if (count < 0) {
+            throw new RuntimeException("has negative loop count " + count);
+        }
+        if (count > Loop.MAX_LOOP_COUNT) {
+            throw new RuntimeException(
+                "has loop count " + count + " exceeding maximum " + Loop.MAX_LOOP_COUNT
+            );
+        }
+        return count;
     }
 
     private static AnfMethod toMethod(Map<?, ?> obj) {
@@ -112,6 +377,38 @@ public final class AnfLoader {
         return new AnfMethod(name, params, body, isPublic);
     }
 
+    /** Walks every binding, including nested ones, checking builtin arity. */
+    private static String checkCallArity(List<AnfBinding> bindings, String methodName) {
+        if (bindings == null) {
+            return null;
+        }
+        for (AnfBinding b : bindings) {
+            AnfValue v = b.value();
+            if (v instanceof runar.compiler.ir.anf.Call call) {
+                String err = BuiltinArity.check(
+                    methodName, b.name(), call.func(),
+                    call.args() == null ? 0 : call.args().size());
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.If branch) {
+                String err = checkCallArity(branch.thenBranch(), methodName);
+                if (err == null) {
+                    err = checkCallArity(branch.elseBranch(), methodName);
+                }
+                if (err != null) {
+                    return err;
+                }
+            } else if (v instanceof runar.compiler.ir.anf.Loop loop) {
+                String err = checkCallArity(loop.body(), methodName);
+                if (err != null) {
+                    return err;
+                }
+            }
+        }
+        return null;
+    }
+
     private static AnfBinding toBinding(Map<?, ?> obj) {
         String name = asString(obj.get("name"));
         AnfValue v = toValue(asObject(obj.get("value")));
@@ -122,8 +419,8 @@ public final class AnfLoader {
         Object locRaw = obj.get("sourceLoc");
         if (locRaw instanceof Map<?, ?> locObj) {
             String file = asString(locObj.get("file"));
-            int line = asInt(locObj.get("line"));
-            int col = asInt(locObj.get("column"));
+            int line = asInt(locObj.get("line"), "sourceLoc line");
+            int col = asInt(locObj.get("column"), "sourceLoc column");
             loc = new runar.compiler.ir.ast.SourceLocation(file, line, col);
         }
         return new AnfBinding(name, v, loc);
@@ -160,13 +457,13 @@ public final class AnfLoader {
                 obj.containsKey("results") ? toStringList(obj.get("results")) : null
             );
             case "loop" -> new Loop(
-                asInt(obj.get("count")),
+                loopCount(obj.get("count")),
                 toBindingList(obj.get("body")),
                 asString(obj.get("iterVar")),
                 // Iterator start / step (issue #121). Older payloads without
                 // these describe zero-start counting-up loops.
-                obj.containsKey("start") ? asBigInt(obj.get("start")) : BigInteger.ZERO,
-                obj.containsKey("step") ? asInt(obj.get("step")) : 1
+                obj.containsKey("start") ? loopStart(obj.get("start")) : BigInteger.ZERO,
+                obj.containsKey("step") ? asInt(obj.get("step"), "loop step") : 1
             );
             case "assert" -> new Assert(
                 asString(obj.get("value")),
@@ -178,7 +475,7 @@ public final class AnfLoader {
             case "check_preimage" -> new CheckPreimage(
                 asString(obj.get("preimage")),
                 obj.containsKey("sighashFlag") && obj.get("sighashFlag") != null
-                    ? asInt(obj.get("sighashFlag")) : null
+                    ? asInt(obj.get("sighashFlag"), "check_preimage sighashFlag") : null
             );
             case "deserialize_state" -> new DeserializeState(asString(obj.get("preimage")));
             case "add_output" -> {
@@ -209,6 +506,29 @@ public final class AnfLoader {
     private static RawScript toRawScript(Map<?, ?> obj) {
         String bytes = asString(obj.get("bytes"));
         if (bytes == null) bytes = "";
+        // N-113 / R-079: an empty span is a claim the emitter cannot honour.
+        // Stack lowering models a raw_script purely from its declared arities
+        // (it pops in_arity and pushes out_arity) because the bytes are opaque
+        // to it, while emission writes nothing at all for a zero-length span.
+        // The stack model and the script then disagree, and every later
+        // PICK/ROLL depth derived from that model addresses the wrong slot —
+        // the span silently degrades to the identity function and a different
+        // witness spends the output than the IR declared.
+        //
+        // The source path already rejects this ("asm() body must be a
+        // non-empty hex string literal", Validate.java); --ir is the same rule
+        // at the external-input trust boundary. All empty bodies are rejected,
+        // including the degenerate in=0/out=0 case, because mirroring the
+        // source validator exactly is worth more than an arity-conditional
+        // rule that would differ from the rule one pass earlier.
+        if (bytes.isEmpty()) {
+            throw new RuntimeException(
+                "raw_script has an empty bytes body but declares in_arity "
+                + asInt(obj.get("in_arity"), "raw_script in_arity") + " / out_arity "
+                + asInt(obj.get("out_arity"), "raw_script out_arity")
+                + "; a span that emits no bytes cannot have a stack effect"
+            );
+        }
         if ((bytes.length() & 1) != 0) {
             throw new RuntimeException(
                 "raw_script bytes have odd hex length " + bytes.length()
@@ -219,8 +539,8 @@ public final class AnfLoader {
                 "raw_script bytes contain non-hex characters"
             );
         }
-        int inArity = asInt(obj.get("in_arity"));
-        int outArity = asInt(obj.get("out_arity"));
+        int inArity = asInt(obj.get("in_arity"), "raw_script in_arity");
+        int outArity = asInt(obj.get("out_arity"), "raw_script out_arity");
         if (inArity < 0) {
             throw new RuntimeException(
                 "raw_script has negative in_arity " + inArity
@@ -325,18 +645,62 @@ public final class AnfLoader {
         return asString(v);
     }
 
-    private static int asInt(Object v) {
-        if (v instanceof Long l) return l.intValue();
-        if (v instanceof Integer i) return i;
-        if (v instanceof BigInteger bi) return bi.intValue();
-        throw new RuntimeException("expected int, got " + (v == null ? "null" : v.getClass()));
-    }
-
     private static BigInteger asBigInt(Object v) {
         if (v instanceof BigInteger bi) return bi;
         if (v instanceof Long l) return BigInteger.valueOf(l);
         if (v instanceof Integer i) return BigInteger.valueOf(i);
         throw new RuntimeException("expected integer, got " + (v == null ? "null" : v.getClass()));
+    }
+
+    /**
+     * A {@code loop}'s iterator start: a JSON integer, or the sanctioned
+     * {@code "<decimal>n"} string for a start too wide for a tier's native
+     * integer (issue #121).
+     *
+     * <p>The schema has said {@code integer | string} all along, and the
+     * {@code n}-suffixed decimal string is the same encoding
+     * {@code load_const.value} and {@code ANFProperty.initialValue} already
+     * use — both of which this loader already accepts as strings.
+     * {@code loop.start} was the one place the arm was missing, so this tier
+     * refused ({@code exit 65}, "expected integer, got class
+     * java.lang.String") a payload its five peers accepted and agreed on
+     * byte-for-byte.
+     *
+     * <p>The suffix is REQUIRED, and that narrowness is the point. The peers
+     * agree on {@code "0n"} / {@code "5n"} / {@code "-3n"} and on nothing
+     * else: {@code "5"} reads as 5 in go/python/zig/ruby and as 0 in rust;
+     * {@code "abc"}, {@code ""} and {@code "5nn"} are refused by go and python
+     * and read as 0 by rust/zig/ruby. There is no majority answer to adopt for
+     * any of those, so they keep the existing refusal. Refusing an input the
+     * tiers disagree about is the safe side of that line — the alternative is
+     * silently inventing a loop start, which is the class of defect N-131 was
+     * about.
+     *
+     * <p>Strips exactly ONE trailing {@code n} and then requires the remainder
+     * to be a plain decimal, so {@code "5nn"} and {@code "n"} stay refused and
+     * a float-shaped {@code "1.5n"} cannot sneak a float back in through the
+     * string arm.
+     */
+    private static BigInteger loopStart(Object v) {
+        if (v instanceof String s) {
+            if (s.length() >= 2 && s.charAt(s.length() - 1) == 'n') {
+                String decimal = s.substring(0, s.length() - 1);
+                try {
+                    return new BigInteger(decimal);
+                } catch (NumberFormatException e) {
+                    throw new RuntimeException(
+                        "loop start: expected a decimal integer before the `n` suffix, got \"" + s + "\"");
+                }
+            }
+            throw new RuntimeException(
+                "loop start: a string start must be the `<decimal>n` form, got \"" + s + "\"");
+        }
+        if (v instanceof BigInteger bi) return bi;
+        if (v instanceof Long l) return BigInteger.valueOf(l);
+        if (v instanceof Integer i) return BigInteger.valueOf(i);
+        throw new RuntimeException(
+            "loop start: expected an integer or a `<decimal>n` string, got "
+                + (v == null ? "null" : v.getClass()));
     }
 
     // ------------------------------------------------------------------

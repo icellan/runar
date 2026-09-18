@@ -42,6 +42,14 @@ return is there so the intrinsic composes with the existing
   verifier absorbs it into the Fiat-Shamir transcript before any
   FRI commitment; any tampering shifts every derived challenge and
   causes downstream consistency checks to fail.
+  The unlocking script pushes this value **twice** — once as the deep
+  `_obs_public_values` transcript-input slot and once as this typed
+  argument (see §2.1). The transcript absorbs the deep slot; Step 1e
+  of `EmitFullSP1FriVerifierBody` `OP_EQUALVERIFY`s the typed argument
+  against it, so the two copies must be byte-identical. Until R-058
+  that check was missing and the typed argument was dropped unread,
+  which made the value advertised in the ABI spender-chosen and
+  independent of the value actually verified.
 - `sp1VKeyHash` — 32-byte keccak256 digest of the verifying key (see
   `docs/sp1-proof-format.md` §5). Must be bound in the covenant as a
   readonly field; a malicious unlocking script cannot supply it.
@@ -68,6 +76,26 @@ push-and-hash shape instead:
 
 The cost of the concatenation re-hash is `O(|proof|)` in SHA-256 block
 work — far cheaper than splitting.
+
+**Canonicalisation, and what the binding covered before R-059.** A stack
+item holding a field element is a script NUMBER, whose encoding is
+minimal and therefore variable-length — `1` is one byte, `300` is two.
+Hashing those raw would bind an ambiguous serialisation, so each numeric
+slot is canonicalised to 4 little-endian bytes (`OP_NUM2BIN 4`) before
+the `OP_CAT`, and the trailing `publicValues` slot is hashed as bytes.
+`sp1fri.CanonicalProofBlob` writes exactly those bytes off-chain: the
+`proofBlob` argument **is** that serialisation, not the raw postcard
+proof.
+
+Until R-059 (CL-BUG-102) the implementation did not match the paragraph
+above. Step 1 asserted `sha256(proofBlob) == sha256(chunk_0||…||chunk_7)`
+over eight *dummy* chunks — arbitrary contiguous slices of that same blob,
+pushed by the unlocking script and dropped unread — while every value the
+verifier consumed came from the separate field layer the check never
+touched. The equality therefore held for **any** blob: a spend carrying
+1589 bytes of the attacker's choosing was measured being accepted by the
+script VM. `packages/runar-go/sp1fri.TestEncodeUnlockingScript_RejectsForgedProofBlob`
+is the gate; the chunk layer is gone.
 
 ### 2.1. Pre-pushed field order (unlocking-script layout)
 
@@ -258,7 +286,7 @@ From BSVM handoff §2.1:
 Measurement methodology (Phase 2, `docs/fri-verifier-measurements.md`):
 deploy to BSV regtest, execute a real SP1 v6.0.2 proof from the
 `evm-guest/` fixture, capture `ls -l` on the compiled script,
-`max_stack_depth` from `integration/go/regtest/` instrumentation,
+`max_stack_depth` from the regtest instrumentation in `integration/go/`,
 and wall-clock on a blocks-per-second mining loop.
 
 ## 5. Fallback order (execute in sequence if targets are missed by >3×)
@@ -317,9 +345,36 @@ Why the three ⚠️ rows differ:
 SP1 outer proof, so neither has a verifying key or a VK hash to corrupt.
 The PoC parameter set encodes exactly that — `SP1VKeyHashByteSize: 0`,
 at which `lowerVerifySP1FRI` drops the `sp1VKeyHash` argument and never
-absorbs it, and `sp1fri.Verify` takes no VK-hash parameter at all. No VK
-hash value can change any verifier decision until a real SP1-wrapped
-fixture and a `SP1VKeyHashByteSize == 32` parameter set land together.
+absorbs it, and `sp1fri.Verify` takes no VK-hash parameter at all.
+
+**R-057 — this used to be true at EVERY parameter set.** The Step 2b
+absorb in `emitTranscriptInit` read an `_obs_sp1_vk_hash` slot that
+`sp1FriPrePushedFieldNames` never allocated, so `SP1VKeyHashByteSize > 0`
+panicked the compiler rather than binding the key; and all five presets
+(`minimal-guest`, `evm-guest`, `production-{100,64,16}`) leave the field
+at 0. A verifier that ignores its VK hash accepts a proof produced for a
+different guest program — it proves "some SP1 program executed", not
+"THIS program executed", contradicting the claim at
+`integration/go/contracts/Sp1FriVerifierPoc.runar.go:48-50`.
+
+`SP1VKeyHashByteSize > 0` now absorbs the contract's readonly
+`Sp1VKeyHash` property at the head of the transcript, per §3 above. The
+value absorbed is the typed argument — a LOCKING-script constant spliced
+at deploy time via `artifact.ConstructorSlots` — not an unlocking-script
+push, so a spender cannot adapt the transcript to a key they do not
+control. `packages/runar-go/sp1fri.EncodeUnlockingScript` correspondingly
+does NOT push `sp1VKeyHash`.
+
+`compilers/go/compiler.TestSp1FriVerifier_VerifyingKeyBindsTheProgram` is
+the standing adversarial check: one compiled covenant, one unlocking
+script built from the canonical fixture, many spliced verifying keys —
+the same proof must be accepted under some keys and rejected under
+others. Both poles are asserted, so a covenant that rejected everything
+would fail it.
+
+A `bad_vk/` FIXTURE still cannot be produced: that needs a real
+SP1-wrapped proof, which neither guest fixture is. The binding is no
+longer the blocker; the fixture is.
 
 ### 6.1. On-chain coverage is narrower than off-chain — KNOWN GAP
 
@@ -474,9 +529,12 @@ whitepaper's trust-model language (per handoff §3 step 3).
   off-chain native intrinsic still mocked, mainnet broadcast deferred).
 
 Fixture generation:
-- `tests/vectors/sp1/fri/minimal-guest/proof.bin` + `vk.bin` +
-  `public_values.hex` + `vk_hash.hex`. Regen via the Plonky3
-  `fib_air.rs` test ported to KoalaBear — see subdirectory README.
+- `tests/vectors/sp1/fri/minimal-guest/proof.postcard` +
+  `public_values.hex` (the verifying key travels inside the postcard
+  blob; there is no separate `vk.bin` or `vk_hash.hex`). Regen via the
+  Plonky3 `fib_air.rs` test ported to KoalaBear — see
+  `tests/vectors/sp1/fri/minimal-guest/README.md` and its `regen/`
+  directory.
 - `tests/vectors/sp1/fri/evm-guest/` real SP1 EVM-guest proof. Regen
   via SP1 SDK v6.0.2 toolchain — see subdirectory README.
 - `tests/vectors/sp1/fri/corruptions/*` produced programmatically

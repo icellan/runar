@@ -15,6 +15,7 @@
 
 import { describe, it, expect, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -1188,26 +1189,67 @@ describe('wire-format-pr-audit — exceptions file loader', () => {
     }
   });
 
+  it('every checked-in exception still matches its file — a DEAD entry is deleted, never left to rot', () => {
+    // N-069. An entry is content-pinned to the sha256 of the file version it
+    // was reviewed against, so the moment that file is edited again the entry
+    // stops suppressing anything and the gate prints it as REJECTED. That
+    // fail-closed behaviour is correct and is covered elsewhere; what is NOT
+    // covered is what happens NEXT. A dead entry has no effect on the gate's
+    // verdict, so nothing makes anyone remove it, and it sits in the file
+    // being printed as REJECTED on every single run. The one signal the escape
+    // hatch has — "look at this, it did not apply" — then fires on every run
+    // for reasons nobody needs to act on, and reviewers learn to scroll past
+    // the block that exists to be read.
+    //
+    // So: an exception is authorised for exactly one version of one file. Once
+    // that version is gone the entry is spent. If the NEW version still needs
+    // cover it gets a fresh, freshly-reviewed, freshly-dated entry; if it does
+    // not (the usual case — it moved a golden like everything else), the entry
+    // is deleted. Either way a stale sha256 is never the resting state.
+    const entries = loadExceptions(REPO_ROOT);
+    const dead = entries
+      .filter((e) => existsSync(join(REPO_ROOT, e.path)))
+      .map((e) => ({
+        path: e.path,
+        pinned: e.sha256,
+        actual: createHash('sha256')
+          .update(readFileSync(join(REPO_ROOT, e.path)))
+          .digest('hex'),
+      }))
+      .filter((r) => r.pinned !== r.actual);
+
+    expect(
+      dead,
+      'these exception entries are pinned to a file version that no longer exists — ' +
+        'they suppress nothing and must be removed (or re-reviewed and re-pinned)',
+    ).toEqual([]);
+  });
+
   it('the checked-in exceptions file holds exactly the reviewed entries (P1-4: an exception is never routine)', () => {
     // The whole point of the gate is that a wire change moves bytes. Every
     // entry here is a wire change that shipped with NO byte evidence, so the
     // count is part of the gate's own audit trail: adding one must be a
     // deliberate, reviewed edit to THIS assertion, not a quiet JSON append.
     //
-    // 2026-08-28 — three entries, one per SDK tier, for the issue-#106
-    // warning-scoping change on `contract.{ts,rs,py}` (PR #147). Those files
-    // are listed under constructor-slot-splicing, but the change adds a
-    // read-only OR-CHECKSIG probe whose only consumer is an INFORMATIONAL
-    // warn() call, so no encoder, offset or byte-producing branch can observe
-    // it. Each entry is pinned to that file's reviewed sha256 and expires
-    // 2026-11-26, so it authorises exactly this version and self-invalidates
-    // on the next edit.
+    // 2026-08-28 — three entries, one per SDK tier, covered the issue-#106
+    // warning-scoping change on `contract.{ts,rs,py}` (PR #147): a read-only
+    // OR-CHECKSIG probe feeding an INFORMATIONAL warn() call, in files listed
+    // under constructor-slot-splicing.
+    //
+    // 2026-09-11 (N-069) — all three DELETED, spent. Each was pinned to the
+    // sha256 of the file version it was reviewed against, and all three files
+    // have since been edited by changes in the same warn-only family
+    // (21fa4cbd, 0f81289a, 1805e635) plus one error-propagation fix (493cf3ce,
+    // `)` -> `)?`). Every content pin therefore mismatched and the gate had
+    // been printing all three as REJECTED on every run, suppressing nothing.
+    // The changes that invalidated them did not need cover: replayed against
+    // this branch the gate passes on 62 moved pins with the exceptions NOT
+    // applied. An entry authorises exactly one version of one file; when that
+    // version is gone the entry is spent and is deleted rather than
+    // re-stamped. See the `DEAD entry` test above, which now keeps it that
+    // way.
     const entries = loadExceptions(REPO_ROOT);
-    expect(entries.map((e) => e.path).sort()).toEqual([
-      'packages/runar-py/runar/sdk/contract.py',
-      'packages/runar-rs/src/sdk/contract.rs',
-      'packages/runar-sdk/src/contract.ts',
-    ]);
+    expect(entries.map((e) => e.path).sort()).toEqual([]);
     // Pin the shape too: an entry that loses its expiry or sign-off is not an
     // exception, it is a permanent hole.
     for (const e of entries) {

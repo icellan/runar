@@ -45,6 +45,49 @@ include_re='\.(go|rs|ts|tsx|py|zig|rb|java|sh|yml|yaml|md|markdown)$'
 # `unimplemented!` from matching `unimplemented_macro` etc.
 markers='\bTODO\b|\bFIXME\b|\bXXX\b|\btodo!|\bunimplemented!'
 
+# A reviewer finding ID of the form `<UPPERCASE-PREFIX>-TODO-<digits>` — e.g.
+# `CL-TODO-001`, `GK-TODO-001` — is a CITATION of an external review report,
+# not deferred work. The two files carrying those IDs today are the FIX for the
+# findings they name (`conformance/negatives/N33-number-type.runar.ts`,
+# `tests/r303-scriptvm-availability-notes.test.ts`). Hyphens are non-word
+# characters, so `\bTODO\b` matches inside the ID.
+#
+# The exception is deliberately as small as it can be: strip ONLY that exact
+# shape, then re-test the line against the UNCHANGED `$markers`. So the rule
+# itself is never weakened — a line that also carries a bare marker still
+# fails, because only the citation was removed from view. The self-test below
+# gates the loosening.
+finding_id_re='[A-Z][A-Z0-9]*-TODO-[0-9][0-9]*'
+
+# Is this hit line an ACTIVE marker? Returns 0 when it is.
+line_has_active_marker() {
+  printf '%s\n' "$1" | sed -E "s/$finding_id_re//g" | grep -qE "$markers"
+}
+
+# Self-test for the rule above. A gate that has never been watched fire is
+# indistinguishable from no gate, and this one decides what counts as deferred
+# work, so it states its own boundary cases: a bare marker must fire, and a
+# citation must not. `expect_marker <fire|silent> <line>`.
+marker_selftest_fail=0
+expect_marker() {
+  local want="$1" line="$2" got
+  if line_has_active_marker "$line"; then got=fire; else got=silent; fi
+  if [ "$got" != "$want" ]; then
+    echo "MARKER SELF-TEST FAILED: expected $want, got $got, for: $line"
+    marker_selftest_fail=1
+  fi
+}
+expect_marker fire   'src/a.ts:3:// TODO: finish this'
+expect_marker fire   'src/a.ts:3:// FIXME: broken'
+expect_marker silent 'src/a.ts:1:// R-301 (XX-TODO-001): the `number` type.'
+expect_marker fire   'src/a.ts:1:// XX-TODO-001 is cited here, and TODO: still deferred'
+if [ "$marker_selftest_fail" -ne 0 ]; then
+  echo "::error::marker self-test failed — the TODO rule no longer draws the line it claims to."
+  fail=1
+else
+  echo "OK — marker self-test: bare markers fire, a <PREFIX>-TODO-<n> finding ID does not."
+fi
+
 # Self-references plus the runar-verification subproject's Markdown planning
 # docs. That subproject is a long-running formal-verification effort that
 # tracks its axiom-discharge work in-repo via `TODO.md` / `PATH2_PLAN.md`
@@ -64,13 +107,22 @@ candidate_paths=$(for r in "${roots[@]}"; do
   fi
 done)
 
-found=$(
+hits=$(
   echo "$candidate_paths" \
     | grep -E "$include_re" \
     | grep -vE "$exclude_re" \
     | xargs grep -nE "$markers" 2>/dev/null \
     | grep -vE "$marker_self_re" || true
 )
+# Re-test each hit through the same predicate the self-test exercises, so a
+# finding-ID citation drops out and everything else survives verbatim.
+found=""
+while IFS= read -r hit; do
+  [ -z "$hit" ] && continue
+  if line_has_active_marker "$hit"; then
+    found="$found$hit"$'\n'
+  fi
+done <<< "$hits"
 if [ -n "$found" ]; then
   echo "::error::TODO/FIXME/XXX/todo!/unimplemented! markers found in source code:"
   echo "$found"

@@ -21,6 +21,7 @@
 //!   - snake_case to camelCase conversion for identifiers
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -71,14 +72,6 @@ pub fn parseMove(allocator: Allocator, source: []const u8, file_name: []const u8
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -520,17 +513,23 @@ fn mapMoveType(name: []const u8) RunarType {
         .{ "u128", .bigint },
         .{ "u256", .bigint },
         .{ "Int", .bigint },
+        .{ "Bigint", .bigint },
         .{ "bigint", .bigint },
         .{ "bool", .boolean },
         .{ "Bool", .boolean },
         .{ "boolean", .boolean },
         .{ "vector", .byte_string },
+        .{ "Bytes", .byte_string },
         .{ "ByteString", .byte_string },
         .{ "PubKey", .pub_key },
         .{ "Sig", .sig },
+        .{ "address", .addr },
         .{ "Addr", .addr },
         .{ "Sha256", .sha256 },
-        .{ "Sha256Digest", .sha256 },
+        // N-108: no `Sha256Digest` arm. The alias is not part of the Move-style
+        // surface vocabulary in the reference tier (`01-parse-move.ts` does not
+        // apply `TYPE_ALIASES`), and six tiers refuse the name here. Zig was the
+        // lone acceptor. Gate: conformance/negatives/N25-sha256digest-alias-move.
         .{ "Ripemd160", .ripemd160 },
         .{ "SigHashPreimage", .sig_hash_preimage },
         .{ "RabinSig", .rabin_sig },
@@ -848,6 +847,10 @@ const Parser = struct {
                 .type_info = type_info,
                 .readonly = readonly,
                 .initializer = initializer,
+                // N-109: spelled type name + field-name token, for the
+                // validator's unsupported-type diagnostic. Diagnostics only.
+                .type_name = types.typeNodeName(type_node),
+                .source_loc = self.tokenSourceLoc(field_name_tok),
                 .fixed_array_length = fa_len,
                 .fixed_array_element = fa_elem,
                 .fixed_array_nested_length = fa_nested_len,
@@ -1174,13 +1177,21 @@ const Parser = struct {
                     }
                     if (decl_name) |dn| {
                         if (std.mem.eql(u8, dn, s.for_stmt.var_name)) {
-                            const init_val: i64 = if (decl_value) |v| switch (v) {
-                                .literal_int => |n| n,
-                                else => 0,
-                            } else 0;
+                            // N-138: a negated literal is a literal.
+                            // N-137: a declaration whose value is not a literal
+                            // at all leaves the start unknown, which the
+                            // unrolled loop model cannot represent.
+                            var init_val: i64 = 0;
+                            var init_const = true;
+                            if (decl_value) |v| {
+                                if (loopStartLiteral(v)) |n| init_val = n else {
+                                    init_const = false;
+                                }
+                            }
                             stmts.items.len -= 1; // pop the decl
                             var merged = s.for_stmt;
                             merged.init_value = init_val;
+                            merged.init_is_const = init_const;
                             stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
                             continue;
                         }
@@ -1340,6 +1351,37 @@ const Parser = struct {
         return .{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Emitted for a `while` that is not a representable bounded counting loop.
+    ///
+    /// Word for word the sentence the other six tiers emit, so a user
+    /// switching tiers reads the same diagnostic.
+    const move_while_shape_diagnostic =
+        "Move `while` must be a bounded counting loop: " ++
+        "`let i = K; while (i < N) { ...; i = i + 1; }`, or the counting-down form " ++
+        "`let i = K; while (i > N) { ...; i = i - 1; }`. The iterator declaration, " ++
+        "the comparison direction and a unit step must all agree.";
+
+    /// Move has no C-style `for`, so a bounded loop is spelled as an induction
+    /// variable declared just before a `while`:
+    ///
+    ///   let i: Int = K;          let i: Int = K;
+    ///   while (i < N) {          while (i > N) {
+    ///     ...                      ...
+    ///     i = i + 1;               i = i - 1;
+    ///   }                        }
+    ///
+    /// `parseMoveBlock` patches `init_value` from the preceding declaration;
+    /// this function supplies everything else the unrolled loop model needs.
+    ///
+    /// The COUNTING-DOWN column used to be missing HERE TOO, and differently
+    /// from the peer tiers: `descending` was never set from the comparison and
+    /// the trailing update was trimmed only for `.add`, so `while (i > 1) {
+    /// ...; i = i - 1; }` produced `start=5 step=+1 bound=1` — count
+    /// `bound - start = -4`, clamped to 0 — against the peers' `start=0
+    /// step=-1 iterVar=_w`. Both were wrong AND they disagreed: a six-vs-one
+    /// hex split (`009c` vs `55007b7c9c77`) on byte-identical source. Deriving
+    /// the direction from the comparison and requiring the step's sign to
+    /// agree fixes the semantics, and the agreement follows from that.
     fn parseMoveWhile(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'while'
@@ -1353,45 +1395,108 @@ const Parser = struct {
         const body = self.parseMoveBlock();
         self.skipSemicolons();
 
-        // Extract var_name and bound from condition if it's a simple comparison: var < N
+        // Extract the iterator, the bound and the DIRECTION from the
+        // condition. `<`/`<=` counts up, `>`/`>=` counts down; `<=`/`>=` are
+        // inclusive. Anything else is not a bound the unrolled model can
+        // represent, and leaves `representable` false.
         var var_name: []const u8 = "_w";
         var bound: i64 = 0;
+        var bound_is_const = false;
+        var descending = false;
+        var inclusive = false;
+        var representable = false;
         if (_cond) |cond| {
             switch (cond) {
                 .binary_op => |bop| {
-                    if (bop.left == .identifier) var_name = bop.left.identifier;
-                    switch (bop.right) {
-                        .literal_int => |v| {
-                            bound = v;
+                    const dir_ok = switch (bop.op) {
+                        .lt, .lte => blk: {
+                            descending = false;
+                            inclusive = bop.op == .lte;
+                            break :blk true;
                         },
-                        else => {},
+                        .gt, .gte => blk: {
+                            descending = true;
+                            inclusive = bop.op == .gte;
+                            break :blk true;
+                        },
+                        else => false,
+                    };
+                    if (dir_ok and bop.left == .identifier) {
+                        var_name = bop.left.identifier;
+                        // N-137's counterpart for the BOUND: a non-literal
+                        // bound is not unrollable, and leaving
+                        // `bound_is_const` at its `true` default silently
+                        // collapsed it to a 0-iteration loop here.
+                        if (loopStartLiteral(bop.right)) |v| {
+                            bound = v;
+                            bound_is_const = true;
+                            representable = true;
+                        }
                     }
                 },
                 else => {},
             }
         }
 
-        // Drop a trailing `var_name = var_name + K` so the for_stmt's implicit
-        // iteration matches TypeScript's native `for (let i = 0n; i < N; i++)`.
+        // Drop the trailing `var_name = var_name ± 1` and carry it as the
+        // loop's update clause for validate.zig to check.
+        //
+        // N-061: the trimmed statement used to vanish here, so `i = i + 2`
+        // produced bytes identical to `i = i + 1`.
         var trimmed_body = body;
-        if (body.len > 0) {
+        var update: ?*const Statement = null;
+        var step_ok = false;
+        if (representable and body.len > 0) {
             const last = body[body.len - 1];
             if (last == .assign) {
                 const a = last.assign;
-                if (std.mem.eql(u8, a.target, var_name)) {
-                    if (a.value == .binary_op) {
-                        const bop = a.value.binary_op;
-                        if (bop.op == .add and bop.left == .identifier and
-                            std.mem.eql(u8, bop.left.identifier, var_name))
-                        {
-                            trimmed_body = body[0 .. body.len - 1];
+                if (std.mem.eql(u8, a.target, var_name) and a.value == .binary_op) {
+                    const bop = a.value.binary_op;
+                    const isIter = struct {
+                        fn f(e: types.Expression, name: []const u8) bool {
+                            return e == .identifier and std.mem.eql(u8, e.identifier, name);
                         }
+                    }.f;
+                    const isOne = struct {
+                        fn f(e: types.Expression) bool {
+                            return e == .literal_int and e.literal_int == 1;
+                        }
+                    }.f;
+                    // Accept `i + 1`, `1 + i` (addition only) and `i - 1`,
+                    // and only when the step's SIGN agrees with the
+                    // comparison direction.
+                    const unit_step = switch (bop.op) {
+                        .add => !descending and
+                            ((isIter(bop.left, var_name) and isOne(bop.right)) or
+                                (isOne(bop.left) and isIter(bop.right, var_name))),
+                        .sub => descending and
+                            isIter(bop.left, var_name) and isOne(bop.right),
+                        else => false,
+                    };
+                    if (unit_step) {
+                        trimmed_body = body[0 .. body.len - 1];
+                        update = &body[body.len - 1];
+                        step_ok = true;
                     }
                 }
             }
         }
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = 0, .bound = bound, .body = trimmed_body, .source_loc = loc } };
+        if (!representable or !step_ok) {
+            self.addError(move_while_shape_diagnostic);
+        }
+
+        return .{ .for_stmt = .{
+            .var_name = var_name,
+            .init_value = 0,
+            .bound = bound,
+            .bound_is_const = bound_is_const,
+            .descending = descending,
+            .inclusive = inclusive,
+            .update = update,
+            .body = trimmed_body,
+            .source_loc = loc,
+        } };
     }
 
     fn parseMoveLoop(self: *Parser) ?Statement {
@@ -1472,6 +1577,28 @@ const Parser = struct {
             },
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value, .source_loc = loc, .target_is_property = is_prop } };
+            },
+            .index_access => |ia| {
+                // `this.arr[idx] = value` — carry the full index-access target
+                // on the Assign so `expand_fixed_arrays.zig` can rewrite it
+                // into leaf or dispatch form. `target` keeps the base property
+                // name so debug output stays meaningful. Without this arm the
+                // statement fell through to `else`, became
+                // `Assign{ target = "unknown", index_target = null }`, and the
+                // element write was silently dropped (N-059). Every other
+                // surface parser in this tier already carried it.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                    .source_loc = loc,
+                    .target_is_property = is_prop,
+                } };
             },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value, .source_loc = loc, .target_is_property = is_prop } };
@@ -1829,8 +1956,11 @@ const Parser = struct {
                     break :blk Expression{ .literal_int = val };
                 } else |_| {
                     // Oversize decimal literal — carry as `literal_bigint`.
-                    if (isAllAsciiDigits(stripped)) {
-                        const decimal = self.allocator.dupe(u8, stripped) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
@@ -2275,4 +2405,26 @@ test "parse error: no module found" {
     const r = parseMove(arena.allocator(), "const x = 5;", "bad.runar.move");
     try std.testing.expect(r.errors.len > 0);
     try std.testing.expect(r.contract == null);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// zero default, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

@@ -283,6 +283,13 @@ function encodeArgument(arg: unknown, param: ABIParam): Uint8Array {
     case 'Sha256':
     case 'Ripemd160':
     case 'Addr':
+    // Point / P256Point / P384Point are fixed-width ByteString subtypes and
+    // push exactly like one. They were simply missing here, so no test could
+    // hand a compiled script a curve point at all — which is why R-053's
+    // optimizer-mode disagreement had no executable witness.
+    case 'Point':
+    case 'P256Point':
+    case 'P384Point':
     case 'SigHashPreimage': {
       const hex = arg as string;
       const bytes = hexToBytes(hex);

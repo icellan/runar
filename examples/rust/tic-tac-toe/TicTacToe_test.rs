@@ -1,160 +1,28 @@
-// Contract logic tests for TicTacToe.
-//
-// Uses inline struct definition because the contract has property initializers
-// via init() that must be called explicitly in native Rust tests.
+//! Native-Rust tests for `TicTacToe.runar.rs`.
+//!
+//! This file used to define an inline MIRROR of the contract — a hand-copied
+//! struct and impl — because the contract itself was not valid Rust: its
+//! `init()` assigned bare `&str` literals to `ByteString` / `PubKey` fields,
+//! both of which are `Vec<u8>` in this tier. `to_byte_string(...)` is the only
+//! spelling that is both valid Rust and valid Rúnar, and until the validator
+//! accepted it in a property INITIALIZER (it already folded in every
+//! expression position) it was refused with "initializer must be a literal
+//! value".
+//!
+//! The mirror was not merely redundant, it was WRONG: it initialized
+//! `p2pkh_prefix` to `b"1976a914".to_vec()` — the eight ASCII bytes of the
+//! string — where the contract's `to_byte_string("1976a914")` denotes the four
+//! bytes `19 76 a9 14`. Every payout assertion below now runs against the
+//! contract's real bytes.
+//!
+//! The contract is `#[path]`-included, so these tests execute the SHIPPED
+//! code. An edit to `TicTacToe.runar.rs` now fails this file.
 
+#[path = "TicTacToe.runar.rs"]
+mod contract;
+
+use contract::TicTacToe;
 use runar::prelude::*;
-
-// ---------------------------------------------------------------------------
-// Inline struct and methods (mirrors the contract but usable in tests)
-// ---------------------------------------------------------------------------
-
-struct TicTacToe {
-    player_x: PubKey,
-    #[allow(dead_code)]
-    bet_amount: Bigint,
-    #[allow(dead_code)]
-    p2pkh_prefix: ByteString,
-    #[allow(dead_code)]
-    p2pkh_suffix: ByteString,
-    player_o: PubKey,
-    c0: Bigint,
-    c1: Bigint,
-    c2: Bigint,
-    c3: Bigint,
-    c4: Bigint,
-    c5: Bigint,
-    c6: Bigint,
-    c7: Bigint,
-    c8: Bigint,
-    turn: Bigint,
-    status: Bigint,
-    #[allow(dead_code)]
-    tx_preimage: SigHashPreimage,
-}
-
-impl TicTacToe {
-    fn join(&mut self, opponent_pk: PubKey, sig: &Sig) {
-        assert!(self.status == 0);
-        assert!(check_sig(sig, &opponent_pk));
-        self.player_o = opponent_pk;
-        self.status = 1;
-        self.turn = 1;
-    }
-
-    fn move_piece(&mut self, position: Bigint, player: PubKey, sig: &Sig) {
-        assert!(self.status == 1);
-        assert!(check_sig(sig, &player));
-        self.assert_correct_player(player);
-        self.place_move(position);
-        if self.turn == 1 {
-            self.turn = 2;
-        } else {
-            self.turn = 1;
-        }
-    }
-
-    fn assert_correct_player(&self, player: PubKey) {
-        if self.turn == 1 {
-            assert!(player == self.player_x);
-        } else {
-            assert!(player == self.player_o);
-        }
-    }
-
-    fn assert_cell_empty(&self, position: Bigint) {
-        if position == 0 { assert!(self.c0 == 0); }
-        else if position == 1 { assert!(self.c1 == 0); }
-        else if position == 2 { assert!(self.c2 == 0); }
-        else if position == 3 { assert!(self.c3 == 0); }
-        else if position == 4 { assert!(self.c4 == 0); }
-        else if position == 5 { assert!(self.c5 == 0); }
-        else if position == 6 { assert!(self.c6 == 0); }
-        else if position == 7 { assert!(self.c7 == 0); }
-        else if position == 8 { assert!(self.c8 == 0); }
-        else { assert!(false); }
-    }
-
-    fn place_move(&mut self, position: Bigint) {
-        self.assert_cell_empty(position);
-        if position == 0 { self.c0 = self.turn; }
-        else if position == 1 { self.c1 = self.turn; }
-        else if position == 2 { self.c2 = self.turn; }
-        else if position == 3 { self.c3 = self.turn; }
-        else if position == 4 { self.c4 = self.turn; }
-        else if position == 5 { self.c5 = self.turn; }
-        else if position == 6 { self.c6 = self.turn; }
-        else if position == 7 { self.c7 = self.turn; }
-        else if position == 8 { self.c8 = self.turn; }
-        else { assert!(false); }
-    }
-
-    fn get_cell_or_override(&self, cell_index: Bigint, override_pos: Bigint, override_val: Bigint) -> Bigint {
-        if cell_index == override_pos { return override_val; }
-        if cell_index == 0 { return self.c0; }
-        else if cell_index == 1 { return self.c1; }
-        else if cell_index == 2 { return self.c2; }
-        else if cell_index == 3 { return self.c3; }
-        else if cell_index == 4 { return self.c4; }
-        else if cell_index == 5 { return self.c5; }
-        else if cell_index == 6 { return self.c6; }
-        else if cell_index == 7 { return self.c7; }
-        else { return self.c8; }
-    }
-
-    fn check_win_after_move(&self, position: Bigint, player: Bigint) -> bool {
-        let v0 = self.get_cell_or_override(0, position, player);
-        let v1 = self.get_cell_or_override(1, position, player);
-        let v2 = self.get_cell_or_override(2, position, player);
-        let v3 = self.get_cell_or_override(3, position, player);
-        let v4 = self.get_cell_or_override(4, position, player);
-        let v5 = self.get_cell_or_override(5, position, player);
-        let v6 = self.get_cell_or_override(6, position, player);
-        let v7 = self.get_cell_or_override(7, position, player);
-        let v8 = self.get_cell_or_override(8, position, player);
-
-        if v0 == player && v1 == player && v2 == player { return true; }
-        if v3 == player && v4 == player && v5 == player { return true; }
-        if v6 == player && v7 == player && v8 == player { return true; }
-        if v0 == player && v3 == player && v6 == player { return true; }
-        if v1 == player && v4 == player && v7 == player { return true; }
-        if v2 == player && v5 == player && v8 == player { return true; }
-        if v0 == player && v4 == player && v8 == player { return true; }
-        if v2 == player && v4 == player && v6 == player { return true; }
-        return false;
-    }
-
-    fn count_occupied(&self) -> Bigint {
-        let mut count: Bigint = 0;
-        if self.c0 != 0 { count += 1; }
-        if self.c1 != 0 { count += 1; }
-        if self.c2 != 0 { count += 1; }
-        if self.c3 != 0 { count += 1; }
-        if self.c4 != 0 { count += 1; }
-        if self.c5 != 0 { count += 1; }
-        if self.c6 != 0 { count += 1; }
-        if self.c7 != 0 { count += 1; }
-        if self.c8 != 0 { count += 1; }
-        count
-    }
-
-    fn move_and_win(&mut self, position: Bigint, player: PubKey, sig: &Sig, change_pkh: ByteString, change_amount: Bigint) {
-        assert!(self.status == 1);
-        assert!(check_sig(sig, &player));
-        self.assert_correct_player(player.clone());
-        self.assert_cell_empty(position);
-        assert!(self.check_win_after_move(position, self.turn));
-
-        let total_payout = self.bet_amount * 2;
-        let payout = cat(&cat(&cat(&num2bin(&total_payout, 8), &self.p2pkh_prefix), &hash160(&player)), &self.p2pkh_suffix);
-        if change_amount > 0 {
-            let change = cat(&cat(&cat(&num2bin(&change_amount, 8), &self.p2pkh_prefix), &change_pkh), &self.p2pkh_suffix);
-            assert!(hash256(&cat(&payout, &change)) == extract_output_hash(&self.tx_preimage));
-        } else {
-            assert!(hash256(&payout) == extract_output_hash(&self.tx_preimage));
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -166,20 +34,44 @@ fn player_x_sig() -> Sig { ALICE.sign_test_message() }
 fn player_o_sig() -> Sig { BOB.sign_test_message() }
 fn zero_pk() -> PubKey { vec![0u8; 33] }
 
+/// Build a game the way the contract does: the constructor supplies only the
+/// readonly `player_x` / `bet_amount`, and `init()` — the contract's OWN
+/// property initializers — supplies everything else. Nothing here restates a
+/// default the contract already declares, so a changed initializer changes
+/// these tests.
 fn new_game() -> TicTacToe {
-    TicTacToe {
+    let mut g = TicTacToe {
         player_x: player_x(),
         bet_amount: 1000,
-        p2pkh_prefix: b"1976a914".to_vec(),
-        p2pkh_suffix: b"88ac".to_vec(),
-        player_o: zero_pk(),
-        c0: 0, c1: 0, c2: 0,
-        c3: 0, c4: 0, c5: 0,
-        c6: 0, c7: 0, c8: 0,
-        turn: 0,
-        status: 0,
+        // Every field below is overwritten by `init()`; these are placeholders
+        // that the struct literal requires, deliberately NOT the real defaults
+        // so that a missing `init()` call fails loudly rather than passing.
+        p2pkh_prefix: Vec::new(),
+        p2pkh_suffix: Vec::new(),
+        player_o: Vec::new(),
+        c0: -1, c1: -1, c2: -1,
+        c3: -1, c4: -1, c5: -1,
+        c6: -1, c7: -1, c8: -1,
+        turn: -1,
+        status: -1,
         tx_preimage: mock_preimage(),
-    }
+    };
+    g.init();
+    g
+}
+
+/// The contract's initializers are the bytes the payout assertions hash, so
+/// pin them here rather than only exercising them indirectly. The old inline
+/// mirror had `b"1976a914".to_vec()` — the ASCII of the string, eight bytes —
+/// which is NOT what `to_byte_string("1976a914")` denotes.
+#[test]
+fn test_init_decodes_bytestring_initializers() {
+    let g = new_game();
+    assert_eq!(g.p2pkh_prefix, vec![0x19, 0x76, 0xa9, 0x14]);
+    assert_eq!(g.p2pkh_suffix, vec![0x88, 0xac]);
+    assert_eq!(g.player_o, zero_pk());
+    assert_eq!(g.turn, 0);
+    assert_eq!(g.status, 0);
 }
 
 fn playing_game() -> TicTacToe {
@@ -296,13 +188,51 @@ fn test_full_game_join_and_moves() {
     game.move_and_win(2, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Win / tie detection.
+//
+// These used to call the PRIVATE helpers `check_win_after_move` and
+// `count_occupied` directly — possible only because this file defined its own
+// mirror of the contract. Rust's real visibility rules reject that on the
+// shipped code, and rightly: those helpers are `fn`, not `pub fn`, so in Rúnar
+// they are inlined into the spending script and are not entry points. Each
+// test now drives the PUBLIC method that consumes the helper, so what is
+// exercised is the path a spender actually takes.
+// ---------------------------------------------------------------------------
+
+/// Set `tx_preimage` so `extract_output_hash` returns the hash of the winning
+/// payout for `winner`, satisfying the covenant check in `move_and_win`.
+fn arm_win_payout(game: &mut TicTacToe, winner: &PubKey) {
+    let total_payout = game.bet_amount * 2;
+    let payout = cat(
+        &cat(&num2bin(&total_payout, 8), &game.p2pkh_prefix),
+        &cat(&hash160(winner), &game.p2pkh_suffix),
+    );
+    game.tx_preimage = hash256(&payout);
+}
+
+/// Set `tx_preimage` so `extract_output_hash` returns the hash of the equal
+/// split both players receive on a tie, satisfying `move_and_tie`.
+fn arm_tie_payout(game: &mut TicTacToe) {
+    let out1 = cat(
+        &cat(&num2bin(&game.bet_amount, 8), &game.p2pkh_prefix),
+        &cat(&hash160(&game.player_x), &game.p2pkh_suffix),
+    );
+    let out2 = cat(
+        &cat(&num2bin(&game.bet_amount, 8), &game.p2pkh_prefix),
+        &cat(&hash160(&game.player_o), &game.p2pkh_suffix),
+    );
+    game.tx_preimage = hash256(&cat(&out1, &out2));
+}
+
 #[test]
 fn test_check_win_row() {
     let mut game = playing_game();
     game.c0 = 1;
     game.c1 = 1;
-    // Position 2 with player=1 completes top row
-    assert!(game.check_win_after_move(2, 1));
+    // Position 2 with player X (turn 1) completes the top row.
+    arm_win_payout(&mut game, &player_x());
+    game.move_and_win(2, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
 #[test]
@@ -310,8 +240,9 @@ fn test_check_win_column() {
     let mut game = playing_game();
     game.c0 = 1;
     game.c3 = 1;
-    // Position 6 with player=1 completes left column
-    assert!(game.check_win_after_move(6, 1));
+    // Position 6 with player X completes the left column.
+    arm_win_payout(&mut game, &player_x());
+    game.move_and_win(6, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
 #[test]
@@ -319,36 +250,58 @@ fn test_check_win_diagonal() {
     let mut game = playing_game();
     game.c0 = 1;
     game.c4 = 1;
-    // Position 8 with player=1 completes main diagonal
-    assert!(game.check_win_after_move(8, 1));
+    // Position 8 with player X completes the main diagonal.
+    arm_win_payout(&mut game, &player_x());
+    game.move_and_win(8, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
 #[test]
 fn test_check_win_anti_diagonal() {
     let mut game = playing_game();
+    game.turn = 2;
     game.c2 = 2;
     game.c4 = 2;
-    // Position 6 with player=2 completes anti-diagonal
-    assert!(game.check_win_after_move(6, 2));
+    // Position 6 with player O (turn 2) completes the anti-diagonal.
+    arm_win_payout(&mut game, &player_o());
+    game.move_and_win(6, player_o(), &player_o_sig(), b"00".to_vec(), 0);
 }
 
 #[test]
+#[should_panic]
 fn test_check_no_win() {
     let mut game = playing_game();
     game.c0 = 1;
     game.c1 = 2;
-    // Position 2 with player=1 does not complete any line
-    assert!(!game.check_win_after_move(2, 1));
+    // Position 2 with player X completes no line, so `move_and_win`'s
+    // `check_win_after_move` assert must reject the spend. The payout is armed
+    // so that a PASS here could only mean the win check itself failed to fire.
+    arm_win_payout(&mut game, &player_x());
+    game.move_and_win(2, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
 #[test]
-fn test_count_occupied() {
+fn test_tie_requires_eight_occupied_cells() {
+    // `move_and_tie` asserts `count_occupied() == 8` — the move about to be
+    // played is the ninth and last. Board below has 8 filled and no line.
     let mut game = playing_game();
-    assert_eq!(game.count_occupied(), 0);
-    game.c0 = 1;
-    game.c4 = 2;
-    game.c8 = 1;
-    assert_eq!(game.count_occupied(), 3);
+    game.c0 = 1; game.c1 = 2; game.c2 = 1;
+    game.c3 = 1; game.c4 = 2; game.c5 = 2;
+    game.c6 = 2; game.c7 = 1;
+    arm_tie_payout(&mut game);
+    game.move_and_tie(8, player_x(), &player_x_sig(), b"00".to_vec(), 0);
+}
+
+#[test]
+#[should_panic]
+fn test_tie_rejects_board_with_a_free_cell() {
+    // Only 7 occupied — `count_occupied() == 8` must reject. Payout armed, so
+    // the rejection can only come from the cell count.
+    let mut game = playing_game();
+    game.c0 = 1; game.c1 = 2; game.c2 = 1;
+    game.c3 = 1; game.c4 = 2; game.c5 = 2;
+    game.c6 = 2;
+    arm_tie_payout(&mut game);
+    game.move_and_tie(7, player_x(), &player_x_sig(), b"00".to_vec(), 0);
 }
 
 #[test]

@@ -51,30 +51,23 @@ func loadP2KBVectors(t *testing.T) p2KBVectorFile {
 // ---------------------------------------------------------------------------
 
 // This contract verifies a depth-1 Poseidon2 Merkle proof. The constructor
-// stores the expected root (8 elements). The verify method takes 8 leaf
-// elements + 8 sibling elements + index, computes the Merkle root using
-// merkleRootPoseidon2KB, and asserts each component matches the expected root.
+// stores the expected root as ONE packed integer; the verify method takes 8
+// leaf elements + 8 sibling elements + index, computes the Merkle root with
+// merkleRootPoseidon2KB and asserts it equals that packed value.
 //
-// merkleRootPoseidon2KB(leaf0..7, sib0..7, index, depth) returns the root
-// components — the function is called 8 times with different result bindings
-// to get all 8 components.
+// merkleRootPoseidon2KB returns the base-2^32 packing of all EIGHT KoalaBear
+// root elements (root_7 most significant) — see codegen EmitPoseidon2RootPack.
+// The packing is injective, so this single equality authenticates the whole
+// root. Before CL-BUG-099 was fixed the builtin returned root[7] alone and
+// this contract compared against a single ~31-bit field element.
 const p2kbMerkleDepth1Source = `
 import { SmartContract, assert, merkleRootPoseidon2KB } from 'runar-lang';
 
 class P2KBMerkleD1 extends SmartContract {
-  readonly r0: bigint;
-  readonly r1: bigint;
-  readonly r2: bigint;
-  readonly r3: bigint;
-  readonly r4: bigint;
-  readonly r5: bigint;
-  readonly r6: bigint;
-  readonly r7: bigint;
-  constructor(r0: bigint, r1: bigint, r2: bigint, r3: bigint,
-              r4: bigint, r5: bigint, r6: bigint, r7: bigint) {
-    super(r0, r1, r2, r3, r4, r5, r6, r7);
-    this.r0 = r0; this.r1 = r1; this.r2 = r2; this.r3 = r3;
-    this.r4 = r4; this.r5 = r5; this.r6 = r6; this.r7 = r7;
+  readonly packedRoot: bigint;
+  constructor(packedRoot: bigint) {
+    super(packedRoot);
+    this.packedRoot = packedRoot;
   }
   public verify(l0: bigint, l1: bigint, l2: bigint, l3: bigint,
                 l4: bigint, l5: bigint, l6: bigint, l7: bigint,
@@ -84,10 +77,27 @@ class P2KBMerkleD1 extends SmartContract {
     const root = merkleRootPoseidon2KB(l0, l1, l2, l3, l4, l5, l6, l7,
                                         s0, s1, s2, s3, s4, s5, s6, s7,
                                         idx, 1n);
-    assert(root === this.r7);
+    assert(root === this.packedRoot);
   }
 }
 `
+
+// packPoseidon2KBRoot mirrors codegen EmitPoseidon2RootPack: base-2^32
+// positional packing of the 8 KoalaBear root elements, root[7] most
+// significant. Every element is < p = 2^31-2^24+1 < 2^32, so the packing is
+// injective — two roots pack equal iff all eight elements are equal.
+func packPoseidon2KBRoot(root []int64) *big.Int {
+	shift := new(big.Int).Lsh(big.NewInt(1), 32)
+	acc := big.NewInt(0)
+	for i := 7; i >= 0; i-- {
+		acc.Mul(acc, shift)
+		acc.Add(acc, big.NewInt(root[i]))
+	}
+	return acc
+}
+
+// koalaBearP is the KoalaBear prime, 2^31 - 2^24 + 1.
+const koalaBearP = int64(2130706433)
 
 // TestP2KB_MerkleDepth1_OnChain deploys a Poseidon2 Merkle verification contract
 // on regtest and verifies compress vectors by running them as depth-1 Merkle proofs.
@@ -138,10 +148,7 @@ func TestP2KB_MerkleDepth1_OnChain(t *testing.T) {
 			// For a depth-1 Merkle tree with index=0: root = compress(leaf=left, sibling=right)
 			// The expected root is v.Expected (from the Plonky3 reference)
 			contract := runar.NewRunarContract(artifact, []interface{}{
-				big.NewInt(v.Expected[0]), big.NewInt(v.Expected[1]),
-				big.NewInt(v.Expected[2]), big.NewInt(v.Expected[3]),
-				big.NewInt(v.Expected[4]), big.NewInt(v.Expected[5]),
-				big.NewInt(v.Expected[6]), big.NewInt(v.Expected[7]),
+				packPoseidon2KBRoot(v.Expected),
 			})
 
 			_, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 100000})
@@ -175,7 +182,15 @@ func TestP2KB_MerkleDepth1_OnChain(t *testing.T) {
 }
 
 // TestP2KB_MerkleDepth1_WrongRoot_Rejected verifies that a wrong expected root
-// is rejected by the on-chain Poseidon2 Merkle verification.
+// is rejected by the on-chain Poseidon2 Merkle verification — for EVERY ONE of
+// the eight KoalaBear limbs of the root, individually.
+//
+// R-056 / CL-BUG-099: this test used to perturb root[7] and nothing else —
+// which happened to be the single limb the truncated codegen actually looked
+// at. It passed while leaving the other seven limbs completely unexercised, so
+// it proved nothing about the 7-of-8 gap. Perturbing each limb in turn is what
+// makes the test load-bearing: a future change that re-narrows the check to any
+// subset of the root fails at least one of the eight sub-cases.
 func TestP2KB_MerkleDepth1_WrongRoot_Rejected(t *testing.T) {
 	vf := loadP2KBVectors(t)
 
@@ -183,10 +198,11 @@ func TestP2KB_MerkleDepth1_WrongRoot_Rejected(t *testing.T) {
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err := helpers.FundWallet(wallet, 1.0)
+	utxos, err := helpers.SplitFund(wallet, 10, 500000)
 	if err != nil {
-		t.Fatalf("fund: %v", err)
+		t.Fatalf("split fund: %v", err)
 	}
+	t.Logf("split-funded %d UTXOs", len(utxos))
 
 	provider := helpers.NewBatchRPCProvider()
 	defer provider.MineAll()
@@ -195,43 +211,54 @@ func TestP2KB_MerkleDepth1_WrongRoot_Rejected(t *testing.T) {
 		t.Fatalf("signer: %v", errS)
 	}
 
-	// Find first compress vector
-	for _, v := range vf.Vectors {
-		if v.Op != "compress" {
-			continue
+	// First compress vector: root = compress(left, right) at depth 1, index 0.
+	var vec *p2KBVector
+	for i := range vf.Vectors {
+		if vf.Vectors[i].Op == "compress" {
+			vec = &vf.Vectors[i]
+			break
 		}
+	}
+	if vec == nil {
+		t.Fatal("no compress vectors found")
+	}
 
-		// Deploy with WRONG expected root (tamper with element 7, which is the
-		// element checked by the contract — merkleRootPoseidon2KB returns the
-		// top stack element, which is root[7])
-		wrongRoot7 := (v.Expected[7] + 1) % 2130706433
-		contract := runar.NewRunarContract(artifact, []interface{}{
-			big.NewInt(v.Expected[0]), big.NewInt(v.Expected[1]),
-			big.NewInt(v.Expected[2]), big.NewInt(v.Expected[3]),
-			big.NewInt(v.Expected[4]), big.NewInt(v.Expected[5]),
-			big.NewInt(v.Expected[6]), big.NewInt(wrongRoot7),
-		})
-
-		_, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 100000})
-		if err != nil {
-			t.Fatalf("deploy: %v", err)
-		}
-
+	spendArgs := func() []interface{} {
 		args := make([]interface{}, 17)
 		for i := 0; i < 8; i++ {
-			args[i] = big.NewInt(v.Left[i])
+			args[i] = big.NewInt(vec.Left[i])
 		}
 		for i := 0; i < 8; i++ {
-			args[8+i] = big.NewInt(v.Right[i])
+			args[8+i] = big.NewInt(vec.Right[i])
 		}
-		args[16] = big.NewInt(0)
-
-		_, _, err = contract.Call("verify", args, provider, signer, nil)
-		if err == nil {
-			t.Fatal("SECURITY FAILURE: wrong Merkle root was accepted!")
-		}
-		t.Logf("PASS: wrong root correctly rejected: %v", err)
-		return
+		args[16] = big.NewInt(0) // index=0
+		return args
 	}
-	t.Fatal("no compress vectors found")
+
+	for limb := 0; limb < 8; limb++ {
+		limb := limb
+		t.Run(fmt.Sprintf("tampered_limb_%d", limb), func(t *testing.T) {
+			// The honest root with exactly ONE limb perturbed. Under the packed
+			// encoding this changes the single value the contract compares, and
+			// the spend must be rejected by the node.
+			tampered := append([]int64(nil), vec.Expected...)
+			tampered[limb] = (tampered[limb] + 1) % koalaBearP
+
+			contract := runar.NewRunarContract(artifact, []interface{}{
+				packPoseidon2KBRoot(tampered),
+			})
+
+			if _, _, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 100000}); err != nil {
+				t.Fatalf("deploy: %v", err)
+			}
+
+			_, _, err := contract.Call("verify", spendArgs(), provider, signer, nil)
+			if err == nil {
+				t.Fatalf("SECURITY FAILURE: an expected root differing from the true root "+
+					"ONLY in limb %d was ACCEPTED on-chain — limb %d is not authenticated "+
+					"(root truncation, CL-BUG-099)", limb, limb)
+			}
+			t.Logf("limb %d perturbation correctly rejected: %v", limb, err)
+		})
+	}
 }

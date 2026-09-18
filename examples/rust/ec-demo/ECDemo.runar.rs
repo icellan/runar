@@ -57,7 +57,7 @@ impl ECDemo {
     ///
     /// Use cases: comparing public key x-coordinates, Schnorr signature
     /// verification (which only uses the x-coordinate).
-    pub fn check_x(&self, expected_x: Bigint) {
+    pub fn check_x(&self, expected_x: BigintBig) {
         assert!(ec_point_x(&self.pt) == expected_x);
     }
 
@@ -68,7 +68,7 @@ impl ECDemo {
     /// unsigned y-coordinate) and converts to a script number.
     ///
     /// Use cases: full point comparison, parity checks for compressed encoding.
-    pub fn check_y(&self, expected_y: Bigint) {
+    pub fn check_y(&self, expected_y: BigintBig) {
         assert!(ec_point_y(&self.pt) == expected_y);
     }
 
@@ -80,7 +80,7 @@ impl ECDemo {
     ///
     /// Use cases: reconstructing points from stored coordinates, building
     /// points from external data.
-    pub fn check_make_point(&self, x: Bigint, y: Bigint, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_make_point(&self, x: BigintBig, y: BigintBig, expected_x: BigintBig, expected_y: BigintBig) {
         let p = ec_make_point(x, y);
         assert!(ec_point_x(&p) == expected_x);
         assert!(ec_point_y(&p) == expected_y);
@@ -118,7 +118,7 @@ impl ECDemo {
     ///
     /// Use cases: combining public keys (key aggregation), Schnorr multi-sig,
     /// Pedersen commitments (C = v*G + r*H).
-    pub fn check_add(&self, other: &Point, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_add(&self, other: &Point, expected_x: BigintBig, expected_y: BigintBig) {
         let result = ec_add(&self.pt, other);
         assert!(ec_point_x(&result) == expected_x);
         assert!(ec_point_y(&result) == expected_y);
@@ -135,7 +135,7 @@ impl ECDemo {
     ///
     /// Use cases: public key derivation (P = k*G), Diffie-Hellman shared
     /// secrets, BIP-32 child key derivation.
-    pub fn check_mul(&self, scalar: Bigint, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_mul(&self, scalar: Bigint, expected_x: BigintBig, expected_y: BigintBig) {
         let result = ec_mul(&self.pt, scalar);
         assert!(ec_point_x(&result) == expected_x);
         assert!(ec_point_y(&result) == expected_y);
@@ -150,7 +150,7 @@ impl ECDemo {
     /// Use cases: deriving a public key from a private key (the fundamental
     /// operation in elliptic curve cryptography), generating nonce points
     /// for Schnorr proofs (R = r*G).
-    pub fn check_mul_gen(&self, scalar: Bigint, expected_x: Bigint, expected_y: Bigint) {
+    pub fn check_mul_gen(&self, scalar: Bigint, expected_x: BigintBig, expected_y: BigintBig) {
         let result = ec_mul_gen(scalar);
         assert!(ec_point_x(&result) == expected_x);
         assert!(ec_point_y(&result) == expected_y);
@@ -167,7 +167,7 @@ impl ECDemo {
     ///
     /// Use cases: subtraction of points (A - B = A + (-B)), cancellation
     /// checks in zero-knowledge proofs.
-    pub fn check_negate(&self, expected_neg_y: Bigint) {
+    pub fn check_negate(&self, expected_neg_y: BigintBig) {
         let neg = ec_negate(&self.pt);
         assert!(ec_point_y(&neg) == expected_neg_y);
     }

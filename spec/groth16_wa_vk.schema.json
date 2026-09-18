@@ -60,19 +60,21 @@
       "items": {
         "$ref": "#/$defs/G1Point"
       },
-      "description": "Public-input commitment basis. Length MUST equal numPubInputs + 1: ic[0] is the constant term, ic[j+1] is multiplied by public input j. The compiler does NOT bake IC into the script; IC is used only by the off-chain witness generator to compute prepared_inputs via multi-scalar multiplication. Any hardcoding of IC would defeat the witness-assisted design."
+      "description": "Public-input commitment basis. Length MUST equal numPubInputs + 1: ic[0] is the constant term, ic[j+1] is multiplied by public input j. IC is used by the off-chain witness generator to compute prepared_inputs via multi-scalar multiplication, AND — in the MSM-binding verifier variant, which is what `runarc groth16-wa` emits — it is baked into the script so the accumulator IC[0] + Σ pub_j·IC[j+1] is recomputed on chain and required to equal the prover-supplied prepared_inputs. That binding is what ties the proof to a statement rather than to whatever prepared_inputs the spender chose; the non-MSM raw variant, whose only check on prepared_inputs is an on-curve test, is unsound for that reason and is not the default."
     }
   },
   "$defs": {
     "DecimalBigInt": {
       "type": "string",
       "pattern": "^[0-9]+$",
-      "description": "Non-negative big integer encoded as a base-10 string."
+      "maxLength": 77,
+      "description": "A single Fp coordinate: non-negative big integer encoded as a base-10 string, CANONICAL — it MUST be < p, the BN254 base field modulus 21888242871839275222246405745257275088696311157297823662689037894645226208583. maxLength 77 is only a coarse structural bound (p has 77 digits); the exact `< p` test cannot be expressed in JSON Schema and is enforced by the loader (bn254witness.VerifyingKey.Validate). A non-canonical value such as x+p is NOT equivalent: the curve checks would silently reduce it mod p while the compiler bakes the raw value into the script as pushdata."
     },
     "G1Point": {
       "type": "object",
       "required": ["x", "y"],
       "additionalProperties": true,
+      "description": "A point on the BN254 G1 curve y² = x³ + 3 over Fp, affine, with the point at infinity encoded as (0, 0). JSON Schema cannot express curve membership; these are enforced by bn254witness.VerifyingKey.Validate at load: each coordinate canonical (< p), and the point on the curve. BN254 G1 has cofactor 1, so on-curve already implies membership of the prime-order (r) subgroup — no separate subgroup test is needed or performed. alphaG1 MUST NOT be the point at infinity (its pairing factor would be the identity, dropping the α·β term from the verification equation). An `ic` entry at infinity IS accepted: it is a public input with no effect on the equation, which is a warning sign but mathematically legal for an unused public-input wire.",
       "properties": {
         "x": {"$ref": "#/$defs/DecimalBigInt"},
         "y": {"$ref": "#/$defs/DecimalBigInt"},
@@ -86,6 +88,7 @@
       "type": "object",
       "required": ["x0", "x1", "y0", "y1"],
       "additionalProperties": true,
+      "description": "A point on the BN254 G2 twist curve y² = x³ + 3/(9+u) over Fp2, affine, with the point at infinity encoded as (0, 0, 0, 0). JSON Schema cannot express curve membership; these are enforced by bn254witness.VerifyingKey.Validate at load: each coordinate canonical (< p), the point NOT at infinity, the point on the twist curve, AND the point inside the prime-order (r) subgroup. Unlike G1, the twist has a large cofactor, so on-curve does NOT imply order r: an on-curve point of small order would admit a small-subgroup attack, and the subgroup test (gnark G2Affine.IsInSubGroup, the ψ-endomorphism test of eprint 2022/348 §3) is a real extra check, not a restatement of the on-curve one. A betaNegG2/gammaNegG2/deltaNegG2 at infinity makes its pairing factor the identity, silently deleting that term from e(A,B)·e(L,-γ)·e(C,-δ)·e(α,-β) = 1.",
       "properties": {
         "x0": {
           "$ref": "#/$defs/DecimalBigInt",

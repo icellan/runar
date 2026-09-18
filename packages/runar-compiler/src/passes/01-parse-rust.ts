@@ -29,11 +29,15 @@ import type {
   Statement,
   Expression,
   SourceLocation,
+  BinaryOp,
 } from '../ir/index.js';
 import type { ParseResult } from './01-parse.js';
+import { snakeToCamelCore } from './snake-to-camel.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
+import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -71,7 +75,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['self', 'self'],
 ]);
 
-function tokenize(source: string): RustToken[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): RustToken[] {
   const tokens: RustToken[] = [];
   let pos = 0;
   let line = 1;
@@ -194,7 +198,12 @@ function tokenize(source: string): RustToken[] {
       continue;
     }
 
-    // Skip unknown
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: l, column: c },
+    ));
     advance();
   }
 
@@ -207,7 +216,7 @@ function tokenize(source: string): RustToken[] {
 // ---------------------------------------------------------------------------
 
 function snakeToCamel(name: string): string {
-  return name.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+  return snakeToCamelCore(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +241,11 @@ const RUST_BUILTIN_MAP: Record<string, string> = {
   // Byte operations — fixups for digit-containing names
   num2bin: 'num2bin', num2Bin: 'num2bin',
   bin2num: 'bin2num', bin2Num: 'bin2num',
+  // The arbitrary-precision spellings from packages/runar-rs. `num2bin_big`
+  // camelises to `num2binBig`, which no builtin registry knows, so without
+  // these two entries the typechecker answers "unknown function" — a
+  // TYPECHECK diagnostic, which --parse-only cannot see. R-RustBigint.
+  num2binBig: 'num2bin', bin2numBig: 'bin2num',
   int2str: 'int2str', int2Str: 'int2str',
   // Byte operations — name divergence fixups
   reverseByteString: 'reverseBytes', reverseBytes: 'reverseBytes',
@@ -297,6 +311,11 @@ function mapRustBuiltin(name: string): string {
 const RUST_TYPE_MAP: Record<string, string> = {
   Bigint: 'bigint', Int: 'bigint', i64: 'bigint', u64: 'bigint',
   i128: 'bigint', u128: 'bigint', i256: 'bigint', u256: 'bigint',
+  // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half of a
+  // pair whose narrow half (`Bigint` = i64) REFUSES what it cannot represent.
+  // A different Rust runtime type, the same Script primitive: reaching for it
+  // must not change one emitted byte. R-RustBigint.
+  BigintBig: 'bigint',
   Bool: 'boolean', bool: 'boolean',
   ByteString: 'ByteString',
   PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
@@ -448,6 +467,7 @@ class RustParser extends ParserCore<RustToken> {
             kind: 'call_expr' as const,
             callee: { kind: 'identifier' as const, name: 'super' },
             args: uninitProps.map(p => ({ kind: 'identifier' as const, name: p.name })),
+            sourceLocation: loc,
           },
           sourceLocation: loc,
         },
@@ -831,6 +851,7 @@ class RustParser extends ParserCore<RustToken> {
           kind: 'call_expr',
           callee: { kind: 'identifier', name: 'assert' },
           args: [expr],
+          sourceLocation: location,
         },
         sourceLocation: location,
       };
@@ -970,15 +991,64 @@ class RustParser extends ParserCore<RustToken> {
     const loopVar = snakeToCamel(loopVarRaw);
     this.expect('in');
 
+    // Two loop headers, both of them real Rust that iterates exactly these
+    // values:
+    //
+    //   for i in a..b        -> a, a+1, … b-1   (ascending)
+    //   for i in (a..b).rev()-> b-1, b-2, … a   (DESCENDING)
+    //
+    // `.rev()` is what lets the Rust surface spell a countdown. A Rust range
+    // only ever ascends — `(5..2)` is empty — so `step = -1` was unreachable
+    // from this surface and no fixture could exercise it across all nine.
+    // `Iterator::rev` is the language's own reversal, and it reverses the
+    // half-open range: the descending loop starts at `b - 1` and ends at `a`
+    // INCLUSIVE, which is why the guard below is `>=` against `a` rather than
+    // `>` against something one lower.
+    const hasParen = this.current().type === '(';
+    if (hasParen) this.advance();
+
     // Parse range: start..end
-    const startExpr = this.parseExpression();
+    const rangeStart = this.parseExpression();
 
     // The '..' should have been consumed inside the expression parser if the
     // start is a literal, OR it might be the next token. We already lex '..'
     // as a single token. The expression parser does NOT handle '..', so it
     // will stop before consuming it.
     this.expect('..');
-    const endExpr = this.parseExpression();
+    const rangeEnd = this.parseExpression();
+
+    let descending = false;
+    if (hasParen) {
+      this.expect(')');
+      this.expect('.');
+      const method = this.expect('ident');
+      if (method.value !== 'rev') {
+        this.errors.push(makeDiagnostic(
+          `Unsupported range method '.${method.value}()' in for loop — only '.rev()' is supported`,
+          'error',
+          location,
+        ));
+      }
+      this.expect('(');
+      this.expect(')');
+      descending = true;
+    }
+
+    // `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs that
+    // start as a compile-time literal — it synthesizes iteration k as
+    // `start + k*step` — so fold the subtraction here when `b` is one, and
+    // otherwise hand the un-foldable expression straight through so ANF
+    // lowering raises its own "Cannot determine loop start" diagnostic rather
+    // than this parser inventing a second wording for the same rule.
+    let startExpr: Expression = rangeStart;
+    let endExpr: Expression = rangeEnd;
+    if (descending) {
+      const upper = literalIntValue(rangeEnd);
+      startExpr = upper === null
+        ? rangeEnd
+        : { kind: 'bigint_literal', value: upper - 1n };
+      endExpr = rangeStart;
+    }
 
     this.expect('{');
     const body: Statement[] = [];
@@ -997,17 +1067,23 @@ class RustParser extends ParserCore<RustToken> {
     };
     const condition = {
       kind: 'binary_expr' as const,
-      op: '<' as const,
+      op: (descending ? '>=' : '<') as BinaryOp,
       left: { kind: 'identifier' as const, name: loopVar },
       right: endExpr,
     };
     const update: Statement = {
       kind: 'expression_statement' as const,
-      expression: {
-        kind: 'increment_expr' as const,
-        operand: { kind: 'identifier' as const, name: loopVar },
-        prefix: false,
-      },
+      expression: descending
+        ? {
+          kind: 'decrement_expr' as const,
+          operand: { kind: 'identifier' as const, name: loopVar },
+          prefix: false,
+        }
+        : {
+          kind: 'increment_expr' as const,
+          operand: { kind: 'identifier' as const, name: loopVar },
+          prefix: false,
+        },
       sourceLocation: location,
     };
 
@@ -1036,6 +1112,9 @@ class RustParser extends ParserCore<RustToken> {
    */
   protected parsePostfixChain(expr: Expression, selfNames: Set<string>): Expression {
     while (true) {
+      // R-142: same locations the base ParserCore attaches — this override
+      // exists only for snake_case conversion and `.clone()` stripping.
+      const at = this.loc();
       if (this.current().type === '(') {
         // Function call
         this.advance();
@@ -1051,7 +1130,7 @@ class RustParser extends ParserCore<RustToken> {
           if (this.current().type === ',') this.advance();
         }
         this.expect(')');
-        expr = { kind: 'call_expr', callee: expr, args };
+        expr = { kind: 'call_expr', callee: expr, args, sourceLocation: at };
       } else if (this.current().type === '.') {
         this.advance();
         const rawProp = this.current().value;
@@ -1068,15 +1147,15 @@ class RustParser extends ParserCore<RustToken> {
 
         // self.property -> PropertyAccessExpr
         if (expr.kind === 'identifier' && selfNames.has(expr.name)) {
-          expr = { kind: 'property_access', property: prop };
+          expr = { kind: 'property_access', property: prop, sourceLocation: at };
         } else {
-          expr = { kind: 'member_expr', object: expr, property: prop };
+          expr = { kind: 'member_expr', object: expr, property: prop, sourceLocation: at };
         }
       } else if (this.current().type === '[') {
         this.advance();
         const index = this.parseExpression();
         this.expect(']');
-        expr = { kind: 'index_access', object: expr, index };
+        expr = { kind: 'index_access', object: expr, index, sourceLocation: at };
       } else {
         break;
       }
@@ -1085,17 +1164,18 @@ class RustParser extends ParserCore<RustToken> {
   }
 
   protected parseUnary(): Expression {
+    const at = this.loc();
     if (this.current().type === '!') {
       this.advance();
-      return { kind: 'unary_expr', op: '!', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '!', operand: this.parseUnary(), sourceLocation: at };
     }
     if (this.current().type === '-') {
       this.advance();
-      return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '-', operand: this.parseUnary(), sourceLocation: at };
     }
     if (this.current().type === '~') {
       this.advance();
-      return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
+      return { kind: 'unary_expr', op: '~', operand: this.parseUnary(), sourceLocation: at };
     }
     // Skip reference operator & in expression context
     if (this.current().type === '&') {
@@ -1174,9 +1254,16 @@ class RustParser extends ParserCore<RustToken> {
       return { kind: 'identifier', name };
     }
 
-    // Fallback
+    // Nothing in the Rust surface syntax can start an expression with this
+    // token. Report it instead of inventing an identifier named after it —
+    // a fabricated identifier turns a syntax error into a wrong program.
+    this.errors.push(makeDiagnostic(
+      `Unexpected token in expression: '${t.value || t.type}'`,
+      'error',
+      this.loc(),
+    ));
     this.advance();
-    return { kind: 'identifier', name: t.value };
+    return { kind: 'bigint_literal', value: 0n };
   }
 }
 
@@ -1184,9 +1271,29 @@ class RustParser extends ParserCore<RustToken> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * The integer value of a literal expression, or null when it is not one.
+ *
+ * A negative literal arrives as a unary minus over a positive one, so both
+ * shapes have to be walked — the same walk `extractBigIntValue` does in ANF
+ * lowering, for the same reason (N-138).
+ */
+function literalIntValue(expr: Expression): bigint | null {
+  if (expr.kind === 'bigint_literal') return expr.value;
+  if (expr.kind === 'unary_expr' && expr.op === '-') {
+    const inner = literalIntValue(expr.operand);
+    return inner === null ? null : -inner;
+  }
+  return null;
+}
+
 export function parseRustSource(source: string, fileName?: string): ParseResult {
+  // R-146: this function is exported from the package index, so the
+  // dispatcher's size guard has to be here too — see ./source-limits.ts.
+  assertSourceWithinLimits(source, 'parseRustSource');
   const file = fileName ?? 'contract.runar.rs';
-  const tokens = tokenize(source);
-  const parser = new RustParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new RustParser(tokens, file, errors);
   return parser.parse();
 }

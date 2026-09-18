@@ -15,7 +15,7 @@
 # are responsible for catching cross-tier regeneration drift.
 #
 # MAINTAINERS: re-stamp the baseline only on intentional size-change PRs.
-# Run `pnpm --filter runar-conformance script-size-check -- --update`
+# Run `npx tsx conformance/runner/script-size-check.ts --update`
 # inside the PR branch and justify the new numbers in the PR description
 # (e.g. "new peephole pass shaves 4% off math-demo and friends — net
 # bytes-saved across all 60 fixtures: X").
@@ -28,6 +28,15 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  # R-217: least privilege. These jobs check out, build, test and upload
+  # artifacts — `actions/upload-artifact` uses the artifact service, not the
+  # contents scope — so read is all they need. Without this block the workflow
+  # inherits the repository default, which on many repositories is read-write
+  # across contents, issues and packages: a compromised step in any job would
+  # then reach the whole repository rather than the job.
+  contents: read
 
 jobs:
   script-size-check:
@@ -42,6 +51,12 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Run script-size verifier
-        run: pnpm --filter runar-conformance run script-size-check
+        # NOT `pnpm --filter runar-conformance`: conformance/ is not a pnpm
+        # workspace member (pnpm-workspace.yaml lists packages/* and
+        # integration/ts only), so the filter matched no project, printed
+        # "No projects matched the filters" and exited 0 — this job was
+        # vacuously green. The checker resolves its own paths from
+        # import.meta.url, so it runs correctly from the repo root.
+        run: npx tsx conformance/runner/script-size-check.ts
       - name: Run script-size verifier tests
         run: npx vitest run conformance/runner/__tests__/script-size-check.test.ts

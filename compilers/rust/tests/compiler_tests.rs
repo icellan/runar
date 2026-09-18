@@ -986,8 +986,18 @@ fn test_source_compile_boolean_logic() {
             "expected {op} in ASM — `&&` / `||` must lower to branches"
         );
     }
+    // W3 / BoolBamboozle: the `boolean` parameter's ABI-domain gate legitimately
+    // contains an OP_BOOLOR, and the stack lowerer emits it before the method
+    // body — nothing to do with `&&` / `||`. Look at the body only, so this
+    // test keeps discriminating what it was written to discriminate.
+    const BOOLEAN_PARAM_GATE_ASM: &str =
+        "OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY ";
+    let body = artifact
+        .asm
+        .strip_prefix(BOOLEAN_PARAM_GATE_ASM)
+        .expect("expected the W3 boolean-param gate at the head of the ASM");
     assert!(
-        !artifact.asm.contains("OP_BOOLAND") && !artifact.asm.contains("OP_BOOLOR"),
+        !body.contains("OP_BOOLAND") && !body.contains("OP_BOOLOR"),
         "source-level `&&` / `||` must not emit OP_BOOLAND / OP_BOOLOR: {}",
         artifact.asm
     );

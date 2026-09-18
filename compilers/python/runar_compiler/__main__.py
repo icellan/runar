@@ -21,7 +21,7 @@ from runar_compiler.compiler import (
     CompilationError,
     artifact_to_json,
     compile_from_ir,
-    compile_from_source,
+    compile_from_source_collecting_warnings,
     compile_source_to_ir,
 )
 
@@ -172,6 +172,11 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            # CL-BUG-104: warnings ride stderr here too, so both CLI paths
+            # agree about whether the compiler talks. Matches the Rust tier's
+            # --parse-only handler (compilers/rust/src/main.rs).
+            for w in valid.warning_strings():
+                print(f"warning: {w}", file=sys.stderr)
         except Exception as e:
             print(f"parse error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -189,6 +194,13 @@ def main() -> None:
                 disable_constant_folding=args.disable_constant_folding,
             )
         except CompilationError as e:
+            print(f"Compilation error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            # Frontend guards (e.g. SourceSizeExceededError from the 4 MiB
+            # MAX_SOURCE_BYTES bound) are not CompilationError. Report them the
+            # way the --source compile path below does instead of dumping a
+            # traceback for what is an ordinary input rejection.
             print(f"Compilation error: {e}", file=sys.stderr)
             sys.exit(1)
         # Serialize the ANFProgram to camelCase JSON (matching Go/TS output)
@@ -211,15 +223,23 @@ def main() -> None:
         except CompilationError as e:
             print(f"Compilation error: {e}", file=sys.stderr)
             sys.exit(1)
+        except Exception as e:
+            # Frontend guards (e.g. SourceSizeExceededError from the 4 MiB
+            # MAX_SOURCE_BYTES bound) are not CompilationError. Report them the
+            # way the --source compile path below does instead of dumping a
+            # traceback for what is an ordinary input rejection.
+            print(f"Compilation error: {e}", file=sys.stderr)
+            sys.exit(1)
         ir_json = json.dumps(_anf_to_camel_dict(program), indent=2, default=str)
         os.makedirs(os.path.dirname(os.path.abspath(args.emit_ir_to)) or ".", exist_ok=True)
         with open(args.emit_ir_to, "w") as f:
             f.write(ir_json)
             f.write("\n")
 
+    warnings: list[str] = []
     try:
         if args.source:
-            artifact = compile_from_source(
+            artifact, warnings = compile_from_source_collecting_warnings(
                 args.source,
                 disable_constant_folding=args.disable_constant_folding,
             )
@@ -234,6 +254,13 @@ def main() -> None:
     except Exception as e:
         print(f"Compilation error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # CL-BUG-104: advisory validator diagnostics go to stderr, one per line,
+    # matching the Rust (`warning: {}`) and Zig (`printDiagnostics`) tiers.
+    # They are advisory only: the exit code stays 0 and stdout still carries
+    # nothing but the artifact bytes.
+    for w in warnings:
+        print(f"warning: {w}", file=sys.stderr)
 
     # Determine output
     if args.hex:
@@ -280,18 +307,15 @@ def main() -> None:
         print(output)
 
 
-_SNAKE_TO_CAMEL = {
-    "contract_name": "contractName",
-    "is_public": "isPublic",
-    "iter_var": "iterVar",
-    "state_values": "stateValues",
-    "initial_value": "initialValue",
-    "script_bytes": "scriptBytes",
+# Wire names that are NOT the mechanical camelCase of the Python field name.
+# Historical Go/TS IR-JSON spellings, frozen by the cross-tier goldens and by
+# the `$defs` in packages/runar-ir-schema/src/schemas/anf-ir.schema.json.
+_SNAKE_WIRE_FIELDS = frozenset({"result_type", "in_arity", "out_arity"})
+
+# Fields whose wire name is a rename rather than a spelling transform.
+# `raw_value` and `value_ref` both land on "value" (they never coexist).
+_FIELD_ALIASES = {
     "else_": "else",
-    "is_auto_injected_state_check": "isAutoInjectedStateCheck",
-    # These stay as snake_case to match Go/TS IR format
-    "result_type": "result_type",
-    # Both raw_value and value_ref map to "value" in Go JSON (they never coexist)
     "value_ref": "value",
     "raw_value": "value",
 }
@@ -300,17 +324,42 @@ _SNAKE_TO_CAMEL = {
 _IR_EXCLUDED_FIELDS = frozenset({
     "const_string", "const_big_int", "const_bool", "const_int",
     "source_loc",  # debug-only, not part of conformance
-    # Python-only metadata used internally by expand_fixed_arrays.
-    # Other compilers don't emit this field in --emit-ir output.
-    "synthetic_array_chain",
     # In-memory carrier for the artifact's top-level parentClass field.
     # Excluded from --emit-ir so it never affects cross-tier ANF parity.
     "parent_class",
+    # Issue #109 (@embedAlways): compiler-internal DCE opt-out flag on
+    # load_prop. The Zig reference keeps it out of the emitted IR too, so
+    # excluding it here keeps the cross-tier ANF bytes identical.
+    "preserve",
+    # N-094 / issue #123: in-memory carrier for the method's declared @sighash
+    # mode. The ANF wire format carries the mode on the `check_preimage` node's
+    # `sighashFlag` instead; the ANFMethod schema is additionalProperties:false,
+    # so emitting it here makes the whole program fail validateANF.
+    "sighash_type",
 })
 
 
 def _snake_key(k: str) -> str:
-    return _SNAKE_TO_CAMEL.get(k, k)
+    """Wire name for an ANF IR field.
+
+    Derived from the field name instead of looked up in a hand-maintained
+    table: camelCase is the wire default, so a field added to
+    ``runar_compiler.ir.types`` reaches the emitted ANF under the name the
+    other six tiers already read. Only the irregulars above are enumerated.
+
+    N-094: the old table was an allowlist in disguise — ``sighash_flag`` had no
+    entry, so it passed through as snake_case, the Go loader ignored the
+    unknown key, and a ``@sighash SINGLE|FORKID`` covenant round-tripped
+    through ``--emit-ir`` as ALL|FORKID: one byte, same script length, wrong
+    sighash mode. ``tests/test_n094_sighash_ir_wire_format.py`` fails if any
+    declared field serializes to a name the cross-tier JSON Schema rejects.
+    """
+    if k in _FIELD_ALIASES:
+        return _FIELD_ALIASES[k]
+    if k in _SNAKE_WIRE_FIELDS:
+        return k
+    head, *rest = k.split("_")
+    return head + "".join(word[:1].upper() + word[1:] for word in rest)
 
 
 def _anf_to_camel_dict(obj: object) -> object:
@@ -327,12 +376,12 @@ def _anf_to_camel_dict(obj: object) -> object:
             v = getattr(obj, f.name)
             if v is None:
                 continue
-            # raw_value is the canonical Go JSON "value" field — parse and emit its content
+            # `raw_value` is the canonical Go JSON "value" field, held DECODED
+            # (see ir/types.py and frontend/anf_lower.py — one representation on
+            # both build paths). Emit it as-is: a `json.loads` here turned the
+            # all-digit hex ByteString "3030" into the number 3030.
             if f.name == "raw_value":
-                try:
-                    d["value"] = _json.loads(v)
-                except (ValueError, TypeError):
-                    d["value"] = v
+                d["value"] = v
                 has_raw_value = True
                 continue
             # Skip value_ref if raw_value was already emitted as "value"
@@ -344,6 +393,13 @@ def _anf_to_camel_dict(obj: object) -> object:
             if f.name == "is_auto_injected_state_check":
                 if not v or kind_val != "assert":
                     continue
+            # N-095: the synthetic-array chain rides on every ANFProperty but
+            # is non-empty only on a leaf minted by expand-fixed-arrays. Skip
+            # the empty case, as Go (`omitempty`) and Rust
+            # (`skip_serializing_if`) do, so the ANF of a FixedArray-free
+            # contract keeps the bytes the goldens were stamped with.
+            if f.name == "synthetic_array_chain" and not v:
+                continue
             key = _snake_key(f.name)
             d[key] = _anf_to_camel_dict(v)
         return d

@@ -20,14 +20,39 @@ package frontend
 //
 // Remove this warning when the per-query verification chain lands.
 
-const sp1FriSoundnessError = "verifySP1FRI: REFUSING to emit a known-unsound proof verifier. " +
+// sp1FriSoundnessRefusal is the shared body of the refusal. The two entry
+// points into the compiler reach it by different routes and offer different
+// escape hatches, so only the closing remedy sentence differs.
+const sp1FriSoundnessRefusal = "verifySP1FRI: REFUSING to emit a known-unsound proof verifier. " +
 	"The per-query chain (input-batch MMCS verify, FRI fold, final-poly equality) is not emitted, so " +
 	"the locking script ACCEPTS forged Merkle openings — an attacker spends with a fabricated proof. " +
 	"Replaying the corruption fixtures through the compiled covenant shows bad_merkle, bad_folding and " +
 	"bad_final_poly all ACCEPTED on-chain while the off-chain reference rejects them. This is NOT usable " +
-	"for a value-bearing covenant. If you are working on the verifier itself, add the comment directive " +
+	"for a value-bearing covenant. "
+
+const sp1FriSoundnessError = sp1FriSoundnessRefusal +
+	"If you are working on the verifier itself, add the comment directive " +
 	"@acknowledgeUnsoundSP1FriVerifier to the contract source to compile it anyway. See " +
 	"docs/sp1-fri-verifier.md."
+
+// SP1FriSoundnessIRError is the same refusal for the `--ir` /
+// CompileFromProgram entry points, which never run Validate and have no source
+// to carry the comment directive.
+//
+// The acknowledgement cannot live in the ANF IR. `ir.ANFProgram` carries no
+// representation of the directive — it is a frontend-AST field stripped by
+// lowering, and the emitted IR JSON is compared byte-for-byte across all seven
+// tiers, so a new field there would break parity. More importantly, IR handed
+// to `--ir` is untrusted input: a flag inside it would be written by whoever
+// authored the verifier call and would authorise nothing. So the acknowledgement
+// has to come from the invoker. See compiler/sp1_fri_ir_guard.go (R-012).
+const SP1FriSoundnessIRError = sp1FriSoundnessRefusal +
+	"This IR reaches the verifier without going through the frontend, so the " +
+	"@acknowledgeUnsoundSP1FriVerifier source directive was never consulted — the ANF IR carries no " +
+	"representation of it, and a flag inside attacker-supplied IR would authorise nothing anyway. " +
+	"If you are working on the verifier itself, acknowledge it on the invocation instead: pass " +
+	"--acknowledge-unsound-sp1-fri on the command line (or CompileOptions.AcknowledgeUnsoundSP1Fri). " +
+	"See docs/sp1-fri-verifier.md."
 
 const sp1FriSoundnessWarning = "verifySP1FRI: the emitted locking script is NOT a sound proof " +
 	"verifier at the PoC parameter set. The per-query chain (input-batch MMCS verify, FRI fold, " +
@@ -58,11 +83,12 @@ func statementsCallSP1Fri(stmts []Statement) bool {
 				return true
 			}
 		case AssignmentStmt:
-			if exprCallsSP1Fri(v.Value) {
+			// Target is an Expression too: `xs[verifySP1FRI(...)] = 1n`.
+			if exprCallsSP1Fri(v.Target) || exprCallsSP1Fri(v.Value) {
 				return true
 			}
 		case *AssignmentStmt:
-			if exprCallsSP1Fri(v.Value) {
+			if exprCallsSP1Fri(v.Target) || exprCallsSP1Fri(v.Value) {
 				return true
 			}
 		case ExpressionStmt:
@@ -82,11 +108,11 @@ func statementsCallSP1Fri(stmts []Statement) bool {
 				return true
 			}
 		case ForStmt:
-			if exprCallsSP1Fri(v.Condition) || statementsCallSP1Fri(v.Body) {
+			if forStmtCallsSP1Fri(v) {
 				return true
 			}
 		case *ForStmt:
-			if exprCallsSP1Fri(v.Condition) || statementsCallSP1Fri(v.Body) {
+			if forStmtCallsSP1Fri(*v) {
 				return true
 			}
 		case ReturnStmt:
@@ -102,6 +128,30 @@ func statementsCallSP1Fri(stmts []Statement) bool {
 	return false
 }
 
+// forStmtCallsSP1Fri walks every limb of a for loop. Init and Update are easy
+// to forget — Init is a VariableDeclStmt held by value and Update is a bare
+// Statement — and either one can host the built-in.
+func forStmtCallsSP1Fri(v ForStmt) bool {
+	if exprCallsSP1Fri(v.Init.Init) || exprCallsSP1Fri(v.Condition) {
+		return true
+	}
+	if v.Update != nil && statementsCallSP1Fri([]Statement{v.Update}) {
+		return true
+	}
+	return statementsCallSP1Fri(v.Body)
+}
+
+// exprCallsSP1Fri reports whether the expression reaches `verifySP1FRI` at any
+// depth.
+//
+// This switch MUST cover every type declared in ast.go that implements
+// Expression, in both its value and pointer form. Any type it misses is a
+// silent bypass of the refusal in Validate: the contract compiles clean into
+// the known-unsound verifier. Go does not check type-switch exhaustiveness, and
+// a fail-closed default is not usable here (it would refuse every contract
+// using a newly-added expression form), so the leaf cases below are listed
+// explicitly and TestSP1FriWalker_HandlesEveryDeclaredExpressionType fails the
+// build if ast.go grows a type this switch does not name.
 func exprCallsSP1Fri(e Expression) bool {
 	if e == nil {
 		return false
@@ -119,6 +169,53 @@ func exprCallsSP1Fri(e Expression) bool {
 		return exprCallsSP1Fri(v.Operand)
 	case *UnaryExpr:
 		return exprCallsSP1Fri(v.Operand)
+	case TernaryExpr:
+		return ternaryCallsSP1Fri(v)
+	case *TernaryExpr:
+		return ternaryCallsSP1Fri(*v)
+	case MemberExpr:
+		return exprCallsSP1Fri(v.Object)
+	case *MemberExpr:
+		return exprCallsSP1Fri(v.Object)
+	case IndexAccessExpr:
+		return exprCallsSP1Fri(v.Object) || exprCallsSP1Fri(v.Index)
+	case *IndexAccessExpr:
+		return exprCallsSP1Fri(v.Object) || exprCallsSP1Fri(v.Index)
+	case IncrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case *IncrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case DecrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case *DecrementExpr:
+		return exprCallsSP1Fri(v.Operand)
+	case ArrayLiteralExpr:
+		return anyExprCallsSP1Fri(v.Elements)
+	case *ArrayLiteralExpr:
+		return anyExprCallsSP1Fri(v.Elements)
+
+	// Leaves: no sub-expressions to descend into. Named explicitly rather than
+	// swept up by a default so the exhaustiveness test can tell "handled" from
+	// "forgotten".
+	case Identifier, *Identifier,
+		BigIntLiteral, *BigIntLiteral,
+		BoolLiteral, *BoolLiteral,
+		ByteStringLiteral, *ByteStringLiteral,
+		PropertyAccessExpr, *PropertyAccessExpr:
+		return false
+	}
+	return false
+}
+
+func ternaryCallsSP1Fri(v TernaryExpr) bool {
+	return exprCallsSP1Fri(v.Condition) || exprCallsSP1Fri(v.Consequent) || exprCallsSP1Fri(v.Alternate)
+}
+
+func anyExprCallsSP1Fri(exprs []Expression) bool {
+	for _, e := range exprs {
+		if exprCallsSP1Fri(e) {
+			return true
+		}
 	}
 	return false
 }
@@ -134,10 +231,8 @@ func callExprIsSP1Fri(c CallExpr) bool {
 			return true
 		}
 	}
-	for _, a := range c.Args {
-		if exprCallsSP1Fri(a) {
-			return true
-		}
+	if exprCallsSP1Fri(c.Callee) {
+		return true
 	}
-	return false
+	return anyExprCallsSP1Fri(c.Args)
 }

@@ -22,6 +22,7 @@
 //!   - Type mappings: i128/Bigint/Int → bigint, bool/Bool → boolean, ByteString/Vec<u8> → ByteString
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -402,6 +403,13 @@ fn mapBuiltin(allocator: Allocator, name: []const u8) []const u8 {
         .{ "verify_slh_dsa_sha2_256f", "verifySLHDSA_SHA2_256f" },
         .{ "bin_2_num", "bin2num" },
         .{ "num_2_bin", "num2bin" },
+        // The arbitrary-precision encoder spellings from packages/runar-rs.
+        // Mapped here, BEFORE camelisation, so the answer does not depend on
+        // this tier's snakeToCamel. Without them the typechecker answers
+        // "unknown function" -- a TYPECHECK diagnostic, which --parse-only
+        // cannot see. R-RustBigint.
+        .{ "bin2num_big", "bin2num" },
+        .{ "num2bin_big", "num2bin" },
         .{ "to_byte_string", "toByteString" },
         .{ "verify_ecdsa_p256", "verifyECDSA_P256" },
         .{ "p256_add", "p256Add" },
@@ -426,6 +434,11 @@ fn mapBuiltin(allocator: Allocator, name: []const u8) []const u8 {
 fn mapRustType(name: []const u8) []const u8 {
     const tmap = std.StaticStringMap([]const u8).initComptime(.{
         .{ "Bigint", "bigint" },
+        // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half
+        // of a pair whose narrow half (`Bigint` = i64) REFUSES what it cannot
+        // represent. A different Rust runtime type, the same Script primitive:
+        // reaching for it must not change one emitted byte. R-RustBigint.
+        .{ "BigintBig", "bigint" },
         .{ "Int", "bigint" },
         .{ "i64", "bigint" },
         .{ "u64", "bigint" },
@@ -436,6 +449,16 @@ fn mapRustType(name: []const u8) []const u8 {
         .{ "ByteString", "ByteString" },
         .{ "Vec", "ByteString" },
         .{ "String", "ByteString" },
+        // N-108: `Sha256Digest` is runar-lang's cross-language spelling of
+        // `Sha256` and the Rust DSL surface uses it (`current_hash:
+        // Sha256Digest`). The reference tier resolves it here
+        // (`01-parse-rust.ts`), as do Python, Ruby and Java; Go, Rust and Zig
+        // did not, so the name fell through as a custom type. In Zig that was
+        // the loudest failure of the three: there is no validator arm for an
+        // unknown property type, so it survived validation and surfaced as
+        // `stack lowering error: UnsupportedOperation` — an internal error, not
+        // a diagnostic. Gate: conformance/subtype-parity/Sha256DigestAliasRust.
+        .{ "Sha256Digest", "Sha256" },
     });
     if (tmap.get(name)) |mapped| return mapped;
     // Pass through Runar primitives: PubKey, Sig, Addr, Sha256, Ripemd160, etc.
@@ -599,10 +622,34 @@ const Parser = struct {
                             const camel_name = snakeToCamel(self.allocator, field_name_tok.text);
                             if (!std.mem.eql(u8, camel_name, "txPreimage")) {
                                 const type_info = types.typeNodeToRunarType(field_type);
+                                // Capture FixedArray shape so expand_fixed_arrays.zig
+                                // can see the length + element type after typecheck.
+                                // PropertyNode flattens TypeNode to a RunarType, so
+                                // without these three fields a parsed `[T; N]` would
+                                // reach the pass as a shapeless `.fixed_array`.
+                                var fa_len: u32 = 0;
+                                var fa_elem: types.RunarType = .unknown;
+                                var fa_nested_len: u32 = 0;
+                                if (field_type == .fixed_array_type) {
+                                    fa_len = field_type.fixed_array_type.length;
+                                    const inner = field_type.fixed_array_type.element.*;
+                                    fa_elem = types.typeNodeToRunarType(inner);
+                                    if (inner == .fixed_array_type) {
+                                        fa_nested_len = inner.fixed_array_type.length;
+                                    }
+                                }
                                 properties.append(self.allocator, .{
                                     .name = camel_name,
                                     .type_info = type_info,
                                     .readonly = readonly,
+                                    // N-109: spelled type name + field-name
+                                    // token, for the validator's
+                                    // unsupported-type diagnostic.
+                                    .type_name = types.typeNodeName(field_type),
+                                    .source_loc = self.tokenSourceLoc(field_name_tok),
+                                    .fixed_array_length = fa_len,
+                                    .fixed_array_element = fa_elem,
+                                    .fixed_array_nested_length = fa_nested_len,
                                 }) catch {};
                             }
                         } else {
@@ -770,6 +817,22 @@ const Parser = struct {
         // Skip optional & and mut (reference types)
         _ = self.match(.ampersand);
         _ = self.matchIdent("mut");
+
+        // Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+        // `[[Bigint; 2]; 2]` surface produces the same
+        // `.fixed_array_type{ .element = .fixed_array_type{...} }` shape the
+        // TS / Rust / Ruby tiers build.
+        if (self.current.kind == .lbracket) {
+            _ = self.bump();
+            const element = self.parseRustType();
+            _ = self.expect(.semicolon);
+            const length_tok = self.expect(.number) orelse return .{ .custom_type = "unknown" };
+            const length = std.fmt.parseInt(u32, length_tok.text, 10) catch 0;
+            _ = self.expect(.rbracket);
+            const elem_ptr = self.allocator.create(TypeNode) catch return .{ .custom_type = "unknown" };
+            elem_ptr.* = element;
+            return .{ .fixed_array_type = .{ .element = elem_ptr, .length = length } };
+        }
 
         if (self.current.kind == .ident) {
             const name = self.bump().text;
@@ -1085,17 +1148,39 @@ const Parser = struct {
             self.addError("expected 'in' in for loop");
         }
 
-        // Parse range: start..end
+        // Two loop headers, both of them real Rust that iterates exactly these
+        // values:
+        //
+        //   for i in a..b         -> a, a+1, … b-1  (ascending)
+        //   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+        //
+        // `.rev()` is what lets the Rust surface spell a countdown. A Rust
+        // range only ever ascends — `(5..2)` is empty — so `step = -1` was
+        // unreachable from this surface and no fixture could exercise it
+        // across all nine. `Iterator::rev` reverses the half-open range: the
+        // descending loop starts at `b - 1` and ends at `a` INCLUSIVE.
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
+        var descending = false;
 
-        // Parse start value
+        const has_paren = self.current.kind == .lparen;
+        if (has_paren) _ = self.bump();
+
+        // Parse range start
+        var range_start: i64 = 0;
+        var range_start_is_const = true;
         if (self.current.kind == .number) {
             const start_tok = self.bump();
-            init_value = parseNumberLiteral(start_tok.text);
+            range_start = parseNumberLiteral(start_tok.text);
+        } else if (self.parseExpression()) |e| {
+            // N-138: keep a negated literal instead of discarding it.
+            if (loopStartLiteral(e)) |v| range_start = v else {
+                range_start_is_const = false;
+            }
         } else {
-            // Non-literal start — parse as expression and try to extract
-            _ = self.parseExpression();
+            range_start_is_const = false;
         }
 
         // Consume '..'
@@ -1105,26 +1190,53 @@ const Parser = struct {
             self.addError("expected '..' in range expression");
         }
 
-        // Parse end value
+        // Parse range end
+        var range_end: i64 = 0;
+        var range_end_is_const = true;
         if (self.current.kind == .number) {
             const end_tok = self.bump();
-            bound = parseNumberLiteral(end_tok.text);
+            range_end = parseNumberLiteral(end_tok.text);
         } else {
             // Non-literal bound — parse as expression
             const bound_expr = self.parseExpression();
             if (bound_expr) |expr| {
-                switch (expr) {
-                    .literal_int => |v| {
-                        bound = v;
-                    },
-                    else => {},
+                if (loopStartLiteral(expr)) |v| range_end = v else {
+                    range_end_is_const = false;
                 }
+            } else {
+                range_end_is_const = false;
             }
+        }
+
+        if (has_paren) {
+            _ = self.expect(.rparen);
+            _ = self.expect(.dot);
+            const method_tok = self.bump();
+            if (!std.mem.eql(u8, method_tok.text, "rev")) {
+                self.addErrorFmt(
+                    "unsupported range method '.{s}()' in for loop — only '.rev()' is supported",
+                    .{method_tok.text},
+                );
+            }
+            _ = self.expect(.lparen);
+            _ = self.expect(.rparen);
+            descending = true;
+        }
+
+        if (descending) {
+            // `(a..b).rev()` starts at `b - 1` and ends at `a` inclusive.
+            init_value = range_end - 1;
+            init_is_const = range_end_is_const;
+            bound = range_start;
+        } else {
+            init_value = range_start;
+            init_is_const = range_start_is_const;
+            bound = range_end;
         }
 
         // Body
         if (self.expect(.lbrace) == null) {
-            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .body = &.{}, .source_loc = loc } };
+            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = descending, .body = &.{}, .source_loc = loc } };
         }
         var body: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
@@ -1132,7 +1244,7 @@ const Parser = struct {
         }
         _ = self.expect(.rbrace);
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .body = body.items, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = descending, .body = body.items, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
@@ -1195,6 +1307,26 @@ const Parser = struct {
             },
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value, .source_loc = loc, .target_is_property = is_prop } };
+            },
+            .index_access => |ia| {
+                // `self.arr[idx] = value` — carry the full index-access target
+                // on the Assign so expand_fixed_arrays can rewrite it into
+                // direct-access / dispatch form. Without this arm the target
+                // collapsed to the literal name "unknown" below and the `.rs`
+                // surface silently diverged from every other surface of the
+                // same contract. Mirrors parse_ts.zig#buildAssignment.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                    .source_loc = loc,
+                    .target_is_property = is_prop,
+                } };
             },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value, .source_loc = loc, .target_is_property = is_prop } };
@@ -1574,8 +1706,11 @@ const Parser = struct {
             return Expression{ .literal_int = val };
         } else |_| {
             // Oversize decimal literal — carry as `literal_bigint`.
-            if (isAllAsciiDigitsRust(stripped)) {
-                const decimal = self.allocator.dupe(u8, stripped) catch return null;
+            // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+            // ordinary way to write secp256k1's group order, and accepted by the
+            // other six tiers -- used to fall into the `invalid integer` arm
+            // below, because this fallback only recognised decimal digits.
+            if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                 return Expression{ .literal_bigint = decimal };
             }
             self.addErrorFmt("invalid integer: '{s}'", .{text});
@@ -1599,16 +1734,6 @@ const Parser = struct {
     }
 };
 
-/// True if every byte in `s` is an ASCII digit (0-9). Used to identify
-/// decimal integer literals that overflow `i64` and need to be routed to
-/// the `literal_bigint` AST node instead.
-fn isAllAsciiDigitsRust(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 /// Parse a number literal, stripping underscores and type suffixes.
 fn parseNumberLiteral(text: []const u8) i64 {
@@ -2063,4 +2188,26 @@ test "reject #[public] attribute (Rust DSL)" {
         if (std.mem.indexOf(u8, err, "#[public]") != null) found = true;
     }
     try std.testing.expect(found);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// discard path, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

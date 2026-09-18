@@ -29,15 +29,34 @@ public final class DeployOptions {
      */
     public final Signer fundingSigner;
 
+    /**
+     * Builtins the caller accepts despite the compiler not claiming they are
+     * sound (R-062). Required — naming each one — when the artifact declares
+     * {@code unsoundPrimitives}; ignored otherwise.
+     */
+    public final java.util.List<String> acknowledgeUnsound;
+
     public DeployOptions(Long satoshis, String changeAddress, Signer fundingSigner) {
+        this(satoshis, changeAddress, fundingSigner, null);
+    }
+
+    public DeployOptions(
+        Long satoshis,
+        String changeAddress,
+        Signer fundingSigner,
+        java.util.List<String> acknowledgeUnsound
+    ) {
         this.satoshis = satoshis;
         this.changeAddress = changeAddress;
         this.fundingSigner = fundingSigner;
+        this.acknowledgeUnsound = acknowledgeUnsound == null
+            ? java.util.List.of()
+            : java.util.List.copyOf(acknowledgeUnsound);
     }
 
     /** Empty options — every field defaulted. */
     public DeployOptions() {
-        this(null, null, null);
+        this(null, null, null, null);
     }
 
     // ------------------------------------------------------------------
@@ -46,16 +65,21 @@ public final class DeployOptions {
 
     /** Copy with {@link #satoshis} set. */
     public DeployOptions withSatoshis(Long satoshis) {
-        return new DeployOptions(satoshis, changeAddress, fundingSigner);
+        return new DeployOptions(satoshis, changeAddress, fundingSigner, acknowledgeUnsound);
     }
 
     /** Copy with {@link #changeAddress} set. */
     public DeployOptions withChangeAddress(String changeAddress) {
-        return new DeployOptions(satoshis, changeAddress, fundingSigner);
+        return new DeployOptions(satoshis, changeAddress, fundingSigner, acknowledgeUnsound);
     }
 
     /** Copy with {@link #fundingSigner} set (issue #134). */
     public DeployOptions withFundingSigner(Signer fundingSigner) {
-        return new DeployOptions(satoshis, changeAddress, fundingSigner);
+        return new DeployOptions(satoshis, changeAddress, fundingSigner, acknowledgeUnsound);
+    }
+
+    /** Copy with {@link #acknowledgeUnsound} set (R-062). */
+    public DeployOptions withAcknowledgeUnsound(java.util.List<String> acknowledgeUnsound) {
+        return new DeployOptions(satoshis, changeAddress, fundingSigner, acknowledgeUnsound);
     }
 }

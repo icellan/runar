@@ -11,6 +11,15 @@
 
 require 'spec_helper'
 
+# Companion-parent raw txs for merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis).
+def merge_parents(provider, contract1, contract2)
+  utxo1 = contract1.get_utxo
+  utxo2 = contract2.get_utxo
+  parent1 = provider.get_raw_transaction(utxo1.txid)
+  parent2 = provider.get_raw_transaction(utxo2.txid)
+  [parent1, parent2, utxo2]
+end
+
 RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
   it 'compiles the FungibleToken contract' do
     artifact = compile_contract('examples/ts/token-ft/FungibleTokenExample.runar.ts')
@@ -179,14 +188,14 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract2 = Runar::SDK::RunarContract.new(artifact, [owner_wallet[:pub_key_hex], 600, 0, token_id_hex])
     contract2.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    utxo2 = contract2.get_utxo
+    parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
     call_txid, _count = contract1.call(
       'merge',
-      [nil, 600, nil, 4000],
+      [nil, 600, nil, parent2, 4000],
       provider, owner_wallet[:signer],
       Runar::SDK::CallOptions.new(
         additional_contract_inputs: [utxo2],
-        additional_contract_input_args: [[nil, 400, nil, 4000]],
+        additional_contract_input_args: [[nil, 400, nil, parent1, 4000]],
         outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 400, 'mergeBalance' => 600 } }]
       )
     )
@@ -207,16 +216,16 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract2 = Runar::SDK::RunarContract.new(artifact, [owner_wallet[:pub_key_hex], 600, 0, token_id_hex])
     contract2.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    utxo2 = contract2.get_utxo
+    parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
 
     expect do
       contract1.call(
         'merge',
-        [nil, 1600, nil, 4000],
+        [nil, 1600, nil, parent2, 4000],
         provider, owner_wallet[:signer],
         Runar::SDK::CallOptions.new(
           additional_contract_inputs: [utxo2],
-          additional_contract_input_args: [[nil, 1400, nil, 4000]],
+          additional_contract_input_args: [[nil, 1400, nil, parent1, 4000]],
           outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 400, 'mergeBalance' => 1600 } }]
         )
       )
@@ -236,16 +245,16 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract2 = Runar::SDK::RunarContract.new(artifact, [owner_wallet[:pub_key_hex], 600, 0, token_id_hex])
     contract2.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    utxo2 = contract2.get_utxo
+    parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
 
     expect do
       contract1.call(
         'merge',
-        [nil, 100, nil, 4000],
+        [nil, 100, nil, parent2, 4000],
         provider, owner_wallet[:signer],
         Runar::SDK::CallOptions.new(
           additional_contract_inputs: [utxo2],
-          additional_contract_input_args: [[nil, -100, nil, 4000]],
+          additional_contract_input_args: [[nil, -100, nil, parent1, 4000]],
           outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 400, 'mergeBalance' => 100 } }]
         )
       )
@@ -265,15 +274,15 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract2 = Runar::SDK::RunarContract.new(artifact, [owner_wallet[:pub_key_hex], 500, 0, token_id_hex])
     contract2.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    utxo2 = contract2.get_utxo
+    parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
 
     call_txid, _count = contract1.call(
       'merge',
-      [nil, 500, nil, 4000],
+      [nil, 500, nil, parent2, 4000],
       provider, owner_wallet[:signer],
       Runar::SDK::CallOptions.new(
         additional_contract_inputs: [utxo2],
-        additional_contract_input_args: [[nil, 0, nil, 4000]],
+        additional_contract_input_args: [[nil, 0, nil, parent1, 4000]],
         outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 0, 'mergeBalance' => 500 } }]
       )
     )
@@ -295,16 +304,16 @@ RSpec.describe 'FungibleToken' do # rubocop:disable RSpec/DescribeClass
     contract2 = Runar::SDK::RunarContract.new(artifact, [owner_wallet[:pub_key_hex], 600, 0, token_id_hex])
     contract2.deploy(provider, owner_wallet[:signer], Runar::SDK::DeployOptions.new(satoshis: 5000))
 
-    utxo2 = contract2.get_utxo
+    parent1, parent2, utxo2 = merge_parents(provider, contract1, contract2)
 
     expect do
       contract1.call(
         'merge',
-        [nil, 600, nil, 4000],
+        [nil, 600, nil, parent2, 4000],
         provider, wrong_wallet[:signer],
         Runar::SDK::CallOptions.new(
           additional_contract_inputs: [utxo2],
-          additional_contract_input_args: [[nil, 400, nil, 4000]],
+          additional_contract_input_args: [[nil, 400, nil, parent1, 4000]],
           outputs: [{ 'satoshis' => 4000, 'state' => { 'owner' => owner_wallet[:pub_key_hex], 'balance' => 400, 'mergeBalance' => 600 } }]
         )
       )

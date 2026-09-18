@@ -106,21 +106,66 @@ describe('NIST P-256 / P-384 codegen — op-count goldens (T-006)', () => {
   //   see. In bytes it is +225 (P-256) / +306 (P-384) standalone, the gap being
   //   the wider n pushes (2 x 48 vs 2 x 32 bytes) and the wider clamp pads
   //   (96 + 49 vs 64 + 33) — 0.023% / 0.015% of the whole script.
+  // Third move, R-052 / CL-BUG-095 — the Point WIDTH gate. A P256Point is 64
+  // bytes and a P384Point is 96, by definition, and NOTHING checked either, so
+  // `p256OnCurve(G || 0xff)` returned TRUE and `pNNNEncodeCompressed` took its
+  // parity bit from the caller's appended byte. Every delta is curve-
+  // INDEPENDENT, which is what makes it a structural gate rather than a
+  // per-bit loop — the two curves pay exactly the same:
+  //
+  //   pNNNAdd             +6  — two cDecomposePoint call sites, 3 ops each
+  //                             (OP_SIZE, push 2*coordBytes, OP_NUMEQUALVERIFY).
+  //   pNNNMul/MulGen/Negate +3 — one call site.
+  //   pNNNOnCurve        +15  — 9 for the clamp-and-flag gate, 3 for the
+  //                             cDecomposePoint gate, 1 for the OP_BOOLAND
+  //                             folding `_len_ok` into the verdict, 2 for the
+  //                             rolls. It CLAMPS rather than aborts because it
+  //                             is the predicate contracts gate untrusted
+  //                             points on; `false` is the right answer.
+  //   verifyECDSA_PNNN   +12  — four internal cDecomposePoint call sites.
+  //
+  // pNNNEncodeCompressed stays at 16: +3 for the gate, -3 because the fixed-
+  // offset parity read (push coordBytes-1, OP_SPLIT, OP_NIP) replaces a 6-op
+  // OP_SIZE/push/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence. Net zero ops,
+  // different bytes.
+  // Fourth move, R-053 / CL-BUG-096 — the infinity-operand case of the affine
+  // adder. Exactly +50 on pNNNAdd and on verifyECDSA_PNNN (which calls
+  // cAffineAdd once, for R1 + R2), and +0 on everything else, because the
+  // branch-free three-way select lives entirely inside cAffineAdd. It is +50
+  // rather than +52 because it SUBSUMES the two standalone `notinf` OP_MULs it
+  // replaces. Curve-INDEPENDENT again, for the same reason as the width gate:
+  // it is a fixed-shape select, not a per-bit loop.
   const goldens: Array<[name: string, fn: (emit: (op: StackOp) => void) => void, expected: number]> = [
-    ['p256Add',               emitP256Add,                6663],
-    ['p256Mul',               emitP256Mul,              140036],
-    ['p256MulGen',            emitP256MulGen,           140038],
-    ['p256Negate',            emitP256Negate,              945],
-    ['p256OnCurve',           emitP256OnCurve,             559],
+    // R-117, the COORDINATE-CANONICITY gate. pNNNAdd +18, pNNNMul +8, pNNNMulGen +8,
+    // pNNNNegate +8 -- the same shape as secp256k1's, because cEmitCoordCanonVerify
+    // is the same 8 ops (two picks, two pushes of p, two OP_LESSTHANs, OP_BOOLAND,
+    // OP_VERIFY) and the Add gates two points. pNNNOnCurve and
+    // pNNNEncodeCompressed are +0: the predicate must stay TOTAL. verifyECDSA_*
+    // is +0 TOO, and that is the load-bearing part -- cEmitMul takes a
+    // verifyCanonical flag that is FALSE on the ECDSA path, because
+    // decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
+    // bytes must return false from a total boolean builtin rather than abort.
+    ['p256Add',               emitP256Add,                6737],
+    // R-157, the pNNNMul ON-CURVE-OR-INFINITY gate: p256Mul 140047 -> 140620 (+573),
+    // p256MulGen +573, p384Mul 211189 -> 211986 (+797), p384MulGen +797. Same shape as
+    // secp256k1's, with each curve's own on-curve body; the two curves differ only
+    // because their on-curve bodies do. pNNNAdd / pNNNNegate / pNNNOnCurve /
+    // pNNNEncodeCompressed are +0, and so is verifyECDSA_pNNN — the gate is at the
+    // PUBLIC pNNNMul entry point, NOT inside cEmitMul, because verifyECDSA shares that
+    // ladder and must return false rather than abort on attacker-chosen bytes.
+    ['p256Mul',               emitP256Mul,              140620],
+    ['p256MulGen',            emitP256MulGen,           140622],
+    ['p256Negate',            emitP256Negate,              956],
+    ['p256OnCurve',           emitP256OnCurve,             574],
     ['p256EncodeCompressed',  emitP256EncodeCompressed,     16],
-    ['verifyECDSA_P256',      emitVerifyECDSA_P256,     297331],
-    ['p384Add',               emitP384Add,               11469],
-    ['p384Mul',               emitP384Mul,              211178],
-    ['p384MulGen',            emitP384MulGen,           211180],
-    ['p384Negate',            emitP384Negate,             1393],
-    ['p384OnCurve',           emitP384OnCurve,             783],
+    ['verifyECDSA_P256',      emitVerifyECDSA_P256,     297393],
+    ['p384Add',               emitP384Add,               11543],
+    ['p384Mul',               emitP384Mul,              211986],
+    ['p384MulGen',            emitP384MulGen,           211988],
+    ['p384Negate',            emitP384Negate,             1404],
+    ['p384OnCurve',           emitP384OnCurve,             798],
     ['p384EncodeCompressed',  emitP384EncodeCompressed,     16],
-    ['verifyECDSA_P384',      emitVerifyECDSA_P384,     453307],
+    ['verifyECDSA_P384',      emitVerifyECDSA_P384,     453369],
   ];
 
   for (const [name, fn, expected] of goldens) {

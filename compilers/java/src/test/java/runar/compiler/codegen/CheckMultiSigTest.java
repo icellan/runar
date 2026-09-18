@@ -2,6 +2,7 @@ package runar.compiler.codegen;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigInteger;
@@ -269,6 +270,182 @@ class CheckMultiSigTest {
         boolean hasMultiSigVerify = hex.contains("af");
         assertTrue(hasMultiSig || hasMultiSigVerify,
             "hex must contain OP_CHECKMULTISIG (ae) or OP_CHECKMULTISIGVERIFY (af); got:\n" + hex);
+    }
+
+    // -------------------- R-054: degenerate thresholds --------------------
+    //
+    // `checkMultiSig(new Sig[]{}, new PubKey[]{pk1})` lowers to
+    //   OP_0 OP_0 <pk> OP_1 OP_CHECKMULTISIG
+    // i.e. nSigs = 0. OP_CHECKMULTISIG with zero required signatures pops the
+    // pubkeys, verifies nothing, and pushes TRUE — the deployed output is
+    // ANYONE-CAN-SPEND while the source reads like an authorization check.
+    // Confirmed byte-identically across all seven tiers before the guard
+    // landed: every one emitted 0000007b51ae for the equivalent contract.
+    //
+    // The mirror image, more signatures than public keys, can never be
+    // satisfied by any witness: the output is permanently UNSPENDABLE.
+    //
+    // The guard lives in StackLower rather than Typecheck so it also covers
+    // the --ir input path, and it is a compile-time refusal rather than extra
+    // emitted opcodes so it moves no bytes for existing valid contracts.
+
+    private static final String EMPTY_SIGS_SRC = """
+        package runar.examples.emptymultisig;
+
+        import runar.lang.SmartContract;
+        import runar.lang.annotations.Public;
+        import runar.lang.annotations.Readonly;
+        import runar.lang.types.PubKey;
+        import runar.lang.types.Sig;
+
+        import static runar.lang.Builtins.assertThat;
+        import static runar.lang.Builtins.checkMultiSig;
+
+        public class EmptyMultiSig extends SmartContract {
+            @Readonly PubKey pk1;
+
+            public EmptyMultiSig(PubKey pk1) {
+                super(pk1);
+                this.pk1 = pk1;
+            }
+
+            @Public
+            public void unlock() {
+                assertThat(checkMultiSig(new Sig[]{}, new PubKey[]{pk1}));
+            }
+        }
+        """;
+
+    private static final String OVER_THRESHOLD_SRC = """
+        package runar.examples.overthreshold;
+
+        import runar.lang.SmartContract;
+        import runar.lang.annotations.Public;
+        import runar.lang.annotations.Readonly;
+        import runar.lang.types.PubKey;
+        import runar.lang.types.Sig;
+
+        import static runar.lang.Builtins.assertThat;
+        import static runar.lang.Builtins.checkMultiSig;
+
+        public class OverThreshold extends SmartContract {
+            @Readonly PubKey pk1;
+
+            public OverThreshold(PubKey pk1) {
+                super(pk1);
+                this.pk1 = pk1;
+            }
+
+            @Public
+            public void unlock(Sig sig1, Sig sig2) {
+                assertThat(checkMultiSig(new Sig[]{sig1, sig2}, new PubKey[]{pk1}));
+            }
+        }
+        """;
+
+    private static final String ONE_OF_ONE_SRC = """
+        package runar.examples.oneofone;
+
+        import runar.lang.SmartContract;
+        import runar.lang.annotations.Public;
+        import runar.lang.annotations.Readonly;
+        import runar.lang.types.PubKey;
+        import runar.lang.types.Sig;
+
+        import static runar.lang.Builtins.assertThat;
+        import static runar.lang.Builtins.checkMultiSig;
+
+        public class OneOfOne extends SmartContract {
+            @Readonly PubKey pk1;
+
+            public OneOfOne(PubKey pk1) {
+                super(pk1);
+                this.pk1 = pk1;
+            }
+
+            @Public
+            public void unlock(Sig sig1) {
+                assertThat(checkMultiSig(new Sig[]{sig1}, new PubKey[]{pk1}));
+            }
+        }
+        """;
+
+    private static final String THREE_OF_THREE_SRC = """
+        package runar.examples.threeofthree;
+
+        import runar.lang.SmartContract;
+        import runar.lang.annotations.Public;
+        import runar.lang.annotations.Readonly;
+        import runar.lang.types.PubKey;
+        import runar.lang.types.Sig;
+
+        import static runar.lang.Builtins.assertThat;
+        import static runar.lang.Builtins.checkMultiSig;
+
+        public class ThreeOfThree extends SmartContract {
+            @Readonly PubKey pk1;
+            @Readonly PubKey pk2;
+            @Readonly PubKey pk3;
+
+            public ThreeOfThree(PubKey pk1, PubKey pk2, PubKey pk3) {
+                super(pk1, pk2, pk3);
+                this.pk1 = pk1;
+                this.pk2 = pk2;
+                this.pk3 = pk3;
+            }
+
+            @Public
+            public void unlock(Sig sig1, Sig sig2, Sig sig3) {
+                assertThat(checkMultiSig(
+                    new Sig[]{sig1, sig2, sig3},
+                    new PubKey[]{pk1, pk2, pk3}));
+            }
+        }
+        """;
+
+    @Test
+    void emptySignatureArrayIsRejected() {
+        RuntimeException e = assertThrows(RuntimeException.class,
+            () -> compile(EMPTY_SIGS_SRC, "EmptyMultiSig.runar.java"),
+            "checkMultiSig with an empty signature array compiled cleanly — "
+                + "that script is anyone-can-spend");
+        assertTrue(e.getMessage() != null && e.getMessage().contains("at least one signature"),
+            "expected an 'at least one signature' diagnostic, got: " + e.getMessage());
+    }
+
+    @Test
+    void moreSigsThanPubKeysIsRejected() {
+        RuntimeException e = assertThrows(RuntimeException.class,
+            () -> compile(OVER_THRESHOLD_SRC, "OverThreshold.runar.java"),
+            "checkMultiSig with m > n compiled cleanly — that script is unspendable");
+        assertTrue(e.getMessage() != null && e.getMessage().contains("cannot exceed"),
+            "expected a 'cannot exceed' diagnostic, got: " + e.getMessage());
+    }
+
+    // Controls: the guard must not break any valid threshold.
+
+    @Test
+    void controlOneOfOneStillCompiles() {
+        StackProgram stack = compile(ONE_OF_ONE_SRC, "OneOfOne.runar.java");
+        List<StackOp> flat = flatten(findMethod(stack, "unlock").ops());
+        assertEquals(1, countOpcode(flat, "OP_CHECKMULTISIG"),
+            "1-of-1 must still emit exactly one OP_CHECKMULTISIG");
+    }
+
+    @Test
+    void controlTwoOfThreeStillCompiles() {
+        StackProgram stack = compile(MULTISIG_2OF3_SRC, "MultiSig2of3.runar.java");
+        List<StackOp> flat = flatten(findMethod(stack, "unlock").ops());
+        assertEquals(1, countOpcode(flat, "OP_CHECKMULTISIG"),
+            "2-of-3 must still emit exactly one OP_CHECKMULTISIG");
+    }
+
+    @Test
+    void controlMEqualsNStillCompiles() {
+        StackProgram stack = compile(THREE_OF_THREE_SRC, "ThreeOfThree.runar.java");
+        List<StackOp> flat = flatten(findMethod(stack, "unlock").ops());
+        assertEquals(1, countOpcode(flat, "OP_CHECKMULTISIG"),
+            "3-of-3 must still emit exactly one OP_CHECKMULTISIG");
     }
 
     // -------------------- determinism --------------------

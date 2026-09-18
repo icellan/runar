@@ -2635,7 +2635,15 @@ class HashOk extends SmartContract {
 
     # T5: checkSig wrong first arg type
     def test_t5_checksig_wrong_first_arg_type(self):
-        """checkSig(bytes, pubkey) → error."""
+        """checkSig(n, pubkey) with n: bigint → error.
+
+        N-104: this used to pass a ByteString where a Sig is expected. That is
+        a move WITHIN the ByteString family, and the reference tier
+        (packages/runar-compiler/src/passes/03-typecheck.ts) accepts it -- so
+        the assertion was pinning this tier's narrower `is_subtype` rather than
+        the language. The wrong-type case is now a CROSS-family one, which
+        every tier including the reference refuses.
+        """
         source = """
 import { SmartContract, assert, checkSig } from 'runar-lang';
 
@@ -2647,7 +2655,7 @@ class BadSig extends SmartContract {
     this.pubKey = pubKey;
   }
 
-  public check(data: ByteString): void {
+  public check(data: bigint): void {
     const ok = checkSig(data, this.pubKey);
     assert(ok);
   }
@@ -2657,12 +2665,17 @@ class BadSig extends SmartContract {
         assert result.contract is not None
         tc_result = type_check(result.contract)
         assert len(tc_result.errors) > 0, (
-            "expected error for checkSig with ByteString as first arg (not Sig)"
+            "expected error for checkSig with bigint as first arg (not Sig)"
         )
 
     # T6: checkSig 2nd arg not PubKey
     def test_t6_checksig_second_arg_not_pubkey(self):
-        """checkSig(sig, bytes) → error."""
+        """checkSig(sig, n) with n: bigint → error.
+
+        N-104: same correction as T5. A ByteString in a PubKey slot is a move
+        within the ByteString family, which the reference tier accepts; the
+        cross-family case is what every tier refuses.
+        """
         source = """
 import { SmartContract, assert, checkSig } from 'runar-lang';
 
@@ -2674,7 +2687,7 @@ class BadPubKey extends SmartContract {
     this.x = x;
   }
 
-  public check(sig: Sig, data: ByteString): void {
+  public check(sig: Sig, data: bigint): void {
     const ok = checkSig(sig, data);
     assert(ok);
   }
@@ -2684,7 +2697,7 @@ class BadPubKey extends SmartContract {
         assert result.contract is not None
         tc_result = type_check(result.contract)
         assert len(tc_result.errors) > 0, (
-            "expected error for checkSig with ByteString as second arg (not PubKey)"
+            "expected error for checkSig with bigint as second arg (not PubKey)"
         )
 
     # T10: bigint subtraction allowed

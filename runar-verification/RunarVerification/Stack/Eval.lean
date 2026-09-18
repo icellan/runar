@@ -787,6 +787,12 @@ def runOpcode (code : String) (s : StackState) : EvalResult StackState :=
       runCheckMultiSig false s
   | "OP_CHECKMULTISIGVERIFY" =>
       runCheckMultiSig true s
+  | "OP_NOP" => .ok s
+      -- R-010 prologue: TS prepends `OP_NOP OP_CODESEPARATOR` (`61ab`)
+      -- at offsets 0–1 of locking scripts that authenticate `_codePart`.
+      -- Consensus OP_NOP is a no-op; without this arm the differential
+      -- fails at byte 0 (`OP_NOP`) while python-bitcoinlib no-ops and
+      -- fails at the first stack-consuming opcode (`OP_DUP` / `OP_PICK`).
   | "OP_CODESEPARATOR" => .ok s
       -- Legacy `runOps` keeps the proof-facing state unchanged here.
       -- Use `runOpsPc` when code-separator index tracking is required.

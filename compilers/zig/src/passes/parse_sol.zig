@@ -22,6 +22,7 @@
 //!   - Supports `if`, `else`, `for` loops, variable declarations with `Type name = expr;`
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -69,14 +70,6 @@ pub fn parseSol(allocator: Allocator, source: []const u8, file_name: []const u8)
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -506,6 +499,12 @@ const Parser = struct {
             constructor = self.autoGenerateConstructor(properties.items);
         }
 
+        // Solidity names state variables WITHOUT a `this.` prefix, so every
+        // reference above is still a bare `.identifier`. Resolve them now that
+        // the whole contract — and therefore the complete property list — has
+        // been parsed. See `solResolveBarePropsStmts`.
+        self.solResolveBareProps(properties.items, methods.items);
+
         return ContractNode{
             .name = name_tok.text,
             .parent_class = parent_class,
@@ -582,6 +581,10 @@ const Parser = struct {
             .type_info = types.typeNodeToRunarType(type_node),
             .readonly = readonly,
             .initializer = initializer,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = types.typeNodeName(type_node),
+            .source_loc = self.tokenSourceLoc(name_tok),
             .fixed_array_length = fa_len,
             .fixed_array_element = fa_elem,
             .fixed_array_nested_length = fa_nested_len,
@@ -664,7 +667,16 @@ const Parser = struct {
         if (std.mem.eql(u8, name, "Sig")) return .sig;
         if (std.mem.eql(u8, name, "Addr")) return .addr;
         if (std.mem.eql(u8, name, "ByteString")) return .byte_string;
-        if (std.mem.eql(u8, name, "Sha256") or std.mem.eql(u8, name, "Sha256Digest")) return .sha256;
+        // N-108: `Sha256Digest` is NOT spelled on the Solidity-like surface.
+        // It is a runar-lang TypeScript alias (`export type Sha256Digest =
+        // Sha256`), resolved per SURFACE rather than per tier. The reference
+        // tier keeps `TYPE_ALIASES` in `01-parse.ts` and neither `01-parse-sol.ts`
+        // nor `01-parse-move.ts` applies it, so TypeScript, Go, Rust, Python,
+        // Ruby and Java all answer "unsupported type 'Sha256Digest' in property
+        // declaration" here. Zig alone accepted it, which made a contract using
+        // the name compile in exactly one tier and emit a locking script no peer
+        // would reproduce. Gate: conformance/negatives/N24-sha256digest-alias-sol.
+        if (std.mem.eql(u8, name, "Sha256")) return .sha256;
         if (std.mem.eql(u8, name, "Ripemd160")) return .ripemd160;
         if (std.mem.eql(u8, name, "SigHashPreimage")) return .sig_hash_preimage;
         if (std.mem.eql(u8, name, "RabinSig")) return .rabin_sig;
@@ -706,20 +718,23 @@ const Parser = struct {
         // the stripped param name so the ANF lowerer treats them consistently
         // with the other compilers (TS/Go/Rust/Python/Ruby).
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        // R-040: the full constructor body, in source order, with the
+        // underscore rename applied to EVERY statement rather than only to
+        // assignment right-hand sides. Solidity has no `super` to write, so
+        // nothing is stripped here; ANF lowering emits super from
+        // `super_args` and then lowers this list. Without it a
+        // `require(_target > 0)` in a constructor was parsed and thrown away.
+        var ctor_body: std.ArrayListUnmanaged(Statement) = .empty;
         for (body) |stmt| {
             switch (stmt) {
                 .assign => |assign| {
                     const renamed_value = self.solRenameUnderscoreIdents(assign.value, params);
                     assignments.append(self.allocator, .{ .target = assign.target, .value = renamed_value }) catch {};
+                    var renamed = assign;
+                    renamed.value = renamed_value;
+                    ctor_body.append(self.allocator, .{ .assign = renamed }) catch {};
                 },
-                .expr_stmt => |expr| {
-                    // Check if it's a call to assert/require (skip)
-                    switch (expr.expr) {
-                        .call => {},
-                        else => {},
-                    }
-                },
-                else => {},
+                else => ctor_body.append(self.allocator, self.solRenameStmt(stmt, params)) catch {},
             }
         }
 
@@ -734,6 +749,15 @@ const Parser = struct {
                             .target = prop.name,
                             .value = .{ .identifier = param.name },
                         }) catch {};
+                        // Keep `body` a complete description of the
+                        // constructor: the auto-generated writes have no
+                        // source statement, so append them after whatever the
+                        // author did write.
+                        ctor_body.append(self.allocator, .{ .assign = .{
+                            .target = prop.name,
+                            .value = .{ .identifier = param.name },
+                            .target_is_property = true,
+                        } }) catch {};
                         break;
                     }
                 }
@@ -744,7 +768,265 @@ const Parser = struct {
             .params = params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = ctor_body.items,
         };
+    }
+
+    /// Apply `solRenameUnderscoreIdents` to every expression a statement
+    /// carries. The expression walker mutates nested nodes in place and only
+    /// ever RETURNS a new value for a bare identifier, so a statement whose
+    /// expression is a bare `_name` needs the returned value written back.
+    fn solRenameStmt(self: *Parser, stmt: Statement, params: []const ParamNode) Statement {
+        switch (stmt) {
+            .const_decl => |d| {
+                var out = d;
+                out.value = self.solRenameUnderscoreIdents(d.value, params);
+                return .{ .const_decl = out };
+            },
+            .let_decl => |d| {
+                var out = d;
+                if (d.value) |v| out.value = self.solRenameUnderscoreIdents(v, params);
+                return .{ .let_decl = out };
+            },
+            .assign => |a| {
+                var out = a;
+                out.value = self.solRenameUnderscoreIdents(a.value, params);
+                return .{ .assign = out };
+            },
+            .expr_stmt => |e| {
+                var out = e;
+                out.expr = self.solRenameUnderscoreIdents(e.expr, params);
+                return .{ .expr_stmt = out };
+            },
+            .assert_stmt => |a| {
+                var out = a;
+                out.condition = self.solRenameUnderscoreIdents(a.condition, params);
+                return .{ .assert_stmt = out };
+            },
+            .if_stmt => |i| {
+                var out = i;
+                out.condition = self.solRenameUnderscoreIdents(i.condition, params);
+                for (out.then_body, 0..) |s, idx| out.then_body[idx] = self.solRenameStmt(s, params);
+                if (out.else_body) |eb| {
+                    for (eb, 0..) |s, idx| eb[idx] = self.solRenameStmt(s, params);
+                }
+                return .{ .if_stmt = out };
+            },
+            .for_stmt => |f| {
+                var out = f;
+                for (out.body, 0..) |s, idx| out.body[idx] = self.solRenameStmt(s, params);
+                return .{ .for_stmt = out };
+            },
+            .return_stmt => |maybe| {
+                if (maybe) |e| return .{ .return_stmt = self.solRenameUnderscoreIdents(e, params) };
+                return stmt;
+            },
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Bare state-variable resolution
+    // ------------------------------------------------------------------
+    //
+    // Solidity reads and writes contract state variables WITHOUT a `this.`
+    // prefix, so this parser produces `.identifier` where the ts / go / rust /
+    // python / ruby / java surfaces produce `.property_access`. The other six
+    // tiers close that gap in their own Solidity parsers, with a scope-aware
+    // post-parse rewrite:
+    //
+    //   packages/runar-compiler/src/passes/01-parse-sol.ts  resolvePropertyAccess
+    //   compilers/go/frontend/parser_sol.go                 solRewriteStmtBareProps
+    //   compilers/rust/src/frontend/parser_sol.rs           sol_rewrite_stmt_bare_props
+    //
+    // Zig was the only tier without one. ANF lowering hid that for a long
+    // time: `lowerIdentifier` and `lowerBinding`'s `writes_property` both fall
+    // back to "not a local AND names a property", so reads and `update_prop`
+    // writes still came out right and the surfaces agreed byte for byte.
+    //
+    // They stopped agreeing when `7dfb8c07` (R-028 sibling) keyed
+    // `methodMutatesState` -> `stmtMutatesStateRec` strictly on
+    // `Assign.target_is_property`, matching the reference's
+    // `stmt.target.kind === 'property_access'`. That walker has no local
+    // scope, so it cannot use the fallback — and with the flag never set on
+    // this surface, every bare state-variable write became invisible to the
+    // continuation-shape decision. A stateful `.runar.sol` contract compiled
+    // to a TERMINAL method: no `_changePKH` / `_changeAmount` / `_newAmount`,
+    // no `hashOutputs` continuation, no `_codePart` witness and hence none of
+    // R-010's `_codePart` authentication, on a script that still moves the
+    // contract's funds. Five conformance fixtures diverged from the other six
+    // tiers on `.runar.sol` alone.
+    //
+    // Fixing the AST rather than re-widening the walker keeps the flag's
+    // meaning intact, so R-028 sibling's own invariant survives: a LOCAL that
+    // merely shadows a property is in `locals` here and is left as an
+    // identifier, exactly as `lowerBinding` treats it.
+
+    /// Whether `name` refers to a contract property at this point in the
+    /// method body — i.e. it names one and no parameter or local declared so
+    /// far shadows it.
+    fn solIsBareProp(
+        name: []const u8,
+        properties: []const PropertyNode,
+        locals: *const std.StringHashMapUnmanaged(void),
+    ) bool {
+        if (locals.contains(name)) return false;
+        for (properties) |p| {
+            if (std.mem.eql(u8, p.name, name)) return true;
+        }
+        return false;
+    }
+
+    /// Rewrite every bare property reference inside `expr`. Compound nodes are
+    /// heap-allocated and mutated in place; only a bare `.identifier` needs a
+    /// new value returned, so callers must write the result back — the same
+    /// contract `solRenameUnderscoreIdents` uses.
+    fn solResolveBarePropsExpr(
+        self: *Parser,
+        expr: Expression,
+        properties: []const PropertyNode,
+        locals: *const std.StringHashMapUnmanaged(void),
+    ) Expression {
+        switch (expr) {
+            .identifier => |name| {
+                if (solIsBareProp(name, properties, locals)) {
+                    return .{ .property_access = .{ .object = "this", .property = name } };
+                }
+                return expr;
+            },
+            .binary_op => |bop| {
+                bop.left = self.solResolveBarePropsExpr(bop.left, properties, locals);
+                bop.right = self.solResolveBarePropsExpr(bop.right, properties, locals);
+                return expr;
+            },
+            .unary_op => |uop| {
+                uop.operand = self.solResolveBarePropsExpr(uop.operand, properties, locals);
+                return expr;
+            },
+            .call => |c| {
+                // The callee is a bareword name, not an expression: a bare
+                // call to a private helper is resolved by name downstream, so
+                // only the arguments carry references to rewrite.
+                for (c.args, 0..) |arg, i| {
+                    c.args[i] = self.solResolveBarePropsExpr(arg, properties, locals);
+                }
+                return expr;
+            },
+            .method_call => |mc| {
+                for (mc.args, 0..) |arg, i| {
+                    mc.args[i] = self.solResolveBarePropsExpr(arg, properties, locals);
+                }
+                return expr;
+            },
+            .ternary => |t| {
+                t.condition = self.solResolveBarePropsExpr(t.condition, properties, locals);
+                t.then_expr = self.solResolveBarePropsExpr(t.then_expr, properties, locals);
+                t.else_expr = self.solResolveBarePropsExpr(t.else_expr, properties, locals);
+                return expr;
+            },
+            .index_access => |ia| {
+                ia.object = self.solResolveBarePropsExpr(ia.object, properties, locals);
+                ia.index = self.solResolveBarePropsExpr(ia.index, properties, locals);
+                return expr;
+            },
+            .increment => |inc| {
+                inc.operand = self.solResolveBarePropsExpr(inc.operand, properties, locals);
+                return expr;
+            },
+            .decrement => |dec| {
+                dec.operand = self.solResolveBarePropsExpr(dec.operand, properties, locals);
+                return expr;
+            },
+            else => return expr,
+        }
+    }
+
+    /// Rewrite bare property references across `stmts`, threading the set of
+    /// names a parameter or an earlier local declaration shadows. `locals` is
+    /// cloned for each nested block so a local declared inside an `if` or a
+    /// loop does not leak out of it.
+    fn solResolveBarePropsStmts(
+        self: *Parser,
+        stmts: []Statement,
+        properties: []const PropertyNode,
+        locals: *std.StringHashMapUnmanaged(void),
+    ) void {
+        for (stmts) |*stmt| {
+            switch (stmt.*) {
+                .assign => |*a| {
+                    a.value = self.solResolveBarePropsExpr(a.value, properties, locals);
+                    // `Assign` stores a bare target NAME plus this flag rather
+                    // than a target expression, so the rewrite lands on the
+                    // flag.
+                    if (!a.target_is_property and solIsBareProp(a.target, properties, locals)) {
+                        a.target_is_property = true;
+                    }
+                    // An element write (`grid[0][0] = v`) also carries the
+                    // whole LHS chain on `index_target`, and Solidity writes
+                    // it bare. `expand_fixed_arrays.zig` only resolves a chain
+                    // rooted at `this.<prop>`, so the root has to be rewritten
+                    // here too — `solResolveBarePropsExpr` mutates the
+                    // heap-allocated chain in place.
+                    if (a.index_target) |ia| {
+                        _ = self.solResolveBarePropsExpr(.{ .index_access = ia }, properties, locals);
+                    }
+                },
+                .const_decl => |*d| {
+                    d.value = self.solResolveBarePropsExpr(d.value, properties, locals);
+                    locals.put(self.allocator, d.name, {}) catch {};
+                },
+                .let_decl => |*d| {
+                    // The initializer is resolved in the scope BEFORE the
+                    // declaration: the new local does not shadow until after.
+                    if (d.value) |v| d.value = self.solResolveBarePropsExpr(v, properties, locals);
+                    locals.put(self.allocator, d.name, {}) catch {};
+                },
+                .expr_stmt => |*e| {
+                    e.expr = self.solResolveBarePropsExpr(e.expr, properties, locals);
+                },
+                .assert_stmt => |*a| {
+                    a.condition = self.solResolveBarePropsExpr(a.condition, properties, locals);
+                },
+                .if_stmt => |*i| {
+                    i.condition = self.solResolveBarePropsExpr(i.condition, properties, locals);
+                    var then_locals = locals.clone(self.allocator) catch return;
+                    defer then_locals.deinit(self.allocator);
+                    self.solResolveBarePropsStmts(i.then_body, properties, &then_locals);
+                    if (i.else_body) |eb| {
+                        var else_locals = locals.clone(self.allocator) catch return;
+                        defer else_locals.deinit(self.allocator);
+                        self.solResolveBarePropsStmts(eb, properties, &else_locals);
+                    }
+                },
+                .for_stmt => |*f| {
+                    // `ForStmt` carries integer bounds, not expressions — only
+                    // the loop variable and the body need scoping.
+                    var body_locals = locals.clone(self.allocator) catch return;
+                    defer body_locals.deinit(self.allocator);
+                    body_locals.put(self.allocator, f.var_name, {}) catch {};
+                    self.solResolveBarePropsStmts(f.body, properties, &body_locals);
+                },
+                .return_stmt => |*maybe| {
+                    if (maybe.*) |e| maybe.* = self.solResolveBarePropsExpr(e, properties, locals);
+                },
+            }
+        }
+    }
+
+    /// Entry point: resolve bare property references in every method body.
+    ///
+    /// The constructor is deliberately excluded, matching Go's
+    /// `parseSolConstructor`. Its writes are already carried by
+    /// `ConstructorNode.assignments` (name-keyed), and `passes/validate.zig`
+    /// uses `target_is_property` to reject writes to `readonly` properties —
+    /// which a constructor is the one place allowed to make.
+    fn solResolveBareProps(self: *Parser, properties: []const PropertyNode, methods: []MethodNode) void {
+        if (properties.len == 0) return;
+        for (methods) |*m| {
+            var locals: std.StringHashMapUnmanaged(void) = .empty;
+            defer locals.deinit(self.allocator);
+            for (m.params) |p| locals.put(self.allocator, p.name, {}) catch {};
+            self.solResolveBarePropsStmts(m.body, properties, &locals);
+        }
     }
 
     /// Auto-generate a constructor for contracts without an explicit one.
@@ -1016,6 +1298,15 @@ const Parser = struct {
         return &.{};
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1025,9 +1316,15 @@ const Parser = struct {
         // Extract: var_name, init_value, bound
         var var_name: []const u8 = "_i";
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // It used to be thrown away, so `i + 1n < 2n` unrolled twice for a loop
+        // the source runs once. Rejected by passes/validate.zig.
+        var cond_tests_iter: bool = true;
 
         // Initializer: Type varname = expr OR let/const varname = expr
         if (self.current.kind == .ident and self.isTypeStart()) {
@@ -1039,8 +1336,11 @@ const Parser = struct {
                     _ = self.bump();
                     if (self.current.kind == .number) {
                         init_value = std.fmt.parseInt(i64, self.bump().text, 0) catch 0;
-                    } else {
-                        _ = self.parseExpression();
+                    } else if (self.parseExpression()) |e| {
+                        // N-138: keep a negated literal instead of discarding it.
+                        if (loopStartLiteral(e)) |v| init_value = v else {
+                            init_is_const = false;
+                        }
                     }
                 }
             }
@@ -1052,8 +1352,11 @@ const Parser = struct {
                     _ = self.bump();
                     if (self.current.kind == .number) {
                         init_value = std.fmt.parseInt(i64, self.bump().text, 0) catch 0;
-                    } else {
-                        _ = self.parseExpression();
+                    } else if (self.parseExpression()) |e| {
+                        // N-138: keep a negated literal instead of discarding it.
+                        if (loopStartLiteral(e)) |v| init_value = v else {
+                            init_is_const = false;
+                        }
                     }
                 }
             }
@@ -1072,6 +1375,10 @@ const Parser = struct {
                         descending = bop.op == .gt or bop.op == .gte;
                         // Issue #121: record inclusivity (`<=`/`>=`).
                         inclusive = bop.op == .lte or bop.op == .gte;
+                        cond_tests_iter = switch (bop.left) {
+                            .identifier => |n| std.mem.eql(u8, n, var_name),
+                            else => false,
+                        };
                         switch (bop.right) {
                             .literal_int => |v| {
                                 bound = v;
@@ -1079,21 +1386,24 @@ const Parser = struct {
                             else => {},
                         }
                     },
-                    else => {},
+                    else => cond_tests_iter = false,
                 }
             }
         }
         self.skipSemicolons();
 
-        // Update: i++ / i += 1, etc. -- skip
+        // Update: `i++`, `i--`, … N-061: the clause used to be parsed and
+        // discarded, so anything the unrolled loop model cannot represent was
+        // silently coerced to a unit step. Record it for validate.zig.
+        var update: ?*const Statement = null;
         if (self.current.kind != .rparen) {
-            _ = self.parseExpression();
+            if (self.parseExpression()) |e| update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
         }
         if (self.expect(.rparen) == null) return null;
 
         const body = self.parseBlockOrStatement();
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
@@ -1179,6 +1489,28 @@ const Parser = struct {
             },
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value, .source_loc = loc, .target_is_property = is_prop } };
+            },
+            .index_access => |ia| {
+                // `this.arr[idx] = value` — carry the full index-access target
+                // on the Assign so `expand_fixed_arrays.zig` can rewrite it
+                // into leaf or dispatch form. `target` keeps the base property
+                // name so debug output stays meaningful. Without this arm the
+                // statement fell through to `else`, became
+                // `Assign{ target = "unknown", index_target = null }`, and the
+                // element write was silently dropped (N-059). Every other
+                // surface parser in this tier already carried it.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                    .source_loc = loc,
+                    .target_is_property = is_prop,
+                } };
             },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value, .source_loc = loc, .target_is_property = is_prop } };
@@ -1570,8 +1902,11 @@ const Parser = struct {
                     // decimal text on a `literal_bigint` AST node — codegen
                     // widens this to a decimal-string-backed push that
                     // matches TS / Go / Python byte-for-byte.
-                    if (isAllAsciiDigits(stripped)) {
-                        const decimal = self.allocator.dupe(u8, stripped) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
@@ -1919,4 +2254,26 @@ test "sol type resolution" {
     try std.testing.expectEqual(RunarType.point, Parser.resolveSolType("Point"));
     // Unknown
     try std.testing.expectEqual(RunarType.unknown, Parser.resolveSolType("SomeRandomType"));
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser recognised a bare `.number` (or a
+/// folded `.literal_int`) and let `-1` fall through to the discard path, so a
+/// loop written `for (… i = -1; …)` unrolled from 0 — a different program from
+/// the one the source describes, and byte-divergent from the other six tiers
+/// with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

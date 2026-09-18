@@ -97,13 +97,25 @@ export function emitRawScriptSource(bytes: Uint8Array, opts: EmitRawScriptOption
   const inArity    = opts.inArity    ?? 0;
   const outArity   = opts.outArity   ?? 1;
   const hex = bytesToHex(bytes);
+  // R-155: `UnsafeSmartContract`, not `SmartContract`.
+  //
+  // This path emits an `asm({...})` call, and the compiler's own validator
+  // refuses that outside `UnsafeSmartContract` — "'asm' is only available in
+  // contracts extending UnsafeSmartContract". So the raw path used to print
+  // source this project cannot recompile, under a header promising a
+  // byte-identical round-trip. That promise was true of the ANF path and never
+  // of the SOURCE. `scripts/probe_minimal.ts` in this same package already got
+  // it right, which is how the contrast was found.
   return `// Recovered via runar-decompiler raw_script path. The asm({...}) call
-// preserves the exact opcode bytes; round-trip is byte-identical via
-// compileFromANF. When Phase 3 surface syntax lands, this source becomes
-// directly re-compilable through the standard \`compile()\` entry.
-import { SmartContract, asm } from 'runar-lang';
+// preserves the exact opcode bytes, and the recovered source recompiles
+// through the standard \`compile()\` entry to those same bytes.
+//
+// It extends UnsafeSmartContract because that is the base class asm() exists
+// for: the unsafe designation relaxes the type-checked subset for the bytes
+// inside the call, which is exactly what a recovered byte stream needs.
+import { UnsafeSmartContract, asm } from 'runar-lang';
 
-export class ${className} extends SmartContract {
+export class ${className} extends UnsafeSmartContract {
   constructor() {
     super();
   }

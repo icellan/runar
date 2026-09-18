@@ -1,7 +1,7 @@
 {
   "fixture": "auction",
   "kind": "stateful",
-  "note": "Auction: bid()/close() verify real checkSig plus extractLocktime(preimage) vs deadline. The call tx nLockTime is threaded via CallOptions.locktime so the on-chain extractLocktime binding is real. Real checkPreimage continuation.",
+  "note": "Auction: bid() verifies a real checkSig and reads NO preimage time field (W7 \u2014 nLockTime is a spender-chosen NOT-BEFORE and cannot bound the chain from above). close() verifies the auctioneer's checkSig plus extractLocktime(preimage) >= deadline AND extractSequence(preimage) !== 0xffffffff. The call tx nLockTime and nSequence are threaded via CallOptions, so both on-chain bindings are real. Real checkPreimage continuation.",
   "spends": [
     {
       "method": "close",
@@ -100,6 +100,88 @@
         },
         "highestBid": "100n"
       }
+    },
+    {
+      "method": "close",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 2000,
+      "sequence": 4294967295,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "W7 THEFT: nLockTime 2000 >= deadline 1000, but every input is FINAL. Consensus ignores nLockTime on a final tx, so the node would mine this at height 1 and the auctioneer closes before anyone can bid. The extractSequence guard must refuse it."
+    },
+    {
+      "method": "close",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 2000,
+      "sequence": 4294967293,
+      "expect": "accept",
+      "note": "W7 DISCRIMINATOR: identical spend at nSequence 0xfffffffd. Accepted, so the reject above is the finality sentinel specifically and not a fee/size/binding difference.",
+      "expectedState": {
+        "highestBidder": {
+          "$pubkey": "alice"
+        },
+        "highestBid": "1n"
+      }
+    },
+    {
+      "method": "bid",
+      "args": [
+        null,
+        {
+          "$pubkey": "alice"
+        },
+        "100n"
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 2000,
+      "expect": "accept",
+      "note": "W7: a bid at nLockTime 2000, past the deadline of 1000, is accepted. bid() does not read nLockTime; the deadline guard that used to 'reject' this was satisfiable by any late bidder writing a stale locktime.",
+      "expectedState": {
+        "highestBidder": {
+          "$pubkey": "alice"
+        },
+        "highestBid": "100n"
+      }
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "16b3bbaee407366a85a1a7c509e2a08c90184ff0fcdacba984a4310b11be43ea"
+  }
 }

@@ -213,8 +213,9 @@ type Two struct {
 }
 
 func (c *Two) Bind() {
+	// W2: both calls name index 0 -- any literal index above 0 is refused now.
 	runar.RequireOutputP2PKH(0, c.PKH1, c.A1)
-	runar.RequireOutputP2PKH(1, c.PKH2, c.A2)
+	runar.RequireOutputP2PKH(0, c.PKH2, c.A2)
 }
 `
 	// Compile via the source-to-IR path so we get the ANF directly,

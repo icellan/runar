@@ -138,7 +138,30 @@ def deserialize_state(fields: list[StateField], script_hex: str) -> dict:
 
     Fields with a ``fixed_array`` annotation are returned as a plain Python
     list (possibly nested) on the grouped name, not as N individual scalars.
+
+    FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out of
+    a locking script any third party can construct, so it is untrusted input,
+    and the caller then builds and SIGNS a continuation output committing to
+    the restored state. A state section that does not describe EXACTLY the
+    artifact's ``state_fields`` is rejected:
+
+    - truncation — a field running past the end of the blob raises instead of
+      yielding a default. Every arm used to return ``False`` / ``0`` / ``''``
+      and advance the nominal width ANYWAY, desynchronising every later field;
+    - overlong tails — bytes left over after the last declared field raise
+      instead of being silently dropped.
+
+    Restoring wrong-but-plausible state from a corrupted continuation is worse
+    than not restoring it at all.
+
+    :raises ValueError: the blob does not match ``fields`` exactly.
     """
+    if len(script_hex) % 2 != 0:
+        raise ValueError(
+            f'deserialize_state: state blob is {len(script_hex)} hex chars — '
+            'not a whole number of bytes'
+        )
+
     sorted_fields = sorted(fields, key=lambda f: f.index)
     result: dict = {}
     offset = 0
@@ -150,14 +173,25 @@ def deserialize_state(fields: list[StateField], script_hex: str) -> dict:
             total = len(fa['syntheticNames'])
             flat: list = [None] * total
             for i in range(total):
-                value, bytes_read = _decode_state_value(script_hex, offset, leaf_type)
+                value, bytes_read = _decode_state_value(
+                    script_hex, offset, leaf_type, f'{field.name}[{i}]')
                 flat[i] = value
                 offset += bytes_read
             result[field.name], _ = _regroup_nested(flat, dims)
         else:
-            value, bytes_read = _decode_state_value(script_hex, offset, field.type)
+            value, bytes_read = _decode_state_value(
+                script_hex, offset, field.type, field.name)
             result[field.name] = value
             offset += bytes_read
+
+    if offset != len(script_hex):
+        raise ValueError(
+            f'deserialize_state: {(len(script_hex) - offset) // 2} unexpected trailing '
+            f'byte(s) after the last state field (consumed {offset // 2} of '
+            f'{len(script_hex) // 2} bytes) — the state section does not match the '
+            "artifact's state_fields"
+        )
+
     return result
 
 
@@ -364,32 +398,59 @@ def decode_push_data(hex_str: str, offset: int) -> tuple[str, int]:
     the SDK read a state section the contract's own script cannot parse.
     ``OP_0`` (0x00) falls through to the ``opcode <= 75`` branch below and
     correctly decodes as the empty byte array (0-length push).
-    """
-    if offset >= len(hex_str):
-        return '', 0
 
-    opcode = int(hex_str[offset:offset + 2], 16)
+    :raises ValueError: the framing is truncated, non-hex, or not a push at all.
+    """
+    def need(chars: int, what: str) -> None:
+        """Assert ``chars`` hex chars are available from ``offset``, else fail closed."""
+        if offset + chars > len(hex_str):
+            raise ValueError(
+                f'deserialize_state: truncated state — {what} runs past the end of the '
+                f'state section (needs {chars // 2} byte(s) at offset {offset // 2}, '
+                f'only {(len(hex_str) - offset) // 2} remain)'
+            )
+
+    need(2, 'push opcode')
+    try:
+        opcode = int(hex_str[offset:offset + 2], 16)
+    except ValueError:
+        raise ValueError(
+            f'deserialize_state: non-hex byte at offset {offset // 2} in the state section'
+        ) from None
 
     if opcode <= 75:
         data_len = opcode * 2
+        need(2 + data_len, 'push payload')
         return hex_str[offset + 2:offset + 2 + data_len], 2 + data_len
     elif opcode == 0x4C:
+        need(4, 'OP_PUSHDATA1 length prefix')
         length = int(hex_str[offset + 2:offset + 4], 16)
         data_len = length * 2
+        need(4 + data_len, 'OP_PUSHDATA1 payload')
         return hex_str[offset + 4:offset + 4 + data_len], 4 + data_len
     elif opcode == 0x4D:
+        need(6, 'OP_PUSHDATA2 length prefix')
         lo = int(hex_str[offset + 2:offset + 4], 16)
         hi = int(hex_str[offset + 4:offset + 6], 16)
         length = lo | (hi << 8)
         data_len = length * 2
+        need(6 + data_len, 'OP_PUSHDATA2 payload')
         return hex_str[offset + 6:offset + 6 + data_len], 6 + data_len
     elif opcode == 0x4E:
+        need(10, 'OP_PUSHDATA4 length prefix')
         b = bytes.fromhex(hex_str[offset + 2:offset + 10])
         length = int.from_bytes(b, 'little')
         data_len = length * 2
+        need(10 + data_len, 'OP_PUSHDATA4 payload')
         return hex_str[offset + 10:offset + 10 + data_len], 10 + data_len
 
-    return '', 2
+    # Not a push opcode at all — encode_push_data_state can never emit one, so
+    # the state section is malformed. This used to consume one byte and return
+    # an empty value, desynchronising every subsequent field.
+    raise ValueError(
+        f'deserialize_state: byte 0x{opcode:02x} at offset {offset // 2} is not a push '
+        'opcode; the state section is malformed'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +464,11 @@ _TYPE_WIDTHS = {
     'Ripemd160': 20,
     'Sha256': 32,
     'Point': 64,
+    # runar-lang's P256Point / P384Point cast constructors hard-assert 64 / 96
+    # bytes and all seven compilers emit them as fixed raw slices; framing them
+    # instead deploys a state section 1-2 bytes long and the first spend fails.
+    'P256Point': 64,
+    'P384Point': 96,
 }
 
 
@@ -416,11 +482,32 @@ def _encode_state_value(value, field_type: str, label: str = '?') -> str:
         else:
             n = int(value)
         return _encode_num2bin(n, 8, label)
-    elif field_type == 'bool':
+    elif field_type in ('bool', 'boolean'):
+        # 1 raw byte. The canonical Runar primitive name is `boolean` — that is
+        # what every compiler writes into stateFields[].type, alongside
+        # encoding 'bool1' / byteLength 1 — and 'bool' is an accepted alias.
+        # Matching only on 'bool' meant a REAL boolean state field fell through
+        # to the push-data branch below, where a Python bool is not a str and
+        # became the empty string, i.e. a constant '00' — the deploy always
+        # said False whatever the caller passed, and the first call that set
+        # the flag built a continuation the covenant rejects.
         return '01' if value else '00'
     elif field_type in _TYPE_WIDTHS:
         # Fixed-size byte types: raw hex, no framing needed.
-        return value if isinstance(value, str) else ''
+        #
+        # A MISSING value is refused rather than coerced. Python wrote '' —
+        # zero bytes for a field the artifact declares N bytes wide — where Go
+        # wrote '<nil>', Java 'null' and TS 'undefined': four different non-hex
+        # placeholders for the same mistake, a silent byte divergence on a path
+        # whose bytes are committed on chain. Refusing is the only answer that
+        # is the same in every tier.
+        if not isinstance(value, str):
+            raise ValueError(
+                f'serialize_state: state field {label!r} ({field_type}) has no value. '
+                "Writing a placeholder would deploy a state section the contract's own "
+                'on-chain reader cannot parse, leaving the output unspendable'
+            )
+        return value
     else:
         # Variable-length types (ByteString, etc.): use push-data encoding
         # so the decoder can determine the length.
@@ -430,25 +517,42 @@ def _encode_state_value(value, field_type: str, label: str = '?') -> str:
         return encode_push_data_state(hex_val)
 
 
-def _decode_state_value(hex_str: str, offset: int, field_type: str) -> tuple:
-    if field_type == 'bool':
-        # 1 raw byte
-        if offset + 2 > len(hex_str):
-            return False, 2
-        byte = hex_str[offset:offset + 2]
-        return byte != '00', 2
-    elif field_type in ('int', 'bigint'):
-        # 8 raw bytes LE sign-magnitude
-        hex_width = 16  # 8 bytes * 2
+def _state_field_byte_width(field_type: str) -> int | None:
+    """Fixed on-wire width of a state field type in bytes, or None if variable.
+
+    The single table ``_encode_state_value``'s raw branch and
+    ``_decode_state_value``'s bounds check both read, so the writer and the
+    reader cannot drift.
+    """
+    if field_type in ('bool', 'boolean'):
+        return 1
+    if field_type in ('int', 'bigint'):
+        return 8
+    return _TYPE_WIDTHS.get(field_type)
+
+
+def _decode_state_value(hex_str: str, offset: int, field_type: str,
+                        label: str = '?') -> tuple:
+    width = _state_field_byte_width(field_type)
+    if width is not None:
+        hex_width = width * 2
         if offset + hex_width > len(hex_str):
-            return 0, hex_width
+            raise ValueError(
+                f'deserialize_state: truncated state — field {label!r} ({field_type}) '
+                f'needs {width} byte(s) at offset {offset // 2} but only '
+                f'{(len(hex_str) - offset) // 2} byte(s) remain'
+            )
         data = hex_str[offset:offset + hex_width]
-        return _decode_num2bin(data), hex_width
-    elif field_type in _TYPE_WIDTHS:
-        w = _TYPE_WIDTHS[field_type] * 2  # hex chars
-        data = hex_str[offset:offset + w] if offset + w <= len(hex_str) else ''
-        return data, w
-    else:
-        # Unknown type: fall back to push-data decoding
-        data, bytes_read = decode_push_data(hex_str, offset)
-        return data, bytes_read
+        if field_type in ('bool', 'boolean'):
+            # 1 raw byte: 0x00 = False, 0x01 = True. Both spellings, matching
+            # _encode_state_value — a reader that knows only 'bool' walks a real
+            # boolean field as push data and desynchronises every field after it.
+            return data != '00', hex_width
+        if field_type in ('int', 'bigint'):
+            # 8 raw bytes LE sign-magnitude
+            return _decode_num2bin(data), hex_width
+        # Raw fixed-size byte types
+        return data, hex_width
+
+    # Variable-length / unknown types: push-data decoding
+    return decode_push_data(hex_str, offset)

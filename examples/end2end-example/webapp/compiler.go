@@ -7,8 +7,9 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/icellan/runar/compilers/go/codegen"
+	gocompiler "github.com/icellan/runar/compilers/go/compiler"
 	"github.com/icellan/runar/compilers/go/frontend"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // sourceLang describes how to locate a PriceBet source variant and what
@@ -99,8 +100,18 @@ func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, threshold int) (
 		return "", "", fmt.Errorf("typecheck %s: %v", key, tcResult.Errors)
 	}
 
-	program := frontend.LowerToANF(parseResult.Contract)
+	// R-091: pass 3b. Without it a FixedArray property never becomes scalar
+	// slots, and the demo would silently lower a different contract than the
+	// CLI does. It is a no-op for contracts that have none.
+	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	if len(expandResult.Errors) > 0 {
+		return "", "", fmt.Errorf("expand fixed arrays %s: %v", key, expandResult.Errors)
+	}
 
+	program := frontend.LowerToANF(expandResult.Contract)
+
+	// The demo's whole point is to bake these four values in, so the patch
+	// stays — it is the ONE deliberate difference from a plain CLI compile.
 	for i := range program.Properties {
 		switch program.Properties[i].Name {
 		case "alicePubKey":
@@ -114,17 +125,18 @@ func compilePriceBet(lang, alicePubKeyHex, bobPubKeyHex string, threshold int) (
 		}
 	}
 
-	stackMethods, err := codegen.LowerToStack(program)
+	// R-091: everything AFTER the patch now goes through the official entry
+	// point, so the demo gets constant folding, the EC optimizer, dead-binding
+	// elimination and the peephole pass — the same passes the CLI runs. Hand
+	// rolling LowerToStack + Emit here is what made the playground emit
+	// `76a9007c7c87697c7c7c7cac` for a P2PKH the real compiler emits as
+	// `76a90088ac`.
+	artifact, err := gocompiler.CompileFromProgram(program)
 	if err != nil {
-		return "", "", fmt.Errorf("stack lower %s: %w", key, err)
+		return "", "", fmt.Errorf("compile %s: %w", key, err)
 	}
 
-	emitResult, err := codegen.Emit(stackMethods)
-	if err != nil {
-		return "", "", fmt.Errorf("emit %s: %w", key, err)
-	}
-
-	return emitResult.ScriptHex, emitResult.ScriptAsm, nil
+	return artifact.Script, artifact.ASM, nil
 }
 
 func readContractSource(spec sourceLang) ([]byte, error) {
@@ -151,27 +163,42 @@ func readContractSource(spec sourceLang) ([]byte, error) {
 // "P2PKH.runar.java" selects the Java parser). Unlike compilePriceBet this
 // path does not patch property initializers — the caller gets whatever the
 // compiler produces from the literal source.
-func compileSource(source []byte, filename string) (scriptHex string, scriptAsm string, err error) {
-	parseResult := frontend.ParseSource(source, filename)
-	if len(parseResult.Errors) > 0 {
-		return "", "", fmt.Errorf("parse: %v", parseResult.Errors)
+// R-091: this used to run the passes by hand — ParseSource, Validate,
+// TypeCheck, LowerToANF, LowerToStack, Emit — and therefore skipped
+// ExpandFixedArrays (pass 3b), constant folding, the EC optimizer,
+// dead-binding elimination and the peephole pass. The playground showed a
+// script the real compiler would never emit, on every contract, not just
+// optimiser-heavy ones:
+//
+//	P2PKH       official 76a90088ac       playground 76a9007c7c87697c7c7c7cac
+//	fold-heavy  official 011293009c       playground 537c7c93547c7c93...7c7c9c
+//	FixedArray  official a 30-byte dispatch chain; playground 14 bytes of
+//	            nonsense, because without pass 3b the property never became
+//	            scalar slots
+//
+// It now calls the same library entry point the CLI uses, so the playground and
+// `runar-go --source` cannot disagree. `compiler_pipeline_test.go` pins that.
+//
+// R-214: the ANF IR comes back too. `CompileFromSourceStrWithResult` has always
+// returned it on the result struct and this function used to drop it on the
+// floor, so the playground could show WHAT a contract compiles to but never
+// WHY — which binding became which push, where the constant folder fired, what
+// the fixed-array expansion produced. Stack IR is deliberately not returned:
+// no tier serialises it (CLAUDE.md, invariant 2), so there is no canonical
+// form to hand out.
+func compileSource(source []byte, filename string) (scriptHex string, scriptAsm string, anf *ir.ANFProgram, err error) {
+	result := gocompiler.CompileFromSourceStrWithResult(string(source), filename)
+	if !result.Success {
+		var msgs []string
+		for _, d := range result.Diagnostics {
+			if d.Severity == frontend.SeverityError {
+				msgs = append(msgs, d.Message)
+			}
+		}
+		if len(msgs) == 0 {
+			msgs = append(msgs, "compilation failed with no error diagnostic")
+		}
+		return "", "", nil, fmt.Errorf("compile: %s", strings.Join(msgs, "; "))
 	}
-	validResult := frontend.Validate(parseResult.Contract)
-	if len(validResult.Errors) > 0 {
-		return "", "", fmt.Errorf("validate: %v", validResult.Errors)
-	}
-	tcResult := frontend.TypeCheck(parseResult.Contract)
-	if len(tcResult.Errors) > 0 {
-		return "", "", fmt.Errorf("typecheck: %v", tcResult.Errors)
-	}
-	program := frontend.LowerToANF(parseResult.Contract)
-	stackMethods, err := codegen.LowerToStack(program)
-	if err != nil {
-		return "", "", fmt.Errorf("stack lower: %w", err)
-	}
-	emitResult, err := codegen.Emit(stackMethods)
-	if err != nil {
-		return "", "", fmt.Errorf("emit: %w", err)
-	}
-	return emitResult.ScriptHex, emitResult.ScriptAsm, nil
+	return result.ScriptHex, result.ScriptAsm, result.ANF, nil
 }

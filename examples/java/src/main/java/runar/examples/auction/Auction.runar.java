@@ -10,6 +10,7 @@ import runar.lang.types.Sig;
 import static runar.lang.Builtins.assertThat;
 import static runar.lang.Builtins.checkSig;
 import static runar.lang.Builtins.extractLocktime;
+import static runar.lang.Builtins.extractSequence;
 
 /**
  * Auction -- on-chain English auction.
@@ -19,8 +20,28 @@ import static runar.lang.Builtins.extractLocktime;
  * block-height deadline. After the deadline, only the auctioneer can
  * close the auction.
  *
- * <p>Time enforcement is via {@code extractLocktime(this.txPreimage)}.
- * Inside the simulator, {@link runar.lang.Builtins#extractLocktime}
+ * <p><b>Time enforcement — read this before copying the pattern.</b>
+ * {@code nLockTime} is chosen by the <i>spender</i> and enforced by
+ * consensus as a NOT-BEFORE: the transaction becomes mineable once the
+ * chain has reached it. Nothing about it bounds the chain from above. A
+ * script can therefore assert "not before T" and can NEVER assert
+ * "before T" — a bidder at height T+1 simply stamps a stale
+ * {@code nLockTime} of T-1 and the node mines it.
+ *
+ * <p>So {@link #bid} carries no deadline check at all: bidding is open
+ * until the auctioneer closes. {@link #close} uses the direction that
+ * does work, {@code nLockTime >= deadline}, paired with
+ * {@code extractSequence != 0xffffffff}. That second assert is
+ * load-bearing, not decoration: consensus ignores {@code nLockTime}
+ * entirely when every input is final, so without it the auctioneer could
+ * stamp {@code nLockTime = deadline} on an all-final transaction and
+ * close at any height, before anyone had a chance to bid.
+ *
+ * <p>A trustless "bids only before T" window needs a time source the
+ * contract can read as state — an oracle or a tick — not the spending
+ * transaction's own locktime. v1 does not ship one.
+ *
+ * <p>Inside the simulator, {@link runar.lang.Builtins#extractLocktime}
  * returns {@code 0}, so tests that exercise the deadline path must
  * construct a {@link runar.lang.runtime.Preimage} with an explicit
  * {@code locktime(...)} and call via
@@ -41,13 +62,17 @@ class Auction extends StatefulSmartContract {
         this.deadline = deadline;
     }
 
-    /** Submit a new bid that outbids the current highest. */
+    /**
+     * Submit a new bid that outbids the current highest.
+     *
+     * <p>There is deliberately no deadline check here — see the class-level
+     * Time enforcement note. A bid lands whenever the contract's UTXO is
+     * still unspent.
+     */
     @Public
     void bid(Sig sig, PubKey bidder, Bigint bidAmount) {
         assertThat(checkSig(sig, bidder));
         assertThat(bidAmount.gt(this.highestBid));
-        // The auction is still open: nLockTime < deadline.
-        assertThat(Bigint.of(extractLocktime(this.txPreimage)).lt(this.deadline));
         this.highestBidder = bidder;
         this.highestBid = bidAmount;
     }
@@ -57,5 +82,10 @@ class Auction extends StatefulSmartContract {
     void close(Sig sig) {
         assertThat(checkSig(sig, this.auctioneer));
         assertThat(Bigint.of(extractLocktime(this.txPreimage)).ge(this.deadline));
+        // ...and that consensus actually enforces that nLockTime. A transaction
+        // whose inputs are all final (nSequence 0xffffffff) is mineable at any
+        // height with nLockTime ignored, so without this the assert above is
+        // script-only theatre and the auctioneer can close immediately.
+        assertThat(Bigint.of(extractSequence(this.txPreimage)).neq(Bigint.of(4294967295L)));
     }
 }

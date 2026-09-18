@@ -963,6 +963,11 @@ func EmitBN254Pairing(emit func(StackOp)) {
 	// Decompose G1 point into (px, py) field elements
 	bn254DecomposePoint(t, "_P", "px", "py")
 
+	// CL-BUG-103: reject off-curve G1, off-twist G2 and off-subgroup G2
+	// inputs BEFORE the Miller loop runs. See bn254_point_validation.go.
+	bn254ValidateG1Input(t, "px", "py", "sp")
+	bn254ValidateG2Input(t, "qx0", "qx1", "qy0", "qy1", "sp")
+
 	// Run Miller loop
 	// Input: px, py, qx0, qx1, qy0, qy1 on tracker
 	// Output: _f (12 Fp slots) on tracker; px, py, qx0..qy1 still present
@@ -986,6 +991,9 @@ func EmitBN254PairingRaw(emit func(StackOp)) {
 	t.PushPrimeCache()
 
 	bn254DecomposePoint(t, "_P", "px", "py")
+	// CL-BUG-103: same mandatory input validation as EmitBN254Pairing.
+	bn254ValidateG1Input(t, "px", "py", "sr")
+	bn254ValidateG2Input(t, "qx0", "qx1", "qy0", "qy1", "sr")
 	bn254MillerLoop(t)
 	bn254DropNames(t, []string{"px", "py", "qx0", "qx1", "qy0", "qy1"})
 	bn254FinalExp(t, "_f", "_result")
@@ -1223,6 +1231,9 @@ func EmitBN254MultiPairing4(emit func(StackOp)) {
 	bn254DecomposePoint(t, "_P3", "p3x", "p3y")
 	bn254DecomposePoint(t, "_P4", "p4x", "p4y")
 
+	// CL-BUG-103: mandatory input validation for every pair.
+	bn254ValidateMultiPairingInputs(t, 4, "m4")
+
 	// Run shared Miller loop for all 4 pairs
 	bn254MultiMillerLoop4(t)
 
@@ -1322,6 +1333,9 @@ func EmitBN254MultiPairing4Raw(emit func(StackOp)) {
 	bn254DecomposePoint(t, "_P2", "p2x", "p2y")
 	bn254DecomposePoint(t, "_P3", "p3x", "p3y")
 	bn254DecomposePoint(t, "_P4", "p4x", "p4y")
+
+	// CL-BUG-103: same mandatory input validation as EmitBN254MultiPairing4.
+	bn254ValidateMultiPairingInputs(t, 4, "r4")
 
 	bn254MultiMillerLoop4(t)
 
@@ -1635,6 +1649,9 @@ func EmitBN254MultiPairing3WithPrecomputed(emit func(StackOp)) {
 	bn254DecomposePoint(t, "_P1", "p1x", "p1y")
 	bn254DecomposePoint(t, "_P2", "p2x", "p2y")
 	bn254DecomposePoint(t, "_P3", "p3x", "p3y")
+
+	// CL-BUG-103: mandatory input validation for every pair.
+	bn254ValidateMultiPairingInputs(t, 3, "m3")
 
 	// Run shared Miller loop for 3 pairs
 	bn254MultiMillerLoop3(t)

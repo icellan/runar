@@ -35,6 +35,30 @@ import runar.compiler.passes.Emit;
  * <p>Expected op counts and byte-lengths were captured by running the
  * Python reference ({@code compilers/python/runar_compiler/codegen/ec.py})
  * on the same commit as this port.
+ *
+ * <p>R-052 / CL-BUG-095, the Point WIDTH gate, moved these goldens. A
+ * {@code Point} is 64 bytes by definition and nothing checked it, so a surplus
+ * byte was split off and silently dropped: {@code ecOnCurve(G || 0xff)} returned
+ * TRUE and {@code ecEncodeCompressed} took its parity bit from the caller's
+ * extra byte. The deltas are all structural, which is what makes them match the
+ * six other tiers byte-for-byte:
+ *
+ * <ul>
+ *   <li>+3 per {@code decomposePoint} call site — OP_SIZE, push 64,
+ *       OP_NUMEQUALVERIFY. {@code ecAdd} decomposes TWICE, hence +6;
+ *       {@code ecMul} / {@code ecMulGen} / {@code ecNegate} once.</li>
+ *   <li>+15 {@code ecOnCurve} — 9 for the clamp-and-flag gate (it must stay a
+ *       PREDICATE and answer {@code false}, not abort, or
+ *       {@code if (ecOnCurve(p))} stops being writable), +3 for the
+ *       {@code decomposePoint} gate, +1 for the extra OP_BOOLAND folding
+ *       {@code _len_ok} in, +2 for rolling the two flags up.</li>
+ *   <li>+3 {@code ecPointX} / {@code ecPointY}.</li>
+ * </ul>
+ *
+ * <p>{@code ecEncodeCompressed} stays at 16 ops and that is NOT an oversight:
+ * the gate adds 3 ops while the fixed-offset parity read (push 31, OP_SPLIT,
+ * OP_NIP) replaces a 6-op OP_SIZE/OP_SUB/OP_SPLIT/OP_SWAP/OP_DROP sequence with
+ * 3. Net zero ops, +2 bytes (push 64 is a 2-byte push, push 1 was 1).
  */
 class EcTest {
 
@@ -47,42 +71,46 @@ class EcTest {
         // OP_SUB/OP_NOT that build `notinf`, the two OP_MULs that mask rx/ry,
         // and the picks/rolls that feed them. All 1-byte ops, hence op count
         // and byte count move together.
-        assertEquals(8223, countOpTree(ops), "ecAdd op count drift");
+        //
+        // CL-BUG-096 then added a further +50 / +50: emitAffineInfinitySelect
+        // replaces the four toTop/drop cleanups and the two `notinf` OP_MULs
+        // with the pinf/qinf/usep/useq/user select. Again all 1-byte ops.
+        assertEquals(8297, countOpTree(ops), "ecAdd op count drift");
 
         String hex = emitHex(ops);
-        assertEquals(25426, hex.length() / 2, "ecAdd hex byte count drift");
+        assertEquals(25634, hex.length() / 2, "ecAdd hex byte count drift");
     }
 
     @Test
     void ecMulShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcMul(ops::add);
-        assertEquals(130515, countOpTree(ops), "ecMul op count drift");
-        assertEquals(428676, emitHex(ops).length() / 2);
+        assertEquals(131073, countOpTree(ops), "ecMul op count drift");
+        assertEquals(429567, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecMulGenShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcMulGen(ops::add);
-        assertEquals(130517, countOpTree(ops), "ecMulGen op count drift");
-        assertEquals(428742, emitHex(ops).length() / 2);
+        assertEquals(131075, countOpTree(ops), "ecMulGen op count drift");
+        assertEquals(429633, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecNegateShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcNegate(ops::add);
-        assertEquals(945, countOpTree(ops));
-        assertEquals(1018, emitHex(ops).length() / 2);
+        assertEquals(956, countOpTree(ops));
+        assertEquals(1096, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecOnCurveShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcOnCurve(ops::add);
-        assertEquals(533, countOpTree(ops));
-        assertEquals(734, emitHex(ops).length() / 2);
+        assertEquals(548, countOpTree(ops));
+        assertEquals(816, emitHex(ops).length() / 2);
     }
 
     @Test
@@ -110,31 +138,37 @@ class EcTest {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcEncodeCompressed(ops::add);
         assertEquals(16, countOpTree(ops));
-        assertEquals(19, emitHex(ops).length() / 2);
+        assertEquals(21, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecMakePointShape() {
+        // R-156, the ecMakePoint FIELD-ELEMENT gate: 467 -> 477 ops (+10) and
+        // 471 -> 547 bytes (+76). Five ops per coordinate -- OP_DUP, OP_0, push p,
+        // OP_WITHIN, OP_VERIFY -- and ecMakePoint has two; the 33-byte push of p is what
+        // makes the byte delta 38 per gate rather than 5. Nothing else moves: this gate
+        // is on the two BIGINT arguments of the point CONSTRUCTOR, a different surface
+        // from R-117's gate on the coordinates of an existing Point.
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcMakePoint(ops::add);
-        assertEquals(467, countOpTree(ops));
-        assertEquals(471, emitHex(ops).length() / 2);
+        assertEquals(477, countOpTree(ops));
+        assertEquals(547, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecPointXShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcPointX(ops::add);
-        assertEquals(233, countOpTree(ops));
-        assertEquals(235, emitHex(ops).length() / 2);
+        assertEquals(236, countOpTree(ops));
+        assertEquals(239, emitHex(ops).length() / 2);
     }
 
     @Test
     void ecPointYShape() {
         List<StackOp> ops = new ArrayList<>();
         Ec.emitEcPointY(ops::add);
-        assertEquals(234, countOpTree(ops));
-        assertEquals(236, emitHex(ops).length() / 2);
+        assertEquals(237, countOpTree(ops));
+        assertEquals(240, emitHex(ops).length() / 2);
     }
 
     @Test

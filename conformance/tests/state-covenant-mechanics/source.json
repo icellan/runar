@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/state-covenant-mechanics/StateCovenantMechanics.runar.ts",
+    ".runar.sol": "../../../examples/sol/state-covenant-mechanics/StateCovenantMechanics.runar.sol",
+    ".runar.move": "../../../examples/move/state-covenant-mechanics/StateCovenantMechanics.runar.move",
+    ".runar.go": "../../../examples/go/state-covenant-mechanics/StateCovenantMechanics.runar.go",
+    ".runar.rs": "../../../examples/rust/state-covenant-mechanics/StateCovenantMechanics.runar.rs",
+    ".runar.py": "../../../examples/python/state-covenant-mechanics/StateCovenantMechanics.runar.py",
+    ".runar.zig": "../../../examples/zig/state-covenant-mechanics/StateCovenantMechanics.runar.zig",
+    ".runar.rb": "../../../examples/ruby/state-covenant-mechanics/StateCovenantMechanics.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/state-covenant-mechanics/StateCovenantMechanics.runar.java"
+  }
+}

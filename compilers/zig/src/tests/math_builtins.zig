@@ -136,6 +136,34 @@ test "math builtin pow lowers to OP_MUL" {
     try expectOpcode(hex, "95");
 }
 
+// E9 — pow: the exponent-domain guard (R-169, the pow half)
+test "math builtin pow guards the exponent domain before unrolling" {
+    // The 32 rounds compute base^min(exp, 32), so without a guard an exponent
+    // outside 0..32 returned that CLAMPED value with no error — measured on
+    // the real VM at pow(2,40) = 2^32. The constant folder computed the TRUE
+    // power for exp <= 256 and the reference interpreter is exact for every
+    // exp >= 0, so one builtin meant three different things. All three now
+    // refuse outside 0..32.
+    //
+    // Pinned as the exact byte SEQUENCE, not as opcode presence: OP_WITHIN
+    // (0xa5) alone would also be satisfied by the `within` builtin elsewhere
+    // in a contract, and the ORDER is what makes this a guard rather than a
+    // stray comparison.
+    //   76 = OP_DUP, 00 = OP_0, 0121 = push(33), a5 = OP_WITHIN, 69 = OP_VERIFY
+    const hex = try compileBuiltinCheck("        runar.assert(runar.pow(a, b) == self.threshold);");
+    defer std.testing.allocator.free(hex);
+    const guard = "760001" ++ "21" ++ "a569";
+    try std.testing.expect(std.mem.indexOf(u8, hex, guard) != null);
+    // 33, not 32: OP_WITHIN is half-open, so a bound of 32 (0x20) would reject
+    // the largest exponent the unroll can actually compute.
+    try std.testing.expect(std.mem.indexOf(u8, hex, "76000120a569") == null);
+    // The guard must precede the accumulator seed (OP_SWAP 7c, OP_1 51) that
+    // opens the unroll — after it, it would be reading the base, not the exp.
+    const guard_at = std.mem.indexOf(u8, hex, guard).?;
+    const seed_at = std.mem.indexOf(u8, hex, "7c5152") orelse return error.NoUnroll;
+    try std.testing.expect(guard_at < seed_at);
+}
+
 // E10 — mulDiv
 test "math builtin mulDiv lowers to OP_MUL and OP_DIV" {
     const hex = try compileBuiltinCheck("        runar.assert(runar.mulDiv(a, b, c) == self.threshold);");

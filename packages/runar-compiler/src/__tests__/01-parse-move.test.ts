@@ -594,3 +594,56 @@ module Arithmetic {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// R-183 (CL-BUG-063): the seven tiers' Move type tables had drifted.
+//
+// Measured before the fix, across all seven Move frontends:
+//
+//   Bigint  -> bigint      accepted by 3 of 7 (python, ruby, java)
+//   Bytes   -> ByteString  accepted by 2 of 7 (go, rust)
+//   address -> Addr        accepted by 4 of 7 (ts, go, rust, ruby)
+//
+// So the same `.runar.move` source parsed in some tiers and was refused, or
+// silently degraded to a custom type, in others — a frontend-parity break in a
+// surface whose whole point is that all seven read it identically. They are all
+// spellings of the same Rúnar type; every tier now accepts the same set.
+// ---------------------------------------------------------------------------
+describe('R-183: Move type aliases are the same set in every tier', () => {
+  const source = (declType: string, paramType: string) => `
+module Aliases {
+    use runar::StatefulSmartContract;
+
+    resource struct Aliases {
+        tag: ${declType},
+        count: &mut ${paramType} = 0,
+    }
+
+    public fun bump(n: ${paramType}) {
+        self.count = self.count + n;
+    }
+}
+`;
+
+  it.each([
+    ['Bigint', 'bigint'],
+    ['Int', 'bigint'],
+    ['u64', 'bigint'],
+  ])('maps %s to %s', (alias, expected) => {
+    const result = parseMoveSource(source('ByteString', alias));
+    expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+    const prop = result.contract!.properties.find((p) => p.name === 'count')!;
+    expect(prop.type).toEqual({ kind: 'primitive_type', name: expected });
+  });
+
+  it.each([
+    ['Bytes', 'ByteString'],
+    ['vector', 'ByteString'],
+    ['address', 'Addr'],
+  ])('maps %s to %s', (alias, expected) => {
+    const result = parseMoveSource(source(alias, 'bigint'));
+    expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+    const prop = result.contract!.properties.find((p) => p.name === 'tag')!;
+    expect(prop.type).toEqual({ kind: 'primitive_type', name: expected });
+  });
+});

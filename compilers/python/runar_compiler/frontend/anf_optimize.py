@@ -9,10 +9,12 @@ Runs between ANF lowering (pass 4) and stack lowering (pass 5).
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import Optional
 
 from runar_compiler.ir.types import (
+    bigint_json_value,
     ANFBinding,
     ANFMethod,
     ANFProgram,
@@ -82,7 +84,10 @@ def _optimize_method(method: ANFMethod) -> None:
         changed = False
         new_body: list[ANFBinding] = []
         for binding in method.body:
-            optimized = _try_optimize(binding.value, value_map)
+            # `new_body` doubles as the prelude list: a rule that folds a new
+            # constant appends its binding here, i.e. immediately BEFORE the
+            # binding being rewritten (see _fresh_const_name).
+            optimized = _try_optimize(binding.value, value_map, new_body)
             if optimized is not None:
                 binding = ANFBinding(name=binding.name, value=optimized, source_loc=binding.source_loc)
                 changed = True
@@ -98,7 +103,8 @@ def _optimize_method(method: ANFMethod) -> None:
 # Optimization rules
 # ---------------------------------------------------------------------------
 
-def _try_optimize(v: ANFValue, vm: dict[str, ANFValue]) -> Optional[ANFValue]:
+def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
+                  prelude: list[ANFBinding]) -> Optional[ANFValue]:
     if v.kind != "call" or v.func is None or v.args is None:
         return None
 
@@ -148,6 +154,22 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue]) -> Optional[ANFValue]:
             if _same_binding(args[0], neg.args[0], vm):
                 return _make_const_hex(INFINITY_HEX)
 
+    # Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+    #
+    # The mirror of Rule 8. It has always been in optimizer/ec-rules.json and the
+    # Go tier -- whose rule engine executes that file directly -- performed it;
+    # the six hand-ported tiers implemented only the forward direction, so the
+    # same ANF compiled to a 1808-byte script in Go and a 26140-byte one
+    # everywhere else (R-034 / CL-BUG-028).
+    #
+    # Placed after Rule 8 and before Rules 9/10/11 to match the JSON's rule
+    # order, which is the order the Go engine tries them in.
+    if func == "ecAdd" and len(args) == 2:
+        neg = _resolve(args[0], vm)
+        if neg is not None and neg.kind == "call" and neg.func == "ecNegate" and neg.args and len(neg.args) == 1:
+            if _same_binding(args[1], neg.args[0], vm):
+                return _make_const_hex(INFINITY_HEX)
+
     # Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
     if func == "ecMul" and len(args) == 2:
         inner = _resolve(args[0], vm)
@@ -156,7 +178,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue]) -> Optional[ANFValue]:
             k1 = _get_const_int(inner.args[1], vm)
             if k1 is not None:
                 combined = (k1 * k2) % CURVE_N
-                return _make_call("ecMul", [inner.args[0], _fresh_const_name(combined, vm)])
+                return _make_call("ecMul", [inner.args[0], _fresh_const_name(combined, vm, prelude)])
 
     # Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2 mod N)
     if func == "ecAdd" and len(args) == 2:
@@ -169,7 +191,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue]) -> Optional[ANFValue]:
             k2 = _get_const_int(right.args[0], vm)
             if k1 is not None and k2 is not None:
                 combined = (k1 + k2) % CURVE_N
-                return _make_call("ecMulGen", [_fresh_const_name(combined, vm)])
+                return _make_call("ecMulGen", [_fresh_const_name(combined, vm, prelude)])
 
     # Rule 11: ecAdd(ecMul(k1,p), ecMul(k2,p)) -> ecMul(k1+k2, p) when same p
     if func == "ecAdd" and len(args) == 2:
@@ -183,7 +205,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue]) -> Optional[ANFValue]:
                 k2 = _get_const_int(right.args[1], vm)
                 if k1 is not None and k2 is not None:
                     combined = (k1 + k2) % CURVE_N
-                    return _make_call("ecMul", [left.args[0], _fresh_const_name(combined, vm)])
+                    return _make_call("ecMul", [left.args[0], _fresh_const_name(combined, vm, prelude)])
 
     # Rule 12: ecMul(k, G) -> ecMulGen(k)
     if func == "ecMul" and len(args) == 2:
@@ -278,7 +300,16 @@ def _make_const_hex(hex_str: str) -> ANFValue:
 
 
 def _make_const_int(n: int) -> ANFValue:
-    return ANFValue(kind="load_const", const_big_int=n, const_int=n, raw_value=n)
+    # A folded EC scalar is a value mod n, routinely far beyond
+    # Number.MAX_SAFE_INTEGER, and it now reaches the emitted IR JSON. Use the
+    # tier's canonical encoding (bare number when a double carries it
+    # losslessly, else the decimal digits with the JS BigInt `n` suffix, as a
+    # string) rather than a bare Python int, which `--emit-ir` would write as
+    # an unquoted 256-bit JSON number that every double-based consumer
+    # silently truncates. Same encoding as
+    # frontend/anf_lower.py::_make_load_const_int.
+    raw = bigint_json_value(n)
+    return ANFValue(kind="load_const", const_big_int=n, const_int=n, raw_value=raw)
 
 
 def _make_call(func: str, args: list[str]) -> ANFValue:
@@ -289,16 +320,27 @@ def _make_call(func: str, args: list[str]) -> ANFValue:
 _fresh_counter = 0
 
 
-def _fresh_const_name(value: int, vm: dict[str, ANFValue]) -> str:
-    """Insert a fresh constant binding into the value map and return its name.
+def _fresh_const_name(value: int, vm: dict[str, ANFValue],
+                      prelude: list[ANFBinding]) -> str:
+    """Bind a freshly folded constant and return its name.
 
     This is needed when optimization produces a new constant (e.g. k1*k2)
     that needs to be referenced by name in a call.
+
+    The binding is appended to *prelude* — the rebuilt method body, at the
+    point just before the binding currently being rewritten — as well as
+    registered in the value map. Registering it in the value map alone is not
+    enough: stack lowering walks the body, so a call referencing a name that
+    never got a binding dies with "value '__ec_opt_N' not found on stack".
+    Mirrors AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
+    `newBindings` list in anf-ec.ts (TypeScript).
     """
     global _fresh_counter
     _fresh_counter += 1
     name = f"__ec_opt_{_fresh_counter}"
-    vm[name] = _make_const_int(value)
+    const = _make_const_int(value)
+    vm[name] = const
+    prelude.append(ANFBinding(name=name, value=const))
     return name
 
 

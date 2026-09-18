@@ -1,14 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
-  findGoBinary,
-  findJavaJarPath,
-  findRubyBinary,
-  findRustBinary,
-  findZigBinary,
-} from '../runner/runner.js';
+  ALL_TIER_IDS,
+  BrokenTier,
+  REPO,
+  Tier,
+  buildSourceTiers,
+  missingTierIds,
+  verdict,
+} from './tier-harness.js';
 
 /**
  * Cross-tier REJECTION parity.
@@ -28,87 +29,236 @@ import {
  * Each fixture is malformed or violates the language subset. Every available
  * tier must refuse all of them. A tier that accepts one is either missing a
  * rule its peers enforce or, worse, silently discarding the offending code.
+ *
+ * ---------------------------------------------------------------------------
+ * R-100 — two ways this gate was lying about its own coverage
+ * ---------------------------------------------------------------------------
+ *
+ * 1. The matrix listed five tiers. TypeScript — the REFERENCE implementation
+ *    every other tier is defined against — and Python were simply absent, so
+ *    "all tiers reject this" was never a claim about the reference tier.
+ *
+ * 2. The verdict was a bare `try { run() } catch { return REJECTED }`. Any
+ *    failure whatsoever scored as a clean rejection: a missing jar, a bad
+ *    argv, a segfault on startup, a timeout. A compiler that could not launch
+ *    at all therefore posted a perfect score.
+ *
+ *    That was not hypothetical. `findRubyBinary()` returns the string
+ *    `"ruby /path/to/runar-compiler-ruby"` — a command AND its argument — and
+ *    it was handed to `execFileSync` as a single executable name, which is
+ *    ENOENT every time. The Java row destructured `['-jar', jar, ...]` into
+ *    `cmd = '-jar'`, spawning a program named `-jar`. Neither tier ever ran a
+ *    single fixture; both showed 13/13 green. The whole suite finished in
+ *    450ms, which is less than one JVM cold start.
+ *
+ *    This repo has been bitten by this exact shape before (the Zig merge
+ *    negatives passed against an unrelated SDK bug), and the rule written down
+ *    from it is: a bare catch is not a rejection assertion.
+ *
+ * The fix has three parts, in increasing order of strength:
+ *
+ *   a. A rejection now requires a VERDICT: the child must exit under its own
+ *      control (no spawn error, no signal), with a non-zero status, and with a
+ *      diagnostic on stderr/stdout. Anything else throws `BrokenTier` and
+ *      fails the test loudly instead of being counted as a pass.
+ *   b. A usage/unknown-flag diagnostic is classified BROKEN, not rejected —
+ *      that is the harness mis-driving the CLI, not the language refusing a
+ *      program. This is deliberately the only wording the gate looks at:
+ *      matching each tier's error prose would couple the gate to seven
+ *      independently-worded diagnostics for no extra safety.
+ *   c. A POSITIVE CONTROL. Every tier must ACCEPT `positive-control.runar.ts`.
+ *      This is the guard that actually kills the class, because it is
+ *      wording-independent: a tier only counts as a witness if it has been
+ *      observed to say yes to good code and no to bad code. Grade the
+ *      discrimination, not the prose.
+ *
+ * ---------------------------------------------------------------------------
+ * Known limit of this gate, found by widening it (R-100)
+ * ---------------------------------------------------------------------------
+ *
+ * The gate measures the CLI's exit status, which is the whole compiler. It
+ * cannot see WHICH PASS refused. That distinction turned out to matter:
+ *
+ *   N07-undeclared-var is rejected by six tiers in the TYPECHECKER. The Java
+ *   tier's frontend USED TO ACCEPT it — `ParserDispatch.parse -> Validate.run
+ *   -> ExpandFixedArrays.run -> Typecheck.run` all passed, and the only thing
+ *   that stopped it was a defensive guard in stack lowering ("Refusing to emit
+ *   a silent OP_0 placeholder"), exiting 70 (EX_SOFTWARE) where every other
+ *   negative exits 65 (EX_DATAERR). That made `runar.lang.sdk.CompileCheck` —
+ *   the frontend-only API a Java contract author calls to ask "is this valid
+ *   Rúnar?" — green-light N07.
+ *
+ *   R-092 fixed it at the root: `neverDeclared` infers as `<unknown>`, and the
+ *   Java typechecker carried an `&& !"<unknown>".equals(t)` escape at eight
+ *   operand checks that its six peers do not have. Deleting those escapes moved
+ *   the rejection into the typechecker ("left operand of '>' must be bigint,
+ *   got '<unknown>'") and the exit code to 65. N15 below is the fixture for the
+ *   operand shape itself.
+ *
+ *   The structural limit still stands: this gate measures the CLI, so it cannot
+ *   SEE which pass refused. Proving the frontend is the one that refuses needs
+ *   a per-tier frontend driver the CLIs do not expose (`--parse-only` stops
+ *   before typecheck); for the Java tier that assertion lives in
+ *   `compilers/java/.../R092UnknownOperandRejectionTest`.
  */
 
-const REPO = resolve(__dirname, '../..');
 const DIR = __dirname;
 
 /**
- * Tier binaries are resolved through the RUNNER's own finders, never by
- * hardcoded paths. CI does not lay the tree out the way a local build does: the
- * conformance job downloads compiler artifacts to the REPO ROOT (`runar-go`,
- * `runar-compiler-rust`, `runar-zig`) and the Java compiler as a jar under
- * `compilers/java/build/libs/`, while a local build leaves them under
- * `compilers/<tier>/`. Hardcoding the local layout found exactly one tier in
- * CI, which the vacuity self-check below caught.
+ * The tier matrix and the `verdict()` contract live in `./tier-harness.ts`.
+ *
+ * They were extracted there (N-112) when the `--ir` lane was added, because
+ * R-100's finding was precisely that a second, weaker verdict mechanism is how
+ * a gate ends up scoring dead tiers as perfect. One `verdict()`, two lanes.
  */
-interface Tier {
-  id: string;
-  bin: string | null;
-  argv: (bin: string, src: string) => string[];
-  cwd?: string;
-}
+const TIERS: Tier[] = buildSourceTiers();
 
-const javaJar = findJavaJarPath();
+const POSITIVE_CONTROL = join(DIR, 'positive-control.runar.ts');
 
-const TIERS: Tier[] = [
-  { id: 'go', bin: findGoBinary(), argv: (b, s) => [b, '--source', s, '--hex'] },
-  { id: 'rust', bin: findRustBinary(), argv: (b, s) => [b, '--source', s, '--hex'] },
-  { id: 'zig', bin: findZigBinary(), argv: (b, s) => [b, 'compile', s, '--hex'] },
-  {
-    id: 'ruby',
-    bin: findRubyBinary(),
-    argv: (b, s) => [b, '--source', s, '--hex'],
-    cwd: join(REPO, 'compilers/ruby'),
-  },
-  // Java ships as a jar, so the binary is `java` and the jar is an argument.
-  {
-    id: 'java',
-    bin: javaJar ? 'java' : null,
-    argv: (_b, s) => ['-jar', javaJar!, '--source', s, '--hex'],
-  },
-];
-
-function accepts(tier: Tier, src: string): boolean {
-  const [cmd, ...args] = tier.argv(tier.bin!, src);
-  try {
-    execFileSync(cmd!, args, {
-      cwd: tier.cwd ?? REPO,
-      stdio: 'pipe',
-      timeout: 120_000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
+/**
+ * Negative fixtures are `N<nn>-*.runar.<ext>`; the positive control is not.
+ *
+ * Every one of the nine frontend surfaces is eligible, not just `.runar.ts`.
+ * N-108 is the reason: `Sha256Digest` is a name the reference tier resolves on
+ * seven surfaces and refuses on `.runar.sol` / `.runar.move`, so the rule it
+ * breaks is only expressible in a fixture written in those languages. A corpus
+ * that could only hold TypeScript could not gate a per-surface rule at all —
+ * which is how a one-tier acceptance survived on `.sol` unnoticed.
+ */
 const fixtures = readdirSync(DIR)
-  .filter((f) => f.endsWith('.runar.ts'))
+  .filter((f) => /^N\d{2}-.*\.runar\.(ts|sol|move|go|rs|py|zig|rb|java)$/.test(f))
   .sort();
 
+const available = TIERS.filter((t) => t.cmd !== null);
+
 describe('cross-tier rejection parity', () => {
-  it('the corpus is non-empty (a silently empty gate proves nothing)', () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(12);
+  // -- vacuity guards -------------------------------------------------------
+
+  it('the matrix names all seven tiers (a silently dropped tier fails here)', () => {
+    expect([...TIERS.map((t) => t.id)].sort()).toEqual([...ALL_TIER_IDS]);
   });
 
-  const available = TIERS.filter((t) => t.bin !== null);
+  it('the corpus is non-empty (a silently empty gate proves nothing)', () => {
+    expect(fixtures.length).toBeGreaterThanOrEqual(28);
+    expect(existsSync(POSITIVE_CONTROL)).toBe(true);
+  });
 
-  it('at least two tiers are built, or the comparison is vacuous', () => {
+  /**
+   * Local devs rarely have all seven toolchains. CI has no such excuse, and a
+   * conformance job that reports PASS while a tier never ran is the exact
+   * failure `assertAllCompilersAvailableInCi` (runner.ts) was added to stop —
+   * same idea, same CI gate, enforced as an assertion rather than an exit.
+   */
+  it('the missing-tier predicate actually detects a missing tier', () => {
+    // Exercises the CI guard's logic without needing to uninstall a toolchain.
+    const withHole: Tier[] = [
+      ...TIERS,
+      { id: 'ghost', cmd: null, prefix: [], argsFor: () => [], cwd: REPO, timeoutMs: 1 },
+    ];
+    expect(missingTierIds(withHole)).toContain('ghost');
+    expect(missingTierIds(TIERS)).not.toContain('ghost');
+  });
+
+  it('every tier is built (strict in CI, ">=2" locally)', () => {
+    const missing = missingTierIds(TIERS);
+    if (process.env.CI === 'true') {
+      expect(
+        missing,
+        `CI=true but these tiers have no toolchain: ${missing.join(', ')}. ` +
+          `The matrix would silently shrink and still report PASS.`,
+      ).toEqual([]);
+    }
     expect(available.length).toBeGreaterThanOrEqual(2);
   });
+
+  // -- positive control -----------------------------------------------------
+  //
+  // The strongest guard in the file: a tier that cannot be observed accepting
+  // valid Rúnar is not a witness to anything when it "rejects" invalid Rúnar.
+
+  for (const tier of available) {
+    it(`${tier.id} ACCEPTS the positive control (else its rejections are vacuous)`, () => {
+      expect(
+        verdict(tier, POSITIVE_CONTROL),
+        `${tier.id} did not accept a valid contract. Every "rejects" row for ` +
+          `this tier below is therefore meaningless — the tier is either ` +
+          `mis-invoked or broken.`,
+      ).toBe('accepted');
+    });
+  }
+
+  // -- the gate itself ------------------------------------------------------
 
   for (const fixture of fixtures) {
     const src = join(DIR, fixture);
     for (const tier of available) {
       it(`${tier.id} rejects ${fixture}`, () => {
         expect(
-          accepts(tier, src),
+          verdict(tier, src),
           `${tier.id} ACCEPTED ${fixture}. Either the tier is missing a rule its ` +
             `peers enforce, or it is silently dropping the offending construct — ` +
             `the latter emits a locking script for a program no other tier accepts.`,
-        ).toBe(false);
+        ).toBe('rejected');
       });
     }
   }
+
+  // -- the verdict function's own contract ----------------------------------
+  //
+  // These are the regression tests for the bare catch. Without them nothing
+  // stops a future edit from collapsing `verdict` back to try/catch->false.
+
+  describe('verdict() distinguishes a rejection from a broken run', () => {
+    const witness = available[0];
+
+    it('a nonexistent executable is BROKEN, not "rejected"', () => {
+      const dead: Tier = {
+        id: 'dead',
+        cmd: join(REPO, 'no/such/compiler-binary'),
+        prefix: [],
+        argsFor: (s) => ['--source', s, '--hex'],
+        cwd: REPO,
+        timeoutMs: 10_000,
+      };
+      expect(() => verdict(dead, POSITIVE_CONTROL)).toThrow(/could not run/i);
+    });
+
+    // The historical Java row. `java -jar /missing.jar` SPAWNS FINE and exits
+    // 1 with a message on stderr — indistinguishable from a compile error by
+    // exit code alone, and counted as 13/13 green by the old bare catch.
+    it('a nonexistent jar is BROKEN, not "rejected"', () => {
+      const deadJar: Tier = {
+        id: 'dead-java',
+        cmd: 'java',
+        prefix: ['-jar', join(REPO, 'no/such/runar.jar')],
+        argsFor: (s) => ['--source', s, '--hex'],
+        cwd: REPO,
+        timeoutMs: 60_000,
+      };
+      expect(() => verdict(deadJar, POSITIVE_CONTROL)).toThrow(BrokenTier);
+    });
+
+    // The historical Ruby row: the finder returns "ruby <script>" and the old
+    // code handed that whole string to execFileSync as one executable name.
+    it('an interpreter command passed unsplit is BROKEN, not "rejected"', () => {
+      const unsplit: Tier = {
+        id: 'unsplit-ruby',
+        cmd: `ruby ${join(REPO, 'compilers/ruby/bin/runar-compiler-ruby')}`,
+        prefix: [],
+        argsFor: (s) => ['--source', s, '--hex'],
+        cwd: join(REPO, 'compilers/ruby'),
+        timeoutMs: 10_000,
+      };
+      expect(() => verdict(unsplit, POSITIVE_CONTROL)).toThrow(/could not run/i);
+    });
+
+    it('a bad argv is BROKEN, not "rejected"', () => {
+      const badArgv: Tier = {
+        ...witness!,
+        id: `${witness!.id}-bad-argv`,
+        argsFor: (s) => ['--definitely-not-a-real-flag', s],
+      };
+      expect(() => verdict(badArgv, POSITIVE_CONTROL)).toThrow(BrokenTier);
+    });
+  });
 });

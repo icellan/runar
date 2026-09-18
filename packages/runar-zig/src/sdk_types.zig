@@ -74,6 +74,10 @@ pub const DeployOptions = struct {
     /// the funding inputs are signed by their real owner. Defaults to the
     /// connected signer (zero behaviour change).
     funding_signer: ?@import("sdk_signer.zig").Signer = null,
+    /// Builtins the caller accepts despite the compiler not claiming they are
+    /// sound (R-062). Required — naming each one — when the artifact declares
+    /// `unsound_primitives`; ignored otherwise.
+    acknowledge_unsound: []const []const u8 = &.{},
 };
 
 /// CallOptions specifies options for calling a contract method.
@@ -214,6 +218,9 @@ pub const RunarArtifact = struct {
     code_separator_index: ?i32 = null,
     code_separator_indices: []i32 = &.{},
     anf_json: ?[]const u8 = null, // raw JSON of the ANF IR (for SDK auto-state computation)
+    /// Builtins this script reaches that the compiler does not claim are sound
+    /// (R-062). Empty for every ordinary contract; see sdk_errors.zig.
+    unsound_primitives: [][]const u8 = &.{},
 
     pub fn isStateful(self: *const RunarArtifact) bool {
         return self.state_fields.len > 0;
@@ -246,6 +253,9 @@ pub const RunarArtifact = struct {
         if (self.code_sep_index_slots.len > 0) a.free(self.code_sep_index_slots);
         if (self.code_separator_indices.len > 0) a.free(self.code_separator_indices);
         if (self.anf_json) |aj| a.free(aj);
+        // R-062: the marker's names are duped out of the parsed JSON.
+        for (self.unsound_primitives) |name| a.free(name);
+        if (self.unsound_primitives.len > 0) a.free(self.unsound_primitives);
         self.* = .{ .allocator = a };
     }
 
@@ -306,10 +316,35 @@ pub const RunarArtifact = struct {
             if (sf_val == .array) {
                 const items = sf_val.array.items;
                 var fields = try allocator.alloc(StateField, items.len);
-                for (items, 0..) |item, i| {
-                    fields[i] = try StateField.fromJsonValue(allocator, item.object);
+                var parsed_fields: usize = 0;
+                // A refused field (see StateField.fromJsonValue) aborts the
+                // loop before `artifact.state_fields` is assigned, so the
+                // artifact-level errdefer cannot reach what we built here.
+                errdefer {
+                    for (fields[0..parsed_fields]) |*sf| sf.deinit(allocator);
+                    allocator.free(fields);
+                }
+                for (items) |item| {
+                    fields[parsed_fields] = try StateField.fromJsonValue(allocator, item.object);
+                    parsed_fields += 1;
                 }
                 artifact.state_fields = fields;
+            }
+        }
+
+        // R-062: the unsound-primitive marker. Absent on every ordinary artifact.
+        if (root.get("unsoundPrimitives")) |up_val| {
+            if (up_val == .array) {
+                const items = up_val.array.items;
+                var names = try allocator.alloc([]const u8, items.len);
+                var n: usize = 0;
+                for (items) |item| {
+                    if (item == .string) {
+                        names[n] = try allocator.dupe(u8, item.string);
+                        n += 1;
+                    }
+                }
+                artifact.unsound_primitives = names[0..n];
             }
         }
 
@@ -521,12 +556,39 @@ pub const FixedArrayInfo = struct {
     }
 };
 
+/// Flatten a (possibly nested) JSON array `initialValue` depth-first into one
+/// string literal per leaf, in the same order as `fixedArray.syntheticNames`.
+///
+/// A leaf shape we cannot render becomes "0" rather than nothing: dropping it
+/// would shift every later element into the wrong state slot, which is a worse
+/// failure than one wrong element.
+fn flattenInitialArray(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    switch (value) {
+        .array => |items| for (items.items) |item| try flattenInitialArray(allocator, item, out),
+        .string, .number_string => |s| try out.append(allocator, try allocator.dupe(u8, s)),
+        .integer => |n| try out.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{n})),
+        .bool => |b| try out.append(allocator, try allocator.dupe(u8, if (b) "true" else "false")),
+        else => try out.append(allocator, try allocator.dupe(u8, "0")),
+    }
+}
+
 /// StateField describes a state field in a stateful contract.
 pub const StateField = struct {
     name: []const u8 = &.{},
     type_name: []const u8 = &.{},
     index: i32 = 0,
     initial_value: ?[]const u8 = null, // stored as string representation
+    /// A FixedArray field's compile-time default, flattened depth-first into
+    /// one string literal per LEAF element. `initial_value` cannot carry it:
+    /// the JSON is an array (nested, for a nested FixedArray), not a scalar.
+    /// A null here on a `fixed_array` field means "no compile-time default",
+    /// not "all zeros" — the two used to be indistinguishable because the
+    /// array was dropped on parse, and the field silently deployed as zeros.
+    initial_array: ?[][]const u8 = null,
     /// When non-null, this state field is a logical FixedArray that expands
     /// into `fixed_array.synthetic_names.len` scalar slots. The SDK flattens
     /// array-typed state values on write and regroups them on read.
@@ -536,6 +598,10 @@ pub const StateField = struct {
         if (self.name.len > 0) allocator.free(self.name);
         if (self.type_name.len > 0) allocator.free(self.type_name);
         if (self.initial_value) |iv| allocator.free(iv);
+        if (self.initial_array) |ia| {
+            for (ia) |leaf| allocator.free(leaf);
+            allocator.free(ia);
+        }
         if (self.fixed_array) |*fa| fa.deinit(allocator);
         self.* = .{};
     }
@@ -562,6 +628,15 @@ pub const StateField = struct {
                 .bool => |b| {
                     field.initial_value = try allocator.dupe(u8, if (b) "true" else "false");
                 },
+                .array => {
+                    var leaves: std.ArrayListUnmanaged([]const u8) = .empty;
+                    errdefer {
+                        for (leaves.items) |leaf| allocator.free(leaf);
+                        leaves.deinit(allocator);
+                    }
+                    try flattenInitialArray(allocator, v, &leaves);
+                    field.initial_array = try leaves.toOwnedSlice(allocator);
+                },
                 else => {},
             }
         }
@@ -575,23 +650,37 @@ pub const StateField = struct {
                 if (v.object.get("length")) |ln| {
                     if (ln == .integer) fa.length = @intCast(ln.integer);
                 }
-                if (v.object.get("syntheticNames")) |sn| {
-                    if (sn == .array) {
-                        var names = try allocator.alloc([]const u8, sn.array.items.len);
-                        var filled: usize = 0;
-                        errdefer {
-                            for (0..filled) |i| allocator.free(names[i]);
-                            allocator.free(names);
-                        }
-                        for (sn.array.items) |it| {
-                            if (it == .string) {
-                                names[filled] = try allocator.dupe(u8, it.string);
-                                filled += 1;
-                            }
-                        }
-                        fa.synthetic_names = names;
-                    }
+                // `syntheticNames` is REQUIRED, and must be an array of
+                // strings — `packages/runar-ir-schema/src/artifact.ts` types it
+                // `syntheticNames: string[]`. Refuse anything else outright
+                // (the posture `8c989dda` took for a JSON float on the `--ir`
+                // boundary) rather than parse what we can:
+                //
+                //  - skipping a non-string entry used to publish the
+                //    full-length slice with UNINITIALISED members, which
+                //    `FixedArrayInfo.deinit` then handed to `allocator.free`;
+                //  - truncating to the entries that did parse is no better.
+                //    These names are positional — entry k names state slot k
+                //    and `serializeState` writes one word per entry — so a
+                //    short list writes a short state section, the unspendable
+                //    case.
+                //
+                // A hand-written artifact is the only way to get here; a
+                // compiler-produced one always carries the full list.
+                const sn = v.object.get("syntheticNames") orelse return error.MalformedSyntheticNames;
+                if (sn != .array) return error.MalformedSyntheticNames;
+                var names = try allocator.alloc([]const u8, sn.array.items.len);
+                var filled: usize = 0;
+                errdefer {
+                    for (names[0..filled]) |n| allocator.free(n);
+                    allocator.free(names);
                 }
+                for (sn.array.items) |it| {
+                    if (it != .string) return error.MalformedSyntheticNames;
+                    names[filled] = try allocator.dupe(u8, it.string);
+                    filled += 1;
+                }
+                fa.synthetic_names = names;
                 field.fixed_array = fa;
             }
         }

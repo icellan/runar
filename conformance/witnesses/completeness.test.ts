@@ -79,6 +79,22 @@ it('every conformance fixture is witnessed, real-crypto-executed, or in the cove
     doubleListed,
     `real-crypto-executed fixtures still listed in coverage-ledger.json (remove them): ${doubleListed.join(', ')}`,
   ).toEqual([]);
+
+  // R-205: the same guard for the OTHER pair of sets.
+  //
+  // The check above covers real-crypto specs and missed witnesses entirely, so
+  // `oracle-price` sat in the ledger as "crypto-witness-infeasible — Rabin
+  // witness is not secp256k1" for months after `witnesses/oracle-price.json`
+  // was added on 2026-08-28. The ledger UNDERSTATED coverage there, which is
+  // the benign direction — but a guard that only checks one of two pairs
+  // cannot tell which direction it is missing, and the dangerous direction is
+  // the same shape.
+  const witnessedAndLedgered = [...witnessed].filter((f) => ledgerAll.has(f));
+  expect(
+    witnessedAndLedgered,
+    `fixtures with a witness in conformance/witnesses/ are still listed in ` +
+      `coverage-ledger.json as needing an exemption (remove them): ${witnessedAndLedgered.join(', ')}`,
+  ).toEqual([]);
 });
 
 // ---------------------------------------------------------------------------

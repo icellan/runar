@@ -8,7 +8,25 @@ Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, `rus
 
 ## Contract Index
 
-Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`, `python/`, `zig/`):
+**Scale, measured rather than remembered (R-199).** The catalogue is far larger
+than the table below, which lists the contracts worth reading FIRST, not the
+whole set:
+
+| tree | contract directories | sources |
+| --- | --- | --- |
+| `ts/` | 80 | 83 `.runar.ts` |
+| `rust/`, `python/` | 79 | 81 each |
+| `sol/`, `move/`, `go/`, `ruby/`, `zig/` | 78 | 80–81 each |
+| `java/` | Gradle layout — `src/main/java/runar/examples/<name>/` | 76 `.runar.java` |
+| `end2end-example/` | one app in nine surfaces + two webapps | 11 |
+
+This README previously claimed "21 contracts" with a "16-contract sol/move
+subset", and left `ruby/` and `java/` out of the testing sections entirely. Use
+`ls -d examples/<tree>/*/` for the current list of any tree; the numbers above
+are what that command reported when this paragraph was written.
+
+The table is a curated starting set, available across the native-language
+frontends (`ts/`, `go/`, `rust/`, `python/`, `zig/`) unless a row says otherwise:
 
 | Contract | Directory | Pattern | Complexity | Description |
 |---|---|---|---|---|
@@ -35,7 +53,31 @@ Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`,
 | **SHA-256 Compress** | `{ts,go,rust,python,zig}/sha256-compress/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 compression builtin directly. |
 | **SHA-256 Finalize** | `{ts,go,rust,python,zig}/sha256-finalize/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 finalize builtin directly. |
 
-The Solidity-like and Move-style example trees include the original 16-contract subset plus `r1-k1-wallet`: `auction`, `blake3`, `covenant-vault`, `ec-demo`, `escrow`, `math-demo`, `oracle-price`, `p2blake3pkh`, `p2pkh`, `property-initializers`, `r1-k1-wallet`, `sha256-compress`, `sha256-finalize`, `stateful-counter`, `tic-tac-toe`, `token-ft`, and `token-nft`.
+### Examples that exist only under `ts/` (R-195)
+
+Three contract directories have no counterpart in any other tree. Measured, not
+remembered — `examples/ts/*/` compared against the eight peer trees:
+
+| Directory | Contracts | Why it is TS-only |
+|---|---|---|
+| `companion-verifier/` | `CompanionVerifier`, `AttributedToken` | A two-input CROSS-CONTRACT covenant: two contracts in one directory, spent together in a single transaction. It does not fit the one-contract-per-directory shape the other trees use, and neither `runStatefulSpend` nor the sdk-output driver protocol can compose a two-input spend — see [testing-guide.md](../docs/testing-guide.md) "UNCOVERED", which carries its close plan. The pattern itself is documented in [cross-covenant-pattern.md](../docs/cross-covenant-pattern.md). |
+| `compiler-directives/` | `Directives` | The ONLY one of the three that is TS-only because the other tiers genuinely cannot take it. `@embedAlways` and `@sighash` are read from comments on the `.runar.ts` surface alone, and the other eight parsers REJECT a source carrying either — deliberately, because silently dropping a directive would change DCE or signing semantics without saying so. A `.runar.py` translation of this contract is a parse error by design, so there is nothing to port. Added by R-209, which found both directives had zero example usage anywhere in the repo. |
+| `nested-if-multi-reassign/` | `StackTrackerRepro` | A REGRESSION REPRO for issue #34 (the ANF parameter-type lookup that searched every method's parameters, lowering `1n + x` to OP_CAT instead of OP_ADD). It pins a defect that lived in one pass of one tier; a translation into eight more surfaces would exercise eight more parsers on a contract whose point is what happens AFTER parsing. Its test (added by R-106) asserts the ANF node, a concrete spend, and interpreter/ScriptVM agreement on that spend. |
+
+The first two are NOT TS-only because of anything the other tiers cannot do.
+Both compile in all seven tiers today from their `.runar.ts` source — verified
+by compiling `CompanionVerifier`, `AttributedToken` and `StackTrackerRepro` with
+the go, rust and java compilers and getting byte-identical hex. What is missing
+there is the eight SURFACE translations, not seven tiers of support.
+
+`compiler-directives/` is the exception, and the only entry whose TS-only status
+is permanent: the directives it demonstrates are defined to exist on one
+surface.
+
+`tests/r195-ts-only-examples.test.ts` keeps this list honest: a new
+TypeScript-only example that is not listed here fails the suite.
+
+The Solidity-like and Move-style trees are NOT a 16-contract subset — each carries 78 contract directories, essentially the whole catalogue (R-199). The frontend-parity claim in CLAUDE.md is what that breadth is for: every fixture in `conformance/tests` is parsed from all nine surfaces by the `--parser-only` matrix.
 
 ---
 
@@ -154,6 +196,31 @@ Compile a Zig example through the Zig compiler:
 ```bash
 cd compilers/zig && zig build run -- compile ../../examples/zig/p2pkh/P2PKH.runar.zig
 ```
+
+### Ruby (rspec)
+
+R-199: this section, and the one below it, were missing entirely — two of the
+nine example trees had no documented way to run them.
+
+```bash
+cd examples/ruby && bundle exec rspec
+```
+
+Each contract directory holds `<Name>.runar.rb` beside a `*_spec.rb` that runs
+the contract as native Ruby against the mock types in `packages/runar-rb`, plus
+a Rúnar compile check.
+
+### Java (Gradle + JUnit 5)
+
+```bash
+cd examples/java && ./gradlew test
+```
+
+The Java tree uses the Gradle source layout rather than one directory per
+contract at the top level: sources live under
+`src/main/java/runar/examples/<contract>/<Name>.runar.java`, with the JUnit
+tests beside them under `src/test/java/`. `CompileCheck.run(Path)` invokes the
+real Java frontend through the composite build.
 
 Run the Zig compiler verification suite:
 

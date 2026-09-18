@@ -26,6 +26,7 @@ import runar.compiler.ir.stack.StackOp;
 import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.ir.stack.SwapOp;
 import runar.compiler.ir.stack.TuckOp;
+import runar.compiler.ir.stack.VerifyCodePartLenOp;
 
 /**
  * Stack IR → Bitcoin Script hex emission (Pass 6).
@@ -54,6 +55,52 @@ public final class Emit {
      * use {@link #runResult(StackProgram)} when the span table is needed.
      */
     public record EmitResult(String scriptHex, List<RawScriptSpan> rawScriptSpans) {}
+
+    /**
+     * Byte offset of a constructor-argument placeholder ({@link PlaceholderOp})
+     * in the emitted script. The deployment SDK splices the real argument value
+     * over the one-byte {@code OP_0} placeholder at {@code byteOffset}.
+     *
+     * <p>Mirrors {@code ConstructorSlot} in {@code compilers/go/codegen/emit.go}
+     * and the {@code constructorSlots} entries the other tiers write into the
+     * artifact. Field names match what
+     * {@code packages/runar-java}'s {@code RunarArtifact.ConstructorSlot} reads.
+     */
+    public record ConstructorSlot(int paramIndex, int byteOffset) {}
+
+    /**
+     * Byte offset of a codeSepIndex placeholder ({@link PushCodeSepIndexOp}) in
+     * the emitted script, together with the codeSeparatorIndex that was current
+     * at that point. The SDK replaces the {@code OP_0} placeholder at
+     * {@code byteOffset} with the deployment-adjusted index.
+     *
+     * <p>Mirrors {@code CodeSepIndexSlot} in {@code compilers/go/codegen/emit.go}.
+     */
+    public record CodeSepIndexSlot(int byteOffset, int codeSepIndex) {}
+
+    /**
+     * R-007: full emit result. Carries everything the deployment SDK needs to
+     * turn a script into a deployable locking script: the constructor-argument
+     * slot offsets, the codeSepIndex slot offsets, and the OP_CODESEPARATOR
+     * byte offsets.
+     *
+     * <p>{@code codeSeparatorIndex} is {@code -1} when no OP_CODESEPARATOR was
+     * emitted (matching the Go tier's sentinel); the artifact writer omits the
+     * field in that case.
+     *
+     * <p>{@link #runResult(StackProgram)} and
+     * {@link #runResultWithSourceMap(StackProgram)} are narrowing views over
+     * this record.
+     */
+    public record EmitResultFull(
+        String scriptHex,
+        List<RawScriptSpan> rawScriptSpans,
+        List<SourceMapping> sourceMap,
+        List<ConstructorSlot> constructorSlots,
+        List<CodeSepIndexSlot> codeSepIndexSlots,
+        int codeSeparatorIndex,
+        List<Integer> codeSeparatorIndices
+    ) {}
 
     /**
      * GAP-002: single source-map entry. Records the opcode index (0-based,
@@ -205,12 +252,15 @@ public final class Emit {
     }
 
     /**
-     * GAP-002: extended emit entry point that also walks the per-op
-     * {@code sourceLoc} field on every {@link StackOp} to build a parallel
-     * {@code SourceMapping} table. Ops with no {@code sourceLoc} are
-     * skipped — the resulting table is sparse over the opcode index space.
+     * R-007: the widest emit entry point. Adds the constructor-slot /
+     * codeSepIndex-slot / OP_CODESEPARATOR offset tables to what
+     * {@link #runResultWithSourceMap(StackProgram)} returns, so the CLI can
+     * write a deployable artifact.
+     *
+     * <p>Recording these offsets is purely observational — the emitted script
+     * bytes are identical to what the narrower entry points produce.
      */
-    public static EmitResultWithSourceMap runResultWithSourceMap(StackProgram program) {
+    public static EmitResultFull runResultFull(StackProgram program) {
         Ctx ctx = new Ctx();
 
         List<StackMethod> publicMethods = new java.util.ArrayList<>();
@@ -218,17 +268,85 @@ public final class Emit {
             if (!"constructor".equals(m.name())) publicMethods.add(m);
         }
 
-        if (publicMethods.isEmpty()) {
-            return new EmitResultWithSourceMap("", List.copyOf(ctx.rawScriptSpans), List.copyOf(ctx.sourceMap));
+        if (!publicMethods.isEmpty()) {
+            // R-010 / CL-BUG-091: a contract whose methods authenticate a
+            // `_codePart` witness gets ONE OP_CODESEPARATOR, and it goes at
+            // offset 1 of the locking script, behind a single OP_NOP.
+            //
+            // The separator used to be emitted per method, at the method's
+            // entry, which kept the preimage small but hid the dispatch
+            // preamble and every preceding method body from scriptCode — and
+            // those hidden bytes are exactly the ones the spender-supplied
+            // `_codePart` witness claims to reproduce. With the separator near
+            // the front, scriptCode == lockingScript[2:], so the script can pin
+            // `_codePart` byte for byte (see emitCodePartAuthentication in
+            // StackLower).
+            //
+            // The gate is `_codePart`, NOT "this contract verifies a preimage".
+            // A contract with no `_codePart` has no witness script to
+            // authenticate, so widening scriptCode buys it no security — and it
+            // costs correctness: the separator would land in front of any user
+            // `checkSig` in the method, while `packages/runar-sdk` signs a
+            // stateless contract's user signature over the FULL locking script.
+            // The node would verify that signature against `script[2:]` and the
+            // spend would fail (`examples/ts/covenant-vault`, a stateless
+            // contract that calls checkPreimage but never uses `_codePart`).
+            // Those contracts keep the pre-R-010 per-method separator, emitted
+            // by StackLower#lowerCheckPreimage.
+            //
+            // Offset 1, not 0: implementations that store "index of the last
+            // executed OP_CODESEPARATOR" in a zero-initialised field cannot
+            // tell "separator at offset 0" from "no separator seen" and fall
+            // back to the whole script. The BSV go-sdk interpreter does exactly
+            // this (thread.subScript: `if t.lastCodeSep > 0 { skip =
+            // t.lastCodeSep + 1 }`), while Bitcoin Core's pbegincodehash is a
+            // true position. Offset 1 keeps every implementation on the same
+            // side of that guard, and costs one byte.
+            boolean needsCodeSep = false;
+            for (StackMethod m : publicMethods) {
+                if (m.needsCodeSeparator()) {
+                    needsCodeSep = true;
+                    break;
+                }
+            }
+            if (needsCodeSep) {
+                ctx.emitOpcode("OP_NOP");
+                ctx.emitOpcode("OP_CODESEPARATOR");
+            }
+
+            if (publicMethods.size() == 1) {
+                for (StackOp op : publicMethods.get(0).ops()) emitStackOp(op, ctx);
+            } else {
+                emitMethodDispatch(publicMethods, ctx);
+            }
         }
 
-        if (publicMethods.size() == 1) {
-            for (StackOp op : publicMethods.get(0).ops()) emitStackOp(op, ctx);
-        } else {
-            emitMethodDispatch(publicMethods, ctx);
-        }
+        // R-095: the pin's length field can only be filled in once the whole
+        // script exists. Mirrors the Go tier's applyCodePartLenFixups call from
+        // getHex()/getAsm(); runResultFull is the single funnel every emit
+        // entry point goes through, so once here is enough.
+        ctx.applyCodePartLenFixups();
 
-        return new EmitResultWithSourceMap(ctx.hex.toString(), List.copyOf(ctx.rawScriptSpans), List.copyOf(ctx.sourceMap));
+        return new EmitResultFull(
+            publicMethods.isEmpty() ? "" : ctx.hex.toString(),
+            List.copyOf(ctx.rawScriptSpans),
+            List.copyOf(ctx.sourceMap),
+            List.copyOf(ctx.constructorSlots),
+            List.copyOf(ctx.codeSepIndexSlots),
+            ctx.codeSeparatorIndex,
+            List.copyOf(ctx.codeSeparatorIndices)
+        );
+    }
+
+    /**
+     * GAP-002: extended emit entry point that also walks the per-op
+     * {@code sourceLoc} field on every {@link StackOp} to build a parallel
+     * {@code SourceMapping} table. Ops with no {@code sourceLoc} are
+     * skipped — the resulting table is sparse over the opcode index space.
+     */
+    public static EmitResultWithSourceMap runResultWithSourceMap(StackProgram program) {
+        EmitResultFull full = runResultFull(program);
+        return new EmitResultWithSourceMap(full.scriptHex(), full.rawScriptSpans(), full.sourceMap());
     }
 
     private static void emitMethodDispatch(List<StackMethod> methods, Ctx ctx) {
@@ -282,10 +400,15 @@ public final class Emit {
             ctx.emitOpcode(o.code());
         } else if (op instanceof IfOp ifo) {
             emitIf(ifo.thenBranch(), ifo.elseBranch(), ctx);
-        } else if (op instanceof PlaceholderOp) {
-            ctx.appendHex("00");
+        } else if (op instanceof PlaceholderOp ph) {
+            ctx.emitPlaceholder(ph.paramIndex().intValueExact());
         } else if (op instanceof PushCodeSepIndexOp) {
-            ctx.appendHex("00");
+            ctx.emitCodeSepIndexPlaceholder();
+        } else if (op instanceof VerifyCodePartLenOp v) {
+            // R-095: pin SIZE(_codePart) against the code part's own deployed
+            // byte length. Fixed-width field, back-patched after the whole
+            // script exists.
+            ctx.emitVerifyCodePartLen(v.delta(), v.exact());
         } else if (op instanceof RawBytesOp rb) {
             // Opaque opcode-byte span from a raw_script ANF node. Written
             // verbatim with no re-encoding; the declared arities are
@@ -315,6 +438,7 @@ public final class Emit {
         if (op instanceof IfOp o) return o.sourceLoc();
         if (op instanceof PlaceholderOp o) return o.sourceLoc();
         if (op instanceof PushCodeSepIndexOp o) return o.sourceLoc();
+        if (op instanceof VerifyCodePartLenOp o) return o.sourceLoc();
         // RawBytesOp / others have no sourceLoc.
         return null;
     }
@@ -340,6 +464,15 @@ public final class Emit {
         // Mirrors the EmitContext pattern from the TS / Go / Rust / Python
         // / Zig / Ruby tiers.
         final java.util.List<SourceMapping> sourceMap = new java.util.ArrayList<>();
+        // R-007: deployment-artifact offset tables. Written alongside the hex,
+        // never in place of it — nothing here changes an emitted byte.
+        final java.util.List<ConstructorSlot> constructorSlots = new java.util.ArrayList<>();
+        final java.util.List<CodeSepIndexSlot> codeSepIndexSlots = new java.util.ArrayList<>();
+        final java.util.List<Integer> codeSeparatorIndices = new java.util.ArrayList<>();
+        /** R-095: verify_code_part_len length fields awaiting back-patch. */
+        final java.util.List<CodePartLenFixup> codePartLenFixups = new java.util.ArrayList<>();
+        /** Byte offset of the most recent OP_CODESEPARATOR; -1 when none was emitted. */
+        int codeSeparatorIndex = -1;
         int byteLength = 0;
         int opcodeIndex = 0;
         runar.compiler.ir.stack.StackSourceLoc pendingSourceLoc;
@@ -371,8 +504,51 @@ public final class Emit {
         void emitOpcode(String name) {
             Integer b = OPCODES.get(name);
             if (b == null) throw new RuntimeException("Unknown opcode: " + name);
+            // R-007: record the byte offset of every OP_CODESEPARATOR so the SDK
+            // can compute the BIP-143 subscript. Observational only — taken
+            // BEFORE appendHex, exactly as the Go tier does.
+            if ("OP_CODESEPARATOR".equals(name)) {
+                codeSeparatorIndex = byteLength;
+                codeSeparatorIndices.add(byteLength);
+            }
             recordSourceMapping();
             appendHex(byteToHex(b));
+            opcodeIndex++;
+        }
+
+        /**
+         * R-007: write the one-byte {@code OP_0} constructor-argument
+         * placeholder and record its offset. Same bytes as the previous bare
+         * {@code appendHex("00")}; the slot entry is the only addition.
+         */
+        void emitPlaceholder(int paramIndex) {
+            constructorSlots.add(new ConstructorSlot(paramIndex, byteLength));
+            // R-084: the placeholder is ONE opcode in the emitted script, so it
+            // records a mapping and consumes an opcode index like any other —
+            // exactly as TS/Go/Rust/Python/Zig/Ruby emitPlaceholder do. Skipping
+            // the bump left every later mapping pointing one opcode short.
+            recordSourceMapping();
+            appendHex("00");
+            opcodeIndex++;
+        }
+
+        /**
+         * R-007: write the one-byte {@code OP_0} codeSepIndex placeholder and
+         * record its offset together with the codeSeparatorIndex current at
+         * this point (0 when no separator has been emitted yet, matching the
+         * Go tier's clamp).
+         */
+        void emitCodeSepIndexPlaceholder() {
+            codeSepIndexSlots.add(new CodeSepIndexSlot(
+                byteLength,
+                codeSeparatorIndex < 0 ? 0 : codeSeparatorIndex
+            ));
+            // R-084: same as emitPlaceholder — one opcode, one index. The Go
+            // tier's push_codesep_index case (codegen/emit.go:621) calls
+            // recordSourceMapping() and nextOpcodeIndex() around the same
+            // appendHex("00"); this one called neither.
+            recordSourceMapping();
+            appendHex("00");
             opcodeIndex++;
         }
 
@@ -397,7 +573,101 @@ public final class Emit {
             rawScriptSpans.add(new RawScriptSpan(offset, bytes.length, inArity, outArity));
             opcodeIndex++;
         }
+
+        /**
+         * R-095 — emit the 9-byte {@code SIZE(_codePart)} pin and register its
+         * length field for back-patching.
+         *
+         * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY</pre>
+         *
+         * <p>{@code LL LL LL LL} is a fixed-width little-endian field, not a
+         * minimal Script number push: the value being patched IS the length of
+         * the script that contains it, so a width that varied with the value
+         * would be self-referential. {@code OP_BIN2NUM} normalises the
+         * fixed-width field back to a minimal Script number so the comparison
+         * is numeric.
+         */
+        void emitVerifyCodePartLen(int delta, boolean exact) {
+            emitOpcode("OP_DUP");
+            // +1 skips the single-byte push header the 4-byte data push carries.
+            int valueByteOffset = byteLength + 1;
+            emitPush(PushValue.ofHex("00000000"));
+            emitOpcode("OP_BIN2NUM");
+            emitOpcode(exact ? "OP_NUMEQUAL" : "OP_GREATERTHANOREQUAL");
+            emitOpcode("OP_VERIFY");
+            codePartLenFixups.add(new CodePartLenFixup(valueByteOffset, delta));
+        }
+
+        /**
+         * Deploy-time byte growth contributed by the codeSepIndex placeholders.
+         *
+         * <p>Each is a 1-byte OP_0 in the template that the SDK replaces with a
+         * push of the adjusted separator index. Post-R-010 that index is always
+         * 1 (the separator sits at offset 1 and no constructor slot precedes
+         * it), which bakes as the single opcode byte OP_1 — zero growth. The
+         * guard is not decoration: if the separator ever moves, the pin's
+         * arithmetic goes silently wrong and every honest spend of a
+         * variable-length-state contract becomes unspendable, so fail loudly
+         * instead.
+         */
+        private int codeSepIndexGrowth() {
+            for (CodeSepIndexSlot slot : codeSepIndexSlots) {
+                if (slot.codeSepIndex() != 1) {
+                    throw new RuntimeException(
+                        "emit: codeSepIndex placeholder resolves to " + slot.codeSepIndex()
+                            + ", not 1. The verify_code_part_len pin assumes the post-R-010 layout"
+                            + " (a single OP_CODESEPARATOR at offset 1, so the placeholder bakes as"
+                            + " OP_1 and adds no bytes). Recompute the placeholder growth before"
+                            + " moving the separator."
+                    );
+                }
+            }
+            return 0;
+        }
+
+        /**
+         * R-095 — resolve every {@code verify_code_part_len} length field.
+         *
+         * <p>Runs once the whole script has been emitted, because the value each
+         * field carries is the DEPLOYED length of the very script it sits in:
+         *
+         * <pre>
+         * deployedCodeLen = emitted template length
+         *                 + growth of the constructor-arg placeholders (delta)
+         *                 + growth of the codeSepIndex placeholders (0)
+         * </pre>
+         *
+         * <p>Idempotent: it overwrites a fixed-width field rather than splicing,
+         * so the script's length never changes and re-running produces the same
+         * bytes.
+         */
+        void applyCodePartLenFixups() {
+            if (codePartLenFixups.isEmpty()) return;
+            int codeSepGrowth = codeSepIndexGrowth();
+            for (CodePartLenFixup fixup : codePartLenFixups) {
+                long deployedLen = (long) byteLength + fixup.delta() + codeSepGrowth;
+                if (deployedLen < 0 || deployedLen > 0x7fffffffL) {
+                    throw new RuntimeException(
+                        "emit: code part length " + deployedLen + " does not fit the 4-byte pin field"
+                    );
+                }
+                StringBuilder le = new StringBuilder(8);
+                for (int i = 0; i < 4; i++) {
+                    le.append(byteToHex((int) ((deployedLen >> (8 * i)) & 0xff)));
+                }
+                int start = fixup.valueByteOffset() * 2;
+                hex.replace(start, start + 8, le.toString());
+            }
+        }
     }
+
+    /**
+     * R-095: one fixed-width length field reserved by
+     * {@code verify_code_part_len}, to be filled in once the whole script
+     * exists. {@code delta} is the deploy-time growth of the constructor-arg
+     * placeholders.
+     */
+    private record CodePartLenFixup(int valueByteOffset, int delta) {}
 
     // ------------------------------------------------------------------
     // Script number encoding

@@ -2,8 +2,9 @@
 // runar-cli/commands/verify.ts — Verify a deployed contract
 // ---------------------------------------------------------------------------
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { InputLimits } from 'runar-ir-schema';
+import { readBoundedFile } from '../input-bounds.js';
 import { WhatsOnChainProvider } from 'runar-sdk';
 import type { RunarArtifact } from 'runar-sdk';
 
@@ -36,7 +37,7 @@ export async function verifyCommand(
   const artifactPath = path.resolve(process.cwd(), options.artifact);
   let artifact: RunarArtifact;
   try {
-    const raw = fs.readFileSync(artifactPath, 'utf-8');
+    const raw = readBoundedFile(artifactPath, InputLimits.MAX_IR_BYTES);
     artifact = JSON.parse(raw) as RunarArtifact;
   } catch (err) {
     console.error(`Failed to load artifact: ${(err as Error).message}`);

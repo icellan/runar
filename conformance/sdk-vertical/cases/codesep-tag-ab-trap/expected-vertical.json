@@ -16,16 +16,16 @@
       "value": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
     }
   ],
-  "codePartByteLength": 1968,
+  "codePartByteLength": 2142,
   "slots": [
     {
       "name": "tag",
       "paramIndex": 1,
-      "templateByteOffset": 546,
-      "byteOffset": 546,
+      "templateByteOffset": 634,
+      "byteOffset": 634,
       "byteLength": 4,
       "headerBytes": 1,
-      "valueByteOffset": 547,
+      "valueByteOffset": 635,
       "valueByteLength": 3,
       "encoding": "data",
       "pushedHex": "ababab"
@@ -33,40 +33,36 @@
     {
       "name": "owner",
       "paramIndex": 2,
-      "templateByteOffset": 1926,
-      "byteOffset": 1931,
+      "templateByteOffset": 2102,
+      "byteOffset": 2105,
       "byteLength": 34,
       "headerBytes": 1,
-      "valueByteOffset": 1932,
+      "valueByteOffset": 2106,
       "valueByteLength": 33,
       "encoding": "data",
       "pushedHex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
     }
   ],
   "templateCodeSeparators": [
-    6,
-    742,
-    1471
+    1
   ],
   "deployedCodeSeparators": [
-    6,
-    745,
-    1476
+    1
   ],
   "codeSepSlotValues": [
     {
-      "templateByteOffset": 510,
-      "templateCodeSepIndex": 6,
-      "deployedByteOffset": 510,
-      "expectedBakedValue": 6,
-      "actualBakedValue": 6
+      "templateByteOffset": 598,
+      "templateCodeSepIndex": 1,
+      "deployedByteOffset": 598,
+      "expectedBakedValue": 1,
+      "actualBakedValue": 1
     },
     {
-      "templateByteOffset": 1246,
-      "templateCodeSepIndex": 742,
-      "deployedByteOffset": 1249,
-      "expectedBakedValue": 745,
-      "actualBakedValue": 745
+      "templateByteOffset": 1420,
+      "templateCodeSepIndex": 1,
+      "deployedByteOffset": 1423,
+      "expectedBakedValue": 1,
+      "actualBakedValue": 1
     }
   ]
 }

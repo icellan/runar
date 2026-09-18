@@ -96,6 +96,72 @@ class AnfOptimizeTest {
         assertEquals(in.size(), bodyOf(out).size(), "unused bindings preserved");
     }
 
+    /**
+     * R-034 / CL-BUG-028 — {@code ec-add-negate-cancel-reversed}.
+     *
+     * <p>{@code optimizer/ec-rules.json} declares BOTH operand orders of the
+     * negate-cancel rule with no {@code "supported"} tag, so both are required
+     * in every tier. The Go engine is data-driven off that JSON and performed
+     * both; the six hand-ported tiers — Java among them — implemented only
+     * {@code ecAdd(x, ecNegate(x))}, so the same ANF compiled to a 1808-byte
+     * script in Go and a 26140-byte one here.
+     *
+     * <p>The rule is unreachable from SOURCE in every tier (pass 04 gives each
+     * occurrence of a variable its own binding, so {@code $x} binds to two
+     * different names and no matcher unifies them). The divergence is reachable
+     * through the {@code --ir} path, which accepts arbitrary ANF.
+     */
+    @Test
+    void ecAddNegateCancelFoldsInBothOperandOrders() {
+        String infinityHex = "0".repeat(128);
+        String pointHex = "ab".repeat(64);
+
+        // Control: the already-implemented forward direction.
+        List<AnfBinding> forward = new ArrayList<>();
+        forward.add(bind("t0", new LoadConst(new BytesConst(pointHex))));
+        forward.add(bind("t1", new Call("ecNegate", List.of("t0"))));
+        forward.add(bind("t2", new Call("ecAdd", List.of("t0", "t1"))));
+        forward.add(bind("t3", new Assert("t2")));
+        assertFoldsToInfinity(forward, infinityHex, "ecAdd(x, ecNegate(x))");
+
+        // The direction that was missing.
+        List<AnfBinding> reversed = new ArrayList<>();
+        reversed.add(bind("t0", new LoadConst(new BytesConst(pointHex))));
+        reversed.add(bind("t1", new Call("ecNegate", List.of("t0"))));
+        reversed.add(bind("t2", new Call("ecAdd", List.of("t1", "t0"))));
+        reversed.add(bind("t3", new Assert("t2")));
+        assertFoldsToInfinity(reversed, infinityHex, "ecAdd(ecNegate(x), x)");
+    }
+
+    /** CONTROL: distinct points must NOT cancel — that would be a wrong answer. */
+    @Test
+    void ecAddOverDistinctPointsDoesNotFold() {
+        List<AnfBinding> in = new ArrayList<>();
+        in.add(bind("p", new LoadConst(new BytesConst("ab".repeat(64)))));
+        in.add(bind("q", new LoadConst(new BytesConst("cd".repeat(64)))));
+        in.add(bind("neg", new Call("ecNegate", List.of("q"))));
+        in.add(bind("t0", new Call("ecAdd", List.of("neg", "p"))));
+        in.add(bind("t1", new Assert("t0")));
+
+        AnfValue v = findValue(AnfOptimize.run(singleMethod("m", in)), "t0");
+        assertEquals(Call.class, v.getClass(), "the ecAdd must survive");
+        assertEquals("ecAdd", ((Call) v).func());
+    }
+
+    private static void assertFoldsToInfinity(List<AnfBinding> in, String infinityHex, String label) {
+        AnfValue v = findValue(AnfOptimize.run(singleMethod("m", in)), "t2");
+        assertEquals(LoadConst.class, v.getClass(), label + " must fold to a constant");
+        assertEquals(infinityHex, ((BytesConst) ((LoadConst) v).value()).hex(),
+            label + " must fold to the point at infinity");
+    }
+
+    private static AnfValue findValue(AnfProgram p, String name) {
+        for (AnfBinding b : bodyOf(p)) {
+            if (b.name().equals(name)) return b.value();
+        }
+        throw new AssertionError("binding " + name + " not found");
+    }
+
     @Test
     void identityIsReferentiallyStable() {
         // The pass returns the same program reference when there is nothing

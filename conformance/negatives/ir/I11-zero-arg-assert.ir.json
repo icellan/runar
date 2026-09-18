@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "R-163 (CL-BUG-133): `assert()` with no arguments.",
+    "",
+    "`if len(args) >= 1 { ... } return` with no else: the guard emitted no",
+    "opcode, no stack slot and no error. Measured before the fix, same file",
+    "through every --ir CLI:",
+    "  go / ruby / rust / python / java   compiled clean, script EMPTY",
+    "  zig                                refused (InvalidBuiltin)",
+    "",
+    "An empty locking script is anyone-can-spend, so the contract's only",
+    "guard did not merely misbehave — it disappeared."
+  ],
+  "contractName": "ZeroArgAssert",
+  "properties": [
+    { "name": "threshold", "type": "bigint", "readonly": true }
+  ],
+  "methods": [
+    {
+      "name": "go",
+      "isPublic": true,
+      "params": [{ "name": "x", "type": "bigint" }],
+      "body": [
+        { "name": "t0", "value": { "kind": "load_param", "name": "x" } },
+        { "name": "t1", "value": { "kind": "call", "func": "assert", "args": [] } }
+      ]
+    }
+  ]
+}

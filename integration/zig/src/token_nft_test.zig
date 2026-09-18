@@ -345,6 +345,7 @@ test "NFT_WrongOwnerRejected" {
     var wrong_local_signer = try wrong_signer.localSigner();
 
     // Attempt transfer with wrong signer -- should be rejected
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -368,7 +369,7 @@ test "NFT_WrongOwnerRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.warn("NFT correctly rejected transfer with wrong owner", .{});
     }
 }

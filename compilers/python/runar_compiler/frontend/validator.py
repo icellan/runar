@@ -30,6 +30,7 @@ from runar_compiler.frontend.ast_nodes import (
     IncrementExpr,
     IndexAccessExpr,
     MemberExpr,
+    MethodNode,
     PrimitiveType,
     PropertyAccessExpr,
     ReturnStmt,
@@ -118,9 +119,24 @@ class _ValidationContext:
     contract: ContractNode
     errors: list[Diagnostic] = field(default_factory=list)
     warnings: list[Diagnostic] = field(default_factory=list)
+    #: Location of the statement currently being validated (R-149).
+    #:
+    #: ``typecheck.py`` auto-attaches a location to every error it raises, so
+    #: the same contract produced located TYPE errors and unlocated VALIDATION
+    #: errors. Eleven ``_add_error`` calls here passed none -- the whole
+    #: ``asm()``-usage family among them -- because they are reached from
+    #: EXPRESSION validation, and Python's ``Expression`` nodes carry no
+    #: ``SourceLocation`` at all (``ast_nodes.py``). The enclosing statement
+    #: does, so ``_validate_statement`` publishes it here and ``_add_error``
+    #: falls back to it. Statement granularity is the difference between
+    #: "somewhere in your contract" and "line 14"; expression granularity needs
+    #: the AST change R-142 made on the TypeScript side.
+    current_stmt_loc: SourceLocation | None = None
 
     def _add_error(self, msg: str, loc: SourceLocation | None = None) -> None:
-        self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
+        self.errors.append(
+            Diagnostic(message=msg, severity=Severity.ERROR, loc=loc or self.current_stmt_loc)
+        )
 
     # -------------------------------------------------------------------
     # Property validation
@@ -187,6 +203,21 @@ class _ValidationContext:
                 if t.name == "void":
                     self._add_error(
                         f"property type 'void' is not valid at {loc.file}:{loc.line}",
+                        loc=loc,
+                    )
+                else:
+                    # R-246: any other unrecognised primitive name used to fall
+                    # through in silence, while the identical name arriving as a
+                    # CustomType is refused below. One property, two spellings,
+                    # two answers. No parser in this tier produces a
+                    # PrimitiveType with an unknown name today — they all map an
+                    # unrecognised name to CustomType — but validate() takes an
+                    # AST, and a pass that synthesises a property (the
+                    # fixed-array expansion synthesises several) is one refactor
+                    # away from building the node this branch dropped.
+                    self._add_error(
+                        f"unsupported type '{t.name}' in property declaration "
+                        f"at {loc.file}:{loc.line}",
                         loc=loc,
                     )
         elif isinstance(t, FixedArrayType):
@@ -391,9 +422,15 @@ class _ValidationContext:
         # compiles to an empty script -- never what the author meant (usually a
         # missing `public` modifier; methods default to private).
         if not any(m.visibility == "public" for m in self.contract.methods):
+            # R-149: a class-level complaint, so anchor it at the constructor's
+            # declaration rather than letting it fall back to wherever
+            # validation happened to be — which would be the constructor's LAST
+            # statement, a line that has nothing to do with the problem.
+            # `ContractNode` carries no location of its own in this tier.
             self._add_error(
                 f"Contract '{self.contract.name}' has no public methods "
-                "— no spending entry points; add 'public' to at least one method"
+                "— no spending entry points; add 'public' to at least one method",
+                self.contract.constructor.source_location,
             )
 
         for method in self.contract.methods:
@@ -446,7 +483,7 @@ class _ValidationContext:
             _warn_manual_preimage_usage(method, self.warnings)
 
         # #131: warn when a public method gates on extractLocktime but never
-        # asserts the spending tx is non-final (extractSequence < 0xffffffff).
+        # asserts the spending tx is non-final (extractSequence !== 0xffffffff).
         # Advisory only.
         if method.visibility == "public":
             _warn_locktime_without_sequence_guard(method, self.contract, self.warnings)
@@ -655,13 +692,26 @@ class _ValidationContext:
                     f"value can be bound to the result variable."
                 )
 
-        _walk_expressions_in_body(method.body, visitor)
+        # R-149: walk one statement at a time so `current_stmt_loc` is the
+        # statement the asm() call sits in. This pass runs BEFORE the statement
+        # loop in `_validate_method`, so without this the fallback would be
+        # stale (the previous method's last statement) or absent entirely.
+        for stmt in method.body:
+            loc = getattr(stmt, "source_location", None)
+            if loc is not None and getattr(loc, "line", 0):
+                self.current_stmt_loc = loc
+            _walk_expressions_in_body([stmt], visitor)
 
     # -------------------------------------------------------------------
     # Statement validation
     # -------------------------------------------------------------------
 
     def _validate_statement(self, stmt: Statement) -> None:
+        # R-149: publish where we are, so a diagnostic raised from inside
+        # expression validation still reports a line.
+        loc = getattr(stmt, "source_location", None)
+        if loc is not None and getattr(loc, "line", 0):
+            self.current_stmt_loc = loc
         if isinstance(stmt, VariableDeclStmt):
             if isinstance(stmt.type, FixedArrayType):
                 self._add_error(
@@ -698,9 +748,261 @@ class _ValidationContext:
             if not _is_compile_time_constant(stmt.condition.right):
                 self._add_error("for loop bound must be a compile-time constant")
 
-        self._validate_expression(stmt.init.init)
+        # R-148: the START, checked the same way and for the same reason. Until
+        # now only the BOUND was validated here; a non-literal start reached
+        # ``anf_lower._extract_loop_shape``, which raises a bare ``ValueError``
+        # with no location. That escapes ``compile_from_source`` -- the tier's
+        # public API, which every other failure exits through as a
+        # ``CompilationError`` carrying located diagnostics -- so a caller
+        # written against that contract got an exception type it does not catch.
+        # Only the CLI was unaffected, because it wraps the call in a generic
+        # ``except Exception``.
+        #
+        # The message is the other six tiers' sentence, word for word; the raise
+        # in ``_extract_loop_shape`` stays as the backstop for ``--ir`` inputs,
+        # which run no frontend at all.
+        if stmt.init is not None and not _is_compile_time_constant(stmt.init.init):
+            self._add_error(
+                "Cannot determine loop start at compile time. "
+                "For-loop iterators must start at an integer literal.",
+                stmt.source_location,
+            )
+
+        self._validate_for_condition_tests_iterator(stmt)
+
+        if stmt.init is not None:
+            self._validate_expression(stmt.init.init)
+        self._validate_for_update(stmt)
+        self._validate_no_output_intrinsic_in_loop(stmt)
         for s in stmt.body:
             self._validate_statement(s)
+
+    def _validate_for_condition_tests_iterator(self, stmt: ForStmt) -> None:
+        """Reject a for-loop whose condition does not test the iterator (W4).
+
+        The bound check above reads only ``condition.right``. Nothing required
+        ``condition.left`` to BE the iterator, and ``_extract_loop_shape``
+        ignores left entirely: it computes ``count = bound - start``. So::
+
+            for (let i = 0n; i + 1n < 2n; i++) { ... }
+
+        runs ONCE in the source language and TWICE in the emitted script
+        (count = 2 - 0). The extra lap executes the ``else`` arm the source can
+        never reach. Measured on ``@bsv/sdk`` ``Spend.validate()`` with a vault
+        whose signature check sits in the first lap and whose second lap sets
+        ``authorized = true``: the phantom-lap loop ACCEPTED an empty signature,
+        while the semantically identical ``i < 1n`` rejected it.
+
+        Refusal rather than lowering: evaluating a general condition per
+        iteration means unrolling against a real interpreter at ANF time, a
+        language extension with no golden behind it. The diagnostic text is
+        shared verbatim with the other six tiers.
+        """
+        iter_name = stmt.init.name if stmt.init is not None else ""
+        cond = stmt.condition
+        if (
+            isinstance(cond, BinaryExpr)
+            and isinstance(cond.left, Identifier)
+            and cond.left.name == iter_name
+        ):
+            return
+
+        self._add_error(
+            f"For loop condition must compare the loop variable '{iter_name}' to a "
+            f"compile-time constant (`{iter_name} < 10n`). The unrolled loop binds the "
+            "iterator as `start + k*step` and takes its trip count from the bound alone, "
+            "so a condition whose left-hand side is anything else -- a computed "
+            "expression, or a different variable -- is not the condition the loop "
+            "actually evaluates",
+            stmt.source_location,
+        )
+
+    # R-127 -- output intrinsics inside a loop body
+    # ------------------------------------------------------------------
+
+    #: The three intrinsics that register an output ref.
+    _OUTPUT_INTRINSIC_NAMES = frozenset({"addOutput", "addRawOutput", "addDataOutput"})
+
+    @staticmethod
+    def _loop_output_intrinsic_msg(intrinsic: str, via: str | None) -> str:
+        """Build the R-127 rejection.
+
+        Shared verbatim with the other six tiers.
+        """
+        via_clause = f" (reached through private method '{via}')" if via else ""
+        return (
+            f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a loop "
+            "body. A loop body lowers into its own scope whose declared outputs never "
+            "reach the method's output list, so the continuation hash would commit to "
+            "fewer outputs than the transaction actually creates: the spend is rejected "
+            "by every shipped SDK and any successor it produces is unspendable. Move the "
+            "call out of the loop."
+        )
+
+    def _validate_no_output_intrinsic_in_loop(self, stmt: ForStmt) -> None:
+        """Reject an output intrinsic called inside a loop body (R-127).
+
+        ``anf_lower`` lowers a loop body into its own sub-context, which starts
+        with a fresh empty add-output ref list, and nothing propagates that list
+        back to the method context -- unlike the if-statement lowering, which
+        concatenates each arm's outputs into one ref precisely so the parent
+        sees them. The continuation hash is then built from whatever
+        ``addOutput`` calls sit at the method's TOP level while the loop's
+        outputs are still emitted into the transaction. Measured on a
+        two-iteration loop before this check existed:
+
+        * loop only -- ts/go/rust/python blew up inside stack lowering ("method
+          parameter '_newAmount' is not on the stack at a post-consumption
+          reference"), zig/ruby emitted a covenant over the WRONG output set,
+          java emitted none.
+        * loop + one top-level call -- compiled clean in every tier, and the ANF
+          continuation hashed exactly ONE leaf while three outputs were built.
+
+        A continuation committing to fewer outputs than the transaction creates
+        is spendable only by a hand-crafted transaction, is rejected by every
+        shipped SDK, and the successor it produces is permanently unspendable
+        (CL-BUG-164).
+
+        Refusal rather than lowering: propagating the refs cannot work by name,
+        because the loop is unrolled at stack-lowering time and one body binding
+        name denotes N physical slots. A correct lowering means unrolling at ANF
+        time, a language feature with no golden behind it; refusing removes
+        nothing that works today.
+        """
+        found = self._find_output_intrinsic(stmt.body, set())
+        if found is None:
+            return
+        intrinsic, via, loc = found
+        self._add_error(
+            self._loop_output_intrinsic_msg(intrinsic, via),
+            loc or stmt.source_location,
+        )
+
+    @staticmethod
+    def _callee_property(expr) -> str | None:
+        """The property/function name a call names, if any."""
+        if not isinstance(expr, CallExpr):
+            return None
+        callee = expr.callee
+        if isinstance(callee, PropertyAccessExpr):
+            return callee.property
+        if isinstance(callee, MemberExpr):
+            return callee.property
+        if isinstance(callee, Identifier):
+            return callee.name
+        return None
+
+    def _private_method_named(self, name: str) -> MethodNode | None:
+        for m in self.contract.methods:
+            if m.name == name and m.visibility == "private":
+                return m
+        return None
+
+    def _find_output_intrinsic(self, stmts, seen: set[str]):
+        """First output intrinsic reachable from ``stmts``.
+
+        Follows calls to private methods: a public method that delegates
+        ``addOutput`` to a private helper has that helper INLINED at ANF time,
+        so a helper called in a loop lands its outputs in the loop's
+        sub-context exactly as a direct call would.
+        """
+        for stmt in stmts:
+            found = self._find_output_intrinsic_in_statement(stmt, seen)
+            if found is not None:
+                return found
+        return None
+
+    def _find_output_intrinsic_in_statement(self, stmt, seen: set[str]):
+        if isinstance(stmt, ExpressionStmt):
+            return self._find_output_intrinsic_in_expr(stmt.expr, stmt.source_location, seen)
+        if isinstance(stmt, VariableDeclStmt):
+            return self._find_output_intrinsic_in_expr(stmt.init, stmt.source_location, seen)
+        if isinstance(stmt, AssignmentStmt):
+            return self._find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        if isinstance(stmt, ReturnStmt):
+            return self._find_output_intrinsic_in_expr(stmt.value, stmt.source_location, seen)
+        if isinstance(stmt, IfStmt):
+            found = self._find_output_intrinsic_in_expr(
+                stmt.condition, stmt.source_location, seen
+            )
+            if found is not None:
+                return found
+            return self._find_output_intrinsic(list(stmt.then) + list(stmt.else_), seen)
+        if isinstance(stmt, ForStmt):
+            return self._find_output_intrinsic(stmt.body, seen)
+        return None
+
+    def _find_output_intrinsic_in_expr(self, expr, loc, seen: set[str]):
+        if expr is None:
+            return None
+        name = self._callee_property(expr)
+        if name is not None:
+            if name in self._OUTPUT_INTRINSIC_NAMES:
+                return (name, None, loc)
+            helper = self._private_method_named(name)
+            if helper is not None and name not in seen:
+                seen.add(name)
+                nested = self._find_output_intrinsic(helper.body, seen)
+                if nested is not None:
+                    return (nested[0], name, loc)
+        for child in _sub_expressions(expr):
+            found = self._find_output_intrinsic_in_expr(child, loc, seen)
+            if found is not None:
+                return found
+        return None
+
+    def _validate_for_update(self, stmt: ForStmt) -> None:
+        """Reject any for-loop update clause the loop model cannot represent
+        (R-065).
+
+        The ANF ``loop`` node carries exactly ``{count, iterVar, start, step,
+        body}`` and synthesizes the iterator on unrolled iteration k as
+        ``start + k*step``. There is no slot for an arbitrary update statement,
+        and ``_extract_loop_step`` only ever understood a unit step —
+        everything else was silently coerced to ``+1`` (or ``-1`` from the
+        comparison direction) and the clause itself was discarded. That made
+        three distinct failures indistinguishable from a correct compile:
+
+        * ``for (let i = 0n; i < 3n; undefinedFn())`` produced byte-identical
+          output. A nonexistent function name raised nothing.
+        * ``for (let i = 0n; i < 3n; this.count++)`` dropped the state write.
+        * ``while (i < 5) : (i += 2)`` unrolled 5 times over i = 0..4 instead
+          of 3 times over i = 0,2,4.
+
+        ``spec/grammar.md``'s ForStatement production admits only
+        ``Identifier ('++' | '--')``, and its Statement Restrictions say "The
+        loop variable MUST use simple increment (``++``) or decrement
+        (``--``)". So rejecting is the fix rather than lowering: appending the
+        update's lowering to the loop body would re-emit ``i++`` as a dead
+        binding on every loop that already compiles correctly, moving bytes
+        across the whole corpus to express nothing.
+
+        The accepted set is every shape the nine frontends actually
+        synthesize: ``i++``/``i--``/``++i``/``--i``; the assignment spelling
+        ``i = i + 1`` / ``i = i - 1`` / ``i = 1 + i`` that ``i += 1`` becomes in
+        the Solidity, Zig and Java parsers; and the effect-free no-op sentinel
+        (a literal or a bare identifier) that the while-shaped parsers
+        synthesize when the source has no continue expression at all.
+
+        The advanced variable must be the declared iterator or the identifier
+        the condition tests. Both are needed: the Zig parser only folds
+        ``var i = 0; while (i < N) : (i += 1)`` into a single ForStmt when the
+        declaration is the immediately preceding statement, so an unfolded loop
+        carries a placeholder init while the update advances the real ``i``
+        named in the condition.
+        """
+        allowed: list[str] = []
+        if stmt.init is not None:
+            allowed.append(stmt.init.name)
+        if isinstance(stmt.condition, BinaryExpr) and isinstance(
+            stmt.condition.left, Identifier
+        ):
+            allowed.append(stmt.condition.left.name)
+
+        if _is_representable_for_update(allowed, stmt.update):
+            return
+
+        self._add_error(LOOP_UPDATE_DIAGNOSTIC, stmt.source_location)
 
     # -------------------------------------------------------------------
     # Expression validation
@@ -879,6 +1181,64 @@ def _ends_with_terminal_asm(body: list[Statement]) -> bool:
     return False
 
 
+# Shared verbatim with the other six tiers. Per-tier diagnostic drift on the
+# same rejection is a recurring defect in this repo, so the string is mirrored,
+# character for character, in
+# packages/runar-compiler/src/passes/02-validate.ts,
+# compilers/go/frontend/validator.go, compilers/rust/src/frontend/validator.rs,
+# compilers/zig/src/frontend/validator.zig,
+# compilers/ruby/lib/frontend/validator.rb and
+# compilers/java/src/main/java/runar/compiler/passes/Validate.java.
+LOOP_UPDATE_DIAGNOSTIC = (
+    "For loop update must advance the loop variable by one (`i++`, `i--`, "
+    "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a "
+    "unit step, so any other update clause -- a function call, a state mutation, or a "
+    "non-unit step such as `i += 2` -- cannot be represented and would be discarded"
+)
+
+
+def _is_allowed_loop_var(allowed: list[str], expr: Expression | None) -> bool:
+    """True when ``expr`` names one of the identifiers the update may advance.
+
+    A property access, an index access or anything else is never accepted:
+    those are the side effects that used to be dropped.
+    """
+    return isinstance(expr, Identifier) and expr.name in allowed
+
+
+def _is_literal_one(expr: Expression | None) -> bool:
+    return isinstance(expr, BigIntLiteral) and expr.value == 1
+
+
+def _is_representable_for_update(allowed: list[str], update: Statement | None) -> bool:
+    if isinstance(update, ExpressionStmt):
+        e = update.expr
+        if isinstance(e, (IncrementExpr, DecrementExpr)):
+            return _is_allowed_loop_var(allowed, e.operand)
+        # The no-op sentinel a while-shaped frontend synthesizes when the source
+        # carries no continue expression: zig's ``while (c) {}``, move's
+        # ``while (c) {}``, go's ``for c {}``. Reading a literal or a bare
+        # identifier has no effect, so discarding it loses nothing.
+        return isinstance(e, (BigIntLiteral, BoolLiteral, Identifier))
+
+    if isinstance(update, AssignmentStmt):
+        # ``i += 1`` / ``i -= 1`` arrive here as ``i = i + 1`` / ``i = i - 1``.
+        if not _is_allowed_loop_var(allowed, update.target):
+            return False
+        v = update.value
+        if not isinstance(v, BinaryExpr):
+            return False
+        if v.op == "+":
+            return (
+                _is_allowed_loop_var(allowed, v.left) and _is_literal_one(v.right)
+            ) or (_is_literal_one(v.left) and _is_allowed_loop_var(allowed, v.right))
+        if v.op == "-":
+            return _is_allowed_loop_var(allowed, v.left) and _is_literal_one(v.right)
+        return False
+
+    return False
+
+
 def _is_compile_time_constant(expr: Expression | None) -> bool:
     # Only integer literals (and their negation) can be unrolled into fixed
     # Bitcoin Script by anf-lower. A bare identifier bound (e.g. ``const N``) or
@@ -967,28 +1327,66 @@ def _is_locktime_read(expr: Expression) -> bool:
 
 
 def _is_sequence_finality_guard(expr: Expression) -> bool:
-    """True when *expr* is an ``extractSequence(...) < <final>``-style comparison
-    (the guard that makes a locktime gate consensus-enforced).
+    """True when *expr* is a comparison on ``extractSequence(...)`` that
+    genuinely EXCLUDES the finality sentinel ``0xffffffff``, reading the field
+    as the unsigned 32-bit wire value it is (see ``_emit_unsigned_bin2num`` in
+    ``codegen/stack.py``).
 
-    Accepts the two natural spellings: ``extractSequence(pre) < N`` / ``<= N``,
-    and the reversed ``N > extractSequence(pre)`` / ``>= ...``. ``N`` must be a
-    bigint literal no greater than the finality sentinel, so the guard genuinely
-    forces non-finality.
+    Accepted::
+
+        extractSequence(pre) !== 0xffffffff   # and the reversed spelling
+        extractSequence(pre) <  N, 0 < N <= 0xffffffff   # reversed: N > ...
+        extractSequence(pre) <= N, N <  0xffffffff   # reversed: N >= ...
+
+    Deliberately NOT accepted: ``<= 0xffffffff`` and ``>= 0xffffffff``.
+    nSequence cannot exceed 0xffffffff, so those are true for every transaction
+    including the final one -- a tautology that used to silence this warning on
+    a contract with no guard at all (W1 / FinalCountdown).
+
+    Also NOT accepted: ``extractSequence(pre) < 0``. Unsigned nSequence is
+    never negative, so that comparison is vacuous.
     """
     if not isinstance(expr, BinaryExpr):
         return False
 
-    def bound_ok(e: Expression) -> bool:
-        return isinstance(e, BigIntLiteral) and e.value <= _SEQUENCE_FINAL
+    def is_final_sentinel(e: Expression) -> bool:
+        return isinstance(e, BigIntLiteral) and e.value == _SEQUENCE_FINAL
 
-    if (expr.op in ("<", "<=")
-            and _is_call_to_named(expr.left, "extractSequence")
-            and bound_ok(expr.right)):
+    def strict_bound_ok(e: Expression) -> bool:
+        return isinstance(e, BigIntLiteral) and e.value > 0 and e.value <= _SEQUENCE_FINAL
+
+    def non_strict_bound_ok(e: Expression) -> bool:
+        return isinstance(e, BigIntLiteral) and e.value < _SEQUENCE_FINAL
+
+    if expr.op == "!==":
+        return (
+            (_is_call_to_named(expr.left, "extractSequence") and is_final_sentinel(expr.right))
+            or (_is_call_to_named(expr.right, "extractSequence") and is_final_sentinel(expr.left))
+        )
+    if expr.op == "<":
+        return _is_call_to_named(expr.left, "extractSequence") and strict_bound_ok(expr.right)
+    if expr.op == "<=":
+        return _is_call_to_named(expr.left, "extractSequence") and non_strict_bound_ok(expr.right)
+    if expr.op == ">":
+        return _is_call_to_named(expr.right, "extractSequence") and strict_bound_ok(expr.left)
+    if expr.op == ">=":
+        return _is_call_to_named(expr.right, "extractSequence") and non_strict_bound_ok(expr.left)
+    return False
+
+
+def _assertion_implies_sequence_guard(expr: Expression) -> bool:
+    """True when asserting *expr* logically implies a sequence-finality guard.
+
+    A matching comparison nested under ``!`` (or ``||``) does not count:
+    ``assert(not (extract_sequence !== 0xffffffff))`` requires a FINAL sequence.
+    ``&&`` implies each conjunct.
+    """
+    if _is_sequence_finality_guard(expr):
         return True
-    if (expr.op in (">", ">=")
-            and _is_call_to_named(expr.right, "extractSequence")
-            and bound_ok(expr.left)):
-        return True
+    if isinstance(expr, BinaryExpr) and expr.op == "&&":
+        return _assertion_implies_sequence_guard(expr.left) or _assertion_implies_sequence_guard(
+            expr.right
+        )
     return False
 
 
@@ -996,7 +1394,7 @@ def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagn
     """#131: warn when *method* (transitively, through the private-helper call
     graph) reads the tx locktime but never asserts the tx is non-final.
 
-    A locktime gate is not consensus-enforced unless ``extractSequence <
+    A locktime gate is not consensus-enforced unless ``extractSequence !==
     0xffffffff`` is also asserted -- otherwise an all-final-sequence spend
     bypasses it. Advisory (warning) only -- no effect on emitted bytecode.
     """
@@ -1011,8 +1409,10 @@ def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagn
         nonlocal reads_locktime, has_sequence_guard
         if _is_locktime_read(expr):
             reads_locktime = True
-        if _is_sequence_finality_guard(expr):
-            has_sequence_guard = True
+        if _is_assert_call(expr) and isinstance(expr, CallExpr):
+            for arg in expr.args:
+                if _assertion_implies_sequence_guard(arg):
+                    has_sequence_guard = True
 
     visited: set[str] = {method.name}
     queue: list = [method]
@@ -1031,9 +1431,9 @@ def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagn
     if reads_locktime and not has_sequence_guard:
         warnings.append(Diagnostic(
             message=f"method '{method.name}' reads extractLocktime but does not assert "
-            f"extractSequence < 0xffffffff; a locktime gate is not consensus-enforced "
+            f"extractSequence is not 0xffffffff; a locktime gate is not consensus-enforced "
             f"unless the tx is non-final — add "
-            f"assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+            f"assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
             severity=Severity.WARNING,
             loc=method.source_location,
         ))
@@ -1074,7 +1474,39 @@ def _is_literal_expression(expr: Expression | None) -> bool:
         return True
     if isinstance(expr, UnaryExpr) and expr.op == "-":
         return isinstance(expr.operand, BigIntLiteral)
-    return False
+    # `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+    # spec/grammar.md section 11:
+    #
+    #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+    #
+    # 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+    # position. This check runs on the AST, BEFORE ANF lowering, so an
+    # initializer still arrives here as a call node and was refused -- in the
+    # one position the `.runar.rs` surface needs it, since the Rust DSL writes
+    # initializers as assignments inside `init()` that the parser LIFTS into
+    # `PropertyNode.initializer`, and a bare `"1976a914"` is a `&str` that
+    # cannot be assigned to a `ByteString` (`Vec<u8>`).
+    #
+    # Accepting it here is only half the job: `_extract_literal_value` in
+    # anf_lower.py must UNWRAP the same shape, or the property validates and
+    # then loses its default entirely.
+    return is_to_byte_string_literal(expr)
+
+
+def is_to_byte_string_literal(expr: Expression | None) -> bool:
+    """Whether the expression is the ``toByteString(<literal>)`` production.
+
+    Literal argument ONLY. ``toByteString(x)`` for a non-literal ``x`` is not
+    this production and stays a non-literal initializer. Peer of the TS helper
+    of the same name in ``02-validate.ts``.
+    """
+    return (
+        isinstance(expr, CallExpr)
+        and isinstance(expr.callee, Identifier)
+        and expr.callee.name == "toByteString"
+        and len(expr.args) == 1
+        and isinstance(expr.args[0], ByteStringLiteral)
+    )
 
 
 def _is_array_literal_of_literals(expr: Expression | None) -> bool:
@@ -1228,3 +1660,22 @@ def _has_cycle(
 
     stack.discard(name)
     return False
+
+
+def _sub_expressions(expr):
+    """Direct sub-expressions of ``expr``, for the R-127 intrinsic search.
+
+    An intrinsic can sit inside an argument list or an operand, not only as a
+    bare expression statement.
+    """
+    if isinstance(expr, CallExpr):
+        return list(expr.args)
+    if isinstance(expr, BinaryExpr):
+        return [expr.left, expr.right]
+    if isinstance(expr, UnaryExpr):
+        return [expr.operand]
+    if isinstance(expr, TernaryExpr):
+        return [expr.condition, expr.consequent, expr.alternate]
+    if isinstance(expr, IndexAccessExpr):
+        return [expr.object, expr.index]
+    return []

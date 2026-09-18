@@ -14,8 +14,8 @@ Before you begin, make sure you have the following installed:
 | **pnpm** | 9.0.0+          | Package manager (workspace support required) |
 | **Go** | 1.26+           | Only needed if you want to build/use the Go compiler |
 | **Rust** | 1.75+           | Only needed if you want to build/use the Rust compiler |
-| **Python** | 3.13+           | Only needed if you want to build/use the Python compiler |
-| **Zig** | 0.15.x           | Only needed if you want to build/use the Zig compiler |
+| **Python** | 3.10+           | Only needed if you want to build/use the Python compiler (`packages/runar-py` declares `requires-python = ">=3.10"`; CI runs 3.11 and 3.12) |
+| **Zig** | 0.16.x           | Only needed if you want to build/use the Zig compiler (CI pins 0.16.0; `compilers/zig` does not build on 0.15) |
 | **Ruby** | 3.2+            | Only needed if you want to build/use the Ruby compiler |
 | **Java** | 17+             | Only needed if you want to build/use the Java compiler (Gradle wrapper pinned at 8.5 is committed and downloads automatically on first run) |
 
@@ -25,9 +25,23 @@ Verify your installations:
 node --version   # v20.x.x or higher
 pnpm --version   # 9.x.x or higher
 go version       # go1.26.x or higher (optional)
-zig version      # 0.15.x (optional)
+zig version      # 0.16.x (optional)
 java --version   # 17 or higher (optional)
 ```
+
+### Node policy
+
+Compiled contracts target the **Chronicle** opcode policy (SV Node v1.2.0),
+which activated on BSV mainnet at block **943,816** on 7 April 2026. Every
+stateful contract embeds `OP_2MUL`, and the EC / NIST P-256 / P-384 / Merkle
+primitives also emit `OP_2DIV` and `OP_RSHIFTNUM`. Mainnet and testnet nodes
+running v1.2.0 or later handle these; a private or older node needs
+`chronicleactivationheight` set, and a validation library still on the old
+policy will not evaluate the scripts the way a miner does.
+
+The P2PKH contract in this guide uses none of those opcodes. See
+[Chronicle Opcode Policy](./chronicle-opcode-policy.md) for which contract
+shapes do.
 
 ---
 
@@ -43,6 +57,17 @@ pnpm build
 ```
 
 This installs the pnpm workspace packages and builds the JavaScript/TypeScript workspace packages such as `runar-lang`, `runar-compiler`, `runar-cli`, `runar-sdk`, `runar-testing`, and `runar-ir-schema`.
+
+**If you intend to run the conformance suite**, it needs a second install.
+`conformance/` is not a pnpm workspace member — it carries its own
+`package.json` and `package-lock.json` — so:
+
+```bash
+cd conformance && npm ci && cd ..
+```
+
+Without it the conformance scripts cannot resolve `tsx` and fail on startup
+rather than reporting a test result.
 
 If you also want the Zig tooling, build and test it from source:
 

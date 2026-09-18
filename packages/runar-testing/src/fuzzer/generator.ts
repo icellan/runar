@@ -685,6 +685,28 @@ function arbSmallShiftLiteralIR(): fc.Arbitrary<Expr> {
 }
 
 /**
+ * Exponent literal for `pow`, straddling the ENFORCED domain (R-169).
+ *
+ * `pow` unrolls 32 conditional multiplies, so it computes `base^min(exp, 32)`
+ * and the emitted script refuses anything outside `0 <= exp <= 32` with
+ * `OP_DUP <0> <33> OP_WITHIN OP_VERIFY`. The constant folder declines outside
+ * the same bound and the interpreter throws there, so the oracle sees the
+ * script and the interpreter REFUSE TOGETHER — which is the property worth
+ * fuzzing, and the one that was never checked.
+ *
+ * The range deliberately covers both sides of the guard rather than staying
+ * inside it. Confining a corpus to the easy half is exactly how `pow`'s clamp
+ * survived three review rounds: there was no `pow` in any fixture past its
+ * bound, the fuzzer never generated `pow` AT ALL, and the single `pow` in any
+ * test in the repo sat at `exp = 10n`.
+ */
+function arbPowExponentLiteralIR(): fc.Arbitrary<Expr> {
+  return fc.integer({ min: -2, max: 40 }).map(
+    (n): Expr => ({ kind: 'bigint_literal', value: BigInt(n) }),
+  );
+}
+
+/**
  * Multi-byte-magnitude literal, used ONLY inside the shift/bitwise arms of
  * `arbBigintExprIR` below (C6 / deep-review finding). `arbBigintLiteralIR`'s
  * [-100, 100] range never needs more than one Bitcoin script-number byte, so
@@ -751,6 +773,17 @@ function arbBigintExprIR(
       arbBigintExprIR(bigintVars, depth - 1),
       arbBigintExprIR(bigintVars, depth - 1),
     ).map(([fn, a, b]): Expr => ({ kind: 'call', fn, args: [a, b] })),
+    // pow(base, <literal exponent>) — R-169. The exponent is fixed at
+    // generation time (like the divisor and shift-count arms) so the execution
+    // oracle sees a decided result, and it straddles the 0..32 guard so the
+    // corpus exercises the REFUSAL as well as the computation. The base is a
+    // depth-0 leaf on purpose: a nested `pow(pow(x, 32), 32)` would ask the
+    // script for a 10^3000 script number and the arm would be testing the
+    // bignum encoder rather than pow.
+    fc.tuple(
+      arbBigintExprIR(bigintVars, 0),
+      arbPowExponentLiteralIR(),
+    ).map(([base, exp]): Expr => ({ kind: 'call', fn: 'pow', args: [base, exp] })),
     // Shifts (bounded non-negative literal count) and bitwise ops (C6 —
     // these lower to byte-array Script opcodes OP_LSHIFT/OP_RSHIFT/OP_AND/
     // OP_OR/OP_XOR; the interpreter models the same byte semantics since
@@ -1680,13 +1713,80 @@ function arbGeneratedStatefulContractOf(
           maxLength: DEFAULT_CONFIG.maxMethods,
         },
       )
-      .map((methods): GeneratedContract => ({
-        name,
-        parentClass: 'StatefulSmartContract',
-        properties,
-        methods: dedupeMethodNames(methods),
-      }));
+      .map((methods): GeneratedContract => {
+        const named = dedupeMethodNames(methods);
+        ensureEveryMutablePropertyIsWritten(properties, named);
+        return {
+          name,
+          parentClass: 'StatefulSmartContract',
+          properties,
+          methods: named,
+        };
+      });
   });
+}
+
+/**
+ * Every property marked mutable must actually be written by some method.
+ *
+ * R-111. `readonly` is drawn by coin flip, independently of which properties the
+ * method bodies go on to assign, so the generator could emit a property that is
+ * mutable BY DECLARATION and written by nothing. On the `.runar.ts` surface that
+ * is expressible — mutability is declared — and the property joins the
+ * serialized state. On the `.runar.zig` surface it is NOT: that frontend INFERS
+ * readonly for a stateful field with no default that no method assigns, so the
+ * same logical contract renders to a Zig source with fewer state slots, and
+ * `addOutput(sats, ...values)` then fails Zig's arity check with
+ * "expects 2 argument(s): satoshis + 1 state value(s), got 4".
+ *
+ * That is the fuzzer artifact the READONLY PARITY note in `renderers.ts`
+ * describes, in the direction that note does not cover — it handles
+ * `readonly: true` reaching every renderer's marker, and this is
+ * `readonly: false` failing to survive a surface that infers.
+ *
+ * It is also why the stateful IR gate excluded Zig. Rather than teach one
+ * surface to express something another infers, the generator stops producing
+ * the shape: an identity write (`this.p = this.p`) is appended for any mutable
+ * property no method assigns. An identity write is a real `update_prop` — DCE
+ * must keep it, since property writes are side-effecting in every tier — so the
+ * property is mutable on every surface, by inference or by declaration.
+ *
+ * Inserted BEFORE any `add_output` in the chosen method: the intrinsic's
+ * operands are the post-mutation values, which is the shape every checked-in
+ * example uses and the one the renderers assume.
+ */
+function ensureEveryMutablePropertyIsWritten(
+  properties: GeneratedProperty[],
+  methods: GeneratedMethod[],
+): void {
+  if (methods.length === 0) return;
+
+  const written = new Set<string>();
+  const walk = (stmts: Stmt[]): void => {
+    for (const st of stmts) {
+      if (st.kind === 'assign' && st.isProperty) written.add(st.target);
+      else if (st.kind === 'if') {
+        walk(st.then);
+        if (st.else_) walk(st.else_);
+      } else if (st.kind === 'for') walk(st.body);
+    }
+  };
+  for (const m of methods) walk(m.body);
+
+  const unwritten = properties.filter((p) => !p.readonly && !written.has(p.name));
+  if (unwritten.length === 0) return;
+
+  const target = methods[0]!;
+  const insertAt = target.body.findIndex((st) => st.kind === 'add_output');
+  const identityWrites: Stmt[] = unwritten.map((p) => ({
+    kind: 'assign',
+    target: p.name,
+    value: { kind: 'property_ref', name: p.name },
+    isProperty: true,
+  }));
+  if (insertAt < 0) target.body.push(...identityWrites);
+  else target.body.splice(insertAt, 0, ...identityWrites);
+  target.mutatesState = true;
 }
 
 /**
@@ -1819,9 +1919,44 @@ interface BytesVar {
 }
 
 /**
+ * Whether `arbBytesExpr` may emit `split`.
+ *
+ * ON. It was off, because the FIRST thing the arm did when switched on was find
+ * a compiler defect it could not work around: `split` pushed TWO stack-map slots
+ * for ONE binding in `05-stack-lower.ts#lowerBuiltinCall`, and the orphaned left
+ * half — unnameable, since no surface parser accepts array destructuring —
+ * desynced the model from the runtime stack, so any read AFTER the split
+ * resolved to the wrong slot and lowering aborted.
+ *
+ * The lowering now emits `OP_SPLIT OP_NIP` and binds one slot, the same shape
+ * `substr`, `right` and `__array_access` already used for the halves they do
+ * not bind. `conformance/split-stack-desync.test.ts` pins that the shapes which
+ * used to abort now compile, and
+ * `conformance/split_residue_execution_test.go` spends one of them on the go-sdk
+ * consensus interpreter with a value bound before the split read back after it.
+ *
+ * Leaving this arm on is the point: `split` had no fuzzer reach at all, which is
+ * why the only shape anyone had ever written was the one that happened to
+ * compile.
+ */
+const SPLIT_ARM_ENABLED = true;
+
+/**
  * A ByteString expression built from the available ByteString vars, tracking a
- * conservative minimum length so `substr` bounds are always in range on both
- * the interpreter and the script engines (OP_SPLIT rejects out-of-range).
+ * conservative minimum length so `substr` and `split` bounds are always in
+ * range on both the interpreter and the script engines (OP_SPLIT rejects
+ * out-of-range).
+ *
+ * `int2str` is deliberately NOT here, and adding it would break the gate. The
+ * Go renderer spells builtins `runar.` + PascalCase, which makes
+ * `runar.Int2Str` — and go, rust, python and java all REJECT that spelling
+ * ("unknown function 'int2Str'"): they camel-case the leading character
+ * instead of consulting the alias map, and the builtin is registered as
+ * `int2str`. Since `fuzz:ir:gate` compiles every case on all seven tiers,
+ * emitting int2str would make four of them permanent outliers. `int2str` is
+ * covered instead by the `byte-builtins` fixture and
+ * `conformance/byte_builtins_execution_test.go`, where the surface spelling is
+ * chosen by hand.
  */
 function arbBytesExpr(
   bytesVars: BytesVar[],
@@ -1855,6 +1990,42 @@ function arbBytesExpr(
         })),
       ),
     ),
+    // split(x, idx) — binds the RIGHT half; `idx` is chosen inside
+    // [0, minLen(x)] so OP_SPLIT is in range on every witness, exactly as the
+    // substr arm above does. Both ends of that interval are reachable, which
+    // is the point: an off-by-one in the OP_SPLIT lowering shows up at idx 0
+    // or at idx == len and nowhere in between.
+    //
+    // NOTE `split` is single-valued and binds the RIGHT half. Rúnar has no
+    // tuple type and no parser accepts array destructuring, so the left half is
+    // unnameable; use `left(data, idx)` for it. Do not "fix" this arm to emit a
+    // tuple — nothing can compile one.
+    //
+    // Gated on SPLIT_ARM_ENABLED below.
+    ...(SPLIT_ARM_ENABLED
+      ? [
+        arbBytesExpr(bytesVars, depth - 1).chain((base) =>
+          fc.integer({ min: 0, max: base.minLen }).map((idx) => ({
+            expr: {
+              kind: 'call',
+              fn: 'split',
+              args: [base.expr, { kind: 'bigint_literal', value: BigInt(idx) }],
+            } as Expr,
+            minLen: base.minLen - idx,
+          })),
+        ),
+      ]
+      : []),
+    // reverseBytes(x) — length-preserving, valid on every input including the
+    // empty string, so no bound is needed. The base is a depth-0 atom on
+    // purpose: each call unrolls 520 OP_SPLIT/OP_CAT iterations (~5.5 KB of
+    // script), and a nested `reverseBytes(reverseBytes(x))` would spend the
+    // corpus's whole size budget proving the peephole pass can survive 1 MB of
+    // one opcode rather than exercising the builtin.
+    atom.map((base) => ({
+      expr: { kind: 'call', fn: 'reverseBytes', args: [base.expr] } as Expr,
+      minLen: base.minLen,
+    })),
   );
 }
 

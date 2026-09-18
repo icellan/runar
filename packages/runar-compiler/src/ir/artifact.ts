@@ -260,4 +260,18 @@ export interface RunarArtifact {
 
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
+
+  /**
+   * Unsound primitives this artifact's script reaches, if any.
+   *
+   * R-245: declared in `runar-ir-schema` and read by the SDKs
+   * (`runar-sdk/src/unsound-primitives.ts`) and by all six native tiers, and
+   * MISSING from this declaration and its sibling — three copies of one wire
+   * type, two of them narrower than the format. A narrower interface does not
+   * fail to compile in TypeScript: an object carrying the field still satisfies
+   * it, and the field just cannot be read or set through this view.
+   *
+   * Absent (not empty) on every artifact that reaches no such builtin.
+   */
+  unsoundPrimitives?: string[];
 }

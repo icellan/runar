@@ -263,3 +263,52 @@ class TestCheckMultiSig:
         fives = [op for op in unlock.ops if _is_push_int(op, 5)]
         assert len(threes) >= 1, "must push nSigs=3"
         assert len(fives) >= 1, "must push nPKs=5"
+
+
+# ---------------------------------------------------------------------------
+# R-054: degenerate thresholds must be rejected at COMPILE time.
+#
+# ``checkMultiSig([], [pk])`` lowers to ``OP_0 OP_0 <pk> OP_1 OP_CHECKMULTISIG``
+# -- nSigs = 0. OP_CHECKMULTISIG with zero required signatures verifies nothing
+# and pushes TRUE, so the deployed output is ANYONE-CAN-SPEND while the source
+# reads like an authorization check. The mirror image, more signatures than
+# public keys, can never be satisfied by any witness: the output is permanently
+# UNSPENDABLE.
+#
+# The guard lives in the lowerer rather than the typechecker so it also covers
+# the ``--ir`` input path, and it is a compile-time refusal rather than extra
+# emitted opcodes so it moves no bytes for existing valid contracts.
+# ---------------------------------------------------------------------------
+
+class TestCheckMultiSigDegenerateThreshold:
+    def test_empty_signature_array_is_rejected(self):
+        prog = _build_check_multi_sig_program(n_sigs=0, n_pks=1)
+        with pytest.raises(RuntimeError, match="at least one signature"):
+            lower_to_stack(prog)
+
+    def test_empty_pubkey_array_is_rejected(self):
+        prog = _build_check_multi_sig_program(n_sigs=1, n_pks=0)
+        with pytest.raises(RuntimeError, match="at least one public key"):
+            lower_to_stack(prog)
+
+    def test_more_sigs_than_pubkeys_is_rejected(self):
+        prog = _build_check_multi_sig_program(n_sigs=2, n_pks=1)
+        with pytest.raises(RuntimeError, match="cannot exceed"):
+            lower_to_stack(prog)
+
+    # -- controls: the guard must not break any valid threshold --------------
+
+    def test_control_1_of_1_still_lowers(self):
+        methods = lower_to_stack(_build_check_multi_sig_program(n_sigs=1, n_pks=1))
+        unlock = next(m for m in methods if m.name == "unlock")
+        assert _is_opcode(unlock.ops[-1], "OP_CHECKMULTISIG")
+
+    def test_control_2_of_3_still_lowers(self):
+        methods = lower_to_stack(_build_check_multi_sig_program(n_sigs=2, n_pks=3))
+        unlock = next(m for m in methods if m.name == "unlock")
+        assert _is_opcode(unlock.ops[-1], "OP_CHECKMULTISIG")
+
+    def test_control_m_equals_n_still_lowers(self):
+        methods = lower_to_stack(_build_check_multi_sig_program(n_sigs=3, n_pks=3))
+        unlock = next(m for m in methods if m.name == "unlock")
+        assert _is_opcode(unlock.ops[-1], "OP_CHECKMULTISIG")

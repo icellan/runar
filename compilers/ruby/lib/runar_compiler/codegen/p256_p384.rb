@@ -307,7 +307,12 @@ module RunarCompiler
 
       def self.c_decompose_point(t, point_name, x_name, y_name, c)
         t.to_top(point_name)
+        # CL-BUG-095: a P256Point/P384Point is exactly 2*coord_bytes bytes and
+        # nothing checked it, so surplus bytes were split off and silently
+        # dropped. Gate the width here, where every consumer that decomposes a
+        # point picks it up. See emit_point_len_verify in ec.rb.
         split_fn = ->(e) {
+          EC.emit_point_len_verify(e, c.coord_bytes * 2)
           e.call(make_stack_op(op: "push", value: big_int_push(c.coord_bytes)))
           e.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
         }
@@ -393,8 +398,11 @@ module RunarCompiler
       # selected as +b + cond*(a - b)+, which needs no branch and keeps the
       # emitted op sequence identical on both paths.
       #
-      # NOT handled: P == -Q, whose true result is the point at infinity, which
-      # affine coordinates cannot represent.
+      # P == -Q IS handled, below: px == qx with py != qy returns the ALL-ZERO
+      # blob this codegen uses for the point at infinity, which the on-curve
+      # gate then rejects. See "THE THIRD CASE, P == -Q" above c_affine_add.
+      # (R-250: this used to say "NOT handled", left over from before that fix
+      # and contradicted a few dozen lines later in the same file.)
       # GAP-301: coordinate canonicity, leaving "_canon" on the tracker.
       #
       # `c_decompose_point` BIN2NUMs each coordinate as an unsigned value that
@@ -521,24 +529,12 @@ module RunarCompiler
         t.copy_to_top("py", "_py2")
         c_field_sub(t, "_s_px_rx", "_py2", "ry", c)
 
-        t.to_top("px")
-        t.drop
-        t.to_top("py")
-        t.drop
-        t.to_top("qx")
-        t.drop
-        t.to_top("qy")
-        t.drop
-
-        # P == -Q -> force the all-zero point (see the header comment).
-        t.to_top("rx")
-        t.copy_to_top("_notinf", "_notinf_x")
-        t.raw_block(["rx", "_notinf_x"], "rx",
-                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MUL")) })
-        t.to_top("ry")
-        t.to_top("_notinf")
-        t.raw_block(["ry", "_notinf"], "ry",
-                    ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_MUL")) })
+        # CL-BUG-096: `pNNNAdd(P, O)` returned an off-curve blob for the same
+        # reason secp256k1's did -- the adder had no infinity-operand case,
+        # while `pNNNMul(P, 0n)` hands it exactly that value. Same branch-free
+        # select, which also subsumes the standalone `notinf` mask that used to
+        # live here.
+        EC.emit_affine_infinity_select(t)
       end
 
       # =================================================================
@@ -823,6 +819,50 @@ module RunarCompiler
       # =================================================================
       # Scalar multiplication (generic for both P-256 and P-384)
       # =================================================================
+
+      # R-117: coordinate canonicity for the VALUE builtins, aborting form.
+      #
+      # The a = -3 twin of ec_emit_coord_canon_verify in ec.rb; see that comment
+      # for the defect. c_affine_add's cond / notinf selectors are the same bare
+      # OP_NUMEQUAL over the raw decomposed coordinates, and c_decompose_point
+      # accepts any width-fitting unsigned value, so x + p is a second spelling
+      # of the same point that both selectors read as "different".
+      #
+      # c_emit_canonicity_guard above is the FLAG form, for the on-curve
+      # predicates. This is the abort form, called only from emit_pNNN_add /
+      # emit_pNNN_mul / emit_pNNN_negate -- never from c_emit_verify_ecdsa's
+      # path, where c_decompress_pub_key and c_emit_sig_range_gate have already
+      # decided that attacker-chosen bytes must make a total boolean builtin
+      # return false rather than abort the script.
+      def self.c_emit_coord_canon_verify(t, x_name, y_name, c)
+        t.copy_to_top(x_name, "_cc_x")
+        c_push_field_p(t, "_cc_px", c)
+        t.raw_block(["_cc_x", "_cc_px"], "_cc_xok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.copy_to_top(y_name, "_cc_y")
+        c_push_field_p(t, "_cc_py", c)
+        t.raw_block(["_cc_y", "_cc_py"], "_cc_yok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_LESSTHAN")) })
+        t.raw_block(["_cc_xok", "_cc_yok"], "", lambda { |e|
+          e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND"))
+          e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+        })
+      end
+
+      # R-157 -- the a = -3 twin of the secp256k1 point gate; see that comment for the
+      # defect, the measurement and the boundary argument. Called from pNNNMul and NOT
+      # from inside the shared ladder, because verifyECDSA shares it and
+      # decompressPubKey / the signature range gate have already decided that
+      # attacker-chosen bytes must make a total boolean builtin return false rather than
+      # abort the script.
+      def self.c_emit_point_gate(emit, emit_on_curve, c)
+        emit.call(make_stack_op(op: "over"))
+        emit.call(make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: ("\x00" * (c.coord_bytes * 2)).b)))
+        emit.call(make_stack_op(op: "opcode", code: "OP_EQUAL"))
+        emit.call(make_stack_op(op: "push", value: big_int_push(2)))
+        emit.call(make_stack_op(op: "pick", depth: 2))
+        emit_on_curve.call(emit)
+        emit.call(make_stack_op(op: "opcode", code: "OP_BOOLOR"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+      end
 
       def self.c_emit_mul(emit, c, g)
         t = EC::ECTracker.new(["_pt", "_k"], emit)
@@ -1399,11 +1439,16 @@ module RunarCompiler
         t = EC::ECTracker.new(["_pa", "_pb"], emit)
         c_decompose_point(t, "_pa", "px", "py", P256_CURVE)
         c_decompose_point(t, "_pb", "qx", "qy", P256_CURVE)
+        # R-117: c_affine_add's selectors compare these four values RAW.
+        c_emit_coord_canon_verify(t, "px", "py", P256_CURVE)
+        c_emit_coord_canon_verify(t, "qx", "qy", P256_CURVE)
         c_affine_add(t, P256_CURVE)
         c_compose_point(t, "rx", "ry", "_result", P256_CURVE)
       end
 
       def self.emit_p256_mul(emit)
+        # R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        c_emit_point_gate(emit, method(:emit_p256_on_curve), P256_CURVE)
         c_emit_mul(emit, P256_CURVE, P256_GROUP)
       end
 
@@ -1417,6 +1462,7 @@ module RunarCompiler
       def self.emit_p256_negate(emit)
         t = EC::ECTracker.new(["_pt"], emit)
         c_decompose_point(t, "_pt", "_nx", "_ny", P256_CURVE)
+        c_emit_coord_canon_verify(t, "_nx", "_ny", P256_CURVE)
         c_push_field_p(t, "_fp", P256_CURVE)
         c_field_sub(t, "_fp", "_ny", "_neg_y", P256_CURVE)
         c_compose_point(t, "_nx", "_neg_y", "_result", P256_CURVE)
@@ -1424,6 +1470,10 @@ module RunarCompiler
 
       def self.emit_p256_on_curve(emit)
         t = EC::ECTracker.new(["_pt"], emit)
+        # CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+        # contracts are told to gate an untrusted point on, so it must stay
+        # total. The flag is ANDed into the result below.
+        EC.emit_point_length_gate(t, "_pt", P256_CURVE.coord_bytes * 2, "_len_ok")
         c_decompose_point(t, "_pt", "_x", "_y", P256_CURVE)
         c_emit_canonicity_guard(t, "_x", "_y", P256_CURVE)
 
@@ -1442,24 +1492,30 @@ module RunarCompiler
         t.to_top("_rhs")
         t.raw_block(["_y2", "_rhs"], "_curve_eq", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) })
 
-        # on-curve = canonical AND curve-equation
+        # on-curve = right width AND canonical AND curve-equation
         t.to_top("_canon")
         t.to_top("_curve_eq")
-        t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.raw_block(["_canon", "_curve_eq"], "_eq_ok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.to_top("_len_ok")
+        t.to_top("_eq_ok")
+        t.raw_block(["_len_ok", "_eq_ok"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
       end
 
       def self.emit_p256_encode_compressed(emit)
+        # CL-BUG-095: the parity byte was taken from the blob's LAST byte, so
+        # one appended byte flipped the sign of the compressed encoding. Width
+        # is now verified AND the parity byte is read from a fixed offset. See
+        # emit_ec_encode_compressed in ec.rb for the full argument.
+        EC.emit_point_len_verify(emit, 64)
         emit.call(make_stack_op(op: "push", value: big_int_push(32)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
-        emit.call(make_stack_op(op: "push", value: big_int_push(1)))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SUB"))
+        # Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.call(make_stack_op(op: "push", value: big_int_push(31)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_NIP")) # drop y_head
         emit.call(make_stack_op(op: "opcode", code: "OP_BIN2NUM"))
         emit.call(make_stack_op(op: "push", value: big_int_push(2)))
         emit.call(make_stack_op(op: "opcode", code: "OP_MOD"))
-        emit.call(make_stack_op(op: "swap"))
-        emit.call(make_stack_op(op: "drop"))
         emit.call(make_stack_op(
           op: "if",
           then: [make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: "\x03".b))],
@@ -1481,11 +1537,16 @@ module RunarCompiler
         t = EC::ECTracker.new(["_pa", "_pb"], emit)
         c_decompose_point(t, "_pa", "px", "py", P384_CURVE)
         c_decompose_point(t, "_pb", "qx", "qy", P384_CURVE)
+        # R-117: c_affine_add's selectors compare these four values RAW.
+        c_emit_coord_canon_verify(t, "px", "py", P384_CURVE)
+        c_emit_coord_canon_verify(t, "qx", "qy", P384_CURVE)
         c_affine_add(t, P384_CURVE)
         c_compose_point(t, "rx", "ry", "_result", P384_CURVE)
       end
 
       def self.emit_p384_mul(emit)
+        # R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+        c_emit_point_gate(emit, method(:emit_p384_on_curve), P384_CURVE)
         c_emit_mul(emit, P384_CURVE, P384_GROUP)
       end
 
@@ -1499,6 +1560,7 @@ module RunarCompiler
       def self.emit_p384_negate(emit)
         t = EC::ECTracker.new(["_pt"], emit)
         c_decompose_point(t, "_pt", "_nx", "_ny", P384_CURVE)
+        c_emit_coord_canon_verify(t, "_nx", "_ny", P384_CURVE)
         c_push_field_p(t, "_fp", P384_CURVE)
         c_field_sub(t, "_fp", "_ny", "_neg_y", P384_CURVE)
         c_compose_point(t, "_nx", "_neg_y", "_result", P384_CURVE)
@@ -1506,6 +1568,10 @@ module RunarCompiler
 
       def self.emit_p384_on_curve(emit)
         t = EC::ECTracker.new(["_pt"], emit)
+        # CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+        # contracts are told to gate an untrusted point on, so it must stay
+        # total. The flag is ANDed into the result below.
+        EC.emit_point_length_gate(t, "_pt", P384_CURVE.coord_bytes * 2, "_len_ok")
         c_decompose_point(t, "_pt", "_x", "_y", P384_CURVE)
         c_emit_canonicity_guard(t, "_x", "_y", P384_CURVE)
 
@@ -1524,24 +1590,30 @@ module RunarCompiler
         t.to_top("_rhs")
         t.raw_block(["_y2", "_rhs"], "_curve_eq", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_EQUAL")) })
 
-        # on-curve = canonical AND curve-equation
+        # on-curve = right width AND canonical AND curve-equation
         t.to_top("_canon")
         t.to_top("_curve_eq")
-        t.raw_block(["_canon", "_curve_eq"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.raw_block(["_canon", "_curve_eq"], "_eq_ok", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
+        t.to_top("_len_ok")
+        t.to_top("_eq_ok")
+        t.raw_block(["_len_ok", "_eq_ok"], "_result", ->(e) { e.call(make_stack_op(op: "opcode", code: "OP_BOOLAND")) })
       end
 
       def self.emit_p384_encode_compressed(emit)
+        # CL-BUG-095: the parity byte was taken from the blob's LAST byte, so
+        # one appended byte flipped the sign of the compressed encoding. Width
+        # is now verified AND the parity byte is read from a fixed offset. See
+        # emit_ec_encode_compressed in ec.rb for the full argument.
+        EC.emit_point_len_verify(emit, 96)
         emit.call(make_stack_op(op: "push", value: big_int_push(48)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SIZE"))
-        emit.call(make_stack_op(op: "push", value: big_int_push(1)))
-        emit.call(make_stack_op(op: "opcode", code: "OP_SUB"))
+        # Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+        emit.call(make_stack_op(op: "push", value: big_int_push(47)))
         emit.call(make_stack_op(op: "opcode", code: "OP_SPLIT"))
+        emit.call(make_stack_op(op: "opcode", code: "OP_NIP")) # drop y_head
         emit.call(make_stack_op(op: "opcode", code: "OP_BIN2NUM"))
         emit.call(make_stack_op(op: "push", value: big_int_push(2)))
         emit.call(make_stack_op(op: "opcode", code: "OP_MOD"))
-        emit.call(make_stack_op(op: "swap"))
-        emit.call(make_stack_op(op: "drop"))
         emit.call(make_stack_op(
           op: "if",
           then: [make_stack_op(op: "push", value: make_push_value(kind: "bytes", bytes_val: "\x03".b))],

@@ -106,119 +106,119 @@ module RunarCompiler
     # the Go approach: a single struct rather than an interface hierarchy, which
     # keeps JSON round-tripping straightforward.
     class ANFValue
-      attr_accessor :kind,
-                    # -- load_param, load_prop, update_prop -----------------
-                    :name,
-                    # -- load_const: raw JSON value (kept for lossless round-trip)
-                    :raw_value,
-                    # -- Decoded constant value (populated by decode_constants)
-                    :const_string,
-                    :const_big_int,   # Ruby Integer is arbitrary-precision
-                    :const_bool,
-                    :const_int,       # small integers from JSON numbers
-                    # -- bin_op ---------------------------------------------
-                    :op,
-                    :left,
-                    :right,
-                    :result_type,     # operand type hint: "bytes" for byte-typed equality
-                    # -- unary_op ------------------------------------------
-                    :operand,
-                    # -- call ----------------------------------------------
-                    :func,
-                    :args,
-                    # -- method_call ---------------------------------------
-                    :object,
-                    :method,
-                    # -- if ------------------------------------------------
-                    :cond,
-                    :then,
-                    :else_,
-                    # Ordered named result slots both arms leave (results[0]
-                    # deepest). Entries name a branch-merged local or an
-                    # arm-written contract property; stack lowering tells the
-                    # two apart from the contract's property list, so the wire
-                    # format stays a plain array of strings. nil (not []) when
-                    # the +if+ carries at most one result -- see the TypeScript
-                    # reference in packages/runar-compiler/src/ir/anf-ir.ts for
-                    # the full contract.
-                    :results,
-                    # -- loop ----------------------------------------------
-                    :count,
-                    :iter_var,
-                    :body,
-                    # Iterator start value (Integer) and step direction
-                    # (+1 / -1) for non-zero-start & countdown loops (#121).
-                    # On iteration +i+ the iterator holds +start + i*step+.
-                    # Zero-start counting-up loops carry start=0, step=1,
-                    # reproducing the historical i = 0..count-1 lowering.
-                    :start,
-                    :step,
-                    # -- assert, update_prop (value ref), check_preimage ---
-                    :value_ref,
-                    # -- check_preimage, deserialize_state -----------------
-                    :preimage,
-                    # -- check_preimage: BIP-143 sighash flag the on-chain
-                    #    OP_PUSH_TX binding appends to the derived signature
-                    #    (issue #123). nil = default ALL|FORKID (0x41),
-                    #    byte-identical to the pinned cross-tier binding blob.
-                    :sighash_flag,
-                    # -- add_output ----------------------------------------
-                    :satoshis,
-                    :state_values,
-                    # -- add_raw_output ------------------------------------
-                    :script_bytes,
-                    # -- array_literal -------------------------------------
-                    :elements,
-                    # -- raw_script: opaque opcode-byte span with declared
-                    #    stack arity (emitted by the asm() intrinsic).
-                    :bytes,
-                    :in_arity,
-                    :out_arity,
-                    # -- assert (auto-injected stateful-continuation marker) --
-                    # +true+ only on the compiler-emitted
-                    # +hash256(continuationOutputs) === extractOutputHash(txPreimage)+
-                    # assert. Off-chain SDK interpreters skip this assert via a
-                    # direct marker lookup instead of structural / taint
-                    # heuristics that misfire on developer covenant asserts.
-                    :is_auto_injected_state_check
+      # Declared field list -- the SINGLE source of truth for what an ANFValue
+      # carries. It drives the accessors, the nil defaults, and (via
+      # +CLI::_anf_to_camel_dict+) the emitted ANF IR JSON, in that declaration
+      # order.
+      #
+      # N-094: the CLI used to keep its OWN copy of this list as an emit
+      # allowlist. +sighash_flag+ was added here and not there, so a
+      # +@sighash SINGLE|FORKID+ covenant silently emitted ANF with no flag and
+      # round-tripped back as ALL|FORKID -- one byte, same script length, wrong
+      # sighash mode. Add a field here and it is emitted; the guard in
+      # +test/test_n094_sighash_ir_wire_format.rb+ fails if it is neither
+      # emitted nor explicitly excluded.
+      FIELDS = [
+        :kind,
+        # -- load_param, load_prop, update_prop -----------------
+        :name,
+        # -- load_const: raw JSON value (kept for lossless round-trip)
+        :raw_value,
+        # -- Decoded constant value (populated by decode_constants)
+        :const_string,
+        # Ruby Integer is arbitrary-precision
+        :const_big_int,
+        :const_bool,
+        # small integers from JSON numbers
+        :const_int,
+        # -- bin_op ---------------------------------------------
+        :op,
+        :left,
+        :right,
+        # operand type hint: "bytes" for byte-typed equality
+        :result_type,
+        # -- unary_op ------------------------------------------
+        :operand,
+        # -- call ----------------------------------------------
+        :func,
+        :args,
+        # -- method_call ---------------------------------------
+        :object,
+        :method,
+        # -- if ------------------------------------------------
+        :cond,
+        :then,
+        :else_,
+        # Ordered named result slots both arms leave (results[0]
+        # deepest). Entries name a branch-merged local or an
+        # arm-written contract property; stack lowering tells the
+        # two apart from the contract's property list, so the wire
+        # format stays a plain array of strings. nil (not []) when
+        # the +if+ carries at most one result -- see the TypeScript
+        # reference in packages/runar-compiler/src/ir/anf-ir.ts for
+        # the full contract.
+        :results,
+        # -- loop ----------------------------------------------
+        :count,
+        :iter_var,
+        :body,
+        # Iterator start value (Integer) and step direction
+        # (+1 / -1) for non-zero-start & countdown loops (#121).
+        # On iteration +i+ the iterator holds +start + i*step+.
+        # Zero-start counting-up loops carry start=0, step=1,
+        # reproducing the historical i = 0..count-1 lowering.
+        :start,
+        :step,
+        # -- assert, update_prop (value ref), check_preimage ---
+        :value_ref,
+        # -- check_preimage, deserialize_state -----------------
+        :preimage,
+        # -- check_preimage: BIP-143 sighash flag the on-chain
+        #    OP_PUSH_TX binding appends to the derived signature
+        #    (issue #123). nil = default ALL|FORKID (0x41),
+        #    byte-identical to the pinned cross-tier binding blob.
+        :sighash_flag,
+        # -- add_output ----------------------------------------
+        :satoshis,
+        :state_values,
+        # -- add_raw_output ------------------------------------
+        :script_bytes,
+        # -- array_literal -------------------------------------
+        :elements,
+        # -- raw_script: opaque opcode-byte span with declared
+        #    stack arity (emitted by the asm() intrinsic).
+        :bytes,
+        :in_arity,
+        :out_arity,
+        # -- assert (auto-injected stateful-continuation marker) --
+        # +true+ only on the compiler-emitted
+        # +hash256(continuationOutputs) === extractOutputHash(txPreimage)+
+        # assert. Off-chain SDK interpreters skip this assert via a
+        # direct marker lookup instead of structural / taint
+        # heuristics that misfire on developer covenant asserts.
+        :is_auto_injected_state_check,
+        # -- load_prop ------------------------------------------
+        # Issue #109 (+@embedAlways+): when true, dead-binding DCE
+        # must NOT remove this binding even though nothing
+        # references it. Set only on the +load_prop+ that ANF
+        # lowering injects for an +@embedAlways+ readonly field.
+        # In-memory only -- the artifact serializer never writes
+        # it, so the cross-tier ANF IR JSON stays byte-identical
+        # (matches compilers/zig/src/ir/types.zig).
+        :preserve,
+      ].freeze
+
+      attr_accessor(*FIELDS)
+
+      # Fields default to nil; the two booleans default to false. Derived from
+      # FIELDS so a new field cannot be declared and left uninitialised.
+      BOOLEAN_FIELDS = %i[is_auto_injected_state_check preserve].freeze
 
       def initialize(kind: "", **_opts)
+        FIELDS.each do |f|
+          instance_variable_set(:"@#{f}", BOOLEAN_FIELDS.include?(f) ? false : nil)
+        end
         @kind = kind
-        @name = nil
-        @raw_value = nil
-        @const_string = nil
-        @const_big_int = nil
-        @const_bool = nil
-        @const_int = nil
-        @op = nil
-        @left = nil
-        @right = nil
-        @result_type = nil
-        @operand = nil
-        @func = nil
-        @args = nil
-        @object = nil
-        @method = nil
-        @cond = nil
-        @then = nil
-        @else_ = nil
-        @results = nil
-        @count = nil
-        @iter_var = nil
-        @body = nil
-        @start = nil
-        @step = nil
-        @value_ref = nil
-        @preimage = nil
-        @sighash_flag = nil
-        @satoshis = nil
-        @state_values = nil
-        @script_bytes = nil
-        @elements = nil
-        @bytes = nil
-        @in_arity = nil
-        @out_arity = nil
-        @is_auto_injected_state_check = false
       end
     end
 
@@ -390,17 +390,38 @@ module RunarCompiler
     end
     private_class_method :_anf_value_from_hash
 
-    # Decode a loop `start` field (#121). Accepts a JS-style "Nn" bigint
-    # string (the canonical serialization), a plain JSON integer, or nil
-    # (older payloads with no start → zero-start counting-up loop).
+    # Decode a loop +start+ field (#121): a JSON integer, or the sanctioned
+    # +"<decimal>n"+ string for a start too wide for a tier's native integer.
+    # Anything else is REFUSED.
+    #
+    # N-133: this used to end in a bare +0+. Every shape it could not read —
+    # "abc", "", "5nn", a boolean, an explicit null — became a zero-start loop
+    # that compiled and exited 0, and it also read an unsuffixed "5" as 5 while
+    # Rust read the same input as 0.
+    #
+    # 0 is what made that invisible: it is a perfectly plausible loop start,
+    # and the commonest one, so the wrong program compiled and nothing looked
+    # wrong. The +n+ suffix is what makes the string arm unambiguous — the same
+    # discriminator +load_const.value+ and +ANFProperty.initialValue+ use — no
+    # producer writes the bare form, and Java already required it. Stripping
+    # exactly one +n+ and then requiring a plain decimal keeps "5nn", "n" and
+    # the float-shaped "1.5n" refused.
+    #
+    # An ABSENT +start+ still means a zero-start counting-up loop; the caller
+    # gates on +d.key?("start")+, so an explicit +null+ reaches here and is
+    # refused, which is what go and java already did.
     def self._decode_loop_start(raw)
-      return 0 if raw.nil?
       return raw if raw.is_a?(Integer)
+
       if raw.is_a?(String)
         return raw[0..-2].to_i if decimal_bigint_literal?(raw)
-        return raw.to_i if raw.match?(/\A-?\d+\z/)
+
+        raise ArgumentError,
+              "loop start: a string start must be the `<decimal>n` form, got #{raw.inspect}"
       end
-      0
+
+      raise ArgumentError,
+            "loop start: expected an integer or a `<decimal>n` string, got #{raw.inspect}"
     end
     private_class_method :_decode_loop_start
 
@@ -417,12 +438,42 @@ module RunarCompiler
     end
     private_class_method :_anf_param_from_hash
 
+    # Decode +ANFProperty.initialValue+ (N-132).
+    #
+    # The string arm carries two different things and the discriminator is the
+    # trailing +n+, exactly as it is for +load_const.value+:
+    #
+    #   "42n"       a decimal bigint -> 42
+    #   "deadbeef"  a hex ByteString -> "\xde\xad\xbe\xef"
+    #
+    # Only the load_const half of that rule was ever applied, so every string
+    # initialValue went to the hex arm — where +pack("H*")+ does not fail on a
+    # non-hex character, it maps it to +(c & 15) + (c >> 6) * 9+. "42n" came out
+    # as the bytes 0x42 0x70, which is neither of the two things it could have
+    # meant. The TS reference compiler writes "42n" for every bigint property
+    # initializer it emits, so that was the common case, not an edge case.
+    #
+    # Everything else is returned untouched: a string without the suffix stays a
+    # hex ByteString ("3030" is two bytes, not the number 3030), a boolean stays
+    # a boolean, a number stays a number.
+    def self._decode_property_initial_value(raw)
+      return raw[0..-2].to_i if decimal_bigint_literal?(raw)
+
+      raw
+    end
+    private_class_method :_decode_property_initial_value
+
     def self._anf_property_from_hash(d)
       ANFProperty.new(
         name: d.fetch("name", ""),
         type: d.fetch("type", ""),
         readonly: d.fetch("readonly", false),
-        initial_value: d["initialValue"]
+        initial_value: _decode_property_initial_value(d["initialValue"]),
+        # N-095: this key is what the artifact assembler regroups expanded
+        # FixedArray leaves by. Dropping it here made Ruby unable to read back
+        # an ANF it had just written: same script bytes, but the SDK saw four
+        # raw +grid__i__j+ scalars instead of +state.grid+.
+        synthetic_array_chain: d["syntheticArrayChain"]
       )
     end
     private_class_method :_anf_property_from_hash

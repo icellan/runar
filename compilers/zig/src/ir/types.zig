@@ -112,6 +112,20 @@ pub fn typeNodeToRunarType(tn: TypeNode) RunarType {
     };
 }
 
+/// The type name as the author SPELLED it, for diagnostics.
+///
+/// `typeNodeToRunarType` collapses every unrecognised name to `.unknown`, so a
+/// `RunarType` alone cannot tell an author WHICH name was rejected — which is
+/// why `validateProperties`'s unsupported-type arm had nothing to say
+/// (N-109). Kept next to the lowering so the two stay in step.
+pub fn typeNodeName(tn: TypeNode) []const u8 {
+    return switch (tn) {
+        .primitive_type => |ptn| ptn.toTsString(),
+        .fixed_array_type => "FixedArray",
+        .custom_type => |name| name,
+    };
+}
+
 pub const ParentClass = enum {
     smart_contract, stateful_smart_contract, unsafe_smart_contract,
 
@@ -165,12 +179,44 @@ pub const PropertyNode = struct {
     fixed_array_element: RunarType = .unknown,
     /// Nested element length for `FixedArray<FixedArray<T, M>, N>`. Zero for flat arrays.
     fixed_array_nested_length: u32 = 0,
+    /// The type name as the author spelled it (`typeNodeName` of the parsed
+    /// `TypeNode`). Diagnostics only — no pass branches on it. Populated by
+    /// every surface parser; empty on synthesized properties (the FixedArray
+    /// expansion's scalar leaves) and on `--ir` inputs, which never reach the
+    /// validator's unsupported-type arm.
+    type_name: []const u8 = "",
+    /// The property declaration's source location, at the field NAME token, in
+    /// the AST-wide 1-based line / 1-based column convention. Populated by
+    /// every surface parser. Null on synthesized properties.
+    source_loc: ?SourceLocation = null,
     /// Synthetic-array chain attached by expand_fixed_arrays pass. Populated on
     /// scalar leaves of an expanded FixedArray property. Null on non-expanded
     /// properties. The chain is outermost-first.
     synthetic_array_chain: ?[]const SyntheticArrayLevel = null,
 };
-pub const ConstructorNode = struct { params: []ParamNode, super_args: []Expression, assignments: []AssignmentNode };
+pub const ConstructorNode = struct {
+    params: []ParamNode,
+    super_args: []Expression,
+    assignments: []AssignmentNode,
+    /// R-040: the constructor's FULL statement body, in source order, minus
+    /// the `super(...)` call (ANF lowering emits that from `super_args`,
+    /// because several surfaces have no `super` for the author to write).
+    ///
+    /// `super_args` + `assignments` alone describe only the two statement
+    /// shapes the artifact's constructor slots need. Every other statement an
+    /// author writes in a constructor — an `assert` on an argument, a local
+    /// declaration — used to be dropped here with no diagnostic, while the
+    /// other six tiers lower the whole body (TS: `lowerStatements(
+    /// contract.constructor.body, ctorCtx)`), so their constructor ANF
+    /// carried statements Zig's did not.
+    ///
+    /// Populated by the six surfaces with an explicit constructor body
+    /// (`.runar.{ts,sol,py,rb,java}` and the `.runar.zig` `init`). Left empty
+    /// by the synthesized constructors (`.runar.{go,rs,move}`, and each
+    /// surface's `autoGenerateConstructor`), which have no source body at all;
+    /// lowering falls back to `assignments` for those.
+    body: []const Statement = &.{},
+};
 pub const MethodNode = struct {
     name: []const u8,
     is_public: bool,
@@ -233,6 +279,16 @@ pub const Assign = struct {
     index_target: ?*IndexAccess = null,
 };
 pub const IfStmt = struct { condition: Expression, then_body: []Statement, else_body: ?[]Statement = null, source_loc: ?SourceLocation = null };
+/// Maximum number of iterations a single loop binding may unroll to.
+///
+/// The bound already existed on the `--ir` input path in the Go, Python and
+/// Ruby tiers but nothing applied it to a loop written in source, in any tier.
+/// A source contract could therefore ask for an unroll count no machine can
+/// honour, and each tier failed differently — here `@intCast` to the `u32`
+/// count is a safety-checked panic in Debug/ReleaseSafe and undefined
+/// behaviour in ReleaseFast. CL-BUG-088.
+pub const MAX_LOOP_COUNT: i64 = 10_000;
+
 // `descending` records whether the source condition counted down (`>`/`>=`).
 // `inclusive` records whether the source comparison was inclusive (`<=`/`>=`).
 // Issue #121: the ANF loop node now carries an explicit start value and step
@@ -248,7 +304,46 @@ pub const IfStmt = struct { condition: Expression, then_body: []Statement, else_
 // rejects the loop with a compile-time-constant diagnostic (matching the
 // reference TS compiler). Defaults to true so unrelated construction sites and
 // format parsers stay literal-bounded by default.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, source_loc: ?SourceLocation = null };
+/// A pre-digested loop shape: the surface parsers resolve the iterator, its
+/// start value, the bound and the direction, so there is no init/condition/
+/// update triple here the way the other six tiers carry one.
+///
+/// `update` is the exception (N-061 / R-065). Every parser used to parse the
+/// update clause and throw it away, so nothing downstream could see that the
+/// author wrote something the unrolled loop model cannot represent — a
+/// non-unit step, a call, or a state write — and it was silently coerced to a
+/// unit step. The parsers that have an update clause now record it verbatim so
+/// `passes/validate.zig` can reject what it cannot represent. `null` means the
+/// surface syntax carries no update clause at all (`for i in 0..N`,
+/// `range(N)`, a bare `while (c)`), which is always representable.
+/// `init_is_const` is the START's counterpart to `bound_is_const` (N-137).
+/// The unrolled loop model synthesises iteration k as `start + k*step`, so a
+/// start that is not a compile-time literal cannot be represented. The bound
+/// had a flag; the start did not, and every surface parser's initializer
+/// branch fell through to "parse the expression and throw it away", leaving
+/// `init_value` at its `0` default. A contract written `for (let i = start; …)`
+/// therefore compiled — in this tier alone — to byte-identical output to
+/// `for (let i = 0n; …)`, committing to a sum the source never computes. The
+/// other six tiers refuse the shape; `validate.zig` now does too.
+/// R-065: `header_requires_update` distinguishes a C-style three-part header
+/// (`for i := 0; i < N; i++`), whose post clause is a slot the source either
+/// filled or left empty, from a surface whose step is implied by the syntax
+/// itself (`for i in 0..N`, `range(N)`, `while (c) : (i += 1)`). Both arrive
+/// with `update == null` when there is no update statement, and validate.zig's
+/// R-065 rule must refuse the first and accept the second — which it could not
+/// do while the AST conflated them. Only the C-style parsers set it; every
+/// other parser gets the `false` default and is unaffected.
+/// W4: `cond_tests_iter` records whether the source condition's LEFT-hand side
+/// was the iterator itself. This tier collapses the condition to `bound` +
+/// `descending` + `inclusive` and threw the left-hand side away, exactly as the
+/// other six tiers' `extractLoopShape` ignores it — so `for (let i = 0n;
+/// i + 1n < 2n; i++)` unrolled TWICE (count = 2 - 0) for a source loop that
+/// runs ONCE, executing an `else` arm the source can never reach. Only the
+/// C-style header parsers (TS/Sol/Go/Java) can express a condition that tests
+/// anything but the iterator; the range-based surfaces (`for i in 0..N`,
+/// `range(N)`, `while (c) : (i += 1)`) test it by construction and keep the
+/// `true` default.
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {
@@ -552,6 +647,11 @@ pub const StackMethod = struct {
     max_stack_depth: u32 = 0,
     /// Parallel array to `instructions`: source location for each instruction (for source maps).
     instruction_source_locs: []?SourceLocation = &.{},
+    /// True if this method's lowering needs the script-level OP_CODESEPARATOR
+    /// the emitter places at offset 1 of the locking script (R-010).
+    /// Contract-level: true for every method of a contract in which ANY method
+    /// authenticates a `_codePart` witness.
+    needs_code_separator: bool = false,
 };
 
 pub const StackOp = union(enum) {
@@ -580,12 +680,29 @@ pub const StackInstruction = union(enum) {
     /// Decimal-string-encoded big integer push (mirrors PushValue.big_int_decimal).
     push_big_int_decimal: []const u8,
     push_codesep_index: void,
+    /// R-095 — pin SIZE(_codePart) against the code part's own DEPLOYED byte
+    /// length. Consumes nothing: expects the numeric SIZE(_codePart) on top of
+    /// the stack and leaves it there, aborting via OP_VERIFY when the claimed
+    /// code part is not the length the deployed script actually has. The
+    /// emitter reserves a FIXED-WIDTH 9-byte sequence and back-patches the
+    /// length once the whole script exists.
+    verify_code_part_len: VerifyCodePartLen,
     placeholder: Placeholder,
     /// Opaque opcode-byte span emitted verbatim by a raw_script ANF node.
     /// The peephole optimizer treats this as a hard barrier; the emitter
     /// writes the bytes as-is and records a `RawScriptSpan` in the artifact.
     raw_bytes: RawBytes,
 };
+
+/// Backing payload for the `verify_code_part_len` StackInstruction variant.
+///
+/// `delta` is the deploy-time byte growth of the template's OP_0 constructor
+/// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`. `exact`
+/// says whether every placeholder's growth is type-determined: true pins with
+/// OP_NUMEQUAL, false with OP_GREATERTHANOREQUAL (a variable-width readonly
+/// constructor argument has no compile-time width, and placeholder growth is
+/// never negative, so the sum is still a sound LOWER bound).
+pub const VerifyCodePartLen = struct { delta: i64, exact: bool };
 
 /// Backing payload for the `raw_bytes` StackInstruction variant. Bytes are
 /// emitted verbatim; in_arity / out_arity describe the declared stack effect

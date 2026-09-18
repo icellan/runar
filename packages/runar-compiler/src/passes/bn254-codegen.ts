@@ -17,6 +17,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
+import { emitPointLenVerify } from './ec-codegen.js';
 
 // ===========================================================================
 // Constants
@@ -547,8 +548,16 @@ export function bn254DecomposePoint(
   yName: string,
 ): void {
   t.toTop(pointName);
-  // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+  // R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+  // Point inherits the check — the same placement CL-BUG-095 chose for
+  // ecDecomposePoint, and for the same reason. Without it OP_SPLIT at 32
+  // discards whatever follows byte 64, so `bn254G1OnCurve(G || 0xff)` returned
+  // TRUE and every value builtin silently accepted a longer blob as the point
+  // it prefixes. ABORTING form: emitBn254G1OnCurve must stay TOTAL, so it
+  // clamps and flags the length BEFORE calling this, exactly as
+  // emitEcOnCurve does.
   t.rawBlock([pointName], null, (e) => {
+    emitPointLenVerify(e, 64);
     e({ op: 'push', value: 32n });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
@@ -638,8 +647,10 @@ export function bn254ComposePoint(
  * P == Q; the unified form is algebraically equivalent for distinct points
  * and collapses to 3*px^2 / (2*py) when P == Q — the correct doubling slope.
  *
- * The only input that still fails is P == -Q (py + qy == 0, group identity),
- * which is out of scope for Groth16 verifier usage.
+ * The remaining zero-denominator input (py + qy == 0) is handled by the
+ * caller, not here: emitBn254G1Add masks P == -Q to the all-zero point at
+ * infinity (see bn254G1InfinityFlag); the Groth16 MSM path shares this helper
+ * unmasked and stays fail-closed.
  */
 export function bn254G1AffineAdd(t: BN254Tracker): void {
   // s_num = px^2 + px*qx + qx^2
@@ -687,6 +698,86 @@ export function bn254G1AffineAdd(t: BN254Tracker): void {
   t.drop();
   t.toTop('qy');
   t.drop();
+}
+
+// ===========================================================================
+// Point at infinity for the bn254G1Add builtin
+// ===========================================================================
+
+/**
+ * bn254G1InfinityFlag: computes `_notinf`, 0 exactly when P == -Q and 1
+ * otherwise, from px/py/qx/qy WITHOUT consuming them. Call it before
+ * bn254G1AffineAdd; apply the result with bn254G1MaskInfinity afterwards.
+ *
+ * P + (-P) is the point at infinity, which affine x||y cannot represent. This
+ * codegen already has an encoding for O — the ALL-ZERO blob, which is what
+ * bn254G1ScalarMul returns for k = 0 mod r and what secp256k1 (ecAffineAdd)
+ * and both NIST curves (cAffineAdd) return for their own P + (-P).
+ * bn254G1Add is a general contract-callable builtin, so it owes callers the
+ * same answer rather than the off-curve blob the unified slope produces there
+ * (py + qy == 0 and bn254FieldInv is Fermat, so inv(0) = 0). O is not on the
+ * curve (0^2 != 0^3 + 3), so the documented assert(bn254G1OnCurve(r)) idiom
+ * still rejects the result, and nothing here adds a failure channel to what is
+ * a pure value-producing expression.
+ *
+ * THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254 has
+ * j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root of unity
+ * w and Q = (w*px, -py) is an ordinary point that also zeroes py + qy while
+ * P + Q is an ordinary point, not O. Masking on the denominator would answer
+ * "infinity" there: plausible and wrong — the exact failure mode 03f50d48
+ * introduced on the NIST curves and f16790a9 had to undo. Testing px == qx
+ * ALONE would be wrong in the other direction: it would swallow doubling.
+ *
+ * This is deliberately NOT inside bn254G1AffineAdd: the Groth16 MSM bind
+ * shares that helper to accumulate vk_x against a witness-supplied point, and
+ * keeps its fail-closed behaviour and its bytes unchanged.
+ *
+ * Byte-identical to `bn254G1InfinityFlag` in compilers/go/codegen/bn254.go.
+ */
+export function bn254G1InfinityFlag(t: BN254Tracker): void {
+  t.copyToTop('px', '_inf_px');
+  t.copyToTop('qx', '_inf_qx');
+  t.rawBlock(['_inf_px', '_inf_qx'], '_xeq', (e) => {
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+  });
+  t.copyToTop('py', '_inf_py');
+  t.copyToTop('qy', '_inf_qy');
+  t.rawBlock(['_inf_py', '_inf_qy'], '_yeq', (e) => {
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+  });
+  // cond = xeq AND yeq: 1 when doubling.
+  t.copyToTop('_xeq', '_xeq_c');
+  t.toTop('_yeq');
+  t.rawBlock(['_xeq_c', '_yeq'], '_cond', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  // notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and the
+  // points are not equal, i.e. exactly the P == -Q case.
+  t.toTop('_xeq');
+  t.toTop('_cond');
+  t.rawBlock(['_xeq', '_cond'], '_notinf', (e) => {
+    e({ op: 'opcode', code: 'OP_SUB' });
+    e({ op: 'opcode', code: 'OP_NOT' });
+  });
+}
+
+/**
+ * bn254G1MaskInfinity: zeroes rx and ry when `_notinf` is 0, consuming it.
+ *
+ * The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
+ * and notinf is 0 or 1, so the product is canonical either way.
+ */
+export function bn254G1MaskInfinity(t: BN254Tracker): void {
+  t.toTop('rx');
+  t.copyToTop('_notinf', '_notinf_x');
+  t.rawBlock(['rx', '_notinf_x'], 'rx', (e) => {
+    e({ op: 'opcode', code: 'OP_MUL' });
+  });
+  t.toTop('ry');
+  t.toTop('_notinf');
+  t.rawBlock(['ry', '_notinf'], 'ry', (e) => {
+    e({ op: 'opcode', code: 'OP_MUL' });
+  });
 }
 
 // ===========================================================================
@@ -887,6 +978,7 @@ function bn254BuildJacobianAddAffineStandard(it: BN254Tracker): void {
 function bn254BuildJacobianAddAffineInline(
   e: (op: StackOp) => void,
   t: BN254Tracker,
+  strict: boolean,
 ): void {
   // Create inner tracker with cloned stack state
   const it = new BN254Tracker([...t.nm], e);
@@ -902,6 +994,10 @@ function bn254BuildJacobianAddAffineInline(
   // against a fresh copy of jx. Consumes only the copies.
   it.copyToTop('jz', '_jz_chk_in');
   bn254FieldSqr(it, '_jz_chk_in', '_jz_chk_sq');
+  if (strict) {
+    // Z1sq is consumed by U2 below; keep a copy for Z1cu.
+    it.copyToTop('_jz_chk_sq', '_jz_chk_sq_keep');
+  }
   it.copyToTop('ax', '_ax_chk_copy');
   bn254FieldMul(it, '_ax_chk_copy', '_jz_chk_sq', '_u2_chk');
   it.copyToTop('jx', '_jx_chk_copy');
@@ -909,8 +1005,31 @@ function bn254BuildJacobianAddAffineInline(
     emitInner({ op: 'opcode', code: 'OP_NUMEQUAL' });
   });
 
-  // Move _h_is_zero to top so OP_IF can consume it.
-  it.toTop('_h_is_zero');
+  let condName = '_h_is_zero';
+  if (strict) {
+    // R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two operands
+    // are the SAME point; H == 0 with R != 0 means they are negatives, whose
+    // sum is O - and the standard mixed-add already answers that correctly,
+    // with Z3 = jz*H = 0 flowing through the Fermat inverse to the all-zero
+    // point.
+    it.copyToTop('jz', '_jz_chk_for_cu');
+    bn254FieldMul(it, '_jz_chk_for_cu', '_jz_chk_sq_keep', '_z1cu_chk');
+    it.copyToTop('ay', '_ay_chk_copy');
+    bn254FieldMul(it, '_ay_chk_copy', '_z1cu_chk', '_s2_chk');
+    it.copyToTop('jy', '_jy_chk_copy');
+    it.rawBlock(['_s2_chk', '_jy_chk_copy'], '_r_is_zero', (emitInner) => {
+      emitInner({ op: 'opcode', code: 'OP_NUMEQUAL' });
+    });
+    it.toTop('_h_is_zero');
+    it.toTop('_r_is_zero');
+    it.rawBlock(['_h_is_zero', '_r_is_zero'], '_dbl_cond', (emitInner) => {
+      emitInner({ op: 'opcode', code: 'OP_BOOLAND' });
+    });
+    condName = '_dbl_cond';
+  }
+
+  // Move the condition to top so OP_IF can consume it.
+  it.toTop(condName);
   it.nm.pop(); // consumed by IF
 
   // ------------------------------------------------------------------
@@ -948,6 +1067,11 @@ export function bn254G1Negate(
   resultName: string,
 ): void {
   bn254DecomposePoint(t, pointName, '_nx', '_ny');
+  // R-141: bn254ComposePoint below is documented as requiring [0, p-1] and
+  // does not check, so without this the negation of a non-canonical point
+  // re-emitted its x half verbatim — a value builtin PRODUCING a blob that is
+  // not a point.
+  bn254EmitCoordCanonVerify(t, '_nx', '_ny');
   // Use bn254FieldNeg which already handles prime caching
   bn254FieldNeg(t, '_ny', '_neg_y');
   bn254ComposePoint(t, '_nx', '_neg_y', resultName);
@@ -1018,6 +1142,78 @@ export function emitBn254FieldNeg(emit: (op: StackOp) => void): void {
 }
 
 /**
+ * bn254EmitPointLengthGate — R-141, CLAMPING form, the BN254 twin of
+ * `emitPointLengthGate` in ec-codegen.ts. Leaves [flag, clamped] on the
+ * tracker. Used by `emitBn254G1OnCurve`, whose job is to answer "is this an
+ * acceptable point?" over untrusted bytes: for a wrong-length blob the correct
+ * answer is FALSE, not an aborted script.
+ */
+function bn254EmitPointLengthGate(t: BN254Tracker, name: string, want: number, flagName: string): void {
+  t.toTop(name);
+  t.rawBlock([name], null, (e) => {
+    e({ op: 'opcode', code: 'OP_SIZE' });
+    e({ op: 'push', value: BigInt(want) });
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+    e({ op: 'swap' });
+    e({ op: 'push', value: new Uint8Array(want) });
+    e({ op: 'opcode', code: 'OP_CAT' });
+    e({ op: 'push', value: BigInt(want) });
+    e({ op: 'opcode', code: 'OP_SPLIT' });
+    e({ op: 'drop' });
+  });
+  t.nm.push(flagName);
+  t.nm.push(name);
+}
+
+/**
+ * bn254EmitCoordCanonVerify — R-141: a BN254 G1 Point's two coordinates must be
+ * FIELD ELEMENTS, aborting form. The direct analogue of
+ * `emitCoordCanonVerify` (R-117), with the placement decision re-derived for
+ * this curve rather than copied.
+ *
+ * `bn254DecomposePoint` BIN2NUMs each half as an UNSIGNED integer, so any value
+ * that fits 32 bytes is accepted. On BN254 that is wider than on secp256k1:
+ * p is ~2^253.6, so `x + p < 2^256` for EVERY x < p — the alias exists for
+ * every point on the curve, not just the small-x ones. Measured on the go-sdk
+ * interpreter before this gate, with G = (1, 2):
+ *
+ *     bn254G1OnCurve(G)             -> 1
+ *     bn254G1OnCurve((1+p) || 2)    -> 1
+ *     bn254G1OnCurve(1 || (2+p))    -> 1
+ *     bn254G1OnCurve(G || 0xff)     -> 1
+ *
+ * WHY THE VALUE BUILTINS ABORT. Unlike secp256k1's `affineAdd`, BN254's adder
+ * is NOT fooled into a wrong answer by the alias — measured,
+ * `bn254G1Add(G, (1+p)||2)` returns the correct 2G, because
+ * `bn254G1InfinityFlag` reduces before it compares. The reason is different:
+ * `bn254ComposePoint`'s own contract says callers must supply [0, p-1] and that
+ * it does not check, and `bn254G1Negate` handed it the RAW decomposed x, so
+ * `bn254G1Negate((1+p) || 2)` returned a blob whose x half is x + p — a value
+ * builtin PRODUCING something that is not a point.
+ *
+ * Deliberately NOT folded into `bn254DecomposePoint`, for R-117's reason: that
+ * helper also runs inside `emitBn254G1OnCurve`, which must return FALSE rather
+ * than abort, and inside the Groth16 / pairing preambles, whose input-validation
+ * policy lives in bn254_point_validation.go and is not this change's to move.
+ */
+function bn254EmitCoordCanonVerify(t: BN254Tracker, xName: string, yName: string): void {
+  t.copyToTop(xName, '_cc_x');
+  bn254PushFieldP(t, '_cc_px');
+  t.rawBlock(['_cc_x', '_cc_px'], '_cc_xok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.copyToTop(yName, '_cc_y');
+  bn254PushFieldP(t, '_cc_py');
+  t.rawBlock(['_cc_y', '_cc_py'], '_cc_yok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.rawBlock(['_cc_xok', '_cc_yok'], null, (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+    e({ op: 'opcode', code: 'OP_VERIFY' });
+  });
+}
+
+/**
  * emitBn254G1Add: add two BN254 G1 points.
  * Stack in:  [point_a, point_b] (b on top)
  * Stack out: [result_point]
@@ -1027,9 +1223,47 @@ export function emitBn254G1Add(emit: (op: StackOp) => void): void {
   t.pushPrimeCache();
   bn254DecomposePoint(t, '_pa', 'px', 'py');
   bn254DecomposePoint(t, '_pb', 'qx', 'qy');
+  // R-141: both points must be canonical before anything consumes them.
+  bn254EmitCoordCanonVerify(t, 'px', 'py');
+  bn254EmitCoordCanonVerify(t, 'qx', 'qy');
+  // The flag must be computed BEFORE the add: bn254G1AffineAdd consumes
+  // px/py/qx/qy.
+  bn254G1InfinityFlag(t);
   bn254G1AffineAdd(t);
+  bn254G1MaskInfinity(t);
   bn254ComposePoint(t, 'rx', 'ry', '_result');
   t.popPrimeCache();
+}
+
+/**
+ * bn254EmitScalarReduce reduces a scalar to [0, r-1]: ((k mod r) + r) mod r.
+ *
+ * OP_MOD takes the sign of the DIVIDEND, so `k mod r` alone lands in (-r, r);
+ * the `+ r, mod r` normalises the negative half. One push of r covers both
+ * reductions - the same shape as emitScalarReduce in ec-codegen.ts, whose
+ * numbers do NOT carry here (see emitBn254G1ScalarMul for the BN254 interval
+ * bounds).
+ *
+ * Without it the ladder below is correct only while 2^255 <= k + 3r < 2^256.
+ * A scalar >= 2^256 - 3r (about 2.2902*r) sets bit 256, which the loop never
+ * reads, and one <= 2^255 - 3r drops k' under 2^255, invalidating the
+ * accumulator seed; either way the ladder returns a DIFFERENT multiple of P
+ * rather than failing. In Groth16 the scalars are the caller-supplied PUBLIC
+ * INPUTS of vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is
+ * attacker-chosen.
+ */
+function bn254EmitScalarReduce(t: BN254Tracker, kName: string, resultName: string): void {
+  t.pushBigInt('_r_red', BN254_R);
+  t.rawBlock([kName, '_r_red'], resultName, (e) => {
+    e({ op: 'opcode', code: 'OP_2DUP' });
+    e({ op: 'opcode', code: 'OP_MOD' });
+    e({ op: 'rot' });
+    e({ op: 'drop' });
+    e({ op: 'over' });
+    e({ op: 'opcode', code: 'OP_ADD' });
+    e({ op: 'swap' });
+    e({ op: 'opcode', code: 'OP_MOD' });
+  });
 }
 
 /**
@@ -1045,9 +1279,17 @@ export function emitBn254G1ScalarMul(emit: (op: StackOp) => void): void {
   t.pushPrimeCache();
   // Decompose to affine base point
   bn254DecomposePoint(t, '_pt', 'ax', 'ay');
+  // R-141: the ladder's base point must be canonical.
+  bn254EmitCoordCanonVerify(t, 'ax', 'ay');
+
+  // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
+  // the scalar is caller input.
+  t.toTop('_k');
+  bn254EmitScalarReduce(t, '_k', '_kr');
+  t.rename('_k');
 
   // k' = k + 3r: guarantees bit 255 is set.
-  // k ∈ [1, r-1], so k+3r ∈ [3r+1, 4r-1]. Since 3r > 2^255, bit 255
+  // k ∈ [0, r-1], so k+3r ∈ [3r, 4r-1]. Since 3r >= 2^255, bit 255
   // is always 1. Adding 3r (≡ 0 mod r) preserves the EC point: k*G = (k+3r)*G.
   t.toTop('_k');
   t.pushBigInt('_r1', BN254_R);
@@ -1101,7 +1343,10 @@ export function emitBn254G1ScalarMul(emit: (op: StackOp) => void): void {
     t.nm.pop(); // _bit consumed by IF
     const addOps: StackOp[] = [];
     const addEmit = (op: StackOp) => addOps.push(op);
-    bn254BuildJacobianAddAffineInline(addEmit, t);
+    // Only the LAST step can be handed accumulator == -base (k = 0 mod r);
+    // see bn254BuildJacobianAddAffineInline for why the strict H == 0 AND
+    // R == 0 test is paid there and nowhere else.
+    bn254BuildJacobianAddAffineInline(addEmit, t, bit === 0);
     emit({ op: 'if', then: addOps, else: [] });
   }
 
@@ -1141,7 +1386,39 @@ export function emitBn254G1Negate(emit: (op: StackOp) => void): void {
 export function emitBn254G1OnCurve(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['_pt'], emit);
   t.pushPrimeCache();
+
+  // R-141: width. `bn254G1OnCurve(G || 0xff)` returned TRUE — the OP_SPLIT at
+  // 32 inside the decomposer discarded the surplus byte. Clamp and remember the
+  // width rather than abort, because this predicate must stay TOTAL; the flag
+  // is ANDed into the result at the end. Same shape as emitEcOnCurve's
+  // CL-BUG-095 gate, and it also means the aborting verify now inside
+  // bn254DecomposePoint can never fire on this path.
+  bn254EmitPointLengthGate(t, '_pt', 64, '_len_ok');
+
   bn254DecomposePoint(t, '_pt', '_x', '_y');
+
+  // R-141: coordinate canonicity. The decomposer BIN2NUMs each coordinate as an
+  // unsigned value that may be >= p, and every field operation below silently
+  // reduces mod p, so a non-canonical ENCODING of a real point passed. p is
+  // ~2^253.6 here, so x + p < 2^256 for EVERY x < p: unlike secp256k1, the
+  // alias exists for every point on the curve. Reject it — require x < p AND
+  // y < p — and AND the result in at the end so the predicate still returns a
+  // boolean.
+  t.copyToTop('_x', '_x_lt');
+  bn254PushFieldP(t, '_p_for_x');
+  t.rawBlock(['_x_lt', '_p_for_x'], '_x_canon', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.copyToTop('_y', '_y_lt');
+  bn254PushFieldP(t, '_p_for_y');
+  t.rawBlock(['_y_lt', '_p_for_y'], '_y_canon', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.toTop('_x_canon');
+  t.toTop('_y_canon');
+  t.rawBlock(['_x_canon', '_y_canon'], '_canon', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
 
   // lhs = y^2
   bn254FieldSqr(t, '_y', '_y2');
@@ -1156,8 +1433,20 @@ export function emitBn254G1OnCurve(emit: (op: StackOp) => void): void {
   // Compare
   t.toTop('_y2');
   t.toTop('_rhs');
-  t.rawBlock(['_y2', '_rhs'], '_result', (e) => {
+  t.rawBlock(['_y2', '_rhs'], '_curve_eq', (e) => {
     e({ op: 'opcode', code: 'OP_EQUAL' });
+  });
+
+  // on-curve = right width AND canonical AND curve-equation
+  t.toTop('_canon');
+  t.toTop('_curve_eq');
+  t.rawBlock(['_canon', '_curve_eq'], '_eq_ok', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  t.toTop('_len_ok');
+  t.toTop('_eq_ok');
+  t.rawBlock(['_len_ok', '_eq_ok'], '_result', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
   t.popPrimeCache();
 }

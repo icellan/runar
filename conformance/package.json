@@ -2,7 +2,7 @@
   "name": "runar-conformance",
   "version": "0.1.0",
   "private": true,
-  "description": "Conformance test infrastructure for verifying R\u00fanar compiler implementations produce identical output",
+  "description": "Conformance test infrastructure for verifying Rúnar compiler implementations produce identical output",
   "type": "module",
   "scripts": {
     "test": "tsx runner/index.ts",
@@ -26,7 +26,7 @@
     "fuzz:metamorphic": "tsx fuzzer/metamorphic-fuzz.ts --num 200 --seed 424242",
     "fuzz:replay": "tsx fuzz-regressions/replay.ts",
     "fuzz:ir:gate": "tsx fuzzer/index.ts --ir --hex --seed 424242 --num 40 --compilers ts,go,rust,python,zig,ruby,java --render native",
-    "fuzz:ir:gate:stateful": "tsx fuzzer/index.ts --ir --hex --stateful --seed 424242 --num 40 --compilers ts,go,rust,python,ruby,java --render native",
+    "fuzz:ir:gate:stateful": "tsx fuzzer/index.ts --ir --hex --stateful --seed 424242 --num 40 --compilers ts,go,rust,python,zig,ruby,java --render native",
     "golden-provenance": "node scripts/check-golden-provenance.mjs --root ..",
     "golden-provenance:self-test": "node scripts/check-golden-provenance.mjs --root .. --self-test",
     "sdk-output": "tsx sdk-output/runner/sdk-runner.ts",
@@ -34,6 +34,9 @@
     "sdk-vertical:generate": "tsx sdk-vertical/generate.ts",
     "sdk-vertical:check": "tsx sdk-vertical/generate.ts --check",
     "differential-witness": "vitest run witnesses/differential.test.ts",
+    "go-only-parity": "vitest run go-only-parity/",
+    "closed-findings": "vitest run closed-findings/",
+    "preimage-binding": "vitest run preimage-binding/",
     "mutation:score": "tsx mutation/run-mutation.ts",
     "sdk-output:check-inputs": "tsx sdk-output/generate-inputs.ts --check"
   },

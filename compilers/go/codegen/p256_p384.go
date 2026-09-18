@@ -335,7 +335,12 @@ func cGroupInv(t *ECTracker, aName, resultName string, g *nistGroupParams) {
 
 func cDecomposePoint(t *ECTracker, pointName, xName, yName string, c *nistCurveParams) {
 	t.toTop(pointName)
+	// CL-BUG-095: a P256Point/P384Point is exactly 2*coordBytes bytes and
+	// nothing checked it, so surplus bytes were split off and silently
+	// dropped. Gate the width here, where every consumer that decomposes a
+	// point picks it up. See ecEmitPointLenVerify in ec.go.
 	t.rawBlock([]string{pointName}, "", func(e func(StackOp)) {
+		ecEmitPointLenVerify(e, c.coordBytes*2)
 		e(StackOp{Op: "push", Value: bigIntPush(int64(c.coordBytes))})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
@@ -426,6 +431,37 @@ func cEmitCanonicityGuard(t *ECTracker, xName, yName string, c *nistCurveParams)
 	t.toTop("_y_canon")
 	t.rawBlock([]string{"_x_canon", "_y_canon"}, "_canon", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+}
+
+// cEmitCoordCanonVerify -- R-117: coordinate canonicity for the VALUE builtins,
+// aborting form.
+//
+// The a = -3 twin of ecEmitCoordCanonVerify in ec.go; see that comment for the
+// defect. cAffineAdd's cond / notinf selectors are the same bare OP_NUMEQUAL
+// over the raw decomposed coordinates, and cDecomposePoint accepts any
+// width-fitting unsigned value, so x + p is a second spelling of the same point
+// that both selectors read as "different".
+//
+// cEmitCanonicityGuard above is the FLAG form, for the on-curve predicates.
+// This is the abort form, called only from EmitPNNNAdd / EmitPNNNMul /
+// EmitPNNNNegate -- never from cEmitVerifyECDSA's path, where decompressPubKey
+// and cEmitSigRangeGate have already decided that attacker-chosen bytes must
+// make a total boolean builtin return false rather than abort the script.
+func cEmitCoordCanonVerify(t *ECTracker, xName, yName string, c *nistCurveParams) {
+	t.copyToTop(xName, "_cc_x")
+	cPushFieldP(t, "_cc_px", c)
+	t.rawBlock([]string{"_cc_x", "_cc_px"}, "_cc_xok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.copyToTop(yName, "_cc_y")
+	cPushFieldP(t, "_cc_py", c)
+	t.rawBlock([]string{"_cc_y", "_cc_py"}, "_cc_yok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.rawBlock([]string{"_cc_xok", "_cc_yok"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
 	})
 }
 
@@ -540,27 +576,11 @@ func cAffineAdd(t *ECTracker, c *nistCurveParams) {
 	t.copyToTop("py", "_py2")
 	cFieldSub(t, "_s_px_rx", "_py2", "ry", c)
 
-	// Clean up original points
-	t.toTop("px")
-	t.drop()
-	t.toTop("py")
-	t.drop()
-	t.toTop("qx")
-	t.drop()
-	t.toTop("qy")
-	t.drop()
-
-	// P == -Q -> force the all-zero point (see the header comment).
-	t.toTop("rx")
-	t.copyToTop("_notinf", "_notinf_x")
-	t.rawBlock([]string{"rx", "_notinf_x"}, "rx", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_MUL"})
-	})
-	t.toTop("ry")
-	t.toTop("_notinf")
-	t.rawBlock([]string{"ry", "_notinf"}, "ry", func(e func(StackOp)) {
-		e(StackOp{Op: "opcode", Code: "OP_MUL"})
-	})
+	// CL-BUG-096: pNNNAdd(P, O) returned an off-curve blob for the same reason
+	// secp256k1's did -- the adder had no infinity-operand case, while
+	// pNNNMul(P, 0n) hands it exactly that value. Same branch-free select,
+	// which also subsumes the standalone `notinf` mask that used to live here.
+	emitAffineInfinitySelect(t)
 }
 
 // ===========================================================================
@@ -1509,17 +1529,39 @@ func cEmitVerifyECDSA(
 // P-256 public API
 // ===========================================================================
 
+// cEmitPointGate -- R-157, the a = -3 twin of ecEmitPointGate in ec.go; see that
+// comment for the defect, the measurement and the boundary argument. Called from
+// EmitPNNNMul and NOT from inside cEmitMul, because cEmitVerifyECDSA shares that
+// ladder and decompressPubKey / cEmitSigRangeGate have already decided that
+// attacker-chosen bytes must make a total boolean builtin return false rather
+// than abort the script.
+func cEmitPointGate(emit func(StackOp), emitOnCurve func(func(StackOp)), c *nistCurveParams) {
+	emit(StackOp{Op: "over"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: make([]byte, c.coordBytes*2)}})
+	emit(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	emit(StackOp{Op: "push", Value: bigIntPush(2)})
+	emit(StackOp{Op: "pick", Depth: 2})
+	emitOnCurve(emit)
+	emit(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+}
+
 // EmitP256Add adds two P-256 points.
 func EmitP256Add(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pa", "_pb"}, emit)
 	cDecomposePoint(t, "_pa", "px", "py", p256CurveParams)
 	cDecomposePoint(t, "_pb", "qx", "qy", p256CurveParams)
+	// R-117: cAffineAdd's selectors compare these four values RAW.
+	cEmitCoordCanonVerify(t, "px", "py", p256CurveParams)
+	cEmitCoordCanonVerify(t, "qx", "qy", p256CurveParams)
 	cAffineAdd(t, p256CurveParams)
 	cComposePoint(t, "rx", "ry", "_result", p256CurveParams)
 }
 
 // EmitP256Mul performs P-256 scalar multiplication.
 func EmitP256Mul(emit func(StackOp)) {
+	// R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+	cEmitPointGate(emit, EmitP256OnCurve, p256CurveParams)
 	cEmitMul(emit, p256CurveParams, p256GroupParams)
 }
 
@@ -1537,6 +1579,7 @@ func EmitP256MulGen(emit func(StackOp)) {
 func EmitP256Negate(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
 	cDecomposePoint(t, "_pt", "_nx", "_ny", p256CurveParams)
+	cEmitCoordCanonVerify(t, "_nx", "_ny", p256CurveParams)
 	cPushFieldP(t, "_fp", p256CurveParams)
 	cFieldSub(t, "_fp", "_ny", "_neg_y", p256CurveParams)
 	cComposePoint(t, "_nx", "_neg_y", "_result", p256CurveParams)
@@ -1545,6 +1588,10 @@ func EmitP256Negate(emit func(StackOp)) {
 // EmitP256OnCurve checks if a P-256 point is on the curve (y^2 = x^3 - 3x + b mod p).
 func EmitP256OnCurve(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
+	// CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+	// contracts are told to gate an untrusted point on, so it must stay
+	// total. The flag is ANDed into the result below.
+	cEmitLengthGate(t, "_pt", p256CurveParams.coordBytes*2, "_len_ok")
 	cDecomposePoint(t, "_pt", "_x", "_y", p256CurveParams)
 	cEmitCanonicityGuard(t, "_x", "_y", p256CurveParams)
 
@@ -1568,31 +1615,36 @@ func EmitP256OnCurve(emit func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
 	})
 
-	// on-curve = canonical AND curve-equation
+	// on-curve = right width AND canonical AND curve-equation
 	t.toTop("_canon")
 	t.toTop("_curve_eq")
-	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_eq_ok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	t.toTop("_len_ok")
+	t.toTop("_eq_ok")
+	t.rawBlock([]string{"_len_ok", "_eq_ok"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 }
 
 // EmitP256EncodeCompressed encodes a P-256 point as 33-byte compressed pubkey.
 func EmitP256EncodeCompressed(emit func(StackOp)) {
+	// CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+	// appended byte flipped the sign of the compressed encoding. Width is now
+	// verified AND the parity byte is read from a fixed offset.
+	ecEmitPointLenVerify(emit, 64)
 	// Split at 32: [x_bytes, y_bytes]
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Get last byte of y for parity
-	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
-	emit(StackOp{Op: "push", Value: bigIntPush(1)})
-	emit(StackOp{Op: "opcode", Code: "OP_SUB"})
+	// Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+	emit(StackOp{Op: "push", Value: bigIntPush(31)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Stack: [x_bytes, y_prefix, last_byte]
+	emit(StackOp{Op: "nip"}) // drop y_head
+	// Stack: [x_bytes, last_byte]
 	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	emit(StackOp{Op: "push", Value: bigIntPush(2)})
 	emit(StackOp{Op: "opcode", Code: "OP_MOD"})
-	// Stack: [x_bytes, y_prefix, parity]
-	emit(StackOp{Op: "swap"})
-	emit(StackOp{Op: "drop"}) // drop y_prefix
 	// Stack: [x_bytes, parity]
 	emit(StackOp{Op: "if",
 		Then: []StackOp{{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x03}}}},
@@ -1617,12 +1669,17 @@ func EmitP384Add(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pa", "_pb"}, emit)
 	cDecomposePoint(t, "_pa", "px", "py", p384CurveParams)
 	cDecomposePoint(t, "_pb", "qx", "qy", p384CurveParams)
+	// R-117: cAffineAdd's selectors compare these four values RAW.
+	cEmitCoordCanonVerify(t, "px", "py", p384CurveParams)
+	cEmitCoordCanonVerify(t, "qx", "qy", p384CurveParams)
 	cAffineAdd(t, p384CurveParams)
 	cComposePoint(t, "rx", "ry", "_result", p384CurveParams)
 }
 
 // EmitP384Mul performs P-384 scalar multiplication.
 func EmitP384Mul(emit func(StackOp)) {
+	// R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+	cEmitPointGate(emit, EmitP384OnCurve, p384CurveParams)
 	cEmitMul(emit, p384CurveParams, p384GroupParams)
 }
 
@@ -1640,6 +1697,7 @@ func EmitP384MulGen(emit func(StackOp)) {
 func EmitP384Negate(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
 	cDecomposePoint(t, "_pt", "_nx", "_ny", p384CurveParams)
+	cEmitCoordCanonVerify(t, "_nx", "_ny", p384CurveParams)
 	cPushFieldP(t, "_fp", p384CurveParams)
 	cFieldSub(t, "_fp", "_ny", "_neg_y", p384CurveParams)
 	cComposePoint(t, "_nx", "_neg_y", "_result", p384CurveParams)
@@ -1648,6 +1706,10 @@ func EmitP384Negate(emit func(StackOp)) {
 // EmitP384OnCurve checks if a P-384 point is on the curve.
 func EmitP384OnCurve(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
+	// CL-BUG-095: width. Clamp rather than abort -- this predicate is what
+	// contracts are told to gate an untrusted point on, so it must stay
+	// total. The flag is ANDed into the result below.
+	cEmitLengthGate(t, "_pt", p384CurveParams.coordBytes*2, "_len_ok")
 	cDecomposePoint(t, "_pt", "_x", "_y", p384CurveParams)
 	cEmitCanonicityGuard(t, "_x", "_y", p384CurveParams)
 
@@ -1671,31 +1733,36 @@ func EmitP384OnCurve(emit func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
 	})
 
-	// on-curve = canonical AND curve-equation
+	// on-curve = right width AND canonical AND curve-equation
 	t.toTop("_canon")
 	t.toTop("_curve_eq")
-	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_eq_ok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	t.toTop("_len_ok")
+	t.toTop("_eq_ok")
+	t.rawBlock([]string{"_len_ok", "_eq_ok"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 }
 
 // EmitP384EncodeCompressed encodes a P-384 point as 49-byte compressed pubkey.
 func EmitP384EncodeCompressed(emit func(StackOp)) {
+	// CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+	// appended byte flipped the sign of the compressed encoding. Width is now
+	// verified AND the parity byte is read from a fixed offset.
+	ecEmitPointLenVerify(emit, 96)
 	// Split at 48: [x_bytes, y_bytes]
 	emit(StackOp{Op: "push", Value: bigIntPush(48)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Get last byte of y for parity
-	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
-	emit(StackOp{Op: "push", Value: bigIntPush(1)})
-	emit(StackOp{Op: "opcode", Code: "OP_SUB"})
+	// Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+	emit(StackOp{Op: "push", Value: bigIntPush(47)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Stack: [x_bytes, y_prefix, last_byte]
+	emit(StackOp{Op: "nip"}) // drop y_head
+	// Stack: [x_bytes, last_byte]
 	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	emit(StackOp{Op: "push", Value: bigIntPush(2)})
 	emit(StackOp{Op: "opcode", Code: "OP_MOD"})
-	// Stack: [x_bytes, y_prefix, parity]
-	emit(StackOp{Op: "swap"})
-	emit(StackOp{Op: "drop"}) // drop y_prefix
 	// Stack: [x_bytes, parity]
 	emit(StackOp{Op: "if",
 		Then: []StackOp{{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x03}}}},

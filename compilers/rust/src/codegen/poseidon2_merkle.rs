@@ -66,6 +66,17 @@ pub fn emit_poseidon2_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize) {
     //
     // At the end, drop index and leave root(8) on the stack.
 
+    // R-120: bound the index BEFORE walking the tree. Identical hole to the SHA-256
+    // Merkle emitter, identical gate -- bit i is read at level i, nothing above bit
+    // depth-1 is ever consulted, and the index is then dropped, so index and
+    // index + 2^depth authenticate the same path. There is no proof-remainder twin
+    // here because the siblings are separate stack items, not one splittable blob.
+    emit(StackOp::Opcode("OP_DUP".into()));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(0))));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(1) << depth)));
+    emit(StackOp::Opcode("OP_WITHIN".into()));
+    emit(StackOp::Opcode("OP_VERIFY".into()));
+
     for i in 0..depth {
         // Stack: [..., current(8), sib_i(8), future_sibs(F*8), index]
         // where F = depth - i - 1 (number of future sibling groups).

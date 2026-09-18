@@ -212,14 +212,6 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 // sp1VKeyHash). The list mirrors the test-side `tracker.pushInt` sequence in
 // `TestSp1FriVerifier_AcceptsMinimalGuestFixture` byte-for-byte.
 //
-// `numChunks` is the number of dummy proof-body chunks the unlocking script
-// uses to back the Step 1 SHA-256 binding; the chunks are arbitrary contiguous
-// slices of the raw proofBlob bytes whose concatenation equals proofBlob.
-// In production each chunk corresponds to a single canonically-encoded proof
-// field per `docs/sp1-fri-verifier.md` §2.1; for the validated PoC fixture
-// any chunking is sufficient (Step 1 is a SHA-256 equality check, not a
-// per-field structural decode).
-//
 // `numRounds` is the number of FRI commit-phase rounds for this param tuple
 // (= len(proof.OpeningProof.CommitPhaseCommits); for the PoC = 1).
 //
@@ -229,10 +221,7 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 // Returns the slot-name slice ordered deepest-first so it can be passed
 // directly to `NewKBTracker(initNames, ...)` — the deepest pre-push has
 // index 0 in the slice.
-func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numChunks, numRounds, finalPolyLen int) []string {
-	if numChunks < 1 {
-		panic(fmt.Sprintf("sp1FriPrePushedFieldNames: numChunks must be >= 1, got %d", numChunks))
-	}
+func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numRounds, finalPolyLen int) []string {
 	if numRounds < 1 {
 		panic(fmt.Sprintf("sp1FriPrePushedFieldNames: numRounds must be >= 1, got %d", numRounds))
 	}
@@ -324,8 +313,10 @@ func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numChunks, numRounds
 //  2. Step 1 — proof-blob SHA-256 binding via `EmitProofBlobBindingHash`.
 //  3. Drop the leftover proof-body chunks (full per-field decoding is a
 //     follow-up; for the PoC fixture the chunks are dummy and dropped).
-//  4. Restore publicValues from alt-stack and rename to `_obs_public_values`
-//     so `emitTranscriptInit` can pick it up by name.
+//  4. Restore the typed publicValues argument from the alt-stack and
+//     OP_EQUALVERIFY it against the deep `_obs_public_values` slot that
+//     `emitTranscriptInit` absorbs, so the value named in the ABI and the
+//     value actually verified cannot differ (R-058).
 //     (sp1VKeyHash is consumed in-line below if present.)
 //  5. Steps 2-5 — `emitTranscriptInit` (transcript init, instance metadata,
 //     trace digest absorb, publicValues absorb, alpha squeeze, quotient
@@ -351,7 +342,6 @@ func sp1FriPrePushedFieldNames(params SP1FriVerifierParams, numChunks, numRounds
 func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams) {
 	// Static PoC layout — all derived from `params` plus the validated
 	// minimal-guest fixture shape (sp1fri/verify.go:48-62 + fri.go:25-95).
-	const numChunks = 8 // matches chunkProof(t, bs, 8) in the test harness
 	// numRounds is derived from the FRI commit-phase recursion. For arity-2
 	// folding (max_log_arity = 1, total_log_reduction = sum(logArity_r) ⇒
 	// numRounds = total_log_reduction). The off-chain reference computes
@@ -388,12 +378,12 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 	// transcript-input slots and are consumed directly via raw StackOps below
 	// (the tracker only tracks the transcript-input layer used by the absorb
 	// helpers).
-	initNames := sp1FriPrePushedFieldNames(params, numChunks, numRounds, finalPolyLen)
+	initNames := sp1FriPrePushedFieldNames(params, numRounds, finalPolyLen)
 
 	// Unlocking-script layout (deepest → top):
 	//   - initNames         — transcript-input slots (tracked)
-	//   - chunks (numChunks) — raw proof-body chunks (untracked; consumed below)
-	//   - proofBlob         — typed arg (untracked; consumed by Step 1)
+	//   - proofBlob         — typed arg (untracked; consumed by Step 1, which
+	//                         binds it to the slots above — R-059)
 	//   - publicValues      — typed arg (untracked; consumed below)
 	//   - sp1VKeyHash       — typed arg (only if SP1VKeyHashByteSize > 0)
 
@@ -409,43 +399,121 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 		emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
 	}
 	// 1b. Park publicValues on alt-stack — keeps it out of the way of the
-	// Step 1 binding. We discard this typed-arg copy after Step 1 because
-	// the transcript absorbs use the deep `_obs_public_values` slot from
-	// the field-push layer (see sp1FriPrePushedFieldNames §3) rather than
-	// this typed-arg copy. Both pushes carry the same bytes; the duplication
-	// is intentional so the typed-arg ABI stays clean and the tracker-driven
-	// absorbs find the slot by name.
+	// Step 1 binding. The transcript absorbs the deep `_obs_public_values`
+	// slot from the field-push layer (see sp1FriPrePushedFieldNames §3), not
+	// this typed-arg copy; Step 1e below OP_EQUALVERIFYs the two so the
+	// duplication cannot diverge (R-058 — it could, and did).
 	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
 
-	// 1c. proofBlob is now on top with the `numChunks` chunks immediately
-	// below. Run the Step 1 SHA-256 binding (see EmitProofBlobBindingHash;
-	// docs/sp1-fri-verifier.md §2). After this call, proofBlob is consumed
-	// and the chunks remain on the data stack in declaration order.
-	EmitProofBlobBindingHash(emit, numChunks)
+	// 1c. proofBlob is now on top, with the TRANSCRIPT-INPUT slots immediately
+	// below it. Bind the blob to those slots (docs/sp1-fri-verifier.md §2).
+	//
+	// R-059 / CL-BUG-102. This used to bind the blob to `numChunks` dummy
+	// chunks pushed by the unlocking script — arbitrary contiguous slices of
+	// that same blob — which were then dropped unread, while every value the
+	// verifier consumes came from the separate layer below. The equality held
+	// by construction for ANY blob: the reviewer's "choose a blob, split it
+	// into eight pieces, push both", measured as a spend carrying 1589 bytes
+	// of the attacker's choosing that the script VM accepted.
+	//
+	// The binding now covers exactly what the verifier consumes: every
+	// transcript-input slot, in canonical order, each numeric slot
+	// canonicalised to 4 little-endian bytes (OP_NUM2BIN) so the
+	// serialisation is unambiguous, with the trailing publicValues slot
+	// hashed as bytes. `sp1fri.CanonicalProofBlob` writes exactly these bytes
+	// off-chain, so `proofBlob` IS the canonical serialisation of the values
+	// checked — and a blob that is anything else fails here.
+	//
+	// The slots are only PICKed, never consumed: they stay in declaration
+	// order for the steps that drain them.
+	EmitProofBlobBindingHash(emit, len(initNames), len(initNames)-1)
 
-	// 1d. Drop the chunks. In production each chunk would be the canonical
-	// byte encoding of a single proof field consumed by subsequent steps;
-	// for the PoC fixture the chunks are dummy slices of the raw blob and
-	// the structured transcript inputs are pushed deeper in the stack as
-	// canonical u32s (see sp1FriPrePushedFieldNames). Drop them en masse.
-	// The chunks were never tracked, so we use raw `drop` ops without
-	// touching tracker.nm.
-	for i := 0; i < numChunks; i++ {
-		emit(StackOp{Op: "drop"})
+	// 1e. Restore publicValues from alt-stack and BIND it to the deep
+	// `_obs_public_values` slot the transcript actually absorbs.
+	//
+	// R-058. This block used to be FROMALTSTACK then drop, "the transcript
+	// absorbs use the deep slot, discarding here keeps the alt-stack
+	// balanced". Balanced it was; sound it was not. The transcript absorbs
+	// `_obs_public_values`, which comes from the UNLOCKING script, while the
+	// typed argument named in the ABI — `VerifySP1FRI(proofBlob,
+	// publicValues)` — was read off the alt-stack and thrown away unread.
+	// The two pushes were assumed to carry the same bytes; nothing checked
+	// it. Inverting all 12 bytes of the typed argument and leaving the deep
+	// slot alone still ACCEPTED, so the argument the ABI advertises as the
+	// proven statement was decorative and the spender chose it freely.
+	//
+	// Anything that reads the spend's ABI arguments to learn what was proven
+	// — an indexer, an overlay, a second covenant spending on the strength
+	// of this one — was reading the attacker's choice rather than the
+	// verified value. One OP_EQUALVERIFY makes the ABI honest: the typed
+	// argument and the absorbed slot must be byte-identical or the spend
+	// aborts.
+	//
+	// The duplicate push itself stays. Deleting it would leave a single
+	// source of truth, which is the better shape, but it changes the
+	// unlocking-script layout and therefore the ABI — a deployment decision,
+	// not a codegen one.
+	//
+	// Net stack effect is zero, same as the drop it replaces: FROMALTSTACK
+	// and the copy each push one, OP_EQUALVERIFY consumes two. The deep slot
+	// is COPIED, never rolled, so every tracked position below is untouched.
+	{
+		pvDepth := tracker.findDepth("_obs_public_values")
+		tracker.rawBlock(nil, "", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+			// The typed arg now sits one above the tracked layer, so the
+			// deep slot is at pvDepth+1. It is the shallowest tracked slot
+			// today (sp1FriPrePushedFieldNames appends it last), i.e.
+			// pvDepth == 0 and this is a plain OP_OVER; the general form
+			// keeps the binding correct if that layout ever moves.
+			if d := pvDepth + 1; d == 1 {
+				e(StackOp{Op: "over"})
+			} else {
+				e(StackOp{Op: "push", Value: bigIntPush(int64(d))})
+				e(StackOp{Op: "pick", Depth: d})
+			}
+			e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+		})
 	}
 
-	// 1e. Restore publicValues from alt-stack and discard. The transcript
-	// absorbs use the deep `_obs_public_values` slot from initNames, not
-	// this typed-arg copy. Discarding here keeps the alt-stack balanced.
-	emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-	emit(StackOp{Op: "drop"})
-
-	// 1f. Restore sp1VKeyHash from alt-stack only if it was parked. Same
-	// rationale as 1e: the deep field push is what the transcript uses,
-	// not this recovered copy. Discard for alt-stack balance.
+	// 1f. Restore sp1VKeyHash from alt-stack only if it was parked, and hand
+	// it to the transcript as the `_obs_sp1_vk_hash` slot.
+	//
+	// R-057. This block used to mirror 1e — FROMALTSTACK then drop, "the deep
+	// field push is what the transcript uses". That was wrong twice over:
+	//
+	//   a) There is no deep field push. `sp1FriPrePushedFieldNames` never
+	//      allocated an `_obs_sp1_vk_hash` slot, so `emitTranscriptInit`
+	//      Step 2b looked up a name that was never on the stack and any
+	//      SP1VKeyHashByteSize > 0 tuple panicked the compiler. The absorb
+	//      was unreachable dead code and every named preset
+	//      (minimal-guest / evm-guest / production-{100,64,16}) leaves the
+	//      field at 0, so NO configuration bound the verifying key.
+	//
+	//   b) Even if such a slot existed it would be the wrong value to absorb.
+	//      Deep field pushes come from the UNLOCKING script — attacker-chosen.
+	//      The typed arg recovered here is the contract's readonly
+	//      `Sp1VKeyHash` property, baked into the LOCKING script at deploy
+	//      time (Sp1FriVerifierPoc.runar.go:48-50: "Bound at compile time; a
+	//      malicious unlocking script cannot supply it"). Absorbing the typed
+	//      arg is what makes that sentence true: the spender cannot adapt the
+	//      transcript to a verifying key they do not control.
+	//
+	// Position: docs/sp1-fri-verifier.md §3 puts `H.absorb_chunked(vkHash)`
+	// at the head of the transcript, before degree_bits — the SP1 outer
+	// wrapper layer (SP1 v6.0.2 crates/stark/src/machine.rs) that wraps
+	// Plonky3's uni-stark verifier. `emitTranscriptInit` Step 2b already
+	// emits it there; this block just supplies the value.
+	//
+	// At SP1VKeyHashByteSize == 0 the typed arg was already dropped by the
+	// dispatch (lowerVerifySP1FRI) and there is nothing parked here. A
+	// zero-length VK field cannot be bound — that tuple is for the raw
+	// Plonky3 fixtures under tests/vectors/sp1/fri/, which carry no SP1
+	// outer wrapper and therefore no verifying key at all.
 	if params.SP1VKeyHashByteSize > 0 {
-		emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-		emit(StackOp{Op: "drop"})
+		tracker.rawBlock(nil, "_obs_sp1_vk_hash", func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+		})
 	}
 
 	// =====================================================================
@@ -551,9 +619,31 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 // References:
 //   - docs/sp1-fri-verifier.md §2 + §2.1.
 //   - packages/runar-go/sp1fri/decode.go:25-48 (canonical traversal order).
-func EmitProofBlobBindingHash(emit func(StackOp), numFields int) {
+func EmitProofBlobBindingHash(emit func(StackOp), numFields, numericFields int) {
 	if numFields < 1 {
 		panic(fmt.Sprintf("EmitProofBlobBindingHash: numFields must be >= 1, got %d", numFields))
+	}
+	if numericFields < 0 || numericFields > numFields {
+		panic(fmt.Sprintf(
+			"EmitProofBlobBindingHash: numericFields must be in [0, numFields=%d], got %d",
+			numFields, numericFields))
+	}
+
+	// R-059: `numericFields` counts, from the DEEPEST field forward, how many
+	// of the bound items are script NUMBERS rather than byte strings. A script
+	// number's encoding is minimal and therefore variable-length — 1 is one
+	// byte, 300 is two — so hashing numbers raw would bind an ambiguous
+	// serialisation: different field values can produce the same concatenation.
+	// Each numeric field is canonicalised to 4 little-endian bytes with
+	// OP_NUM2BIN first, which is exactly what the off-chain encoder writes
+	// (`sp1fri.CanonicalProofBlob`). Byte-string fields (today only the
+	// trailing publicValues slot) are hashed as they stand.
+	canonicalise := func(index int) {
+		if index >= numericFields {
+			return
+		}
+		emit(StackOp{Op: "push", Value: bigIntPush(4)})
+		emit(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 	}
 
 	// Step 1a: hash proofBlob (currently on top), park digest on alt-stack.
@@ -566,6 +656,7 @@ func EmitProofBlobBindingHash(emit func(StackOp), numFields int) {
 	field0Depth := numFields - 1
 	emit(StackOp{Op: "push", Value: bigIntPush(int64(field0Depth))})
 	emit(StackOp{Op: "pick", Depth: field0Depth})
+	canonicalise(0)
 
 	// Step 1c: walk forward through the fields, picking each and CAT-ing into
 	// the accumulator. With the accumulator sitting one slot above the
@@ -577,6 +668,7 @@ func EmitProofBlobBindingHash(emit func(StackOp), numFields int) {
 		depth := numFields - i
 		emit(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
 		emit(StackOp{Op: "pick", Depth: depth})
+		canonicalise(i)
 		emit(StackOp{Op: "opcode", Code: "OP_CAT"})
 	}
 

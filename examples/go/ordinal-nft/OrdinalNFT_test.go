@@ -96,7 +96,9 @@ func TestOrdinalNFT_AttachesImageInscription(t *testing.T) {
 
 	// Small PNG header as inscription data
 	pngData := "89504e470d0a1a0a"
-	contract.WithInscription(&runar.Inscription{ContentType: "image/png", Data: pngData})
+	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "image/png", Data: pngData}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 
@@ -127,7 +129,9 @@ func TestOrdinalNFT_AttachesTextInscription(t *testing.T) {
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
 
 	textData := hex.EncodeToString([]byte("Hello, Ordinals!"))
-	contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: textData})
+	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: textData}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 
@@ -156,16 +160,21 @@ func TestOrdinalNFT_InscriptionRoundTripFromUtxo(t *testing.T) {
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
 
 	pngData := "89504e470d0a1a0a"
-	contract.WithInscription(&runar.Inscription{ContentType: "image/png", Data: pngData})
+	if _, err := contract.WithInscription(&runar.Inscription{ContentType: "image/png", Data: pngData}); err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 
 	lockingScript := contract.GetLockingScript()
 
-	reconnected := runar.FromUtxo(a, runar.UTXO{
+	reconnected, err := runar.FromUtxo(a, runar.UTXO{
 		Txid:        "0000000000000000000000000000000000000000000000000000000000000000",
 		OutputIndex: 0,
 		Satoshis:    1,
 		Script:      lockingScript,
 	})
+	if err != nil {
+		t.Fatalf("FromUtxo: %v", err)
+	}
 	insc := reconnected.GetInscription()
 	if insc == nil {
 		t.Fatal("expected inscription after FromUtxo")
@@ -199,7 +208,10 @@ func TestOrdinalNFT_LockingScriptWithoutInscription(t *testing.T) {
 func TestOrdinalNFT_WithInscriptionChaining(t *testing.T) {
 	a := compileContract(t)
 	contract := runar.NewRunarContract(a, []interface{}{runar.Alice.PubKeyHash})
-	result := contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: ""})
+	result, err := contract.WithInscription(&runar.Inscription{ContentType: "text/plain", Data: ""})
+	if err != nil {
+		t.Fatalf("WithInscription: %v", err)
+	}
 	if result != contract {
 		t.Error("WithInscription should return the same contract for chaining")
 	}

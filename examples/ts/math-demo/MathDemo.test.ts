@@ -99,6 +99,23 @@ describe('MathDemo', () => {
   });
 
   // --- pow ---
+  //
+  // READ THIS BEFORE ADDING A CASE HERE. `TestContract` runs the INTERPRETER,
+  // not the compiled script -- the same distinction that hid R-169's `sqrt`
+  // half, and its `pow` half too. The emitted script unrolls 32 conditional
+  // multiplies, so it computed base^min(exp, 32) and returned that CLAMPED
+  // value with no error for any larger exponent, while the interpreter every
+  // assertion below drives was exact. Every exponent this block originally
+  // pinned (0, 1, 5, 10) is inside the clamp, which is exactly why a green
+  // suite proved nothing.
+  //
+  // Coverage of the EMITTED SCRIPT lives in
+  // `packages/runar-compiler/src/__tests__/r169-pow-exponent-domain.test.ts`
+  // (executed on ScriptVM against JavaScript's own BigInt `**`) and in
+  // `conformance/witnesses/real-crypto/math-demo.json` (real secp256k1 spends,
+  // with the past-bound rows at base 1 and 0 -- the only bases where the clamp
+  // is invisible to the covenant's own state check). A case added here does
+  // NOT cover the script.
   describe('exponentiate (pow)', () => {
     it('computes 2^10 = 1024', () => {
       const c = TestContract.fromSource(source, { value: 2n });
@@ -123,10 +140,72 @@ describe('MathDemo', () => {
       c.call('exponentiate', { exp: 5n });
       expect(c.state.value).toBe(243n);
     });
+
+    it('REFUSES an exponent past 32 rather than returning value^32', () => {
+      // The third implementation of the same builtin. The script aborts on
+      // `OP_DUP <0> <33> OP_WITHIN OP_VERIFY` and the constant folder declines
+      // to fold; the interpreter must refuse on the same boundary or `pow`
+      // means different things depending on which one you ask.
+      //
+      // `call` REPORTS failure, it does not throw -- and the reason is checked,
+      // not just the boolean. Asserting only `success === false` would be
+      // satisfied by any unrelated failure (a bad arg name, a missing method),
+      // and "state unchanged" alone would be satisfied by a no-op.
+      for (const exp of [33n, 40n, 257n]) {
+        const c = TestContract.fromSource(source, { value: 2n });
+        const r = c.call('exponentiate', { exp });
+        expect(r.success, `pow(2, ${exp}) must be refused`).toBe(false);
+        expect(r.error).toMatch(/pow: exponent outside the supported domain/);
+        expect(c.state.value).toBe(2n);
+      }
+    });
+
+    it('REFUSES a negative exponent', () => {
+      // Before R-169 the script returned 1 here (no round takes its branch),
+      // the folder declined and the interpreter threw -- one builtin, three
+      // different answers. All three now refuse.
+      for (const exp of [-1n, -32n]) {
+        const c = TestContract.fromSource(source, { value: 2n });
+        const r = c.call('exponentiate', { exp });
+        expect(r.success, `pow(2, ${exp}) must be refused`).toBe(false);
+        expect(r.error).toMatch(/pow: negative exponent/);
+        expect(c.state.value).toBe(2n);
+      }
+    });
+
+    it('CONTROL: exp = 32, the boundary, still works', () => {
+      // An over-strict guard (`exp < 32`) reddens this while leaving every
+      // refusal above green.
+      const c = TestContract.fromSource(source, { value: 2n });
+      c.call('exponentiate', { exp: 32n });
+      expect(c.state.value).toBe(4294967296n);
+    });
   });
 
   // --- sqrt ---
+  //
+  // READ THIS BEFORE ADDING A CASE HERE. `TestContract` runs the INTERPRETER,
+  // not the compiled script. For most of this file that distinction does not
+  // matter; for `sqrt` it hid a real defect for the life of the builtin (R-169).
+  // The emitted script ran 16 unconditional Newton rounds with no convergence
+  // break and returned 3 for sqrt(8), 8 for sqrt(63) and 15280627 for
+  // sqrt(10^12), while the interpreter -- which every assertion below drives --
+  // was correct the whole time. Note that the four values this block originally
+  // pinned (100, 0, 10, 1000000) are ALL values where the broken script happened
+  // to agree, which is exactly why a green suite proved nothing.
+  //
+  // Coverage of the EMITTED SCRIPT lives in
+  // `packages/runar-compiler/src/__tests__/r169-sqrt-newton-convergence.test.ts`
+  // (executed on ScriptVM against `s*s <= n < (s+1)^2`) and in
+  // `conformance/witnesses/real-crypto/math-demo.json` (real secp256k1 spends
+  // with pinned expectedState). A case added here does NOT cover the script.
   describe('squareRoot (sqrt)', () => {
+    it('computes sqrt(99) = 9 — a value the emitted script got wrong (R-169)', () => {
+      const c = TestContract.fromSource(source, { value: 99n });
+      c.call('squareRoot');
+      expect(c.state.value).toBe(9n);
+    });
+
     it('computes sqrt(100) = 10', () => {
       const c = TestContract.fromSource(source, { value: 100n });
       c.call('squareRoot');

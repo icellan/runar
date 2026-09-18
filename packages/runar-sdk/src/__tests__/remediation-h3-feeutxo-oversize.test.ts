@@ -36,6 +36,13 @@ async function setup() {
   const methodSigner = new LocalSigner(METHOD_KEY);
   // Shares #118's terminal-payout setup (fee 0 without feeUtxo) — opt out
   // of P1-2's fee floor only; Spend + conservation still run.
+  //
+  // M-1: that sentence used to be false in this file's own execution. The
+  // `feeUtxo` each case builds inline was never registered with the
+  // provider, so `allInputsKnown` was false and the conservation check was
+  // skipped alongside the fee floor — leaving `expect(burnWarned(warn))` as
+  // the only assertion on the whole broadcast. `registerFeeUtxo()` below
+  // registers it, so conservation genuinely runs and the comment is true.
   const provider = new MockProvider('testnet', { enforceFeeFloor: false });
   const methodAddr = await methodSigner.getAddress();
   provider.addUtxo(methodAddr, {
@@ -47,6 +54,16 @@ async function setup() {
   const contract = new RunarContract(TRIVIAL_ARTIFACT, []);
   await contract.deploy(provider, methodSigner, { satoshis: CONTRACT_SATS });
   return { methodSigner, provider, contract };
+}
+
+/**
+ * Register the inline `feeUtxo` with the provider (M-1) and return it, so
+ * `MockProvider.broadcast()` can run `Spend` over that input and evaluate
+ * value conservation over the whole tx instead of skipping both.
+ */
+function registerFeeUtxo(provider: MockProvider, utxo: UTXO): UTXO {
+  provider.addUtxo('fee-funder', utxo);
+  return utxo;
 }
 
 /** True when a console.warn call carried the H3 burn advisory. */
@@ -65,7 +82,9 @@ describe('H3 (#118): oversized feeUtxo burn warning', () => {
     const fundingSigner = new LocalSigner(FUNDING_KEY);
     const feeScript = buildP2PKHScript(await fundingSigner.getPublicKey());
     // ~30-sat real fee at the mock's 100 sat/KB rate; 500,000 sats is ~15000x.
-    const feeUtxo: UTXO = { txid: 'ee'.repeat(32), outputIndex: 1, satoshis: 500_000, script: feeScript };
+    const feeUtxo = registerFeeUtxo(provider, {
+      txid: 'ee'.repeat(32), outputIndex: 1, satoshis: 500_000, script: feeScript,
+    });
 
     await contract.call('settle', [], provider, methodSigner, {
       terminalOutputs: [{ scriptHex: PAYOUT, satoshis: CONTRACT_SATS }],
@@ -82,7 +101,9 @@ describe('H3 (#118): oversized feeUtxo burn warning', () => {
     const fundingSigner = new LocalSigner(FUNDING_KEY);
     const feeScript = buildP2PKHScript(await fundingSigner.getPublicKey());
     // Close to the ~30-sat estimated fee — no meaningful excess burned.
-    const feeUtxo: UTXO = { txid: 'ee'.repeat(32), outputIndex: 1, satoshis: 100, script: feeScript };
+    const feeUtxo = registerFeeUtxo(provider, {
+      txid: 'ee'.repeat(32), outputIndex: 1, satoshis: 100, script: feeScript,
+    });
 
     await contract.call('settle', [], provider, methodSigner, {
       terminalOutputs: [{ scriptHex: PAYOUT, satoshis: CONTRACT_SATS }],

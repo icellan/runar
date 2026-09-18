@@ -112,8 +112,15 @@ module Runar
 
       # code_separator_index is the byte offset of the OP_CODESEPARATOR opcode
       # itself; the subscript begins at the next byte.
+      # R-178: this used to return the UNTRIMMED script, so a fund-moving
+      # signature was computed over a wrong scriptCode with no error. There is
+      # no correct subscript for a separator offset that is not in the script.
       trim_pos = (code_separator_index + 1) * 2
-      return script_hex if trim_pos > script_hex.length
+      if trim_pos > script_hex.length
+        raise ArgumentError,
+              "get_subscript: code_separator_index #{code_separator_index} is past the " \
+              "end of the script (#{script_hex.length / 2} bytes)"
+      end
 
       script_hex[trim_pos..]
     end

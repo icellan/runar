@@ -17,6 +17,6 @@ package runar.compiler.ir.stack;
 public sealed interface StackOp
     permits PushOp, DupOp, SwapOp, RollOp, PickOp, DropOp, OpcodeOp, IfOp,
             NipOp, OverOp, RotOp, TuckOp, PlaceholderOp, PushCodeSepIndexOp,
-            RawBytesOp {
+            VerifyCodePartLenOp, RawBytesOp {
     String op();
 }

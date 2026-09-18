@@ -141,7 +141,7 @@ each implementation.
 | `update_prop` | mutates `env` + `stateDelta` (`anf-interpreter.ts:220-225`) | mutates state map | mutates `env` + `stateDelta` (`AnfInterpreter.java:338-344`) |
 | `add_output` | extracts state values into `stateDelta` (`anf-interpreter.ts:227-241`) | extracts | extracts (`AnfInterpreter.java:345-360`) |
 | `add_data_output` | records to `dataOutputs[]` (`anf-interpreter.ts:243-252`) | records | records (`AnfInterpreter.java:361-369`) |
-| `add_raw_output` | **skipped** — `return undefined` (`anf-interpreter.ts:254-259`) | **skipped** | **skipped** — listed in `CHAIN_ONLY_KINDS` (`AnfInterpreter.java:56-59`) |
+| `add_raw_output` | **recorded** — pushed to `rawOutputs[]` and to the ordered state-class `outputs[]` (`anf-interpreter.ts:577+`) | **recorded** (`sdk_anf_interpreter.zig:1012+`) | **recorded** — pushed to `rawOutputs` and `outputs` (`AnfInterpreter.java:961+`) |
 | `check_preimage` | **skipped** (`anf-interpreter.ts:255`) | **skipped** | **skipped** (`AnfInterpreter.java:56`) |
 | `deserialize_state` | **skipped** (`anf-interpreter.ts:256`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
 | `get_state_script` | **skipped** (`anf-interpreter.ts:257`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
@@ -217,7 +217,7 @@ still TS / Java / Zig only; when it lands, this matrix should grow
 
 ### Summary of intentional skips
 
-- **On-chain-only kinds** (`check_preimage`, `deserialize_state`, `get_state_script`, `add_raw_output`): the dedicated `check_preimage` ANF kind is still skipped (returns `undefined`/`null`/no-op) — it is a no-op marker on the binding side. The actual `checkPreimage(preimage)` call (which lowers to a `call` ANF kind, not `check_preimage`) IS verified in real-crypto mode. `deserialize_state`, `get_state_script`, `add_raw_output` remain unconditional skips: they are simulation-only intrinsics; on-chain enforcement happens in compiled Bitcoin Script, not here.
+- **On-chain-only kinds** (`check_preimage`, `deserialize_state`, `get_state_script`): the dedicated `check_preimage` ANF kind is still skipped (returns `undefined`/`null`/no-op) — it is a no-op marker on the binding side. The actual `checkPreimage(preimage)` call (which lowers to a `call` ANF kind, not `check_preimage`) IS verified in real-crypto mode. `deserialize_state` and `get_state_script` remain unconditional skips: they are simulation-only intrinsics; on-chain enforcement happens in compiled Bitcoin Script, not here. **`add_raw_output` is NOT among them** — R-198: this list, the per-kind table and the "out of scope" note below all said it was skipped, while the section above them ("`add_raw_output` simulation — supported (pass-through only)") and every implementation said otherwise. The implementations win: TS, Zig and Java each record the output and append it to the ordered state-class list so a transaction builder can emit it at the right index (finding G1).
 - **`assert`**: all three SDKs skip by default and enforce in `executeStrict` / `executeOnChainAuthoritative` — TS throws `AssertionFailureError`, Zig returns `error.AssertionFailure`, Java throws `AssertionFailureException`. The two strict modes both enforce explicit `assert(...)` predicates; only `executeOnChainAuthoritative` additionally verifies `checkSig` / `checkMultiSig` / `checkPreimage` against the caller-supplied sighash.
 - **`array_literal`**: TS + Java still rely on the next-step `call` resolving the array via `args` (`Array.isArray(...)` / `List<?>` checks in `verifyMultiSigReal`); the Zig SDK now has an explicit case that materializes an `ANFValue.array` from the binding's `elements` refs, so a contract that builds its multisig sigs/pks lists in the body via `array_literal` works under real-crypto on Zig.
 
@@ -248,7 +248,9 @@ All three interpreters produce a tuple of:
 1. **`state` / `newState`** — a map of property name → resolved value, accumulating every `update_prop` and `add_output` `stateValues` extraction in evaluation order.
 2. **`dataOutputs`** — an ordered list of `{satoshis: bigint, script: string}` records, one per `add_data_output` binding executed.
 
-`add_raw_output` is **not** recorded — neither as a state change nor as a data output. This is a documented gap. Off-chain consumers that need raw-output simulation must extend the interpreters explicitly.
+3. **`rawOutputs`** — an ordered list of `{satoshis, script}` records, one per `add_raw_output` binding executed, mirrored into the ordered state-class `outputs` list so a builder can place it at the correct source-order index (finding G1).
+
+`add_raw_output` IS recorded, in every interpreter that implements the kind. This paragraph previously said the opposite and called it "a documented gap" (R-198); the code it describes — `anf-interpreter.ts:577`, `AnfInterpreter.java:961`, `sdk_anf_interpreter.zig:1012` — has recorded it since finding G1. What the interpreters do NOT do is introspect the caller-supplied script bytes; they forward them verbatim.
 
 `get_state_script` returns nothing — simulation does not synthesize the
 continuation locking script. The on-chain runtime handles that via
@@ -272,7 +274,8 @@ continuation locking script. The on-chain runtime handles that via
   Go / Rust / Python / Ruby without a real-crypto entry point is documented
   there, and is upheld by per-SDK unit tests on the Tier-1 stacks plus
   on-chain verification for any production pre-broadcast check on Tier-2.
-- `add_raw_output` simulation is explicitly out of scope across all seven
-  SDKs (see "out of scope" section above).
+- `add_raw_output` simulation is IMPLEMENTED as pass-through recording, not out
+  of scope — see the per-kind matrix (R-198 corrected this line, which
+  contradicted both the code and the section above it).
 - (`array_literal` element resolution in Zig has landed — see the per-kind
   matrix and the multisig tests.)

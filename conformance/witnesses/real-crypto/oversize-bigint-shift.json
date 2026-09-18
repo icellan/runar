@@ -36,5 +36,8 @@
       "expect": "reject",
       "note": "tampered continuation output — the oversize shift result must be committed to by hashOutputs, so corrupting output 0 has to fail the checkPreimage binding (OP_CHECKSIGVERIFY) on the real Spend engine."
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "769850c844d770761ae3aee770324eb651191e62487ded7010d180b8162c5785"
+  }
 }

@@ -18,6 +18,14 @@
 // fallback vs statement-form if/else chains), writes (if/else chain ending
 // in `assert(false)`), nested literal chains (single-hop resolve), and
 // initializer distribution / length-mismatch rules.
+//
+// `this.board[idx]++` / `--` in statement position is desugared to
+// `this.board[idx] = this.board[idx] +/- 1` before the index rewrite, so the
+// write goes through the dispatch chain above. Downstream, both anf_lower and
+// side_effect_summary only recognise an increment as a state mutation when its
+// operand is a bare property access, so without this the mutation is silently
+// discarded AND the method is classified terminal (no continuation assertion
+// at all). The same shape in expression position is a compile error.
 
 package frontend
 
@@ -252,6 +260,42 @@ func (ctx *expandContext) extractArrayLiteralElements(prop PropertyNode, meta *a
 	return arrLit.Elements, extractOK
 }
 
+// familyOfElementType reports which literal family a FixedArray element type
+// demands: "bigint", "boolean", "ByteString", or "" when the type is not one
+// this pass can judge (it then declines to complain). N-133.
+//
+// The two predicates are typecheck.go's, not copies -- a second list is how
+// the ByteString family drifted once already.
+func familyOfElementType(t TypeNode) string {
+	prim, ok := t.(PrimitiveType)
+	if !ok {
+		return ""
+	}
+	switch {
+	case prim.Name == "boolean":
+		return "boolean"
+	case isBigintFamily(prim.Name):
+		return "bigint"
+	case isByteFamily(prim.Name):
+		return "ByteString"
+	}
+	return ""
+}
+
+// familyOfLiteral reports the literal family of an initializer element, or ""
+// when the expression is not a literal this pass can judge. N-133.
+func familyOfLiteral(expr Expression) string {
+	switch expr.(type) {
+	case BigIntLiteral:
+		return "bigint"
+	case BoolLiteral:
+		return "boolean"
+	case ByteStringLiteral:
+		return "ByteString"
+	}
+	return ""
+}
+
 // expandArrayMeta recursively emits scalar leaf properties for the given
 // array meta. Initializer elements are distributed pairwise; for nested
 // arrays a non-array-literal element is a compile error.
@@ -308,6 +352,30 @@ func (ctx *expandContext) expandArrayMeta(
 			}
 			out = append(out, ctx.expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere)...)
 		} else {
+			// N-133: the element-type check. typecheck's array-literal branch
+			// never sees a property initializer -- it is consumed here -- so
+			// before this every tier accepted
+			// `FixedArray<bigint, 2> = [1n, true]` and emitted a DIFFERENT
+			// program (the boolean became the number 1, a hex literal became a
+			// byte string under OP_ADD).
+			if slotInit != nil {
+				want := familyOfElementType(meta.elementType)
+				got := familyOfLiteral(slotInit)
+				if want != "" && got != "" && want != got {
+					declared := "FixedArray"
+					if prim, ok := meta.elementType.(PrimitiveType); ok {
+						declared = prim.Name
+					}
+					ctx.pushError(
+						fmt.Sprintf(
+							"Property '%s' initializer element %d is a %s literal, but the FixedArray element type is '%s'",
+							meta.rootName, i, got, declared,
+						),
+						loc,
+					)
+				}
+			}
+
 			out = append(out, PropertyNode{
 				Name:                slot,
 				Type:                meta.elementType,
@@ -525,10 +593,93 @@ func (ctx *expandContext) rewriteReturnStmt(stmt ReturnStmt) []Statement {
 
 func (ctx *expandContext) rewriteExpressionStmt(stmt ExpressionStmt) []Statement {
 	var prelude []Statement
+
+	// `c.Board[idx]++` / `--` in statement position. The generic expression
+	// rewrite below turns `c.Board[idx]` into a read dispatch ternary, and both
+	// ANF lowering and the side-effect summary only recognise an increment as a
+	// state mutation when its operand is a bare PropertyAccessExpr. Left alone,
+	// the new value is computed and DISCARDED: no update_prop, MutatesState
+	// stays false, and ContinuationShapeFor calls the method terminal, so NO
+	// continuation assertion is injected for a method that does mutate state.
+	// Desugar to the assignment form, which already routes through
+	// rewriteArrayWrite. Statement position discards the expression's value, so
+	// prefix and postfix are equivalent here.
+	var incOperand Expression
+	incOp := ""
+	switch e := stmt.Expr.(type) {
+	case IncrementExpr:
+		incOperand, incOp = e.Operand, "+"
+	case DecrementExpr:
+		incOperand, incOp = e.Operand, "-"
+	}
+	if _, isIndex := incOperand.(IndexAccessExpr); isIndex {
+		// Bind every impure index to a `const` first: the desugar names the
+		// element twice (read + write) and each index must be evaluated once.
+		target := ctx.stabilizeIndexChain(incOperand, &prelude, stmt.SourceLocation)
+		assignment := AssignmentStmt{
+			Target: target,
+			Value: BinaryExpr{
+				Op:    incOp,
+				Left:  cloneExpression(target),
+				Right: BigIntLiteral{Value: big.NewInt(1)},
+			},
+			SourceLocation: stmt.SourceLocation,
+		}
+		return append(prelude, ctx.rewriteAssignment(assignment)...)
+	}
+
 	newExpr := ctx.rewriteExpression(stmt.Expr, &prelude)
 	s := stmt
 	s.Expr = newExpr
 	return append(prelude, s)
+}
+
+// rejectArrayElementMutationInExpression rejects `c.Board[idx]++` used for its
+// VALUE (not in statement position). It cannot be desugared to an assignment,
+// and the increment lowering has no way to write back through a dispatch
+// chain. Silently dropping the write is the dangerous outcome.
+func (ctx *expandContext) rejectArrayElementMutationInExpression(operand Expression, op string) {
+	if _, ok := operand.(IndexAccessExpr); !ok {
+		return
+	}
+	base := operand
+	for {
+		idx, ok := base.(IndexAccessExpr)
+		if !ok {
+			break
+		}
+		base = idx.Object
+	}
+	if ctx.tryResolveArrayBase(base) != "" {
+		ctx.pushError(
+			"`"+op+"` on a FixedArray element is only supported as a statement; "+
+				"assign the result explicitly instead",
+			SourceLocation{},
+		)
+	}
+}
+
+// stabilizeIndexChain rewrites every index in an index-access chain so the
+// chain can be safely duplicated: impure indices are hoisted to a fresh
+// `__idx_K` binding, pure ones are left in place. The base object is returned
+// untouched — rewriteAssignment resolves it.
+func (ctx *expandContext) stabilizeIndexChain(
+	expr Expression,
+	prelude *[]Statement,
+	loc SourceLocation,
+) Expression {
+	idx, ok := expr.(IndexAccessExpr)
+	if !ok {
+		return cloneExpression(expr)
+	}
+	newObject := ctx.stabilizeIndexChain(idx.Object, prelude, loc)
+	var newIndex Expression
+	if isPureReference(idx.Index) {
+		newIndex = cloneExpression(idx.Index)
+	} else {
+		newIndex = ctx.hoistIfImpure(ctx.rewriteExpression(idx.Index, prelude), prelude, loc, "idx")
+	}
+	return IndexAccessExpr{Object: newObject, Index: newIndex}
 }
 
 // ---------------------------------------------------------------------------
@@ -573,10 +724,12 @@ func (ctx *expandContext) rewriteExpression(expr Expression, prelude *[]Statemen
 		e.Alternate = alt
 		return e
 	case IncrementExpr:
+		ctx.rejectArrayElementMutationInExpression(e.Operand, "++")
 		operand := ctx.rewriteExpression(e.Operand, prelude)
 		e.Operand = operand
 		return e
 	case DecrementExpr:
+		ctx.rejectArrayElementMutationInExpression(e.Operand, "--")
 		operand := ctx.rewriteExpression(e.Operand, prelude)
 		e.Operand = operand
 		return e

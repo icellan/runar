@@ -509,6 +509,13 @@ pub fn deployWithWallet(
         funding_tag: ?[]const u8 = null,
         network: ?[]const u8 = null,
         fee_rate: ?i64 = null,
+        /// Builtins the caller accepts despite the compiler not claiming they
+        /// are sound (R-062). Zig already ran the gate on this path — it
+        /// delegates to `contract.deploy`, which enforces it — but it had no
+        /// way to SUPPLY an acknowledgement, so a legitimate acknowledged
+        /// deploy was refused. Same mechanism and same error as
+        /// `DeployOptions.acknowledge_unsound`.
+        acknowledge_unsound: []const []const u8 = &.{},
     },
 ) ![]u8 {
     var wallet_provider = WalletProvider.init(
@@ -531,17 +538,35 @@ pub fn deployWithWallet(
     );
     defer wallet_signer.deinit();
 
-    // Set expected script on provider for UTXO filtering
+    // Set expected script on provider for UTXO filtering.
+    //
+    // buildP2PKHScript takes a 40-hex PUBKEY HASH (or a Base58Check address);
+    // it was being handed the 66-hex PUBKEY, which matched neither branch and
+    // fell through to the Base58 decoder, so every wallet deploy failed with
+    // OutOfMemory before reaching contract.deploy. Hash the key first, the way
+    // the call path in sdk_contract.zig does.
     const pub_key_hex = try wallet_signer.signer().getPublicKey(contract.allocator);
     defer contract.allocator.free(pub_key_hex);
-    const expected_script = try deploy_mod.buildP2PKHScript(contract.allocator, pub_key_hex);
+    const bsvz = @import("bsvz");
+    const pub_key_bytes = try state_mod.hexToBytes(contract.allocator, pub_key_hex);
+    defer contract.allocator.free(pub_key_bytes);
+    const ripe_hash = bsvz.crypto.hash.hash160(pub_key_bytes);
+    var pkh_hex: [40]u8 = undefined;
+    _ = bsvz.primitives.hex.encodeLower(&ripe_hash.bytes, &pkh_hex) catch return error.OutOfMemory;
+    const expected_script = try deploy_mod.buildP2PKHScript(contract.allocator, &pkh_hex);
     defer contract.allocator.free(expected_script);
     try wallet_provider.setExpectedScript(expected_script);
 
     return contract.deploy(
         wallet_provider.provider(),
         wallet_signer.signer(),
-        .{ .satoshis = options.satoshis },
+        .{
+            .satoshis = options.satoshis,
+            // R-062: carry the caller's acknowledgement into the ONE gate this
+            // tier has. Without it the wallet path could only ever refuse an
+            // unsound artifact, never fund an acknowledged one.
+            .acknowledge_unsound = options.acknowledge_unsound,
+        },
     );
 }
 

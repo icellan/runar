@@ -183,9 +183,13 @@ describe('requireOutputP2PKH', () => {
           this.bond = bond;
         }
 
+        // Both calls name index 0: W2 refuses any literal index above 0, and
+        // the property under test is per-METHOD idempotence of the injected
+        // param and the hashOutputs commitment, which two calls at the same
+        // index exercise exactly as well.
         public payMulti() {
           requireOutputP2PKH(0n, this.bondPKH, this.bond);
-          requireOutputP2PKH(1n, this.bondPKH, this.bond);
+          requireOutputP2PKH(0n, this.bondPKH, this.bond);
         }
       }
     `;
@@ -211,9 +215,13 @@ describe('requireOutputP2PKH', () => {
           this.bond = bond;
         }
 
+        // Both calls name index 0: W2 refuses any literal index above 0, and
+        // the property under test is per-METHOD idempotence of the injected
+        // param and the hashOutputs commitment, which two calls at the same
+        // index exercise exactly as well.
         public payMulti() {
           requireOutputP2PKH(0n, this.bondPKH, this.bond);
-          requireOutputP2PKH(1n, this.bondPKH, this.bond);
+          requireOutputP2PKH(0n, this.bondPKH, this.bond);
         }
       }
     `;

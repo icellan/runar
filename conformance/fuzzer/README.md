@@ -142,7 +142,7 @@ cd conformance
 # PR gate: fixed seed, deterministic, ~3s. `--num` must be at least
 # `REQUIRED_CASE_COUNT` (spend-shapes.ts): families are drawn round-robin, so a
 # smaller run never reaches the tail families.
-node_modules/.bin/tsx fuzzer/index.ts --spend-oracle --metamorphic --seed 424242 --num 32
+node_modules/.bin/tsx fuzzer/index.ts --spend-oracle --metamorphic --seed 424242 --num 35
 
 # Longer sweep
 node_modules/.bin/tsx fuzzer/index.ts --spend-oracle --seed 1 --num 500 --time-budget-ms 240000
@@ -156,9 +156,13 @@ other fuzz finding — see `conformance/fuzz-regressions/README.md`.
 
 ### CI
 
-- **PR** — fixed seed `424242`, 32 cases (== `REQUIRED_CASE_COUNT`, one per
+- **PR** — fixed seed `424242`, 35 cases (== `REQUIRED_CASE_COUNT`, one per
   construct family), `--metamorphic`. Deterministic, no
   native toolchains needed (in-process TS compiler + `@bsv/sdk`).
+  The workflow carries that count as a literal, so
+  `__tests__/spend-oracle-num-gate.test.ts` pins every `--spend-oracle` step's
+  `--num` — and this README's — at or above `REQUIRED_CASE_COUNT`. Adding a
+  family reddens that test until both places are updated.
 - **Nightly / push** — rotating `run_id`-derived seed, 400 cases, with a
   wall-clock budget. An early-stopped run that did not finish its corpus FAILS
   (same C5 rule as the other budgeted modes) rather than reporting a partial

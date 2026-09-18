@@ -43,6 +43,13 @@ func emitRoll(emit func(StackOp), d int) {
 	emit(StackOp{Op: "roll", Depth: d})
 }
 
+// poseidon2MerkleMaxDepth is the largest Merkle depth EmitPoseidon2MerkleRoot
+// can emit. Higher depths produce quadratically larger scripts because of the
+// roll operations at each level. It is the ONE place the limit is written:
+// lowerMerkleRootPoseidon2KB reads it too, so the check the author sees and the
+// check the emitter enforces cannot drift apart again (R-172).
+const poseidon2MerkleMaxDepth = 32
+
 // EmitPoseidon2MerkleRoot emits Poseidon2 Merkle root computation.
 //
 // Stack in:  [..., leaf(8 elems), proof(depth*8 elems), index]
@@ -51,8 +58,13 @@ func emitRoll(emit func(StackOp), d int) {
 // depth is a compile-time constant (unrolled loop). Must be in [1, 32].
 // Higher depths produce quadratically larger scripts due to roll operations.
 func EmitPoseidon2MerkleRoot(emit func(StackOp), depth int) {
-	if depth < 1 || depth > 32 {
-		panic(fmt.Sprintf("EmitPoseidon2MerkleRoot: depth must be in [1, 32], got %d", depth))
+	// Internal assertion, not the author-facing gate: lowerMerkleRootPoseidon2KB
+	// checks the same bound against the constant in the source and reports it
+	// under the builtin's own name (R-172). Reaching this panic means a caller
+	// bypassed that gate.
+	if depth < 1 || depth > poseidon2MerkleMaxDepth {
+		panic(fmt.Sprintf("EmitPoseidon2MerkleRoot: depth must be in [1, %d], got %d",
+			poseidon2MerkleMaxDepth, depth))
 	}
 	// Strategy overview:
 	//
@@ -68,6 +80,19 @@ func EmitPoseidon2MerkleRoot(emit func(StackOp), depth int) {
 	// 7. Restore index from alt.
 	//
 	// At the end, drop index and leave root(8) on the stack.
+
+	// R-120: bound the index BEFORE walking the tree. Identical hole to
+	// emitMerkleRoot in merkle.go, identical gate — bit i is read at level i,
+	// nothing above bit depth-1 is ever consulted, and the index is then
+	// dropped, so index and index + 2^depth authenticate the same path. There
+	// is no proof-remainder twin here because the siblings are separate stack
+	// items rather than one splittable blob: a wrong count corrupts the stack
+	// rather than being silently discarded.
+	emit(StackOp{Op: "opcode", Code: "OP_DUP"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Lsh(big.NewInt(1), uint(depth))}})
+	emit(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
 
 	for i := 0; i < depth; i++ {
 		// Stack: [..., current(8), sib_i(8), future_sibs(F*8), index]
@@ -191,4 +216,47 @@ func EmitPoseidon2MerkleRoot(emit func(StackOp), depth int) {
 	// After all levels: [..., root(8), index]
 	emit(StackOp{Op: "drop"})
 	// Stack: [..., root_0..root_7]
+}
+
+// poseidon2RootPackBase is the radix used to pack the 8-element Poseidon2
+// KoalaBear root into a single Script integer. Every KoalaBear element is
+// < p = 2^31 - 2^24 + 1 < 2^32, so base-2^32 positional packing is INJECTIVE
+// over the whole root: two roots pack to the same integer if and only if all
+// eight of their elements are equal.
+const poseidon2RootPackBase = int64(1) << 32
+
+// EmitPoseidon2RootPack folds the 8-element Poseidon2 KoalaBear root that
+// EmitPoseidon2MerkleRoot leaves on the stack into ONE Script integer.
+//
+// Stack in:  [..., root_0, root_1, ..., root_7]   (root_7 on top)
+// Stack out: [..., packed]
+//
+// where packed = Σ root_i · (2^32)^i — i.e. root_7 is the most significant
+// limb and root_0 the least significant.
+//
+// WHY THIS EXISTS (CL-BUG-099 / R-056). The Rúnar type system has no
+// multi-word return type: `merkleRootPoseidon2KB` is declared to return one
+// `bigint`. The dispatch used to reconcile that by emitting seven OP_NIPs,
+// keeping root_7 and discarding root_0..root_6 — so a contract writing
+// `assert(merkleRootPoseidon2KB(...) === expected)` authenticated against a
+// SINGLE ~31-bit field element. Second-preimage work against such a check is
+// ~2^31 Poseidon2 permutations and birthday work ~2^15.5.
+//
+// Packing keeps the declared return type (one `bigint`) while making every
+// limb load-bearing: equality on the packed value is equality on all eight
+// limbs. Misuse is fail-closed — a contract that compares the result against
+// a single limb simply never spends.
+//
+// This is deliberately NOT applied inside EmitPoseidon2MerkleRoot: the SP1
+// FRI verifier (sp1_fri.go emitMerkleVerify) consumes the eight raw limbs and
+// does its own 8 × OP_NUMEQUALVERIFY against a caller-supplied expected root.
+func EmitPoseidon2RootPack(emit func(StackOp)) {
+	// Horner from the top of the stack down. After step k the top holds
+	// Σ_{j=7-k..7} root_j · (2^32)^(j-(7-k)) and root_(6-k) sits directly
+	// below it, so OP_ADD folds in the next limb with no rolls at all.
+	for i := 0; i < 7; i++ {
+		emit(StackOp{Op: "push", Value: bigIntPush(poseidon2RootPackBase)})
+		emit(StackOp{Op: "opcode", Code: "OP_MUL"})
+		emit(StackOp{Op: "opcode", Code: "OP_ADD"})
+	}
 }

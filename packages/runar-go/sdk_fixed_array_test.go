@@ -29,7 +29,7 @@ func TestFixedArray_FlatSerializeRoundTrip(t *testing.T) {
 	if len(hex) != 48 {
 		t.Errorf("serialized hex length = %d, want 48", len(hex))
 	}
-	out := DeserializeState(fields, hex)
+	out := mustDeserializeState(t, fields, hex)
 	got, ok := out["board"].([]interface{})
 	if !ok {
 		t.Fatalf("deserialized board is %T, want []interface{}", out["board"])
@@ -70,7 +70,7 @@ func TestFixedArray_NestedSerializeRoundTrip(t *testing.T) {
 	if len(hex) != 64 {
 		t.Errorf("serialized hex length = %d, want 64", len(hex))
 	}
-	out := DeserializeState(fields, hex)
+	out := mustDeserializeState(t, fields, hex)
 	got, ok := out["grid"].([]interface{})
 	if !ok {
 		t.Fatalf("grid is %T, want []interface{}", out["grid"])

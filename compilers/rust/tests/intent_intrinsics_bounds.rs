@@ -48,7 +48,7 @@ func (c *Cov) Pay() {
 }
 "#;
     let errors = typecheck_errors(source);
-    assert_error_contains(&errors, "bound to <= 1000");
+    assert_error_contains(&errors, "must be 0 in v1");
 }
 
 #[test]
@@ -114,4 +114,129 @@ func (c *Cov) Bind() {
 "#;
     let errors = typecheck_errors(source);
     assert_error_contains(&errors, "MAX_SCRIPT_BYTES");
+}
+
+// R-068 — `-0` index evades the literal gate and silently DELETES the covenant
+//
+// The typecheck index gate above accepts `UnaryExpr{Neg, BigIntLiteral}` only
+// so that a negative index reports "must be >= 0" instead of the misleading
+// "must be an integer literal". `-0` negates to `0`, so it passes that bound
+// check — but ANF lowering matches on a bare `BigIntLiteral` and, finding a
+// `UnaryExpr`, falls through to `load_const ""`: no witness param, no hash
+// assertion, NO COVENANT, and no diagnostic. A contract whose whole purpose
+// is the covenant compiles to a script that does not carry it.
+
+/// Compile all the way to ANF IR. Returns Err(diagnostics) on rejection.
+fn lower_to_ir_result(
+    source: &str,
+    file: &str,
+) -> Result<runar_compiler_rust::ir::ANFProgram, String> {
+    runar_compiler_rust::compile_source_str_to_ir(source, Some(file))
+}
+
+const EPS_NEG_ZERO_SRC: &str = r#"
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+    runar.StatefulSmartContract
+    H     runar.ByteString
+    Count runar.Bigint
+}
+
+func (c *Cov) Bind() {
+    s := runar.ExtractPrevOutputScript(-0, c.H)
+    runar.Assert(runar.Len(s) > 0)
+    c.Count = c.Count + 1
+}
+"#;
+
+const ROP_NEG_ZERO_SRC: &str = r#"
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+    runar.StatefulSmartContract
+    PKH   runar.ByteString
+    Amt   runar.Bigint
+    Count runar.Bigint
+}
+
+func (c *Cov) Pay() {
+    runar.RequireOutputP2PKH(-0, c.PKH, c.Amt)
+    c.Count = c.Count + 1
+}
+"#;
+
+#[test]
+fn test_extract_prev_output_script_negative_zero_index_rejects() {
+    let errors = typecheck_errors(EPS_NEG_ZERO_SRC);
+    assert_error_contains(&errors, "must be an integer literal");
+}
+
+#[test]
+fn test_require_output_p2pkh_negative_zero_index_rejects() {
+    let errors = typecheck_errors(ROP_NEG_ZERO_SRC);
+    assert_error_contains(&errors, "must be an integer literal");
+}
+
+/// The funds-safety half of the pair: a `-0` index must never reach codegen,
+/// because when it does the intrinsic lowers to a bare empty-string constant
+/// and the covenant it was supposed to install is simply absent.
+#[test]
+fn test_negative_zero_index_never_silently_drops_the_covenant() {
+    for (label, src) in [
+        ("extractPrevOutputScript", EPS_NEG_ZERO_SRC),
+        ("requireOutputP2PKH", ROP_NEG_ZERO_SRC),
+    ] {
+        match lower_to_ir_result(src, "Test.runar.go") {
+            Err(_) => {}
+            Ok(program) => {
+                let json = serde_json::to_string(&program).expect("serialize ANF");
+                panic!(
+                    "{}(-0, ...) compiled with NO diagnostic; covenant markers \
+                     present: _prevOutScript_={} _serialisedOutputs={}",
+                    label,
+                    json.contains("_prevOutScript_"),
+                    json.contains("_serialisedOutputs"),
+                );
+            }
+        }
+    }
+}
+
+// Controls — the valid forms must keep lowering exactly as before.
+
+#[test]
+fn test_literal_zero_index_still_installs_the_covenant() {
+    let eps = EPS_NEG_ZERO_SRC.replace("ExtractPrevOutputScript(-0,", "ExtractPrevOutputScript(0,");
+    let program = lower_to_ir_result(&eps, "Test.runar.go").expect("valid eps contract must lower");
+    let json = serde_json::to_string(&program).expect("serialize ANF");
+    assert!(
+        json.contains("_prevOutScript_0"),
+        "extractPrevOutputScript(0, ...) must still auto-inject its witness param"
+    );
+
+    // W2: 0 is the only index this intrinsic accepts. The state write also has
+    // to go: R-300 refuses `requireOutputP2PKH(0, ...)` in a state-mutating
+    // method, because the implicit continuation puts the contract's own
+    // codePart at output 0. Index 1 used to dodge that and is no longer legal.
+    let rop = ROP_NEG_ZERO_SRC
+        .replace("RequireOutputP2PKH(-0,", "RequireOutputP2PKH(0,")
+        .replace("    c.Count = c.Count + 1\n", "");
+    let program = lower_to_ir_result(&rop, "Test.runar.go").expect("valid rop contract must lower");
+    let json = serde_json::to_string(&program).expect("serialize ANF");
+    assert!(
+        json.contains("_serialisedOutputs"),
+        "requireOutputP2PKH(0, ...) must still auto-inject _serialisedOutputs"
+    );
+}
+
+#[test]
+fn test_plain_negative_index_still_reports_the_bound_message() {
+    let src = EPS_NEG_ZERO_SRC.replace("ExtractPrevOutputScript(-0,", "ExtractPrevOutputScript(-3,");
+    let errors = typecheck_errors(&src);
+    assert_error_contains(&errors, "must be >= 0");
 }

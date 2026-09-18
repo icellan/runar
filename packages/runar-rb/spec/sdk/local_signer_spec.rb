@@ -168,7 +168,18 @@ RSpec.describe Runar::SDK::LocalSigner do
   # ---------------------------------------------------------------------------
   # When bsv-sdk IS available (integration path — only runs if gem installed)
   # ---------------------------------------------------------------------------
-  context 'when the bsv-sdk gem is available', if: Runar::SDK::LocalSigner::BSV_SDK_AVAILABLE do
+  #
+  # R-213: this group has never run. No bsv-sdk gem is published for Ruby
+  # (CLAUDE.md: there is no `bsv-blockchain` Ruby SDK) and none is declared, so
+  # BSV_SDK_AVAILABLE is always false and `if:` excluded the whole group
+  # SILENTLY — the suite reported no skip, no pending, nothing. Reading the file
+  # you would think the library path was covered.
+  #
+  # `skip:` instead of `if:` keeps the examples out of the run while making
+  # rspec report them as pending with the reason attached, so the absence is
+  # visible in the output rather than inferred from the source.
+  context 'when the bsv-sdk gem is available',
+          skip: (Runar::SDK::LocalSigner::BSV_SDK_AVAILABLE ? false : 'no bsv-sdk gem is published for Ruby; this path cannot run here') do
     subject(:signer) { described_class.new(KEY_ONE_HEX) }
 
     it 'is a Runar::SDK::Signer' do

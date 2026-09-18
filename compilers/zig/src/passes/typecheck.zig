@@ -68,6 +68,19 @@ fn sig(comptime params: []const RunarType, comptime ret: RunarType) FuncSig {
     return .{ .params = params, .return_type = ret };
 }
 
+/// Names that are legal without being a local, a builtin or a property: the
+/// `SigHash` namespace object and the three secp256k1 constants from
+/// runar-lang. Every frontend hands them to the typechecker as bare
+/// identifiers. They used to be carried by the `.unknown` fall-through; once
+/// that fall-through raises they have to be listed, exactly as the TS
+/// reference tier lists them in KNOWN_GLOBALS.
+const known_globals = std.StaticStringMap(RunarType).initComptime(.{
+    .{ "SigHash", .unknown },
+    .{ "EC_P", .bigint },
+    .{ "EC_N", .bigint },
+    .{ "EC_G", .point },
+});
+
 const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     // Hash functions
     .{ "sha256", sig(&.{.byte_string}, .sha256) },
@@ -226,7 +239,14 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
 // ============================================================================
 
 /// ByteString-family types: all are subtypes of ByteString.
-fn isByteFamily(t: RunarType) bool {
+///
+/// N-076: this is the SINGLE source of truth for "is a value of this type a
+/// byte string or a script number?", and `anf_lower.zig` consults it rather
+/// than keeping a second copy. The copy it replaces carried `.rabin_sig` and
+/// `.rabin_pub_key`, which `isBigintFamily` right below files as NUMBERS -- so
+/// `===` on a Rabin value emitted OP_EQUAL and, far worse, `+` on one emitted
+/// OP_CAT where the source said addition.
+pub fn isByteFamily(t: RunarType) bool {
     return switch (t) {
         .byte_string, .pub_key, .sig, .sha256, .ripemd160, .addr, .sig_hash_preimage, .point,
         .p256_point, .p384_point => true,
@@ -235,7 +255,10 @@ fn isByteFamily(t: RunarType) bool {
 }
 
 /// BigInt-family types: all are subtypes of bigint.
-fn isBigintFamily(t: RunarType) bool {
+///
+/// `pub` for the same reason as `isByteFamily` above: expand_fixed_arrays.zig
+/// needs the question answered (N-133) and must not keep a second copy.
+pub fn isBigintFamily(t: RunarType) bool {
     return switch (t) {
         .bigint, .rabin_sig, .rabin_pub_key => true,
         else => false,
@@ -338,6 +361,12 @@ const TypeChecker = struct {
     contract: ContractNode,
     errors: std.ArrayListUnmanaged([]const u8),
     prop_types: std.StringHashMapUnmanaged(RunarType),
+    /// Element type of each `FixedArray<T, N>` property, for the T that this
+    /// tier can actually name. Populated only when T is a scalar: a nested
+    /// `FixedArray<FixedArray<..>, N>` records `.fixed_array` as its element
+    /// and loses the leaf type at parse time, so it is deliberately absent
+    /// here rather than guessed. R-073 / CL-BUG-168.
+    prop_elem_types: std.StringHashMapUnmanaged(RunarType),
     method_sigs: std.StringHashMapUnmanaged(FuncSig),
     /// Origin keys of affine values consumed in the current scope.
     /// 2026-04-30 audit finding F6.
@@ -358,6 +387,7 @@ const TypeChecker = struct {
             .contract = contract,
             .errors = .empty,
             .prop_types = .empty,
+            .prop_elem_types = .empty,
             .method_sigs = .empty,
             .consumed_values = .empty,
             .affine_aliases = .empty,
@@ -369,6 +399,12 @@ const TypeChecker = struct {
         // origin keys for affine tracking.
         for (contract.properties) |prop| {
             try self.prop_types.put(allocator, prop.name, prop.type_info);
+            if (prop.type_info == .fixed_array and
+                prop.fixed_array_element != .unknown and
+                prop.fixed_array_element != .fixed_array)
+            {
+                try self.prop_elem_types.put(allocator, prop.name, prop.fixed_array_element);
+            }
             const key = try std.fmt.allocPrint(allocator, "prop:{s}", .{prop.name});
             try self.prop_origin_keys.put(allocator, prop.name, key);
         }
@@ -397,6 +433,7 @@ const TypeChecker = struct {
         }
         self.method_sigs.deinit(self.allocator);
         self.prop_types.deinit(self.allocator);
+        self.prop_elem_types.deinit(self.allocator);
         self.consumed_values.deinit(self.allocator);
         self.affine_aliases.deinit(self.allocator);
         var keys_it = self.prop_origin_keys.iterator();
@@ -404,6 +441,60 @@ const TypeChecker = struct {
         self.prop_origin_keys.deinit(self.allocator);
         self.stateful_ctx_params.deinit(self.allocator);
         // Note: self.errors ownership transfers to caller via toOwnedSlice
+    }
+
+    /// One emitted state value: what the state continuation actually carries.
+    /// `type_info` is `.unknown` for the leaf of a nested FixedArray, whose
+    /// scalar type this tier's AST does not record.
+    const StateSlot = struct { name: []const u8, type_info: RunarType };
+
+    /// The mutable state as `addOutput` sees it — one slot per value the
+    /// continuation carries, NOT one per declared property.
+    ///
+    /// N-107: `expand_fixed_arrays` (pass 3b) runs after this one and splits a
+    /// FixedArray property into one scalar sibling per element, so the DECLARED
+    /// property list is not the emitted state. The naming mirrors that pass
+    /// (`<root>__<i>`, `<root>__<i>__<j>` for a nested array) so a diagnostic
+    /// names the synthetic property the next pass will create.
+    ///
+    /// Names for expanded slots are allocated and appended to `owned`; the
+    /// caller frees them. A zero length is already a parse/validate error, so
+    /// the property is kept whole in that case and this rule never fires on a
+    /// contract that is going to be rejected for a better reason.
+    fn collectStateSlots(
+        self: *TypeChecker,
+        out: *std.ArrayListUnmanaged(StateSlot),
+        owned: *std.ArrayListUnmanaged([]u8),
+    ) void {
+        for (self.contract.properties) |p| {
+            if (p.readonly) continue;
+            if (p.type_info != .fixed_array or p.fixed_array_length == 0) {
+                out.append(self.allocator, .{ .name = p.name, .type_info = p.type_info }) catch return;
+                continue;
+            }
+            const nested = p.fixed_array_element == .fixed_array and p.fixed_array_nested_length > 0;
+            var i: u32 = 0;
+            while (i < p.fixed_array_length) : (i += 1) {
+                if (nested) {
+                    var j: u32 = 0;
+                    while (j < p.fixed_array_nested_length) : (j += 1) {
+                        const nm = std.fmt.allocPrint(self.allocator, "{s}__{d}__{d}", .{ p.name, i, j }) catch return;
+                        owned.append(self.allocator, nm) catch {
+                            self.allocator.free(nm);
+                            return;
+                        };
+                        out.append(self.allocator, .{ .name = nm, .type_info = .unknown }) catch return;
+                    }
+                    continue;
+                }
+                const nm = std.fmt.allocPrint(self.allocator, "{s}__{d}", .{ p.name, i }) catch return;
+                owned.append(self.allocator, nm) catch {
+                    self.allocator.free(nm);
+                    return;
+                };
+                out.append(self.allocator, .{ .name = nm, .type_info = p.fixed_array_element }) catch return;
+            }
+        }
     }
 
     fn addError(self: *TypeChecker, comptime fmt: []const u8, args: anytype) void {
@@ -476,10 +567,30 @@ const TypeChecker = struct {
         // (codePart >= 253 bytes forces a 3-byte CompactSize length prefix,
         // never the P2PKH template's 0x19), so the contract is PERMANENTLY
         // unspendable. The terminal case (no state mutation -> no continuation)
-        // stays valid, and addOutput/addRawOutput layouts are left to the
-        // developer. Mirrors compilers/../03-typecheck.ts analyzeMethodOutputSignals.
+        // stays valid.
+        //
+        // R-300: "addOutput/addRawOutput layouts are left to the developer" used
+        // to finish that sentence, and it was wrong — no layout the developer can
+        // pick makes the offsets work. this.addOutput(...) writes the continuation
+        // (codePart plus serialised state, hundreds of bytes) at output 0, so
+        // outputIndex*34 lands INSIDE that script for every index. addRawOutput's
+        // length is a runtime value, so the stride cannot be proven there either.
+        // See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
+        // Mirrors compilers/../03-typecheck.ts analyzeMethodOutputSignals.
         if (self.contract.parent_class == .stateful_smart_contract) {
             const signals = analyzeMethodOutputSignals(method.body, self.contract.properties);
+            if (has_require_p2pkh and signals.has_state_output) {
+                self.addError(
+                    "method '{s}' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — " ++
+                        "the intrinsic reads output i at byte offset i*34, which is only correct when " ++
+                        "every earlier output is exactly 34 bytes, and a state-continuation output never " ++
+                        "is (codePart plus serialised state). The assertion would read bytes from the " ++
+                        "middle of the contract's own locking script, so the contract would be " ++
+                        "permanently unspendable. Assert the payment from a separate method that emits " ++
+                        "no output of its own",
+                    .{method.name},
+                );
+            }
             if (signals.requires_output_p2pkh_zero and signals.mutates_state and !signals.has_state_output) {
                 self.addError(
                     "method '{s}' calls requireOutputP2PKH(0, ...) but also mutates state " ++
@@ -539,18 +650,50 @@ const TypeChecker = struct {
                 }
             },
             .assign => |assign| {
-                // Index-target writes (e.g. `this.board[i] = v`) are typed
-                // permissively — the FixedArray element type is resolved later
-                // by the expand_fixed_arrays pass. We still type-check the
-                // value + index sub-expressions.
+                // R-073 / CL-BUG-168: an index-target write (`this.cells[0] = v`)
+                // used to return from here with the VALUE unchecked against the
+                // array's element type, so `this.cells[0] = <ByteString>` on a
+                // `FixedArray<bigint, 3>` emitted a full locking script in this
+                // tier while all six peer tiers rejected it. The old comment
+                // blamed `expand_fixed_arrays`, but that pass runs after
+                // typecheck and carries no type environment: nothing downstream
+                // ever performed the check.
+                //
+                // The element type cannot come from `inferExprType` — its
+                // `.index_access` arm returns `.unknown` unconditionally and must
+                // keep doing so (see the N-019 tripwire at the bottom of this
+                // file) — so it is read off the declared property instead.
                 if (assign.index_target != null) {
                     _ = self.inferExprType(assign.index_target.?.index, env);
-                    _ = self.inferExprType(assign.value, env);
+                    const elem_value_type = self.inferExprType(assign.value, env);
+                    // Only a direct `this.<prop>[i] = v` is checkable here.
+                    // `target_is_property` is what separates it from a write to
+                    // a local that merely shares the name — every one of this
+                    // tier's nine surface parsers sets the flag on its
+                    // index-access arm. A nested chain (`this.grid[i][j] = v`)
+                    // parses with `target = "unknown"` and has no recorded leaf
+                    // type, so it falls through to the pre-existing permissive
+                    // behaviour.
+                    if (assign.target_is_property or env.lookup(assign.target) == null) {
+                        if (self.prop_elem_types.get(assign.target)) |elem_type| {
+                            if (!isSubtype(elem_value_type, elem_type)) {
+                                self.addError("type '{s}' is not assignable to type '{s}'", .{
+                                    types.runarTypeToString(elem_value_type),
+                                    types.runarTypeToString(elem_type),
+                                });
+                            }
+                        }
+                    }
                     return;
                 }
                 const target_type = if (self.prop_types.get(assign.target)) |t| t else (env.lookup(assign.target) orelse .unknown);
-                // Skip subtype check when the target is a FixedArray — the
-                // expand pass will split it into scalar siblings.
+                // Whole-array reassignment (`this.cells = other`) is not a legal
+                // Rúnar program at all: `expand_fixed_arrays` refuses it outright
+                // ("cannot reassign entire FixedArray property"). Comparing a
+                // scalar value type against `.fixed_array` here would only add a
+                // second, less specific diagnostic for a program already refused,
+                // so the subtype check is skipped and the later pass owns the
+                // rejection.
                 if (target_type == .fixed_array) {
                     _ = self.inferExprType(assign.value, env);
                     return;
@@ -580,6 +723,14 @@ const TypeChecker = struct {
             .for_stmt => |for_s| {
                 env.pushScope() catch return;
                 env.define(for_s.var_name, .bigint);
+                // N-061 / R-065: the update clause used to be skipped entirely
+                // here (and discarded outright by the parsers), so
+                // `for (let i = 0n; i < 3n; undefinedFn())` compiled clean — a
+                // hole in the rule that only Rúnar builtins and contract
+                // methods are callable. validate.zig separately restricts the
+                // clause to a unit-step advance; this is the type-level half of
+                // the same guard.
+                if (for_s.update) |u| self.checkStatement(u.*, env);
                 self.checkStatements(for_s.body, env);
                 env.popScope();
             },
@@ -613,9 +764,36 @@ const TypeChecker = struct {
             .identifier => |name| {
                 if (std.mem.eql(u8, name, "this") or std.mem.eql(u8, name, "self")) return .unknown; // sentinel
                 if (std.mem.eql(u8, name, "super")) return .unknown;
+                if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) return .boolean;
+                // The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+                // the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+                // identifier arm as a name to be typed. It is a discard, not a reference:
+                // nothing is being looked up, so `undefined` is the wrong word for it.
+                // Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+                // `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+                // "Undefined variable '_'" — invariant 1 (all seven parse all nine
+                // surfaces) already broken for this shape. Listing it here rather than
+                // letting the new fall-through reject it keeps the six tiers' bytes and
+                // brings the seventh into line.
+                if (std.mem.eql(u8, name, "_")) return .unknown;
                 if (env.lookup(name)) |t| return t;
                 if (self.prop_types.get(name)) |t| return t;
                 if (builtin_functions.get(name) != null) return .unknown; // builtin ref
+                if (known_globals.get(name)) |t| return t;
+                // GK-BUG-009 -- a name that resolves to nothing is an error HERE,
+                // at the only pass that can see the binding environment. It used
+                // to return `.unknown` silently, and `.unknown` is compatible
+                // with everything under isSubtype by design (R-092), so
+                // `notAThing === 1n` raised nothing. `notAThing > 1n` did raise
+                // -- the bigint-family check does not admit `.unknown` -- which
+                // is why R-085's `>` pin read as closed while the `===` path was
+                // wide open. Where the reference is reachable from codegen,
+                // stack lowering later refuses to emit an OP_0 placeholder and
+                // the compile still fails, but for the wrong reason; where it is
+                // NOT reachable (an uncalled private helper, a zero-iteration
+                // loop) nothing fired at all and the contract compiled to a
+                // locking script.
+                self.addError("Undefined variable '{s}'", .{name});
                 return .unknown;
             },
             .property_access => |pa| {
@@ -645,6 +823,29 @@ const TypeChecker = struct {
                 if (cons_type != alt_type) {
                     if (isSubtype(alt_type, cons_type)) return cons_type;
                     if (isSubtype(cons_type, alt_type)) return alt_type;
+                    // N-099: arms related in NEITHER direction used to fall
+                    // through to `return cons_type`, silently retyping the
+                    // alternate. A ByteString and a bigint do not share a stack
+                    // representation -- one is a byte string, the other a script
+                    // number -- so the retyped arm leaves the wrong kind of
+                    // value on the stack and everything downstream reads a type
+                    // the author never wrote. ts / rust / java already refused
+                    // this; go / python / zig / ruby accepted it.
+                    //
+                    // Ported from the TypeScript reference (Rust carries it
+                    // verbatim), wording included -- hence the capital T, which
+                    // differs from the lowercase house style of the condition
+                    // message above. That casing divergence is pre-existing and
+                    // left alone; the new message matches TS so the seven tiers
+                    // agree on it.
+                    //
+                    // `unknown` never reaches here: isSubtype treats it as top
+                    // of the lattice, so a private helper's return type is
+                    // related to everything, exactly as in TS.
+                    self.addError(
+                        "Ternary branches have incompatible types: '{s}' and '{s}'",
+                        .{ types.runarTypeToString(cons_type), types.runarTypeToString(alt_type) },
+                    );
                 }
                 return cons_type;
             },
@@ -658,14 +859,23 @@ const TypeChecker = struct {
                 return .unknown;
             },
             .increment => |inc| {
-                const operand_type = self.inferExprType(inc.operand, env);
+                // N-019: `inferOperandType`, not `inferExprType` — a FixedArray
+                // element read resolves to the array's declared element type
+                // here, the same way `checkBinaryExpr` resolves its operands.
+                // Safe now, and only now: `expand_fixed_arrays.zig` desugars a
+                // statement-position `this.arr[i]++` into the assignment form
+                // and REFUSES the expression form, so an increment that types
+                // here also writes back. Before that port landed this arm had
+                // to refuse, because typing it would have produced an increment
+                // of a temporary with no state continuation.
+                const operand_type = self.inferOperandType(inc.operand, env);
                 if (!isBigintFamily(operand_type)) {
                     self.addError("++ operator requires bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
                 return .bigint;
             },
             .decrement => |dec| {
-                const operand_type = self.inferExprType(dec.operand, env);
+                const operand_type = self.inferOperandType(dec.operand, env);
                 if (!isBigintFamily(operand_type)) {
                     self.addError("-- operator requires bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
                 }
@@ -682,9 +892,69 @@ const TypeChecker = struct {
     // Binary expression type checking
     // ------------------------------------------------------------------
 
+    /// N-097: type an operand of a binary expression, resolving a FixedArray
+    /// ELEMENT READ (`this.<prop>[idx]`) to the array's declared element type.
+    ///
+    /// This is the R-073 shape (`1f8eb8a9`) applied to the read side: the type
+    /// is read off the DECLARED property, at the one site that needs it, rather
+    /// than taught to `inferExprType`. `inferExprType(.index_access)` still
+    /// returns `.unknown` for every caller — see `operandElementType` for why
+    /// that separation is load-bearing.
+    ///
+    /// `inferExprType` is called first and unconditionally: it is what reports
+    /// "array index must be bigint" and what walks the index sub-expression for
+    /// affine-consumption tracking. Only its RESULT is substituted, and only
+    /// when it came back `.unknown` — a tier that already has an opinion keeps
+    /// it.
+    fn inferOperandType(self: *TypeChecker, expr: Expression, env: *TypeEnv) RunarType {
+        const inferred = self.inferExprType(expr, env);
+        if (inferred != .unknown) return inferred;
+        return self.operandElementType(expr, env) orelse inferred;
+    }
+
+    /// The declared element type of `this.<prop>[idx]`, or null when the
+    /// expression is not a resolvable single-level read of a FixedArray
+    /// property.
+    ///
+    /// SCOPE — why this is not simply `inferExprType(.index_access)`:
+    ///
+    /// The N-019 tripwire at the bottom of this file forbids typing element
+    /// reads in general, because the `.increment` / `.decrement` arms would
+    /// then accept `this.board[i]++`. This tier's `expand_fixed_arrays`
+    /// rewrites an increment by recursing into its operand, so a runtime-index
+    /// increment becomes `increment(<read-dispatch ternary>)`: it increments a
+    /// temporary, writes back to no slot, and emits no state continuation —
+    /// the N-019 fund-loss defect verbatim. The pass-3b increment desugar that
+    /// the other six tiers carry is not ported here.
+    ///
+    /// Keeping the resolution in a helper that only `checkBinaryExpr` calls is
+    /// what keeps that shut: the increment arms still call `inferExprType`,
+    /// still see `.unknown`, and still refuse. The tripwire test is unmodified
+    /// and still passes.
+    ///
+    /// Only a `this.<prop>` base is resolved. A local that merely shares the
+    /// array's name parses as `.identifier`, not `.property_access`, so
+    /// shadowing cannot borrow the property's element type. A nested chain
+    /// (`this.grid[0][1]`) has an `.index_access` object and is absent from
+    /// `prop_elem_types` anyway — it stays `.unknown`, the documented R-073
+    /// residual gap.
+    fn operandElementType(self: *TypeChecker, expr: Expression, env: *TypeEnv) ?RunarType {
+        const ia = switch (expr) {
+            .index_access => |p| p.*,
+            else => return null,
+        };
+        const base = switch (ia.object) {
+            .property_access => |pa| pa,
+            else => return null,
+        };
+        if (!std.mem.eql(u8, base.object, "this")) return null;
+        if (env.lookup(base.property) != null) return null;
+        return self.prop_elem_types.get(base.property);
+    }
+
     fn checkBinaryExpr(self: *TypeChecker, bin: *const types.BinaryOp, env: *TypeEnv) RunarType {
-        const left_type = self.inferExprType(bin.left, env);
-        const right_type = self.inferExprType(bin.right, env);
+        const left_type = self.inferOperandType(bin.left, env);
+        const right_type = self.inferOperandType(bin.right, env);
 
         switch (bin.op) {
             // ByteString concatenation: ByteString + ByteString -> ByteString
@@ -716,10 +986,15 @@ const TypeChecker = struct {
             },
             // Equality
             .eq, .neq => {
+                // Exactly the reference tier's rule: each side is tried as a
+                // subtype of the other, and nothing else. The both-in-family
+                // clauses that used to sit here were a copy of what
+                // `isSubtype` already does (N-104) — four of the seven tiers
+                // needed the copy because their `isSubtype` lacked the
+                // clauses; none of them do now, and a second copy of the
+                // lattice is a second thing to drift.
                 const compatible = isSubtype(left_type, right_type) or
-                    isSubtype(right_type, left_type) or
-                    (isByteFamily(left_type) and isByteFamily(right_type)) or
-                    (isBigintFamily(left_type) and isBigintFamily(right_type));
+                    isSubtype(right_type, left_type);
                 if (!compatible and left_type != .unknown and right_type != .unknown) {
                     self.addError("cannot compare '{s}' and '{s}' with '{s}'", .{
                         types.runarTypeToString(left_type),
@@ -843,32 +1118,200 @@ const TypeChecker = struct {
     // Method call expression type checking (this.method() etc.)
     // ------------------------------------------------------------------
 
+    /// Type-check the arguments of the three output intrinsics --
+    /// `this.addOutput` / `this.addRawOutput` / `this.addDataOutput` -- and
+    /// return their result type.
+    ///
+    /// N-098: the first argument is the output's SATOSHI AMOUNT, and this tier
+    /// used to accept any type there. That is not a missing lint.
+    /// `lowerAddOutput` prepends the operand as `OP_8 OP_NUM2BIN`, so a
+    /// ByteString in that slot is reinterpreted as a script number with no
+    /// conversion and becomes the amount the covenant commits to:
+    /// `blob: ByteString` and `blob: bigint` compiled to the SAME script, byte
+    /// for byte. On the real @bsv/sdk Spend engine with `blob = 0x2a` only a
+    /// 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+    /// OP_NUM2BIN, making the UTXO unspendable.
+    ///
+    /// Ported from the TypeScript reference, wording included. Deliberately the
+    /// FIRST argument only: TS also checks arity, the state-value types and the
+    /// scriptBytes argument, and none of those are this finding.
+    ///
+    /// N-105: the SECOND argument of addRawOutput / addDataOutput is the
+    /// created output's LOCKING SCRIPT, and this tier used to accept any type
+    /// there too. lowerAddRawOutput takes OP_SIZE of the operand,
+    /// varint-prefixes it and concatenates it after the amount — no conversion
+    /// — so `n: bigint` and `n: ByteString` compiled to the SAME script, byte
+    /// for byte. A script number on the stack is its minimal little-endian
+    /// encoding, so the covenant commits to an output whose locking script IS
+    /// those bytes. Executed on the real @bsv/sdk Spend engine against the
+    /// exact opcode window this tier emits: n=0 gives an EMPTY locking script,
+    /// n=81 gives OP_1 and n=118 gives OP_DUP — all three anyone-can-spend —
+    /// while n=1000 gives 0xe8 0x03, an invalid opcode, and the output is
+    /// unspendable.
+    ///
+    /// `unknown` is escaped exactly as TS escapes `<unknown>` -- a private
+    /// helper's declared return type is discarded at parse time in every tier,
+    /// so `this.sats()` infers as `unknown` and must keep compiling.
+    fn checkOutputIntrinsicArgs(
+        self: *TypeChecker,
+        name: []const u8,
+        args: []const types.Expression,
+        env: *TypeEnv,
+    ) RunarType {
+        // N-105: all three intrinsics build an OUTPUT, and an output only
+        // exists in a stateful contract. TS refuses the call outright and
+        // checks nothing else, so the early return is part of the ported
+        // behaviour. This tier used to report its own wording here and then
+        // carry on checking; it now matches the reference on both counts.
+        if (self.contract.parent_class != .stateful_smart_contract) {
+            self.addError("{s}() is only available in StatefulSmartContract", .{name});
+            return .void;
+        }
+
+        if (std.mem.eql(u8, name, "addOutput")) {
+            // The surface form `this.addOutput(satoshis, .{ v1, v2, ... })` that
+            // Zig and Move tuple syntax produce carries the state values in a
+            // trailing array literal. lowerAddOutputArgs unwraps it the same
+            // way, so the arity checked here is the arity codegen will see.
+            const state_args: []const Expression = blk: {
+                if (args.len == 2) switch (args[1]) {
+                    .array_literal => |elems| break :blk elems,
+                    else => {},
+                };
+                break :blk if (args.len > 1) args[1..] else &.{};
+            };
+
+            // N-107: count the state slots the continuation will actually
+            // carry, not the DECLARED mutable properties. expand_fixed_arrays
+            // runs right after this pass and splits `board: FixedArray<bigint,
+            // 3>` into `board__0 .. board__2`, so a contract declaring `board`
+            // and `n` emits FOUR state values. addOutput is positional against
+            // the emitted values, which is why the declared count answers the
+            // wrong question.
+            //
+            // This used to be `const shape_checkable = !has_fixed_array_state`:
+            // the rule was scoped OUT of every contract with FixedArray state,
+            // because porting it verbatim would have rejected Boardy (in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py)
+            // the way the reference tier did. The cost of that opt-out was
+            // silent: a wrong-arity addOutput on a FixedArray contract was
+            // ACCEPTED here and emitted a state continuation that disagreed
+            // with the contract's own state. Gate:
+            // conformance/negatives/N26-addoutput-arity-fixedarray.
+            var slots: std.ArrayListUnmanaged(StateSlot) = .empty;
+            var slot_names: std.ArrayListUnmanaged([]u8) = .empty;
+            defer {
+                for (slot_names.items) |n| self.allocator.free(n);
+                slot_names.deinit(self.allocator);
+                slots.deinit(self.allocator);
+            }
+            self.collectStateSlots(&slots, &slot_names);
+            const mutable_count = slots.items.len;
+            const expected = 1 + mutable_count;
+            const got = if (args.len == 0) @as(usize, 0) else 1 + state_args.len;
+            if (got != expected) {
+                self.addError(
+                    "addOutput() expects {d} argument(s): satoshis + {d} state value(s), got {d}",
+                    .{ expected, mutable_count, got },
+                );
+            }
+            if (args.len >= 1) {
+                const sat_type = self.inferExprType(args[0], env);
+                if (!isBigintFamily(sat_type) and sat_type != .unknown) {
+                    self.addError(
+                        "addOutput() first argument (satoshis) must be bigint, got '{s}'",
+                        .{types.runarTypeToString(sat_type)},
+                    );
+                }
+            }
+            // Walk the emitted state slots in declaration order alongside the
+            // state values. Every state value is inferred, surplus ones
+            // included, so a type error inside one is not swallowed by the
+            // arity diagnostic.
+            for (state_args, 0..) |arg, i| {
+                const arg_type = self.inferExprType(arg, env);
+                if (i >= slots.items.len) continue;
+                const slot = slots.items[i];
+                // `.unknown` marks a leaf of a NESTED FixedArray, whose scalar
+                // type this tier's AST does not record (see `prop_elem_types`
+                // above: `FixedArray<FixedArray<..>, N>` stores `.fixed_array`
+                // as its element and loses the leaf type at parse time). The
+                // ARITY is still checked for those slots — that is the part
+                // that decides how many values the continuation commits to —
+                // and only the per-slot type check is skipped, deliberately,
+                // rather than guessed.
+                if (slot.type_info == .unknown) continue;
+                if (!isSubtype(arg_type, slot.type_info) and arg_type != .unknown) {
+                    self.addError(
+                        "addOutput() argument {d} ({s}) must be '{s}', got '{s}'",
+                        .{
+                            i + 2,
+                            slot.name,
+                            types.runarTypeToString(slot.type_info),
+                            types.runarTypeToString(arg_type),
+                        },
+                    );
+                }
+            }
+            return .void;
+        }
+
+        // addRawOutput / addDataOutput — (satoshis, scriptBytes).
+        if (args.len != 2) {
+            self.addError(
+                "{s}() expects 2 arguments (satoshis, scriptBytes), got {d}",
+                .{ name, args.len },
+            );
+        }
+        if (args.len >= 1) {
+            const sat_type = self.inferExprType(args[0], env);
+            if (!isBigintFamily(sat_type) and sat_type != .unknown) {
+                self.addError(
+                    "{s}() first argument (satoshis) must be bigint, got '{s}'",
+                    .{ name, types.runarTypeToString(sat_type) },
+                );
+            }
+        }
+        if (args.len >= 2) {
+            // TS uses isSubtype against ByteString, not equality, so every
+            // ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+            const script_type = self.inferExprType(args[1], env);
+            if (!isSubtype(script_type, .byte_string) and script_type != .unknown) {
+                self.addError(
+                    "{s}() second argument (scriptBytes) must be ByteString, got '{s}'",
+                    .{ name, types.runarTypeToString(script_type) },
+                );
+            }
+        }
+        return .void;
+    }
+
     fn checkMethodCallExpr(self: *TypeChecker, mc: *const types.MethodCall, env: *TypeEnv) RunarType {
         const is_this = std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self");
         const is_stateful_ctx = self.stateful_ctx_params.get(mc.object) != null;
 
         if (is_this or is_stateful_ctx) {
-            if (std.mem.eql(u8, mc.method, "getStateScript")) return .byte_string;
-            if (std.mem.eql(u8, mc.method, "addOutput")) {
-                if (self.contract.parent_class != .stateful_smart_contract) {
-                    self.addError("addOutput() is only available in StatefulSmartContract, not SmartContract", .{});
+            if (std.mem.eql(u8, mc.method, "getStateScript")) {
+                // R-173: the builtin takes none — it returns the contract's own
+                // state script, a property of the contract rather than of
+                // anything a caller could pass. Five tiers used to accept
+                // arguments and DISCARD them, emitting hex byte-identical to
+                // the zero-argument spelling, so an author who believed the
+                // arguments meant something got a script that ignored them with
+                // no diagnostic. Message is the reference tier's.
+                if (mc.args.len != 0) {
+                    self.addError("getStateScript() takes no arguments", .{});
                 }
-                for (mc.args) |arg| _ = self.inferExprType(arg, env);
-                return .void;
+                return .byte_string;
+            }
+            if (std.mem.eql(u8, mc.method, "addOutput")) {
+                return self.checkOutputIntrinsicArgs("addOutput", mc.args, env);
             }
             if (std.mem.eql(u8, mc.method, "addRawOutput")) {
-                if (self.contract.parent_class != .stateful_smart_contract) {
-                    self.addError("addRawOutput() is only available in StatefulSmartContract, not SmartContract", .{});
-                }
-                for (mc.args) |arg| _ = self.inferExprType(arg, env);
-                return .void;
+                return self.checkOutputIntrinsicArgs("addRawOutput", mc.args, env);
             }
             if (std.mem.eql(u8, mc.method, "addDataOutput")) {
-                if (self.contract.parent_class != .stateful_smart_contract) {
-                    self.addError("addDataOutput() is only available in StatefulSmartContract, not SmartContract", .{});
-                }
-                for (mc.args) |arg| _ = self.inferExprType(arg, env);
-                return .void;
+                return self.checkOutputIntrinsicArgs("addDataOutput", mc.args, env);
             }
             if (self.method_sigs.get(mc.method)) |method_sig| {
                 return self.checkCallArgs(mc.method, method_sig, mc.args, env);
@@ -962,7 +1405,21 @@ const TypeChecker = struct {
                     .unary_op => |u| {
                         if (u.op == .negate) {
                             switch (u.operand) {
-                                .literal_int => |v| idx_lit = -v,
+                                // N-060: this arm exists ONLY to reach the
+                                // "must be >= 0" message below, so it must
+                                // surrender anything that is not actually
+                                // negative (`v > 0` is `-v < 0`, and it also
+                                // dodges negating minInt). `-0` negates to 0
+                                // and would sail past that bound check, but
+                                // ANF lowering matches on a bare .literal_int:
+                                // on a .unary_op it falls through to
+                                // `load_const ""` and the covenant the
+                                // intrinsic was supposed to install is
+                                // silently absent. Leave idx_lit null so the
+                                // non-literal-index diagnostic fires instead.
+                                .literal_int => |v| {
+                                    if (v > 0) idx_lit = -v;
+                                },
                                 else => {},
                             }
                         }
@@ -978,8 +1435,8 @@ const TypeChecker = struct {
                     if (idx < 0) {
                         self.addError("{s}() argument 1 (index) must be >= 0; got {d}", .{ func_name, idx });
                     }
-                    if (std.mem.eql(u8, func_name, "requireOutputP2PKH") and idx > 1000) {
-                        self.addError("requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got {d} (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)", .{idx});
+                    if (std.mem.eql(u8, func_name, "requireOutputP2PKH") and idx > 0) {
+                        self.addError("requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got {d}. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit", .{idx});
                     }
                 } else {
                     self.addError("{s}() argument 1 (index) must be an integer literal", .{func_name});
@@ -2309,4 +2766,105 @@ test "isBigintFamily: comprehensive" {
     try std.testing.expect(!isBigintFamily(.byte_string));
     try std.testing.expect(!isBigintFamily(.boolean));
     try std.testing.expect(!isBigintFamily(.pub_key));
+}
+
+// ---------------------------------------------------------------------------
+// N-019: FixedArray element increments, and where they are made safe.
+// ---------------------------------------------------------------------------
+
+// `inferExprType`'s `.index_access` arm returns `.unknown` unconditionally — it
+// never resolves a FixedArray property base to its element type. Element types
+// are resolved at the sites that can act on them, off the DECLARED property:
+// `inferOperandType` (the R-073 shape).
+//
+// N-097 added the first two of those sites: `checkBinaryExpr`'s two operands,
+// so `assert(this.xs[0] >= 0n)` and `arr[i] = arr[i] + 1` compile here and are
+// byte-identical to the other six tiers. Runtime-index WRITES
+// (`this.board[i] = v`) were always unaffected.
+//
+// N-019's history is why the `.increment` / `.decrement` arms came last. In six
+// tiers `this.board[i]++` emitted NO state continuation at all — pass 3b
+// rewrote the increment's operand into a read ternary and the write was
+// dropped, leaving the spending path unconstrained (the fund-loss bug, fixed by
+// `4c062371`). This tier refused the construct instead, which was safe and was
+// also the reason the pass-3b desugar could not be ported: it would have been
+// dead code behind a type error.
+//
+// N-124 UPDATE: the prerequisite was met, and the refusal is gone.
+// `expand_fixed_arrays.zig` now desugars a statement-position
+// `this.board[i]++` into `this.board[idx] = this.board[idx] + 1` through the
+// existing `rewriteIndexAssign` path — the same rewrite the other six tiers
+// carry since `4c062371` — and REFUSES the expression form, which cannot be
+// desugared. With the write-back guaranteed, the `.increment` / `.decrement`
+// arms route through `inferOperandType` like every other operand.
+//
+// The invariant that replaced the refusal, and the thing to protect: an
+// increment that TYPES here must also WRITE BACK. `src/tests/n124_fixed_array_increment.zig`
+// pins it three ways — both index forms byte-identical to the Go tier,
+// `arr[i]++` byte-identical to `arr[i] = arr[i] + 1n`, and a no-mutation
+// control whose script is strictly shorter (that difference is the state
+// continuation whose absence WAS the N-019 fund loss).
+// See also `src/tests/n097_fixed_array_element_read.zig`.
+fn n019ArrayElementIncrementContract(alloc: Allocator) !ContractNode {
+    const board_read = try alloc.create(types.IndexAccess);
+    board_read.* = .{
+        .object = .{ .property_access = .{ .object = "this", .property = "board" } },
+        .index = .{ .identifier = "i" },
+    };
+    const inc = try alloc.create(types.IncrementExpr);
+    inc.* = .{ .operand = .{ .index_access = board_read }, .prefix = false };
+
+    const body = try alloc.alloc(Statement, 1);
+    body[0] = .{ .expr_stmt = .{ .expr = .{ .increment = inc } } };
+
+    const params = try alloc.alloc(types.ParamNode, 1);
+    params[0] = .{ .name = "i", .type_info = .bigint };
+
+    const methods = try alloc.alloc(MethodNode, 1);
+    methods[0] = .{ .name = "bump", .is_public = true, .params = params, .body = body };
+
+    const props = try alloc.alloc(types.PropertyNode, 1);
+    props[0] = .{
+        .name = "board",
+        .type_info = .fixed_array,
+        .readonly = false,
+        .fixed_array_length = 3,
+        .fixed_array_element = .bigint,
+    };
+
+    return .{
+        .name = "BumpIncr",
+        .parent_class = .stateful_smart_contract,
+        .properties = props,
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+}
+
+test "N-019: `this.board[i]++` types, because pass 3b now writes it back" {
+    // WAS: "is rejected, not silently miscompiled". The refusal was never the
+    // goal — it was the safe answer available while the pass-3b increment
+    // desugar was unported, and the tripwire above said so in as many words:
+    // "Port the pass-3b desugar BEFORE relaxing this."
+    //
+    // N-124 ported it. `expand_fixed_arrays.zig` turns a statement-position
+    // `this.board[i]++` into `this.board[idx] = this.board[idx] + 1` through
+    // the existing `rewriteIndexAssign` path, so the increment that types here
+    // also writes back and also carries a state continuation — byte-identical
+    // to the Go tier. Expression position stays refused, in that pass rather
+    // than in this one.
+    //
+    // What still must not happen is this arm typing an element read it cannot
+    // write back. That is covered where it belongs now:
+    // `src/tests/n124_fixed_array_increment.zig` pins both forms against the
+    // Go tier's bytes, pins `arr[i]++` equal to `arr[i] = arr[i] + 1n`, and
+    // pins the expression form as an error.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const contract = try n019ArrayElementIncrementContract(alloc);
+    const result = try typeCheck(alloc, contract);
+
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
 }

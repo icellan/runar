@@ -189,8 +189,9 @@ class TestIntentIntrinsics < Minitest::Test
       }
 
       func (c *Cov) PayMulti() {
+      \t// W2: both calls name index 0 -- any literal index above 0 is refused now.
       \trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
-      \trunar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+      \trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
       }
     GO
     prog = must_lower_go(source)

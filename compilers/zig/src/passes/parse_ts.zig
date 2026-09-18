@@ -18,6 +18,7 @@
 //!   - Types: `PubKey`, `Sig`, `Addr`, `ByteString`, `bigint`, `boolean`, `void`
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
@@ -69,17 +70,6 @@ pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) 
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9). Used to identify
-/// decimal integer literals that overflow `i64` (e.g. the secp256k1 group
-/// order) so the parser can route them to a `literal_bigint` AST node
-/// instead of truncating to `i64`.
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -765,6 +755,10 @@ const Parser = struct {
                 .fixed_array_element = fa_elem,
                 .fixed_array_nested_length = fa_nested_len,
                 .embed_always = embed_always,
+                // N-109: the spelled type name + the field-name token, for the
+                // validator's unsupported-type diagnostic. Diagnostics only.
+                .type_name = types.typeNodeName(type_node),
+                .source_loc = self.tokenSourceLoc(name_tok),
             } };
         }
 
@@ -825,6 +819,12 @@ const Parser = struct {
     fn methodToConstructor(self: *Parser, m: MethodNode) ConstructorNode {
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        // R-040: every statement that is not the `super(...)` call, in source
+        // order. ANF lowering emits super from `super_args` and then lowers
+        // this list, so a statement the two summary fields cannot express
+        // (an `assert` on an argument, a local declaration) is no longer
+        // dropped on the floor.
+        var body: std.ArrayListUnmanaged(Statement) = .empty;
 
         for (m.body) |stmt| {
             switch (stmt) {
@@ -835,13 +835,16 @@ const Parser = struct {
                         if (self.extractSuperArgs(expr)) |args| {
                             for (args) |arg| super_args.append(self.allocator, arg) catch {};
                         }
+                        continue;
                     }
+                    body.append(self.allocator, stmt) catch {};
                 },
                 .assign => |assign| {
                     // this.x = value
                     assignments.append(self.allocator, .{ .target = assign.target, .value = assign.value }) catch {};
+                    body.append(self.allocator, stmt) catch {};
                 },
-                else => {},
+                else => body.append(self.allocator, stmt) catch {},
             }
         }
 
@@ -849,6 +852,7 @@ const Parser = struct {
             .params = m.params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = body.items,
         };
     }
 
@@ -1018,6 +1022,15 @@ const Parser = struct {
             }
         }
 
+        // `number` is not a Runar type (R-301). resolveTsTypeName maps it onto
+        // bigint, which is the right lowering but the wrong silence: a contract
+        // declaring `x: number` compiled to the same script as `x: bigint` with
+        // nothing said. The go and rust tiers have always refused it here. The
+        // mapping stays so the rest of the parse continues on a sane node.
+        if (std.mem.eql(u8, name, "number")) {
+            self.addError("'number' type is not allowed in Runar contracts; use 'bigint' instead");
+        }
+
         return resolveTsTypeName(name);
     }
 
@@ -1162,6 +1175,15 @@ const Parser = struct {
         return &.{};
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1171,6 +1193,8 @@ const Parser = struct {
         // Extract: var_name, init_value, bound
         var var_name: []const u8 = "_i";
         var init_value: i64 = 0;
+        // N-137: the START's counterpart to `bound_is_const` below.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
@@ -1178,6 +1202,10 @@ const Parser = struct {
         // (`i < this.x`) or an identifier bound (`i < N`) must be rejected by
         // the validator rather than silently collapsing to a 0-iteration loop.
         var bound_is_const: bool = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // A header with no condition at all keeps the `true` default; a
+        // condition that is not a comparison sets it false below.
+        var cond_tests_iter: bool = true;
 
         // Initializer: let/const varname = expr
         if (self.checkIdent("let") or self.checkIdent("const")) {
@@ -1190,10 +1218,26 @@ const Parser = struct {
                 }
                 if (self.current.kind == .assign) {
                     _ = self.bump();
-                    if (self.current.kind == .number) {
+                    // N-138: a NEGATIVE literal start is a literal. This branch
+                    // used to recognise `.number` only, so `for (let i = -1n; …)`
+                    // fell through to "parse the expression and throw it away"
+                    // and unrolled from 0 — byte-divergent from the other six
+                    // tiers on the same source, with no size difference to
+                    // notice. `extractBigIntValue` in the reference tier walks
+                    // a unary minus for exactly this reason.
+                    if (self.current.kind == .minus) {
+                        _ = self.bump();
+                        if (self.current.kind == .number) {
+                            init_value = -(std.fmt.parseInt(i64, self.bump().text, 10) catch 0);
+                        } else {
+                            _ = self.parseExpression();
+                            init_is_const = false;
+                        }
+                    } else if (self.current.kind == .number) {
                         init_value = std.fmt.parseInt(i64, self.bump().text, 10) catch 0;
                     } else {
                         _ = self.parseExpression();
+                        init_is_const = false;
                     }
                 }
             }
@@ -1214,6 +1258,13 @@ const Parser = struct {
                         // Issue #121: record inclusivity (`<=`/`>=`) so anf-lower
                         // adds one to the iteration count.
                         inclusive = bop.op == .lte or bop.op == .gte;
+                        // W4: the LEFT-hand side has to be the iterator. It was
+                        // thrown away here, so `i + 1n < 2n` unrolled twice for a
+                        // loop the source runs once.
+                        cond_tests_iter = switch (bop.left) {
+                            .identifier => |n| std.mem.eql(u8, n, var_name),
+                            else => false,
+                        };
                         switch (bop.right) {
                             .literal_int => |v| {
                                 bound = v;
@@ -1222,21 +1273,26 @@ const Parser = struct {
                             else => {},
                         }
                     },
-                    else => {},
+                    else => cond_tests_iter = false,
                 }
             }
         }
         self.skipSemicolons();
 
-        // Update: i++ / i += 1, etc. — skip
+        // Update: `i++`, `i--`, … N-061: the clause used to be parsed and
+        // discarded, so a non-unit step, a call to an undefined function and a
+        // write to contract state all compiled to the same bytes as `i++`.
+        // Record it so validate.zig can reject what the unrolled loop model
+        // cannot represent.
+        var update: ?*const Statement = null;
         if (self.current.kind != .rparen) {
-            _ = self.parseExpression();
+            if (self.parseExpression()) |e| update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
         }
         if (self.expect(.rparen) == null) return null;
 
         const body = self.parseBlockOrStatement();
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .init_is_const = init_is_const, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
@@ -1654,8 +1710,11 @@ const Parser = struct {
                     // intact; the Zig codegen tier widens this to a
                     // decimal-string-backed push during emit, matching
                     // TS / Go / Python byte-for-byte.
-                    if (isAllAsciiDigits(stripped)) {
-                        const decimal = self.allocator.dupe(u8, stripped) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});

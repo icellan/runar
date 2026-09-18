@@ -18,6 +18,12 @@ import (
 // Constant value representation
 // ---------------------------------------------------------------------------
 
+// powFoldExponentLimit is the upper end of the domain pow is exact on, shared
+// with the emitted script (codegen/stack.go#lowerPow unrolls exactly this many
+// conditional multiplies and enforces the bound with
+// OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the reference interpreter.
+const powFoldExponentLimit = 32
+
 type constKind int
 
 const (
@@ -276,7 +282,13 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 			return nil
 		}
 		base, exp := bigArgs[0], bigArgs[1]
-		if exp.Sign() < 0 || exp.Cmp(big.NewInt(256)) > 0 {
+		// Decline outside the domain the emitted script GUARANTEES and
+		// ENFORCES (codegen/stack.go#lowerPow: 0 <= exp <= 32, the number of
+		// unrolled conditional multiplies). The old bound was 256, which
+		// folded exponents the script CLAMPED to 32 — so for 33 <= exp <= 256
+		// the fold-ON and fold-OFF scripts accepted mutually exclusive inputs
+		// (R-169, the pow half).
+		if exp.Sign() < 0 || exp.Cmp(big.NewInt(powFoldExponentLimit)) > 0 {
 			return nil
 		}
 		result := big.NewInt(1)
@@ -306,6 +318,14 @@ func evalBuiltinCall(funcName string, args []*constValue) *constValue {
 		}
 		n := bigArgs[0]
 		if n.Sign() < 0 {
+			return nil
+		}
+		// Decline outside the domain the emitted script GUARANTEES and ENFORCES
+		// (codegen/stack.go lowerSqrt): n >= 0 and n encodable in <= 62 script
+		// bytes, i.e. n < 2^495. Outside it the compiled script aborts, so
+		// folding to a value here would make sqrt(k) mean one thing folded and
+		// another executed — R-169 at the other end of the domain.
+		if n.BitLen() > 495 {
 			return nil
 		}
 		if n.Sign() == 0 {
@@ -520,14 +540,21 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		}
 
 	case "loop":
+		// N-128: COPY the node, then replace the body. The previous form built a
+		// fresh ANFValue from three hand-picked fields and silently dropped
+		// StartRaw, Start and Step — so a loop that did not begin at 0, or that
+		// counted down, came out of the folder as a zero-start step-1 loop and
+		// the unroller computed a different number. Folding is ON by default, so
+		// that was the user-facing path; `--disable-constant-folding` agreed with
+		// every other tier, which is exactly why the fold-OFF goldens never saw
+		// it. The reference tier has always used a spread here
+		// (`{ ...value, body: foldedBody }`), which is the same thing this now
+		// does: every field survives by construction, including any added later.
 		bodyEnv := env.clone()
 		foldedBody := foldBindings(value.Body, bodyEnv)
-		return &ir.ANFValue{
-			Kind:    "loop",
-			Count:   value.Count,
-			IterVar: value.IterVar,
-			Body:    foldedBody,
-		}
+		folded := *value
+		folded.Body = foldedBody
+		return &folded
 
 	case "assert", "update_prop", "get_state_script",
 		"check_preimage", "deserialize_state",
@@ -573,13 +600,18 @@ func foldConstantsOnly(program *ir.ANFProgram) *ir.ANFProgram {
 	return &result
 }
 
+// foldMethod folds a method's body. It copies the method wholesale and
+// overwrites only Body — never re-enumerating ir.ANFMethod's fields.
+//
+// Enumerating them is how N-093 shipped: the rebuild listed 4 of 5 fields and
+// silently dropped SigHashType, so a `@sighash` directive survived fold-OFF and
+// vanished under the shipped fold-ON default. SigHashType is `json:"-"`, so the
+// cross-tier ANF comparison structurally cannot catch that class of loss.
+// Copy-then-overwrite makes a future sixth field unlosable by construction
+// (the same shape frontend/expand_fixed_arrays.go already uses).
 func foldMethod(method *ir.ANFMethod) ir.ANFMethod {
 	env := newConstEnv()
-	foldedBody := foldBindings(method.Body, env)
-	return ir.ANFMethod{
-		Name:     method.Name,
-		Params:   method.Params,
-		Body:     foldedBody,
-		IsPublic: method.IsPublic,
-	}
+	m := *method
+	m.Body = foldBindings(method.Body, env)
+	return m
 }

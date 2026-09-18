@@ -42,11 +42,21 @@ describe('Auction', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects a bid after deadline', () => {
+  // W7: this used to be "rejects a bid after deadline", asserted by putting
+  // DEADLINE + 1 into the MOCK locktime. That test passed while the contract
+  // was fully exploitable, for two compounding reasons: nLockTime is a
+  // spender-chosen NOT-BEFORE (a late bidder writes DEADLINE - 1, not
+  // DEADLINE + 1, and the node mines it), and `TestContract` has no notion of
+  // chain height or input finality at all. The guard is gone; bidding is open
+  // until the auctioneer closes. Spend-level coverage of both the polarity and
+  // close's finality guard lives in
+  // packages/runar-testing/src/__tests__/w7-auction-locktime-polarity.test.ts.
+  it('accepts a bid whatever the locktime says — v1 cannot close the window', () => {
     const auction = makeAuction(100n);
     auction.setMockPreimage({ locktime: DEADLINE + 1n });
     const result = auction.call('bid', { sig: CHARLIE_SIG, bidder: CHARLIE.pubKey, bidAmount: 200n });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    expect(auction.state.highestBid).toBe(200n);
   });
 
   it('allows close after deadline', () => {

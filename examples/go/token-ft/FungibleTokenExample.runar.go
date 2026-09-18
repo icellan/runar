@@ -16,15 +16,11 @@ import runar "github.com/icellan/runar/packages/runar-go"
 // Operations:
 //   - Transfer -- Split: 1 UTXO -> 2 UTXOs (recipient + change back to sender)
 //   - Send     -- Simple send: 1 UTXO -> 1 UTXO (full balance to new owner)
-//   - Merge    -- Secure merge: 2 UTXOs -> 1 UTXO (consolidate two token UTXOs)
+//   - Merge    -- Merge: 2 UTXOs -> 1 UTXO. Companion-parent merge (W8).
 //
-// Secure merge design:
-// The merge uses position-dependent output construction verified via hashPrevouts.
-// Each input reads its own balance from its locking script (verified by OP_PUSH_TX)
-// and writes it to a specific slot in the output based on its position in the transaction.
-// Since hashOutputs forces both inputs to agree on the exact same output, each input's
-// claimed otherBalance must equal the other input's real verified balance.
-// This prevents the inflation attack where an attacker lies about otherBalance.
+// Companion-parent merge (W8 / SoloMerge): authenticates the companion via
+// otherParentTx. Input count is not identity. Pin:
+// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
 //
 // The output stores both individual balances (Balance and MergeBalance) so they can
 // be independently verified. Subsequent operations use the sum as the available balance.
@@ -81,56 +77,85 @@ func (c *FungibleToken) Send(sig runar.Sig, to runar.PubKey, outputSatoshis runa
 	c.AddOutput(outputSatoshis, to, c.Balance+c.MergeBalance, 0)
 }
 
-// Merge securely consolidates two token UTXOs into one.
-// (2 UTXOs -> 1 UTXO)
-//
-// Why this is secure (anti-inflation proof):
-//
-// Each input reads its own balance from its locking script (c.Balance), which is
-// verified by OP_PUSH_TX — it cannot be faked. Each input writes its verified balance
-// to a specific output slot based on its position in the transaction.
-//
-// Position is derived from allPrevouts (verified against hashPrevouts in the
-// preimage, so it reflects the real transaction) and the input's own outpoint.
-//
-// The output has two balance slots: Balance (slot 0) and MergeBalance (slot 1).
-// Each input places its own verified balance in its slot, and the claimed otherBalance
-// in the other slot:
-//
-//	Input 0 (balance=400): AddOutput(sats, owner, 400, otherBalance_0)
-//	Input 1 (balance=600): AddOutput(sats, owner, otherBalance_1, 600)
-//
-// Both inputs must produce byte-identical outputs (enforced by hashOutputs in BIP-143).
-// This forces:
-//   - slot 0: 400 == otherBalance_1  ->  input 1 MUST pass 400
-//   - slot 1: otherBalance_0 == 600  ->  input 0 MUST pass 600
-//
-// Any lie causes a hashOutputs mismatch and the transaction is rejected on-chain.
-// The inputs can be in any order — each self-discovers its position from the preimage.
-//
-// Parameters:
-//   - sig: current owner's signature (authorization)
-//   - otherBalance: claimed balance of the other merging input
-//   - allPrevouts: concatenated outpoints of all tx inputs (verified via hashPrevouts)
-//   - outputSatoshis: satoshis to fund the merged output UTXO
-func (c *FungibleToken) Merge(sig runar.Sig, otherBalance runar.Bigint, allPrevouts runar.ByteString, outputSatoshis runar.Bigint) {
+// Merge consolidates two token UTXOs into one. Companion-parent merge (W8).
+func (c *FungibleToken) Merge(sig runar.Sig, otherBalance runar.Bigint, allPrevouts runar.ByteString, otherParentTx runar.ByteString, outputSatoshis runar.Bigint) {
 	runar.Assert(runar.CheckSig(sig, c.Owner))
 	runar.Assert(outputSatoshis >= 1)
 	runar.Assert(otherBalance >= 0)
+	runar.Assert(runar.Len(c.TokenId) > 0)
 
-	// Verify allPrevouts is authentic (matches the actual transaction inputs)
+	pad00 := runar.Num2Bin(0, 1)
 	runar.Assert(runar.Hash256(allPrevouts) == runar.ExtractHashPrevouts(c.TxPreimage))
+	runar.Assert(runar.Len(allPrevouts) >= 72)
 
-	// Determine position: am I the first contract input?
 	myOutpoint := runar.ExtractOutpoint(c.TxPreimage)
 	firstOutpoint := runar.Substr(allPrevouts, 0, 36)
-	myBalance := c.Balance + c.MergeBalance
-
+	secondOutpoint := runar.Substr(allPrevouts, 36, 36)
+	companionOutpoint := firstOutpoint
 	if myOutpoint == firstOutpoint {
-		// I'm input 0: my verified balance goes to slot 0
+		companionOutpoint = secondOutpoint
+	} else {
+		runar.Assert(myOutpoint == secondOutpoint)
+	}
+	companionTxid := runar.Substr(companionOutpoint, 0, 32)
+	companionVout := runar.Bin2Num(runar.Cat(runar.Substr(companionOutpoint, 32, 4), pad00))
+	runar.Assert(companionVout == 0)
+	runar.Assert(runar.Hash256(otherParentTx) == companionTxid)
+
+	inCount := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, 4, 1), pad00))
+	runar.Assert(inCount >= 1)
+	runar.Assert(inCount <= 3)
+	off := runar.Bigint(5)
+	if 0 < inCount {
+		sl := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+36, 1), pad00))
+		runar.Assert(sl < 253)
+		off = off + 36 + 1 + sl + 4
+	}
+	if 1 < inCount {
+		sl := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+36, 1), pad00))
+		runar.Assert(sl < 253)
+		off = off + 36 + 1 + sl + 4
+	}
+	if 2 < inCount {
+		sl := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+36, 1), pad00))
+		runar.Assert(sl < 253)
+		off = off + 36 + 1 + sl + 4
+	}
+	outCountPrefix := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off, 1), pad00))
+	runar.Assert(outCountPrefix != 254)
+	runar.Assert(outCountPrefix != 255)
+	outHdr := runar.Bigint(1)
+	outCount := outCountPrefix
+	if outCountPrefix == 253 {
+		outCount = runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+1, 2), pad00))
+		outHdr = 3
+	}
+	runar.Assert(outCount >= 1)
+	marker := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+outHdr+8, 1), pad00))
+	runar.Assert(marker == 253)
+	scriptLen := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+outHdr+9, 2), pad00))
+	scriptStart := off + outHdr + 11
+	runar.Assert(runar.Len(otherParentTx) >= scriptStart+scriptLen)
+	companionScript := runar.Substr(otherParentTx, scriptStart, scriptLen)
+	runar.Assert(scriptLen > 49)
+
+	sc := runar.ExtractScriptCode(c.TxPreimage)
+	scMarker := runar.Bin2Num(runar.Cat(runar.Substr(sc, 0, 1), pad00))
+	runar.Assert(scMarker == 253)
+	myBody := runar.Substr(sc, 3, runar.Len(sc)-3)
+	companionBody := runar.Substr(companionScript, 2, scriptLen-2)
+	runar.Assert(runar.Len(myBody) == runar.Len(companionBody))
+	runar.Assert(runar.Len(myBody) > 49)
+	runar.Assert(runar.Substr(myBody, 0, runar.Len(myBody)-49) == runar.Substr(companionBody, 0, runar.Len(companionBody)-49))
+
+	otherPrimary := runar.Bin2Num(runar.Cat(runar.Substr(companionScript, scriptLen-16, 8), pad00))
+	otherMerge := runar.Bin2Num(runar.Cat(runar.Substr(companionScript, scriptLen-8, 8), pad00))
+	runar.Assert(otherPrimary+otherMerge == otherBalance)
+
+	myBalance := c.Balance + c.MergeBalance
+	if myOutpoint == firstOutpoint {
 		c.AddOutput(outputSatoshis, c.Owner, myBalance, otherBalance)
 	} else {
-		// I'm input 1: my verified balance goes to slot 1
 		c.AddOutput(outputSatoshis, c.Owner, otherBalance, myBalance)
 	}
 }

@@ -34,32 +34,16 @@ import { foldConstants, eliminateDeadBindings } from '../optimizer/constant-fold
 import { lowerToStack } from '../passes/05-stack-lower.js';
 import { remapValueRefs } from '../passes/04-anf-lower.js';
 import { minimalValueFor, type AnfKind } from './anf-kind-factories.js';
+import { ALL_ANF_KINDS } from './anf-kind-list.js';
 
 // ---------------------------------------------------------------------------
 // Enumerated kinds
 // ---------------------------------------------------------------------------
 
-const ALL_ANF_KINDS = [
-  'load_param',
-  'load_prop',
-  'load_const',
-  'bin_op',
-  'unary_op',
-  'call',
-  'method_call',
-  'if',
-  'loop',
-  'assert',
-  'update_prop',
-  'get_state_script',
-  'check_preimage',
-  'deserialize_state',
-  'add_output',
-  'add_raw_output',
-  'add_data_output',
-  'array_literal',
-  'raw_script',
-] as const;
+// The list itself lives in `anf-kind-list.ts` (R-098): `spec-coverage.test.ts`
+// requires spec/ir-format.md to document every kind, and both consumers must
+// read the same vocabulary. The type-level gate below stays here.
+export { ALL_ANF_KINDS } from './anf-kind-list.js';
 
 type ListedKind = (typeof ALL_ANF_KINDS)[number];
 

@@ -1,6 +1,6 @@
 # Rúnar Type System
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the type system for Rúnar. The type system is designed to be simple, fully static, and to guarantee that all programs can be compiled to finite Bitcoin Script.
@@ -48,9 +48,29 @@ RabinSig RabinPubKey
 #### `boolean`
 
 - Two values: `true` and `false`.
-- Represented on the stack as `OP_TRUE` (non-zero) and `OP_FALSE` (`OP_0`, empty byte vector).
+- Represented on the stack as `OP_TRUE` (`0x01`) and `OP_FALSE` (`OP_0`, empty byte vector).
 - Result type of comparison and logical operations.
 - `bigint` values are NOT implicitly convertible to `boolean`. Use explicit comparison: `x !== 0n`.
+- **The domain is enforced on-chain, not merely declared.** A `boolean` parameter
+  of a public method is a witness item the spender writes, so the compiler emits
+  a domain check at method entry, before any of the body runs:
+
+  ```
+  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY
+  ```
+
+  applied to a copy of the parameter. `OP_EQUAL` is a byte comparison, so the
+  only two accepted encodings are the empty item and `{0x01}`; a non-minimal
+  `{0x00}`, a `-1`, or any other value aborts the script. Without it a spender
+  could push `OP_2`, which is equal to neither `true` nor `false`, and an
+  exhaustive-looking `=== true` / `=== false` split would take NEITHER arm — so
+  every check inside both arms would be skipped. The gate costs 9 bytes per
+  parameter (10 or 11 when the parameter is not on top of the entry stack) and
+  is emitted once, at the unlocking boundary; private helpers inherit it,
+  because their arguments come from an already-gated caller.
+- The gate deliberately does NOT canonicalise with `OP_0NOTEQUAL`. Mapping every
+  truthy value onto `true` would make `OP_2` take the `=== true` arm, which is
+  not the contract the author wrote.
 
 #### `ByteString`
 
@@ -61,7 +81,12 @@ RabinSig RabinPubKey
 
 ### 2.2 Domain Types
 
-Domain types are **subtypes of `ByteString`** with additional compile-time size constraints. A value of a domain type can be used anywhere a `ByteString` is expected, but not vice versa.
+Domain types are members of the `ByteString` family, distinguished by the size each
+one documents. The sizes below describe intent for a human reader: **they are not
+checked** by any tier, at compile time or at runtime (see §6.1, "Declared sizes are
+not checked"). Assignment inside the family is permitted in both directions — a
+domain type where a `ByteString` is expected, and a `ByteString` where a domain type
+is expected.
 
 | Type       | Size (bytes) | Description                                  |
 |------------|-------------|----------------------------------------------|
@@ -72,6 +97,8 @@ Domain types are **subtypes of `ByteString`** with additional compile-time size 
 | `Addr`     | 20          | Bitcoin address (= RIPEMD-160 of SHA-256 of pubkey) |
 | `SigHashPreimage` | variable | Serialized sighash preimage for OP_PUSH_TX |
 | `Point`    | 64          | secp256k1 elliptic curve point (affine coordinates) |
+| `P256Point`| 64          | NIST P-256 curve point (same affine layout as `Point`) |
+| `P384Point`| 96          | NIST P-384 curve point (x[48] \|\| y[48], big-endian) |
 
 #### Point Encoding
 
@@ -194,10 +221,39 @@ let result = checkSig(sig, pk);   // inferred: boolean
     ─────────────────────────────────────────────────
     e1 op e2 : bigint
 
-                    Comparison
-    e1 : T    e2 : T    op ∈ {==, ===, !=, !==, <, <=, >, >=}
-    ─────────────────────────────────────────────────────────
+                    Equality
+    e1 : T    e2 : S    (T <: S or S <: T)    op ∈ {==, ===, !=, !==}
+    ─────────────────────────────────────────────────────────────────
     e1 op e2 : boolean
+
+                    Relational
+    e1 : bigint    e2 : bigint    op ∈ {<, <=, >, >=}
+    ─────────────────────────────────────────────────
+    e1 op e2 : boolean
+
+                    Shift
+    e1 : bigint    e2 : bigint    op ∈ {<<, >>}
+    ───────────────────────────────────────────
+    e1 op e2 : bigint
+
+                    Bitwise (numeric)
+    e1 : bigint    e2 : bigint    op ∈ {&, |, ^}
+    ────────────────────────────────────────────
+    e1 op e2 : bigint
+
+                    Bitwise (bytes)
+    e1 : ByteString    e2 : ByteString    op ∈ {&, |, ^}
+    ────────────────────────────────────────────────────
+    e1 op e2 : ByteString
+
+                    Bitwise Complement
+    e : bigint
+    ──────────────
+    ~e : bigint
+
+    e : ByteString
+    ──────────────────
+    ~e : ByteString
 
                     Logical
     e1 : boolean    e2 : boolean    op ∈ {&&, ||}
@@ -345,9 +401,34 @@ The `OP_RETURN` terminates script execution so the state fields are never execut
 A value of type `S` is assignable to a target of type `T` if:
 
 1. `S` and `T` are the same type, OR
-2. `S <: T` (subtype relationship), OR
-3. `S` is a domain type and `T` is `ByteString` (widening), OR
-4. `S` is `RabinSig` or `RabinPubKey` and `T` is `bigint` (widening).
+2. `S` and `T` are both in the `ByteString` family (`ByteString` itself and every
+   domain type in §2.2), in either direction, OR
+3. `S` and `T` are both in the `bigint` family (`bigint`, `RabinSig`,
+   `RabinPubKey`), in either direction.
+
+Rules 2 and 3 are **mutual**, not the one-way widening the subtyping arrows in
+§2.2 suggest: `ByteString` is assignable to `Addr`, `Ripemd160` is assignable to
+`Sha256`, and `bigint` is assignable to `RabinSig`. Cross-FAMILY assignment stays
+a compile-time error — `bigint` never reaches a `ByteString` slot and vice versa.
+
+#### Declared sizes are not checked
+
+Neither rule consults the byte lengths in §2.2. A 1-byte value annotated `Sha256`
+is assignable to a `PubKey`, and no tier verifies at compile time or at runtime
+that either value has its documented size. This is deliberate, and it follows from
+what Script can represent: every domain type is the same stack item as a
+`ByteString` holding the same bytes, so a narrowing rule could only reject source
+— it could never make an emitted script safer. The lengths that reach domain-typed
+slots also come mostly from `split()` halves, `OP_CAT` results, preimage extractors
+and hash builtins, where the length is not statically knowable at all.
+
+A contract that needs a length guarantee states it in code, where it survives to
+the chain: `assert(len(pk) === 33n)` emits `OP_SIZE` and fails the script; the
+annotation emits nothing.
+
+`conformance/subtype-parity/FamilyWidening.runar.ts` gates the lattice and
+`conformance/subtype-parity/DomainTypeLength.runar.ts` gates the size property —
+both require all seven tiers to accept and to emit byte-identical script.
 
 ### 6.2 Equality Compatibility
 
@@ -407,7 +488,7 @@ For each method:
 | Rúnar Type | Script Representation |
 |---|---|
 | `bigint` | Script number (little-endian sign-magnitude, minimal encoding) |
-| `boolean` | `OP_TRUE` (0x01) or `OP_FALSE` (empty) |
+| `boolean` | `OP_TRUE` (0x01) or `OP_FALSE` (empty); public-method parameters are domain-checked on-chain — see § 2 `boolean` |
 | `ByteString` | Raw bytes pushed with appropriate `OP_PUSHDATA` |
 | `PubKey` | 33 bytes pushed directly |
 | `Sig` | DER bytes pushed directly |

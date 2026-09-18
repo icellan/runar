@@ -12,7 +12,7 @@
 //! an optimized Jacobian doubling formula.
 
 use super::stack::{PushValue, StackOp};
-use super::ec::emit_reverse_32;
+use super::ec::{emit_affine_infinity_select, emit_point_len_verify, emit_reverse_32, AffineSelectTracker};
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
 use std::sync::LazyLock;
@@ -484,7 +484,12 @@ fn c_group_inv(t: &mut ECTracker, a_name: &str, result_name: &str, g: &NistGroup
 
 fn c_decompose_point(t: &mut ECTracker, point_name: &str, x_name: &str, y_name: &str, c: &NistCurveParams) {
     t.to_top(point_name);
+    // CL-BUG-095: a P256Point/P384Point is exactly 2*coord_bytes bytes and
+    // nothing checked it, so surplus bytes were split off and silently dropped.
+    // Gate the width here, where every consumer that decomposes a point picks it
+    // up. See emit_point_len_verify in ec.rs.
     t.raw_block(&[point_name], None, |e| {
+        emit_point_len_verify(e, c.coord_bytes * 2);
         e(StackOp::Push(PushValue::Int(BigInt::from(c.coord_bytes as i128))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
@@ -577,6 +582,30 @@ fn c_emit_canonicity_guard(t: &mut ECTracker, x_name: &str, y_name: &str, c: &Ni
     t.raw_block(&["_x_canon", "_y_canon"], Some("_canon"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
+}
+
+/// Lets the shared `emit_affine_infinity_select` (ec.rs) drive this module's
+/// own `ECTracker` — the two trackers are separate types, the select is one
+/// implementation. See the helper's doc comment for why it is pure masking.
+impl<'a> AffineSelectTracker for ECTracker<'a> {
+    fn sel_copy_to_top(&mut self, name: &str, alias: &str) {
+        let d = self.find_depth(name);
+        self.pick(d, alias);
+    }
+    fn sel_push_int(&mut self, name: &str, v: i128) {
+        self.push_int(name, v);
+    }
+    fn sel_to_top(&mut self, name: &str) {
+        let d = self.find_depth(name);
+        self.roll(d);
+    }
+    fn sel_raw_ops(&mut self, consume: &[&str], produce: &str, codes: &[&str]) {
+        self.raw_block(consume, Some(produce), |e| {
+            for c in codes {
+                e(StackOp::Opcode((*c).into()));
+            }
+        });
+    }
 }
 
 fn c_affine_add(t: &mut ECTracker, c: &NistCurveParams) {
@@ -690,23 +719,11 @@ fn c_affine_add(t: &mut ECTracker, c: &NistCurveParams) {
     t.copy_to_top("py", "_py2");
     c_field_sub(t, "_s_px_rx", "_py2", "ry", c);
 
-    // Clean up original points
-    t.to_top("px"); t.drop();
-    t.to_top("py"); t.drop();
-    t.to_top("qx"); t.drop();
-    t.to_top("qy"); t.drop();
-
-    // P == -Q -> force the all-zero point (see the header comment).
-    t.to_top("rx");
-    t.copy_to_top("_notinf", "_notinf_x");
-    t.raw_block(&["rx", "_notinf_x"], Some("rx"), |e| {
-        e(StackOp::Opcode("OP_MUL".into()));
-    });
-    t.to_top("ry");
-    t.to_top("_notinf");
-    t.raw_block(&["ry", "_notinf"], Some("ry"), |e| {
-        e(StackOp::Opcode("OP_MUL".into()));
-    });
+    // CL-BUG-096: `pNNNAdd(P, O)` returned an off-curve blob for the same reason
+    // secp256k1's did — the adder had no infinity-operand case, while
+    // `pNNNMul(P, 0n)` hands it exactly that value. Same branch-free select,
+    // which also subsumes the standalone `notinf` mask that used to live here.
+    emit_affine_infinity_select(t);
 }
 
 // ===========================================================================
@@ -999,7 +1016,63 @@ fn c_build_jacobian_add_or_double_inline(
 // Scalar multiplication (generic for both P-256 and P-384)
 // ===========================================================================
 
-fn c_emit_mul(emit: &mut dyn FnMut(StackOp), c: &NistCurveParams, g: &NistGroupParams) {
+/// R-117 — coordinate canonicity for the VALUE builtins, aborting form.
+///
+/// The a = -3 twin of `emit_coord_canon_verify` in ec.rs; see that doc comment
+/// for the defect. `c_affine_add`'s `cond` / `notinf` selectors are the same
+/// bare OP_NUMEQUAL over the raw decomposed coordinates, and
+/// `c_decompose_point` accepts any width-fitting unsigned value, so `x + p` is
+/// a second spelling of the same point that both selectors read as "different".
+///
+/// `c_emit_canonicity_guard` above is the FLAG form, for the on-curve
+/// predicates. This is the abort form, called only from `emit_pNNN_add` /
+/// `emit_pNNN_mul` / `emit_pNNN_negate` — never from `c_emit_verify_ecdsa`'s
+/// path, where `decompress_pub_key` and `c_emit_sig_range_gate` have already
+/// decided that attacker-chosen bytes must make a total boolean builtin return
+/// false rather than abort the script.
+fn c_emit_coord_canon_verify(t: &mut ECTracker, x_name: &str, y_name: &str, c: &NistCurveParams) {
+    t.copy_to_top(x_name, "_cc_x");
+    c_push_field_p(t, "_cc_px", c);
+    t.raw_block(&["_cc_x", "_cc_px"], Some("_cc_xok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top(y_name, "_cc_y");
+    c_push_field_p(t, "_cc_py", c);
+    t.raw_block(&["_cc_y", "_cc_py"], Some("_cc_yok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.raw_block(&["_cc_xok", "_cc_yok"], None, |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
+    });
+}
+
+/// R-157 -- the a = -3 twin of `emit_point_gate` in ec.rs; see that doc comment
+/// for the defect, the measurement and the boundary argument. Called from
+/// `emit_pNNN_mul` and NOT from inside `c_emit_mul`, because `c_emit_verify_ecdsa`
+/// shares that ladder and `decompress_pub_key` / `c_emit_sig_range_gate` have
+/// already decided that attacker-chosen bytes must make a total boolean builtin
+/// return false rather than abort the script.
+fn c_emit_point_gate(
+    emit: &mut dyn FnMut(StackOp),
+    emit_on_curve: fn(&mut dyn FnMut(StackOp)),
+    c: &NistCurveParams,
+) {
+    emit(StackOp::Over);
+    emit(StackOp::Push(PushValue::Bytes(vec![0u8; c.coord_bytes * 2])));
+    emit(StackOp::Opcode("OP_EQUAL".into()));
+    emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
+    emit(StackOp::Pick { depth: 2 });
+    emit_on_curve(emit);
+    emit(StackOp::Opcode("OP_BOOLOR".into()));
+    emit(StackOp::Opcode("OP_VERIFY".into()));
+}
+
+fn c_emit_mul(
+    emit: &mut dyn FnMut(StackOp),
+    c: &NistCurveParams,
+    g: &NistGroupParams,
+) {
     let mut t = ECTracker::new(&["_pt", "_k"], emit);
     c_decompose_point(&mut t, "_pt", "ax", "ay", c);
 
@@ -1593,12 +1666,17 @@ pub fn emit_p256_add(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pa", "_pb"], emit);
     c_decompose_point(&mut t, "_pa", "px", "py", &P256_CURVE);
     c_decompose_point(&mut t, "_pb", "qx", "qy", &P256_CURVE);
+    // R-117: c_affine_add's selectors compare these four values RAW.
+    c_emit_coord_canon_verify(&mut t, "px", "py", &P256_CURVE);
+    c_emit_coord_canon_verify(&mut t, "qx", "qy", &P256_CURVE);
     c_affine_add(&mut t, &P256_CURVE);
     c_compose_point(&mut t, "rx", "ry", "_result", &P256_CURVE);
 }
 
 /// p256Mul: P-256 scalar multiplication.
 pub fn emit_p256_mul(emit: &mut dyn FnMut(StackOp)) {
+    // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    c_emit_point_gate(emit, emit_p256_on_curve, &P256_CURVE);
     c_emit_mul(emit, &P256_CURVE, &P256_GROUP);
 }
 
@@ -1616,6 +1694,7 @@ pub fn emit_p256_mul_gen(emit: &mut dyn FnMut(StackOp)) {
 pub fn emit_p256_negate(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
     c_decompose_point(&mut t, "_pt", "_nx", "_ny", &P256_CURVE);
+    c_emit_coord_canon_verify(&mut t, "_nx", "_ny", &P256_CURVE);
     c_push_field_p(&mut t, "_fp", &P256_CURVE);
     c_field_sub(&mut t, "_fp", "_ny", "_neg_y", &P256_CURVE);
     c_compose_point(&mut t, "_nx", "_neg_y", "_result", &P256_CURVE);
@@ -1624,6 +1703,10 @@ pub fn emit_p256_negate(emit: &mut dyn FnMut(StackOp)) {
 /// p256OnCurve: check if a P-256 point is on the curve (y^2 = x^3 - 3x + b mod p).
 pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
+    // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+    // contracts are told to gate an untrusted point on, so it must stay total.
+    // The flag is ANDed into the result below.
+    c_emit_length_gate(&mut t, "_pt", P256_CURVE.coord_bytes * 2, "_len_ok");
     c_decompose_point(&mut t, "_pt", "_x", "_y", &P256_CURVE);
     c_emit_canonicity_guard(&mut t, "_x", "_y", &P256_CURVE);
 
@@ -1647,31 +1730,37 @@ pub fn emit_p256_on_curve(emit: &mut dyn FnMut(StackOp)) {
         e(StackOp::Opcode("OP_EQUAL".into()));
     });
 
-    // on-curve = canonical AND curve-equation
+    // on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon");
     t.to_top("_curve_eq");
-    t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
+    t.raw_block(&["_canon", "_curve_eq"], Some("_eq_ok"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    t.to_top("_len_ok");
+    t.to_top("_eq_ok");
+    t.raw_block(&["_len_ok", "_eq_ok"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
 }
 
 /// p256EncodeCompressed: encode a P-256 point as 33-byte compressed pubkey.
 pub fn emit_p256_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
+    // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+    // appended byte flipped the sign of the compressed encoding. Width is now
+    // verified AND the parity byte is read from a fixed offset. See
+    // emit_ec_encode_compressed in ec.rs for the full argument.
+    emit_point_len_verify(emit, 64);
     // Split at 32: [x_bytes, y_bytes]
     emit(StackOp::Push(PushValue::Int(BigInt::from(32))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Get last byte of y for parity
-    emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
-    emit(StackOp::Opcode("OP_SUB".into()));
+    // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(StackOp::Push(PushValue::Int(BigInt::from(31))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Stack: [x_bytes, y_prefix, last_byte]
+    emit(StackOp::Opcode("OP_NIP".into())); // drop y_head
+    // Stack: [x_bytes, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
     emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
-    // Stack: [x_bytes, y_prefix, parity]
-    emit(StackOp::Swap);
-    emit(StackOp::Drop); // drop y_prefix
     // Stack: [x_bytes, parity]
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],
@@ -1696,12 +1785,17 @@ pub fn emit_p384_add(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pa", "_pb"], emit);
     c_decompose_point(&mut t, "_pa", "px", "py", &P384_CURVE);
     c_decompose_point(&mut t, "_pb", "qx", "qy", &P384_CURVE);
+    // R-117: c_affine_add's selectors compare these four values RAW.
+    c_emit_coord_canon_verify(&mut t, "px", "py", &P384_CURVE);
+    c_emit_coord_canon_verify(&mut t, "qx", "qy", &P384_CURVE);
     c_affine_add(&mut t, &P384_CURVE);
     c_compose_point(&mut t, "rx", "ry", "_result", &P384_CURVE);
 }
 
 /// p384Mul: P-384 scalar multiplication.
 pub fn emit_p384_mul(emit: &mut dyn FnMut(StackOp)) {
+    // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    c_emit_point_gate(emit, emit_p384_on_curve, &P384_CURVE);
     c_emit_mul(emit, &P384_CURVE, &P384_GROUP);
 }
 
@@ -1719,6 +1813,7 @@ pub fn emit_p384_mul_gen(emit: &mut dyn FnMut(StackOp)) {
 pub fn emit_p384_negate(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
     c_decompose_point(&mut t, "_pt", "_nx", "_ny", &P384_CURVE);
+    c_emit_coord_canon_verify(&mut t, "_nx", "_ny", &P384_CURVE);
     c_push_field_p(&mut t, "_fp", &P384_CURVE);
     c_field_sub(&mut t, "_fp", "_ny", "_neg_y", &P384_CURVE);
     c_compose_point(&mut t, "_nx", "_neg_y", "_result", &P384_CURVE);
@@ -1727,6 +1822,10 @@ pub fn emit_p384_negate(emit: &mut dyn FnMut(StackOp)) {
 /// p384OnCurve: check if a P-384 point is on the curve.
 pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = ECTracker::new(&["_pt"], emit);
+    // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+    // contracts are told to gate an untrusted point on, so it must stay total.
+    // The flag is ANDed into the result below.
+    c_emit_length_gate(&mut t, "_pt", P384_CURVE.coord_bytes * 2, "_len_ok");
     c_decompose_point(&mut t, "_pt", "_x", "_y", &P384_CURVE);
     c_emit_canonicity_guard(&mut t, "_x", "_y", &P384_CURVE);
 
@@ -1750,31 +1849,37 @@ pub fn emit_p384_on_curve(emit: &mut dyn FnMut(StackOp)) {
         e(StackOp::Opcode("OP_EQUAL".into()));
     });
 
-    // on-curve = canonical AND curve-equation
+    // on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon");
     t.to_top("_curve_eq");
-    t.raw_block(&["_canon", "_curve_eq"], Some("_result"), |e| {
+    t.raw_block(&["_canon", "_curve_eq"], Some("_eq_ok"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    t.to_top("_len_ok");
+    t.to_top("_eq_ok");
+    t.raw_block(&["_len_ok", "_eq_ok"], Some("_result"), |e| {
         e(StackOp::Opcode("OP_BOOLAND".into()));
     });
 }
 
 /// p384EncodeCompressed: encode a P-384 point as 49-byte compressed pubkey.
 pub fn emit_p384_encode_compressed(emit: &mut dyn FnMut(StackOp)) {
+    // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+    // appended byte flipped the sign of the compressed encoding. Width is now
+    // verified AND the parity byte is read from a fixed offset. See
+    // emit_ec_encode_compressed in ec.rs for the full argument.
+    emit_point_len_verify(emit, 96);
     // Split at 48: [x_bytes, y_bytes]
     emit(StackOp::Push(PushValue::Int(BigInt::from(48))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Get last byte of y for parity
-    emit(StackOp::Opcode("OP_SIZE".into()));
-    emit(StackOp::Push(PushValue::Int(BigInt::from(1))));
-    emit(StackOp::Opcode("OP_SUB".into()));
+    // Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(StackOp::Push(PushValue::Int(BigInt::from(47))));
     emit(StackOp::Opcode("OP_SPLIT".into()));
-    // Stack: [x_bytes, y_prefix, last_byte]
+    emit(StackOp::Opcode("OP_NIP".into())); // drop y_head
+    // Stack: [x_bytes, last_byte]
     emit(StackOp::Opcode("OP_BIN2NUM".into()));
     emit(StackOp::Push(PushValue::Int(BigInt::from(2))));
     emit(StackOp::Opcode("OP_MOD".into()));
-    // Stack: [x_bytes, y_prefix, parity]
-    emit(StackOp::Swap);
-    emit(StackOp::Drop); // drop y_prefix
     // Stack: [x_bytes, parity]
     emit(StackOp::If {
         then_ops: vec![StackOp::Push(PushValue::Bytes(vec![0x03]))],

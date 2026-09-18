@@ -28,6 +28,21 @@ var ecGenX *big.Int
 // secp256k1 generator y-coordinate
 var ecGenY *big.Int
 
+// secp256k1 domain parameters.
+//
+// Source: SEC 2: Recommended Elliptic Curve Domain Parameters, Version 2.0,
+// section 2.4.1 (Certicom Research, 2010) —
+// https://www.secg.org/sec2-v2.pdf
+//
+// p  = 2^256 - 2^32 - 977, the field prime
+// Gx, Gy — the standard generator, uncompressed
+//
+// R-239: these were bare literals, while the Poseidon2 round constants in this
+// same package cite Plonky3 and the SLH-DSA parameters cite FIPS 205. A wrong
+// digit here does not fail a vector — it produces an EC implementation that
+// agrees with itself, passes every self-consistency check, and is not the curve
+// anyone else is on. Checking the digits against the standard is the only
+// defence, and that needs the standard named.
 func init() {
 	ecFieldP, _ = new(big.Int).SetString("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f", 16)
 	ecFieldPMinus2 = new(big.Int).Sub(ecFieldP, big.NewInt(2))
@@ -347,12 +362,61 @@ func ecFieldInv(t *ECTracker, aName, resultName string) {
 // Point decompose / compose
 // ===========================================================================
 
+// ecEmitPointLenVerify -- CL-BUG-095 -- is a length gate for a `Point`
+// argument, ABORTING form.
+//
+// A `Point` is DEFINED as exactly `want` bytes (x || y, big-endian, no
+// prefix). Nothing checked that: surplus bytes were silently discarded
+// because decomposePoint splits at the coordinate width and the reversal
+// helper reverses exactly that many bytes and drops the remainder. Aborting
+// is right here because every caller of this form produces a VALUE with no
+// error channel to report through (ecAdd, ecMul, ecNegate, ecPointX,
+// ecPointY, ecEncodeCompressed) -- there is no correct value to return for a
+// blob that is not a point. Predicates use ecEmitPointLengthGate instead,
+// because for them "no" is an answer.
+func ecEmitPointLenVerify(e func(StackOp), want int) {
+	e(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+	e(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+}
+
+// ecEmitPointLengthGate -- CL-BUG-095 -- is a length gate for a `Point`
+// argument, CLAMPING form: leaves [flag, clamped] on the tracker, where
+// clamped is the value forced to exactly want bytes (v || 00*want, split at
+// want, tail dropped) and flag is OP_SIZE(v) == want.
+//
+// Used by the on-curve predicates, whose whole job is to answer "is this an
+// acceptable point?" over untrusted bytes -- for a wrong-length blob the
+// correct answer is false, not an aborted script. The caller ANDs flag into
+// its boolean result, so whatever the clamped bytes happen to compute can
+// never make a wrong-length point certify as on-curve. Same shape as
+// cEmitLengthGate in p256_p384.go.
+func ecEmitPointLengthGate(t *ECTracker, name string, want int, flagName string) {
+	t.toTop(name)
+	t.rawBlock([]string{name}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_SIZE"})
+		e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+		e(StackOp{Op: "swap"})
+		e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: make([]byte, want)}})
+		e(StackOp{Op: "opcode", Code: "OP_CAT"})
+		e(StackOp{Op: "push", Value: bigIntPush(int64(want))})
+		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		e(StackOp{Op: "drop"})
+	})
+	t.nm = append(t.nm, flagName)
+	t.nm = append(t.nm, name)
+}
+
 // ecDecomposePoint decomposes a 64-byte Point into (x_num, y_num) on stack.
 // Consumes pointName, produces xName and yName.
 func ecDecomposePoint(t *ECTracker, pointName, xName, yName string) {
 	t.toTop(pointName)
-	// OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+	// OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) -- but only
+	// for a value that really is 64 bytes. CL-BUG-095: gate the width first,
+	// here, so every consumer that decomposes a Point inherits the check.
 	t.rawBlock([]string{pointName}, "", func(e func(StackOp)) {
+		ecEmitPointLenVerify(e, 64)
 		e(StackOp{Op: "push", Value: bigIntPush(32)})
 		e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	})
@@ -564,26 +628,154 @@ func ecAffineAdd(t *ECTracker) {
 	t.copyToTop("py", "_py2")
 	ecFieldSub(t, "_s_px_rx", "_py2", "ry")
 
-	// Clean up original points
-	t.toTop("px")
-	t.drop()
-	t.toTop("py")
-	t.drop()
-	t.toTop("qx")
-	t.drop()
-	t.toTop("qy")
-	t.drop()
+	// CL-BUG-096: select over the infinity operands and the P == -Q case, and
+	// consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+	// mask that used to live here. See emitAffineInfinitySelect.
+	emitAffineInfinitySelect(t)
+}
 
-	// P == -Q -> force the all-zero point (see the header comment).
+// emitAffineInfinitySelect handles the infinity-operand case of affine
+// addition, shared by secp256k1 and the two NIST curves because it is pure
+// integer masking and touches no field parameter.
+//
+// The group law has an identity, and this codegen has a representation for it:
+// the ALL-ZERO blob. It is not a theoretical value -- the codegen MANUFACTURES
+// it, from ecMul(P, k) whenever k = 0 (mod n), from affineAdd's own P + (-P)
+// masking, and from the ec-mul-zero / ec-add-negate-cancel rewrites in
+// optimizer/ec-rules.json. affineAdd nonetheless had no case for it: fed
+// (G, O) it took the chord path with s = Gy/Gx and returned an off-curve blob
+// from a script that SUCCEEDED.
+//
+// And the always-on EC optimizer already believed the right answer:
+// ec-add-identity-right / -left rewrite ecAdd($x, INFINITY) to $x. So the
+// same source meant "P" with the optimizer on and "garbage" with it off.
+// Fixing the adder rather than deleting the two rules is the only option that
+// works, because the rules cannot see a zero scalar that only exists at
+// runtime -- deleting them would leave the runtime path just as wrong and
+// rewrite nothing.
+//
+// Branch-free, in the style the rest of this adder uses. Exactly one of the
+// three masks is 1 and the other two are 0, so the sum selects one term:
+//
+//	pinf = (px == 0) AND (py == 0)          P is O
+//	qinf = (qx == 0) AND (qy == 0)          Q is O
+//	usep = qinf AND NOT pinf                -> answer is P
+//	useq = pinf                             -> answer is Q  (covers O + O = O)
+//	user = notinf AND NOT(pinf OR qinf)     -> answer is the computed sum
+//
+// `user` folds in the pre-existing `notinf` mask (the P == -Q case), so
+// P + (-P) still yields the all-zero blob and nothing about that case changes.
+//
+// Requiring BOTH coordinates to be zero is load-bearing, not belt-and-braces.
+// x = 0 has genuine curve points whenever the curve's b is a quadratic
+// residue -- (0, sqrt(b)) -- and testing x alone would map them to O. y = 0
+// has none on any of these three curves (all have prime order, so no point of
+// order 2), but the conjunction makes that fact not need to be true.
+//
+// Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+// [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+//
+// Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+// rx, ry in their place.
+func emitAffineInfinitySelect(t *ECTracker) {
+	// pinf = (px == 0) AND (py == 0)
+	t.copyToTop("px", "_px_z")
+	t.pushInt("_zero_px", 0)
+	t.rawBlock([]string{"_px_z", "_zero_px"}, "_pxz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.copyToTop("py", "_py_z")
+	t.pushInt("_zero_py", 0)
+	t.rawBlock([]string{"_py_z", "_zero_py"}, "_pyz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.rawBlock([]string{"_pxz", "_pyz"}, "_pinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// qinf = (qx == 0) AND (qy == 0)
+	t.copyToTop("qx", "_qx_z")
+	t.pushInt("_zero_qx", 0)
+	t.rawBlock([]string{"_qx_z", "_zero_qx"}, "_qxz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.copyToTop("qy", "_qy_z")
+	t.pushInt("_zero_qy", 0)
+	t.rawBlock([]string{"_qy_z", "_zero_qy"}, "_qyz", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+	t.rawBlock([]string{"_qxz", "_qyz"}, "_qinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// usep = qinf AND NOT pinf
+	t.copyToTop("_qinf", "_usep_q")
+	t.copyToTop("_pinf", "_usep_p")
+	t.rawBlock([]string{"_usep_q", "_usep_p"}, "_usep", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NOT"})
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// useq = pinf
+	t.copyToTop("_pinf", "_useq")
+
+	// user = notinf AND NOT(pinf OR qinf)
+	t.toTop("_pinf")
+	t.toTop("_qinf")
+	t.rawBlock([]string{"_pinf", "_qinf"}, "_anyinf", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+	})
+	t.toTop("_notinf")
+	t.toTop("_anyinf")
+	t.rawBlock([]string{"_notinf", "_anyinf"}, "_user", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NOT"})
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+
+	// rx = px*usep + qx*useq + rx*user
+	t.toTop("px")
+	t.copyToTop("_usep", "_usep_x")
+	t.rawBlock([]string{"px", "_usep_x"}, "_selx_p", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.toTop("qx")
+	t.copyToTop("_useq", "_useq_x")
+	t.rawBlock([]string{"qx", "_useq_x"}, "_selx_q", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
 	t.toTop("rx")
-	t.copyToTop("_notinf", "_notinf_x")
-	t.rawBlock([]string{"rx", "_notinf_x"}, "rx", func(e func(StackOp)) {
+	t.copyToTop("_user", "_user_x")
+	t.rawBlock([]string{"rx", "_user_x"}, "_selx_r", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.rawBlock([]string{"_selx_q", "_selx_r"}, "_selx_qr", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+	t.rawBlock([]string{"_selx_p", "_selx_qr"}, "rx", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+
+	// ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+	t.toTop("py")
+	t.toTop("_usep")
+	t.rawBlock([]string{"py", "_usep"}, "_sely_p", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.toTop("qy")
+	t.toTop("_useq")
+	t.rawBlock([]string{"qy", "_useq"}, "_sely_q", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_MUL"})
 	})
 	t.toTop("ry")
-	t.toTop("_notinf")
-	t.rawBlock([]string{"ry", "_notinf"}, "ry", func(e func(StackOp)) {
+	t.toTop("_user")
+	t.rawBlock([]string{"ry", "_user"}, "_sely_r", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+	})
+	t.rawBlock([]string{"_sely_q", "_sely_r"}, "_sely_qr", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
+	})
+	t.rawBlock([]string{"_sely_p", "_sely_qr"}, "ry", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_ADD"})
 	})
 }
 
@@ -891,6 +1083,53 @@ func ecBuildJacobianAddOrDoubleInline(e func(StackOp), t *ECTracker) {
 // Public entry points (called from stack lowerer)
 // ===========================================================================
 
+// ecEmitCoordCanonVerify -- R-117: a Point's two coordinates must be FIELD
+// ELEMENTS, aborting form.
+//
+// ecDecomposePoint BIN2NUMs each half of the blob as an unsigned integer, so
+// any value that fits in the coordinate width is accepted -- x + p included,
+// whenever x + p < 2^256 (on secp256k1 that is every x < 2^32 + 977).
+// Downstream field arithmetic reduces mod p, so (x+p)||y behaves as the point
+// (x, y); ecAffineAdd's two case selectors do NOT reduce, and they are bare
+// OP_NUMEQUAL on exactly these raw values:
+//
+//	cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+//	notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+//
+// so for P and its alias both read 0, the chord path runs on two equal points,
+// den_chord = qx - px == 0 (mod p), and ecFieldInv is Fermat with inv(0) = 0.
+// Measured before this gate landed, x = 1: ecAdd(P, P) gave the correct 2P and
+// ecAdd(P, P') gave x = p-2 -- a script that SUCCEEDED and returned a blob that
+// is not a point. Both the doubling case and the P + (-P) case are driven by
+// these selectors, so both are defeated by the same trick.
+//
+// REJECT rather than reduce: EmitEcOnCurve already answers "no" to a
+// non-canonical encoding, so reducing here would leave the predicate and the
+// value builtins disagreeing about whether the blob is a point at all. This is
+// also the policy CL-BUG-095 set for the WIDTH -- predicates clamp and flag,
+// value producers OP_VERIFY.
+//
+// Callers are the user-facing value builtins only; deliberately NOT folded into
+// ecDecomposePoint, which also runs inside EmitEcOnCurve and must stay total.
+//
+// x and y are unsigned by construction, so "< p" is the whole check.
+func ecEmitCoordCanonVerify(t *ECTracker, xName, yName string) {
+	t.copyToTop(xName, "_cc_x")
+	ecPushFieldP(t, "_cc_px")
+	t.rawBlock([]string{"_cc_x", "_cc_px"}, "_cc_xok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.copyToTop(yName, "_cc_y")
+	ecPushFieldP(t, "_cc_py")
+	t.rawBlock([]string{"_cc_y", "_cc_py"}, "_cc_yok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	})
+	t.rawBlock([]string{"_cc_xok", "_cc_yok"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+}
+
 // EmitEcAdd adds two points.
 // Stack in: [point_a, point_b] (b on top)
 // Stack out: [result_point]
@@ -898,6 +1137,9 @@ func EmitEcAdd(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pa", "_pb"}, emit)
 	ecDecomposePoint(t, "_pa", "px", "py")
 	ecDecomposePoint(t, "_pb", "qx", "qy")
+	// R-117: ecAffineAdd's selectors compare these four values RAW.
+	ecEmitCoordCanonVerify(t, "px", "py")
+	ecEmitCoordCanonVerify(t, "qx", "qy")
 	ecAffineAdd(t)
 	ecComposePoint(t, "rx", "ry", "_result")
 }
@@ -933,7 +1175,74 @@ func ecEmitScalarReduce(t *ECTracker, kName, resultName string, n *big.Int) {
 // Stack out: [result_point]
 //
 // Uses 256-iteration double-and-add with Jacobian coordinates.
+// ecEmitPointGate --
+// R-157 -- gate a Point operand of the scalar ladder: it must be ON the curve, or
+// be the point at infinity. ABORTS otherwise. Raw ops, straight-line, run before
+// the ladder's tracker exists.
+//
+// ecMul(P, k) does not compute k*P. It computes ((k mod n) + 3n)*P: the MSB-first
+// ladder adds 3n so a fixed high bit is always set, and +3n is a no-op ONLY when
+// ord(P) divides n. Cofactor 1 gives ord(P) = n for every point on the curve, so
+// the trick is sound there and nowhere else. An off-curve point lies on some other
+// curve y^2 = x^3 + b' of unrelated order, and the ladder silently answers a
+// different question. Measured on @bsv/sdk's Spend with the off-curve P = (5, 7),
+// which lies on y^2 = x^3 - 76:
+//
+//     ecMul(P, 1n) -> c8b039d1...9438f2ff, which is NOT P
+//
+// matching (1 + 3n)*P on that other curve exactly. So the primitive violated its
+// own contract for EVERY off-curve input, not merely a contrived one.
+//
+// The degenerate sub-case is worse. For a 2-torsion point of the other curve --
+// any (x, 0) -- every multiple collapses to the all-zero blob, because the
+// ladder's unguarded mixed-add hits H = R = 0 mid-ladder, sets Z3 = 0, and a
+// Jacobian accumulator at infinity never leaves it. Combined with R-053, which
+// correctly taught ecAdd that the all-zero blob is the identity, that turns a
+// Schnorr-shaped s*G == R + e*P check into a free pass: choose an off-curve P of
+// order 2, e*P is O, R + O is R, and any s with R = s*G verifies with no knowledge
+// of any discrete log.
+//
+// WHY HERE AND NOT IN THE CALLER. The +3n offset is INTERNAL to ecMul. A caller
+// cannot see it, cannot know the obligation exists without reading this codegen,
+// and gains nothing by checking what ecMul can check more cheaply (ecOnCurve is
+// 816 bytes against ecMul's 428 KB -- 0.2%). The obligation WAS written down, in
+// all seven tiers, in the ladder's own docstring: "callers who accept untrusted
+// points must gate them on ecOnCurve first". Nothing enforced it, and the
+// repository's own schnorr-zkp fixture takes its pubKey from a DEPLOYER-supplied
+// constructor slot, where that idiom is not even reachable.
+//
+// WHY NOT ecAdd, which is the other half of the boundary: affineAdd implements the
+// group law with no n-dependent trick, so on an off-curve operand it returns the
+// CORRECT sum on that operand's own curve. It does not lie. And O -- deliberately
+// not on the curve -- must keep flowing through ecAdd for R-053 to hold. Gating
+// the adder would break a working primitive to fix a different one.
+//
+// WHY O IS EXEMPT, and it is load-bearing: ecMul(P, 0n) returns the all-zero blob,
+// ecAdd(P, -P) returns it, and the EC optimizer folds to it, so O is a reachable
+// runtime operand -- while ecOnCurve(O) is false by construction (0^2 != 0^3 + b).
+// A bare on-curve gate would reject the identity this codegen manufactures itself.
+//
+// This SUBSUMES R-117's coordinate-canonicity gate on the mul builtins, which is
+// why that call is removed here rather than left as defence in depth: a
+// non-canonical coordinate makes ecOnCurve false and cannot equal the all-zero
+// blob, so it still aborts, and keeping both would be 74 bytes saying the same
+// thing twice in two places that must agree.
+//
+// Stack in/out: [point, scalar] -- unchanged.
+func ecEmitPointGate(emit func(StackOp), emitOnCurve func(func(StackOp)), coordBytes int) {
+	emit(StackOp{Op: "over"})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: make([]byte, coordBytes*2)}})
+	emit(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+	emit(StackOp{Op: "push", Value: bigIntPush(2)})
+	emit(StackOp{Op: "pick", Depth: 2})
+	emitOnCurve(emit)
+	emit(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+}
+
 func EmitEcMul(emit func(StackOp)) {
+	// R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+	ecEmitPointGate(emit, EmitEcOnCurve, 32)
 	t := NewECTracker([]string{"_pt", "_k"}, emit)
 	// Decompose to affine base point
 	ecDecomposePoint(t, "_pt", "ax", "ay")
@@ -1042,6 +1351,7 @@ func EmitEcMulGen(emit func(StackOp)) {
 func EmitEcNegate(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
 	ecDecomposePoint(t, "_pt", "_nx", "_ny")
+	ecEmitCoordCanonVerify(t, "_nx", "_ny")
 	ecPushFieldP(t, "_fp")
 	ecFieldSub(t, "_fp", "_ny", "_neg_y")
 	ecComposePoint(t, "_nx", "_neg_y", "_result")
@@ -1052,6 +1362,13 @@ func EmitEcNegate(emit func(StackOp)) {
 // Stack out: [boolean]
 func EmitEcOnCurve(emit func(StackOp)) {
 	t := NewECTracker([]string{"_pt"}, emit)
+
+	// CL-BUG-095: width. `ecOnCurve(G || 0xff)` returned TRUE -- decomposePoint
+	// discarded the surplus byte. Clamp and remember the width, rather than
+	// abort, because this predicate must stay total; the flag is ANDed into
+	// the result at the end.
+	ecEmitPointLengthGate(t, "_pt", 64, "_len_ok")
+
 	ecDecomposePoint(t, "_pt", "_x", "_y")
 
 	// GAP-301: coordinate canonicity. ecDecomposePoint BIN2NUMs each coordinate
@@ -1093,10 +1410,15 @@ func EmitEcOnCurve(emit func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_EQUAL"})
 	})
 
-	// on-curve = canonical AND curve-equation
+	// on-curve = right width AND canonical AND curve-equation
 	t.toTop("_canon")
 	t.toTop("_curve_eq")
-	t.rawBlock([]string{"_canon", "_curve_eq"}, "_result", func(e func(StackOp)) {
+	t.rawBlock([]string{"_canon", "_curve_eq"}, "_eq_ok", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
+	})
+	t.toTop("_len_ok")
+	t.toTop("_eq_ok")
+	t.rawBlock([]string{"_len_ok", "_eq_ok"}, "_result", func(e func(StackOp)) {
 		e(StackOp{Op: "opcode", Code: "OP_BOOLAND"})
 	})
 }
@@ -1119,21 +1441,22 @@ func EmitEcModReduce(emit func(StackOp)) {
 // Stack in: [point (64 bytes)]
 // Stack out: [compressed (33 bytes)]
 func EmitEcEncodeCompressed(emit func(StackOp)) {
+	// CL-BUG-095: the parity byte used to be taken from the blob's LAST byte
+	// (OP_SIZE, OP_SUB 1, OP_SPLIT), not a fixed offset -- so appending one
+	// byte flipped the sign of the compressed encoding. Width is now verified
+	// AND the parity byte is read from a fixed offset.
+	ecEmitPointLenVerify(emit, 64)
 	// Split at 32: [x_bytes, y_bytes]
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Get last byte of y for parity
-	emit(StackOp{Op: "opcode", Code: "OP_SIZE"})
-	emit(StackOp{Op: "push", Value: bigIntPush(1)})
-	emit(StackOp{Op: "opcode", Code: "OP_SUB"})
+	// Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+	emit(StackOp{Op: "push", Value: bigIntPush(31)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	// Stack: [x_bytes, y_prefix, last_byte]
+	emit(StackOp{Op: "nip"}) // drop y_head
+	// Stack: [x_bytes, last_byte]
 	emit(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 	emit(StackOp{Op: "push", Value: bigIntPush(2)})
 	emit(StackOp{Op: "opcode", Code: "OP_MOD"})
-	// Stack: [x_bytes, y_prefix, parity]
-	emit(StackOp{Op: "swap"})
-	emit(StackOp{Op: "drop"}) // drop y_prefix
 	// Stack: [x_bytes, parity]
 	emit(StackOp{Op: "if",
 		Then: []StackOp{{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x03}}}},
@@ -1147,7 +1470,47 @@ func EmitEcEncodeCompressed(emit func(StackOp)) {
 // EmitEcMakePoint converts (x: bigint, y: bigint) to a 64-byte Point.
 // Stack in: [x_num, y_num] (y on top)
 // Stack out: [point_bytes (64 bytes)]
+// ecEmitFieldElementVerify --
+// R-156 -- verify that the script number on TOS is a FIELD ELEMENT, 0 <= v < p.
+// Leaves the value in place (OP_DUP feeds the check, OP_VERIFY consumes the
+// flag), so the caller's stack shape is unchanged.
+//
+// ecMakePoint converts each coordinate with `push 33, OP_NUM2BIN, push 32,
+// OP_SPLIT, OP_DROP`. NUM2BIN(33) writes a 33-byte little-endian SIGN-MAGNITUDE
+// script number, so byte 32 is exactly where the sign bit lives AND where any
+// bits >= 2^256 land -- and the split drops precisely that byte. The result was
+// an ecMakePoint that is NOT INJECTIVE:
+//
+//     ecMakePoint( 1n, y) == ecMakePoint(-1n, y)            sign discarded
+//     ecMakePoint( 1n, y) == ecMakePoint(1n + 2^256, y)     magnitude truncated
+//     ecMakePoint( x,  y) == ecMakePoint(x, -y)             and on the y half
+//
+// all three measured on @bsv/sdk's Spend. The y-half collision is the sharpest:
+// `ecMakePoint(x, 0n - y)` is how an author spells negation by hand, and it
+// silently produced (x, +y) -- the point being negated -- rather than (x, p-y).
+//
+// R-117's coordinate-canonicity gate does not cover this and cannot: the bytes
+// emitted for -1n are the perfectly canonical encoding of 1, so no downstream
+// consumer can tell. The aliasing happens before any Point exists.
+//
+// REJECT rather than reduce, for the reason R-117 gives: ecOnCurve answers "no"
+// to a coordinate outside [0, p), so reducing here would leave the constructor
+// and the predicate disagreeing about what a point is. Rejecting also restores
+// injectivity, which is the property the defect broke.
+//
+// OP_WITHIN(v, 0, p) is `0 <= v < p` in one opcode -- the same half-open bound
+// the `within` builtin exposes to contract authors.
+func ecEmitFieldElementVerify(emit func(StackOp)) {
+	emit(StackOp{Op: "dup"})
+	emit(StackOp{Op: "push", Value: bigIntPush(0)})
+	emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(ecFieldP)}})
+	emit(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+	emit(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+}
+
 func EmitEcMakePoint(emit func(StackOp)) {
+	// R-156: y must be a field element before its sign byte is dropped.
+	ecEmitFieldElementVerify(emit)
 	// Convert y to 32 bytes big-endian (NUM2BIN(33) to handle sign byte, then take first 32)
 	emit(StackOp{Op: "push", Value: bigIntPush(33)})
 	emit(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
@@ -1158,6 +1521,8 @@ func EmitEcMakePoint(emit func(StackOp)) {
 	// Stack: [x_num, y_be]
 	emit(StackOp{Op: "swap"})
 	// Stack: [y_be, x_num]
+	// R-156: and so must x.
+	ecEmitFieldElementVerify(emit)
 	emit(StackOp{Op: "push", Value: bigIntPush(33)})
 	emit(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
@@ -1174,6 +1539,9 @@ func EmitEcMakePoint(emit func(StackOp)) {
 // Stack in: [point (64 bytes)]
 // Stack out: [x as bigint]
 func EmitEcPointX(emit func(StackOp)) {
+	// CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x --
+	// the split at 32 left an empty tail that `drop` happily removed.
+	ecEmitPointLenVerify(emit, 64)
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	emit(StackOp{Op: "drop"})
@@ -1188,6 +1556,7 @@ func EmitEcPointX(emit func(StackOp)) {
 // Stack in: [point (64 bytes)]
 // Stack out: [y as bigint]
 func EmitEcPointY(emit func(StackOp)) {
+	ecEmitPointLenVerify(emit, 64)
 	emit(StackOp{Op: "push", Value: bigIntPush(32)})
 	emit(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	emit(StackOp{Op: "swap"})

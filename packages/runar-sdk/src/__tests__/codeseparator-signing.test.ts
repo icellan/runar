@@ -283,14 +283,22 @@ describe('OP_CODESEPARATOR: stateful terminal method without terminalOutputs', (
       pubKeyHex,       // auctioneer
       otherPubKey,     // highestBidder
       1000n,           // highestBid
-      0n,              // deadline=0 so extractLocktime check passes
+      1n,              // deadline: non-zero, so `extractLocktime >= deadline`
+                       // is not vacuously true (W7 — the old deadline=0 made
+                       // it pass whatever the SDK threaded).
     ]);
 
     await contract.deploy(provider, signer, { satoshis: 50_000 });
 
     // Call close WITHOUT terminalOutputs — this was the failing pattern.
     // Before the fix, this pushed _codePart causing CLEANSTACK.
-    const result = await contract.call('close', [null], provider, signer);
+    //
+    // `locktime: 1` is load-bearing (W7): close() asserts
+    // `extractSequence !== 0xffffffff`, and `resolveInputSequence` only
+    // defaults the inputs to the non-final 0xfffffffe when a NON-ZERO locktime
+    // is set. With no locktime the SDK emits an all-final tx, which is exactly
+    // the spend the guard exists to refuse.
+    const result = await contract.call('close', [null], provider, signer, { locktime: 1 });
     expect(result.txid).toBeTruthy();
     expect(result.txid.length).toBe(64);
 

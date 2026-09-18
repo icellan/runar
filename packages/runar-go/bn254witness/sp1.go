@@ -46,10 +46,13 @@ type sp1G2File struct {
 // LoadSP1VKFromFile reads a vk.json file in the Rúnar SP1 fixture format
 // and returns a VerifyingKey ready to feed into GenerateWitness.
 //
-// The G2 points are already pre-negated in the file, so this function is a
-// pure deserialization step — no arithmetic or Fp2 swap is applied. This is
-// the architectural goal of the Rúnar Groth16 refactor: SP1 VK constants
-// drop in verbatim.
+// The G2 points are already pre-negated in the file, so no arithmetic or Fp2
+// swap is applied to them. This is the architectural goal of the Rúnar Groth16
+// refactor: SP1 VK constants drop in verbatim.
+//
+// Deserialisation is followed by VerifyingKey.Validate, which rejects keys
+// whose own points are non-canonical, at infinity, off their curve, or outside
+// the prime-order subgroup on G2. See that method for the precise boundary.
 func LoadSP1VKFromFile(path string) (VerifyingKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -100,13 +103,22 @@ func LoadSP1VKFromFile(path string) (VerifyingKey, error) {
 		ic[i] = &pair
 	}
 
-	return VerifyingKey{
+	vk := VerifyingKey{
 		AlphaG1:    alpha,
 		BetaNegG2:  betaNeg,
 		GammaNegG2: gammaNeg,
 		DeltaNegG2: deltaNeg,
 		IC:         ic,
-	}, nil
+	}
+
+	// Curve-membership guards (R-159). Decimal strings that parse as big
+	// integers are not yet a verifying key: see VerifyingKey.Validate for
+	// exactly what is enforced and what is deliberately left to the caller.
+	if err := vk.Validate(); err != nil {
+		return VerifyingKey{}, fmt.Errorf("LoadSP1VKFromFile: %s: %w", path, err)
+	}
+
+	return vk, nil
 }
 
 // parseDecimal parses a decimal-string representation of a big.Int. Empty

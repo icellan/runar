@@ -83,13 +83,19 @@ describe('checkSourceAnchors — RED: catches a wrong mapping the golden compare
 
   it('flags a mapping pointing past the end of the file', () => {
     const golden = loadGolden('if-else', 'ts');
+    // if-else/ts does not map opcodeIndex 0 (first tracked op is 9). Mutate
+    // a mapping that actually exists or this RED case is a no-op.
+    expect(golden.mappings.length, 'if-else/ts golden is empty').toBeGreaterThan(0);
+    const target = golden.mappings[0]!.opcodeIndex;
     const mutated: SourceMap = {
-      mappings: golden.mappings.map((m) => (m.opcodeIndex === 0 ? { ...m, line: 9999, column: 0 } : m)),
+      mappings: golden.mappings.map((m) =>
+        m.opcodeIndex === target ? { ...m, line: 9999, column: 0 } : m,
+      ),
     };
     const report = checkSourceAnchors(mutated, REPO_ROOT);
     expect(report.ok).toBe(false);
     expect(report.violations).toContainEqual(
-      expect.objectContaining({ opcodeIndex: 0, kind: 'line-out-of-bounds' }),
+      expect.objectContaining({ opcodeIndex: target, kind: 'line-out-of-bounds' }),
     );
   });
 

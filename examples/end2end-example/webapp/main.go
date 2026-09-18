@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -9,9 +11,34 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 const contractSats = 20000
+
+// maxCompileBodyBytes caps the /api/compile request body. The endpoint is
+// unauthenticated and hands caller-supplied bytes to the full compiler
+// pipeline, so an unbounded body is a free amplification primitive: the cap
+// is enforced while reading, not after buffering. 1 MiB is ~300x the largest
+// bundled example contract.
+//
+// A variable rather than a constant so tests can shrink it.
+var maxCompileBodyBytes int64 = 1 << 20 // 1 MiB
+
+// compileTimeout bounds a single playground compile so no one request can
+// occupy a handler goroutine indefinitely. Must stay below serverWriteTimeout
+// or the connection is torn down before the error response is written.
+var compileTimeout = 10 * time.Second
+
+// Connection-level deadlines. Without these a bare http.ListenAndServe lets a
+// slowloris client hold a connection (and its goroutine) open forever.
+const (
+	serverReadTimeout  = 15 * time.Second
+	serverWriteTimeout = 30 * time.Second
+	serverIdleTimeout  = 60 * time.Second
+)
 
 type RoundResult struct {
 	Round     int    `json:"round"`
@@ -66,9 +93,21 @@ type LogEntry struct {
 	Type    string `json:"type"`
 }
 
-var game = &GameState{Phase: "init"}
+
 
 func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	srv := newServer(port)
+
+	log.Printf("PriceBet webapp listening on %s", srv.Addr)
+	log.Fatal(srv.ListenAndServe())
+}
+
+func newServer(port string) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/init", handleInit)
@@ -78,6 +117,7 @@ func main() {
 	mux.HandleFunc("/api/round/reveal", handleReveal)
 	mux.HandleFunc("/api/compile", handleCompile)
 	mux.HandleFunc("/api/lang", handleLang)
+	mux.HandleFunc("/api/template", handleTemplate)
 
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -88,13 +128,14 @@ func main() {
 		http.ServeFile(w, r, "static/index.html")
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	return &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       serverReadTimeout,
+		ReadHeaderTimeout: serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
 	}
-
-	log.Printf("PriceBet webapp listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
@@ -109,6 +150,9 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 }
 
 func handleInit(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -201,12 +245,18 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleState(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	game.mu.Lock()
 	defer game.mu.Unlock()
 	jsonResponse(w, game)
 }
 
 func handleNewRound(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -242,6 +292,9 @@ func handleNewRound(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleBet(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -302,7 +355,7 @@ func handleBet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if game.AliceBet != "" && game.BobBet != "" {
-		if err := deployContract(); err != nil {
+		if err := deployContract(game); err != nil {
 			jsonError(w, fmt.Sprintf("deploy contract: %v", err), 500)
 			return
 		}
@@ -311,7 +364,9 @@ func handleBet(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, game)
 }
 
-func deployContract() error {
+// deployContract builds and broadcasts the contract funding tx for ONE
+// visitor's game (R-152: it used to reach for the package-level singleton).
+func deployContract(game *GameState) error {
 	scriptHex, _, err := compilePriceBet(game.Lang, game.Alice.PubKeyHex, game.Bob.PubKeyHex, game.Threshold)
 	if err != nil {
 		return fmt.Errorf("compile: %w", err)
@@ -370,6 +425,9 @@ func deployContract() error {
 }
 
 func handleReveal(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	if r.Method != "POST" {
 		jsonError(w, "POST only", 405)
 		return
@@ -478,6 +536,9 @@ func handleReveal(w http.ResponseWriter, r *http.Request) {
 // { "lang": "<key>" }. Also serves GET to report the current selection and
 // the full set of supported languages (useful for populating the UI).
 func handleLang(w http.ResponseWriter, r *http.Request) {
+	// R-152: resolve this visitor's game. The package-level singleton is gone,
+	// so a handler that forgets this does not compile.
+	game := sessionFor(w, r)
 	switch r.Method {
 	case "GET":
 		game.mu.Lock()
@@ -503,6 +564,10 @@ func handleLang(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// compileSourceFn is the compile entry point used by handleCompile. It is a
+// variable so tests can substitute a stub.
+var compileSourceFn = compileSource
+
 // handleCompile is the playground endpoint: it accepts arbitrary Rúnar
 // source for any supported input format and returns the compiled locking
 // script. The filename's extension drives parser dispatch (".runar.java"
@@ -515,12 +580,20 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxCompileBodyBytes)
+
 	var req struct {
 		Source   string `json:"source"`
 		Filename string `json:"filename"`
 		Lang     string `json:"lang"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonError(w, fmt.Sprintf("request body exceeds %d bytes", maxCompileBodyBytes),
+				http.StatusRequestEntityTooLarge)
+			return
+		}
 		jsonError(w, "bad request: "+err.Error(), 400)
 		return
 	}
@@ -542,16 +615,92 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 		filename = spec.filename
 	}
 
-	scriptHex, scriptAsm, err := compileSource([]byte(req.Source), filename)
-	if err != nil {
-		jsonError(w, err.Error(), 400)
+	// The compiler pipeline is synchronous and has no cancellation hook, so
+	// run it on its own goroutine and stop waiting once the deadline passes.
+	// The goroutine is left to finish on its own -- the buffered channel means
+	// it never blocks -- so a pathological compile still burns one worker, but
+	// it no longer holds the client connection or the handler goroutine.
+	ctx, cancel := context.WithTimeout(r.Context(), compileTimeout)
+	defer cancel()
+
+	type compileResult struct {
+		scriptHex string
+		scriptAsm string
+		anf       *ir.ANFProgram
+		err       error
+	}
+	resultCh := make(chan compileResult, 1)
+	go func() {
+		hex, asm, anf, err := compileSourceFn([]byte(req.Source), filename)
+		resultCh <- compileResult{hex, asm, anf, err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		jsonError(w, fmt.Sprintf("compile exceeded %s", compileTimeout),
+			http.StatusServiceUnavailable)
+		return
+	case res := <-resultCh:
+		if res.err != nil {
+			jsonError(w, res.err.Error(), 400)
+			return
+		}
+		payload := map[string]any{
+			"scriptHex": res.scriptHex,
+			"scriptAsm": res.scriptAsm,
+			"filename":  filename,
+		}
+		// R-214: the ANF IR is what makes this a playground rather than a hex
+		// printer. Omitted entirely when the pipeline produced none, so a
+		// client can tell "no IR" from "empty IR".
+		if res.anf != nil {
+			payload["anfIr"] = res.anf
+		}
+		jsonResponse(w, payload)
+	}
+}
+
+// handleTemplate serves the starter contract for one language.
+//
+// R-154: the frontend used to carry its own templates and had exactly two of
+// the nine — java and ts — with `|| PLAYGROUND_TEMPLATES.java` covering the
+// rest. Choosing Ruby and clicking "Load Template" produced Java source, which
+// was then sent for compilation as `P2PKH.runar.rb` and rejected. The failure
+// looked like the user's mistake.
+//
+// Seven more string literals in app.js would be the same bug with a longer
+// fuse. These bytes come off disk from the per-language PriceBet sources the
+// webapp already resolves and compiles for every round, so a template that
+// stops compiling is a broken example contract — something the rest of the
+// suite already notices — rather than a stale copy nobody reads.
+//
+// Unlike /api/compile this does NOT fall back to TypeScript for an unknown
+// language. `normalizeLang` maps anything unrecognised to "ts", which is a
+// sensible default for compiling and would reinstate exactly this bug here:
+// handing back a language the caller did not ask for, silently.
+func handleTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "" && r.Method != http.MethodGet {
+		jsonError(w, "GET only", 405)
 		return
 	}
 
-	jsonResponse(w, map[string]string{
-		"scriptHex": scriptHex,
-		"scriptAsm": scriptAsm,
-		"filename":  filename,
+	key := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("lang")))
+	spec, ok := sourceLangs[key]
+	if !ok {
+		jsonError(w, fmt.Sprintf("unknown lang %q", key), 400)
+		return
+	}
+
+	source, err := readContractSource(spec)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("template unavailable for %s: %v", key, err), 500)
+		return
+	}
+
+	jsonResponse(w, map[string]any{
+		"lang":     key,
+		"filename": spec.filename,
+		"source":   string(source),
 	})
 }
 

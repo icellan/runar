@@ -24,6 +24,8 @@ const ConstructorNode = types.ConstructorNode;
 const MethodNode = types.MethodNode;
 const Expression = types.Expression;
 const Statement = types.Statement;
+const ForStmt = types.ForStmt;
+const SourceLocation = types.SourceLocation;
 const RunarType = types.RunarType;
 const ParentClass = types.ParentClass;
 const CompilerDiagnostic = types.CompilerDiagnostic;
@@ -138,7 +140,43 @@ fn validateProperties(
                 .message = "property type 'void' is not valid",
                 .severity = .@"error",
             });
-        } else if (!isValidPropertyType(prop.type_info) and prop.type_info != .unknown) {
+        } else if (prop.type_info == .unknown) {
+            // N-109: an unrecognised type name. `typeNodeToRunarType` collapses
+            // every `custom_type` to `.unknown`, so this arm used to be guarded
+            // OFF with `and prop.type_info != .unknown` and could never fire on
+            // the case it was written for. The contract then ran all the way to
+            // stack lowering, which refused it with `UnsupportedOperation` — no
+            // type name, no source location, and three passes after the six
+            // peer tiers refuse it in the validator.
+            //
+            // Message text matches the Go / Python / Ruby peers byte for byte;
+            // `location` carries the field-name token so the CLI can print the
+            // same `file:line:col:` prefix those tiers print.
+            const loc = prop.source_loc;
+            const spelled = if (prop.type_name.len > 0) prop.type_name else "<unknown>";
+            if (loc) |l| {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "unsupported type '{s}' in property declaration at {s}:{d}",
+                        .{ spelled, l.file, l.line },
+                    ),
+                    .location = l,
+                    .severity = .@"error",
+                    .owned_message = true,
+                });
+            } else {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "unsupported type '{s}' in property declaration",
+                        .{spelled},
+                    ),
+                    .severity = .@"error",
+                    .owned_message = true,
+                });
+            }
+        } else if (!isValidPropertyType(prop.type_info)) {
             try errors.append(allocator, .{
                 .message = "unsupported type in property declaration",
                 .severity = .@"error",
@@ -241,8 +279,39 @@ fn isLiteralExpression(expr: Expression) bool {
             .literal_int, .literal_bigint => true,
             else => false,
         },
+        // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+        // spec/grammar.md section 11:
+        //
+        //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        //
+        // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        // position. This check runs on the AST, BEFORE ANF lowering, so an
+        // initializer still arrives here as a call node and was refused -- in
+        // the one position the `.runar.rs` surface needs it, since the Rust
+        // DSL writes initializers as assignments inside `init()` that the
+        // parser LIFTS into `PropertyNode.initializer`, and a bare
+        // `"1976a914"` is a `&str` that cannot be assigned to a `ByteString`
+        // (`Vec<u8>`).
+        //
+        // Accepting it here is only half the job: `extractLiteralValue` in
+        // anf_lower.zig must UNWRAP the same shape, or the property validates
+        // and then loses its default entirely.
+        .call => isToByteStringLiteral(expr),
         else => false,
     };
+}
+
+/// Whether the expression is the `toByteString(<literal>)` ByteStringLiteral
+/// production. Literal argument ONLY -- `toByteString(x)` for a non-literal
+/// `x` is not this production and stays a non-literal initializer. Peer of the
+/// TS helper of the same name in `02-validate.ts`.
+pub fn isToByteStringLiteral(expr: Expression) bool {
+    const c = switch (expr) {
+        .call => |c| c,
+        else => return false,
+    };
+    if (!std.mem.eql(u8, c.callee, "toByteString") or c.args.len != 1) return false;
+    return c.args[0] == .literal_bytes;
 }
 
 /// Whether an expression is an array literal whose elements are all literal
@@ -290,6 +359,34 @@ fn validateConstructor(
         if (!assigned and prop.initializer == null) {
             try errors.append(allocator, .{
                 .message = "property must be assigned in the constructor",
+                .severity = .@"error",
+            });
+        }
+    }
+
+    // N-092: a FixedArray may not be a constructor PARAMETER.
+    //
+    // A property's deploy-time value reaches the script through a constructor
+    // SLOT, and `expand_fixed_arrays.zig` is what turns a FixedArray PROPERTY
+    // into the scalar siblings those slots can address. A constructor
+    // PARAMETER has no such expansion, so the argument has nowhere to be
+    // spliced: before this check the tier compiled such a contract to a full
+    // stateful locking script with `constructorSlots: []` — deployable, with
+    // state its own ABI claims to take an argument for and can never receive.
+    //
+    // The rule keys on the parameter's TYPE alone, not on the parent class:
+    // ts / go / rust / python / java all refuse it on stateless contracts too.
+    // Spelled to match the ts / rust / python / java wording verbatim, since
+    // the cross-tier rejection gate compares diagnostics.
+    for (ctor.params) |param| {
+        if (param.type_info == .fixed_array) {
+            try errors.append(allocator, .{
+                .message = try std.fmt.allocPrint(
+                    allocator,
+                    "Constructor parameter '{s}' cannot be a FixedArray. Use initialized properties or pass each element as a separate parameter.",
+                    .{param.name},
+                ),
+                .owned_message = true,
                 .severity = .@"error",
             });
         }
@@ -593,7 +690,7 @@ fn validateMethods(
         }
 
         // #131: warn when a public method gates on extractLocktime but never
-        // asserts the spending tx is non-final (extractSequence < 0xffffffff).
+        // asserts the spending tx is non-final (extractSequence !== 0xffffffff).
         // Advisory only — no effect on emitted bytecode.
         if (method.is_public) {
             try warnLocktimeWithoutSequenceGuard(allocator, contract, method, warnings);
@@ -607,7 +704,7 @@ fn validateMethods(
 
         // Validate for-loop bounds are compile-time constants
         for (method.body) |stmt| {
-            try validateStatement(allocator, stmt, errors);
+            try validateStatement(allocator, contract, stmt, errors);
         }
     }
 }
@@ -1046,9 +1143,323 @@ fn isAssertCall(expr: Expression) bool {
     };
 }
 
+// ---------------------------------------------------------------------------
+// R-127 -- output intrinsics inside a loop body
+// ---------------------------------------------------------------------------
+
+/// The three intrinsics that register an output ref.
+const output_intrinsic_names = [_][]const u8{ "addOutput", "addRawOutput", "addDataOutput" };
+
+fn isOutputIntrinsicName(name: []const u8) bool {
+    for (output_intrinsic_names) |n| {
+        if (std.mem.eql(u8, n, name)) return true;
+    }
+    return false;
+}
+
+/// Where an output intrinsic was found, and how it was reached.
+const IntrinsicSite = struct {
+    intrinsic: []const u8,
+    /// The private method it was reached through, if any.
+    via: ?[]const u8 = null,
+    location: ?SourceLocation = null,
+};
+
+/// Reject an output intrinsic called inside a loop body (R-127).
+///
+/// `anf_lower` lowers a loop body into its own sub-context, which starts with a
+/// fresh empty add-output ref list, and nothing propagates that list back to the
+/// method context -- unlike the if-statement lowering, which concatenates each
+/// arm's outputs into one ref precisely so the parent sees them. The
+/// continuation hash is then built from whatever `addOutput` calls sit at the
+/// method's TOP level while the loop's outputs are still emitted into the
+/// transaction. Measured on a two-iteration loop before this check existed:
+///
+///   * loop only -- ts/go/rust/python blew up inside stack lowering ("method
+///     parameter '_newAmount' is not on the stack at a post-consumption
+///     reference"), zig/ruby emitted a covenant over the WRONG output set, java
+///     emitted none. THIS tier was one of the two that silently shipped the
+///     wrong covenant.
+///   * loop + one top-level call -- compiled clean in every tier, and the ANF
+///     continuation hashed exactly ONE leaf while three outputs were built.
+///
+/// A continuation committing to fewer outputs than the transaction creates is
+/// spendable only by a hand-crafted transaction, is rejected by every shipped
+/// SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+///
+/// Refusal rather than lowering: propagating the refs cannot work by name,
+/// because the loop is unrolled at stack-lowering time and one body binding name
+/// denotes N physical slots. A correct lowering means unrolling at ANF time, a
+/// language feature with no golden behind it; refusing removes nothing that
+/// works today.
+///
+/// The diagnostic text is shared VERBATIM with the other six tiers.
+fn validateNoOutputIntrinsicInLoop(
+    allocator: Allocator,
+    contract: ContractNode,
+    f: ForStmt,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer seen.deinit(allocator);
+    const site = try findOutputIntrinsic(allocator, contract, f.body, &seen) orelse return;
+
+    const via_clause = if (site.via) |v|
+        try std.fmt.allocPrint(allocator, " (reached through private method '{s}')", .{v})
+    else
+        try allocator.dupe(u8, "");
+    try errors.append(allocator, .{
+        .message = try std.fmt.allocPrint(
+            allocator,
+            "Output intrinsic '{s}'{s} cannot be called inside a loop body. A loop body " ++
+                "lowers into its own scope whose declared outputs never reach the method's " ++
+                "output list, so the continuation hash would commit to fewer outputs than the " ++
+                "transaction actually creates: the spend is rejected by every shipped SDK and " ++
+                "any successor it produces is unspendable. Move the call out of the loop.",
+            .{ site.intrinsic, via_clause },
+        ),
+        .severity = .@"error",
+        .location = site.location orelse f.source_loc,
+    });
+}
+
+/// The property/function name a call names, if any.
+fn calleeProperty(expr: Expression) ?[]const u8 {
+    return switch (expr) {
+        .call => |c| c.callee,
+        .method_call => |mc| mc.method,
+        else => null,
+    };
+}
+
+fn privateMethodNamed(contract: ContractNode, name: []const u8) ?MethodNode {
+    for (contract.methods) |m| {
+        if (!m.is_public and std.mem.eql(u8, m.name, name)) return m;
+    }
+    return null;
+}
+
+/// First output intrinsic reachable from `stmts`, following calls to private
+/// methods: a public method that delegates `addOutput` to a private helper has
+/// that helper INLINED at ANF time, so a helper called in a loop lands its
+/// outputs in the loop's sub-context exactly as a direct call would.
+fn findOutputIntrinsic(
+    allocator: Allocator,
+    contract: ContractNode,
+    stmts: []const Statement,
+    seen: *std.ArrayListUnmanaged([]const u8),
+) Allocator.Error!?IntrinsicSite {
+    for (stmts) |stmt| {
+        if (try findOutputIntrinsicInStatement(allocator, contract, stmt, seen)) |site| return site;
+    }
+    return null;
+}
+
+fn findOutputIntrinsicInStatement(
+    allocator: Allocator,
+    contract: ContractNode,
+    stmt: Statement,
+    seen: *std.ArrayListUnmanaged([]const u8),
+) Allocator.Error!?IntrinsicSite {
+    return switch (stmt) {
+        .expr_stmt => |e| findOutputIntrinsicInExpr(allocator, contract, e.expr, e.source_loc, seen),
+        .const_decl => |d| findOutputIntrinsicInExpr(allocator, contract, d.value, d.source_loc, seen),
+        .let_decl => |d| if (d.value) |v|
+            findOutputIntrinsicInExpr(allocator, contract, v, d.source_loc, seen)
+        else
+            null,
+        .assign => |a| findOutputIntrinsicInExpr(allocator, contract, a.value, a.source_loc, seen),
+        .assert_stmt => |a| findOutputIntrinsicInExpr(allocator, contract, a.condition, a.source_loc, seen),
+        .return_stmt => |r| if (r) |v|
+            findOutputIntrinsicInExpr(allocator, contract, v, null, seen)
+        else
+            null,
+        .if_stmt => |i| blk: {
+            if (try findOutputIntrinsicInExpr(allocator, contract, i.condition, i.source_loc, seen)) |site| {
+                break :blk site;
+            }
+            if (try findOutputIntrinsic(allocator, contract, i.then_body, seen)) |site| break :blk site;
+            if (i.else_body) |eb| {
+                if (try findOutputIntrinsic(allocator, contract, eb, seen)) |site| break :blk site;
+            }
+            break :blk null;
+        },
+        .for_stmt => |f| findOutputIntrinsic(allocator, contract, f.body, seen),
+    };
+}
+
+fn findOutputIntrinsicInExpr(
+    allocator: Allocator,
+    contract: ContractNode,
+    expr: Expression,
+    loc: ?SourceLocation,
+    seen: *std.ArrayListUnmanaged([]const u8),
+) Allocator.Error!?IntrinsicSite {
+    if (calleeProperty(expr)) |name| {
+        if (isOutputIntrinsicName(name)) {
+            return IntrinsicSite{ .intrinsic = name, .location = loc };
+        }
+        if (privateMethodNamed(contract, name)) |helper| {
+            var already = false;
+            for (seen.items) |s| {
+                if (std.mem.eql(u8, s, name)) already = true;
+            }
+            if (!already) {
+                try seen.append(allocator, name);
+                if (try findOutputIntrinsic(allocator, contract, helper.body, seen)) |nested| {
+                    return IntrinsicSite{ .intrinsic = nested.intrinsic, .via = name, .location = loc };
+                }
+            }
+        }
+    }
+    // An intrinsic can sit inside an argument list or an operand, not only as a
+    // bare expression statement.
+    switch (expr) {
+        .call => |c| for (c.args) |a| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, a, loc, seen)) |site| return site;
+        },
+        .method_call => |mc| for (mc.args) |a| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, a, loc, seen)) |site| return site;
+        },
+        .binary_op => |b| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, b.left, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, b.right, loc, seen)) |site| return site;
+        },
+        .unary_op => |u| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, u.operand, loc, seen)) |site| return site;
+        },
+        .ternary => |t| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, t.condition, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, t.then_expr, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, t.else_expr, loc, seen)) |site| return site;
+        },
+        .index_access => |ia| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, ia.object, loc, seen)) |site| return site;
+            if (try findOutputIntrinsicInExpr(allocator, contract, ia.index, loc, seen)) |site| return site;
+        },
+        else => {},
+    }
+    return null;
+}
+
+/// The cross-tier loop-START diagnostic (N-137). Shared VERBATIM with the
+/// other six tiers, which raise it from ANF lowering:
+/// `extractLoopShape` in packages/runar-compiler/src/passes/04-anf-lower.ts,
+/// `extractLoopShape` in compilers/go/frontend/anf_lower.go, and the Rust,
+/// Python, Ruby and Java peers. This tier raises it earlier, in validation,
+/// because its parsers discard the start expression rather than carrying it to
+/// ANF; the user-visible sentence is identical either way.
+const loop_start_diagnostic = "Cannot determine loop start at compile time. " ++
+    "For-loop iterators must start at an integer literal.";
+
+/// The cross-tier loop-update diagnostic. Shared VERBATIM with the other six
+/// tiers — `compilers/rust/src/frontend/validator.rs` is the source of truth,
+/// and `compilers/go/frontend/validator.go`,
+/// `packages/runar-compiler/src/passes/02-validate.ts`,
+/// `compilers/python/runar_compiler/frontend/validator.py`,
+/// `compilers/ruby/lib/runar_compiler/frontend/validator.rb` and
+/// `compilers/java/src/main/java/runar/compiler/passes/Validate.java` carry the
+/// same string character for character. Per-tier diagnostic drift on the same
+/// rejection is a recurring defect in this repo, so do not reword it here.
+const loop_update_diagnostic = "For loop update must advance the loop variable by one (`i++`, `i--`, " ++
+    "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a " ++
+    "unit step, so any other update clause -- a function call, a state mutation, or a " ++
+    "non-unit step such as `i += 2` -- cannot be represented and would be discarded";
+
+/// True when `expr` names the identifier the update is allowed to advance. A
+/// property access, an index access or anything else is never accepted: those
+/// are the side effects that used to be dropped.
+fn isAllowedLoopVar(allowed: []const u8, expr: Expression) bool {
+    return switch (expr) {
+        .identifier => |name| std.mem.eql(u8, name, allowed),
+        else => false,
+    };
+}
+
+fn isLiteralOne(expr: Expression) bool {
+    return switch (expr) {
+        .literal_int => |v| v == 1,
+        else => false,
+    };
+}
+
+/// Whether the unrolled loop model can represent `update` (N-061 / R-065).
+///
+/// The ANF `loop` node carries exactly `{count, iterVar, start, step, body}`
+/// and synthesizes the iterator on unrolled iteration k as `start + k*step`.
+/// There is no slot for an arbitrary update statement, and this tier's parsers
+/// derive the step from the COMPARISON DIRECTION alone — so every other update
+/// clause was coerced to a unit step and discarded.
+///
+/// The accepted set is every shape the nine frontends actually synthesize:
+/// `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+/// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig, Move and Java
+/// parsers; and the effect-free no-op sentinel (a literal or a bare identifier)
+/// that the while-shaped parsers synthesize when the source has no continue
+/// expression at all.
+fn isRepresentableForUpdate(allowed: []const u8, update: Statement) bool {
+    return switch (update) {
+        .expr_stmt => |e| switch (e.expr) {
+            .increment => |inc| isAllowedLoopVar(allowed, inc.operand),
+            .decrement => |dec| isAllowedLoopVar(allowed, dec.operand),
+            // The no-op sentinel a while-shaped frontend synthesizes when the
+            // source carries no continue expression. Reading a literal or a
+            // bare identifier has no effect, so discarding it loses nothing.
+            .literal_int, .literal_bool, .identifier => true,
+            else => false,
+        },
+        // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+        .assign => |a| blk: {
+            if (a.target_is_property or !std.mem.eql(u8, a.target, allowed)) break :blk false;
+            break :blk switch (a.value) {
+                .binary_op => |bop| switch (bop.op) {
+                    .add => (isAllowedLoopVar(allowed, bop.left) and isLiteralOne(bop.right)) or
+                        (isLiteralOne(bop.left) and isAllowedLoopVar(allowed, bop.right)),
+                    .sub => isAllowedLoopVar(allowed, bop.left) and isLiteralOne(bop.right),
+                    else => false,
+                },
+                else => false,
+            };
+        },
+        else => false,
+    };
+}
+
+/// The step direction the loop's UPDATE clause expresses, or null when the
+/// clause carries no direction at all.
+///
+/// Null means "no constraint": a surface whose step is implied by the syntax
+/// (`for i in 0..N`, `range(N)`, a bare `while (c)`) arrives with `update ==
+/// null`, and the while-shaped parsers synthesize an effect-free literal or
+/// bare identifier as a no-op sentinel. Both are direction-free by
+/// construction, so pairing either with a countdown comparison is legal.
+/// Anything the loop model cannot represent at all is rejected separately by
+/// `isRepresentableForUpdate`.
+fn loopUpdateAscends(f: anytype) ?bool {
+    const u = f.update orelse return null;
+    return switch (u.*) {
+        .expr_stmt => |e| switch (e.expr) {
+            .increment => true,
+            .decrement => false,
+            else => null,
+        },
+        // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+        .assign => |a| switch (a.value) {
+            .binary_op => |bop| switch (bop.op) {
+                .add => true,
+                .sub => false,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
+}
+
 /// Validate individual statements (currently checks for-loop bounds).
 fn validateStatement(
     allocator: Allocator,
+    contract: ContractNode,
     stmt: Statement,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
 ) !void {
@@ -1068,12 +1479,129 @@ fn validateStatement(
                     .severity = .@"error",
                 });
             }
-            for (f.body) |s| try validateStatement(allocator, s, errors);
+            // N-137: the START, same rule and the same reason. The unrolled
+            // loop model synthesises iteration k as `start + k*step`, so a
+            // runtime start cannot be represented — and every surface parser
+            // here silently left `init_value` at its `0` default instead, so
+            // `for (let i = start; i < 3n; i++)` compiled to byte-identical
+            // output to `for (let i = 0n; …)`: a covenant over a sum the
+            // source never computes, in this tier alone. The other six tiers
+            // refuse it from anf-lowering; the message below is theirs, word
+            // for word, so a user switching tiers reads the same sentence.
+            if (!f.init_is_const) {
+                try errors.append(allocator, .{
+                    .message = loop_start_diagnostic,
+                    .severity = .@"error",
+                    .location = f.source_loc,
+                });
+            }
+            // W4: the condition must test the ITERATOR. Only the bound was ever
+            // looked at -- here and in all six peer tiers' `extractLoopShape`,
+            // which computes `count = bound - start` and ignores the left-hand
+            // side entirely. So `for (let i = 0n; i + 1n < 2n; i++)` unrolled
+            // TWICE for a loop the source runs ONCE, executing an `else` arm the
+            // source can never reach. Measured on @bsv/sdk Spend.validate() with
+            // a vault whose signature check sits in the first lap and whose
+            // second lap sets `authorized = true`: the phantom-lap loop ACCEPTED
+            // an empty signature, while the semantically identical `i < 1n`
+            // rejected it. Refusing is the fix -- evaluating a general condition
+            // per iteration is a language extension. The message is the other
+            // six tiers' sentence, word for word.
+            if (!f.cond_tests_iter) {
+                try errors.append(allocator, .{
+                    .message = try std.fmt.allocPrint(
+                        allocator,
+                        "For loop condition must compare the loop variable '{s}' to a " ++
+                            "compile-time constant (`{s} < 10n`). The unrolled loop binds the " ++
+                            "iterator as `start + k*step` and takes its trip count from the " ++
+                            "bound alone, so a condition whose left-hand side is anything else " ++
+                            "-- a computed expression, or a different variable -- is not the " ++
+                            "condition the loop actually evaluates",
+                        .{ f.var_name, f.var_name },
+                    ),
+                    .severity = .@"error",
+                    .location = f.source_loc,
+                });
+            }
+            // W4 (found by the new N42 fixture, not by inspection): the
+            // comparison DIRECTION must agree with the update. The other six
+            // tiers refuse a mismatch inside loop-shape extraction --
+            // "For loop counting up (i++) must use '<' or '<='" -- but this
+            // tier resolves the shape in the PARSER, where `descending` comes
+            // from the operator and the step sign comes from the update, and
+            // nothing ever compared them. Measured on
+            // conformance/negatives/N42-loop-direction-mismatch.runar.ts:
+            //
+            //   ts/go/rust/python/ruby/java   refuse
+            //   zig                           exit 0, script `007c9c`
+            //                                 (OP_0 OP_SWAP OP_NUMEQUAL)
+            //
+            // i.e. the loop body and every assertion in it were dropped from
+            // the locking script with no diagnostic -- the same silent
+            // zero-iteration collapse the Move countdown fold was fixed for.
+            // The message is the other six tiers' sentence, word for word.
+            if (loopUpdateAscends(f)) |ascends| {
+                if (ascends and f.descending) {
+                    try errors.append(allocator, .{
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "For loop counting up (i++) must use '<' or '<=' (got '{s}').",
+                            .{if (f.inclusive) ">=" else ">"},
+                        ),
+                        .severity = .@"error",
+                        .location = f.source_loc,
+                    });
+                } else if (!ascends and !f.descending) {
+                    try errors.append(allocator, .{
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            "For loop counting down (i--) must use '>' or '>=' (got '{s}').",
+                            .{if (f.inclusive) "<=" else "<"},
+                        ),
+                        .severity = .@"error",
+                        .location = f.source_loc,
+                    });
+                }
+            }
+            // N-061 / R-065: reject any update clause the unrolled loop model
+            // cannot represent. `null` means the surface syntax carries no
+            // update at all (`for i in 0..N`, `range(N)`, a bare `while (c)`),
+            // which is always representable.
+            //
+            // R-065 (second hole): "no update at all" was doing double duty.
+            // A C-style three-part header has an update SLOT, and `for i :=
+            // runar.Int(0); i < 5; {` — legal Go, update in the body — left it
+            // empty. That arrived here as `update == null` too and sailed
+            // straight through this `if`, so Zig unrolled it five times (114
+            // hexchars) while all six peers refused the program. The AST now
+            // records which of the two shapes produced the null, and only the
+            // implied-step surfaces are exempt.
+            if (f.update) |u| {
+                if (!isRepresentableForUpdate(f.var_name, u.*)) {
+                    try errors.append(allocator, .{
+                        .message = loop_update_diagnostic,
+                        .severity = .@"error",
+                        .location = f.source_loc,
+                    });
+                }
+            } else if (f.header_requires_update) {
+                try errors.append(allocator, .{
+                    .message = loop_update_diagnostic,
+                    .severity = .@"error",
+                    .location = f.source_loc,
+                });
+            }
+            // R-127: an output intrinsic in the body never reaches
+            // the method's output list, so the continuation would commit to
+            // fewer outputs than the transaction creates. This tier was one of
+            // the two that silently emitted the wrong covenant.
+            try validateNoOutputIntrinsicInLoop(allocator, contract, f, errors);
+            for (f.body) |s| try validateStatement(allocator, contract, s, errors);
         },
         .if_stmt => |if_s| {
-            for (if_s.then_body) |s| try validateStatement(allocator, s, errors);
+            for (if_s.then_body) |s| try validateStatement(allocator, contract, s, errors);
             if (if_s.else_body) |eb| {
-                for (eb) |s| try validateStatement(allocator, s, errors);
+                for (eb) |s| try validateStatement(allocator, contract, s, errors);
             }
         },
         else => {},
@@ -1198,69 +1726,102 @@ fn isLocktimeRead(expr: Expression) bool {
     return isCallToNamed(expr, "extractLocktime") or isCallToNamed(expr, "currentBlockHeight");
 }
 
-/// True when `expr` is an int/bigint literal no greater than the finality
-/// sentinel (0xffffffff), so a guard against it genuinely forces non-finality.
-/// The TS reference matches a `bigint_literal`; the Zig frontend lowers small
-/// bigints to `literal_int` and only oversize values to `literal_bigint`, so
-/// both variants are accepted here.
-fn sequenceBoundOk(expr: Expression) bool {
+/// True when `expr` is an int/bigint literal EQUAL to the finality sentinel
+/// (0xffffffff). The TS reference matches a `bigint_literal`; the Zig frontend
+/// lowers small bigints to `literal_int` and only oversize values to
+/// `literal_bigint`, so both variants are accepted here.
+fn sequenceLiteral(expr: Expression) ?i128 {
     return switch (expr) {
-        .literal_int => |v| @as(i128, v) <= SEQUENCE_FINAL,
-        .literal_bigint => |s| blk: {
-            const n = std.fmt.parseInt(i128, s, 10) catch break :blk false;
-            break :blk n <= SEQUENCE_FINAL;
-        },
-        else => false,
+        .literal_int => |v| @as(i128, v),
+        .literal_bigint => |str| std.fmt.parseInt(i128, str, 10) catch null,
+        else => null,
     };
 }
 
-/// True when `expr` is an `extractSequence(...) < <final>`-style comparison
-/// (the guard that makes a locktime gate consensus-enforced). Accepts the two
-/// natural spellings: `extractSequence(pre) < N` / `<= N`, and the reversed
-/// `N > extractSequence(pre)` / `>= ...`. `N` must be an int/bigint literal no
-/// greater than the finality sentinel.
+/// True when `expr` is a comparison on `extractSequence(...)` that genuinely
+/// EXCLUDES the finality sentinel 0xffffffff, reading the field as the
+/// unsigned 32-bit wire value it is (see emitUnsignedBin2Num in stack_lower).
+///
+/// Accepted:
+///   extractSequence(pre) !== 0xffffffff   and the reversed spelling
+///   extractSequence(pre) <  N, 0 < N <= 0xffffffff   (reversed: N > ...)
+///   extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
+///
+/// Deliberately NOT accepted: `<= 0xffffffff` and `>= 0xffffffff`. nSequence
+/// cannot exceed 0xffffffff, so those are true for every transaction including
+/// the final one — a tautology that used to silence this warning on a contract
+/// with no guard at all (W1 / FinalCountdown).
+///
+/// Also NOT accepted: `extractSequence(pre) < 0`. Unsigned nSequence is never
+/// negative, so that comparison is vacuous.
 fn isSequenceFinalityGuard(expr: Expression) bool {
     const b = switch (expr) {
         .binary_op => |bp| bp,
         else => return false,
     };
-    if ((b.op == .lt or b.op == .lte) and
-        isCallToNamed(b.left, "extractSequence") and sequenceBoundOk(b.right))
-    {
-        return true;
+    switch (b.op) {
+        .neq => {
+            if (isCallToNamed(b.left, "extractSequence")) {
+                if (sequenceLiteral(b.right)) |n| return n == SEQUENCE_FINAL;
+            }
+            if (isCallToNamed(b.right, "extractSequence")) {
+                if (sequenceLiteral(b.left)) |n| return n == SEQUENCE_FINAL;
+            }
+            return false;
+        },
+        .lt => {
+            if (!isCallToNamed(b.left, "extractSequence")) return false;
+            if (sequenceLiteral(b.right)) |n| return n > 0 and n <= SEQUENCE_FINAL;
+            return false;
+        },
+        .lte => {
+            if (!isCallToNamed(b.left, "extractSequence")) return false;
+            if (sequenceLiteral(b.right)) |n| return n < SEQUENCE_FINAL;
+            return false;
+        },
+        .gt => {
+            if (!isCallToNamed(b.right, "extractSequence")) return false;
+            if (sequenceLiteral(b.left)) |n| return n > 0 and n <= SEQUENCE_FINAL;
+            return false;
+        },
+        .gte => {
+            if (!isCallToNamed(b.right, "extractSequence")) return false;
+            if (sequenceLiteral(b.left)) |n| return n < SEQUENCE_FINAL;
+            return false;
+        },
+        else => return false,
     }
-    if ((b.op == .gt or b.op == .gte) and
-        isCallToNamed(b.right, "extractSequence") and sequenceBoundOk(b.left))
-    {
-        return true;
-    }
-    return false;
 }
 
-/// Recursively scan an expression for a locktime read and/or a sequence guard,
-/// setting the respective flags. Pure — no allocation.
-fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool) void {
+/// Recursively scan an expression for a locktime read and, when `count_guard`
+/// is set, a sequence-finality guard. Guards only count inside `assert`
+/// (F7): an assignment of the comparison does not enforce anything.
+fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool, count_guard: bool) void {
     if (isLocktimeRead(expr)) reads_locktime.* = true;
-    if (isSequenceFinalityGuard(expr)) has_guard.* = true;
+    if (count_guard and isSequenceFinalityGuard(expr)) has_guard.* = true;
     switch (expr) {
-        .call => |c| for (c.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard),
-        .method_call => |mc| for (mc.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard),
+        .call => |c| for (c.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard, count_guard),
+        .method_call => |mc| for (mc.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard, count_guard),
         .binary_op => |b| {
-            scanExprForLocktime(b.left, reads_locktime, has_guard);
-            scanExprForLocktime(b.right, reads_locktime, has_guard);
+            const next = if (count_guard and b.op == .or_op) false else count_guard;
+            scanExprForLocktime(b.left, reads_locktime, has_guard, next);
+            scanExprForLocktime(b.right, reads_locktime, has_guard, next);
         },
-        .unary_op => |u| scanExprForLocktime(u.operand, reads_locktime, has_guard),
+        .unary_op => |u| {
+            const next = if (u.op == .not) false else count_guard;
+            scanExprForLocktime(u.operand, reads_locktime, has_guard, next);
+        },
         .ternary => |t| {
-            scanExprForLocktime(t.condition, reads_locktime, has_guard);
-            scanExprForLocktime(t.then_expr, reads_locktime, has_guard);
-            scanExprForLocktime(t.else_expr, reads_locktime, has_guard);
+            scanExprForLocktime(t.condition, reads_locktime, has_guard, count_guard);
+            scanExprForLocktime(t.then_expr, reads_locktime, has_guard, count_guard);
+            scanExprForLocktime(t.else_expr, reads_locktime, has_guard, count_guard);
         },
         .index_access => |ia| {
-            scanExprForLocktime(ia.object, reads_locktime, has_guard);
-            scanExprForLocktime(ia.index, reads_locktime, has_guard);
+            scanExprForLocktime(ia.object, reads_locktime, has_guard, count_guard);
+            scanExprForLocktime(ia.index, reads_locktime, has_guard, count_guard);
         },
-        .increment => |inc| scanExprForLocktime(inc.operand, reads_locktime, has_guard),
-        .decrement => |dec| scanExprForLocktime(dec.operand, reads_locktime, has_guard),
+        .increment => |inc| scanExprForLocktime(inc.operand, reads_locktime, has_guard, count_guard),
+        .decrement => |dec| scanExprForLocktime(dec.operand, reads_locktime, has_guard, count_guard),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
         .property_access, .array_literal,
         => {},
@@ -1270,14 +1831,14 @@ fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool
 /// Statement walker feeding `scanExprForLocktime`.
 fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool) void {
     switch (stmt) {
-        .expr_stmt => |expr| scanExprForLocktime(expr.expr, reads_locktime, has_guard),
-        .const_decl => |cd| scanExprForLocktime(cd.value, reads_locktime, has_guard),
+        .expr_stmt => |e| scanExprForLocktime(e.expr, reads_locktime, has_guard, isCallToNamed(e.expr, "assert")),
+        .const_decl => |cd| scanExprForLocktime(cd.value, reads_locktime, has_guard, false),
         .let_decl => |ld| {
-            if (ld.value) |v| scanExprForLocktime(v, reads_locktime, has_guard);
+            if (ld.value) |v| scanExprForLocktime(v, reads_locktime, has_guard, false);
         },
-        .assign => |a| scanExprForLocktime(a.value, reads_locktime, has_guard),
+        .assign => |a| scanExprForLocktime(a.value, reads_locktime, has_guard, false),
         .if_stmt => |if_s| {
-            scanExprForLocktime(if_s.condition, reads_locktime, has_guard);
+            scanExprForLocktime(if_s.condition, reads_locktime, has_guard, false);
             for (if_s.then_body) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
             if (if_s.else_body) |eb| {
                 for (eb) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
@@ -1286,16 +1847,16 @@ fn scanStmtForLocktime(stmt: Statement, reads_locktime: *bool, has_guard: *bool)
         .for_stmt => |fs| {
             for (fs.body) |s| scanStmtForLocktime(s, reads_locktime, has_guard);
         },
-        .assert_stmt => |a| scanExprForLocktime(a.condition, reads_locktime, has_guard),
+        .assert_stmt => |a| scanExprForLocktime(a.condition, reads_locktime, has_guard, true),
         .return_stmt => |opt_expr| {
-            if (opt_expr) |expr| scanExprForLocktime(expr, reads_locktime, has_guard);
+            if (opt_expr) |expr| scanExprForLocktime(expr, reads_locktime, has_guard, false);
         },
     }
 }
 
 /// #131: warn when `method` (transitively, through the private-helper call
 /// graph) reads the tx locktime but never asserts the tx is non-final. A
-/// locktime gate is not consensus-enforced unless `extractSequence < 0xffffffff`
+/// locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
 /// is also asserted — otherwise an all-final-sequence spend bypasses it.
 /// Advisory (warning) only — no effect on emitted bytecode. The message is
 /// allocator-owned (matches sighash_validate's allocPrint'd diagnostics).
@@ -1347,8 +1908,8 @@ fn warnLocktimeWithoutSequenceGuard(
         const msg = try std.fmt.allocPrint(
             allocator,
             "method '{s}' reads extractLocktime but does not assert extractSequence " ++
-                "< 0xffffffff; a locktime gate is not consensus-enforced unless the tx " ++
-                "is non-final — add assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+                "is not 0xffffffff; a locktime gate is not consensus-enforced unless the tx " ++
+                "is non-final — add assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
             .{method.name},
         );
         try warnings.append(allocator, .{
@@ -2638,4 +3199,132 @@ test "H2: warns when the locktime read is in a private helper but no sequence gu
     const w = locktimeWarning(result).?;
     // The warning names the public entry point, not the helper.
     try testing.expect(std.mem.indexOf(u8, w.message, "unlock") != null);
+}
+
+test "H2: assigned comparison still warns" {
+    const allocator = testing.allocator;
+
+    var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var seq_call = types.CallExpr{ .callee = "extractSequence", .args = &seq_args };
+    var seq_cmp = types.BinaryOp{ .op = .neq, .left = .{ .call = &seq_call }, .right = .{ .literal_int = 0xffffffff } };
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    var lt_cmp = types.BinaryOp{
+        .op = .gte,
+        .left = .{ .call = &lt_call },
+        .right = .{ .property_access = .{ .object = "this", .property = "deadline" } },
+    };
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .const_decl = .{ .name = "ok", .value = .{ .binary_op = &seq_cmp } } },
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &lt_cmp } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{
+        makeProperty("count", .bigint, false),
+        makeProperty("deadline", .bigint, true),
+    };
+    var assignments = [_]types.AssignmentNode{ makeAssignment("count"), makeAssignment("deadline") };
+    var super_args = [_]Expression{ .{ .identifier = "count" }, .{ .identifier = "deadline" } };
+    var params = [_]types.ParamNode{ makeParam("count"), makeParam("deadline") };
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
+}
+
+test "H2: vacuous strict bound still warns" {
+    const allocator = testing.allocator;
+
+    var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var seq_call = types.CallExpr{ .callee = "extractSequence", .args = &seq_args };
+    var seq_cmp = types.BinaryOp{ .op = .lt, .left = .{ .call = &seq_call }, .right = .{ .literal_int = 0 } };
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    var lt_cmp = types.BinaryOp{
+        .op = .gte,
+        .left = .{ .call = &lt_call },
+        .right = .{ .property_access = .{ .object = "this", .property = "deadline" } },
+    };
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &seq_cmp } } },
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &lt_cmp } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{
+        makeProperty("count", .bigint, false),
+        makeProperty("deadline", .bigint, true),
+    };
+    var assignments = [_]types.AssignmentNode{ makeAssignment("count"), makeAssignment("deadline") };
+    var super_args = [_]Expression{ .{ .identifier = "count" }, .{ .identifier = "deadline" } };
+    var params = [_]types.ParamNode{ makeParam("count"), makeParam("deadline") };
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
+}
+
+test "H2: negated sequence comparison still warns" {
+    const allocator = testing.allocator;
+
+    // assert(!(extractSequence(this.txPreimage) !== 0xffffffffn))
+    var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var seq_call = types.CallExpr{ .callee = "extractSequence", .args = &seq_args };
+    var seq_cmp = types.BinaryOp{ .op = .neq, .left = .{ .call = &seq_call }, .right = .{ .literal_int = 0xffffffff } };
+    var not_u = types.UnaryOp{ .op = .not, .operand = .{ .binary_op = &seq_cmp } };
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    var lt_cmp = types.BinaryOp{
+        .op = .gte,
+        .left = .{ .call = &lt_call },
+        .right = .{ .property_access = .{ .object = "this", .property = "deadline" } },
+    };
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .assert_stmt = .{ .condition = .{ .unary_op = &not_u } } },
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &lt_cmp } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{
+        makeProperty("count", .bigint, false),
+        makeProperty("deadline", .bigint, true),
+    };
+    var assignments = [_]types.AssignmentNode{ makeAssignment("count"), makeAssignment("deadline") };
+    var super_args = [_]Expression{ .{ .identifier = "count" }, .{ .identifier = "deadline" } };
+    var params = [_]types.ParamNode{ makeParam("count"), makeParam("deadline") };
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
 }

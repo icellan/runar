@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc && cp -r src/schemas dist/schemas",
+    "build": "tsc && rm -rf dist/schemas && cp -r src/schemas dist/schemas",
     "test": "vitest run",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit"

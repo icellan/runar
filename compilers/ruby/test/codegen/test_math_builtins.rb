@@ -136,10 +136,44 @@ class TestMathBuiltinsCodegen < Minitest::Test
   def test_pow_unrolls_into_long_mul_sequence
     artifact = compile_call_artifact('pow', 2)
     asm = artifact.asm
-    # 32-iter unroll => many OP_MUL ops (≥ 32 by the bounded loop count).
+    # EXACTLY 32, not ">= 32". A lower bound cannot detect change in either
+    # direction: it passes on 32 and on 64 alike, so it pins nothing about the
+    # unroll count it claims to pin. The count is load-bearing -- it IS the
+    # exponent domain the guard below enforces -- so it is pinned exactly.
     op_mul_count = asm.scan('OP_MUL').length
-    assert_operator op_mul_count, :>=, 32,
-                    "pow must unroll ≥ 32 OP_MUL ops, got #{op_mul_count}"
+    assert_equal 32, op_mul_count,
+                 "pow must unroll exactly 32 OP_MUL ops, got #{op_mul_count}"
+  end
+
+  # -- pow: the exponent-domain guard (R-169, the pow half) -----------------
+
+  def test_pow_guards_the_exponent_domain_before_unrolling
+    # The 32 rounds compute base^min(exp, 32), so without a guard an exponent
+    # outside 0..32 returned that CLAMPED value with no error -- measured on
+    # the real VM at pow(2,40) = 2^32. The constant folder computed the TRUE
+    # power for exp <= 256 and the interpreter is exact for every exp >= 0, so
+    # one builtin meant three things. All three now refuse outside 0..32.
+    #
+    # Pinned as an ORDERED sequence sited BEFORE the first round, not as a
+    # membership test: a guard emitted after the OP_SWAP would be reading the
+    # base instead of the exponent, and one without OP_VERIFY would leave a
+    # boolean on the stack instead of aborting.
+    artifact = compile_call_artifact('pow', 2)
+    asm = artifact.asm
+    # `asm` renders a data push as its hex bytes, so 33 reads as <21>.
+    assert_match(/OP_DUP\s+OP_0\s+<21>\s+OP_WITHIN\s+OP_VERIFY/, asm,
+                 "pow must emit OP_DUP <0> <33> OP_WITHIN OP_VERIFY before the " \
+                 "unroll; got: #{asm[0, 200]}")
+    guard_at = asm.index(/OP_WITHIN/)
+    first_round_at = asm.index(/OP_SWAP\s+OP_1\s/)
+    refute_nil guard_at, 'no OP_WITHIN in the pow lowering'
+    refute_nil first_round_at, 'no accumulator seed in the pow lowering'
+    assert_operator guard_at, :<, first_round_at,
+                    'the exponent guard must run before the accumulator seed'
+    # 33, not 32: OP_WITHIN is half-open, so a bound of 32 would reject the
+    # largest exponent the unroll can actually compute.
+    refute_match(/OP_DUP\s+OP_0\s+(OP_16|<20>)\s+OP_WITHIN/, asm,
+                 'guard upper bound must be 33 = <21> (OP_WITHIN is half-open), not 32')
   end
 
   # -- mulDiv: MUL then DIV -------------------------------------------------
@@ -164,16 +198,30 @@ class TestMathBuiltinsCodegen < Minitest::Test
     assert_includes asm, '1027', 'percentOf must push 10000 (little-endian 0x2710 = "1027")'
   end
 
-  # -- sqrt: 16-iter Newton's method under IF guard -------------------------
+  # -- sqrt: 256-round min-clamped Newton under IF guard ---------------------
 
-  def test_sqrt_emits_16_newton_iterations
+  def test_sqrt_emits_256_min_clamped_newton_rounds
+    # R-169. The previous version of this test asserted `>= 32 OP_DIV` for
+    # "16 Newton steps". A lower bound cannot detect a round-count change in
+    # either direction, so it stayed green while the emitted sqrt was wrong --
+    # and would have stayed green at 512 too. Exact counts here.
     artifact = compile_call_artifact('sqrt', 1)
     asm = artifact.asm
-    # 16 iter × (OVER OVER DIV ADD push(2) DIV) inside IF block.
+    # 256 rounds × (OVER OVER DIV OVER ADD push(2) DIV MIN) inside the IF block.
     op_div_count = asm.scan('OP_DIV').length
-    assert_operator op_div_count, :>=, 32,
-                    "sqrt must unroll ≥ 32 DIVs for 16 Newton steps, got #{op_div_count}"
+    assert_equal 512, op_div_count,
+                 "sqrt must unroll exactly 512 OP_DIV (2 per round × 256), got #{op_div_count}"
+    # OP_MIN IS the convergence break: it clamps each new iterate against the
+    # previous one. Without it integer Newton reaches floor(sqrt(n)) and then
+    # oscillates between it and floor+1, so a fixed round count returns
+    # whichever side the parity lands on -- sqrt(8) came out as 3.
+    op_min_count = asm.scan('OP_MIN').length
+    assert_equal 256, op_min_count,
+                 "sqrt must emit one OP_MIN per round (the convergence break), got #{op_min_count}"
     assert_includes asm, 'OP_IF', 'sqrt must guard zero input with OP_IF'
+    # Domain guards: n >= 0 and n encodable in <= 62 script bytes (n < 2^495).
+    assert_includes asm, 'OP_SIZE', 'sqrt must guard the upper end of its domain'
+    assert_includes asm, 'OP_GREATERTHANOREQUAL', 'sqrt must refuse a negative n'
   end
 
   # -- gcd: 256-iter unrolled Euclidean loop --------------------------------

@@ -56,7 +56,12 @@ class Repro extends SmartContract {
 }
 `
 
-	const expectedHex = "76009c6375787b9c777767519d9168"
+	// W3 / BoolBamboozle re-stamp: `method9`'s `c` and `method7`'s `z` are
+	// `boolean` parameters, so each dispatch arm now opens with the 9-byte
+	// ABI-domain gate (OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+	// OP_BOOLOR OP_VERIFY). Measured against the TypeScript reference
+	// compiler, which emits these exact bytes for this source.
+	const expectedHex = "76009c6375767600877c51879b69787b9c777767519d767600877c51879b699168"
 
 	result := CompileFromSourceStrWithResult(source, "Repro.runar.ts", CompileOptions{DisableConstantFolding: true})
 	if !result.Success {

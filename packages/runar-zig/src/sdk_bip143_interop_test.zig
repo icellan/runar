@@ -56,10 +56,16 @@ test "interop: BIP-143 preimage + signature for every scenario" {
         const want_digest = s.get("digestHex").?.string;
         const sig_hex = s.get("sigHex").?.string;
         const pubkey_hex = s.get("pubkeyHex").?.string;
-        try std.testing.expectEqual(@as(i64, 0x41), s.get("sighashFlags").?.integer);
+        const sighash_flags: u32 = @intCast(s.get("sighashFlags").?.integer);
 
-        // 1. Independently recompute the BIP-143 preimage.
-        var result = try oppushtx.computeOpPushTx(allocator, tx_hex, input_index, subscript, sats, -1);
+        // 1. Independently recompute the BIP-143 preimage under the scenario's
+        //    OWN sighash flags.
+        //
+        //    R-206: this used to reject anything but 0x41, and every scenario
+        //    in the fixture was ALL|FORKID — so the per-mode zeroing rules were
+        //    implemented seven times and compared zero times.
+        var result = try oppushtx.computeOpPushTxWithSigHash(
+            allocator, tx_hex, input_index, subscript, sats, -1, sighash_flags);
         defer result.deinit(allocator);
         std.testing.expectEqualStrings(want_preimage, result.preimage_hex) catch |err| {
             std.debug.print("\n{s}: BIP-143 PREIMAGE DIVERGENCE from TS reference\n", .{name});

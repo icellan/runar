@@ -61,7 +61,7 @@ conformance/fuzz-regressions/
 | `id` | must equal the directory name |
 | `title` | one line describing the divergence |
 | `discovered` | ISO date the divergence was found |
-| `oracle` | which fuzzer oracle found it — `execute` today |
+| `oracle` | which oracle the entry replays against — `execute` or `tri-modal` (see Scope) |
 | `sourceFile` | contract file, relative to the entry directory |
 | `fileName` | name handed to the compiler; selects the frontend parser |
 | `method` | public method spent through |
@@ -179,9 +179,29 @@ fold-ON deployed bytes on the `@bsv/sdk`-backed `ScriptVM` versus the ANF
 interpreter, asserting accept/reject.
 
 That oracle is in-process and TS-only, so it cannot run contracts needing a real
-transaction context or real crypto. Findings from the cross-tier parity oracles
-(`--anf`, `--ir`, `--canonical`) are not replayable here yet; add a second
-`oracle` kind to `replay.ts` when the first such finding needs pinning.
+transaction context or real crypto.
+
+An entry declares which oracle it replays against, and `replay.ts` supports two:
+
+- `execute` — the bare `ScriptVM` accept/reject verdict. `ScriptVM.success` is
+  "no evaluation error and truthy top of stack"; it does NOT apply the consensus
+  wrappers, so it does not enforce minimal encoding, clean stack, or push-only
+  unlocking.
+- `tri-modal` — the CONSENSUS verdict (`Spend.validate()`). Required for any
+  divergence only a real node sees. `1 >> 1` leaves a non-minimal `[0x00]`: a
+  node aborts when a numeric op consumes it, while the bare VM accepts. Pinning
+  such an entry against `execute` would record the weaker engine's verdict as
+  if it were the chain's.
+
+R-253: this section used to say findings from anything but `--execute` "are not
+replayable here yet; add a second `oracle` kind to `replay.ts` when the first
+such finding needs pinning". That kind landed, and
+`2026-08-17-shift-nonminimal-zero-numeric-consume` uses it. A reader following
+the old text would have concluded a consensus-only regression could not be
+pinned here, and not pinned one.
+
+Findings from the cross-tier parity oracles (`--anf`, `--ir`, `--canonical`) are
+still not replayable through this corpus.
 
 ## Current entries
 
@@ -191,8 +211,10 @@ transaction context or real crypto. Findings from the cross-tier parity oracles
 | `2026-07-12-invert-byte-semantics` | `~` is OP_INVERT over script-number bytes, not numeric two's-complement |
 | `2026-07-14-chained-shift-and-length-mismatch` | **funds loss** — chained `(x << 8) & 0` aborts on-chain; the interpreter called the spend valid |
 | `2026-07-14-chained-shift-or-nonminimal` | chained `(x << 8) \| 5` succeeds on-chain; the interpreter aborted (opposite direction of the same bug) |
+| `2026-08-06-branch-k1-empty-pad-guard-bypass` | **funds risk** — a K=1 branch merge padded the shorter arm with an EMPTY push and registered it as the merged value, so the script accepted a spend the source rejects |
+| `2026-08-17-shift-nonminimal-zero-numeric-consume` | **funds locking** — `1 >> 1` leaves a non-minimal `[0x00]`; a numeric consumer aborts on chain while the interpreter accepted. Pinned against the `tri-modal` (consensus) oracle, not `execute` |
 
-All four come from the shift/bitwise semantics bug fixed in PR #141
+The first four come from the shift/bitwise semantics bug fixed in PR #141
 (commits `61796893`, `88bb6903`, `694c891b`). The original
 `fuzz-findings-execute/` directories had already passed their 30-day artifact
 retention by the time this corpus was created — which is precisely the gap this

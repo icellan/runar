@@ -870,6 +870,16 @@ class _TsParser:
             # Treat T[] as unknown, we only support FixedArray
             self.add_error(f"use FixedArray<T, N> instead of {name}[]")
 
+        # `number` is not a Runar type (R-301). _parse_ts_type_name maps it onto
+        # bigint, which is the right lowering but the wrong silence: a contract
+        # declaring `x: number` compiled to the same script as `x: bigint` with
+        # nothing said. The go and rust tiers have always refused it here. The
+        # mapping stays so the rest of the parse continues on a sane node.
+        if name == "number":
+            self.add_error(
+                "'number' type is not allowed in Runar contracts; use 'bigint' instead"
+            )
+
         return _parse_ts_type_name(name)
 
     def _skip_type_args(self) -> None:

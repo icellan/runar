@@ -130,6 +130,9 @@ class RunarArtifact:
     code_separator_index: int | None = None
     code_separator_indices: list[int] | None = None
     anf: dict | None = None
+    # Builtins this script reaches that the compiler does not claim are sound
+    # (R-062). Empty for every ordinary contract; see unsound_primitives.py.
+    unsound_primitives: list[str] = field(default_factory=list)
 
     @staticmethod
     def from_dict(d: dict) -> RunarArtifact:
@@ -190,6 +193,7 @@ class RunarArtifact:
             code_separator_index=d.get('codeSeparatorIndex'),
             code_separator_indices=d.get('codeSeparatorIndices'),
             anf=d.get('anf'),
+            unsound_primitives=list(d.get('unsoundPrimitives') or []),
         )
 
 
@@ -203,6 +207,10 @@ class DeployOptions:
     # so the funding inputs are signed by their real owner. Defaults to the
     # connected signer (zero behaviour change).
     funding_signer: 'Signer | None' = None
+    # Builtins the caller accepts despite the compiler not claiming they are
+    # sound (R-062). Required — naming each one — when the artifact declares
+    # unsound_primitives; ignored otherwise.
+    acknowledge_unsound: list[str] = field(default_factory=list)
 
 
 @dataclass

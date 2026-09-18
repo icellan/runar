@@ -14,7 +14,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
-import { ECTracker } from './ec-codegen.js';
+import { ECTracker, emitPointLenVerify, emitPointLengthGate, emitAffineInfinitySelect } from './ec-codegen.js';
 
 // ===========================================================================
 // P-256 constants (secp256r1 / NIST P-256)
@@ -320,7 +320,12 @@ function cGroupInv(t: ECTracker, aName: string, resultName: string, g: GroupPara
  */
 function cDecomposePoint(t: ECTracker, pointName: string, xName: string, yName: string, c: CurveParams): void {
   t.toTop(pointName);
+  // CL-BUG-095: a P256Point/P384Point is exactly 2*coordBytes bytes and
+  // nothing checked it, so surplus bytes were split off and silently dropped.
+  // Gate the width here, where every consumer that decomposes a point picks it
+  // up. See emitPointLenVerify in ec-codegen.ts.
   t.rawBlock([pointName], null, (e) => {
+    emitPointLenVerify(e, c.coordBytes * 2);
     e({ op: 'push', value: BigInt(c.coordBytes) });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
@@ -412,6 +417,39 @@ function cEmitCanonicityGuard(t: ECTracker, xName: string, yName: string, c: Cur
   t.toTop('_y_canon');
   t.rawBlock(['_x_canon', '_y_canon'], '_canon', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+}
+
+/**
+ * R-117 — coordinate canonicity for the VALUE builtins, aborting form.
+ *
+ * The a = -3 twin of `emitCoordCanonVerify` in ec-codegen.ts; see that
+ * docstring for the defect. `cAffineAdd`'s `cond` / `notinf` selectors are the
+ * same bare OP_NUMEQUAL over the raw decomposed coordinates, and
+ * `cDecomposePoint` accepts any width-fitting unsigned value, so `x + p` is a
+ * second spelling of the same point that both selectors read as "different".
+ *
+ * `cEmitCanonicityGuard` above is the FLAG form, for the on-curve predicates.
+ * This is the abort form, and it is called only from `pNNNAdd` / `pNNNMul` /
+ * `pNNNNegate` — never from `cEmitVerifyECDSA`'s path, where `decompressPubKey`
+ * and `cEmitSigRangeGate` have already decided, for reasons recorded in their
+ * own docstrings, that attacker-chosen bytes must make a total boolean builtin
+ * return false rather than abort the script.
+ */
+function cEmitCoordCanonVerify(t: ECTracker, xName: string, yName: string, c: CurveParams): void {
+  t.copyToTop(xName, '_cc_x');
+  pushFieldP(t, '_cc_px', c);
+  t.rawBlock(['_cc_x', '_cc_px'], '_cc_xok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.copyToTop(yName, '_cc_y');
+  pushFieldP(t, '_cc_py', c);
+  t.rawBlock(['_cc_y', '_cc_py'], '_cc_yok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.rawBlock(['_cc_xok', '_cc_yok'], null, (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+    e({ op: 'opcode', code: 'OP_VERIFY' });
   });
 }
 
@@ -532,23 +570,11 @@ function cAffineAdd(t: ECTracker, c: CurveParams): void {
   t.copyToTop('py', '_py2');
   cFieldSub(t, '_s_px_rx', '_py2', 'ry', c);
 
-  // Clean up original points
-  t.toTop('px'); t.drop();
-  t.toTop('py'); t.drop();
-  t.toTop('qx'); t.drop();
-  t.toTop('qy'); t.drop();
-
-  // P == -Q -> force the all-zero point (see the header comment).
-  t.toTop('rx');
-  t.copyToTop('_notinf', '_notinf_x');
-  t.rawBlock(['rx', '_notinf_x'], 'rx', (e) => {
-    e({ op: 'opcode', code: 'OP_MUL' });
-  });
-  t.toTop('ry');
-  t.toTop('_notinf');
-  t.rawBlock(['ry', '_notinf'], 'ry', (e) => {
-    e({ op: 'opcode', code: 'OP_MUL' });
-  });
+  // CL-BUG-096: `pNNNAdd(P, O)` returned an off-curve blob for the same reason
+  // secp256k1's did — the adder had no infinity-operand case, while
+  // `pNNNMul(P, 0n)` hands it exactly that value. Same branch-free select,
+  // which also subsumes the standalone `notinf` mask that used to live here.
+  emitAffineInfinitySelect(t);
 }
 
 // ===========================================================================
@@ -1494,6 +1520,37 @@ function cEmitVerifyECDSA(
 // ===========================================================================
 
 /**
+ * R-157 — the a = -3 twin of `emitPointGate` in ec-codegen.ts; see that
+ * docstring for the defect, the measurement and the boundary argument. The
+ * ladder here uses the same `k + 3n` construction with the curve's own n, and
+ * `cEmitMul`'s exception analysis is stated, in its own docstring, only for
+ * points on the curve.
+ *
+ * It is called from `pNNNMul` and NOT from inside `cEmitMul`, because
+ * `cEmitVerifyECDSA` shares that ladder and has already decided — see
+ * `decompressPubKey` and `cEmitSigRangeGate` — that attacker-chosen bytes must
+ * make a total boolean builtin return false rather than abort the script. A
+ * gate inside `cEmitMul` would turn `verifyECDSA_pNNN(bad_pubkey, …)` from
+ * `false` into an abort.
+ *
+ * Stack in/out: [point, scalar] — unchanged.
+ */
+function cEmitPointGate(
+  emit: (op: StackOp) => void,
+  emitOnCurve: (e: (op: StackOp) => void) => void,
+  c: CurveParams,
+): void {
+  emit({ op: 'over' });
+  emit({ op: 'push', value: new Uint8Array(c.coordBytes * 2) });
+  emit({ op: 'opcode', code: 'OP_EQUAL' });
+  emit({ op: 'push', value: 2n });
+  emit({ op: 'pick', depth: 2 });
+  emitOnCurve(emit);
+  emit({ op: 'opcode', code: 'OP_BOOLOR' });
+  emit({ op: 'opcode', code: 'OP_VERIFY' });
+}
+
+/**
  * P-256 point addition.
  * Stack in: [P256Point, P256Point] (second on top)
  * Stack out: [P256Point]
@@ -1502,6 +1559,9 @@ export function emitP256Add(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pa', '_pb'], emit);
   cDecomposePoint(t, '_pa', 'px', 'py', P256_PARAMS);
   cDecomposePoint(t, '_pb', 'qx', 'qy', P256_PARAMS);
+  // R-117: cAffineAdd's selectors compare these four values RAW.
+  cEmitCoordCanonVerify(t, 'px', 'py', P256_PARAMS);
+  cEmitCoordCanonVerify(t, 'qx', 'qy', P256_PARAMS);
   cAffineAdd(t, P256_PARAMS);
   cComposePoint(t, 'rx', 'ry', '_result', P256_PARAMS);
 }
@@ -1512,6 +1572,8 @@ export function emitP256Add(emit: (op: StackOp) => void): void {
  * Stack out: [P256Point]
  */
 export function emitP256Mul(emit: (op: StackOp) => void): void {
+  // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+  cEmitPointGate(emit, emitP256OnCurve, P256_PARAMS);
   cEmitMul(emit, P256_PARAMS, P256_GROUP);
 }
 
@@ -1537,6 +1599,7 @@ export function emitP256MulGen(emit: (op: StackOp) => void): void {
 export function emitP256Negate(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
   cDecomposePoint(t, '_pt', '_nx', '_ny', P256_PARAMS);
+  cEmitCoordCanonVerify(t, '_nx', '_ny', P256_PARAMS);
   pushFieldP(t, '_fp', P256_PARAMS);
   cFieldSub(t, '_fp', '_ny', '_neg_y', P256_PARAMS);
   cComposePoint(t, '_nx', '_neg_y', '_result', P256_PARAMS);
@@ -1549,6 +1612,10 @@ export function emitP256Negate(emit: (op: StackOp) => void): void {
  */
 export function emitP256OnCurve(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
+  // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+  // contracts are told to gate an untrusted point on, so it must stay total.
+  // The flag is ANDed into the result below.
+  emitPointLengthGate(t, '_pt', P256_PARAMS.coordBytes * 2, '_len_ok');
   cDecomposePoint(t, '_pt', '_x', '_y', P256_PARAMS);
   cEmitCanonicityGuard(t, '_x', '_y', P256_PARAMS);
 
@@ -1572,10 +1639,15 @@ export function emitP256OnCurve(emit: (op: StackOp) => void): void {
     e({ op: 'opcode', code: 'OP_EQUAL' });
   });
 
-  // on-curve = canonical AND curve-equation
+  // on-curve = right width AND canonical AND curve-equation
   t.toTop('_canon');
   t.toTop('_curve_eq');
-  t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
+  t.rawBlock(['_canon', '_curve_eq'], '_eq_ok', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  t.toTop('_len_ok');
+  t.toTop('_eq_ok');
+  t.rawBlock(['_len_ok', '_eq_ok'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
 }
@@ -1586,21 +1658,22 @@ export function emitP256OnCurve(emit: (op: StackOp) => void): void {
  * Stack out: [compressed (33 bytes)]
  */
 export function emitP256EncodeCompressed(emit: (op: StackOp) => void): void {
+  // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+  // appended byte flipped the sign of the compressed encoding. Width is now
+  // verified AND the parity byte is read from a fixed offset. See
+  // emitEcEncodeCompressed in ec-codegen.ts for the full argument.
+  emitPointLenVerify(emit, 64);
   // Split at 32: [x_bytes, y_bytes]
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Get last byte of y for parity
-  emit({ op: 'opcode', code: 'OP_SIZE' });
-  emit({ op: 'push', value: 1n });
-  emit({ op: 'opcode', code: 'OP_SUB' });
+  // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+  emit({ op: 'push', value: 31n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Stack: [x_bytes, y_prefix, last_byte]
+  emit({ op: 'opcode', code: 'OP_NIP' }); // drop y_head
+  // Stack: [x_bytes, last_byte]
   emit({ op: 'opcode', code: 'OP_BIN2NUM' });
   emit({ op: 'push', value: 2n });
   emit({ op: 'opcode', code: 'OP_MOD' });
-  // Stack: [x_bytes, y_prefix, parity]
-  emit({ op: 'swap' });
-  emit({ op: 'drop' }); // drop y_prefix
   // Stack: [x_bytes, parity]
   emit({ op: 'if',
     then: [{ op: 'push', value: new Uint8Array([0x03]) }],
@@ -1633,6 +1706,9 @@ export function emitP384Add(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pa', '_pb'], emit);
   cDecomposePoint(t, '_pa', 'px', 'py', P384_PARAMS);
   cDecomposePoint(t, '_pb', 'qx', 'qy', P384_PARAMS);
+  // R-117: cAffineAdd's selectors compare these four values RAW.
+  cEmitCoordCanonVerify(t, 'px', 'py', P384_PARAMS);
+  cEmitCoordCanonVerify(t, 'qx', 'qy', P384_PARAMS);
   cAffineAdd(t, P384_PARAMS);
   cComposePoint(t, 'rx', 'ry', '_result', P384_PARAMS);
 }
@@ -1643,6 +1719,8 @@ export function emitP384Add(emit: (op: StackOp) => void): void {
  * Stack out: [P384Point]
  */
 export function emitP384Mul(emit: (op: StackOp) => void): void {
+  // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+  cEmitPointGate(emit, emitP384OnCurve, P384_PARAMS);
   cEmitMul(emit, P384_PARAMS, P384_GROUP);
 }
 
@@ -1668,6 +1746,7 @@ export function emitP384MulGen(emit: (op: StackOp) => void): void {
 export function emitP384Negate(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
   cDecomposePoint(t, '_pt', '_nx', '_ny', P384_PARAMS);
+  cEmitCoordCanonVerify(t, '_nx', '_ny', P384_PARAMS);
   pushFieldP(t, '_fp', P384_PARAMS);
   cFieldSub(t, '_fp', '_ny', '_neg_y', P384_PARAMS);
   cComposePoint(t, '_nx', '_neg_y', '_result', P384_PARAMS);
@@ -1680,6 +1759,10 @@ export function emitP384Negate(emit: (op: StackOp) => void): void {
  */
 export function emitP384OnCurve(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
+  // CL-BUG-095: width. Clamp rather than abort — this predicate is what
+  // contracts are told to gate an untrusted point on, so it must stay total.
+  // The flag is ANDed into the result below.
+  emitPointLengthGate(t, '_pt', P384_PARAMS.coordBytes * 2, '_len_ok');
   cDecomposePoint(t, '_pt', '_x', '_y', P384_PARAMS);
   cEmitCanonicityGuard(t, '_x', '_y', P384_PARAMS);
 
@@ -1703,10 +1786,15 @@ export function emitP384OnCurve(emit: (op: StackOp) => void): void {
     e({ op: 'opcode', code: 'OP_EQUAL' });
   });
 
-  // on-curve = canonical AND curve-equation
+  // on-curve = right width AND canonical AND curve-equation
   t.toTop('_canon');
   t.toTop('_curve_eq');
-  t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
+  t.rawBlock(['_canon', '_curve_eq'], '_eq_ok', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  t.toTop('_len_ok');
+  t.toTop('_eq_ok');
+  t.rawBlock(['_len_ok', '_eq_ok'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
 }
@@ -1717,21 +1805,22 @@ export function emitP384OnCurve(emit: (op: StackOp) => void): void {
  * Stack out: [compressed (49 bytes)]
  */
 export function emitP384EncodeCompressed(emit: (op: StackOp) => void): void {
+  // CL-BUG-095: the parity byte was taken from the blob's LAST byte, so one
+  // appended byte flipped the sign of the compressed encoding. Width is now
+  // verified AND the parity byte is read from a fixed offset. See
+  // emitEcEncodeCompressed in ec-codegen.ts for the full argument.
+  emitPointLenVerify(emit, 96);
   // Split at 48: [x_bytes, y_bytes]
   emit({ op: 'push', value: 48n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Get last byte of y for parity
-  emit({ op: 'opcode', code: 'OP_SIZE' });
-  emit({ op: 'push', value: 1n });
-  emit({ op: 'opcode', code: 'OP_SUB' });
+  // Take y[47] at a FIXED offset: [x_bytes, y_head, y_last]
+  emit({ op: 'push', value: 47n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Stack: [x_bytes, y_prefix, last_byte]
+  emit({ op: 'opcode', code: 'OP_NIP' }); // drop y_head
+  // Stack: [x_bytes, last_byte]
   emit({ op: 'opcode', code: 'OP_BIN2NUM' });
   emit({ op: 'push', value: 2n });
   emit({ op: 'opcode', code: 'OP_MOD' });
-  // Stack: [x_bytes, y_prefix, parity]
-  emit({ op: 'swap' });
-  emit({ op: 'drop' }); // drop y_prefix
   // Stack: [x_bytes, parity]
   emit({ op: 'if',
     then: [{ op: 'push', value: new Uint8Array([0x03]) }],

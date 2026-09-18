@@ -482,7 +482,7 @@ export const INPUT_FORMATS = [
   { ext: '.runar.java', compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'] as const },
 ] as const;
 
-type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];
+export type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];
 const EMPTY_COMPILERS: readonly CompilerId[] = [];
 
 export interface CompilerOutput {
@@ -512,6 +512,8 @@ export function findGoBinary(): string | null {
   const candidates = [
     join(GO_COMPILER_DIR, 'runar-go'),
     join(GO_COMPILER_DIR, 'runar-go.exe'),
+    join(REPO_ROOT, 'runar-go'),
+    join(REPO_ROOT, 'runar-go.exe'),
     join(process.cwd(), 'runar-go'),
     join(process.cwd(), 'runar-go.exe'),
   ];
@@ -544,6 +546,8 @@ export function findRustBinary(): string | null {
     join(RUST_COMPILER_DIR, 'target/release/runar-compiler-rust'),
     join(RUST_COMPILER_DIR, 'target/debug/runar-compiler-rust'),
     join(RUST_COMPILER_DIR, 'runar-compiler-rust'),
+    join(REPO_ROOT, 'runar-compiler-rust'),
+    join(REPO_ROOT, 'runar-compiler-rust.exe'),
     join(process.cwd(), 'runar-compiler-rust'),
     join(process.cwd(), 'runar-compiler-rust.exe'),
   ];
@@ -974,6 +978,8 @@ export function findZigBinary(): string | null {
   const candidates = [
     join(ZIG_COMPILER_DIR, 'zig-out/bin/runar-zig'),
     join(ZIG_COMPILER_DIR, 'runar-zig'),
+    join(REPO_ROOT, 'runar-zig'),
+    join(REPO_ROOT, 'runar-zig.exe'),
     join(process.cwd(), 'runar-zig'),
     join(process.cwd(), 'runar-zig.exe'),
   ];
@@ -1311,7 +1317,7 @@ export interface ParseOnlyResult {
   durationMs: number;
 }
 
-interface ParseOnlyDeps {
+export interface ParseOnlyDeps {
   source: string;
   sourceFile: string;
 }
@@ -1556,6 +1562,32 @@ async function runJavaParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<
   }
 }
 
+/**
+ * Run ONE tier's `--parse-only` mode over one source. Returns `undefined` when
+ * that tier's binary is not available locally.
+ *
+ * Extracted from the switch inside `runAllParserOnlyChecks` so the same nine
+ * drivers can be pointed at a source that is NOT a conformance fixture. The
+ * parser-only matrix only walks `conformance/tests/*`, which is precisely why
+ * a `.runar.rs` surface form used by a checked-in example but by no fixture
+ * (`[T; N]`) could be unparseable in four tiers for as long as it liked.
+ */
+export async function runParseOnly(
+  compiler: CompilerId,
+  deps: ParseOnlyDeps,
+): Promise<ParseOnlyResult | undefined> {
+  switch (compiler) {
+    case 'ts':     return runTsParseOnly(deps);
+    case 'go':     return runGoParseOnly(deps);
+    case 'rust':   return runRustParseOnly(deps);
+    case 'python': return runPythonParseOnly(deps);
+    case 'zig':    return runZigParseOnly(deps);
+    case 'ruby':   return runRubyParseOnly(deps);
+    case 'java':   return runJavaParseOnly(deps);
+  }
+  return undefined;
+}
+
 export interface ParserCoverageEntry {
   fixture: string;
   format: string;
@@ -1597,15 +1629,7 @@ export async function runAllParserOnlyChecks(
   // missing while CI=true. Mirrors runConformanceTest above.
   assertAllCompilersAvailableInCi();
 
-  const entries = readdirSync(testsDir, { withFileTypes: true });
-  let testDirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => join(testsDir, e.name))
-    .sort();
-  if (options?.filter) {
-    const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
-  }
+  const testDirs = discoverFixtureDirs(testsDir, options);
 
   const limit = makeLimiter(defaultConcurrency());
   const allTasks: Promise<ParserCoverageEntry>[] = [];
@@ -1634,18 +1658,7 @@ export async function runAllParserOnlyChecks(
         const source = readFileSync(format.sourceFile, 'utf-8');
         const deps: ParseOnlyDeps = { source, sourceFile: format.sourceFile };
         // Run all 7 compilers in parallel for this (fixture, format) pair.
-        const results = await Promise.all(compilers.map(async (c) => {
-          switch (c) {
-            case 'ts':     return runTsParseOnly(deps);
-            case 'go':     return runGoParseOnly(deps);
-            case 'rust':   return runRustParseOnly(deps);
-            case 'python': return runPythonParseOnly(deps);
-            case 'zig':    return runZigParseOnly(deps);
-            case 'ruby':   return runRubyParseOnly(deps);
-            case 'java':   return runJavaParseOnly(deps);
-          }
-          return undefined;
-        }));
+        const results = await Promise.all(compilers.map((c) => runParseOnly(c, deps)));
         return {
           fixture,
           format: format.ext,
@@ -1757,6 +1770,14 @@ export function printParserCoverageReport(report: ParserCoverageReport): void {
 //     source-driven multi-format mode.
 //   * Only the six NON-TS tiers participate. TS is covered by the
 //     multi-format runner (which compiles from source).
+//     TS's own IR-INPUT path is a separate question, and for a long time the
+//     answer was "nothing gates it": `loadANFFromJSON` could not decode a
+//     plain JSON number, so 52 of these 78 goldens were unloadable by the TS
+//     tier and it could not have joined this loop even if asked. That is
+//     fixed, and `tests/ir-loader-consumes-conformance-goldens.test.ts` now
+//     replays every golden through `loadANFFromJSON` + `compileFromANF` and
+//     compares against `expected-script.hex` — the TS half of this gate,
+//     living in vitest because it needs no subprocess.
 //   * The per-fixture `compilers` allowlist in source.json SCOPES this gate
 //     (unlike `--parser-only`, where it is intentionally ignored). A fixture
 //     whose allowlist has no overlap with the six tiers is skipped.
@@ -1841,16 +1862,8 @@ export async function runAllIrParityChecks(
   // CI safety net: a missing binary must not silently shrink the tier set.
   assertAllCompilersAvailableInCi();
 
-  const entries = readdirSync(testsDir, { withFileTypes: true });
-  let testDirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => join(testsDir, e.name))
-    .sort();
-  if (options?.filter) {
-    const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
-  }
-  testDirs = testDirs.filter((d) => existsSync(join(d, 'expected-ir.json')));
+  const testDirs = discoverFixtureDirs(testsDir, options)
+    .filter((d) => existsSync(join(d, 'expected-ir.json')));
 
   const limit = makeLimiter(defaultConcurrency());
   const results = await Promise.all(testDirs.map((testDir) => limit(async (): Promise<IrParityFixtureResult> => {
@@ -1990,20 +2003,59 @@ export function printIrParityReport(report: IrParityReport): void {
 }
 
 // ---------------------------------------------------------------------------
-// CI strict-mode: fail loudly if any compiler binary is missing in CI.
+// Strict-mode: fail loudly if any compiler binary is missing.
 // ---------------------------------------------------------------------------
 //
 // The runner historically treated a missing compiler binary as `undefined`
 // and silently skipped it. That's the right default for local devs (who
 // rarely have all 7 toolchains installed) but it's a footgun in CI: the job
 // happily reports "PASS — all 7 compilers tested" even when one of them
-// never ran. We now gate that skip behind `!process.env.CI` and bail out
-// early if any binary is missing in CI.
+// never ran.
+//
+// Three outcomes (R-103):
+//   'fail' — CI, or a local run that asked for strictness via
+//            RUNAR_CONFORMANCE_STRICT. Exits non-zero.
+//   'warn' — permissive local run. Prints an unmissable banner naming the
+//            tiers that will NOT be exercised, so a local "PASS" can never
+//            be read as full coverage.
+//   'ok'   — every binary located.
+export type MissingCompilerAction = 'ok' | 'fail' | 'warn';
+
+export function decideMissingCompilerAction(
+  missing: string[],
+  env: { CI?: string; RUNAR_CONFORMANCE_STRICT?: string },
+): MissingCompilerAction {
+  if (missing.length === 0) return 'ok';
+  if (env.CI === 'true') return 'fail';
+  const strict = env.RUNAR_CONFORMANCE_STRICT;
+  if (strict === '1' || strict === 'true') return 'fail';
+  return 'warn';
+}
+
+// A run that evaluated ZERO fixtures is not a pass — it is a run that never
+// measured anything. Every mode's fixture set is discovered by walking
+// `conformance/tests`, so a path-resolution mistake (or a mistyped --filter)
+// used to print "Summary: 0 passed, 0 failed, 0 skipped (0 total)" and exit 0
+// (R-103). Returns the operator-facing message, or null when the set is fine.
+export function emptyFixtureSetError(
+  count: number,
+  ctx: { mode: string; testsDir: string; filter?: string },
+): string | null {
+  if (count > 0) return null;
+  const why = ctx.filter
+    ? `no fixture matched --filter ${ctx.filter}`
+    : 'the directory contains no fixture subdirectories (wrong path? wrong cwd?)';
+  return (
+    `[conformance/runner] ${ctx.mode} run evaluated 0 fixtures — ${why}.\n` +
+    `  searched: ${ctx.testsDir}\n` +
+    `  A zero-fixture run measures nothing and must never be reported as a pass.`
+  );
+}
+
 let strictModeChecked = false;
 function assertAllCompilersAvailableInCi(): void {
   if (strictModeChecked) return;
   strictModeChecked = true;
-  if (process.env.CI !== 'true') return;
 
   const probes: Array<{ name: string; path: string | null }> = [
     { name: 'go',     path: findGoBinary() },
@@ -2014,10 +2066,27 @@ function assertAllCompilersAvailableInCi(): void {
     { name: 'java',   path: findJavaBinary() },
   ];
   const missing = probes.filter(p => p.path === null).map(p => p.name);
-  if (missing.length > 0) {
+  const action = decideMissingCompilerAction(missing, process.env);
+  if (action === 'ok') return;
+
+  if (action === 'warn') {
+    console.error('');
+    console.error(
+      `[conformance/runner] INCOMPLETE COVERAGE: ${missing.length} compiler ` +
+      (missing.length === 1 ? 'binary was' : 'binaries were') +
+      ` not located and will NOT be exercised: ${missing.join(', ')}.\n` +
+      `  A PASS from this run does NOT mean all seven tiers agree.\n` +
+      `  Set RUNAR_CONFORMANCE_STRICT=1 to make a missing toolchain a non-zero exit locally.`,
+    );
+    console.error('');
+    return;
+  }
+
+  {
     const cwd = process.cwd();
+    const reason = process.env.CI === 'true' ? 'CI=true' : 'RUNAR_CONFORMANCE_STRICT set';
     const msg =
-      `[conformance/runner] CI=true but ${missing.length} compiler binary` +
+      `[conformance/runner] ${reason} but ${missing.length} compiler binary` +
       (missing.length === 1 ? '' : ' binaries') +
       ` could not be located: ${missing.join(', ')}.\n` +
       `  cwd: ${cwd}\n` +
@@ -2583,6 +2652,101 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
 }
 
 /**
+ * The corpus this run was supposed to cover, as declared on disk.
+ *
+ * `script-size-baseline.json` carries one entry per fixture, so it is a
+ * COMMITTED list of what the suite contains — independent of whatever a given
+ * run happens to enumerate.
+ */
+export function declaredCorpus(conformanceDir: string): string[] {
+  const p = join(conformanceDir, 'script-size-baseline.json');
+  const raw = JSON.parse(readFileSync(p, 'utf8')) as { fixtures?: Record<string, unknown> };
+  return Object.keys(raw.fixtures ?? {}).sort();
+}
+
+/**
+ * Refuse to report on a partial corpus.
+ *
+ * The summary line is `N passed, 0 failed (N total)`, where N is whatever
+ * discovery found. That denominator is DISCOVERED, not declared, so a run that
+ * enumerates fewer fixtures than the suite holds reports green — it cannot
+ * distinguish "every fixture passed" from "I found fewer fixtures". That is
+ * fail-open, in the harness that gates everything else.
+ *
+ * This is not hypothetical. A run during the R-102 work reported
+ * `78 passed, 0 failed (78 total)` — exit 0 — while the suite held 82. The four
+ * missing were exactly the four fixtures added on this branch, and the cause was
+ * a stale concurrent runner's output being read as the current run's. Nothing
+ * failed, because from the runner's point of view nothing had.
+ *
+ * Silence about a fixture is not a pass. Throwing here converts that into a
+ * loud failure that names what went missing.
+ */
+export function assertCorpusComplete(discovered: string[], declared: string[]): void {
+  const found = new Set(discovered);
+  const missing = declared.filter((f) => !found.has(f));
+  if (missing.length > 0) {
+    throw new Error(
+      `conformance discovery found ${discovered.length} fixtures but ` +
+        `script-size-baseline.json declares ${declared.length}. NOT REPORTING A ` +
+        `PASS on a partial corpus — a missing fixture is not a passing one.\n` +
+        `Missing:\n  ${missing.join('\n  ')}\n` +
+        `If a fixture was deliberately removed, remove its baseline entry in the ` +
+        `same commit. If not, discovery is wrong — check for a concurrent runner ` +
+        `or a stale output file before trusting any green result.`,
+    );
+  }
+}
+
+/**
+ * The ONE place fixtures are discovered.
+ *
+ * There used to be four copies of this block, and `assertCorpusComplete` was
+ * wired into exactly one of them — `runAllConformanceTests`. Every CI
+ * invocation of the runner passes a mode flag (`--parser-only`, `--ir-parity`,
+ * `--multi-format`), and all three of those routed to an UNGUARDED copy, so the
+ * two gates that enforce the CLAUDE.md invariants still had a discovered
+ * denominator. Hiding one fixture and running `--ir-parity` printed
+ * `81 ok, 0 failed, 0 skipped` and exited 0.
+ *
+ * Patching the other three copies would have left the same shape: a guard that
+ * has to be remembered four times. Collapsing them means there is one place to
+ * get it wrong, and the "discovers fixtures in exactly one place" case in
+ * `conformance/corpus-completeness.test.ts` fails if a fifth copy appears.
+ *
+ * That sentence originally named a file, `runner-discovery-is-single-sourced.test.ts`,
+ * which does not exist and never did -- written in the same commit that fixed
+ * this guard's scope, and two commits before another was fixed for citing a
+ * test that never existed either. Naming a plausible filename is the cheapest
+ * way to make a comment unverifiable.
+ */
+export function discoverFixtureDirs(
+  testsDir: string,
+  options?: { filter?: string },
+): string[] {
+  const entries = readdirSync(testsDir, { withFileTypes: true });
+  let testDirs = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => join(testsDir, e.name))
+    .sort();
+
+  // Checked on the UNFILTERED discovery, before any narrowing: whether the
+  // caller asked for a subset is a separate question from whether the corpus is
+  // all there. Skipped only when `testsDir` is not the real suite — some
+  // harnesses point this at a scratch tree, which has no baseline beside it.
+  const conformanceDir = dirname(testsDir);
+  if (existsSync(join(conformanceDir, 'script-size-baseline.json'))) {
+    assertCorpusComplete(testDirs.map((d) => basename(d)), declaredCorpus(conformanceDir));
+  }
+
+  if (options?.filter) {
+    const filterLower = options.filter.toLowerCase();
+    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
+  }
+  return testDirs;
+}
+
+/**
  * Discover and run all conformance tests in the given directory.
  *
  * Each subdirectory of `testsDir` is treated as a separate test case.
@@ -2592,19 +2756,7 @@ export async function runAllConformanceTests(
   testsDir: string,
   options?: { filter?: string },
 ): Promise<ConformanceResult[]> {
-  const entries = readdirSync(testsDir, { withFileTypes: true });
-  let testDirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => join(testsDir, e.name))
-    .sort();
-
-  // Optional filter: only run tests whose name includes the filter string
-  if (options?.filter) {
-    const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) =>
-      basename(d).toLowerCase().includes(filterLower),
-    );
-  }
+  const testDirs = discoverFixtureDirs(testsDir, options);
 
   // Bounded-concurrency parallelism: each test fires 7 compilers simultaneously,
   // so we cap outer parallelism conservatively. See `defaultConcurrency`.
@@ -3036,16 +3188,7 @@ export async function runAllMultiFormatConformanceTests(
   testsDir: string,
   options?: { filter?: string; format?: string },
 ): Promise<ConformanceResult[]> {
-  const entries = readdirSync(testsDir, { withFileTypes: true });
-  let testDirs = entries
-    .filter((e) => e.isDirectory())
-    .map((e) => join(testsDir, e.name))
-    .sort();
-
-  if (options?.filter) {
-    const filterLower = options.filter.toLowerCase();
-    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
-  }
+  const testDirs = discoverFixtureDirs(testsDir, options);
 
   const limit = makeLimiter(defaultConcurrency());
 

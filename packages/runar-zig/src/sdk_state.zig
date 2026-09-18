@@ -29,7 +29,19 @@ pub fn serializeState(
 
     for (sorted) |field_idx| {
         if (field_idx >= values.len) continue;
-        const encoded = try encodeStateValue(allocator, values[field_idx], fields[field_idx].type_name);
+        const field = fields[field_idx];
+        // A FixedArray field occupies one state slot PER LEAF ELEMENT, not one
+        // slot in total. Its `type_name` is the whole `"FixedArray<bigint, 4>"`
+        // string, which matches no scalar case in `encodeStateValue`, so
+        // dispatching on it alone fell through to the variable-length branch
+        // and wrote the single byte `00` where the contract's own on-chain
+        // reader rebuilds N fixed-width words (32 bytes for a 4-element bigint
+        // array). The deploy succeeded and the UTXO was unspendable.
+        if (field.fixed_array) |fa| {
+            try appendFixedArrayField(allocator, &hex_out, field, fa, values[field_idx]);
+            continue;
+        }
+        const encoded = try encodeStateValue(allocator, values[field_idx], field.type_name);
         defer allocator.free(encoded);
         try hex_out.appendSlice(allocator, encoded);
     }
@@ -39,11 +51,33 @@ pub fn serializeState(
 
 /// DeserializeState decodes state values from a hex-encoded Bitcoin Script
 /// data section. Caller must strip the code prefix and OP_RETURN byte first.
+///
+/// FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out of a
+/// locking script any third party can construct, so it is untrusted input, and
+/// the caller then builds and SIGNS a continuation output committing to the
+/// restored state. A state section that does not describe EXACTLY `fields` is
+/// rejected:
+///
+///   - truncation — a field running past the end of the blob returns
+///     error.TruncatedStateSection instead of a plausible-but-wrong value.
+///     Every arm used to bounds-check, return a DEFAULT and then advance the
+///     NOMINAL width anyway, desynchronising every later field.
+///   - a byte that is not a push opcode returns error.MalformedStateSection
+///     rather than consuming one byte and yielding an empty value.
+///   - overlong tails — bytes left over after the last declared field return
+///     error.TrailingStateBytes instead of being silently dropped.
+///   - a blob that is not a whole number of bytes returns
+///     error.OddLengthStateBlob.
+///
+/// Restoring wrong-but-plausible state from a corrupted continuation is worse
+/// than not restoring it at all.
 pub fn deserializeState(
     allocator: std.mem.Allocator,
     fields: []const types.StateField,
     script_hex: []const u8,
 ) ![]types.StateValue {
+    if (script_hex.len % 2 != 0) return error.OddLengthStateBlob;
+
     const sorted = try allocator.alloc(usize, fields.len);
     defer allocator.free(sorted);
     for (0..fields.len) |i| sorted[i] = i;
@@ -62,10 +96,19 @@ pub fn deserializeState(
 
     var offset: usize = 0;
     for (sorted) |field_idx| {
-        const decoded = try decodeStateValue(allocator, script_hex, offset, fields[field_idx].type_name);
+        const field = fields[field_idx];
+        if (field.fixed_array) |fa| {
+            const read = try readFixedArrayField(allocator, field, fa, script_hex, offset);
+            result[field_idx] = read.value;
+            offset += read.hex_chars_read;
+            continue;
+        }
+        const decoded = try decodeStateValue(allocator, script_hex, offset, field.type_name);
         result[field_idx] = decoded.value;
         offset += decoded.hex_chars_read;
     }
+
+    if (offset != script_hex.len) return error.TrailingStateBytes;
 
     return result;
 }
@@ -156,7 +199,15 @@ fn encodeStateValue(
             .array_value => return error.ArrayValueInScalarField,
         };
         return encodeNum2Bin(allocator, n, 8);
-    } else if (std.mem.eql(u8, field_type, "bool")) {
+    } else if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) {
+        // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
+        // what every compiler writes into stateFields[].type, alongside
+        // encoding "bool1" / byteLength 1 — and `bool` is an accepted alias.
+        // Matching only on "bool" meant a REAL boolean state field fell through
+        // to the variable-length branch below, where a .boolean value is not
+        // .bytes and became the empty string, i.e. a constant "00": the deploy
+        // always said false whatever the caller passed, and the first call that
+        // set the flag built a continuation the covenant rejects.
         const b: bool = switch (value) {
             .boolean => |bv| bv,
             .int => |i| i != 0,
@@ -168,12 +219,25 @@ fn encodeStateValue(
         std.mem.eql(u8, field_type, "Addr") or
         std.mem.eql(u8, field_type, "Ripemd160") or
         std.mem.eql(u8, field_type, "Sha256") or
-        std.mem.eql(u8, field_type, "Point"))
+        std.mem.eql(u8, field_type, "Point") or
+        std.mem.eql(u8, field_type, "P256Point") or
+        std.mem.eql(u8, field_type, "P384Point"))
     {
-        // Fixed-size byte types: raw hex, no framing
+        // Fixed-size byte types: raw hex, no framing.
+        // P256Point (64) and P384Point (96) belong here because runar-lang's
+        // cast constructors hard-assert those widths and all seven compilers
+        // emit them as fixed raw slices; framing them instead deploys a state
+        // section 1-2 bytes long and the first spend fails.
+        //
+        // A value the encoder cannot render as raw hex is REFUSED rather than
+        // written as "". Zig wrote zero bytes for a field the artifact declares
+        // N bytes wide; Python/Ruby wrote "" too, Go wrote "<nil>", Java "null"
+        // and TS "undefined" — four different non-hex placeholders for the same
+        // mistake, a silent byte divergence on a path whose bytes are committed
+        // on chain. Refusing is the only answer that is the same in every tier.
         return switch (value) {
             .bytes => |b| allocator.dupe(u8, b),
-            else => allocator.dupe(u8, ""),
+            else => error.MissingStateValue,
         };
     } else {
         // Variable-length types: use push-data encoding
@@ -468,49 +532,52 @@ const DecodedValue = struct {
     hex_chars_read: usize,
 };
 
+/// Fixed on-wire width of a state field type in bytes, or null if the type is
+/// variable-width. The single table `encodeStateValue`'s raw branch and
+/// `decodeStateValue`'s bounds check both read, so the writer and the reader
+/// cannot drift.
+pub fn stateFieldByteWidth(field_type: []const u8) ?usize {
+    if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) return 1;
+    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) return 8;
+    if (std.mem.eql(u8, field_type, "PubKey")) return 33;
+    if (std.mem.eql(u8, field_type, "Addr") or std.mem.eql(u8, field_type, "Ripemd160")) return 20;
+    if (std.mem.eql(u8, field_type, "Sha256")) return 32;
+    if (std.mem.eql(u8, field_type, "Point") or std.mem.eql(u8, field_type, "P256Point")) return 64;
+    if (std.mem.eql(u8, field_type, "P384Point")) return 96;
+    return null;
+}
+
 fn decodeStateValue(
     allocator: std.mem.Allocator,
     hex: []const u8,
     offset: usize,
     field_type: []const u8,
 ) !DecodedValue {
-    if (std.mem.eql(u8, field_type, "bool")) {
-        if (offset + 2 > hex.len) {
-            return .{ .value = .{ .boolean = false }, .hex_chars_read = 2 };
-        }
-        const is_true = !std.mem.eql(u8, hex[offset .. offset + 2], "00");
-        return .{ .value = .{ .boolean = is_true }, .hex_chars_read = 2 };
-    } else if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
-        const byte_width: usize = 8;
-        const hex_width = byte_width * 2;
-        if (offset + hex_width > hex.len) {
-            return .{ .value = .{ .int = 0 }, .hex_chars_read = hex_width };
-        }
-        return .{ .value = .{ .int = decodeNum2Bin(hex[offset .. offset + hex_width]) }, .hex_chars_read = hex_width };
-    } else if (std.mem.eql(u8, field_type, "PubKey")) {
-        const w: usize = 66;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "Addr") or std.mem.eql(u8, field_type, "Ripemd160")) {
-        const w: usize = 40;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "Sha256")) {
-        const w: usize = 64;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else if (std.mem.eql(u8, field_type, "Point")) {
-        const w: usize = 128;
-        if (offset + w > hex.len) return .{ .value = .{ .bytes = try allocator.dupe(u8, "") }, .hex_chars_read = w };
-        return .{ .value = .{ .bytes = try allocator.dupe(u8, hex[offset .. offset + w]) }, .hex_chars_read = w };
-    } else {
-        // Push-data decode
-        const result = decodePushData(hex, offset);
+    const width = stateFieldByteWidth(field_type) orelse {
+        // Variable-length / unknown types: push-data decoding.
+        const result = try decodePushData(hex, offset);
         return .{
             .value = .{ .bytes = try allocator.dupe(u8, result.data) },
             .hex_chars_read = result.bytes_consumed,
         };
+    };
+
+    const hex_width = width * 2;
+    if (offset + hex_width > hex.len) return error.TruncatedStateSection;
+    const data = hex[offset .. offset + hex_width];
+
+    if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) {
+        // 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+        // encodeStateValue — a reader that knows only "bool" walks a real
+        // boolean field as push data and desynchronises every field after it.
+        return .{ .value = .{ .boolean = !std.mem.eql(u8, data, "00") }, .hex_chars_read = hex_width };
     }
+    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
+        // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
+        return .{ .value = .{ .int = decodeNum2Bin(data) }, .hex_chars_read = hex_width };
+    }
+    // Raw fixed-size byte types.
+    return .{ .value = .{ .bytes = try allocator.dupe(u8, data) }, .hex_chars_read = hex_width };
 }
 
 /// decodeNum2Bin decodes a fixed-width LE sign-magnitude number.
@@ -547,48 +614,57 @@ const PushDataResult = struct {
 /// single-byte values — accepting them would let the SDK read a state section
 /// the contract's own script cannot parse. OP_0 (0x00) falls through to the
 /// `opcode <= 75` branch and correctly decodes as the empty byte array.
-pub fn decodePushData(hex: []const u8, offset: usize) PushDataResult {
-    if (offset >= hex.len) {
-        return .{ .data = "", .bytes_consumed = 0 };
-    }
+pub fn decodePushData(hex: []const u8, offset: usize) !PushDataResult {
+    // Assert `chars` hex chars are available from `offset`, else fail closed.
+    const need = struct {
+        fn f(h: []const u8, off: usize, chars: usize) !void {
+            if (off + chars > h.len) return error.TruncatedStateSection;
+        }
+    }.f;
 
-    const opcode = hexByteAt(hex, offset) orelse return .{ .data = "", .bytes_consumed = 2 };
+    try need(hex, offset, 2);
+    const opcode = hexByteAt(hex, offset) orelse return error.MalformedStateSection;
 
     if (opcode <= 75) {
         const data_len = @as(usize, opcode) * 2;
+        try need(hex, offset, 2 + data_len);
         const start = offset + 2;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 2 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 2 + data_len };
     } else if (opcode == 0x4c) {
         // OP_PUSHDATA1
-        const length = hexByteAt(hex, offset + 2) orelse return .{ .data = "", .bytes_consumed = 4 };
+        try need(hex, offset, 4);
+        const length = hexByteAt(hex, offset + 2) orelse return error.MalformedStateSection;
         const data_len = @as(usize, length) * 2;
+        try need(hex, offset, 4 + data_len);
         const start = offset + 4;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 4 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 4 + data_len };
     } else if (opcode == 0x4d) {
         // OP_PUSHDATA2
-        const lo = hexByteAt(hex, offset + 2) orelse return .{ .data = "", .bytes_consumed = 6 };
-        const hi = hexByteAt(hex, offset + 4) orelse return .{ .data = "", .bytes_consumed = 6 };
-        const length = @as(usize, lo) | (@as(usize, hi) << 8);
-        const data_len = length * 2;
+        try need(hex, offset, 6);
+        const lo = hexByteAt(hex, offset + 2) orelse return error.MalformedStateSection;
+        const hi = hexByteAt(hex, offset + 4) orelse return error.MalformedStateSection;
+        const data_len = (@as(usize, lo) | (@as(usize, hi) << 8)) * 2;
+        try need(hex, offset, 6 + data_len);
         const start = offset + 6;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 6 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 6 + data_len };
     } else if (opcode == 0x4e) {
         // OP_PUSHDATA4
-        const b0 = hexByteAt(hex, offset + 2) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const b1 = hexByteAt(hex, offset + 4) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const b2 = hexByteAt(hex, offset + 6) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const b3 = hexByteAt(hex, offset + 8) orelse return .{ .data = "", .bytes_consumed = 10 };
-        const length = @as(usize, b0) | (@as(usize, b1) << 8) | (@as(usize, b2) << 16) | (@as(usize, b3) << 24);
-        const data_len = length * 2;
+        try need(hex, offset, 10);
+        const b0 = hexByteAt(hex, offset + 2) orelse return error.MalformedStateSection;
+        const b1 = hexByteAt(hex, offset + 4) orelse return error.MalformedStateSection;
+        const b2 = hexByteAt(hex, offset + 6) orelse return error.MalformedStateSection;
+        const b3 = hexByteAt(hex, offset + 8) orelse return error.MalformedStateSection;
+        const data_len = (@as(usize, b0) | (@as(usize, b1) << 8) |
+            (@as(usize, b2) << 16) | (@as(usize, b3) << 24)) * 2;
+        try need(hex, offset, 10 + data_len);
         const start = offset + 10;
-        if (start + data_len > hex.len) return .{ .data = "", .bytes_consumed = 10 };
         return .{ .data = hex[start .. start + data_len], .bytes_consumed = 10 + data_len };
     }
 
-    return .{ .data = "", .bytes_consumed = 2 };
+    // Not a push opcode at all — encodePushDataState can never emit one, so the
+    // state section is malformed. This used to consume one byte and return an
+    // empty value, desynchronising every subsequent field.
+    return error.MalformedStateSection;
 }
 
 // ---------------------------------------------------------------------------
@@ -614,6 +690,153 @@ pub fn encodeArg(allocator: std.mem.Allocator, value: types.StateValue) ![]u8 {
 // ---------------------------------------------------------------------------
 // FixedArray flatten / regroup for state values
 // ---------------------------------------------------------------------------
+
+/// Maximum `FixedArray<...>` nesting depth the state codec walks. Deeper types
+/// are truncated to this many dimensions rather than recursing without bound;
+/// no compiler tier emits anything close.
+pub const MAX_FIXED_ARRAY_DIMS = 8;
+
+/// Index of the last TOP-LEVEL `,` in `inner` — depth 0 with respect to
+/// `<`/`>`, scanned from the right, exactly like the TS and Go tiers. That is
+/// what separates `FixedArray<FixedArray<bigint, 2>, 3>`'s element type from
+/// its length without being fooled by the inner comma.
+fn splitLastTopLevelComma(inner: []const u8) ?usize {
+    var depth: i32 = 0;
+    var i: usize = inner.len;
+    while (i > 0) {
+        i -= 1;
+        const ch = inner[i];
+        if (ch == '>') {
+            depth += 1;
+        } else if (ch == '<') {
+            depth -= 1;
+        } else if (ch == ',' and depth == 0) {
+            return i;
+        }
+    }
+    return null;
+}
+
+/// Parse a nested `FixedArray<...>` type string into its dimensions,
+/// outermost-first, writing into `buf` and returning the filled prefix:
+///
+///     "FixedArray<bigint, 9>"                            -> { 9 }
+///     "FixedArray<FixedArray<bigint, 2>, 3>"             -> { 3, 2 }
+///     "FixedArray<FixedArray<FixedArray<bigint,2>,3>,4>" -> { 4, 3, 2 }
+///
+/// A non-FixedArray type yields an empty slice. Mirrors `parseFixedArrayDims`
+/// in packages/runar-sdk/src/state.ts and packages/runar-go/sdk_state.go.
+pub fn parseFixedArrayDims(type_name: []const u8, buf: []u32) []u32 {
+    var n: usize = 0;
+    var current = std.mem.trim(u8, type_name, " ");
+    while (n < buf.len and
+        std.mem.startsWith(u8, current, "FixedArray<") and
+        std.mem.endsWith(u8, current, ">"))
+    {
+        const inner = current["FixedArray<".len .. current.len - 1];
+        const split = splitLastTopLevelComma(inner) orelse break;
+        const len_str = std.mem.trim(u8, inner[split + 1 ..], " ");
+        const len = std.fmt.parseInt(u32, len_str, 10) catch break;
+        if (len == 0) break;
+        buf[n] = len;
+        n += 1;
+        current = std.mem.trim(u8, inner[0..split], " ");
+    }
+    return buf[0..n];
+}
+
+/// Return the innermost scalar type of a (possibly nested) FixedArray string.
+///
+/// This is deliberately NOT `FixedArrayInfo.element_type`: for a nested array
+/// that field is the IMMEDIATE child (`"FixedArray<bigint, 2>"`), which is not
+/// a scalar `encodeStateValue` knows, so encoding against it would take the
+/// push-data branch and produce a state section the script cannot read.
+pub fn unwrapFixedArrayLeaf(type_name: []const u8) []const u8 {
+    var current = std.mem.trim(u8, type_name, " ");
+    while (std.mem.startsWith(u8, current, "FixedArray<") and
+        std.mem.endsWith(u8, current, ">"))
+    {
+        const inner = current["FixedArray<".len .. current.len - 1];
+        const split = splitLastTopLevelComma(inner) orelse return current;
+        current = std.mem.trim(u8, inner[0..split], " ");
+    }
+    return current;
+}
+
+/// Append the `fa.synthetic_names.len` leaf words a FixedArray state field
+/// occupies. The caller may pass the value grouped (`.array_value`, nested to
+/// any depth); it is flattened depth-first into leaf order.
+///
+/// A leaf the caller did not supply is written as the scalar DEFAULT, never
+/// skipped: a state section short of what the contract's on-chain reader
+/// rebuilds is unspendable, so padding is the only non-destructive choice.
+/// Matches the Go tier, where a missing element reaches `encodeStateValue` as
+/// a nil `interface{}` and encodes as a zero word.
+fn appendFixedArrayField(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    field: types.StateField,
+    fa: types.FixedArrayInfo,
+    value: types.StateValue,
+) !void {
+    const leaf_type = unwrapFixedArrayLeaf(field.type_name);
+
+    var flat: std.ArrayListUnmanaged(types.StateValue) = .empty;
+    defer {
+        for (flat.items) |v| v.deinit(allocator);
+        flat.deinit(allocator);
+    }
+    if (value == .array_value) try flattenStateValue(allocator, &flat, value);
+
+    var i: usize = 0;
+    while (i < fa.synthetic_names.len) : (i += 1) {
+        const elem: types.StateValue = if (i < flat.items.len)
+            flat.items[i]
+        else
+            .{ .int = 0 };
+        const encoded = try encodeStateValue(allocator, elem, leaf_type);
+        defer allocator.free(encoded);
+        try out.appendSlice(allocator, encoded);
+    }
+}
+
+/// Read the leaf words of a FixedArray state field and regroup them into the
+/// nested shape declared by `field.type_name`.
+fn readFixedArrayField(
+    allocator: std.mem.Allocator,
+    field: types.StateField,
+    fa: types.FixedArrayInfo,
+    hex: []const u8,
+    start_offset: usize,
+) !DecodedValue {
+    const leaf_type = unwrapFixedArrayLeaf(field.type_name);
+    const slots = fa.synthetic_names.len;
+
+    const flat = try allocator.alloc(types.StateValue, slots);
+    var filled: usize = 0;
+    defer {
+        for (flat[0..filled]) |v| v.deinit(allocator);
+        allocator.free(flat);
+    }
+
+    var offset = start_offset;
+    while (filled < slots) {
+        const decoded = try decodeStateValue(allocator, hex, offset, leaf_type);
+        flat[filled] = decoded.value;
+        filled += 1;
+        offset += decoded.hex_chars_read;
+    }
+
+    var dims_buf: [MAX_FIXED_ARRAY_DIMS]u32 = undefined;
+    const dims = parseFixedArrayDims(field.type_name, &dims_buf);
+    // A declared shape that does not multiply out to the slot count means the
+    // artifact's `type` and `syntheticNames` disagree; hand back the leaves as
+    // one flat array rather than dropping the field.
+    const value = regroupStateValues(allocator, flat[0..filled], dims) catch
+        try regroupStateValues(allocator, flat[0..filled], &[_]u32{@intCast(filled)});
+
+    return .{ .value = value, .hex_chars_read = offset - start_offset };
+}
 
 /// Recursively flatten a StateValue into the scalar leaves it represents. Used
 /// to write a nested FixedArray value into N scalar state slots. Scalar values

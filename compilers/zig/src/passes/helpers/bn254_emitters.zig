@@ -39,6 +39,10 @@ const bn254_field_p_be = [_]u8{
 
 /// BN254 curve order r
 /// = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+/// BN254 curve order r in decimal, for `big_int_decimal` pushes.
+const bn254_curve_r_decimal =
+    "21888242871839275222246405745257275088548364400416034343698204186575808495617";
+
 const bn254_curve_r_be = [_]u8{
     0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29,
     0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
@@ -194,10 +198,16 @@ pub const BN254Tracker = struct {
     }
 
     /// Push the BN254 curve order r as script-num bytes.
+    /// Push the BN254 curve order r.
+    ///
+    /// Emitted as `big_int_decimal`, NOT as raw script-num bytes. The two
+    /// encode to the identical 32 push bytes, but `raw_bytes` is a HARD
+    /// peephole barrier (`tryWindow4` bails on it), so with a bytes push the
+    /// ladder's `+r +r +r` stayed three separate adds while Go / TS / Python /
+    /// Ruby folded it into a single `+3r` via rule 27. That was a 67-byte
+    /// cross-tier divergence in every `bn254G1ScalarMul`.
     pub fn pushCurveR(self: *BN254Tracker, name: ?[]const u8) !void {
-        const encoded = try beToUnsignedScriptNumAlloc(self.allocator, bn254_curve_r_be[0..]);
-        try self.owned_bytes.append(self.allocator, encoded);
-        try self.emitRaw(.{ .push = .{ .bytes = encoded } });
+        try self.emitRaw(.{ .push = .{ .big_int_decimal = bn254_curve_r_decimal } });
         try self.names.append(self.allocator, name);
     }
 
@@ -553,6 +563,15 @@ fn fieldInv(t: *BN254Tracker, a_name: []const u8, result_name: []const u8) !void
 fn decomposePoint(t: *BN254Tracker, point_name: []const u8, x_name: []const u8, y_name: []const u8) !void {
     try t.toTop(point_name);
     t.popNames(1);
+    // R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+    // Point inherits the check -- the same placement CL-BUG-095 chose for
+    // ec_emitters.zig. Without it OP_SPLIT at 32 discards whatever follows byte
+    // 64, so bn254G1OnCurve(G || 0xff) returned TRUE. ABORTING form:
+    // emitBN254G1OnCurve must stay TOTAL, so it clamps and flags the length
+    // BEFORE calling this.
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushInt(64);
+    try t.emitOpcode("OP_NUMEQUALVERIFY");
     // OP_SPLIT at 32: [point] -> [x_bytes, y_bytes]
     try t.emitPushInt(32);
     try t.emitOpcode("OP_SPLIT");
@@ -627,6 +646,11 @@ fn composePoint(t: *BN254Tracker, x_name: []const u8, y_name: []const u8, result
 /// (via the curve equation y^2 = x^3 + b) and collapses to the doubling slope
 /// 3*px^2 / (2*py) when P == Q.
 ///
+/// The remaining zero-denominator input (py + qy == 0) is handled by the
+/// caller: emitBN254G1Add masks P == -Q to the all-zero point at infinity
+/// (see g1InfinityFlag); the Groth16 MSM path shares this helper unmasked and
+/// stays fail-closed.
+///
 /// Expects px, py, qx, qy on the tracker. Consumes all four and produces rx, ry.
 fn g1AffineAdd(t: *BN254Tracker) !void {
     // s_num = px^2 + px*qx + qx^2
@@ -674,6 +698,84 @@ fn g1AffineAdd(t: *BN254Tracker) !void {
     try t.drop();
     try t.toTop("qy");
     try t.drop();
+}
+
+// ===========================================================================
+// Point at infinity for the bn254G1Add builtin
+// ===========================================================================
+
+/// g1InfinityFlag computes `_notinf`, 0 exactly when P == -Q and 1 otherwise,
+/// reading px/py/qx/qy WITHOUT consuming them. Call it before g1AffineAdd;
+/// apply the result with g1MaskInfinity afterwards.
+///
+/// P + (-P) is the point at infinity, which affine x||y cannot represent. This
+/// codegen already has an encoding for O — the ALL-ZERO blob, which is what
+/// bn254G1ScalarMul returns for k = 0 mod r and what secp256k1 and both NIST
+/// curves return for their own P + (-P). bn254G1Add is a general
+/// contract-callable builtin, so it owes callers the same answer rather than
+/// the off-curve blob the unified slope produces there (py + qy == 0 and the
+/// field inverse is Fermat, so inv(0) = 0). O is not on the curve
+/// (0^2 != 0^3 + 3), so the documented assert(bn254G1OnCurve(r)) idiom still
+/// rejects the result.
+///
+/// THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254 has
+/// j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root of unity
+/// w and Q = (w*px, -py) is an ordinary point that also zeroes py + qy while
+/// P + Q is an ordinary point, not O. Masking on the denominator would answer
+/// "infinity" there: plausible and wrong — the exact failure mode 03f50d48
+/// introduced on the NIST curves and f16790a9 had to undo. Testing px == qx
+/// ALONE would be wrong in the other direction: it would swallow doubling.
+///
+/// Deliberately NOT inside g1AffineAdd: the Groth16 MSM bind shares that
+/// helper and keeps its fail-closed behaviour and its bytes unchanged.
+///
+/// Byte-identical to `bn254G1InfinityFlag` in compilers/go/codegen/bn254.go.
+fn g1InfinityFlag(t: *BN254Tracker) !void {
+    try t.copyToTop("px", "_inf_px");
+    try t.copyToTop("qx", "_inf_qx");
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_xeq");
+
+    try t.copyToTop("py", "_inf_py");
+    try t.copyToTop("qy", "_inf_qy");
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_yeq");
+
+    // cond = xeq AND yeq: 1 when doubling.
+    try t.copyToTop("_xeq", "_xeq_c");
+    try t.toTop("_yeq");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_cond");
+
+    // notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and the
+    // points are not equal, i.e. exactly the P == -Q case.
+    try t.toTop("_xeq");
+    try t.toTop("_cond");
+    t.popNames(2);
+    try t.emitOpcode("OP_SUB");
+    try t.emitOpcode("OP_NOT");
+    try t.names.append(t.allocator, "_notinf");
+}
+
+/// g1MaskInfinity zeroes rx and ry when `_notinf` is 0, consuming it.
+///
+/// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
+/// and notinf is 0 or 1, so the product is canonical either way.
+fn g1MaskInfinity(t: *BN254Tracker) !void {
+    try t.toTop("rx");
+    try t.copyToTop("_notinf", "_notinf_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "rx");
+
+    try t.toTop("ry");
+    try t.toTop("_notinf");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "ry");
 }
 
 // ===========================================================================
@@ -857,6 +959,7 @@ fn buildJacobianAddAffineInline(
     allocator: Allocator,
     base_names: []const ?[]const u8,
     parent_prime_cache_active: bool,
+    strict: bool,
 ) !EcOpBundle {
     var it = try BN254Tracker.init(allocator, base_names);
     errdefer it.deinit();
@@ -869,17 +972,46 @@ fn buildJacobianAddAffineInline(
     // ------------------------------------------------------------------
     try it.copyToTop("jz", "_jz_chk_in");
     try fieldSqr(&it, "_jz_chk_in", "_jz_chk_sq");
+    if (strict) {
+        // Z1sq is consumed by U2 below; keep a copy for Z1cu.
+        try it.copyToTop("_jz_chk_sq", "_jz_chk_sq_keep");
+    }
     try it.copyToTop("ax", "_ax_chk_copy");
     try fieldMul(&it, "_ax_chk_copy", "_jz_chk_sq", "_u2_chk");
     try it.copyToTop("jx", "_jx_chk_copy");
-    try it.toTop("_u2_chk");
-    // Stack top: [..., _jx_chk_copy, _u2_chk]; consume both via OP_NUMEQUAL
+    // Stack top: [..., _u2_chk, _jx_chk_copy]; consume both via OP_NUMEQUAL.
+    // No OP_SWAP first: OP_NUMEQUAL is commutative and the six other tiers
+    // compare in this order, so the swap was a byte of pure divergence on
+    // every one of the ladder's 255 steps.
     it.popNames(2);
     try it.emitOpcode("OP_NUMEQUAL");
     try it.names.append(it.allocator, "_h_is_zero");
 
-    // Move _h_is_zero to top and consume (OP_IF consumes it).
-    try it.toTop("_h_is_zero");
+    var cond_name: []const u8 = "_h_is_zero";
+    if (strict) {
+        // R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two
+        // operands are the SAME point; H == 0 with R != 0 means they are
+        // negatives, whose sum is O -- and the standard mixed-add already
+        // answers that correctly, with Z3 = jz*H = 0 flowing through the
+        // Fermat inverse to the all-zero point.
+        try it.copyToTop("jz", "_jz_chk_for_cu");
+        try fieldMul(&it, "_jz_chk_for_cu", "_jz_chk_sq_keep", "_z1cu_chk");
+        try it.copyToTop("ay", "_ay_chk_copy");
+        try fieldMul(&it, "_ay_chk_copy", "_z1cu_chk", "_s2_chk");
+        try it.copyToTop("jy", "_jy_chk_copy");
+        it.popNames(2);
+        try it.emitOpcode("OP_NUMEQUAL");
+        try it.names.append(it.allocator, "_r_is_zero");
+        try it.toTop("_h_is_zero");
+        try it.toTop("_r_is_zero");
+        it.popNames(2);
+        try it.emitOpcode("OP_BOOLAND");
+        try it.names.append(it.allocator, "_dbl_cond");
+        cond_name = "_dbl_cond";
+    }
+
+    // Move the condition to top and consume (OP_IF consumes it).
+    try it.toTop(cond_name);
     it.popNames(1);
 
     // ------------------------------------------------------------------
@@ -938,6 +1070,10 @@ fn buildJacobianAddAffineInline(
 /// g1Negate negates a point: (x, p - y).
 fn g1Negate(t: *BN254Tracker, point_name: []const u8, result_name: []const u8) !void {
     try decomposePoint(t, point_name, "_nx", "_ny");
+    // R-141: composePoint below is documented as requiring [0, p-1] and does
+    // not check, so without this the negation of a non-canonical point
+    // re-emitted its x half verbatim.
+    try bn254EmitCoordCanonVerify(t, "_nx", "_ny");
     try fieldNeg(t, "_ny", "_neg_y");
     try composePoint(t, "_nx", "_neg_y", result_name);
 }
@@ -976,11 +1112,79 @@ fn emitBN254FieldNeg(t: *BN254Tracker) !void {
     try t.popPrimeCache();
 }
 
+/// bn254EmitPointLengthGate -- R-141, CLAMPING form, the BN254 twin of the EC
+/// point length gate. Leaves [flag, clamped] on the tracker. Used by
+/// emitBN254G1OnCurve, whose job is to answer "is this an acceptable point?"
+/// over untrusted bytes: for a wrong-length blob the correct answer is FALSE,
+/// not an aborted script.
+fn bn254EmitPointLengthGate(t: *BN254Tracker, name: []const u8, want: i64, flag_name: []const u8) !void {
+    try t.toTop(name);
+    t.popNames(1);
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushInt(want);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.emitRaw(.{ .swap = {} });
+    try t.emitRaw(.{ .push = .{ .bytes = &[_]u8{0} ** 64 } });
+    try t.emitOpcode("OP_CAT");
+    try t.emitPushInt(want);
+    try t.emitOpcode("OP_SPLIT");
+    try t.emitRaw(.{ .drop = {} });
+    try t.names.append(t.allocator, flag_name);
+    try t.names.append(t.allocator, name);
+}
+
+/// bn254EmitCoordCanonVerify -- R-141: a BN254 G1 Point's two coordinates must
+/// be FIELD ELEMENTS, aborting form. The direct analogue of the R-117 EC gate,
+/// with the placement re-derived for this curve.
+///
+/// decomposePoint BIN2NUMs each half as an UNSIGNED integer, so any value that
+/// fits 32 bytes is accepted; p is ~2^253.6, so x + p < 2^256 for EVERY x < p
+/// -- unlike secp256k1, the alias exists for every point on the curve.
+/// Measured before this gate, with G = (1, 2):
+///
+/// ```text
+/// bn254G1OnCurve((1+p) || 2) -> 1
+/// bn254G1OnCurve(1 || (2+p)) -> 1
+/// bn254G1OnCurve(G || 0xff)  -> 1
+/// ```
+///
+/// The value builtins abort for a DIFFERENT reason than secp256k1's did:
+/// BN254's adder is not fooled into a wrong answer (bn254G1Add(G, (1+p)||2)
+/// returns the correct 2G, because g1InfinityFlag reduces before it compares),
+/// but composePoint is documented as requiring [0, p-1] and not checking, and
+/// g1Negate handed it the raw decomposed x -- a value builtin PRODUCING
+/// something that is not a point.
+///
+/// Deliberately NOT folded into decomposePoint: that helper also runs inside
+/// emitBN254G1OnCurve, which must return FALSE rather than abort.
+fn bn254EmitCoordCanonVerify(t: *BN254Tracker, x_name: []const u8, y_name: []const u8) !void {
+    try t.copyToTop(x_name, "_cc_x");
+    try t.pushFieldP("_cc_px");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_cc_xok");
+    try t.copyToTop(y_name, "_cc_y");
+    try t.pushFieldP("_cc_py");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_cc_yok");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 fn emitBN254G1Add(t: *BN254Tracker) !void {
     try t.pushPrimeCache();
     try decomposePoint(t, "_pa", "px", "py");
     try decomposePoint(t, "_pb", "qx", "qy");
+    // R-141: both points must be canonical before anything consumes them.
+    try bn254EmitCoordCanonVerify(t, "px", "py");
+    try bn254EmitCoordCanonVerify(t, "qx", "qy");
+    // The flag must be computed BEFORE the add: g1AffineAdd consumes
+    // px/py/qx/qy.
+    try g1InfinityFlag(t);
     try g1AffineAdd(t);
+    try g1MaskInfinity(t);
     try composePoint(t, "rx", "ry", "_result");
     try t.popPrimeCache();
 }
@@ -989,9 +1193,39 @@ fn emitBN254G1ScalarMul(t: *BN254Tracker) !void {
     try t.pushPrimeCache();
     // Decompose base point to affine (ax, ay)
     try decomposePoint(t, "_pt", "ax", "ay");
+    // R-141: the ladder's base point must be canonical.
+    try bn254EmitCoordCanonVerify(t, "ax", "ay");
+
+    // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
+    // the scalar is caller input.
+    //
+    // ((k mod r) + r) mod r. OP_MOD takes the sign of the DIVIDEND, so
+    // `k mod r` alone lands in (-r, r); the `+ r, mod r` normalises the
+    // negative half. One push of r covers both reductions.
+    //
+    // Without it the ladder below is correct only while
+    // 2^255 <= k + 3r < 2^256. A scalar >= 2^256 - 3r (about 2.2902*r) sets
+    // bit 256, which the loop never reads, and one <= 2^255 - 3r drops k'
+    // under 2^255, invalidating the accumulator seed; either way the ladder
+    // returns a DIFFERENT multiple of P rather than failing. In Groth16 the
+    // scalars are the caller-supplied PUBLIC INPUTS of
+    // vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is attacker-chosen.
+    try t.toTop("_k");
+    try t.pushCurveR("_r_red");
+    t.popNames(2);
+    try t.emitOpcode("OP_2DUP");
+    try t.emitOpcode("OP_MOD");
+    try t.emitRaw(.{ .rot = {} });
+    try t.emitRaw(.{ .drop = {} });
+    try t.emitRaw(.{ .over = {} });
+    try t.emitOpcode("OP_ADD");
+    try t.emitRaw(.{ .swap = {} });
+    try t.emitOpcode("OP_MOD");
+    try t.names.append(t.allocator, "_kr");
+    t.renameTop("_k");
 
     // k' = k + 3*r  (guarantees bit 255 is set)
-    // k in [1, r-1], so k+3r in [3r+1, 4r-1]. 3r > 2^255, so bit 255 always 1.
+    // k in [0, r-1], so k+3r in [3r, 4r-1]. 3r >= 2^255, so bit 255 always 1.
     // Adding 3r (= 0 mod r) preserves the EC point: k*G = (k+3r)*G.
     try t.toTop("_k");
     try t.pushCurveR("_r1");
@@ -1042,7 +1276,10 @@ fn emitBN254G1ScalarMul(t: *BN254Tracker) !void {
         try t.toTop("_bit");
         t.popNames(1);
 
-        var add_bundle = try buildJacobianAddAffineInline(t.allocator, t.names.items, t.prime_cache_active);
+        // Only the LAST step can be handed accumulator == -base (k = 0 mod r);
+        // see buildJacobianAddAffineInline for why the strict H == 0 AND
+        // R == 0 test is paid there and nowhere else.
+        var add_bundle = try buildJacobianAddAffineInline(t.allocator, t.names.items, t.prime_cache_active, bit == 0);
         errdefer add_bundle.deinit();
 
         // Transfer ownership of owned_bytes into the outer tracker so the
@@ -1078,7 +1315,31 @@ fn emitBN254G1Negate(t: *BN254Tracker) !void {
 
 fn emitBN254G1OnCurve(t: *BN254Tracker) !void {
     try t.pushPrimeCache();
+
+    // R-141: width. bn254G1OnCurve(G || 0xff) returned TRUE -- the OP_SPLIT at
+    // 32 inside decomposePoint discarded the surplus byte. Clamp and remember
+    // the width rather than abort: this predicate must stay TOTAL.
+    try bn254EmitPointLengthGate(t, "_pt", 64, "_len_ok");
+
     try decomposePoint(t, "_pt", "_x", "_y");
+
+    // R-141: coordinate canonicity. Reject x >= p or y >= p and AND the result
+    // in at the end, so the predicate still returns a boolean.
+    try t.copyToTop("_x", "_x_lt");
+    try t.pushFieldP("_p_for_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_x_canon");
+    try t.copyToTop("_y", "_y_lt");
+    try t.pushFieldP("_p_for_y");
+    t.popNames(2);
+    try t.emitOpcode("OP_LESSTHAN");
+    try t.names.append(t.allocator, "_y_canon");
+    try t.toTop("_x_canon");
+    try t.toTop("_y_canon");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_canon");
 
     // lhs = y^2
     try fieldSqr(t, "_y", "_y2");
@@ -1095,6 +1356,18 @@ fn emitBN254G1OnCurve(t: *BN254Tracker) !void {
     try t.toTop("_rhs");
     t.popNames(2);
     try t.emitOpcode("OP_EQUAL");
+    try t.names.append(t.allocator, "_curve_eq");
+
+    // on-curve = right width AND canonical AND curve-equation
+    try t.toTop("_canon");
+    try t.toTop("_curve_eq");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_eq_ok");
+    try t.toTop("_len_ok");
+    try t.toTop("_eq_ok");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
     try t.names.append(t.allocator, "_result");
     try t.popPrimeCache();
 }
@@ -1208,4 +1481,117 @@ test "p-2 bit 253 is set (MSB of exponent)" {
     try std.testing.expectEqual(@as(u1, 1), bn254PMinus2Bit(2));
     // bit 0 of p-2 (= 0x45) is 1
     try std.testing.expectEqual(@as(u1, 1), bn254PMinus2Bit(0));
+}
+
+// ===========================================================================
+// Scalar-domain tests for bn254G1ScalarMul
+// ===========================================================================
+//
+// `bn254G1ScalarMul` is a contract-callable builtin in every tier (see
+// passes/typecheck.zig), and until these pins existed nothing outside the Go
+// tier had ever compared its emitted ladder against the reference. What the
+// comparison found: the scalar was never reduced mod r.
+//
+// The ladder builds k' = k + 3r, seeds the accumulator at bit 255 rather than
+// stepping it, and iterates bits 254..0. That is sound ONLY while
+// 2^255 <= k' < 2^256, i.e. while 2^255 - 3r <= k < 2^256 - 3r (about
+// -0.3549*r to 2.2902*r). Outside that window the ladder does not fail — it
+// applies the multiplier 2^255 + ((k + 3r) mod 2^255), which is not congruent
+// to k mod r. In Groth16 the scalars are the caller-supplied PUBLIC INPUTS of
+// vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is attacker-chosen.
+//
+// Reducing also makes k = 0 mod r reachable, and there the final ladder step
+// is handed accumulator == -base. The mixed-add's H == 0 test cannot tell
+// -base from +base, so the last step additionally needs R == 0 (`strict`) or
+// it returns -2P where the answer is the point at infinity.
+
+/// Name a bundle op for sequence matching. A push of r answers "PUSH_R" in
+/// EITHER representation (`big_int_decimal` or raw script-num `bytes`), so the
+/// shape assertion below is independent of the push-kind change that let the
+/// peephole fold `+r +r +r` into `+3r`.
+fn bn254TestOpName(op: StackOp, r_script_num: []const u8) []const u8 {
+    return switch (op) {
+        .opcode => |name| name,
+        .rot => "OP_ROT",
+        .drop => "OP_DROP",
+        .over => "OP_OVER",
+        .swap => "OP_SWAP",
+        .push => |v| switch (v) {
+            .big_int_decimal => |d| if (std.mem.eql(u8, d, bn254_curve_r_decimal)) "PUSH_R" else "_",
+            .bytes => |b| if (std.mem.eql(u8, b, r_script_num)) "PUSH_R" else "_",
+            else => "_",
+        },
+        else => "_",
+    };
+}
+
+test "bn254_g1_scalar_mul reduces the scalar mod r before the ladder" {
+    const allocator = std.testing.allocator;
+    var bundle = try buildBuiltinOps(allocator, .bn254_g1_scalar_mul);
+    defer bundle.deinit();
+
+    const r_script_num = try beToUnsignedScriptNumAlloc(allocator, bn254_curve_r_be[0..]);
+    defer allocator.free(r_script_num);
+
+    // ((k mod r) + r) mod r. OP_MOD takes the sign of the DIVIDEND, so
+    // `k mod r` alone lands in (-r, r); the `+ r, mod r` normalises the
+    // negative half.
+    const want = [_][]const u8{
+        "PUSH_R", "OP_2DUP", "OP_MOD",  "OP_ROT", "OP_DROP",
+        "OP_OVER", "OP_ADD", "OP_SWAP", "OP_MOD",
+    };
+
+    var hits: usize = 0;
+    var i: usize = 0;
+    while (i + want.len <= bundle.ops.len) : (i += 1) {
+        var all = true;
+        for (want, 0..) |w, j| {
+            if (!std.mem.eql(u8, bn254TestOpName(bundle.ops[i + j], r_script_num), w)) {
+                all = false;
+                break;
+            }
+        }
+        if (all) hits += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), hits);
+}
+
+test "bn254_g1_scalar_mul pays the strict R == 0 test at the last step only" {
+    const allocator = std.testing.allocator;
+    var bundle = try buildBuiltinOps(allocator, .bn254_g1_scalar_mul);
+    defer bundle.deinit();
+
+    // The 255 bit-iteration IFs, in emission order (bit 254 down to bit 0).
+    var branches: std.ArrayList([]StackOp) = .empty;
+    defer branches.deinit(allocator);
+    for (bundle.ops) |op| switch (op) {
+        .@"if" => |b| try branches.append(allocator, b.then),
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 255), branches.items.len);
+
+    const boolands = struct {
+        fn count(ops: []const StackOp) usize {
+            var n: usize = 0;
+            for (ops) |o| switch (o) {
+                .opcode => |name| {
+                    if (std.mem.eql(u8, name, "OP_BOOLAND")) n += 1;
+                },
+                else => {},
+            };
+            return n;
+        }
+    }.count;
+
+    const base = boolands(branches.items[0]);
+    // The final step gains exactly one OP_BOOLAND: it combines H == 0 with
+    // R == 0, which is what separates accumulator == -base (sum is O) from
+    // accumulator == +base (double it).
+    try std.testing.expectEqual(base + 1, boolands(branches.items[254]));
+    // Every earlier step keeps the cheap H == 0 test. Paying the strict test
+    // at all 255 steps would be ~5.8 KB re-deciding a branch that provably
+    // cannot fire before the last one.
+    for (branches.items[0..254]) |b| {
+        try std.testing.expectEqual(base, boolands(b));
+    }
 }

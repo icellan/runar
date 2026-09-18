@@ -139,7 +139,30 @@ t3 = bin_op("==", t1, t2)
 t4 = assert(t3)
 ```
 
-Each temporary (`t0`, `t1`, ...) is numbered sequentially within each method. The sequence of bindings IS the evaluation order, which is exactly what the stack machine needs.
+Each temporary (`t0`, `t1`, ...) is numbered sequentially within a lowering
+**context**. The sequence of bindings IS the evaluation order, which is exactly
+what the stack machine needs.
+
+> **Binding names are not unique within a method (R-181).** It is tempting to
+> read the numbering as SSA. It is not. Two reuses are normal and deliberate:
+>
+> * a branch arm rebinds a merged local under its own name, so the same name
+>   appears twice in one binding list — this is how both arms are given the
+>   same result set in the same order;
+> * an arm lowers in its own context, so its temp indices can collide with the
+>   parent's. A conditional binding `t18` can itself contain a `t18`.
+>
+> Measured over the 78 golden `expected-ir.json` files: 21 same-list reuses and
+> 93 nested-context reuses.
+>
+> What holds instead — and what makes the reuse safe — is ordinary **lexical
+> scope**: every value reference resolves to a binding earlier in its own list,
+> or in an enclosing list, or to a method parameter. Measured over the same
+> corpus: 2531 references, zero resolving outside their scope. Anything that
+> FLATTENS an arm into its parent (branch inlining, a whole-method walk keyed by
+> name) must rename first — `remap_value_refs`, `max_temp_index` and
+> `compute_last_uses` are all keyed by name and all operate within one context.
+> `conformance/anf-scope.test.ts` pins this.
 
 ### Why ANF?
 
@@ -151,7 +174,7 @@ Each temporary (`t0`, `t1`, ...) is numbered sequentially within each method. Th
 
 The ANF IR is the **conformance boundary** for the multi-compiler strategy. All compilers must produce byte-identical ANF IR (serialized via RFC 8785 / JCS) for the same source. To ensure this:
 
-- Temporaries are numbered sequentially per method (`t0`, `t1`, ...).
+- Temporaries are numbered sequentially per lowering context (`t0`, `t1`, ...) — see the note above on why that is not per method.
 - Sub-expressions are flattened left-to-right.
 - Constants are always wrapped in `load_const` (never inlined).
 - Logical operators (`&&`, `||`) SHORT-CIRCUIT -- they desugar to the conditional, so the right operand is evaluated only when the left does not already decide the result.
@@ -251,14 +274,16 @@ Complex built-in functions like `verifyWOTS` and `verifySLHDSA_SHA2_*` are handl
 - **WOTS+** (`verifyWOTS`): Inline in `05-stack-lower.ts`. Emits ~10 KB of Bitcoin Script with 67 conditional hash chain loops. Uses the same `emitOp` pattern as other builtins.
 - **SLH-DSA** (`verifySLHDSA_SHA2_*`): In separate module `slh-dsa-codegen.ts`. Emits 200-900 KB of Bitcoin Script depending on parameter set. Uses a `SLHTracker` class to manage named stack positions across ~2,100 tweakable hash operations. Each hash uses a dynamically-constructed 22-byte ADRS for domain separation.
 
-The SLH-DSA codegen is replicated across all five maintained compilers:
+The SLH-DSA codegen is replicated across all seven maintained compilers:
 - TypeScript: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts`
 - Go: `compilers/go/codegen/slh_dsa.go`
 - Rust: `compilers/rust/src/codegen/slh_dsa.rs`
 - Python: `compilers/python/runar_compiler/codegen/slh_dsa.py`
 - Zig: `compilers/zig/src/passes/helpers/pq_emitters.zig`
+- Ruby: `compilers/ruby/lib/runar_compiler/codegen/slh_dsa.rb`
+- Java: `compilers/java/src/main/java/runar/compiler/codegen/SlhDsa.java`
 
-All five produce byte-identical Bitcoin Script on the shared conformance corpus.
+All seven produce byte-identical Bitcoin Script on the shared conformance corpus.
 
 ### Elliptic Curve Codegen
 
@@ -266,14 +291,16 @@ EC built-in functions (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `e
 
 - **EC codegen** (`ec-codegen.ts`): Synthesizes secp256k1 field arithmetic from base opcodes (`OP_ADD`, `OP_MUL`, `OP_MOD`, etc.). The most complex operations are `ecMul` and `ecMulGen`, which emit a 256-iteration double-and-add loop using Jacobian projective coordinates internally. Each scalar multiplication generates ~50-100 KB of Bitcoin Script.
 
-The EC codegen is replicated across all five maintained compilers:
+The EC codegen is replicated across all seven maintained compilers:
 - TypeScript: `packages/runar-compiler/src/passes/ec-codegen.ts`
 - Go: `compilers/go/codegen/ec.go`
 - Rust: `compilers/rust/src/codegen/ec.rs`
 - Python: `compilers/python/runar_compiler/codegen/ec.py`
 - Zig: `compilers/zig/src/passes/helpers/ec_emitters.zig`
+- Ruby: `compilers/ruby/lib/runar_compiler/codegen/ec.rb`
+- Java: `compilers/java/src/main/java/runar/compiler/codegen/Ec.java`
 
-All five produce byte-identical Bitcoin Script on the shared conformance corpus.
+All seven produce byte-identical Bitcoin Script on the shared conformance corpus.
 
 ### SHA-256 Compression Codegen
 
@@ -281,14 +308,16 @@ The `sha256Compress` and `sha256Finalize` built-in functions are handled by a de
 
 - **SHA-256 codegen** (`sha256-codegen.ts`): Inlines one round of SHA-256 compression (~3000 opcodes, ~74 KB of script). Uses little-endian stack representation during computation for efficiency (3 ops for LE-to-number vs 15 for BE). Bitwise operations (AND, OR, XOR, INVERT) work endian-agnostic on equal-length byte arrays. Rotation uses arithmetic (`OP_DIV`/`OP_MUL`/`OP_MOD`) instead of `OP_LSHIFT` for numeric correctness.
 
-The SHA-256 codegen is replicated across all five maintained compilers:
+The SHA-256 codegen is replicated across all seven maintained compilers:
 - TypeScript: `packages/runar-compiler/src/passes/sha256-codegen.ts`
 - Go: `compilers/go/codegen/sha256.go`
 - Rust: `compilers/rust/src/codegen/sha256.rs`
 - Python: `compilers/python/runar_compiler/codegen/sha256.py`
 - Zig: `compilers/zig/src/passes/helpers/sha256_emitters.zig`
+- Ruby: `compilers/ruby/lib/runar_compiler/codegen/sha256.rb`
+- Java: `compilers/java/src/main/java/runar/compiler/codegen/Sha256.java`
 
-All five produce byte-identical Bitcoin Script on the shared conformance corpus.
+All seven produce byte-identical Bitcoin Script on the shared conformance corpus.
 
 ### BLAKE3 Compression Codegen
 
@@ -296,14 +325,16 @@ The `blake3Compress` and `blake3Hash` built-in functions are handled by a dedica
 
 - **BLAKE3 codegen** (`blake3-codegen.ts`): Inlines the BLAKE3 compression function (~10,000 opcodes, ~11 KB of script). The compression runs 7 rounds of 8 quarter-round G mixing calls (4 column + 4 diagonal) with a precomputed message schedule. Uses native `OP_LSHIFT`/`OP_RSHIFT` for byte-aligned rotations (16-bit, 8-bit) and general rotation for non-aligned (12-bit, 7-bit). State words are tracked at their stack depth positions for efficient rolling. The `blake3Hash` wrapper zero-pads the message to 64 bytes and prepends the IV as chaining value before splicing in the compression ops. Parameters are hardcoded: blockLen=64, counter=0, flags=11 (CHUNK_START|CHUNK_END|ROOT).
 
-The BLAKE3 codegen is replicated across all five maintained compilers:
+The BLAKE3 codegen is replicated across all seven maintained compilers:
 - TypeScript: `packages/runar-compiler/src/passes/blake3-codegen.ts`
 - Go: `compilers/go/codegen/blake3.go`
 - Rust: `compilers/rust/src/codegen/blake3.rs`
 - Python: `compilers/python/runar_compiler/codegen/blake3.py`
 - Zig: `compilers/zig/src/passes/helpers/blake3_emitters.zig`
+- Ruby: `compilers/ruby/lib/runar_compiler/codegen/blake3.rb`
+- Java: `compilers/java/src/main/java/runar/compiler/codegen/Blake3.java`
 
-All five produce byte-identical Bitcoin Script on the shared conformance corpus.
+All seven produce byte-identical Bitcoin Script on the shared conformance corpus.
 
 ### OP_CODESEPARATOR
 
@@ -405,7 +436,7 @@ Rúnar defines a canonical IR conformance boundary at the ANF level. Any compile
 | **Python** | hand-written recursive descent (portable + native formats: `.runar.py`, `.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`) | Complete |
 | **Zig** | hand-written recursive descent (`.runar.zig`, `.runar.ts`) | Complete |
 
-All five maintained compilers share the same ANF-to-Script pipeline (Passes 4-6) semantically. The non-TypeScript compilers implement their own Passes 1-3 (parsing, validation, type-checking) using language-native tools, but must produce identical ANF IR and script output on the shared corpus. Each compiler supports a different slice of the source-format matrix: TypeScript is the broadest shared frontend, and Go, Rust, Python, and Zig add their own native syntaxes.
+All seven maintained compilers share the same ANF-to-Script pipeline (Passes 4-6) semantically. The non-TypeScript compilers implement their own Passes 1-3 (parsing, validation, type-checking) using language-native tools, but must produce identical ANF IR and script output on the shared corpus. Every compiler accepts every one of the nine source formats (`.runar.{ts,sol,move,go,rs,py,zig,rb,java}`) — frontend parity is a project invariant with no per-tier carve-outs, enforced by the conformance runner's `--parser-only` matrix. The per-fixture `compilers` allowlist scopes ANF-IR / hex parity only.
 
 ### Why Multiple Compilers?
 

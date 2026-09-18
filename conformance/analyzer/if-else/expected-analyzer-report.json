@@ -1,36 +1,24 @@
 {
-  "script": "007c637c00937677677c0094767768517a7500a0",
-  "scriptSize": 20,
+  "script": "767600877c51879b69007c637c00937677677c0094767768517a7500a0",
+  "scriptSize": 29,
   "findings": [
     {
       "severity": "warning",
-      "code": "UNCONDITIONALLY_SUCCEEDS",
-      "message": "Execution path has no verification opcode — any unlocking input will satisfy it",
-      "path": "IF[false] at 2"
-    },
-    {
-      "severity": "warning",
-      "code": "UNCONDITIONALLY_SUCCEEDS",
-      "message": "Execution path has no verification opcode — any unlocking input will satisfy it",
-      "path": "IF[true] at 2"
+      "code": "NO_SIG_CHECK",
+      "message": "Execution path has no signature verification (OP_CHECKSIG/OP_CHECKMULTISIG)",
+      "path": "IF[false] at 11"
     },
     {
       "severity": "warning",
       "code": "NO_SIG_CHECK",
       "message": "Execution path has no signature verification (OP_CHECKSIG/OP_CHECKMULTISIG)",
-      "path": "IF[false] at 2"
-    },
-    {
-      "severity": "warning",
-      "code": "NO_SIG_CHECK",
-      "message": "Execution path has no signature verification (OP_CHECKSIG/OP_CHECKMULTISIG)",
-      "path": "IF[true] at 2"
+      "path": "IF[true] at 11"
     }
   ],
   "paths": [
     {
       "id": 0,
-      "description": "IF[false] at 2",
+      "description": "IF[false] at 11",
       "branchChoices": [
         false
       ],
@@ -40,7 +28,7 @@
     },
     {
       "id": 1,
-      "description": "IF[true] at 2",
+      "description": "IF[true] at 11",
       "branchChoices": [
         true
       ],
@@ -55,6 +43,6 @@
     "pathsWithCheckSig": 0,
     "pathsWithoutCheckSig": 2,
     "maxStackDepth": 0,
-    "scriptSizeBytes": 20
+    "scriptSizeBytes": 29
   }
 }

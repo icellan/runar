@@ -400,8 +400,9 @@ type Cov struct {
 }
 
 func (c *Cov) PayMulti() {
+    // W2: both calls name index 0 -- any literal index above 0 is refused now.
     runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
-    runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
 }
 """
         program = _must_lower_go_source(source)
@@ -539,3 +540,181 @@ func (c *IntentDemo) CoSpendPrivileged() {
                 f"expected param {want!r} in coSpendPrivileged ABI; "
                 f"got: {sorted(param_names)}"
             )
+
+
+# ---------------------------------------------------------------------------
+# requireOutputP2PKH — the serialised-output hash binding must be emitted on
+# EVERY control-flow path that asserts an output, not just the first one
+# lowered (R-023 / CX-BUG-053).
+#
+# The intrinsic's per-output assertion compares a substring of the
+# auto-injected witness ``_serialisedOutputs`` against the expected P2PKH
+# bytes. That witness is attacker-supplied; the ONLY thing tying it to the
+# transaction actually being signed is
+#   assert(hash256(_serialisedOutputs) === extractOutputHash(txPreimage))
+# If a branch omits that binding, a spender taking that branch can pass any
+# bytes they like as ``_serialisedOutputs`` and the covenant enforces nothing
+# about the real outputs.
+# ---------------------------------------------------------------------------
+
+def _binding_kinds(bindings):
+    return [(b.name, b.value.kind, getattr(b.value, "func", None)) for b in bindings]
+
+
+def _has_output_hash_binding(bindings) -> bool:
+    """True iff ``bindings`` (one straight-line list, no recursion into
+    nested ifs) contains the hash256(_serialisedOutputs) ===
+    extractOutputHash(txPreimage) commitment."""
+    by_name = {b.name: b.value for b in bindings}
+
+    def _is_load_param(ref: str, param: str) -> bool:
+        v = by_name.get(ref)
+        return v is not None and v.kind == "load_param" and v.name == param
+
+    hashed_witness = set()
+    output_hash = set()
+    for b in bindings:
+        v = b.value
+        if v.kind != "call":
+            continue
+        if v.func == "hash256" and len(v.args or []) == 1 and _is_load_param(
+            v.args[0], "_serialisedOutputs"
+        ):
+            hashed_witness.add(b.name)
+        if v.func == "extractOutputHash" and len(v.args or []) == 1 and _is_load_param(
+            v.args[0], "txPreimage"
+        ):
+            output_hash.add(b.name)
+
+    for b in bindings:
+        v = b.value
+        if v.kind != "bin_op" or v.op != "===":
+            continue
+        if (v.left in hashed_witness and v.right in output_hash) or (
+            v.right in hashed_witness and v.left in output_hash
+        ):
+            return True
+    return False
+
+
+def _find_if(bindings):
+    for b in bindings:
+        if b.value.kind == "if":
+            return b.value
+    return None
+
+
+_COND_BOND_SOURCE = """
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type CondBond struct {
+    runar.StatefulSmartContract
+    PkhA runar.ByteString `runar:"readonly"`
+    PkhB runar.ByteString `runar:"readonly"`
+    Bond runar.Bigint     `runar:"readonly"`
+}
+
+func (c *CondBond) PayBond(useA runar.Bool) {
+    // W2: index 0 is the only one this intrinsic accepts; the branch-binding
+    // property under test is about which ARM emits the commitment, not which
+    // output index it names.
+    if useA {
+        runar.RequireOutputP2PKH(0, c.PkhA, c.Bond)
+    } else {
+        runar.RequireOutputP2PKH(0, c.PkhB, c.Bond)
+    }
+}
+"""
+
+
+class TestRequireOutputP2PKHBranchBinding:
+    def test_both_branches_bind_the_serialised_outputs(self):
+        """R-023: a terminal (no state mutation) method whose two arms each
+        assert an output must commit ``_serialisedOutputs`` to the preimage's
+        hashOutputs on BOTH arms. Only one arm runs on chain, so a missing
+        binding on the second arm is an unconstrained-witness bypass."""
+        program = _must_lower_go_source(_COND_BOND_SOURCE)
+        m = _find_method(program, "payBond")
+        assert "_serialisedOutputs" in _param_names(m), _param_names(m)
+
+        # The method is terminal: nothing outside the `if` re-establishes the
+        # binding (no state continuation is emitted), so each arm must carry
+        # its own.
+        assert not _has_output_hash_binding(m.body), (
+            "precondition: the top-level body must not already carry the "
+            f"binding; got {_binding_kinds(m.body)}"
+        )
+
+        node = _find_if(m.body)
+        assert node is not None, _binding_kinds(m.body)
+
+        assert _has_output_hash_binding(node.then), (
+            "then-arm is missing hash256(_serialisedOutputs) === "
+            f"extractOutputHash(txPreimage); got {_binding_kinds(node.then)}"
+        )
+        assert _has_output_hash_binding(node.else_), (
+            "else-arm is missing hash256(_serialisedOutputs) === "
+            "extractOutputHash(txPreimage) — the spender may take this path "
+            "with an arbitrary _serialisedOutputs witness; got "
+            f"{_binding_kinds(node.else_)}"
+        )
+
+    def test_single_unconditional_call_emits_exactly_one_binding(self):
+        """Control: the straight-line single-call shape is unchanged."""
+        source = """
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+    runar.StatefulSmartContract
+    BondPKH runar.ByteString `runar:"readonly"`
+    Bond    runar.Bigint     `runar:"readonly"`
+}
+
+func (c *Cov) PayBond() {
+    // W2: index 0 is the only one this intrinsic accepts.
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+}
+"""
+        program = _must_lower_go_source(source)
+        m = _find_method(program, "payBond")
+        assert _has_output_hash_binding(m.body)
+        n = sum(
+            1
+            for b in m.body
+            if b.value.kind == "call" and b.value.func == "extractOutputHash"
+        )
+        assert n == 1, f"expected exactly one output-hash commitment, got {n}"
+
+    def test_two_sequential_calls_still_share_one_binding(self):
+        """Control: two calls on the SAME straight-line path still dedup to a
+        single commitment — the fix must not turn the dedup off wholesale."""
+        source = """
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+    runar.StatefulSmartContract
+    BondPKH runar.ByteString `runar:"readonly"`
+    Bond    runar.Bigint     `runar:"readonly"`
+}
+
+func (c *Cov) PayMulti() {
+    // W2: index 0 is the only one this intrinsic accepts; the dedup property
+    // under test is per-path, not per-index.
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+}
+"""
+        program = _must_lower_go_source(source)
+        m = _find_method(program, "payMulti")
+        n = sum(
+            1
+            for b in m.body
+            if b.value.kind == "call" and b.value.func == "extractOutputHash"
+        )
+        assert n == 1, f"expected exactly one output-hash commitment, got {n}"

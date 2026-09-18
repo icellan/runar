@@ -36,6 +36,7 @@ import runar.compiler.ir.ast.ReturnStatement;
 import runar.compiler.ir.ast.SourceLocation;
 import runar.compiler.ir.ast.Statement;
 import runar.compiler.ir.ast.TypeNode;
+import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.VariableDeclStatement;
 import runar.compiler.ir.ast.Visibility;
@@ -157,6 +158,23 @@ public final class RustParser {
     private static final int TOK_RSHIFT = 68;
     private static final int TOK_DOTDOT = 69;
 
+    /**
+     * The integer value of a literal expression, or {@code null} when it is
+     * not one.
+     *
+     * <p>A negative literal arrives as a unary minus over a positive one, so
+     * both shapes have to be walked — the same walk ANF lowering does, for the
+     * same reason (N-138).
+     */
+    private static BigInteger literalIntValue(Expression expr) {
+        if (expr instanceof BigIntLiteral lit) return lit.value();
+        if (expr instanceof UnaryExpr un && un.op() == Expression.UnaryOp.NEG) {
+            BigInteger inner = literalIntValue(un.operand());
+            return inner == null ? null : inner.negate();
+        }
+        return null;
+    }
+
     private static final Map<String, Integer> KEYWORDS = new HashMap<>();
     static {
         KEYWORDS.put("use", TOK_USE);
@@ -205,6 +223,13 @@ public final class RustParser {
         SPECIAL_BUILTINS.put("verify_slh_dsa_sha2_256s", "verifySLHDSA_SHA2_256s");
         SPECIAL_BUILTINS.put("verify_slh_dsa_sha2_256f", "verifySLHDSA_SHA2_256f");
         SPECIAL_BUILTINS.put("bin_2_num", "bin2num");
+        // The arbitrary-precision encoder spellings from packages/runar-rs.
+        // Mapped here, BEFORE camelisation, so the answer does not depend on
+        // this tier's snakeToCamel. Without them the typechecker answers
+        // "unknown function" -- a TYPECHECK diagnostic, which --parse-only
+        // cannot see. R-RustBigint.
+        SPECIAL_BUILTINS.put("bin2num_big", "bin2num");
+        SPECIAL_BUILTINS.put("num2bin_big", "num2bin");
         SPECIAL_BUILTINS.put("int_2_str", "int2str");
         SPECIAL_BUILTINS.put("to_byte_string", "toByteString");
         // P-256
@@ -251,6 +276,11 @@ public final class RustParser {
     private static final Map<String, String> TYPE_MAP = new HashMap<>();
     static {
         TYPE_MAP.put("Bigint", "bigint");
+        // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half
+        // of a pair whose narrow half (`Bigint` = i64) REFUSES what it cannot
+        // represent. A different Rust runtime type, the same Script primitive:
+        // reaching for it must not change one emitted byte. R-RustBigint.
+        TYPE_MAP.put("BigintBig", "bigint");
         TYPE_MAP.put("Int", "bigint");
         TYPE_MAP.put("i64", "bigint");
         TYPE_MAP.put("u64", "bigint");
@@ -633,6 +663,27 @@ public final class RustParser {
 
     private static TypeNode parseRustType(State s) {
         Token tok = s.peek();
+
+        // Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+        // `[[Bigint; 2]; 2]` surface produces the same
+        // FixedArrayType(FixedArrayType(...)) shape the TS / Rust / Ruby tiers
+        // build.
+        if (tok.kind == TOK_LBRACKET) {
+            s.advance();
+            TypeNode element = parseRustType(s);
+            s.expect(TOK_SEMI);
+            Token lengthTok = s.expect(TOK_NUMBER);
+            int length;
+            try {
+                length = Integer.parseInt(lengthTok.value);
+            } catch (NumberFormatException nfe) {
+                length = 0;
+                s.addError("line " + lengthTok.line + ": array length must be integer");
+            }
+            s.expect(TOK_RBRACKET);
+            return new FixedArrayType(element, length);
+        }
+
         if (tok.kind == TOK_IDENT) {
             String name = tok.value;
             s.advance();
@@ -1097,9 +1148,58 @@ public final class RustParser {
             }
 
             s.expect(TOK_IN);
-            Expression startExpr = parseExpression(s);
+            // Two loop headers, both of them real Rust that iterates exactly
+            // these values:
+            //
+            //   for i in a..b         -> a, a+1, … b-1  (ascending)
+            //   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+            //
+            // `.rev()` is what lets the Rust surface spell a countdown. A Rust
+            // range only ever ascends — `(5..2)` is empty — so `step = -1` was
+            // unreachable from this surface and no fixture could exercise it
+            // across all nine. `Iterator::rev` reverses the half-open range:
+            // the descending loop starts at `b - 1` and ends at `a` INCLUSIVE,
+            // which is why the guard below is `>=` against `a`.
+            boolean hasParen = s.check(TOK_LPAREN);
+            if (hasParen) s.advance();
+
+            Expression rangeStart = parseExpression(s);
             s.expect(TOK_DOTDOT);
-            Expression endExpr = parseExpression(s);
+            Expression rangeEnd = parseExpression(s);
+
+            boolean descending = false;
+            if (hasParen) {
+                s.expect(TOK_RPAREN);
+                s.expect(TOK_DOT);
+                Token methodTok = s.advance();
+                if (!"rev".equals(methodTok.value)) {
+                    s.errors.add("unsupported range method '." + methodTok.value
+                        + "()' in for loop — only '.rev()' is supported");
+                }
+                s.expect(TOK_LPAREN);
+                s.expect(TOK_RPAREN);
+                descending = true;
+            }
+
+            // `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs
+            // that start as a compile-time literal — it synthesizes iteration
+            // k as `start + k*step` — so fold the subtraction here when `b` is
+            // one, and otherwise hand the un-foldable expression straight
+            // through so ANF lowering raises its own "Cannot determine loop
+            // start" diagnostic rather than this parser inventing a second
+            // wording for the same rule.
+            Expression startExpr;
+            Expression endExpr;
+            if (descending) {
+                BigInteger upper = literalIntValue(rangeEnd);
+                startExpr = upper == null
+                    ? rangeEnd
+                    : new BigIntLiteral(upper.subtract(BigInteger.ONE));
+                endExpr = rangeStart;
+            } else {
+                startExpr = rangeStart;
+                endExpr = rangeEnd;
+            }
 
             s.expect(TOK_LBRACE);
             List<Statement> loopBody = new ArrayList<>();
@@ -1116,12 +1216,14 @@ public final class RustParser {
                 stmtLoc
             );
             Expression loopCondition = new BinaryExpr(
-                Expression.BinaryOp.LT,
+                descending ? Expression.BinaryOp.GE : Expression.BinaryOp.LT,
                 new Identifier(varName),
                 endExpr
             );
             ExpressionStatement update = new ExpressionStatement(
-                new IncrementExpr(new Identifier(varName), false),
+                descending
+                    ? new DecrementExpr(new Identifier(varName), false)
+                    : new IncrementExpr(new Identifier(varName), false),
                 stmtLoc
             );
 

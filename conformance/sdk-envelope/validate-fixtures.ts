@@ -123,7 +123,79 @@ function main(): void {
     }
   }
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors validate against the TS reference.`);
+  // 4. R-260 depth vectors. Each one must (a) actually have the nesting depth
+  //    it claims, measured the same way every tier's guard measures it — the
+  //    maximum number of simultaneously-open {/[ containers outside strings —
+  //    and (b) carry a signature that genuinely verifies. (b) is what gives the
+  //    over-limit vector its teeth: a tier that fails to enforce the bound
+  //    returns ok:true rather than falling through to some other rejection, so
+  //    the interop assertion cannot pass by accident.
+  const depthLimit = fixture.payload_depth_limit as number;
+  if (typeof depthLimit !== 'number') fail('payload_depth_limit missing');
+  const depthVectors = fixture.depth_vectors as Array<{
+    _vector_id?: string;
+    max_depth: number;
+    expect_ok: boolean;
+    reason?: string;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>;
+  if (!Array.isArray(depthVectors) || depthVectors.length === 0) fail('depth_vectors missing or empty');
+
+  const measureDepth = (payload: string): number => {
+    let depth = 0;
+    let max = 0;
+    let inString = false;
+    let escaped = false;
+    for (const c of payload) {
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === '\\') escaped = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === '{' || c === '[') {
+        depth++;
+        if (depth > max) max = depth;
+      } else if ((c === '}' || c === ']') && depth > 0) depth--;
+    }
+    return max;
+  };
+
+  let sawAtLimit = false;
+  let sawOverLimit = false;
+  for (const [i, v] of depthVectors.entries()) {
+    const id = v._vector_id ? ` (${v._vector_id})` : '';
+    const measured = measureDepth(v.envelope.payload);
+    if (measured !== v.max_depth) {
+      fail(`depth_vectors[${i}]${id}: declares max_depth ${v.max_depth}, payload measures ${measured}`);
+    }
+    if (v.envelope.pubkey !== ALICE_PUB_HEX) {
+      fail(`depth_vectors[${i}]${id}: pubkey ${v.envelope.pubkey} != documented signer ${ALICE_PUB_HEX}`);
+    }
+    const d = Hash.sha256(Utils.toArray(v.envelope.payload, 'utf8'));
+    let ok = false;
+    try {
+      ok = ecdsaVerifyRaw(
+        new BigNumber(d),
+        Signature.fromDER(Utils.toArray(v.envelope.sig, 'hex')),
+        PublicKey.fromDER(Utils.toArray(v.envelope.pubkey, 'hex')),
+      );
+    } catch (e) {
+      fail(`depth_vectors[${i}]${id}: signature failed to parse/verify: ${(e as Error).message}`);
+    }
+    if (!ok) {
+      fail(`depth_vectors[${i}]${id}: signature does not verify — the vector would reject as bad-sig and prove nothing about the depth bound`);
+    }
+    if (v.max_depth === depthLimit && v.expect_ok) sawAtLimit = true;
+    if (v.max_depth === depthLimit + 1 && !v.expect_ok && v.reason === 'bad-json') sawOverLimit = true;
+  }
+  if (!sawAtLimit) fail(`depth_vectors must carry an accepted vector at exactly max_depth ${depthLimit}`);
+  if (!sawOverLimit) {
+    fail(`depth_vectors must carry a bad-json vector at exactly max_depth ${depthLimit + 1}`);
+  }
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors validate against the TS reference.`);
 }
 
 main();

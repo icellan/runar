@@ -168,9 +168,18 @@ The Rúnar compiler parses `self.add_output(...)` as `this.addOutput(...)` regar
 for i in 0..10 {
     // body
 }
+
+for i in (2..6).rev() {   // i = 5, 4, 3, 2 — counting DOWN
+    // body
+}
 ```
 
 Range syntax maps to a bounded for loop. The upper bound must be a compile-time constant.
+
+A Rust range only ever ascends — `(5..2)` is empty — so a countdown is spelled
+with `Iterator::rev`. It reverses the half-open range, so `(2..6).rev()` starts
+at `6 - 1` and ends at `2` inclusive, iterating 5, 4, 3, 2 exactly as it does in
+Rust. `.rev()` is the only range method the surface accepts.
 
 ### If/Else
 
@@ -182,10 +191,29 @@ if amount > threshold {
 }
 ```
 
-### Ternary (if expression)
+### Conditional values: no if-expression
+
+Rúnar's `.runar.rs` surface has **no if-expression**. This page used to show
 
 ```rust
-let x = if cond { a } else { b };
+let x = if cond { a } else { b };   // NOT Rúnar — rejected by all seven tiers
+```
+
+and no tier has ever parsed it: measured by exit code on exactly that spelling,
+TypeScript, Go, Rust, Python, Zig and Ruby exit 1 and Java exits 65, in both the
+statement-first and statement-last arrangement. `spec/frontend-spec.md` carried
+the same false claim independently, which is why correcting one file was not
+enough (R-131).
+
+Use the statement form, as the Go surface does — this compiles in all seven
+tiers:
+
+```rust
+let mut x: Int = self.threshold;
+if amount > self.threshold {
+    x = amount;
+}
+assert!(x >= self.threshold);
 ```
 
 ---
@@ -194,7 +222,7 @@ let x = if cond { a } else { b };
 
 | Rust type | Rúnar type |
 |-----------|-----------|
-| `Bigint` / `Int` / `i64` / `u64` / `i128` / `u128` | `bigint` |
+| `Bigint` / `Int` / `i64` / `u64` / `i128` / `u128` / `BigintBig` | `bigint` |
 | `bool` / `Bool` | `boolean` |
 | `ByteString` | `ByteString` |
 | `PubKey` | `PubKey` |
@@ -207,7 +235,48 @@ let x = if cond { a } else { b };
 | `RabinPubKey` | `RabinPubKey` |
 | `Point` | `Point` |
 
-All byte types are `Vec<u8>` aliases. Integer types are `i64` aliases.
+### Integer width
+
+`Bigint` is `i64` in `packages/runar-rs`. A Bitcoin Script number is an
+arbitrary-width byte string and Rúnar's `bigint` is arbitrary precision by
+specification, so the alias is deliberately narrower than the type it stands
+for: the values contracts declare `Bigint` are satoshi counts, loop indices and
+board cells, and `num_bigint::BigInt` is not `Copy`, so making all of them wide
+would stop `self.count + 1` compiling on a borrowed field for no gain.
+
+Nothing narrows silently as a result. `bin2num` and `num2bin` **panic** rather
+than return a truncated answer, and name the wide peer to use instead:
+
+- `bin2num` of a push carrying a value past `i64` panics. It used to return the
+  low 64 bits, so `bin2num` of `123456789012345678901234567890` in sixteen
+  bytes came back as `-4362896299872285998` while `OP_BIN2NUM` left the whole
+  value on the stack. The boundary is the VALUE, not the push width — a
+  sixteen-byte push of `1000` is `1000` and decodes fine.
+- `num2bin` into a width too small for the value panics. `OP_NUM2BIN` has no
+  wrap-around; it FAILS on a size too small for the number. Note that the sign
+  needs a bit of its own, so `255` needs two bytes, and `i64::MIN` needs NINE:
+  in eight, the sign bit and the top magnitude bit are the same bit and the
+  push decodes as `0`.
+
+For values past 2^63, type the field, parameter or binding `BigintBig`
+(`num_bigint::BigInt`) and use `bin2num_big` / `num2bin_big`. **Every one of
+those spellings lowers to the same `bigint` primitive and the same builtins, so
+the emitted Script is byte-identical either way** — `conformance/subtype-parity/
+RustBigintBigSpellings.runar.rs` and its `.runar.ts` reference peer gate exactly
+that, per tier.
+
+Unlike the Go tier, the arithmetic needs no helper functions:
+`num_bigint::BigInt` implements `Add`/`Sub`/`Mul`/`PartialEq`/`PartialOrd`, so
+`a + b` and `a == b` are written as operators and mean what they say. Go needs
+`runar.BigintBigEqual` because `==` on a `*big.Int` silently compares pointers;
+Rust has no such hazard.
+
+A secp256k1 coordinate is 256 bits, so `ec_point_x`, `ec_point_y` and
+`ec_make_point` take and return `BigintBig`. They used to use `i64` and keep the
+low eight bytes of a coordinate, which is wrong for every real curve point.
+
+All byte types are `Vec<u8>` aliases. `Bigint` and `Int` are `i64` aliases;
+`BigintBig` is `num_bigint::BigInt`.
 
 ---
 
@@ -263,13 +332,51 @@ Built-in functions use snake_case and take references for byte-type arguments:
 | `len(&data)` | `len(data)` |
 | `cat(&a, &b)` | `cat(a, b)` |
 | `substr(&data, start, len)` | `substr(data, start, len)` |
+| `split(&data, index)` | `split(data, index)` |
 | `left(&data, n)` | `left(data, n)` |
 | `right(&data, n)` | `right(data, n)` |
 | `reverse_bytes(&data)` | `reverseBytes(data)` |
-| `num2bin(&n, size)` | `num2bin(n, size)` |
-| `bin2num(&data)` / `bin_2_num(&data)` | `bin2num(data)` |
-| `int2str(n, radix)` / `int_2_str(n, radix)` | `int2str(n, radix)` |
-| `to_byte_string(&data)` | `toByteString(data)` |
+| `num2bin(&n, size)` / `num2bin_big(&n, size)` | `num2bin(n, size)` |
+| `bin2num(&data)` / `bin_2_num(&data)` / `bin2num_big(&data)` | `bin2num(data)` |
+| `int2str(n, byte_len)` / `int_2_str(n, byte_len)` | `int2str(n, byteLen)` |
+| `to_byte_string("hex")` | `toByteString('hex')` |
+
+Five of these need a word beyond the mapping, because the obvious reading of
+the name is wrong:
+
+- **`to_byte_string` is not a function call — it is how you WRITE a ByteString
+  literal here.** `spec/grammar.md` section 11 defines the literal as
+  `ByteStringLiteral = 'toByteString' '(' StringLiteral ')'`, and all seven
+  compilers fold it to a literal during ANF lowering, so it reaches the IR
+  indistinguishable from the bare `'00ff'` the other eight surfaces use. In
+  `.runar.rs` it is also the ONLY spelling available: `ByteString` is `Vec<u8>`
+  in this tier, so a bare `"00ff"` is a `&str` that will not compare or assign
+  to it, and no `PartialEq` between the two can be added from
+  `packages/runar-rs` (orphan rule). Write `to_byte_string("00ff")` and the
+  file is valid Rust, valid Rúnar, and byte-identical to every other surface.
+  A NON-literal argument — `to_byte_string(x)` — is not the literal production
+  and stays an identity cast, as it always was.
+
+- **`split` is single-valued.** It returns the bytes from `index` onwards — the
+  RIGHT half of the cut — because that is what `spec/grammar.md` declares and
+  what every tier emits (`OP_SPLIT OP_NIP`). `left(&data, index)` is the other
+  side. There is no pair and no tuple: Rúnar has no tuple type and no surface
+  parser accepts destructuring, so a pair return would be unnameable.
+- **`int2str` has no radix.** Despite the name it is `OP_NUM2BIN`: `byte_len` is
+  a WIDTH in bytes and the result is fixed-width little-endian sign-magnitude,
+  identical to `num2bin`. There is no decimal string anywhere in it.
+- **`split`, `left`, `right`, `num2bin` and `int2str` REFUSE rather than clamp.**
+  `OP_SPLIT` fails on a position past the end of the element and `OP_NUM2BIN`
+  fails on a width too small for the value; neither wraps. The mocks panic in
+  exactly those cases, because a value the emitted script can never produce is
+  worse than an error.
+- **`reverse_bytes` stops at 520 bytes.** Every tier lowers `reverseBytes` to a
+  loop unrolled exactly 520 times and then drops the remainder, so past that
+  length the script reverses only the first 520 bytes. The mock panics there
+  rather than returning an answer the script disagrees with.
+
+Each of these is spent on a consensus interpreter, per builtin and at its
+boundaries, by `packages/runar-rs/tests/mock_script_agreement.rs`.
 
 ### Preimage Extract Functions
 

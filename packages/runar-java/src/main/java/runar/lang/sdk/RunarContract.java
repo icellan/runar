@@ -176,8 +176,87 @@ public final class RunarContract {
      * {@code with_inscription}, and TS {@code withInscription}.
      */
     public RunarContract withInscription(Inscription insc) {
+        Inscription previous = this.inscription;
         this.inscription = insc;
+        try {
+            assertCodePartLengthPinHonoured();
+        } catch (IllegalArgumentException e) {
+            this.inscription = previous;
+            throw e;
+        }
         return this;
+    }
+
+    /**
+     * Decodes the value of every EQUALITY {@code verify_code_part_len} pin in a
+     * compiled script.
+     *
+     * <p>The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+     *
+     * <pre>
+     *   76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+     *   OP_DUP  &lt;len LE32&gt;    OP_BIN2NUM  cmp  OP_VERIFY
+     * </pre>
+     *
+     * <p>{@code 9c} is OP_NUMEQUAL — an exact pin, the only variant a longer
+     * code part can violate. {@code a2} is OP_GREATERTHANOREQUAL, a lower bound
+     * that extra bytes satisfy, so it is deliberately not returned here.
+     *
+     * <p>Read from the emitted TEMPLATE rather than from a built code script:
+     * the template holds OP_0 placeholders where constructor args go, so no
+     * caller-supplied byte string can be mistaken for a pin.
+     */
+    static List<Integer> decodeExactCodePartLenPins(String scriptHex) {
+        List<Integer> values = new ArrayList<>();
+        for (int i = 0; i + 18 <= scriptHex.length(); i += 2) {
+            String seq = scriptHex.substring(i, i + 18);
+            if (!seq.startsWith("7604")) continue;
+            if (!seq.regionMatches(12, "81", 0, 2)) continue;
+            if (!seq.regionMatches(14, "9c", 0, 2)) continue;
+            if (!seq.regionMatches(16, "69", 0, 2)) continue;
+            int value = 0;
+            boolean ok = true;
+            for (int b = 3; b >= 0; b--) { // little-endian
+                try {
+                    value = (value << 8) | Integer.parseInt(seq.substring(4 + 2 * b, 6 + 2 * b), 16);
+                } catch (NumberFormatException e) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) values.add(value);
+        }
+        return values;
+    }
+
+    /**
+     * Verifies that every equality {@code verify_code_part_len} pin the compiler
+     * baked into this artifact still describes the code part this contract
+     * produces.
+     *
+     * <p>The check is the invariant itself, not a restatement of the compiler's
+     * derivation: it decodes the pinned number straight out of the emitted
+     * template and compares it to the rendered code part. So it permits every
+     * combination that actually works — a stateless contract or a fixed-size
+     * state layout carries no pin at all, and a lower-bound pin is satisfied by
+     * a longer code part — and rejects only the shape that would lock funds.
+     */
+    private void assertCodePartLengthPinHonoured() {
+        List<Integer> pinned = decodeExactCodePartLenPins(artifact.scriptHex());
+        if (pinned.isEmpty()) return;
+        int actual = ContractScript.renderCodePart(artifact, constructorArgs, inscription).length() / 2;
+        for (int value : pinned) {
+            if (value == actual) continue;
+            throw new IllegalArgumentException(
+                "RunarContract.withInscription: " + artifact.contractName() + " pins "
+                    + "SIZE(_codePart) == " + value + ", but with this inscription attached the "
+                    + "code part is " + actual + " bytes. Deploying it would make every spend "
+                    + "fail OP_VERIFY and lock the contract's funds permanently. An "
+                    + "inscription cannot be attached to a stateful contract with a "
+                    + "variable-length state section: the envelope is part of the code "
+                    + "part, and its length is not known when the pin is compiled"
+            );
+        }
     }
 
     public Inscription inscription() {
@@ -296,6 +375,10 @@ public final class RunarContract {
             lockingScript, InputLimits.MAX_SCRIPT_BYTES,
             artifact.contractName() + ".deploy"
         );
+        // R-062: this overload carries no options, so it can acknowledge
+        // nothing — an unsound artifact must go through
+        // deploy(provider, signer, DeployOptions).
+        UnsoundPrimitives.assertAcknowledged(artifact, null, artifact.contractName() + ".deploy");
         TransactionBuilder.DeployResult r = TransactionBuilder.buildDeployWithLockingScript(
             lockingScript, provider, signer, satoshis, changeAddress
         );
@@ -328,6 +411,14 @@ public final class RunarContract {
         // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
         ScriptSizeExceededError.assertScriptHexUnderLimit(
             lockingScript, InputLimits.MAX_SCRIPT_BYTES,
+            artifact.contractName() + ".deploy"
+        );
+        // R-062: and refuse to fund a script reaching a builtin the compiler
+        // does not claim is sound unless the caller says so here, in the same
+        // breath as the money.
+        UnsoundPrimitives.assertAcknowledged(
+            artifact,
+            options == null ? null : options.acknowledgeUnsound,
             artifact.contractName() + ".deploy"
         );
         TransactionBuilder.DeployResult r = TransactionBuilder.buildDeployWithLockingScript(
@@ -449,12 +540,26 @@ public final class RunarContract {
             if (artifact.anf() != null) {
                 Map<String, Object> namedArgs = buildNamedArgs(userParams, args);
                 try {
+                    // The interpreter knows only the EXPANDED scalar property
+                    // names, so a grouped FixedArray entry has to be spread
+                    // over its synthetic leaves first — see
+                    // StateSerializer.flattenFixedArrayState.
+                    Map<String, Object> flatState =
+                        StateSerializer.flattenFixedArrayState(artifact.stateFields(), state);
                     AnfInterpreter.ExecutionResult execResult = AnfInterpreter.computeNewStateAndDataOutputs(
-                        artifact.anf(), methodName, state, namedArgs, constructorArgs
+                        artifact.anf(), methodName, flatState, namedArgs, constructorArgs
                     );
                     // Caller-supplied state wins; the interpreter's is the
                     // fallback. The output shape below is taken either way.
-                    if (stateUpdates == null) state.putAll(execResult.newState);
+                    // ...and the post-state comes back under those same
+                    // synthetic names, so regroup before it reaches `state`.
+                    // Without this the grouped entry keeps its pre-call value
+                    // and only StateSerializer's synthetic-key preference keeps
+                    // the continuation bytes honest.
+                    if (stateUpdates == null) {
+                        state.putAll(StateSerializer.regroupFixedArrayState(
+                            artifact.stateFields(), execResult.newState));
+                    }
                     for (AnfInterpreter.DataOutput d : execResult.dataOutputs) {
                         resolvedDataOutputs.add(
                             new TransactionBuilder.DataOutput(d.satoshis(), d.script())
@@ -783,7 +888,7 @@ public final class RunarContract {
         int codeSepIdx = getCodeSepIndex(methodIndex);
         String fullScriptHex = currentUtxo.scriptHex();
         String sighashSubscript = codeSepIdx >= 0
-            ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+            ? subscriptAfterCodeSep(fullScriptHex, codeSepIdx)
             : fullScriptHex;
 
         // The BIP-143 preimage placeholder MUST be the length the real preimage
@@ -854,7 +959,7 @@ public final class RunarContract {
         List<String> extraSubscripts = new ArrayList<>();
         for (UTXO u : extraContractUtxos) {
             extraSubscripts.add(codeSepIdx >= 0
-                ? u.scriptHex().substring((codeSepIdx + 1) * 2)
+                ? subscriptAfterCodeSep(u.scriptHex(), codeSepIdx)
                 : u.scriptHex());
         }
 
@@ -1233,7 +1338,7 @@ public final class RunarContract {
             int codeSepIdx = getCodeSepIndex(methodIndex);
             String fullScriptHex = currentUtxo.scriptHex();
             String sighashSubscript = codeSepIdx >= 0
-                ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+                ? subscriptAfterCodeSep(fullScriptHex, codeSepIdx)
                 : fullScriptHex;
 
             // Pass 1: placeholder unlock so we can compute the preimage
@@ -2112,7 +2217,7 @@ public final class RunarContract {
             int codeSepIdx = getCodeSepIndex(methodIndex);
             String fullScriptHex = currentUtxo.scriptHex();
             String sighashSubscript = codeSepIdx >= 0
-                ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+                ? subscriptAfterCodeSep(fullScriptHex, codeSepIdx)
                 : fullScriptHex;
 
             String placeholderUnlock = buildPushTxUnlock(
@@ -2323,4 +2428,28 @@ public final class RunarContract {
         return parsed.sighashBIP143(inputIndex, currentUtxo.scriptHex(), currentUtxo.satoshis(),
             sigHashType);
     }
+
+    /**
+     * The subscript that follows the OP_CODESEPARATOR at {@code codeSepIdx}.
+     *
+     * <p>R-178: the three call sites each wrote
+     * {@code scriptHex.substring((codeSepIdx + 1) * 2)}, which throws
+     * StringIndexOutOfBoundsException when the offset is past the end — a
+     * fund-moving signature path reporting a bad input as a JVM internal error.
+     * There is no correct scriptCode for a separator offset that is not in the
+     * script, so this refuses, and says which input was wrong.
+     */
+    // Package-private rather than private so the R-178 rejection can be tested
+    // directly; the three call sites are inside signing flows that need a
+    // provider, a signer and a funded artifact to reach.
+    static String subscriptAfterCodeSep(String scriptHex, int codeSepIdx) {
+        int trimPos = (codeSepIdx + 1) * 2;
+        if (trimPos > scriptHex.length()) {
+            throw new IllegalArgumentException(
+                "codeSeparatorIndex " + codeSepIdx + " is past the end of the subscript ("
+                    + (scriptHex.length() / 2) + " bytes)");
+        }
+        return scriptHex.substring(trimPos);
+    }
+
 }

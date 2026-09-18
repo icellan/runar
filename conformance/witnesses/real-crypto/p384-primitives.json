@@ -76,5 +76,9 @@
       "expect": "reject",
       "note": "GAP-301 on a real engine: the two arguments are ONE group element in two encodings (x = 2 and x + p; this curve has an on-curve point with x small enough that x + p still fits the coordinate width). p384Add compares the RAW x coordinates to detect doubling, so it takes the chord path, divides by (qx - px) = p = 0, and — cFieldInv being Fermat, inv(0) = 0 — returns a point that is neither 2P nor on the curve, from a script that SUCCEEDS. The only thing that can reject it is p384OnCurve, which is verifyAdd's first assert, and which is also where the x < p canonicity guard lives. Nothing outside the TS tier had ever executed a non-canonical coordinate."
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "31d36ffbca3d6273f9acd6b16644eea62bb384c81a57969ba4e357e1f9fc8a62"
+  },
+  "goldenHashesNote": "R-052 / CL-BUG-095 (no length validation on any Point argument in any tier) and R-053 / CL-BUG-096 (ecAdd(P, O) returned an off-curve blob while the always-on EC optimizer rewrote the same expression as the identity) both moved this golden. The pin is deliberately self-invalidating: any later change to expected-script.hex must come back through this witness, whose spends re-EXECUTE the fixture's actual compiled locking script on the real @bsv/sdk Spend engine with real secp256k1 — which is why this fixture takes provenance path (A) rather than an allowlist hash. Both defects were reproduced by EXECUTION before the fix, not inferred: ecOnCurve(G||0xff) returned TRUE, ecPointX on a 32-byte blob succeeded, ecEncodeCompressed(G||0x01) flipped the compressed sign from 02 to 03, and ecAdd(G, allZero64) returned cf88213f...169139c6 with ecOnCurve(result) false. All seven independently written compilers regenerate these exact bytes; before each regeneration the conformance run reported 0 mismatches BETWEEN compilers against 70 unanimous golden mismatches, which is the signature of a correct port meeting a stale reference rather than a port bug. expected-ir.json is provably unmoved in both commits, so the ANF is untouched and only stack lowering changed."
 }

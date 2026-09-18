@@ -111,6 +111,10 @@ describe('#118 — terminal call pays a miner fee via CallOptions.feeUtxo', () =
     const fundingSigner = new LocalSigner(FUNDING_KEY);
     const feeScript = buildP2PKHScript(await fundingSigner.getPublicKey());
     const feeUtxo: UTXO = { txid: 'ee'.repeat(32), outputIndex: 1, satoshis: FEE_SATS, script: feeScript };
+    // M-1: register the fee coin so MockProvider can run `Spend` over input 1
+    // and evaluate conservation over the whole tx. Unregistered, it silently
+    // switched off conservation as well as the fee floor this file opts out of.
+    provider.addUtxo('fee-funder', feeUtxo);
 
     await contract.call('settle', [], provider, methodSigner, {
       terminalOutputs: [{ scriptHex: PAYOUT, satoshis: CONTRACT_SATS }],

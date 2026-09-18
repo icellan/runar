@@ -9,6 +9,9 @@
 require "json"
 require "set"
 require_relative "types"
+# R-128 / R-165: the arity check below reads the frontend's own signature
+# table rather than keeping a second copy of it.
+require_relative "../frontend/typecheck"
 require_relative "unknown_anf_kind_error"
 require_relative "input_limits"
 
@@ -74,6 +77,16 @@ module RunarCompiler
         raise ArgumentError, "invalid IR JSON: #{e.message}"
       end
 
+      # N-131: refuse float syntax before anything narrows it. Ruby's own
+      # narrowing was silent in both directions -- Integer("1e30".to_f) is
+      # where {"start":1e30} became 0 -- so the check has to happen on the
+      # parsed document, not on whatever survived a to_i.
+      begin
+        InputLimits.assert_no_json_floats(d)
+      rescue InputLimits::IRFloatValueError => e
+        raise ArgumentError, e.message
+      end
+
       program = anf_program_from_hash(d)
 
       # Decode typed constant values from raw JSON
@@ -118,6 +131,10 @@ module RunarCompiler
         errors << "contractName is required"
       end
 
+      # R-126 / CL-BUG-164: an add_output must name exactly one state value per
+      # MUTABLE property. Counted once, up front.
+      mutable_count = program.properties.count { |p| !p.readonly }
+
       program.methods.each_with_index do |m, i|
         if m.name.nil? || m.name.empty?
           errors << "method[#{i}] has empty name"
@@ -132,7 +149,7 @@ module RunarCompiler
           end
         end
 
-        errors.concat(_validate_bindings(m.body, m.name))
+        errors.concat(_validate_bindings(m.body, m.name, mutable_count))
       end
 
       program.properties.each_with_index do |prop, i|
@@ -144,11 +161,82 @@ module RunarCompiler
         end
       end
 
+      # N-113 / R-081: a contract with no public method has no spending entry
+      # point and emits an EMPTY locking script -- which is anyone-can-spend,
+      # not merely useless. On the real @bsv/sdk `Spend` engine under full
+      # consensus rules, an empty locking script with the one-byte push-only
+      # witness OP_1 (0x51) validates. Before this guard the --ir path exited 0
+      # and handed the SDKs a well-formed artifact whose "script" was "".
+      #
+      # The source pipeline already rejects the same shape in
+      # frontend/validator.rb; validate_ir is reached only from the IR loader,
+      # so this closes the rule's gap on externally supplied IR.
+      #
+      # Appended LAST so the structural diagnostics above keep priority -- a
+      # malformed binding is the more actionable error when both are present
+      # (load_ir raises errors[0]). Mirrors compilers/go/ir/loader.go,
+      # including the ordering.
+      #
+      # N-113: the CONSTRUCTOR does not count. This check mirrors
+      # frontend/validator.rb, but runs over a differently-shaped list: the
+      # AST keeps the constructor in its own field while ANF lowering flattens
+      # it INTO `program.methods`, so one `isPublic: true` on the constructor
+      # walked past the guard. It is never a spending entry point (emit and
+      # stack lowering both filter it out by NAME) and the contract emitted an
+      # EMPTY locking script at exit 0.
+      unless program.methods.any? { |m| m.is_public && m.name != 'constructor' }
+        errors << "contract #{program.contract_name} has no public methods " \
+                  "— no spending entry points; an empty locking script is " \
+                  "anyone-can-spend"
+      end
+
       errors
     end
 
     # Validate a list of ANF bindings, including nested ones.
-    def self._validate_bindings(bindings, method_name)
+    # Allowed argument counts per builtin, READ from the frontend's own
+    # signature table so the two cannot drift. Two builtins accept more than
+    # one count (an optional trailing argument the table cannot express) and
+    # one is variadic by a rule; both are special-cased in typecheck for the
+    # same reasons. R-128 / R-165.
+    VARIABLE_ARITY = {
+      "assert" => [1, 2],
+      "extractPrevOutputScript" => [2, 3]
+    }.freeze
+
+    def self._check_builtin_arity(method_name, binding)
+      func_name = binding.value.func.to_s
+      got = (binding.value.args || []).length
+
+      if func_name == "merkleRootPoseidon2KB"
+        # 8 leaf elements + 8 per proof level + index + depth.
+        if got < 10
+          return "method #{method_name} binding #{binding.name} calls " \
+                 "#{func_name}() with #{got} argument(s); it takes at least 10 " \
+                 "arguments (8 leaf + index + depth)"
+        end
+        if ((got - 10) % 8) != 0
+          return "method #{method_name} binding #{binding.name} calls " \
+                 "#{func_name}() with #{got} argument(s); it takes 8*depth + 10 arguments"
+        end
+        return nil
+      end
+
+      allowed = VARIABLE_ARITY[func_name]
+      if allowed.nil?
+        sig = ::RunarCompiler::Frontend::BUILTIN_FUNCTIONS[func_name]
+        return nil if sig.nil?
+
+        allowed = [sig.params.length]
+      end
+      return nil if allowed.include?(got)
+
+      wanted = allowed.length == 1 ? allowed[0].to_s : "#{allowed[0..-2].join(', ')} or #{allowed[-1]}"
+      "method #{method_name} binding #{binding.name} calls #{func_name}() with " \
+        "#{got} argument(s); it takes #{wanted}"
+    end
+
+    def self._validate_bindings(bindings, method_name, mutable_count)
       errors = []
 
       bindings.each_with_index do |binding, i|
@@ -167,13 +255,69 @@ module RunarCompiler
                     "has unknown kind #{kind.inspect}"
         end
 
+        # R-128 / R-165: builtin call arity. The source pipeline type-checks
+        # every call; `--ir` runs no frontend, so a wrong-arity call used to
+        # reach stack lowering, where each dispatch family pops len(args) from
+        # the stack MODEL and then emits a FIXED-arity opcode blob. `cat` with
+        # one argument compiled to a bare OP_CAT; `assert` with none compiled
+        # to an EMPTY script, dropping the contract's only guard.
+        if kind == "call"
+          err = _check_builtin_arity(method_name, binding)
+          errors << err if err
+        end
+
+        # R-164 / CL-BUG-134: `super` outside a constructor.
+        #
+        # `super` emits no opcodes -- the constructor args are already on the
+        # stack -- but stack lowering pushes a stackMap slot for it anyway:
+        # +1 model, +0 physical. Invisible on the SOURCE path (the constructor
+        # is never lowered to script) and reachable via `--ir`, where every
+        # subsequent PICK/ROLL depth is off by one. Refusing beats inventing a
+        # physical push for a call with no runtime meaning.
+        if kind == "call" && binding.value.func == "super" && method_name != "constructor"
+          errors << "super() is only valid in a constructor; method '#{method_name}' calls it. " \
+                    "It emits no opcodes -- the constructor args are already on the stack -- so " \
+                    "stack lowering pushes a model slot with no physical value, and every later " \
+                    "PICK/ROLL depth in the method is off by one."
+        end
+
+        # R-126 / CL-BUG-164: add_output state-value arity.
+        #
+        # The source pipeline counts addOutput arity in the typechecker (the
+        # N20 / N23 / N26 negatives). `--ir` runs no frontend, so such a node
+        # reached stack lowering directly, and `_lower_add_output` serializes
+        # the OP_RETURN payload with the MIN of the two lists. Under-arity
+        # emitted an output carrying fewer state fields than the contract has;
+        # over-arity silently dropped the surplus. Measured through each tier's
+        # own --ir CLI on a two-mutable-field contract (correct arity = 1394
+        # hexchars): go, rust, zig, ruby, python and java ALL accepted, emitting
+        # 1388 and 1396 hexchars respectively.
+        #
+        # CL-BUG-164 settled the cost: every SDK's StateSerializer writes ALL
+        # mutable fields, so a short-payload continuation is spendable only by a
+        # hand-crafted transaction, and the successor it produces is permanently
+        # unspendable because the next call's deserialize_state slices at fixed
+        # offsets. The message is shared verbatim with the other six tiers.
+        if kind == "add_output"
+          got = (binding.value.state_values || []).length
+          if got != mutable_count
+            errors << "add_output in method '#{method_name}' carries #{got} state " \
+                      "values, but the contract declares #{mutable_count} mutable " \
+                      "properties. The output's OP_RETURN payload is serialized from " \
+                      "this list while deserialize_state slices the declared properties " \
+                      "at fixed offsets, so any other count commits to a state payload " \
+                      "no SDK-built transaction can produce and a successor that cannot " \
+                      "be spent."
+          end
+        end
+
         # Validate nested bindings
         if kind == "if"
           if binding.value.then
-            errors.concat(_validate_bindings(binding.value.then, method_name))
+            errors.concat(_validate_bindings(binding.value.then, method_name, mutable_count))
           end
           if binding.value.else_
-            errors.concat(_validate_bindings(binding.value.else_, method_name))
+            errors.concat(_validate_bindings(binding.value.else_, method_name, mutable_count))
           end
         end
 
@@ -188,12 +332,35 @@ module RunarCompiler
                       "has loop count #{count} exceeding maximum #{MAX_LOOP_COUNT}"
           end
           if binding.value.body
-            errors.concat(_validate_bindings(binding.value.body, method_name))
+            errors.concat(_validate_bindings(binding.value.body, method_name, mutable_count))
           end
         end
 
         if kind == "raw_script"
           body = binding.value.bytes || ""
+          # N-113 / R-079: an empty span is a claim the emitter cannot honour.
+          # Stack lowering models a raw_script purely from its declared arities
+          # (it pops in_arity and pushes out_arity) because the bytes are
+          # opaque to it, while emission writes nothing at all for a
+          # zero-length span. The stack model and the script then disagree, and
+          # every later PICK/ROLL depth derived from that model addresses the
+          # wrong slot -- the span silently degrades to the identity function
+          # and a different witness spends the output than the IR declared.
+          #
+          # The source path already rejects this ("asm() body must be a
+          # non-empty hex string literal", frontend/validator.rb); --ir is the
+          # same rule at the external-input trust boundary. All empty bodies
+          # are rejected, including the degenerate in=0/out=0 case, because
+          # mirroring the source validator exactly is worth more than an
+          # arity-conditional rule that would differ from the rule one pass
+          # earlier.
+          if body.empty?
+            errors << "method #{method_name} binding #{binding.name} " \
+                      "raw_script has an empty bytes body but declares " \
+                      "in_arity #{binding.value.in_arity || 0} / " \
+                      "out_arity #{binding.value.out_arity || 0}; a span " \
+                      "that emits no bytes cannot have a stack effect"
+          end
           if body.length.odd?
             errors << "method #{method_name} binding #{binding.name} " \
                       "raw_script bytes have odd hex length #{body.length}"

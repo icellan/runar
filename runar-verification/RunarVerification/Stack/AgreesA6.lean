@@ -123,7 +123,7 @@ theorem structuralConstBodyB_iff (body : List ANFBinding) :
         | call _ _ => simp at hHead
         | methodCall _ _ _ => simp at hHead
         | ifVal _ _ _ _ => simp at hHead
-        | loop _ _ _ => simp at hHead
+        | loop _ _ _ _ _ => simp at hHead
         | assert _ => simp at hHead
         | updateProp _ _ => simp at hHead
         | getStateScript => simp at hHead
@@ -153,7 +153,7 @@ theorem structuralConstBodyB_iff (body : List ANFBinding) :
         | call _ _ => simp [structuralConstValue] at hHead
         | methodCall _ _ _ => simp [structuralConstValue] at hHead
         | ifVal _ _ _ _ => simp [structuralConstValue] at hHead
-        | loop _ _ _ => simp [structuralConstValue] at hHead
+        | loop _ _ _ _ _ => simp [structuralConstValue] at hHead
         | assert _ => simp [structuralConstValue] at hHead
         | updateProp _ _ => simp [structuralConstValue] at hHead
         | getStateScript => simp [structuralConstValue] at hHead
@@ -193,7 +193,7 @@ theorem structuralIfValBodyNarrowB_iff (body : List ANFBinding) :
       | unaryOp _ _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | call _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | methodCall _ _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
-      | loop _ _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
+      | loop _ _ _ _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | assert _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | updateProp _ _ => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
       | getStateScript => simp [structuralIfValBodyNarrowB, structuralIfValBodyNarrow]
@@ -1381,7 +1381,7 @@ private theorem runOps_lowerValue_loadConst_preserves_metadata
   | call _ _ => simp [structuralConstValue] at hHead
   | methodCall _ _ _ => simp [structuralConstValue] at hHead
   | ifVal _ _ _ _ => simp [structuralConstValue] at hHead
-  | loop _ _ _ => simp [structuralConstValue] at hHead
+  | loop _ _ _ _ _ => simp [structuralConstValue] at hHead
   | assert _ => simp [structuralConstValue] at hHead
   | updateProp _ _ => simp [structuralConstValue] at hHead
   | getStateScript => simp [structuralConstValue] at hHead
@@ -4868,7 +4868,7 @@ theorem ifValArithBodyBool_iff
   | [.mk _ (.unaryOp _ _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.call _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.methodCall _ _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
-  | [.mk _ (.loop _ _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
+  | [.mk _ (.loop _ _ _ _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.assert _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ (.updateProp _ _) _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]
   | [.mk _ .getStateScript _] => by simp only [ifValArithBodyBool, ifValArithBody, reduceCtorEq]

@@ -1,8 +1,6 @@
-//go:build ignore
-
 package contract
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 // StatefulWOTSGate — stateful + post-quantum interaction fixture (GAP-407).
 type StatefulWOTSGate struct {

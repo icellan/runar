@@ -18,6 +18,14 @@ const Opcode = opcodes.Opcode;
 // Emit Context — accumulates hex, asm, and metadata during emission
 // ============================================================================
 
+/// One fixed-width length field reserved by `verify_code_part_len`, to be
+/// filled in once the whole script exists (R-095).
+pub const CodePartLenFixup = struct {
+    value_byte_offset: usize,
+    asm_index: usize,
+    delta: i64,
+};
+
 pub const EmitContext = struct {
     /// Raw script bytes accumulated during emission.
     script_bytes: std.ArrayListUnmanaged(u8) = .empty,
@@ -47,6 +55,8 @@ pub const EmitContext = struct {
     pending_source_loc: ?types.SourceLocation = null,
     /// Current opcode index (incremented per emitted instruction).
     opcode_index: u32 = 0,
+    /// R-095 — verify_code_part_len length fields awaiting back-patch.
+    code_part_len_fixups: std.ArrayListUnmanaged(CodePartLenFixup) = .empty,
     /// Allocator for all dynamic allocation.
     allocator: std.mem.Allocator,
 
@@ -55,6 +65,7 @@ pub const EmitContext = struct {
     }
 
     pub fn deinit(self: *EmitContext) void {
+        self.code_part_len_fixups.deinit(self.allocator);
         self.script_bytes.deinit(self.allocator);
         for (self.owned_asm_parts.items) |part| {
             self.allocator.free(part);
@@ -234,13 +245,60 @@ pub const EmitContext = struct {
         });
     }
 
+    /// R-095 — resolve every `verify_code_part_len` length field.
+    ///
+    /// Runs once the whole script has been emitted, because the value each
+    /// field carries is the DEPLOYED length of the very script it sits in:
+    ///
+    ///     deployedCodeLen = emitted template length
+    ///                     + growth of the constructor-arg placeholders (delta)
+    ///                     + growth of the codeSepIndex placeholders (0)
+    ///
+    /// Idempotent: it overwrites a fixed-width field in place rather than
+    /// splicing, so the script's length never changes.
+    ///
+    /// The codeSepIndex placeholders contribute nothing because post-R-010 the
+    /// separator is always at offset 1, so each bakes as the single opcode
+    /// byte OP_1. The guard is not decoration: if the separator ever moves,
+    /// the pin's arithmetic goes silently wrong and every honest spend of a
+    /// variable-length-state contract becomes unspendable.
+    pub fn applyCodePartLenFixups(self: *EmitContext) !void {
+        if (self.code_part_len_fixups.items.len == 0) return;
+        for (self.code_sep_index_slots.items) |slot| {
+            if (slot.code_sep_index != 1) return error.CodeSepIndexNotOne;
+        }
+        const total: i64 = @intCast(self.script_bytes.items.len);
+        for (self.code_part_len_fixups.items) |fixup| {
+            const deployed_len = total + fixup.delta;
+            if (deployed_len < 0 or deployed_len > 0x7fffffff) return error.CodePartLenOutOfRange;
+            const v: u32 = @intCast(deployed_len);
+            var i: usize = 0;
+            while (i < 4) : (i += 1) {
+                self.script_bytes.items[fixup.value_byte_offset + i] =
+                    @truncate((v >> @intCast(8 * i)) & 0xff);
+            }
+            const le = try std.fmt.allocPrint(self.allocator, "<{x:0>2}{x:0>2}{x:0>2}{x:0>2}>", .{
+                self.script_bytes.items[fixup.value_byte_offset],
+                self.script_bytes.items[fixup.value_byte_offset + 1],
+                self.script_bytes.items[fixup.value_byte_offset + 2],
+                self.script_bytes.items[fixup.value_byte_offset + 3],
+            });
+            try self.owned_asm_parts.append(self.allocator, le);
+            if (fixup.asm_index < self.asm_parts.items.len) {
+                self.asm_parts.items[fixup.asm_index] = le;
+            }
+        }
+    }
+
     /// Get the final hex-encoded script. Caller owns the returned memory.
     pub fn getHex(self: *EmitContext) ![]u8 {
+        try self.applyCodePartLenFixups();
         return opcodes.bytesToHex(self.allocator, self.script_bytes.items);
     }
 
     /// Get the final ASM text (space-separated). Caller owns the returned memory.
     pub fn getAsm(self: *EmitContext) ![]u8 {
+        try self.applyCodePartLenFixups();
         if (self.asm_parts.items.len == 0) {
             return try self.allocator.dupe(u8, "");
         }
@@ -340,6 +398,31 @@ pub fn emitStackInstruction(ctx: *EmitContext, inst: types.StackInstruction) !vo
                 .code_sep_index = code_sep_idx,
             });
         },
+        .verify_code_part_len => |pin| {
+            // R-095: pin SIZE(_codePart) against the code part's own deployed
+            // byte length.
+            //
+            //   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+            //
+            // LL LL LL LL is a FIXED-WIDTH little-endian field, not a minimal
+            // Script number push: the value being patched IS the length of the
+            // script that contains it, so a width that varied with the value
+            // would be self-referential. OP_BIN2NUM normalises it back to a
+            // minimal Script number so the comparison is numeric.
+            try ctx.emitOpcode(.op_dup);
+            // +1 skips the single-byte push header the 4-byte data push carries.
+            const value_byte_offset: usize = @as(usize, ctx.byte_offset) + 1;
+            const asm_index = ctx.asm_parts.items.len;
+            try ctx.emitPushData(&[_]u8{ 0, 0, 0, 0 });
+            try ctx.emitOpcode(.op_bin2num);
+            try ctx.emitOpcode(if (pin.exact) .op_numequal else .op_greaterthanorequal);
+            try ctx.emitOpcode(.op_verify);
+            try ctx.code_part_len_fixups.append(ctx.allocator, .{
+                .value_byte_offset = value_byte_offset,
+                .asm_index = asm_index,
+                .delta = pin.delta,
+            });
+        },
         .placeholder => |ph| {
             try ctx.recordConstructorSlot(ph.param_index);
             try ctx.emitOpcode(.op_0);
@@ -425,6 +508,49 @@ fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []cons
     return null;
 }
 
+/// R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness gets
+/// ONE OP_CODESEPARATOR, and it goes at offset 1 of the locking script, behind a
+/// single OP_NOP.
+///
+/// The separator used to be emitted per method, at the method's entry, which
+/// kept the preimage small but hid the dispatch preamble and every preceding
+/// method body from scriptCode — and those hidden bytes are exactly the ones
+/// the spender-supplied `_codePart` witness claims to reproduce. With the
+/// separator near the front, scriptCode == lockingScript[2:], so the script
+/// can pin `_codePart` byte for byte (see emitCodePartAuthentication in
+/// stack_lower.zig).
+///
+/// The gate is `_codePart`, NOT "the method verifies a preimage". A contract
+/// that calls checkPreimage but never touches `_codePart` — a stateless
+/// covenant such as examples/ts/covenant-vault — has no witness to
+/// authenticate, so widening its scriptCode buys nothing. It also costs: the
+/// hoisted separator lands ahead of the user's own `checkSig`, so the node
+/// computes that signature's sighash over `script[2:]` while
+/// `packages/runar-sdk` signs a stateless contract over the FULL locking
+/// script, and the spend dies with "OP_CHECKSIGVERIFY requires that a valid
+/// signature is provided". Such contracts keep the pre-R-010 layout (a
+/// separator at the method's entry, emitted by lowerCheckPreimage).
+///
+/// Offset 1, not 0: implementations that store "index of the last executed
+/// OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+/// offset 0" from "no separator seen" and fall back to the whole script. The
+/// BSV go-sdk interpreter does exactly this (thread.subScript:
+/// `if t.lastCodeSep > 0 { skip = t.lastCodeSep + 1 }`), while Bitcoin Core's
+/// pbegincodehash is a true position. Offset 1 keeps every implementation on
+/// the same side of that guard, and costs one byte.
+fn emitCodeSeparatorPrologue(ctx: *EmitContext, methods: []const types.StackMethod) !void {
+    var needs_code_sep = false;
+    for (methods) |m| {
+        if (m.needs_code_separator) {
+            needs_code_sep = true;
+            break;
+        }
+    }
+    if (!needs_code_sep) return;
+    try ctx.emitOpcode(.op_nop);
+    try ctx.emitOpcode(.op_codeseparator);
+}
+
 /// Emit dispatch table with source map support (looks up source locs from ANF methods).
 ///
 /// Mirrors the TS reference compiler's emitMethodDispatch
@@ -439,6 +565,8 @@ fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []cons
 ///   OP_ENDIF (×(N-1) total ENDIFs)
 fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.StackMethod, anf_methods: []const types.ANFMethod) !void {
     if (methods.len == 0) return;
+
+    try emitCodeSeparatorPrologue(ctx, methods);
 
     if (methods.len == 1) {
         ctx.pending_source_loc = findMethodSourceLoc(anf_methods, methods[0].name);
@@ -476,6 +604,8 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
 /// Pattern: see `emitDispatchTableWithSourceMap`.
 pub fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !void {
     if (methods.len == 0) return;
+
+    try emitCodeSeparatorPrologue(ctx, methods);
 
     if (methods.len == 1) {
         // Single method: no dispatch needed, just emit the body
@@ -1796,9 +1926,18 @@ fn regroupOnePass(allocator: std.mem.Allocator, entries: []const RegroupEntry) !
         }
         const marker = entry.chain[chain_len - 1];
         if (marker.index != 0) {
-            try out.append(allocator, entry);
-            i += 1;
-            continue;
+            // R-289: a sibling reaching the head of the loop has no run head
+            // before it — the head consumes its whole run and advances past
+            // it, so an index != 0 here means the chain was not written by
+            // pass 3b. Emitting it as a scalar publishes an ABI the SDK reads
+            // as N independent fields instead of one array, with no
+            // diagnostic. The peers carry the detail in the error message;
+            // a Zig error set cannot, so it is logged (the R-238 pattern).
+            std.log.warn(
+                "malformed synthetic-array chain on '{s}': element {d} of '{s}' appears without the element 0 that starts its run. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+                .{ entry.name, marker.index, marker.base },
+            );
+            return error.MalformedSyntheticArrayChain;
         }
 
         // Greedily extend: every follower must share the same innermost
@@ -1817,9 +1956,16 @@ fn regroupOnePass(allocator: std.mem.Allocator, entries: []const RegroupEntry) !
             run_count += 1;
         }
         if (run_count != marker.length) {
-            try out.append(allocator, entry);
-            i += 1;
-            continue;
+            // R-289: a well-formed expansion always emits all N siblings
+            // contiguously, so a short run means the chain was not written by
+            // pass 3b. Leaving them ungrouped published an ABI the SDK reads
+            // as N independent fields instead of one array — a wrong state
+            // layout from an artifact the compiler called valid.
+            std.log.warn(
+                "malformed synthetic-array chain on '{s}': '{s}' declares {d} elements but the contiguous run has {d}. Synthetic-array chains are written by the expand-fixed-arrays pass; this IR did not come from it",
+                .{ entry.name, marker.base, marker.length, run_count },
+            );
+            return error.MalformedSyntheticArrayChain;
         }
 
         // Collapse the run.

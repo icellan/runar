@@ -267,6 +267,17 @@ function add(c: Curve, aHex: string, bHex: string): string {
   return exec(ops);
 }
 
+/** Did the adder ABORT? `exec` above reports only the stack, not the error. */
+function addAborted(c: Curve, aHex: string, bHex: string): boolean {
+  const ops: StackOp[] = [
+    { op: 'push', value: blob(aHex) } as StackOp,
+    { op: 'push', value: blob(bHex) } as StackOp,
+  ];
+  c.emitAdd((o: StackOp) => ops.push(o));
+  const { scriptHex } = emitMethod({ name: 't', ops } as never) as { scriptHex: string };
+  return (new ScriptVM().executeHex(scriptHex) as never as { error?: unknown }).error !== undefined;
+}
+
 /**
  * OpenSSL's verdict on an uncompressed point: on-curve AND canonical.
  * `ECDH.convertKey` parses 04‖x‖y through OpenSSL's `EC_POINT_oct2point`,
@@ -320,16 +331,30 @@ for (const [name, c] of Object.entries(CURVES) as Array<[string, Curve]>) {
     // Why the guard is load-bearing rather than cosmetic: the two encodings
     // denote the same group element, but `emitAdd` compares the RAW x values
     // to detect doubling, so it takes the chord path and divides by zero.
-    it('the gate is load-bearing: add(P, P′) is neither 2P nor even on the curve', () => {
+    //
+    // R-117 CLOSED THE OTHER HALF OF THIS, and the history is the point. This
+    // very test recorded, as the JUSTIFICATION for the predicate guard, that
+    // `add(P, P′)` returned an off-curve blob from a SUCCEEDING script and that
+    // “only the on-curve gate can reject the input”. That was true, and it left
+    // every caller who did not write the gate holding a wrong answer with no
+    // error channel — a documented defect standing in the value builtins
+    // because the predicate could paper over it. `ecAdd` / `ecMul` / `ecNegate`
+    // and their P-256 / P-384 twins now VERIFY that both coordinates are field
+    // elements and abort otherwise, so the adder never reaches the chord path
+    // on a non-canonical operand at all.
+    //
+    // The predicate guard is still load-bearing, and still tested above: it is
+    // what lets `if (ecOnCurve(p))` answer “no” instead of killing the script.
+    it('the gate is load-bearing: add(P, P′) is REJECTED (it used to return an off-curve blob)', () => {
+      expect(addAborted(c, canonical, nonCanonicalX)).toBe(true);
+      expect(addAborted(c, nonCanonicalX, canonical)).toBe(true);
+
+      // CONTROL — the canonical double still computes, and is on the curve.
+      // Without this, a gate that rejected EVERYTHING would pass the line above.
+      expect(addAborted(c, canonical, canonical)).toBe(false);
       const two = add(c, canonical, canonical);
-      const mixed = add(c, canonical, nonCanonicalX);
-      expect(mixed).not.toBe(two);
-      const rx = BigInt('0x' + mixed.slice(0, w));
-      const ry = BigInt('0x' + mixed.slice(w));
-      expect(isOnCurve(c, rx, ry)).toBe(false);
-      // …and the script SUCCEEDS while returning it, so nothing downstream
-      // can notice: only the on-curve gate can reject the input.
-      expect(mixed).not.toBe('(empty)');
+      expect(two).not.toBe('(empty)');
+      expect(isOnCurve(c, BigInt('0x' + two.slice(0, w)), BigInt('0x' + two.slice(w)))).toBe(true);
     });
 
     if (c.alreadyGuarded) {

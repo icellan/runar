@@ -114,7 +114,15 @@ POSEIDON2_KB_ROUND_CONSTANTS = [
     [839997195, 1225781098, 2011967775, 575084315, 1309329169, 786393545, 995788880, 1702925345, 1444525226, 908073383, 1811535085, 1531002367, 1635653662, 1585100155, 867006515, 879151050],
 ]
 
-assert len(POSEIDON2_KB_ROUND_CONSTANTS) == POSEIDON2_KB_TOTAL_ROUNDS
+# R-175: a bare `assert` here is removed by `python -O`, so a malformed table
+# would reach codegen instead of failing. Every other module in this package
+# raises RuntimeError for the same class of invariant.
+if len(POSEIDON2_KB_ROUND_CONSTANTS) != POSEIDON2_KB_TOTAL_ROUNDS:
+    raise RuntimeError(
+        "poseidon2-kb round-constant table has "
+        f"{len(POSEIDON2_KB_ROUND_CONSTANTS)} rows, expected "
+        f"{POSEIDON2_KB_TOTAL_ROUNDS}"
+    )
 
 
 # ===========================================================================
@@ -163,7 +171,10 @@ def p2kb_external_mds4(t: KBTracker, names: list[str], round_: int, group: int) 
     out2 = sum + c + 2*d  (= a + b + 2c + 3d)
     out3 = sum + d + 2*a  (= 3a + b + c + 2d)
     """
-    assert len(names) == 4
+    if len(names) != 4:
+        raise RuntimeError(
+            f"p2kb_external_mds4 takes a group of 4 names, got {len(names)}"
+        )
     prefix = f"_p2mds_r{round_}_g{group}"
 
     # Compute sum = a + b + c + d (unreduced -- intermediate)
@@ -228,7 +239,11 @@ def p2kb_external_mds_full(t: KBTracker, names: list[str], round_: int) -> None:
     1. Apply circ(2,3,1,1) to each group of 4 (via p2kb_external_mds4)
     2. Cross-group mixing: add sum of position-equivalent elements to each element
     """
-    assert len(names) == POSEIDON2_KB_WIDTH
+    if len(names) != POSEIDON2_KB_WIDTH:
+        raise RuntimeError(
+            f"p2kb_external_mds_full takes a state of {POSEIDON2_KB_WIDTH} names, "
+            f"got {len(names)}"
+        )
 
     # Step 1: Apply 4x4 MDS blockwise (names are modified in-place by MDS4)
     for g in range(4):
@@ -276,7 +291,11 @@ def p2kb_internal_diffusion(t: KBTracker, names: list[str], round_: int) -> None
     For diag_m_1[0] = p-2 (== -2 mod p): state[0] = -2*state[0] + sum
     Other entries include modular inverses (1/2, 1/8, etc.); uses kbFieldMulConst.
     """
-    assert len(names) == POSEIDON2_KB_WIDTH
+    if len(names) != POSEIDON2_KB_WIDTH:
+        raise RuntimeError(
+            f"p2kb_internal_diffusion takes a state of {POSEIDON2_KB_WIDTH} names, "
+            f"got {len(names)}"
+        )
     prefix = f"_p2id_r{round_}"
 
     # Step 1: Compute sum of all state elements.
@@ -325,7 +344,11 @@ def p2kb_internal_diffusion(t: KBTracker, names: list[str], round_: int) -> None
 
 def p2kb_add_round_constants(t: KBTracker, names: list[str], round_: int) -> None:
     """Add round constants to all 16 state elements. Used in external rounds."""
-    assert len(names) == POSEIDON2_KB_WIDTH
+    if len(names) != POSEIDON2_KB_WIDTH:
+        raise RuntimeError(
+            f"p2kb_add_round_constants takes a state of {POSEIDON2_KB_WIDTH} names, "
+            f"got {len(names)}"
+        )
     for i in range(POSEIDON2_KB_WIDTH):
         rc = POSEIDON2_KB_ROUND_CONSTANTS[round_][i]
         if rc == 0:
@@ -338,7 +361,11 @@ def p2kb_add_round_constants(t: KBTracker, names: list[str], round_: int) -> Non
 
 def p2kb_add_round_constant_elem0(t: KBTracker, names: list[str], round_: int) -> None:
     """Add the round constant to element 0 only. Used in internal rounds."""
-    assert len(names) == POSEIDON2_KB_WIDTH
+    if len(names) != POSEIDON2_KB_WIDTH:
+        raise RuntimeError(
+            f"p2kb_add_round_constant_elem0 takes a state of {POSEIDON2_KB_WIDTH} names, "
+            f"got {len(names)}"
+        )
     rc = POSEIDON2_KB_ROUND_CONSTANTS[round_][0]
     if rc == 0:
         return  # Skip zero round constants
@@ -367,7 +394,11 @@ def p2kb_permute(t: KBTracker, names: list[str]) -> None:
       Phase 3 -- 4 external rounds (rounds 24-27):
         add round constants, full sbox, external MDS (blockwise + cross-group)
     """
-    assert len(names) == POSEIDON2_KB_WIDTH
+    if len(names) != POSEIDON2_KB_WIDTH:
+        raise RuntimeError(
+            f"p2kb_permute takes a state of {POSEIDON2_KB_WIDTH} names, "
+            f"got {len(names)}"
+        )
 
     # Initial MDS before external rounds (Plonky3's external_initial_permute_state)
     p2kb_external_mds_full(t, names, -1)

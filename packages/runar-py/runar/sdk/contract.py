@@ -3,6 +3,7 @@
 from __future__ import annotations
 import hashlib
 import warnings
+from typing import Sequence
 from runar.sdk.types import (
     RunarArtifact, Utxo, TransactionData, TxOutput,
     DeployOptions, CallOptions, OutputSpec, TerminalOutput, PreparedCall,
@@ -10,6 +11,7 @@ from runar.sdk.types import (
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.errors import assert_script_hex_under_limit, WitnessValueMissingError
+from .unsound_primitives import assert_unsound_primitives_acknowledged
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
 from runar.sdk.deployment import (
     build_deploy_transaction, select_utxos, build_p2pkh_script,
@@ -60,6 +62,41 @@ def is_empty_sig(value: object) -> bool:
     Uses ``isinstance`` so identity holds even if the module is imported twice.
     """
     return isinstance(value, _EmptySig)
+
+
+def decode_exact_code_part_len_pins(script_hex: str) -> list[int]:
+    """Decode the value of every EQUALITY ``verify_code_part_len`` pin in a
+    compiled script.
+
+    The compiler emits the pin as a fixed-width, unambiguous nine-byte run::
+
+        76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+        OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+
+    ``9c`` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part
+    can violate. ``a2`` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+    satisfy, so it is deliberately not returned here.
+
+    Read from the emitted TEMPLATE rather than from a built code script: the
+    template holds OP_0 placeholders where constructor args go, so no
+    caller-supplied byte string can be mistaken for a pin.
+    """
+    values: list[int] = []
+    for i in range(0, max(len(script_hex) - 17, 0), 2):
+        seq = script_hex[i:i + 18]
+        if not seq.startswith('7604'):
+            continue
+        if seq[12:14] != '81':
+            continue
+        if seq[14:16] != '9c':
+            continue
+        if seq[16:18] != '69':
+            continue
+        try:
+            values.append(int.from_bytes(bytes.fromhex(seq[4:12]), 'little'))
+        except ValueError:
+            continue
+    return values
 
 
 def _is_likely_or_checksig(artifact) -> bool:
@@ -304,6 +341,14 @@ class RunarContract:
             f"{self.artifact.contract_name}.deploy",
         )
 
+        # R-062: and refuse to fund a script reaching a builtin the compiler
+        # does not claim is sound unless the caller says so here, in the same
+        # breath as the money.
+        assert_unsound_primitives_acknowledged(
+            self.artifact, opts.acknowledge_unsound,
+            f"{self.artifact.contract_name}.deploy",
+        )
+
         fee_rate = provider.get_fee_rate()
         all_utxos = provider.get_utxos(address)
         if not all_utxos:
@@ -349,6 +394,7 @@ class RunarContract:
         self,
         satoshis: int = 1,
         description: str = '',
+        acknowledge_unsound: Sequence[str] = (),
     ) -> tuple[str, int]:
         """Deploy the contract using a BRC-100 wallet.
 
@@ -359,6 +405,12 @@ class RunarContract:
         Args:
             satoshis: Satoshis to lock in the contract output (default: 1).
             description: Human-readable description for the wallet action.
+            acknowledge_unsound: Builtins the caller accepts despite the
+                compiler not claiming they are sound (R-062). Required —
+                naming each one — when the artifact declares
+                ``unsound_primitives``; ignored otherwise. Same mechanism and
+                same error as ``DeployOptions.acknowledge_unsound`` on
+                ``deploy()``.
 
         Returns:
             (txid, output_index) tuple.
@@ -381,6 +433,14 @@ class RunarContract:
         # DoS-bound: reject pathological scripts BEFORE involving the wallet.
         assert_script_hex_under_limit(
             locking_script, MAX_SCRIPT_BYTES,
+            f"{self.artifact.contract_name}.deploy_with_wallet",
+        )
+
+        # R-062: the wallet is a SECOND funding path, and it must make the same
+        # decision ``deploy()`` makes. Before ``create_action``, so no wallet is
+        # ever asked for the coins.
+        assert_unsound_primitives_acknowledged(
+            self.artifact, acknowledge_unsound,
             f"{self.artifact.contract_name}.deploy_with_wallet",
         )
 
@@ -1475,9 +1535,55 @@ class RunarContract:
         the compiled code and the state section (if any). Once deployed, the
         inscription is immutable -- it persists identically across all state
         transitions.
+
+        N-043 -- RAISES when the envelope would break the contract's own
+        ``SIZE(_codePart)`` pin. A stateful contract with a variable-length
+        state section carries an equality pin on the deployed code-part length,
+        and the envelope lands INSIDE the code part (see
+        ``_get_code_part_hex``). The compiler bakes that number before any
+        inscription exists, so the pinned length and the real one differ by the
+        envelope's size and every honest spend aborts at OP_VERIFY -- with the
+        funds already committed. Refusing here turns a permanent, silent lock
+        into a loud error before a single satoshi moves.
         """
+        previous = self._inscription
         self._inscription = inscription
+        try:
+            self._assert_code_part_length_pin_honoured()
+        except ValueError:
+            self._inscription = previous
+            raise
         return self
+
+    def _assert_code_part_length_pin_honoured(self) -> None:
+        """Verify that every equality ``verify_code_part_len`` pin the compiler
+        baked into this artifact still describes the code part this contract
+        produces.
+
+        The check is the invariant itself, not a restatement of the compiler's
+        derivation: it decodes the pinned number straight out of the emitted
+        template and compares it to ``_get_code_part_hex()``. So it permits
+        every combination that actually works -- a stateless contract or a
+        fixed-size state layout carries no pin at all, and a lower-bound pin is
+        satisfied by a longer code part -- and rejects only the shape that would
+        lock funds.
+        """
+        pinned = decode_exact_code_part_len_pins(self.artifact.script)
+        if not pinned:
+            return
+        actual = len(self._get_code_part_hex()) // 2
+        for value in pinned:
+            if value == actual:
+                continue
+            raise ValueError(
+                f'RunarContract.with_inscription: {self.artifact.contract_name} pins '
+                f'SIZE(_codePart) == {value}, but with this inscription attached the '
+                f'code part is {actual} bytes. Deploying it would make every spend '
+                f'fail OP_VERIFY and lock the contract\'s funds permanently. An '
+                f'inscription cannot be attached to a stateful contract with a '
+                f'variable-length state section: the envelope is part of the code '
+                f'part, and its length is not known when the pin is compiled'
+            )
 
     @property
     def inscription(self) -> Inscription | None:

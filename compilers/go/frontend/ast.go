@@ -344,3 +344,29 @@ var primitiveTypeNames = map[string]bool{
 func IsPrimitiveType(name string) bool {
 	return primitiveTypeNames[name]
 }
+
+// typeAliases are alternative spellings that denote a canonical primitive.
+// `Sha256Digest` is the name runar-lang exposes — packages/runar-lang/src/types.ts
+// declares `export type Sha256Digest = Sha256` — and contracts use it in field
+// and parameter annotations.
+//
+// N-104: every OTHER surface parser in this package already normalised it
+// (parser_gocontract.go, parser_java.go, parser_python.go, parser_ruby.go,
+// parser_zig.go), but the `.runar.ts` surface did not, so on a TypeScript
+// source the name stayed a CustomType. It then matched nothing in the subtype
+// tables and `const h: Sha256Digest = pkh` failed — with a diagnostic naming a
+// type this tier had no rule for at all. Rust had the identical hole; five
+// tiers accepted the same source. Normalising is the PARSER's job: by the time
+// validate and typecheck see a type it must already be the canonical name.
+var typeAliases = map[string]string{
+	"Sha256Digest": "Sha256",
+}
+
+// ResolveTypeAlias maps an alternative spelling to its canonical primitive
+// name, returning `name` unchanged when it is not an alias.
+func ResolveTypeAlias(name string) string {
+	if canonical, ok := typeAliases[name]; ok {
+		return canonical
+	}
+	return name
+}

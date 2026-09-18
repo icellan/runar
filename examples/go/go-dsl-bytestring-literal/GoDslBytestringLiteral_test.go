@@ -10,6 +10,10 @@ import (
 // source is a parser-only fixture. We can't construct it natively from the
 // test binary, so this suite covers the Rúnar frontend (parse → validate →
 // typecheck) only.
+//
+// The reason for the exclusion is written at the top of the contract file,
+// and examples/go/build-exclusions is the ratchet that keeps the excluded set
+// from growing without one.
 
 func TestGoDslBytestringLiteral_Compile(t *testing.T) {
 	if err := runar.CompileCheck("GoDslBytestringLiteral.runar.go"); err != nil {

@@ -23,6 +23,15 @@ env:
   # into no-ops.
   TURBO_CACHE_DIR: .turbo/cache
 
+permissions:
+  # R-217: least privilege. These jobs check out, build, test and upload
+  # artifacts — `actions/upload-artifact` uses the artifact service, not the
+  # contents scope — so read is all they need. Without this block the workflow
+  # inherits the repository default, which on many repositories is read-write
+  # across contents, issues and packages: a compromised step in any job would
+  # then reach the whole repository rather than the job.
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Lint — block reintroduction of dishonest test patterns
@@ -356,6 +365,11 @@ jobs:
       RUNAR_REQUIRE_ALL_COMPILERS: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          # tests/golden-provenance-gate-is-cwd-independent.test.ts diffs
+          # origin/main...HEAD. A shallow PR checkout has no merge-base
+          # (`fatal: origin/main...HEAD: no merge base`).
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -464,6 +478,46 @@ jobs:
           npx tsx fuzz-regressions/replay.ts
       - name: Example tests (TS + Sol + Move)
         run: npx vitest run examples/ts/ examples/sol/ examples/move/
+      - name: Chronicle opcode-policy disclosure gate
+        # Compiled contracts require the Chronicle opcode policy: every stateful
+        # contract embeds OP_2MUL in its checkPreimage binding blob, and the EC /
+        # NIST-P / Merkle primitives emit OP_2DIV and OP_RSHIFTNUM. No user-facing
+        # document said so. This asserts the disclosure is present in README.md,
+        # SECURITY.md and the getting-started / integration / API guides, and that
+        # docs/chronicle-opcode-policy.md still names every Chronicle codepoint the
+        # emitter can produce — the liveness half reads the OPCODES table out of
+        # packages/runar-compiler/src/passes/06-emit.ts, so adding a Chronicle
+        # opcode without documenting it fails HERE, in the job that owns that file.
+        run: npx vitest run tests/chronicle-opcode-disclosure.test.ts
+      - name: Release-script composition gate
+        # scripts/release.sh commits, tags, pushes and publishes. Two defects:
+        # it re-ran the `git add -A`/`git commit`/`git tag v<version>` that
+        # scripts/bump-version.sh had already performed (under `set -e` the
+        # duplicates exit 1 and 128, aborting the release AFTER the bump was
+        # committed and tagged and BEFORE anything was pushed — a half-finished
+        # release), and it invoked no test suite, lint or typecheck anywhere
+        # before publishing. This drives the script's --dry-run mode and asserts
+        # the ordered command plan: the gate runs before any mutation, the
+        # commit and v-tag stay delegated to bump-version.sh, and no
+        # side-effecting command bypasses the dry-run guard. Executes nothing —
+        # no build, no commit, no tag, no push, no publish.
+        run: npx vitest run tests/release-script.test.ts
+      - name: Repo-root tests/ (whole directory)
+        # R-110: root `tests/` is not a pnpm workspace member, so `turbo run
+        # test` never reaches it, and every other `npx vitest run` in this
+        # workflow is path-scoped. Seven of its nine files — the Rúnar-vs-Plonky3
+        # BabyBear / BabyBear-ext4 / Merkle / FRI-colinearity vectors that are the
+        # provenance for the Go-only STARK codegen, plus the version-consistency
+        # and script-size gates — were executed by nothing at all. They pass; the
+        # problem was that nobody would have been told if they stopped.
+        #
+        # Run the DIRECTORY, not a list of files: naming the two above is what let
+        # the other seven rot, and a vector file added tomorrow must be gated the
+        # day it lands. `tests/ci-covers-root-tests.test.ts` fails if this step is
+        # ever narrowed back to a file list.
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          npx vitest run tests/
       - run: pnpm run typecheck
 
   go-compiler:
@@ -478,7 +532,14 @@ jobs:
           cache-dependency-path: compilers/go/go.sum
       - run: cd compilers/go && go build ./...
       - run: cd compilers/go && go build -o runar-go .
-      - run: cd compilers/go && go test -race -v ./...
+      # Race-instrumented `go test ./...` OOMs the 7 GiB GitHub runner
+      # (exit 143 / "runner has received a shutdown signal"). Root package
+      # passes; codegen dies ~70s in. Split so each package is a fresh
+      # process, and skip -race on codegen (SLH/EC tests).
+      - run: cd compilers/go && go test -race -timeout 10m .
+      - run: cd compilers/go && go test -race -timeout 10m ./frontend ./ir
+      - run: cd compilers/go && go test -race -timeout 20m ./compiler
+      - run: cd compilers/go && go test -timeout 20m ./codegen
       - uses: actions/upload-artifact@v4
         with:
           name: runar-go
@@ -514,6 +575,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The Go peer is not decoration. `tests/test_n094_sighash_ir_wire_format.py`
+      # carries a cross-tier case that asks Go to load OUR ANF and checks it
+      # reaches the same script; it `pytest.skip`s when `compilers/go/runar-go`
+      # is absent. Without this toolchain the job exited 0 with that case
+      # skipped on every run, so the one assertion in the file that crosses a
+      # tier boundary had never executed in CI.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: compilers/go/go.sum
+      - name: Build the Go peer compiler
+        run: cd compilers/go && go build -o runar-go .
       - run: pip install pytest
       - run: cd compilers/python && python -m pytest tests/ -v
 
@@ -526,7 +599,37 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: cd compilers/zig && zig build test
+      # N-086 (`src/tests/n086_cross_tier_sighash_fixed_array.zig`) compiles the
+      # same @sighash FixedArray contract with every peer tier it can find and
+      # requires byte-identical hex. A tier counts as a peer only if its probe
+      # path exists AND its interpreter answers `--version`, and the test skips
+      # only when it finds ZERO peers.
+      #
+      # That is why this job was not failing: ubuntu-latest ships python3 and
+      # ruby, and both of those tiers probe a checked-in SOURCE file, so the
+      # comparison ran against an accidental two-tier peer set that nothing
+      # here pinned. The three COMPILED tiers — Go, Rust, Java, the ones whose
+      # codegen can actually drift — were never in it, and had the runner image
+      # dropped ruby the comparison would have quietly narrowed with the job
+      # still green.
+      #
+      # So pin the set: build the Go peer, and set the floor that turns a
+      # too-small peer set from a silent narrowing into a red job. Rust and
+      # Java are deliberately left out — their builds cost more than this job
+      # is worth, and the full seven-tier comparison is the `conformance` job's
+      # responsibility.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: compilers/go/go.sum
+      - name: Build the Go peer compiler
+        run: cd compilers/go && go build -o runar-go .
+      - name: 'Zig compiler unit tests (cross-tier floor: go + python + ruby)'
+        env:
+          # Counts PEERS, which excludes Zig itself. Verified locally: with 5
+          # peers built, 5 exits 0 and 7 exits non-zero naming what is missing.
+          RUNAR_CROSS_TIER_MIN: '3'
+        run: cd compilers/zig && zig build test
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
       - name: Build release binary
@@ -576,6 +679,15 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      # Same reason as the Python job: `test/test_n094_sighash_ir_wire_format.rb`
+      # skips its cross-tier case unless `compilers/go/runar-go` is executable,
+      # so without the Go toolchain that case never ran here.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: compilers/go/go.sum
+      - name: Build the Go peer compiler
+        run: cd compilers/go && go build -o runar-go .
       - name: Ruby compiler unit tests
         run: cd compilers/ruby && rake test
       - name: Ruby compiler conformance (IR -> hex)
@@ -774,6 +886,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The analyzer gate (`conformance/analyzer/run.ts`) builds each SDK's
+      # analyzer from source. Zig's wrapper is `zig build analyzer` in
+      # packages/runar-zig — the downloaded `runar-zig` compiler binary is
+      # not that toolchain, so without this the 8 zig × fixture pairs die
+      # with `zig: command not found`.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       # Read-only restore of the turbo build-output cache written by the
       # ts-compiler job (this job `needs:` it, so the same-commit entry exists).
       # See that job's writer step for the staleness argument. `pnpm run build`
@@ -826,6 +946,39 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: conformance/node_modules/.bin/tsx conformance/runner/index.ts --tests-dir conformance/tests --parser-only
+      - name: Conformance vitest suites not reached by any other step
+        # `conformance/` is NOT a pnpm workspace member (pnpm-workspace.yaml
+        # lists packages/* and integration/ts), so `turbo run test` never
+        # descends into it, and conformance/'s own `npm test` runs the
+        # conformance RUNNER rather than vitest. A .test.ts file there is
+        # executed only if a workflow names its path.
+        #
+        # These eight were named by nothing — 376 passing assertions that no
+        # pipeline ran. Two of them (codepart-pin, dce) were added during this
+        # remediation pass itself, which is the sharp version of the problem:
+        # a guard is only as real as the thing that runs it.
+        #
+        # sdk-vertical is listed because its CI step invokes the runner via
+        # `tsx sdk-vertical/runner/vertical-runner.ts` — that does not execute
+        # the directory's vitest files.
+        #
+        # tests/conformance-tests-reachable-from-ci.test.ts fails if a future
+        # conformance test file is added without being named here.
+        run: >
+          npx vitest run
+          conformance/anf-scope.test.ts
+          conformance/corpus-completeness.test.ts
+          conformance/go-only-executing-coverage.test.ts
+          conformance/fixture-count-doc.test.ts
+          conformance/split-stack-desync.test.ts
+          conformance/codepart-pin
+          conformance/dce
+          conformance/source-map
+          conformance/subtype-parity
+          conformance/sdk-vertical
+          conformance/runner/__tests__
+          conformance/anf-interpreter/num2bin-engine-parity.test.ts
+          conformance/analyzer/__tests__
       - name: Cross-tier rejection parity (programs that must NOT compile)
         # The parser-only step above proves every tier ACCEPTS what it should.
         # Nothing proved they agree on what to REFUSE, and that gap let a Go
@@ -835,6 +988,37 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: cd conformance && npx vitest run negatives/
+      - name: Go-only family parity (refuse, or match Go byte for byte)
+        # R-037. Seven crypto families are scoped to the Go tier by policy, and
+        # every fixture using them declares `"compilers": ["go"]` — so the other
+        # six tiers are never compared on them, while five of those six ship
+        # live, dispatched codegen for them anyway. This asserts the property
+        # that must hold whichever way the policy is eventually resolved: a
+        # non-Go tier either REFUSES the family with a real diagnostic, or emits
+        # hex byte-identical to Go's. It forbids the third state — compiles, and
+        # differs — which nothing else in the repo would notice.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: cd conformance && npx vitest run go-only-parity/
+      - name: Regression pins for previously-closed findings
+        # Seven reviewer findings were fixed without their `testable_assertion`
+        # ever being encoded anywhere. Each case here passed at the commit that
+        # added it; the point is that none of the seven can silently reopen.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: cd conformance && npx vitest run closed-findings/
+      - name: OP_PUSH_TX binding blob is byte-identical in all seven tiers
+        # R-105. Forged-preimage rejection — the BUG-100 exploit — is proven by
+        # packages/runar-testing oppushtx-binding.test.ts against the TypeScript
+        # tier's CHECK_PREIMAGE_BINDING_HEX, over a 60-context sighash sweep. The
+        # other six tiers emit their own copy of that blob and nothing asserted
+        # the copies matched, so six tiers' covenant binding rested on
+        # resemblance. This requires every tier's compiled stateful contract to
+        # contain that exact 428-byte blob verbatim, exactly once, which
+        # transfers the execution proof by construction.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: cd conformance && npx vitest run preimage-binding/
       - name: Run multi-format source conformance (all 7 compilers, all 9 formats)
         # Adds the TypeScript compiler to the central conformance job (it was
         # previously absent) and exercises every compiler's frontend against
@@ -915,6 +1099,32 @@ jobs:
         # loudly on the PR that moves the code, not weeks later as a mystery
         # survivor. See conformance/mutation/__tests__/mutant-staleness.test.ts.
         run: npx vitest run conformance/mutation
+      - name: Bitcoin Script static analyzer — 7-tier conformance
+        # R-219: the analyzer is implemented in all seven tiers, has 8 committed
+        # goldens, and `conformance/analyzer/run.ts` diffs every (fixture, tier)
+        # pair against them — and nothing ran it. A working seven-tier gate with
+        # no CI step is a gate that silently stops being true.
+        #
+        # It was also DEAD in an ordinary checkout: tools/analyzer-runner/ts.sh
+        # hardcoded `node_modules/.pnpm/node_modules/.bin/tsx`, a path pnpm only
+        # materialises under some hoisting settings, so the wrapper died with
+        # "No such file or directory" on every fixture. Fixed to try the layouts
+        # that actually occur, then PATH.
+        #
+        # The driver exits non-zero on any mismatch or runner error, so this
+        # step needs no extra assertion. Runs in the `conformance` job because
+        # it needs the same seven compiler binaries already downloaded above.
+        run: npx tsx conformance/analyzer/run.ts
+      - name: Derived-artifact freshness
+        # Analyzer reports, sdk-output input.json / locking hex, source-map
+        # goldens, decompiler templates + coverage, and the script-size
+        # baseline are all children of compiler output. Each had (or has) its
+        # own job, and a codegen change that moved bytes could leave those
+        # children internally consistent — every existing job green — while
+        # they no longer described the compiler. This is the single `--check`
+        # that covers every listed corpus. See
+        # conformance/scripts/check-derived-artifacts.ts.
+        run: npx tsx conformance/scripts/check-derived-artifacts.ts --check
 
   conformance-anf-parity:
     # Cross-interpreter parity for the ANF lenient interpreter shipped by

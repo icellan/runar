@@ -20,6 +20,9 @@ from typing import Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from runar_compiler.codegen.stack import StackOp, PushValue
 
+# Total WOTS+ signature length in bytes: len (67 chains) * n (32).
+WOTS_SIG_LEN = 67 * 32
+
 
 # ---------------------------------------------------------------------------
 # Lazy imports to avoid circular dependency with stack.py
@@ -140,7 +143,16 @@ def emit_verify_wots(emit: Callable) -> None:
     emit(_make_stack_op(op="opcode", code="OP_SHA256"))
 
     # Canonical layout
-    emit(_make_stack_op(op="swap"))
+    emit(_make_stack_op(op="swap"))  # pubSeed msgHash sig
+
+    # R-135: enforce the exact signature length on-chain. The chain loop consumes
+    # WOTS_SIG_LEN bytes via OP_SPLIT and then drops whatever is left, so without this
+    # gate `sig || junk` verified identically to `sig`. Short signatures already abort
+    # inside OP_SPLIT; this closes the over-long direction. Net stack effect 0.
+    emit(_make_stack_op(op="opcode", code="OP_SIZE"))
+    emit(_make_stack_op(op="push", value=_big_int_push(WOTS_SIG_LEN)))
+    emit(_make_stack_op(op="opcode", code="OP_EQUALVERIFY"))
+
     emit(_make_stack_op(op="push", value=_big_int_push(0)))
     emit(_make_stack_op(op="opcode", code="OP_0"))
     emit(_make_stack_op(op="push", value=_big_int_push(3)))

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/loop-shapes/LoopShapes.runar.ts",
+    ".runar.sol": "../../../examples/sol/loop-shapes/LoopShapes.runar.sol",
+    ".runar.move": "../../../examples/move/loop-shapes/LoopShapes.runar.move",
+    ".runar.go": "../../../examples/go/loop-shapes/LoopShapes.runar.go",
+    ".runar.rs": "../../../examples/rust/loop-shapes/LoopShapes.runar.rs",
+    ".runar.py": "../../../examples/python/loop-shapes/LoopShapes.runar.py",
+    ".runar.zig": "../../../examples/zig/loop-shapes/LoopShapes.runar.zig",
+    ".runar.rb": "../../../examples/ruby/loop-shapes/LoopShapes.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/loop-shapes/LoopShapes.runar.java"
+  }
+}

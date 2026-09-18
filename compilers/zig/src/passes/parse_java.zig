@@ -21,6 +21,7 @@
 //!   - Types: `boolean`/`Boolean`, `BigInteger`/`Bigint`, Rúnar domain types, `FixedArray<T, N>`.
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -345,6 +346,14 @@ fn resolveJavaType(name: []const u8) TypeNode {
     }
     if (std.mem.eql(u8, name, "Ripemd160") or std.mem.eql(u8, name, "Hash160")) {
         return .{ .primitive_type = .ripemd160 };
+    }
+    // N-108: `docs/formats/java.md` publishes `Sha256Digest -> Sha256` in the
+    // Java surface type table, and `runar.lang.types.Sha256Digest` is a real
+    // importable type, so contracts spell it. Five tiers resolved it; Zig and
+    // the Java tier itself did not, which made the Java compiler refuse the
+    // exact name its own format guide documents.
+    if (std.mem.eql(u8, name, "Sha256Digest")) {
+        return .{ .primitive_type = .sha256 };
     }
     if (PrimitiveTypeName.fromTsString(name)) |ptn| return .{ .primitive_type = ptn };
     return .{ .custom_type = name };
@@ -742,6 +751,10 @@ const Parser = struct {
             .type_info = type_info,
             .readonly = is_readonly,
             .initializer = initializer,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = types.typeNodeName(type_node),
+            .source_loc = self.tokenSourceLoc(name_tok),
             .fixed_array_length = fixed_length,
             .fixed_array_element = fixed_element,
         }) catch {};
@@ -1076,6 +1089,15 @@ const Parser = struct {
         return &.{};
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1083,9 +1105,15 @@ const Parser = struct {
 
         var var_name: []const u8 = "_i";
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
         var descending: bool = false;
         var inclusive: bool = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // It used to be thrown away, so `i + 1n < 2n` unrolled twice for a loop
+        // the source runs once. Rejected by passes/validate.zig.
+        var cond_tests_iter: bool = true;
 
         // Init: `Type name = expr;` or plain expression
         if (self.current.kind == .ident) {
@@ -1105,10 +1133,24 @@ const Parser = struct {
                     var_name = self.bump().text;
                 }
                 if (self.match(.assign)) {
+                    // N-129: the non-`number` arm used to DISCARD the parsed
+                    // expression, so `for (Bigint i = Bigint.of(3); ...)` — the
+                    // only way to write a non-zero start on this surface, since
+                    // the loop variable is a Bigint — started at 0 and unrolled
+                    // the wrong iterations. `parseExpression` already folds
+                    // `Bigint.of(<literal>)` to a literal; use what it returns.
                     if (self.current.kind == .number) {
                         init_value = parseNumberLiteral(self.bump().text);
                     } else {
-                        _ = self.parseExpression();
+                        const init_expr = self.parseExpression();
+                        if (init_expr) |e| {
+                            // N-138: `.literal_int` alone missed a negated literal.
+                            if (loopStartLiteral(e)) |v| init_value = v else {
+                                init_is_const = false;
+                            }
+                        } else {
+                            init_is_const = false;
+                        }
                     }
                 }
             } else {
@@ -1130,20 +1172,67 @@ const Parser = struct {
                         descending = bop.op == .gt or bop.op == .gte;
                         // Issue #121: record inclusivity (`<=`/`>=`).
                         inclusive = bop.op == .lte or bop.op == .gte;
+                        cond_tests_iter = switch (bop.left) {
+                            .identifier => |n| std.mem.eql(u8, n, var_name),
+                            else => false,
+                        };
                         switch (bop.right) {
                             .literal_int => |v| bound = v,
                             else => {},
                         }
                     },
-                    else => {},
+                    else => cond_tests_iter = false,
                 }
             }
         }
         _ = self.expect(.semicolon);
 
-        // Update: consume until the matching `)` for the for-loop. Track nested
-        // parentheses so that `i = i.plus(Bigint.ONE)` does not terminate at
-        // the inner `)`.
+        // Update: `i = i.plus(Bigint.ONE)`, `i++`, … N-061: this clause was
+        // consumed as raw tokens and discarded, so `i = i.plus(Bigint.of(2))`
+        // compiled to bytes identical to the unit step. Try to parse the two
+        // shapes Java actually writes here and record the result for
+        // validate.zig; anything else falls through to the original
+        // token-skip, so no source that parsed before stops parsing now.
+        var update: ?*const Statement = null;
+        if (self.current.kind == .ident) {
+            const save2_pos = self.tokenizer.pos;
+            const save2_line = self.tokenizer.line;
+            const save2_col = self.tokenizer.col;
+            const save2_current = self.current;
+            const target_tok = self.bump();
+            if (self.current.kind == .assign) {
+                _ = self.bump();
+                if (self.parseExpression()) |v| {
+                    update = self.storeUpdateStmt(.{ .assign = .{ .target = target_tok.text, .value = v } });
+                }
+            } else if (self.current.kind == .plus_plus or self.current.kind == .minus_minus) {
+                const is_inc = self.current.kind == .plus_plus;
+                _ = self.bump();
+                if (is_inc) {
+                    const inc = self.allocator.create(types.IncrementExpr) catch null;
+                    if (inc) |ptr| {
+                        ptr.* = .{ .operand = .{ .identifier = target_tok.text }, .prefix = false };
+                        update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .increment = ptr } } });
+                    }
+                } else {
+                    const dec = self.allocator.create(types.DecrementExpr) catch null;
+                    if (dec) |ptr| {
+                        ptr.* = .{ .operand = .{ .identifier = target_tok.text }, .prefix = false };
+                        update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = .{ .decrement = ptr } } });
+                    }
+                }
+            }
+            if (update == null) {
+                self.tokenizer.pos = save2_pos;
+                self.tokenizer.line = save2_line;
+                self.tokenizer.col = save2_col;
+                self.current = save2_current;
+            }
+        }
+
+        // Consume whatever is left until the matching `)` for the for-loop.
+        // Track nested parentheses so that `i = i.plus(Bigint.ONE)` does not
+        // terminate at the inner `)`.
         var paren_depth: usize = 0;
         while (self.current.kind != .eof) {
             if (self.current.kind == .lparen) {
@@ -1157,7 +1246,7 @@ const Parser = struct {
         _ = self.expect(.rparen);
 
         const body = self.parseStmtOrBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {
@@ -1905,21 +1994,29 @@ const Parser = struct {
     fn methodToConstructor(self: *Parser, m: MethodNode) ConstructorNode {
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        // R-040: see parse_ts.methodToConstructor — the full body minus the
+        // `super(...)` call, so nothing is silently discarded.
+        var body: std.ArrayListUnmanaged(Statement) = .empty;
 
         for (m.body) |stmt| {
             switch (stmt) {
-                .expr_stmt => |expr| switch (expr.expr) {
-                    .call => |call| {
-                        if (std.mem.eql(u8, call.callee, "super")) {
-                            for (call.args) |arg| super_args.append(self.allocator, arg) catch {};
-                        }
-                    },
-                    else => {},
+                .expr_stmt => |expr| {
+                    switch (expr.expr) {
+                        .call => |call| {
+                            if (std.mem.eql(u8, call.callee, "super")) {
+                                for (call.args) |arg| super_args.append(self.allocator, arg) catch {};
+                                continue;
+                            }
+                        },
+                        else => {},
+                    }
+                    body.append(self.allocator, stmt) catch {};
                 },
                 .assign => |assign| {
                     assignments.append(self.allocator, .{ .target = assign.target, .value = assign.value }) catch {};
+                    body.append(self.allocator, stmt) catch {};
                 },
-                else => {},
+                else => body.append(self.allocator, stmt) catch {},
             }
         }
 
@@ -1927,6 +2024,7 @@ const Parser = struct {
             .params = m.params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = body.items,
         };
     }
 
@@ -1978,8 +2076,11 @@ const Parser = struct {
         if (std.fmt.parseInt(i64, stripped, 0)) |val| {
             return Expression{ .literal_int = val };
         } else |_| {
-            if (isAllAsciiDigitsJava(stripped)) {
-                const decimal = self.allocator.dupe(u8, stripped) catch return null;
+            // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+            // ordinary way to write secp256k1's group order, and accepted by the
+            // other six tiers -- used to fall into the `invalid integer` arm
+            // below, because this fallback only recognised decimal digits.
+            if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                 return Expression{ .literal_bigint = decimal };
             }
             self.addErrorFmt("invalid integer: '{s}'", .{text});
@@ -1992,13 +2093,6 @@ const Parser = struct {
 // Helpers
 // ============================================================================
 
-fn isAllAsciiDigitsJava(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 fn parseNumberLiteral(text: []const u8) i64 {
     var buf: [64]u8 = undefined;
@@ -2382,4 +2476,26 @@ test "binary ops parse correctly (Java)" {
         .const_decl => |cd| try std.testing.expectEqualStrings("r", cd.name),
         else => return error.ExpectedVarDecl,
     }
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser recognised a bare `.number` (or a
+/// folded `.literal_int`) and let `-1` fall through to the discard path, so a
+/// loop written `for (… i = -1; …)` unrolled from 0 — a different program from
+/// the one the source describes, and byte-divergent from the other six tiers
+/// with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

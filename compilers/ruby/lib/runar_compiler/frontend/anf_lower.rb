@@ -12,8 +12,11 @@
 require "json"
 require "set"
 require_relative "../ir/types"
+require_relative "../ir/loader"
 require_relative "ast_nodes"
 require_relative "sighash_directive"
+require_relative "typecheck"
+require_relative "validator"
 
 module RunarCompiler
   module Frontend
@@ -53,10 +56,19 @@ module RunarCompiler
     # Byte-typed expression detection
     # -------------------------------------------------------------------
 
-    BYTE_TYPES = %w[
-      ByteString PubKey Sig Sha256 Ripemd160 Addr SigHashPreimage
-      RabinSig RabinPubKey Point P256Point P384Point
-    ].to_set.freeze
+    # N-076: there is deliberately no list here. typecheck.rb's
+    # BYTESTRING_SUBTYPES is the authority on whether a value of a given type
+    # sits on the stack as a BYTE STRING rather than as a script NUMBER, and
+    # this module consults it.
+    #
+    # The second, hand-maintained copy this replaces carried "RabinSig" and
+    # "RabinPubKey", which typecheck.rb files under BIGINT_SUBTYPES -- so
+    # `===` on a Rabin value emitted OP_EQUAL and, far worse, `+` on one
+    # emitted OP_CAT where the source said addition.
+    #
+    # Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+    # with OP_ADD.
+    BYTE_TYPES = BYTESTRING_SUBTYPES
     private_constant :BYTE_TYPES
 
     BYTE_RETURNING_FUNCTIONS = %w[
@@ -67,6 +79,35 @@ module RunarCompiler
       p384Add p384Mul p384MulGen p384Negate p384EncodeCompressed
     ].to_set.freeze
     private_constant :BYTE_RETURNING_FUNCTIONS
+
+    # Preimage field extractors that return BYTES (ByteString / Sha256).
+    #
+    # N-054: this list is a transcription of the return_type the type checker
+    # already records for these builtins in typecheck.rb, and the stack lowerer
+    # agrees with it byte for byte: _lower_extractor ends the split sequence
+    # with OP_BIN2NUM for exactly the SIX extractors that are NOT listed here,
+    # and for none of the ones that are.
+    #
+    # So an extractor listed here leaves a byte string on the stack and must be
+    # compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+    # leaves a minimally-encoded script NUMBER and must be compared with
+    # OP_NUMEQUAL and added with OP_ADD.
+    #
+    # Getting it backwards is a correctness defect in both directions. OP_EQUAL
+    # on a number is over-strict -- it rejects a witness that encodes the same
+    # value with different bytes (0400 for 4), i.e. it refuses a valid spend.
+    # OP_NUMEQUAL on a hash or a scriptCode is under-strict -- trailing
+    # high-order zero bytes and negative zero compare equal to values they are
+    # not byte-equal to, i.e. a covenant bypass.
+    #
+    # This replaces a name[0, 7] == "extract" prefix test that swept the six
+    # numeric extractors in with the byte ones.
+    BYTE_RETURNING_EXTRACTORS = %w[
+      extractHashPrevouts extractHashSequence extractOutpoint
+      extractScriptCode extractOutputHash extractOutputs
+      extractPrevOutputScript
+    ].to_set.freeze
+    private_constant :BYTE_RETURNING_EXTRACTORS
 
     # @param expr [Expression, nil]
     # @param ctx [LoweringContext]
@@ -104,7 +145,7 @@ module RunarCompiler
           # Expression-form asm<ByteString>({...}) yields a byte value.
           return expr.asm_return_type == "ByteString" if expr.callee.name == "asm"
           return true if BYTE_RETURNING_FUNCTIONS.include?(expr.callee.name)
-          return true if expr.callee.name.length >= 7 && expr.callee.name[0, 7] == "extract"
+          return true if BYTE_RETURNING_EXTRACTORS.include?(expr.callee.name)
         end
         return false
       end
@@ -248,6 +289,15 @@ module RunarCompiler
       if expr.is_a?(UnaryExpr) && expr.op == "-"
         return -expr.operand.value if expr.operand.is_a?(BigIntLiteral)
       end
+      # `toByteString('<hex>')` IS the ByteStringLiteral production (see
+      # spec/grammar.md section 11 and the peer check in validator.rb). UNWRAP
+      # it so `initial_value` holds the bare value, byte-identical to what the
+      # bare `'<hex>'` spelling produces. Without this the validator would
+      # accept the property and this method would return nil for it -- silently
+      # DROPPING the default rather than storing a call node. Literal argument
+      # only.
+      return expr.args[0].value if Frontend.to_byte_string_literal?(expr)
+
       nil
     end
     private_class_method :_extract_literal_value
@@ -559,20 +609,28 @@ module RunarCompiler
     end
     private_class_method :_embed_always?
 
-    # Issue #109: emit the DCE-surviving preservation pair for each
+    # Issue #109: emit the DCE-surviving preservation +load_prop+ for each
     # +@embedAlways+ readonly field into the given (public) method context.
     #
-    # Reproduces exactly what a hand-written +const _bind = this.field;+ lowers
-    # to: a +load_prop+ followed by a +load_const("@ref:<t>")+ alias. The alias
-    # marks the +load_prop+ as referenced (see collect_refs_from_value in
-    # constant_fold.rb / dce.rb), so dead-binding DCE keeps it; stack lowering
-    # then emits the field's constructor-slot placeholder and NIPs the unused
-    # value off the stack at method end. The field's bytes therefore remain in
-    # the deployed locking script for downstream recovery.
+    # The injected +load_prop+ carries +preserve = true+, so has_side_effect? in
+    # dce.rb keeps it even though nothing references it; stack lowering then
+    # emits the field's constructor-slot placeholder and NIPs the unused value
+    # off the stack at method end. The field's bytes therefore remain in the
+    # deployed locking script for downstream recovery.
+    #
+    # This used to emit an alias pair instead -- the +load_prop+ plus a
+    # +load_const("@ref:<t>")+ whose only job was to make the +load_prop+ look
+    # referenced. That survives ONE DCE sweep but not the fixed-point loop in
+    # dce.rb: sweep 1 drops the now-unreferenced alias, sweep 2 then drops the
+    # +load_prop+ it was protecting, and both halves vanish. Marking the node
+    # itself does not depend on a referencing binding surviving. Mirrors the Zig
+    # reference (compilers/zig/src/passes/anf_lower.zig).
     def self._emit_embed_always_preservation(ctx, fields)
       fields.each do |field|
-        load_ref = ctx.emit(IR::ANFValue.new(kind: "load_prop").tap { |v| v.name = field.name })
-        ctx.emit_named("__embedAlways_#{field.name}", _make_load_const_string("@ref:#{load_ref}"))
+        ctx.emit(IR::ANFValue.new(kind: "load_prop").tap do |v|
+          v.name = field.name
+          v.preserve = true
+        end)
       end
     end
     private_class_method :_emit_embed_always_preservation
@@ -603,12 +661,10 @@ module RunarCompiler
     # reference compiler's methodScopeT struct.
     class MethodScope
       attr_reader :auto_injected_params
-      attr_accessor :did_emit_hash_outputs_check
 
       def initialize
         @auto_injected_params = []
         @auto_injected_set = {}
-        @did_emit_hash_outputs_check = false
       end
 
       # Idempotent: second call with the same name is a no-op.
@@ -661,6 +717,8 @@ module RunarCompiler
         # loop body, or an inlined helper's block -- and false only in the
         # context a method's own body is lowered into.
         @nested = false
+        # R-072: see the +did_emit_hash_outputs_check+ accessor below.
+        @did_emit_hash_outputs_check = false
       end
 
       # @return [MethodScope] shared per-method bookkeeping for intent intrinsics
@@ -675,6 +733,22 @@ module RunarCompiler
       # walks method.body and does NOT recurse, so an +if+ its recogniser accepts
       # is only actually REWRITTEN at method top level.
       attr_accessor :nested
+
+      # R-072. +requireOutputP2PKH+ emits its
+      # +hash256(_serialisedOutputs) === extractOutputHash(txPreimage)+
+      # commitment at most once per CONTROL-FLOW PATH, so this lives on the
+      # context and deliberately NOT on +method_scope+ (which is shared by
+      # reference).
+      #
+      # +sub_context+ copies the parent's value in, because a commitment on a
+      # dominating path really has been established by the time the nested block
+      # runs; the copy means writes inside the block stay there, so an +if+'s two
+      # arms cannot latch the flag for each other. Exactly one arm executes on
+      # chain, and the arm-local per-output assertion only compares a substring
+      # of the spender-supplied +_serialisedOutputs+ witness: an arm without its
+      # own commitment constrains nothing about the transaction's real outputs,
+      # and the bond it claims to enforce can be satisfied with invented bytes.
+      attr_accessor :did_emit_hash_outputs_check
 
       # Push an alias for a parameter name, used while inlining the body of
       # a private method into this context: identifier references to that
@@ -701,6 +775,37 @@ module RunarCompiler
         @contract.methods.find do |m|
           m.name == name && m.name != "constructor" && m.visibility != "public"
         end
+      end
+
+      # Refuse a call to a private method whose argument count does not match
+      # that method's parameter count.
+      #
+      # R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+      # table first, while ANF lowering resolves it against the contract's
+      # private methods first. A private method that shadows a builtin name
+      # with a different arity -- `private min(a, b, c)` called as `min(x, y)`
+      # -- therefore passes the arity check for `min` the BUILTIN and then
+      # lowers as `min` the METHOD. Nothing forbids the shadowing.
+      #
+      # Downstream, params and args were zipped pairwise up to the shorter of
+      # the two, so the surplus was dropped on the floor: the extra argument
+      # was evaluated and discarded, or the unbound parameter compiled to a
+      # dangling reference. When the unbound parameter happened to be UNUSED
+      # the contract compiled clean -- an arity mismatch silently accepted.
+      # When it was used, it surfaced two passes later as "method parameter
+      # 'c' is not on the stack", naming a pass the author never wrote in.
+      #
+      # Refused here, where both counts are known, on every call form
+      # (`m(x)`, `this.m(x)`, member `this.m(x)`) and for both the inlined and
+      # the method_call lowering path.
+      def check_private_call_arity(name, arg_refs)
+        method = get_private_method(name)
+        return if method.nil?
+        return if method.params.size == arg_refs.size
+
+        raise ArgumentError,
+              "private method '#{name}' expects #{method.params.size} " \
+              "argument(s), got #{arg_refs.size}."
       end
 
       # Whether a call to `name` should be ANF-inlined rather than emitted as
@@ -747,11 +852,29 @@ module RunarCompiler
 
         aliased_params.reverse_each { |p| pop_param_alias(p) }
 
-        if end_index > start_index
-          @bindings[end_index - 1].name
-        else
-          emit(Frontend._make_load_const_string("@void"))
-        end
+        return @bindings[end_index - 1].name if end_index > start_index
+
+        # R-290: the body emitted nothing, so there is no value for the caller
+        # to reference.
+        #
+        # Refuse it. The alternative is what was here before: a `load_const "@void"`
+        # sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+        # special-cased). It survived pass 4 and died in pass 6's hex decoder —
+        # "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+        # messages that name neither the method nor the problem, and that only fire
+        # because the string happens to be odd-length and non-hex. An even-length
+        # sentinel would decode to zeros in the Rust decoder's
+        # `from_str_radix(..).unwrap_or(0)` and reach the script.
+        #
+        # Reachable from source that parses, validates and type-checks: declare a public
+        # method BEFORE two same-named privates. The side-effect summary resolves the
+        # name through a last-wins map and caches the OUTPUT-EMITTING one, so
+        # `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+        # whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+        # IR, `--hex` exit 1 with the hex-decoder message.
+        raise ArgumentError,
+              "private method '#{method_name}' was inlined but produced no " \
+              "bindings, so the call site has no value to reference."
       end
 
       # Generate a fresh temp name.
@@ -902,10 +1025,28 @@ module RunarCompiler
         sub.instance_variable_set(:@param_types, @param_types.dup)
         sub.instance_variable_set(:@local_aliases, @local_aliases.dup)
         sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
+        # Deep-copy the inlined-param alias stack. +_inline_private_method_call+
+        # pushes the caller's argument refs onto the CURRENT context before
+        # lowering the private body; without this, an if arm / loop body /
+        # ternary arm inside that body lowers with no aliases and falls through
+        # to +load_param+ naming the PRIVATE's own parameter -- which resolves to
+        # the CALLER's same-named parameter instead of the argument that was
+        # passed in. spec/semantics.md 6.3 makes inlining substitution, so the
+        # helper form and the hand-inlined form must compile to the same script.
+        # Copied (not shared) because push/pop inside the nested block are
+        # balanced there and must not disturb the parent's frames.
+        sub.instance_variable_set(
+          :@param_alias_stack,
+          @param_alias_stack.each_with_object({}) { |(k, v), h| h[k] = v.dup }
+        )
         # Share the per-method intent-intrinsic bookkeeping so witness-param
-        # registrations and the once-per-method hashOutputs flag propagate up
-        # from if/else branches. Mirrors Go subContext.methodScope sharing.
+        # registrations propagate up from if/else branches. Mirrors Go
+        # subContext.methodScope sharing.
         sub.instance_variable_set(:@method_scope, @method_scope)
+        # R-072: the hashOutputs commitment flag is inherited by VALUE -- a
+        # parent commitment dominates this block, but one emitted inside it must
+        # not flow back out to a sibling arm.
+        sub.did_emit_hash_outputs_check = @did_emit_hash_outputs_check
         # Propagate the method's declared @sighash flag (issue #123) so a manual
         # checkPreimage inside an if/else branch binds under the same mode.
         sub.sighash_flag = @sighash_flag
@@ -1473,6 +1614,27 @@ module RunarCompiler
       def _lower_call_expr(e)
         callee = e.callee
 
+        # `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+        # spec/grammar.md section 11:
+        #
+        #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        #
+        # so it must reach the IR as a literal, indistinguishable from the bare
+        # `'<hex>'` spelling the other surfaces use. Lowering it to a
+        # `toByteString` call node instead made the `.runar.rs` surface -- where
+        # a bare literal is not valid Rust and this wrapper is the ONLY spelling
+        # that is both valid Rust and valid Rúnar -- unable to match the one
+        # `expected-ir.json` every format is compared against.
+        #
+        # Literal argument only. `toByteString(x)` for a non-literal `x` is not
+        # this production; it stays an identity-cast call node (the typechecker
+        # types it ByteString -> ByteString and stack lowering already treats it
+        # as a no-op), so its behaviour is unchanged.
+        if callee.is_a?(Identifier) && callee.name == "toByteString" &&
+           e.args.length == 1 && e.args[0].is_a?(ByteStringLiteral)
+          return lower_expr_to_ref(e.args[0])
+        end
+
         # super(...) call -- accepts both Identifier("super") and MemberExpr(super, "")
         is_super = (callee.is_a?(Identifier) && callee.name == "super") ||
                    (callee.is_a?(MemberExpr) && callee.object.is_a?(Identifier) && callee.object.name == "super")
@@ -1570,9 +1732,11 @@ module RunarCompiler
         # paying `amount` satoshis to `pubkeyHash`. Auto-injects
         # `_serialisedOutputs` (once per method) and emits
         # hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
-        # first time the intrinsic is called in a method body. Subsequent
-        # calls in the same method skip the hashOutputs check and emit only
-        # the per-output substring assertion.
+        # first time the intrinsic is called on a given CONTROL-FLOW PATH. A
+        # later call on the same path skips the commitment and emits only the
+        # per-output substring assertion; a call on a path the commitment does
+        # not dominate emits its own (R-072 -- the substring assertion alone
+        # only constrains the spender-supplied witness, not the transaction).
         #
         # v1 assumes all outputs in the serialised set are exactly 34 bytes
         # (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte
@@ -1584,14 +1748,23 @@ module RunarCompiler
             return emit(Frontend._make_load_const_string(""))
           end
           idx = idx_lit.value.to_i
+          # W2 backstop. The user-facing refusal lives in the typechecker, where a
+          # diagnostic carries a source location -- but ANF lowering is reachable from
+          # callers that run no typechecker, and R-012 is this repo's standing lesson about
+          # a security check that lives in exactly one pass. Unreachable in the normal
+          # pipeline: typecheck answers first.
+          if idx != 0
+            raise "requireOutputP2PKH: outputIndex must be 0; got #{idx}. The emitted assertion reads output i at byte offset i*34, which is an output boundary only if every earlier output is exactly 34 bytes -- an attacker sizes output 0 freely and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset."
+          end
 
           @method_scope.record_auto_injected_param("_serialisedOutputs", "ByteString")
           add_param("_serialisedOutputs")
           register_param_type("_serialisedOutputs", "ByteString")
 
-          # Emit the hashOutputs(preimage) check exactly once per method.
-          unless @method_scope.did_emit_hash_outputs_check
-            @method_scope.did_emit_hash_outputs_check = true
+          # Emit the hashOutputs(preimage) commitment once per control-flow path
+          # (R-072 -- see the +did_emit_hash_outputs_check+ accessor).
+          unless @did_emit_hash_outputs_check
+            @did_emit_hash_outputs_check = true
             serialised_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_serialisedOutputs" })
             actual_out_hash_ref = emit(Frontend._make_call("hash256", [serialised_ref]))
             preimage_ref = emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
@@ -1752,6 +1925,7 @@ module RunarCompiler
         # this.method(...) via PropertyAccessExpr
         if callee.is_a?(PropertyAccessExpr)
           arg_refs = _lower_args(e.args)
+          check_private_call_arity(callee.property, arg_refs)
           if should_inline_private?(callee.property)
             return inline_private_method_call(callee.property, arg_refs)
           end
@@ -1768,6 +1942,7 @@ module RunarCompiler
            callee.object.is_a?(Identifier) &&
            callee.object.name == "this"
           arg_refs = _lower_args(e.args)
+          check_private_call_arity(callee.property, arg_refs)
           if should_inline_private?(callee.property)
             return inline_private_method_call(callee.property, arg_refs)
           end
@@ -1814,6 +1989,7 @@ module RunarCompiler
           # path as `this.requireOwner(sig)` so downstream stack lowering can
           # inline the body. Keeps .runar.move in sync with .runar.ts.
           if _is_private_method(callee.name)
+            check_private_call_arity(callee.name, arg_refs)
             if should_inline_private?(callee.name)
               return inline_private_method_call(callee.name, arg_refs)
             end
@@ -2260,6 +2436,75 @@ module RunarCompiler
     end
 
     # -------------------------------------------------------------------
+    # Continuation-shape AST descent (shared by all three effect walkers)
+    # -------------------------------------------------------------------
+    #
+    # Ports the descent of the reference +side_effect_summary+ module
+    # (packages/runar-compiler/src/passes/side-effect-summary.ts and the Go /
+    # Rust / Python peers). CL-BUG-155: the three walkers below used to visit
+    # only ExpressionStmt / IfStmt-bodies / ForStmt-body / ReturnStmt, so a
+    # side effect reachable through a variable-declaration initialiser, an
+    # if-condition, a loop header, an assignment's value or a call argument
+    # never reached the continuation-shape decision. Both failure modes are
+    # unsafe: an output intrinsic behind an initialiser makes the body load
+    # +_changePKH+ that the header never declared (stack lowering refuses),
+    # and a state mutation behind one silently marks the method TERMINAL, so
+    # the deployed script carries no continuation covenant at all.
+
+    # Child STATEMENTS of a statement, in reference-walk order.
+    # @return [Array<Statement>]
+    def self._child_statements(stmt)
+      if stmt.is_a?(IfStmt)
+        return (stmt.then || []) + (stmt.else_ || [])
+      end
+      if stmt.is_a?(ForStmt)
+        # The loop header is walked too: an effect can hide in init or update.
+        return [stmt.init, stmt.update].compact + (stmt.body || [])
+      end
+      []
+    end
+    private_class_method :_child_statements
+
+    # Child EXPRESSIONS carried directly by a statement.
+    # @return [Array<Expression>]
+    def self._statement_expressions(stmt)
+      return [stmt.target, stmt.value].compact if stmt.is_a?(AssignmentStmt)
+      return [stmt.expr].compact if stmt.is_a?(ExpressionStmt)
+      return [stmt.condition].compact if stmt.is_a?(IfStmt)
+      return [stmt.condition].compact if stmt.is_a?(ForStmt)
+      # parser_ruby promotes a private method's trailing ExpressionStmt to a
+      # ReturnStmt for implicit-return semantics, so effects land here too.
+      return [stmt.value].compact if stmt.is_a?(ReturnStmt)
+      return [stmt.init].compact if stmt.is_a?(VariableDeclStmt)
+      []
+    end
+    private_class_method :_statement_expressions
+
+    # Child EXPRESSIONS of an expression. Mirrors the reference +collectExpr+
+    # descent exactly -- note that an increment/decrement operand is NOT
+    # descended into (the reference stops after its property check).
+    # @return [Array<Expression>]
+    def self._child_expressions(expr)
+      if expr.is_a?(CallExpr)
+        kids = (expr.args || []).dup
+        # The callee subexpression can hold nested calls / member chains.
+        # An Identifier callee has no children, so skip it.
+        kids << expr.callee if expr.callee && !expr.callee.is_a?(Identifier)
+        return kids
+      end
+      return [expr.left, expr.right].compact if expr.is_a?(BinaryExpr)
+      return [expr.operand].compact if expr.is_a?(UnaryExpr)
+      if expr.is_a?(TernaryExpr)
+        return [expr.condition, expr.consequent, expr.alternate].compact
+      end
+      return [expr.object, expr.index].compact if expr.is_a?(IndexAccessExpr)
+      return [expr.object].compact if expr.is_a?(MemberExpr)
+      return (expr.elements || []).compact if expr.is_a?(ArrayLiteralExpr)
+      []
+    end
+    private_class_method :_child_expressions
+
+    # -------------------------------------------------------------------
     # State mutation analysis
     # -------------------------------------------------------------------
 
@@ -2290,52 +2535,25 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._stmt_mutates_state(stmt, mutable_props, contract, seen)
-      if stmt.is_a?(AssignmentStmt)
-        if stmt.target.is_a?(PropertyAccessExpr)
-          return mutable_props.include?(stmt.target.property)
-        end
-        return false
+      if stmt.is_a?(AssignmentStmt) && stmt.target.is_a?(PropertyAccessExpr) &&
+         mutable_props.include?(stmt.target.property)
+        return true
       end
 
-      if stmt.is_a?(ExpressionStmt)
-        return _expr_mutates_state(stmt.expr, mutable_props, contract, seen)
-      end
-
-      if stmt.is_a?(IfStmt)
-        return true if _body_mutates_state(stmt.then, mutable_props, contract, seen)
-        if stmt.else_ && stmt.else_.any?
-          return true if _body_mutates_state(stmt.else_, mutable_props, contract, seen)
-        end
-        return false
-      end
-
-      if stmt.is_a?(ForStmt)
-        if stmt.update && _stmt_mutates_state(stmt.update, mutable_props, contract, seen)
-          return true
-        end
-        return _body_mutates_state(stmt.body, mutable_props, contract, seen)
-      end
-
-      if stmt.is_a?(ReturnStmt) && stmt.value
-        return _expr_mutates_state(stmt.value, mutable_props, contract, seen)
-      end
-
-      false
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_mutates_state(e, mutable_props, contract, seen)
+      }
+      _child_statements(stmt).any? { |s| _stmt_mutates_state(s, mutable_props, contract, seen) }
     end
     private_class_method :_stmt_mutates_state
 
     # @return [Boolean]
     def self._expr_mutates_state(expr, mutable_props, contract, seen)
       return false if expr.nil?
-      if expr.is_a?(IncrementExpr)
-        if expr.operand.is_a?(PropertyAccessExpr)
-          return mutable_props.include?(expr.operand.property)
-        end
-      end
-      if expr.is_a?(DecrementExpr)
-        if expr.operand.is_a?(PropertyAccessExpr)
-          return mutable_props.include?(expr.operand.property)
-        end
+      if expr.is_a?(IncrementExpr) || expr.is_a?(DecrementExpr)
+        # The reference stops here -- it does not descend into the operand.
+        return expr.operand.is_a?(PropertyAccessExpr) &&
+               mutable_props.include?(expr.operand.property)
       end
       if expr.is_a?(CallExpr)
         target = _resolve_private_method(expr.callee, contract)
@@ -2344,7 +2562,7 @@ module RunarCompiler
           return true if _body_mutates_state(target.body, mutable_props, contract, new_seen)
         end
       end
-      false
+      _child_expressions(expr).any? { |e| _expr_mutates_state(e, mutable_props, contract, seen) }
     end
     private_class_method :_expr_mutates_state
 
@@ -2384,27 +2602,10 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._stmt_has_add_output(stmt, contract, seen)
-      if stmt.is_a?(ExpressionStmt)
-        return _expr_has_add_output(stmt.expr, contract, seen)
-      end
-      if stmt.is_a?(IfStmt)
-        return true if _body_has_add_output(stmt.then, contract, seen)
-        if stmt.else_ && stmt.else_.any?
-          return true if _body_has_add_output(stmt.else_, contract, seen)
-        end
-        return false
-      end
-      if stmt.is_a?(ForStmt)
-        return _body_has_add_output(stmt.body, contract, seen)
-      end
-      # Ruby's parser_ruby promotes a private method's trailing
-      # ExpressionStmt to a ReturnStmt for implicit-return semantics, so
-      # `add_output(...)` calls in helper bodies wind up here. Walk the
-      # return value the same way an ExpressionStmt would be walked.
-      if stmt.is_a?(ReturnStmt) && stmt.value
-        return _expr_has_add_output(stmt.value, contract, seen)
-      end
-      false
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_has_add_output(e, contract, seen)
+      }
+      _child_statements(stmt).any? { |s| _stmt_has_add_output(s, contract, seen) }
     end
     private_class_method :_stmt_has_add_output
 
@@ -2428,7 +2629,7 @@ module RunarCompiler
           return true if _body_has_add_output(target.body, contract, new_seen)
         end
       end
-      false
+      _child_expressions(expr).any? { |e| _expr_has_add_output(e, contract, seen) }
     end
     private_class_method :_expr_has_add_output
 
@@ -2451,23 +2652,10 @@ module RunarCompiler
 
     # @return [Boolean]
     def self._stmt_has_add_data_output(stmt, contract, seen)
-      if stmt.is_a?(ExpressionStmt)
-        return _expr_has_add_data_output(stmt.expr, contract, seen)
-      end
-      if stmt.is_a?(IfStmt)
-        return true if _body_has_add_data_output(stmt.then, contract, seen)
-        if stmt.else_ && stmt.else_.any?
-          return true if _body_has_add_data_output(stmt.else_, contract, seen)
-        end
-        return false
-      end
-      if stmt.is_a?(ForStmt)
-        return _body_has_add_data_output(stmt.body, contract, seen)
-      end
-      if stmt.is_a?(ReturnStmt) && stmt.value
-        return _expr_has_add_data_output(stmt.value, contract, seen)
-      end
-      false
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_has_add_data_output(e, contract, seen)
+      }
+      _child_statements(stmt).any? { |s| _stmt_has_add_data_output(s, contract, seen) }
     end
     private_class_method :_stmt_has_add_data_output
 
@@ -2491,7 +2679,7 @@ module RunarCompiler
           return true if _body_has_add_data_output(target.body, contract, new_seen)
         end
       end
-      false
+      _child_expressions(expr).any? { |e| _expr_has_add_data_output(e, contract, seen) }
     end
     private_class_method :_expr_has_add_data_output
 
@@ -2522,6 +2710,19 @@ module RunarCompiler
       unless stmt.condition.is_a?(BinaryExpr)
         raise "Cannot determine loop bound at compile time. For-loop bounds must be integer literals."
       end
+      # W4 backstop. The user-facing refusal lives in the validator, which is
+      # where a located diagnostic belongs -- but ANF lowering is reachable
+      # without it, and then the count comes from `bound - start` while the
+      # condition tests something else entirely: `i + 1n < 2n` runs once in the
+      # source language and twice here.
+      iter_name = stmt.init&.name.to_s
+      left = stmt.condition.left
+      unless left.is_a?(Identifier) && left.name == iter_name
+        raise "For loop condition must compare the loop variable '#{iter_name}' to a " \
+              "compile-time constant; the left-hand side is not the iterator, so the " \
+              "unrolled trip count would not be the one the source asks for."
+      end
+
       op = stmt.condition.op
       bound = _extract_bigint_value(stmt.condition.right)
       if bound.nil?
@@ -2545,6 +2746,18 @@ module RunarCompiler
         else
           raise "For loop counting down (i--) must use '>' or '>=' (got '#{op}')."
         end
+      end
+
+      # Bound the arbitrary-precision count BEFORE handing it to the unroller.
+      # Ruby Integers do not truncate, so `[0, count].max` faithfully preserves
+      # a bound of 10**20 and the unroller then tries to honour it — a hang, not
+      # a diagnostic. MAX_LOOP_COUNT already bounded loop counts arriving on the
+      # `--ir` path; a loop written in source deserves the same ceiling.
+      # CL-BUG-088.
+      max_count = ::RunarCompiler::IR::MAX_LOOP_COUNT
+      if count > max_count
+        raise "For loop unrolls to #{count} iterations, " \
+              "exceeding the maximum loop count of #{max_count}."
       end
 
       { start: start, step: step, count: [0, count].max }
@@ -3057,26 +3270,26 @@ module RunarCompiler
             )
           end
 
-          # The then-branch value: remap the value_ref through branch_map
+          # An arm's VALUE is its LAST binding. value_bindings is everything
+          # before the original update_prop, which ends on the assigned value
+          # only when that value was computed INSIDE the arm. When the arm
+          # assigns something bound outside it — a local, or anything hoisted
+          # before the chain — value_bindings does not contain it and is
+          # usually empty, so the arm was emitted EMPTY and stack lowering
+          # padded it with a zero push: `if (p == 0n) { this.c0 = someLocal }`
+          # compiled to `this.c0 = 0`, silently corrupting state on the MATCHED
+          # branch. (TicTacToe's `this.cN = this.turn` escapes only because its
+          # load_prop lands inside the arm.)
+          #
+          # Materialise the value explicitly whenever the arm does not already
+          # end on it. When it does — every shape that compiled correctly
+          # before — this is a no-op and no bytes move.
           then_value_ref = branch_map[branch[:value_ref]] || branch[:value_ref]
-          # If there are no value_bindings, we need a load_prop for the value
-          if then_bindings.empty?
-            load_name = fresh.call
+          if then_bindings.empty? || then_bindings.last.name != then_value_ref
             then_bindings << IR::ANFBinding.new(
-              name: load_name,
-              value: IR::ANFValue.new(kind: "load_prop").tap { |v| v.name = "turn" }
+              name: fresh.call,
+              value: _make_load_const_string("@ref:#{then_value_ref}")
             )
-            # We need the actual turn value — use the value_ref from the branch
-            # which points to a load_prop that was inside the original branch
-            then_bindings = branch[:value_bindings].map do |vb|
-              new_name = fresh.call
-              branch_map[vb.name] = new_name
-              IR::ANFBinding.new(
-                name: new_name,
-                value: _remap_value_refs(vb.value, branch_map)
-              )
-            end
-            then_value_ref = branch_map[branch[:value_ref]] || branch[:value_ref]
           end
 
           # Else branch: keep old property value

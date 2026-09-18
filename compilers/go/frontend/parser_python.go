@@ -570,6 +570,10 @@ var pySpecialNames = map[string]string{
 	"add_data_output":  "addDataOutput",
 	"get_state_script": "getStateScript",
 
+	// Intent sub-covenant intrinsics (BSVM Phase 13). The all-caps PKH token
+	// does not survive snake -> camel (it comes back as requireOutputP2pkh).
+	"require_output_p2pkh": "requireOutputP2PKH",
+
 	// Transaction intrinsics
 	"extract_locktime":     "extractLocktime",
 	"extract_output_hash":  "extractOutputHash",
@@ -594,6 +598,8 @@ var pySpecialNames = map[string]string{
 	"bin2num":  "bin2num",
 	"log2":    "log2",
 	"div_mod": "divmod",
+	// 'to' collapses to the digit '2', which no mechanical rule produces.
+	"int_to_str": "int2str",
 
 	// EC constants
 	"EC_P": "EC_P",
@@ -1332,15 +1338,39 @@ func (p *pyParser) parsePyFor(loc SourceLocation) Statement {
 	p.expectIdent("range")
 	p.expect(pyTokLParen)
 
-	// range(n) or range(a, b)
+	// range(n), range(a, b), or range(a, b, step) with step in {1, -1}.
+	//
+	// The third argument is what lets the Python surface spell a COUNTDOWN.
+	// Until it existed, `range` was the surface's only loop syntax and it
+	// could only ascend, so `step = -1` — a shape the ANF loop node has
+	// carried since issue #121 and every tier lowers — was unreachable from
+	// Python, and no fixture could exercise it across all nine surfaces.
+	//
+	// Only ±1 is accepted: the ANF loop node synthesizes iteration k as
+	// `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+	// representation. Refusing it is the same rule the for-header surfaces
+	// enforce on `i += 2` (N-061), stated in Python's spelling.
 	first := p.parsePyExpression()
 	var initExpr Expression
 	var limitExpr Expression
+	descending := false
 
 	if p.match(pyTokComma) {
 		// range(a, b)
 		initExpr = first
 		limitExpr = p.parsePyExpression()
+		if p.match(pyTokComma) {
+			stepExpr := p.parsePyExpression()
+			step, ok := literalIntValue(stepExpr)
+			switch {
+			case ok && step.Cmp(big.NewInt(1)) == 0:
+				descending = false
+			case ok && step.Cmp(big.NewInt(-1)) == 0:
+				descending = true
+			default:
+				p.addError(RangeStepDiagnostic)
+			}
+		}
 	} else {
 		// range(n) — init = 0, limit = n
 		initExpr = BigIntLiteral{Value: big.NewInt(0)}
@@ -1361,14 +1391,23 @@ func (p *pyParser) parsePyFor(loc SourceLocation) Statement {
 		SourceLocation: loc,
 	}
 
+	// `range` is half-open at BOTH ends: `range(5, 1, -1)` yields 5, 4, 3, 2,
+	// so the descending guard is `i > stop`, exactly as `<` is for ascending.
+	condOp := "<"
+	var updateExpr Expression = IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
+	if descending {
+		condOp = ">"
+		updateExpr = DecrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
+	}
+
 	condition := BinaryExpr{
-		Op:    "<",
+		Op:    condOp,
 		Left:  Identifier{Name: varName},
 		Right: limitExpr,
 	}
 
 	update := ExpressionStmt{
-		Expr:           IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false},
+		Expr:           updateExpr,
 		SourceLocation: loc,
 	}
 
@@ -1900,3 +1939,28 @@ func (p *pyParser) pyIsPyTypeStart() bool {
 
 // Ensure the _ import is used
 var _ = unicode.IsUpper
+
+// RangeStepDiagnostic is emitted for a `range` step the unrolled loop model
+// cannot represent. Shared verbatim with the other six tiers.
+const RangeStepDiagnostic = "range() step must be 1 or -1. The unrolled loop carries only a start value " +
+	"and a unit step, so any other step -- range(0, 10, 2), say -- cannot be " +
+	"represented and would be discarded."
+
+// literalIntValue returns the integer value of a literal expression.
+//
+// A negative literal arrives as a unary minus over a positive one, so both
+// shapes have to be walked — the same walk anf_lower does, for the same reason
+// (N-138).
+func literalIntValue(expr Expression) (*big.Int, bool) {
+	switch e := expr.(type) {
+	case BigIntLiteral:
+		return e.Value, e.Value != nil
+	case UnaryExpr:
+		if e.Op == "-" {
+			if inner, ok := literalIntValue(e.Operand); ok {
+				return new(big.Int).Neg(inner), true
+			}
+		}
+	}
+	return nil, false
+}

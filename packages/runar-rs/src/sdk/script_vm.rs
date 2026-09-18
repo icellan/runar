@@ -16,6 +16,29 @@
 //! a script's pass/fail outcome is reported, but per-opcode stepping is not
 //! available. This is a documented, intentional divergence — see
 //! `audits/cross-language-completeness-20260513.md` § GAP-M2.
+//!
+//! # OP_2MUL / OP_2DIV are refused, so the EC families cannot run here
+//!
+//! `bsv-sdk` 0.2.89 rejects OP_2MUL and OP_2DIV unconditionally
+//! (`src/script/spend_ops.rs`, under "Disabled Opcodes") with no post-Genesis
+//! override, and BSV re-enabled both at Genesis. Four of this repo's codegen
+//! modules emit OP_2MUL — `compilers/rust/src/codegen/{ec, p256_p384, bn254,
+//! koalabear}.rs` — so a contract using secp256k1, NIST P-256/P-384, BN254 or
+//! KoalaBear compiles to a script this VM will not execute.
+//!
+//! **The failure is indistinguishable from a real one at a glance.**
+//! [`VmResult::success`] is `false` and [`VmResult::error`] carries
+//! `DisabledOpcode("OP_2MUL")` — the interpreter refused the PROGRAM, and the
+//! script may be perfectly valid on the network. Check `error` before reading
+//! `success` as a verdict about the contract: `error: None` means the script
+//! ran and evaluated false, which is the only outcome that says anything about
+//! the values.
+//!
+//! The Go tier's interpreter takes `WithAfterGenesis()` and runs these scripts,
+//! which is where those families are actually covered.
+//! `packages/runar-rs/tests/mock_script_agreement.rs` pins the limitation with
+//! a test, so the day upstream lifts it, the excuse it grants does not outlive
+//! the reason for it.
 
 use bsv::script::locking_script::LockingScript;
 use bsv::script::spend::{Spend, SpendParams};

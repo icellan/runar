@@ -83,7 +83,9 @@ def _spend_method_ops() -> list[StackOp]:
 # Captured from the current Python implementation. The WOTS+ verification
 # unrolls all 96 chains (64 message + 32 checksum) so the Stack-IR is dense.
 # Pinned baseline; any drift in the WOTS emitter will fail this immediately.
-EXPECTED_SPEND_OP_COUNT = 15494
+# R-135: +3 ops for the exact-signature-length gate (OP_SIZE, push 2144,
+# OP_EQUALVERIFY). 15494 -> 15497.
+EXPECTED_SPEND_OP_COUNT = 15497
 
 # 64 message-nibble chains + 3 checksum chains = 67 WOTS+ chains.
 # Each chain emits 1 SHA256 (chain start) + 1 SPLIT (sig element extract).

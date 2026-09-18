@@ -1,0 +1,855 @@
+{
+  "contractName": "ArrayWrite",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t3"
+            ],
+            "func": "extractSigHashType",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_const",
+            "value": 65
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "t4",
+            "op": "===",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t8"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "i"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "bin_op",
+            "left": "t10",
+            "op": "===",
+            "right": "t11"
+          }
+        },
+        {
+          "name": "t25",
+          "value": {
+            "cond": "t12",
+            "else": [
+              {
+                "name": "t14",
+                "value": {
+                  "kind": "load_param",
+                  "name": "i"
+                }
+              },
+              {
+                "name": "t15",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t16",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t14",
+                  "op": "===",
+                  "right": "t15"
+                }
+              },
+              {
+                "name": "t24",
+                "value": {
+                  "cond": "t16",
+                  "else": [
+                    {
+                      "name": "t18",
+                      "value": {
+                        "kind": "load_param",
+                        "name": "i"
+                      }
+                    },
+                    {
+                      "name": "t19",
+                      "value": {
+                        "kind": "load_const",
+                        "value": 2
+                      }
+                    },
+                    {
+                      "name": "t20",
+                      "value": {
+                        "kind": "bin_op",
+                        "left": "t18",
+                        "op": "===",
+                        "right": "t19"
+                      }
+                    },
+                    {
+                      "name": "t23",
+                      "value": {
+                        "cond": "t20",
+                        "else": [
+                          {
+                            "name": "t22",
+                            "value": {
+                              "kind": "load_prop",
+                              "name": "table__3"
+                            }
+                          }
+                        ],
+                        "kind": "if",
+                        "then": [
+                          {
+                            "name": "t21",
+                            "value": {
+                              "kind": "load_prop",
+                              "name": "table__2"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t17",
+                      "value": {
+                        "kind": "load_prop",
+                        "name": "table__1"
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t13",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "table__0"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "kind": "bin_op",
+            "left": "t25",
+            "op": "+",
+            "right": "t26"
+          }
+        },
+        {
+          "name": "__val_0",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t27"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "kind": "load_param",
+            "name": "i"
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "kind": "bin_op",
+            "left": "t28",
+            "op": "===",
+            "right": "t29"
+          }
+        },
+        {
+          "name": "t75",
+          "value": {
+            "kind": "load_param",
+            "name": "i"
+          }
+        },
+        {
+          "name": "t76",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t77",
+          "value": {
+            "kind": "bin_op",
+            "left": "t75",
+            "op": "===",
+            "right": "t76"
+          }
+        },
+        {
+          "name": "t78",
+          "value": {
+            "kind": "load_param",
+            "name": "i"
+          }
+        },
+        {
+          "name": "t79",
+          "value": {
+            "kind": "load_const",
+            "value": 2
+          }
+        },
+        {
+          "name": "t80",
+          "value": {
+            "kind": "bin_op",
+            "left": "t78",
+            "op": "===",
+            "right": "t79"
+          }
+        },
+        {
+          "name": "t81",
+          "value": {
+            "kind": "load_param",
+            "name": "i"
+          }
+        },
+        {
+          "name": "t82",
+          "value": {
+            "kind": "load_const",
+            "value": 3
+          }
+        },
+        {
+          "name": "t83",
+          "value": {
+            "kind": "bin_op",
+            "left": "t81",
+            "op": "===",
+            "right": "t82"
+          }
+        },
+        {
+          "name": "t84",
+          "value": {
+            "kind": "unary_op",
+            "op": "!",
+            "operand": "t30"
+          }
+        },
+        {
+          "name": "t85",
+          "value": {
+            "kind": "bin_op",
+            "left": "t84",
+            "op": "&&",
+            "right": "t77"
+          }
+        },
+        {
+          "name": "t86",
+          "value": {
+            "kind": "unary_op",
+            "op": "!",
+            "operand": "t77"
+          }
+        },
+        {
+          "name": "t87",
+          "value": {
+            "kind": "bin_op",
+            "left": "t84",
+            "op": "&&",
+            "right": "t86"
+          }
+        },
+        {
+          "name": "t88",
+          "value": {
+            "kind": "bin_op",
+            "left": "t87",
+            "op": "&&",
+            "right": "t80"
+          }
+        },
+        {
+          "name": "t89",
+          "value": {
+            "kind": "unary_op",
+            "op": "!",
+            "operand": "t80"
+          }
+        },
+        {
+          "name": "t90",
+          "value": {
+            "kind": "bin_op",
+            "left": "t84",
+            "op": "&&",
+            "right": "t86"
+          }
+        },
+        {
+          "name": "t91",
+          "value": {
+            "kind": "bin_op",
+            "left": "t90",
+            "op": "&&",
+            "right": "t89"
+          }
+        },
+        {
+          "name": "t92",
+          "value": {
+            "kind": "bin_op",
+            "left": "t91",
+            "op": "&&",
+            "right": "t83"
+          }
+        },
+        {
+          "name": "t93",
+          "value": {
+            "kind": "bin_op",
+            "left": "t30",
+            "op": "||",
+            "right": "t77"
+          }
+        },
+        {
+          "name": "t94",
+          "value": {
+            "kind": "bin_op",
+            "left": "t93",
+            "op": "||",
+            "right": "t80"
+          }
+        },
+        {
+          "name": "t95",
+          "value": {
+            "kind": "bin_op",
+            "left": "t94",
+            "op": "||",
+            "right": "t83"
+          }
+        },
+        {
+          "name": "t96",
+          "value": {
+            "kind": "assert",
+            "value": "t95"
+          }
+        },
+        {
+          "name": "t97",
+          "value": {
+            "kind": "load_prop",
+            "name": "table__0"
+          }
+        },
+        {
+          "name": "t100",
+          "value": {
+            "cond": "t30",
+            "else": [
+              {
+                "name": "t99",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t97"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t98",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__val_0"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t101",
+          "value": {
+            "kind": "update_prop",
+            "name": "table__0",
+            "value": "t100"
+          }
+        },
+        {
+          "name": "t102",
+          "value": {
+            "kind": "load_prop",
+            "name": "table__1"
+          }
+        },
+        {
+          "name": "t105",
+          "value": {
+            "cond": "t85",
+            "else": [
+              {
+                "name": "t104",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t102"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t103",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__val_0"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t106",
+          "value": {
+            "kind": "update_prop",
+            "name": "table__1",
+            "value": "t105"
+          }
+        },
+        {
+          "name": "t107",
+          "value": {
+            "kind": "load_prop",
+            "name": "table__2"
+          }
+        },
+        {
+          "name": "t110",
+          "value": {
+            "cond": "t88",
+            "else": [
+              {
+                "name": "t109",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t107"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t108",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__val_0"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t111",
+          "value": {
+            "kind": "update_prop",
+            "name": "table__2",
+            "value": "t110"
+          }
+        },
+        {
+          "name": "t112",
+          "value": {
+            "kind": "load_prop",
+            "name": "table__3"
+          }
+        },
+        {
+          "name": "t115",
+          "value": {
+            "cond": "t92",
+            "else": [
+              {
+                "name": "t114",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t112"
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t113",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__val_0"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t116",
+          "value": {
+            "kind": "update_prop",
+            "name": "table__3",
+            "value": "t115"
+          }
+        },
+        {
+          "name": "t56",
+          "value": {
+            "kind": "load_const",
+            "value": true
+          }
+        },
+        {
+          "name": "t57",
+          "value": {
+            "kind": "assert",
+            "value": "t56"
+          }
+        },
+        {
+          "name": "t58",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t59",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t60",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t61",
+          "value": {
+            "kind": "bin_op",
+            "left": "t59",
+            "op": "!==",
+            "right": "t60"
+          }
+        },
+        {
+          "name": "t64",
+          "value": {
+            "cond": "t61",
+            "else": [
+              {
+                "name": "t63",
+                "value": {
+                  "kind": "load_const",
+                  "value": ""
+                }
+              }
+            ],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t62",
+                "value": {
+                  "args": [
+                    "t58",
+                    "t59"
+                  ],
+                  "func": "buildChangeOutput",
+                  "kind": "call"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t65",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t66",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t67",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t68",
+          "value": {
+            "args": [
+              "t66",
+              "t65",
+              "t67"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t69",
+          "value": {
+            "args": [
+              "t68",
+              "t64"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t70",
+          "value": {
+            "args": [
+              "t69"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t71",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t72",
+          "value": {
+            "args": [
+              "t71"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t73",
+          "value": {
+            "kind": "bin_op",
+            "left": "t70",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t72"
+          }
+        },
+        {
+          "name": "t74",
+          "value": {
+            "isAutoInjectedStateCheck": true,
+            "kind": "assert",
+            "value": "t73"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "bump",
+      "params": [
+        {
+          "name": "i",
+          "type": "bigint"
+        },
+        {
+          "name": "_changePKH",
+          "type": "Ripemd160"
+        },
+        {
+          "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "initialValue": 0,
+      "name": "table__0",
+      "readonly": false,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 0,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    },
+    {
+      "initialValue": 0,
+      "name": "table__1",
+      "readonly": false,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 1,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    },
+    {
+      "initialValue": 0,
+      "name": "table__2",
+      "readonly": false,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 2,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    },
+    {
+      "initialValue": 0,
+      "name": "table__3",
+      "readonly": false,
+      "syntheticArrayChain": [
+        {
+          "base": "table",
+          "index": 3,
+          "length": 4
+        }
+      ],
+      "type": "bigint"
+    }
+  ]
+}

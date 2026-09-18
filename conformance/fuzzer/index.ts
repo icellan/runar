@@ -330,11 +330,16 @@ Options:
                          byte-identical output OR an identical typed rejection.
                          Each non-TS tier is driven via its --canonicalise CLI
                          shim. Use --num for case count and --seed to reproduce.
-  --require-tiers <list> --canonical only. Tiers whose shim MUST be runnable; a
-                         missing one FAILS the run instead of quietly shrinking
-                         it. Default: every tier in --compilers (all 7 for a
-                         bare run). 'all' = all 7; 'none' = opt out (local
-                         exploration only — never in CI).
+  --require-tiers <list> --canonical and --ir. Tiers that MUST have been
+                         compared; a missing one FAILS the run instead of
+                         quietly shrinking it. For --canonical that means the
+                         shim must be runnable; for --ir it means the tier must
+                         have compiled at least one of the generated programs,
+                         which also catches a tier whose binary is present but
+                         which rejects every program. Default: every tier in
+                         --compilers (all 7 for a bare run). 'all' = all 7;
+                         'none' = opt out (local exploration only — never in
+                         CI).
   --execute              TS-GAP-001 (randomized) / TS-GAP-005 — source-vs-script
                          EXECUTION oracle. Generates stateless, non-crypto
                          contracts, renders each to TS, and runs every generated
@@ -747,7 +752,7 @@ async function main(): Promise<void> {
   }
 
   if (opts.ir) {
-    const results = await runIRDifferentialFuzzing(opts.num, {
+    const report = await runIRDifferentialFuzzing(opts.num, {
       seed: opts.seed,
       compilers: opts.compilers,
       verbose: opts.verbose,
@@ -755,8 +760,10 @@ async function main(): Promise<void> {
       renderStrategy: opts.renderStrategy,
       includeStateful: opts.stateful,
       findingsDir: opts.findingsDir,
+      requireTiers: opts.requireTiers ?? opts.compilers,
     });
 
+    const results = report.results;
     const mismatches = results.filter((r) => !r.match);
     if (mismatches.length > 0) {
       console.log(`\nMismatches found: ${mismatches.length}`);
@@ -786,7 +793,18 @@ async function main(): Promise<void> {
       console.log(`\nResults written to: ${opts.output}`);
     }
 
-    if (mismatches.length > 0) process.exit(1);
+    // A tier that produced nothing for the whole run proved nothing. Failing
+    // here is the difference between "seven tiers agree" and "the six that
+    // answered agree".
+    if (report.missingRequiredTiers.length > 0) {
+      console.error(
+        `\nMISSING TIER(S): ${report.missingRequiredTiers.join(', ')} compiled none of the ` +
+          `${results.length} generated programs. A tier that never produced output has not been ` +
+          'compared — fix the toolchain, or narrow the requirement deliberately with --require-tiers.',
+      );
+    }
+
+    if (mismatches.length > 0 || report.missingRequiredTiers.length > 0) process.exit(1);
     return;
   }
 

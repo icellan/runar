@@ -295,8 +295,53 @@ fn field_neg(t: &mut BBTracker, a_name: &str, result_name: &str) {
 /// Emit ext4 mul component.
 /// Stack in: [a0, a1, a2, a3, b0, b1, b2, b3]
 /// Stack out: [result]
+/// R-119 -- a witness-supplied field element must BE a field element, aborting
+/// form.
+///
+/// Nothing in this module or its KoalaBear twin ever compared anything: the
+/// OP_LESSTHAN / OP_WITHIN / OP_GREATERTHANOREQUAL count in both was zero.
+/// Every operand of the four scalar builtins and the eight ext4 entry points is
+/// an unlock argument and went straight into OP_ADD / OP_SUB / OP_MUL / OP_MOD.
+///
+/// The `v` vs `v + p` half of the finding did NOT reproduce -- every emitter
+/// reduces its result mod p, so `bbFieldAdd(5+p, 0)` and `bbFieldAdd(5, 0)`
+/// both returned 5. The NEGATIVE half did: `field_add` and `field_mul` reduce
+/// with a BARE OP_MOD on the documented assumption that both operands are
+/// already in [0, p-1], and OP_MOD takes the sign of the dividend. Measured
+/// before this gate:
+///
+/// ```text
+/// bbFieldAdd(-1, 0) -> -1        bbFieldAdd(p-1, 0) -> 2013265920
+/// bbFieldMul(-1, 1) -> -1        bbFieldInv(-1)     -> -1
+/// ```
+///
+/// Two different script numbers for one residue, out of a builtin whose
+/// declared codomain is the field -- and script equality is numeric, so the
+/// escaped spelling breaks every downstream comparison and every serialisation
+/// of the element.
+///
+/// REJECT, not reduce, and gate the INPUT: a reduce would leave `v` and `v + p`
+/// as two accepted spellings of one element, which is the aliasing this finding
+/// is about. Gating the input makes the builtins canonical-in / canonical-out,
+/// so the gate is idempotent under composition. ABORTING because these are
+/// VALUE builtins -- the split R-117 drew for EC and CL-BUG-095 set for the
+/// Point width. Public entry points only; the internal helpers run hundreds of
+/// times on values canonical by construction.
+fn emit_canon_verify(t: &mut BBTracker<'_>, names: &[&str]) {
+    for n in names {
+        t.copy_to_top(n, "_cv");
+        t.raw_block(&["_cv"], None, |e| {
+            e(StackOp::Push(PushValue::Int(BigInt::from(0))));
+            e(StackOp::Push(PushValue::Int(BigInt::from(BB_P))));
+            e(StackOp::Opcode("OP_WITHIN".into()));
+            e(StackOp::Opcode("OP_VERIFY".into()));
+        });
+    }
+}
+
 fn emit_ext4_mul_component(emit: &mut dyn FnMut(StackOp), component: usize) {
     let t = &mut BBTracker::new(&["a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"], emit);
+    emit_canon_verify(t, &["a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"]);
 
     match component {
         0 => {
@@ -393,6 +438,7 @@ fn emit_ext4_mul_component(emit: &mut dyn FnMut(StackOp), component: usize) {
 /// Stack out: [result]
 fn emit_ext4_inv_component(emit: &mut dyn FnMut(StackOp), component: usize) {
     let t = &mut BBTracker::new(&["a0", "a1", "a2", "a3"], emit);
+    emit_canon_verify(t, &["a0", "a1", "a2", "a3"]);
 
     // Step 1: Compute norm_0 = a0^2 + W*a2^2 - 2*W*a1*a3
     t.copy_to_top("a0", "_a0c");
@@ -517,6 +563,7 @@ fn emit_ext4_inv_component(emit: &mut dyn FnMut(StackOp), component: usize) {
 /// Stack out: [..., (a + b) mod p]
 pub fn emit_bb_field_add(emit: &mut dyn FnMut(StackOp)) {
     let t = &mut BBTracker::new(&["a", "b"], emit);
+    emit_canon_verify(t, &["a", "b"]);
     field_add(t, "a", "b", "result");
     // Stack should now be: [result]
 }
@@ -526,6 +573,7 @@ pub fn emit_bb_field_add(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [..., (a - b) mod p]
 pub fn emit_bb_field_sub(emit: &mut dyn FnMut(StackOp)) {
     let t = &mut BBTracker::new(&["a", "b"], emit);
+    emit_canon_verify(t, &["a", "b"]);
     field_sub(t, "a", "b", "result");
 }
 
@@ -534,6 +582,7 @@ pub fn emit_bb_field_sub(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [..., (a * b) mod p]
 pub fn emit_bb_field_mul(emit: &mut dyn FnMut(StackOp)) {
     let t = &mut BBTracker::new(&["a", "b"], emit);
+    emit_canon_verify(t, &["a", "b"]);
     field_mul(t, "a", "b", "result");
 }
 
@@ -542,6 +591,7 @@ pub fn emit_bb_field_mul(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [..., a^(p-2) mod p]
 pub fn emit_bb_field_inv(emit: &mut dyn FnMut(StackOp)) {
     let t = &mut BBTracker::new(&["a"], emit);
+    emit_canon_verify(t, &["a"]);
     field_inv(t, "a", "result");
 }
 

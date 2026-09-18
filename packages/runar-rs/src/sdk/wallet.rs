@@ -10,10 +10,12 @@ use bsv::transaction::Transaction as BsvTransaction;
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
 use serde_json::Value;
-use super::types::{TransactionData, TxInput, TxOutput, Utxo};
+use super::types::{RunarArtifact, TransactionData, TxInput, TxOutput, Utxo};
 use super::provider::Provider;
 use super::signer::Signer;
 use super::script_utils::build_p2pkh_script;
+use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
+use super::unsound_primitives::assert_unsound_primitives_acknowledged;
 
 // ---------------------------------------------------------------------------
 // WalletClient trait
@@ -106,6 +108,9 @@ pub trait WalletClient {
 // ---------------------------------------------------------------------------
 // WalletProvider options
 // ---------------------------------------------------------------------------
+/// The default ARC broadcaster. This is a MAINNET endpoint — see R-179.
+pub const MAINNET_ARC_URL: &str = "https://arc.gorillapool.io";
+
 
 /// Options for constructing a WalletProvider.
 pub struct WalletProviderOptions<W: WalletClient> {
@@ -194,15 +199,26 @@ impl<W: WalletClient> WalletProvider<W> {
         network: Option<String>,
         fee_rate: Option<i64>,
     ) -> Self {
+        let resolved_network = network.unwrap_or_else(|| "mainnet".to_string());
         WalletProvider {
             wallet,
             protocol_id,
             key_id,
             basket,
             funding_tag: funding_tag.unwrap_or_else(|| "funding".to_string()),
-            arc_url: arc_url.unwrap_or_else(|| "https://arc.gorillapool.io".to_string()),
+            // R-179: only mainnet has a default ARC endpoint, because the
+            // default IS a mainnet endpoint. A non-mainnet provider that names
+            // none is left with an empty arc_url and refuses in `broadcast`
+            // rather than sending a testnet-configured spend to real money.
+            arc_url: arc_url.unwrap_or_else(|| {
+                if resolved_network == "mainnet" {
+                    MAINNET_ARC_URL.to_string()
+                } else {
+                    String::new()
+                }
+            }),
             overlay_url,
-            network: network.unwrap_or_else(|| "mainnet".to_string()),
+            network: resolved_network.clone(),
             fee_rate: fee_rate.unwrap_or(100),
             tx_cache: HashMap::new(),
             cached_pub_key: None,
@@ -332,6 +348,15 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
     }
 
     fn broadcast(&mut self, tx: &BsvTransaction) -> Result<String, String> {
+        // R-179: see `new` — an empty arc_url means a non-mainnet provider was
+        // built without naming its own endpoint.
+        if self.arc_url.is_empty() {
+            return Err(format!(
+                "WalletProvider broadcast: no ARC endpoint for network '{}' — {} is a \
+                 MAINNET broadcaster; pass arc_url explicitly",
+                self.network, MAINNET_ARC_URL
+            ));
+        }
         let raw_hex = tx.to_hex().map_err(|e| format!("WalletProvider broadcast: to_hex failed: {}", e))?;
 
         // Issue #107: when a broadcaster is injected, delegate to it so the SDK
@@ -593,6 +618,11 @@ pub struct DeployWithWalletOptions {
     pub satoshis: Option<i64>,
     /// Human-readable description for the wallet action.
     pub description: Option<String>,
+    /// Builtins the caller accepts despite the compiler not claiming they are
+    /// sound (R-062). Required — naming each one — when the artifact declares
+    /// `unsound_primitives`; ignored otherwise. Same mechanism and same error
+    /// as `DeployOptions::acknowledge_unsound` on the ordinary deploy path.
+    pub acknowledge_unsound: Vec<String>,
 }
 
 impl Default for DeployWithWalletOptions {
@@ -600,6 +630,7 @@ impl Default for DeployWithWalletOptions {
         DeployWithWalletOptions {
             satoshis: None,
             description: None,
+            acknowledge_unsound: Vec::new(),
         }
     }
 }
@@ -612,13 +643,35 @@ impl Default for DeployWithWalletOptions {
 /// This is a standalone function rather than a method on RunarContract to avoid
 /// generic type parameter complications. The caller should update the contract's
 /// UTXO tracking after deployment.
+///
+/// R-062: takes the `artifact` — not just its name — because this is a funding
+/// path, and a funding path has to be able to read `unsound_primitives` before
+/// it asks a wallet for coins. `locking_script` stays separate: it is the built
+/// script, with constructor args spliced in, which is not `artifact.script`.
 pub fn deploy_with_wallet<W: WalletClient>(
     wallet: &W,
     basket: &str,
     locking_script: &str,
-    contract_name: &str,
+    artifact: &RunarArtifact,
     options: Option<&DeployWithWalletOptions>,
 ) -> Result<(String, usize), String> {
+    let contract_name = artifact.contract_name.as_str();
+    let context = format!("{contract_name}.deploy_with_wallet");
+
+    // DoS-bound: reject pathological scripts BEFORE involving the wallet.
+    // `deploy` has run this since it was added; the wallet path never did.
+    assert_script_hex_under_limit(locking_script, MAX_SCRIPT_BYTES, &context)?;
+
+    // R-062: the wallet is a SECOND funding path, and it must make the same
+    // decision `deploy` makes — refuse to fund a script reaching a builtin the
+    // compiler does not claim is sound unless the caller says so here. Before
+    // `create_action`, so no wallet is ever asked for the coins.
+    assert_unsound_primitives_acknowledged(
+        artifact,
+        options.map(|o| o.acknowledge_unsound.as_slice()).unwrap_or(&[]),
+        &context,
+    )?;
+
     let satoshis = options
         .and_then(|o| o.satoshis)
         .unwrap_or(1);
@@ -1090,6 +1143,70 @@ mod tests {
         assert_eq!(provider.get_network(), "mainnet");
     }
 
+    // R-179 (CL-BUG-072): arc_url and network were defaulted independently, so
+    // a provider configured for testnet reported get_network() == "testnet" and
+    // broadcast every transaction to the MAINNET ARC. `new` returns Self and
+    // cannot refuse, so a non-mainnet provider that names no endpoint is left
+    // with an empty arc_url and `broadcast` refuses.
+    #[test]
+    fn r179_testnet_without_arc_url_does_not_inherit_the_mainnet_endpoint() {
+        let wallet = MockWalletClient::new();
+        let provider = WalletProvider::new(
+            wallet,
+            (2, "test".to_string()),
+            "1".to_string(),
+            "my-basket".to_string(),
+            None,
+            None,
+            None,
+            Some("testnet".to_string()),
+            None,
+        );
+        assert_eq!(provider.get_network(), "testnet");
+        assert_eq!(
+            provider.arc_url, "",
+            "a testnet provider must not inherit the mainnet ARC endpoint"
+        );
+    }
+
+    #[test]
+    fn r179_testnet_with_an_explicit_arc_url_is_accepted() {
+        let wallet = MockWalletClient::new();
+        let provider = WalletProvider::new(
+            wallet,
+            (2, "test".to_string()),
+            "1".to_string(),
+            "my-basket".to_string(),
+            None,
+            Some("https://arc.testnet.example".to_string()),
+            None,
+            Some("testnet".to_string()),
+            None,
+        );
+        assert_eq!(provider.arc_url, "https://arc.testnet.example");
+        assert_eq!(provider.get_network(), "testnet");
+    }
+
+    #[test]
+    fn r179_mainnet_default_is_unchanged() {
+        for network in [None, Some("mainnet".to_string())] {
+            let wallet = MockWalletClient::new();
+            let provider = WalletProvider::new(
+                wallet,
+                (2, "test".to_string()),
+                "1".to_string(),
+                "my-basket".to_string(),
+                None,
+                None,
+                None,
+                network,
+                None,
+            );
+            assert_eq!(provider.get_network(), "mainnet");
+            assert_eq!(provider.arc_url, MAINNET_ARC_URL);
+        }
+    }
+
     #[test]
     fn wallet_provider_get_fee_rate() {
         let wallet = MockWalletClient::new();
@@ -1265,6 +1382,26 @@ mod tests {
     // deploy_with_wallet tests
     // -----------------------------------------------------------------------
 
+    /// Minimal artifact with no unsound primitives (R-062 control shape).
+    fn test_artifact(name: &str) -> RunarArtifact {
+        use super::super::types::{Abi, AbiConstructor};
+        RunarArtifact {
+            version: "runar-v0.1.0".to_string(),
+            contract_name: name.to_string(),
+            parent_class: None,
+            abi: Abi { constructor: AbiConstructor { params: vec![] }, methods: vec![] },
+            script: "51".to_string(),
+            asm: None,
+            state_fields: None,
+            constructor_slots: None,
+            code_sep_index_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
+            anf: None,
+            unsound_primitives: None,
+        }
+    }
+
     #[test]
     fn deploy_with_wallet_creates_action() {
         let wallet = MockWalletClient::new();
@@ -1272,7 +1409,7 @@ mod tests {
             &wallet,
             "my-basket",
             "76a91400000000000000000000000000000000000000008888ac",
-            "TestContract",
+            &test_artifact("TestContract"),
             None,
         )
         .unwrap();
@@ -1292,12 +1429,13 @@ mod tests {
         let opts = DeployWithWalletOptions {
             satoshis: Some(5000),
             description: Some("My custom deploy".to_string()),
+            acknowledge_unsound: Vec::new(),
         };
         let (txid, _) = deploy_with_wallet(
             &wallet,
             "my-basket",
             "51",
-            "MyContract",
+            &test_artifact("MyContract"),
             Some(&opts),
         )
         .unwrap();

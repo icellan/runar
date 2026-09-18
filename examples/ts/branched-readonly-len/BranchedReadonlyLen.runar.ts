@@ -1,4 +1,4 @@
-import { StatefulSmartContract, ByteString, len } from 'runar-lang';
+import { StatefulSmartContract, ByteString, len, toByteString } from 'runar-lang';
 
 /**
  * BranchedReadonlyLen exercises a state-mutating if/else branched on a
@@ -24,7 +24,7 @@ class BranchedReadonlyLen extends StatefulSmartContract {
       this.tag = scratch;
     } else {
       this.count = this.count - 1n;
-      this.tag = '3030';
+      this.tag = toByteString('3030');
     }
     this.addOutput(1000n, this.count, this.tag);
   }

@@ -26,8 +26,7 @@ conformance/source-map/
   `ec-demo`'s compiled output explodes EC primitives to ~750 KB of hex
   and ~45 MB of source-map JSON per tier; committing 7 × 45 MB into the
   repo is not OK. `arithmetic` is structurally similar (computation-dense,
-  multi-method) and stays sub-kilobyte per tier. See
-  `_review/GAP-002-audit.md`.
+  multi-method) and stays sub-kilobyte per tier.
 - `if-else`
 
 ## Tiers (7)

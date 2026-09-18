@@ -404,3 +404,199 @@ describe('validateArtifact', () => {
     expect(result.valid).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue R-089 — `@sighash` fields the compilers emit but the schemas rejected.
+//
+// Every tier emits `{ kind: 'check_preimage', preimage, sighashFlag }` for a
+// method that declares a non-default `@sighash` mode, and carries the same
+// mode into `abi.methods[].sigHashType`. Both `$defs` are
+// `additionalProperties: false`, so before this was fixed `validateANF` /
+// `validateArtifact` REJECTED correct compiler output — the one artifact-level
+// gate that could have caught a *dropped* sighash field could not process a
+// *present* one.
+//
+// The fields are optional: absent means the default `ALL|FORKID` (0x41), which
+// keeps every pre-existing golden byte-identical.
+// ---------------------------------------------------------------------------
+
+/** `SINGLE|FORKID` = 0x43 = 67 — the flag the Go/TS tiers emit for that mode. */
+const SIGHASH_SINGLE_FORKID = 67;
+
+function makeSighashANF(): TestProgram {
+  return {
+    contractName: 'Sighash',
+    properties: [{ name: 'n', type: 'bigint', readonly: false }],
+    methods: [
+      {
+        name: 'bump',
+        params: [{ name: 'txPreimage', type: 'SigHashPreimage' }],
+        body: [
+          { name: 't0', value: { kind: 'load_param', name: 'txPreimage' } },
+          {
+            name: 't1',
+            value: {
+              kind: 'check_preimage',
+              preimage: 't0',
+              sighashFlag: SIGHASH_SINGLE_FORKID,
+            },
+          },
+          { name: 't2', value: { kind: 'assert', value: 't1' } },
+        ],
+        isPublic: true,
+      },
+    ],
+  };
+}
+
+describe('R-089 — check_preimage.sighashFlag (ANF)', () => {
+  it('accepts a check_preimage carrying a non-default sighashFlag', () => {
+    const result = validateANF(makeSighashANF());
+    if (!result.valid) {
+      throw new Error(
+        'validateANF rejected a check_preimage with sighashFlag:\n' +
+          result.errors.map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`).join('\n'),
+      );
+    }
+    expect(result.valid).toBe(true);
+  });
+
+  it('control: the same program without sighashFlag (default mode) still validates', () => {
+    const anf = makeSighashANF();
+    delete (anf.methods[0]!.body[1]!.value as Record<string, unknown>).sighashFlag;
+    expect(validateANF(anf).valid).toBe(true);
+  });
+
+  it('rejects a non-integer sighashFlag', () => {
+    const anf = makeSighashANF();
+    (anf.methods[0]!.body[1]!.value as Record<string, unknown>).sighashFlag = 'SINGLE|FORKID';
+    expect(validateANF(anf).valid).toBe(false);
+  });
+
+  it('still rejects a genuinely bogus extra property on check_preimage', () => {
+    const anf = makeSighashANF();
+    (anf.methods[0]!.body[1]!.value as Record<string, unknown>).notARealField = 1;
+    const result = validateANF(anf);
+    expect(result.valid).toBe(false);
+    expect(
+      (result as { errors: Array<{ keyword: string }> }).errors.some(
+        (e) => e.keyword === 'additionalProperties',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('R-089 — ABIMethod.sigHashType (artifact)', () => {
+  function makeSighashArtifact() {
+    const artifact = makeValidArtifact();
+    (artifact.abi.methods[0] as Record<string, unknown>).sigHashType =
+      SIGHASH_SINGLE_FORKID;
+    return artifact;
+  }
+
+  it('accepts an ABI method carrying a non-default sigHashType', () => {
+    const result = validateArtifact(makeSighashArtifact());
+    if (!result.valid) {
+      throw new Error(
+        'validateArtifact rejected an ABI method with sigHashType:\n' +
+          result.errors.map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`).join('\n'),
+      );
+    }
+    expect(result.valid).toBe(true);
+  });
+
+  it('control: the same artifact without sigHashType (default mode) still validates', () => {
+    expect(validateArtifact(makeValidArtifact()).valid).toBe(true);
+  });
+
+  it('rejects a non-integer sigHashType', () => {
+    const artifact = makeSighashArtifact();
+    (artifact.abi.methods[0] as Record<string, unknown>).sigHashType = '0x43';
+    expect(validateArtifact(artifact).valid).toBe(false);
+  });
+
+  it('still rejects a genuinely bogus extra property on an ABI method', () => {
+    const artifact = makeSighashArtifact();
+    (artifact.abi.methods[0] as Record<string, unknown>).notARealField = true;
+    const result = validateArtifact(artifact);
+    expect(result.valid).toBe(false);
+    expect(
+      (result as { errors: Array<{ keyword: string }> }).errors.some(
+        (e) => e.keyword === 'additionalProperties',
+      ),
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-089 audit follow-up — `add_output.preimage` carries `''` as a sentinel.
+//
+// An EXPLICIT `this.addOutput(...)` has no verified-preimage temp to extract a
+// codePart from, so all seven tiers emit `preimage: ''`; stack lowering reads
+// it as "no ref" (`if (value.preimage) refs.push(...)` in 05-stack-lower.ts).
+// The schema's `minLength: 1` therefore rejected 11 of the 74 CHECKED-IN
+// golden ANFs. `check_preimage` / `deserialize_state` always name a real temp
+// and keep their `minLength: 1`.
+// ---------------------------------------------------------------------------
+
+describe("R-089 — add_output.preimage accepts the '' sentinel", () => {
+  function makeAddOutputANF(preimage: string): TestProgram {
+    return {
+      contractName: 'Emitter',
+      properties: [{ name: 'n', type: 'bigint', readonly: false }],
+      methods: [
+        {
+          name: 'pay',
+          params: [],
+          body: [
+            { name: 't0', value: { kind: 'load_const', value: 1000 } },
+            { name: 't1', value: { kind: 'load_prop', name: 'n' } },
+            {
+              name: 't2',
+              value: {
+                kind: 'add_output',
+                satoshis: 't0',
+                stateValues: ['t1'],
+                preimage,
+              },
+            },
+          ],
+          isPublic: true,
+        },
+      ],
+    };
+  }
+
+  it("accepts an explicit addOutput's empty preimage", () => {
+    const result = validateANF(makeAddOutputANF(''));
+    if (!result.valid) {
+      throw new Error(
+        "validateANF rejected add_output with the '' preimage sentinel:\n" +
+          result.errors.map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`).join('\n'),
+      );
+    }
+    expect(result.valid).toBe(true);
+  });
+
+  it('control: a named preimage temp still validates', () => {
+    expect(validateANF(makeAddOutputANF('t9')).valid).toBe(true);
+  });
+
+  it('still requires the preimage key to be present', () => {
+    const anf = makeAddOutputANF('');
+    delete (anf.methods[0]!.body[2]!.value as Record<string, unknown>).preimage;
+    expect(validateANF(anf).valid).toBe(false);
+  });
+
+  it('control: check_preimage still rejects an empty preimage ref', () => {
+    const anf = makeSighashANF();
+    (anf.methods[0]!.body[1]!.value as Record<string, unknown>).preimage = '';
+    const result = validateANF(anf);
+    expect(result.valid).toBe(false);
+    expect(
+      (result as { errors: Array<{ keyword: string }> }).errors.some(
+        (e) => e.keyword === 'minLength',
+      ),
+    ).toBe(true);
+  });
+});

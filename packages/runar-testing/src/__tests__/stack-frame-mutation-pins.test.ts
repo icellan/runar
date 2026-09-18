@@ -172,8 +172,13 @@ export class EmptyElseGuard extends SmartContract {
   }
 }
 `,
-  foldOff: '0063516776686351916968006351776891',
-  foldOn: '006351677668635100696700680063517b75677c689177',
+  // W3 / BoolBamboozle re-stamp: `m(b: boolean)` is a public method with a
+  // `boolean` parameter, so both spellings now open with the 9-byte ABI-domain
+  // gate `76 76 00 87 7c 51 87 9b 69`. The mutation this pin kills lives in the
+  // empty-else reconcile further down the stream and is unaffected — the tail
+  // of both strings is byte-for-byte what it was.
+  foldOff: '767600877c51879b690063516776686351916968006351776891',
+  foldOn: '767600877c51879b69006351677668635100696700680063517b75677c689177',
 };
 
 // ---------------------------------------------------------------------------
@@ -211,11 +216,12 @@ export class SinkDistance extends StatefulSmartContract {
   }
 }
 `,
-  // Stateful: ~1 KB of preimage machinery, so the pin is `sha256(scriptHex)`
+  // Stateful: ~1 KB of preimage machinery (R-010 added the `_codePart`
+  // authentication, +79 hex chars fold-OFF), so the pin is `sha256(scriptHex)`
   // rather than a kilobyte of literal hex. Same detection power; when it fires,
   // diff the two scripts rather than reading the digest.
-  foldOff: '5702a5b2755c59ea57fee5b59b9304d0447868cc2793f3d75e0d122dc1baebf6',
-  foldOn: 'd8c752ee2160480f1b3e87aedad6144a21aec4f160162813a4bf3cbea4c709b0',
+  foldOff: 'e4e9723d6c78546fd0267cb413843973117f4652e78831cb6ddc07f6481a3f83',
+  foldOn: 'e69b341b4934f092f0230de6ca5c97e9d606caa77bf043354883688c6a40538b',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -234,8 +240,10 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
       const off = hexOf(p, true);
       const on = hexOf(p, false);
       if (p === W4) {
-        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1282);
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1300);
+        // W1's zero-pad before the auto-injected sighash-type pin's OP_BIN2NUM
+        // added 6 hex chars to both modes.
+        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1446);
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1464);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {

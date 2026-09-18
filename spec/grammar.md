@@ -1,6 +1,6 @@
 # Rúnar Language Grammar
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document defines the formal grammar for Rúnar, a strict subset of TypeScript designed for compilation to Bitcoin SV Script. Rúnar source files are valid TypeScript that can be type-checked by `tsc`, but only the constructs defined here are accepted by the Rúnar compiler.
@@ -68,13 +68,21 @@ ContractDeclaration
 BaseClass
     = 'SmartContract'
     | 'StatefulSmartContract'
+    | 'UnsafeSmartContract'
     ;
 ```
 
 ### Rules
 
 - Exactly one class per file.
-- The class MUST extend `SmartContract` (stateless) or `StatefulSmartContract` (stateful).
+- The class MUST extend `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `UnsafeSmartContract` (stateless, plus the raw `asm()` escape hatch — see the note below).
+- `UnsafeSmartContract` is `SmartContract` plus one additional builtin:
+  `asm({ body, in_arity, out_arity })`, which splices verbatim opcode bytes into the emitted script.
+  `body` is a hex string (or an array form built from opcode helpers). The compiler does not interpret those
+  bytes — it lowers them to a `raw_script` ANF node (see `spec/ir-format.md` section 4.19), which is
+  opaque to every analysis: dead-code elimination must not remove it, the stack model cannot verify
+  the declared arity, and no type information crosses it. Use of this base class moves the burden of
+  stack-shape correctness entirely onto the contract author.
 - `StatefulSmartContract` automatically handles preimage verification and state continuation for public methods. Specifically, the ANF lowerer implicitly injects a `txPreimage: SigHashPreimage` parameter, a `checkPreimage(txPreimage)` assertion at method entry, and state continuation code (via `addOutput`) at method exit. Developers do not need to write these explicitly.
 - Decorators are **disallowed**.
 - Generic type parameters on the class are **disallowed**.
@@ -390,6 +398,10 @@ ForStatement
                 Identifier RelOp Expression ';'
                 Identifier ( '++' | '--' ) ')' Block
     ;
+(* All three Identifiers denote the SAME variable -- the loop iterator.
+   EBNF cannot express that equality, so it is a Statement Restriction
+   below rather than a production. The condition's left-hand side in
+   particular is not an arbitrary Expression: see W4. *)
 
 RelOp
     = '<' | '<=' | '>' | '>='
@@ -408,8 +420,12 @@ ReturnStatement
 
 ### Statement Restrictions
 
-- **Variable declarations**: `const` variables cannot be reassigned. `let` variables can be reassigned but not re-declared in the same scope.
-- **For loops**: MUST be bounded. The loop bound (the right-hand side of the comparison) MUST be a compile-time constant integer literal or `const` variable initialized to a literal. The loop variable MUST use simple increment (`++`) or decrement (`--`). Nested loops are allowed but the total unrolled iteration count must be statically determinable.
+- **Variable declarations**: `const` variables cannot be reassigned. `let` variables can be reassigned but not re-declared in the same scope. A declaration list declares **exactly one** variable -- `let a = 1n, b = 2n;` is an error, in statement position and in a for-initializer alike. The VariableDeclaration production above already admits only one declarator; the rule is restated here because it is enforced, not merely implied.
+  - Like the for-loop left-hand-side rule, this is a spending-condition rule. Every declarator after the first used to be discarded before the AST was built, and the value is not always what is lost: a private helper carrying the contract's guard, called from a for-initializer's second declarator, compiled to byte-identical output to the same loop with the declarator deleted (`008b519c77` either way), and `@bsv/sdk` `Spend.validate()` accepted a value the guard exists to reject. The dropped name is never referenced again, so nothing downstream can catch it as an undeclared variable. (W5; `conformance/negatives/N43-multi-declarator-statement.runar.ts` and `N44-for-init-extra-declarator.runar.ts` are the seven-tier gates.)
+- **For loops**: MUST be bounded. The loop bound (the right-hand side of the comparison) MUST be a compile-time constant integer literal or `const` variable initialized to a literal. The **left**-hand side of the comparison MUST be the loop variable itself -- not a computed expression (`i + 1n < 2n`), and not a different variable (`j < 3n`). The loop variable MUST use simple increment (`++`) or decrement (`--`). Nested loops are allowed but the total unrolled iteration count must be statically determinable.
+  - The left-hand-side rule is a spending-condition rule, not a style rule. The loop is unrolled at compile time as `start + k*step` and the trip count comes from the bound alone, so `for (let i = 0n; i + 1n < 2n; i++)` runs ONCE in the source language and TWICE in the emitted script. A contract whose first lap checks a signature and whose second lap overwrites the result spends on an EMPTY signature: measured through `@bsv/sdk` `Spend.validate()`, `i + 1n < 2n` accepted it and the semantically identical `i < 1n` rejected it. (W4; `conformance/negatives/N40-loop-computed-condition-left.runar.ts` and `N41-loop-condition-stray-variable.runar.ts` are the seven-tier gates.)
+  - The comparison direction MUST agree with the update: `<` / `<=` with `++`, `>` / `>=` with `--`. (`conformance/negatives/N42-loop-direction-mismatch.runar.ts`.)
+- **Output intrinsics in a loop body**: `this.addOutput`, `this.addRawOutput` and `this.addDataOutput` MUST NOT be called inside a loop body, directly or through a private helper called there. A loop body lowers into its own scope whose declared outputs never reach the method's output list, so the state continuation would commit to fewer outputs than the transaction actually creates -- a covenant no shipped SDK can spend, whose successor is unspendable. Declare the outputs at the method's top level. (R-127; `conformance/negatives/N30-output-intrinsic-in-loop.runar.ts` is the seven-tier gate.)
 - **While loops, do-while loops**: **disallowed**.
 - **Switch statements**: **disallowed** (use if/else chains).
 - **Labeled statements, break, continue**: **disallowed**.
@@ -591,8 +607,16 @@ BuiltinFunction_Hash
     | 'ripemd160'          /* ripemd160(data: ByteString): Ripemd160 */
     | 'hash160'            /* hash160(data: ByteString): Ripemd160 -- SHA-256 then RIPEMD-160 */
     | 'hash256'            /* hash256(data: ByteString): Sha256 -- double SHA-256 */
+    | 'sha256Compress'     /* sha256Compress(state: ByteString, block: ByteString): ByteString */
+    | 'sha256Finalize'     /* sha256Finalize(state: ByteString, remaining: ByteString, msgBitLen: bigint): ByteString */
+    | 'blake3Compress'     /* blake3Compress(state: ByteString, block: ByteString): ByteString */
+    | 'blake3Hash'         /* blake3Hash(data: ByteString): ByteString */
     ;
 ```
+
+`sha256Compress` / `sha256Finalize` expose the SHA-256 compression function so a
+contract can verify a digest over data it never holds in full. BLAKE3 is
+single-block (0–64 B) — see `docs/language-reference.md`.
 
 ### Signature Verification
 
@@ -633,7 +657,28 @@ BuiltinFunction_EC
     | 'ecPointX'           /* ecPointX(p: Point): bigint */
     | 'ecPointY'           /* ecPointY(p: Point): bigint */
     ;
+
+BuiltinFunction_NistEC
+    = 'p256Add'                /* p256Add(a: P256Point, b: P256Point): P256Point */
+    | 'p256Mul'                /* p256Mul(p: P256Point, k: bigint): P256Point */
+    | 'p256MulGen'             /* p256MulGen(k: bigint): P256Point */
+    | 'p256Negate'             /* p256Negate(p: P256Point): P256Point */
+    | 'p256OnCurve'            /* p256OnCurve(p: P256Point): boolean */
+    | 'p256EncodeCompressed'   /* p256EncodeCompressed(p: P256Point): ByteString */
+    | 'p384Add'                /* p384Add(a: P384Point, b: P384Point): P384Point */
+    | 'p384Mul'                /* p384Mul(p: P384Point, k: bigint): P384Point */
+    | 'p384MulGen'             /* p384MulGen(k: bigint): P384Point */
+    | 'p384Negate'             /* p384Negate(p: P384Point): P384Point */
+    | 'p384OnCurve'            /* p384OnCurve(p: P384Point): boolean */
+    | 'p384EncodeCompressed'   /* p384EncodeCompressed(p: P384Point): ByteString */
+    | 'verifyECDSA_P256'       /* verifyECDSA_P256(msgHash: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifyECDSA_P384'       /* verifyECDSA_P384(msgHash: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    ;
 ```
+
+The NIST curves are a separate production because they carry a separate script
+-size warning: a single `verifyECDSA_P256` call exceeds the BSV default
+`maxscriptsizepolicy` on its own. See `docs/language-reference.md`.
 
 ### Byte-String Operations
 
@@ -650,7 +695,22 @@ BuiltinFunction_Bytes
     ;
 ```
 
-> **Note on `split`:** At the Bitcoin Script level, `OP_SPLIT` leaves two values on the stack (left part and right part). However, the Rúnar type checker treats the return type as `ByteString` (the right/top part). The left part remains on the stack but is not directly accessible through normal Rúnar expressions. Use `left(data, len)` or `right(data, len)` for explicit single-value extraction.
+> **Note on `split`:** `split(data, index)` is single-valued: it returns the
+> bytes from `index` onwards — the RIGHT half of the cut. At the Bitcoin Script
+> level `OP_SPLIT` leaves two values on the stack, so the compiler emits
+> `OP_SPLIT OP_NIP` and drops the left half at the split site. `left(data,
+> index)` is the other side of the same cut (`OP_SPLIT OP_DROP`), so no
+> information is lost by binding one of them.
+>
+> Rúnar has no tuple type and no surface parser accepts array destructuring, so
+> a pair return would be unnameable in all nine surfaces; this note used to say
+> the left part "remains on the stack but is not directly accessible", which
+> described an implementation artifact rather than a semantic. That artifact was
+> a defect: the stack model carried an anonymous slot for it that nothing ever
+> consumed, so any read after a split resolved to the wrong slot. The behaviour
+> specified here is pinned by `conformance/split-stack-desync.test.ts` and spent
+> on a consensus interpreter by
+> `conformance/split_residue_execution_test.go`.
 
 ### Conversion
 
@@ -718,6 +778,13 @@ BuiltinFunction_State
     = 'addOutput'          /* this.addOutput(satoshis: bigint, ...stateValues): void */
     | 'addRawOutput'       /* this.addRawOutput(satoshis: bigint, scriptBytes: ByteString): void */
     | 'addDataOutput'      /* this.addDataOutput(satoshis: bigint, scriptBytes: ByteString): void */
+    | 'buildChangeOutput'  /* buildChangeOutput(changePKH: ByteString, changeAmount: bigint): ByteString */
+    ;
+
+BuiltinFunction_Intent
+    = 'requireOutputP2PKH'      /* requireOutputP2PKH(outputIndex: bigint, pubKeyHash: ByteString, amount: bigint): void */
+    | 'extractPrevOutputScript' /* extractPrevOutputScript(witnessSlot: bigint, expectedHash: ByteString): ByteString -- hash-preimage check on a caller-supplied string; does NOT read an input (W6) */
+    | 'currentBlockHeight'      /* currentBlockHeight(): bigint */
     ;
 ```
 
@@ -744,13 +811,92 @@ BuiltinFunction
     | BuiltinFunction_Sig
     | BuiltinFunction_PQ
     | BuiltinFunction_EC
+    | BuiltinFunction_NistEC
     | BuiltinFunction_Bytes
     | BuiltinFunction_Conv
     | BuiltinFunction_Math
     | BuiltinFunction_Preimage
     | BuiltinFunction_State
+    | BuiltinFunction_Intent
     ;
 ```
+
+**What "complete" excludes.** The productions above cover every builtin that is
+part of the Rúnar language in ALL SEVEN tiers. They deliberately do not list the
+EVM/STARK proof-system primitives — BabyBear (`bb*`), KoalaBear (`kb*`), BN254
+(`bn254*`) and Merkle (`merkleRoot*`), 35 names in total — which are **Go-only by
+project policy** (see CLAUDE.md). Those ship Stack-IR codegen in the Go
+reference compiler alone, their fixtures carry an explicit `"compilers": ["go"]`
+allowlist, and they are not a conformance target for the other six tiers. A
+contract that calls one is not portable Rúnar, so the language grammar does not
+define it.
+
+`tests/r200-grammar-lists-every-builtin.test.ts` enforces exactly that split: it
+reads the type checker's own tables and requires every non-Go-only builtin to
+appear here.
+
+**Intent intrinsics.** The three in `BuiltinFunction_Intent` are cross-tier
+compiler intrinsics, not library calls: each lowers to an auto-injected witness
+parameter plus the assertions that bind it to the spending transaction.
+
+`requireOutputP2PKH(i, pubKeyHash, amount)` asserts that output `i` of the
+spending transaction is a standard 34-byte P2PKH paying `amount` to
+`pubKeyHash`. It injects `_serialisedOutputs` and commits it to the preimage's
+`hashOutputs` once per control-flow path. **`i` must be an integer literal, and
+in v1 it must be `0`.**
+
+The check reads output `i` at byte offset `i*34`, which is the start of output
+`i` only if every earlier output is exactly 34 bytes. A transaction guarantees
+no such thing — an output is `value[8] ‖ CompactSize(len) ‖ script[len]` and the
+spender picks output 0's length — so for `i > 0` an attacker places the promised
+34 P2PKH bytes inside an earlier output's OP_RETURN at that offset and sends the
+real output `i` elsewhere. Offset 0 IS a boundary, so index 0 is sound; anything
+beyond it needs a CompactSize walk the v1 codegen does not emit (W2).
+
+The same 34-byte assumption is why the type checker refuses a method that also
+calls `addDataOutput` (a variable-length OP_RETURN breaks the stride) or
+`addOutput` / `addRawOutput` (a state-continuation output is never 34 bytes).
+See R-300 — note that this is a ban on the CONTRACT's own outputs and was never
+a constraint on the transaction, which is what the index rule above adds.
+
+`extractPrevOutputScript(i, expectedHash)` injects `_prevOutScript_<i>` as a
+witness parameter, asserts `hash256` of that witness equals `expectedHash`, and
+returns the witness bytes. **`i` must be an integer literal** — the parameter
+name is built from it at compile time.
+
+**`i` is a label, not an input (W6 / GhostInput).** The emitted script contains
+no vin lookup, no parent transaction, no outpoint comparison and no input-count
+check; what it proves is that the SPENDER knows a byte string with the given
+hash. A transaction with one input satisfies a covenant calling
+`extractPrevOutputScript(1n, ...)`, because nothing looks for a second one. And
+locking scripts are public, so knowing the bytes of a deployed covenant costs
+nothing. Use it for intent-TEMPLATE matching, never as evidence that a companion
+covenant is being spent alongside you. The construction that does bind a
+specific companion UTXO — parse the companion input's parent tx, hash-bound to
+the spending tx through the BIP-143 preimage — is written out and tested in
+`examples/ts/companion-verifier/`.
+
+`currentBlockHeight()` is a source-level desugar to
+`extractLocktime(this.txPreimage)`, so it is valid only where that preimage
+exists — inside a `StatefulSmartContract` method. **The name is misleading and
+kept only for source compatibility: it does not read the chain height.** It
+reads the spending transaction's own `nLockTime`, a number the spender writes.
+
+`nLockTime` is a NOT-BEFORE. Consensus asserts only that the chain has already
+reached it, and only for a non-final transaction. Therefore
+`extractLocktime(p) >= T` is sound (pair it with
+`extractSequence(p) !== 0xffffffffn`, or consensus ignores `nLockTime` and the
+gate is script-only), while `extractLocktime(p) < T` — equivalently
+`currentBlockHeight() < T` — proves nothing about the current height: a spender
+at height T + 1000 simply writes a stale locktime. Closing a time window needs a
+time source the contract reads as state, not the spending transaction's own
+locktime.
+
+The cross-covenant pattern these compose into is documented in
+[`docs/cross-covenant-pattern.md`](../docs/cross-covenant-pattern.md), and the
+directives that change what a covenant commits to are in
+[`docs/language-reference.md`](../docs/language-reference.md) under "Compiler
+Directives".
 
 ---
 

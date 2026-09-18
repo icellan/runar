@@ -61,8 +61,12 @@ fn load_ir_depth_walk_ignores_braces_inside_strings() {
 
 #[test]
 fn load_ir_accepts_minimal_program() {
-    let minimal =
-        r#"{"contractName":"X","properties":[],"methods":[]}"#;
+    // N-113: this fixture used to be `"methods":[]`, which R-081 established is
+    // not a minimal VALID program at all — it is the anyone-can-spend shape
+    // (no public method => empty locking script => spendable with OP_1). The
+    // test's subject is the DoS caps, not the schema, so the fix is a fixture
+    // that is genuinely minimal AND valid rather than a weaker assertion.
+    let minimal = r#"{"contractName":"X","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[]}]}"#;
     let res = load_ir_from_str_typed(minimal);
     assert!(res.is_ok(), "expected ok, got {:?}", res);
 }

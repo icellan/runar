@@ -968,10 +968,24 @@ func TestSourceCompile_BooleanLogic(t *testing.T) {
 			t.Errorf("expected %s in ASM — `&&` / `||` must lower to branches", op)
 		}
 	}
-	if strings.Contains(artifact.ASM, "OP_BOOLAND") || strings.Contains(artifact.ASM, "OP_BOOLOR") {
+	//
+	// W3 / BoolBamboozle: the `boolean` parameter's ABI-domain gate legitimately
+	// contains an OP_BOOLOR, and it is emitted by the stack lowerer before the
+	// method body — nothing to do with `&&` / `||`. Look at the body only, so
+	// this test keeps discriminating what it was written to discriminate.
+	body := strings.TrimPrefix(artifact.ASM, booleanParamGateASM+" ")
+	if body == artifact.ASM {
+		t.Fatalf("expected the W3 boolean-param gate at the head of the ASM: %s", artifact.ASM)
+	}
+	if strings.Contains(body, "OP_BOOLAND") || strings.Contains(body, "OP_BOOLOR") {
 		t.Errorf("source-level `&&` / `||` must not emit OP_BOOLAND / OP_BOOLOR: %s", artifact.ASM)
 	}
 }
+
+// booleanParamGateASM is the W3 ABI-domain gate the stack lowerer emits once per
+// `boolean` parameter of a public method, here in its depth-0 (OP_DUP copy)
+// spelling. See emitBooleanParamGate in codegen/stack.go.
+const booleanParamGateASM = "OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY"
 
 func TestSourceCompile_IfElse(t *testing.T) {
 	source, ok := conformanceSourcePath("if-else")

@@ -21,6 +21,22 @@ import { UnknownANFKindError } from 'runar-ir-schema';
 
 type ConstValue = string | bigint | boolean;
 
+/**
+ * Upper end of the domain `sqrt` is exact on, shared with the emitted script
+ * and the reference interpreter. The script enforces it with
+ * `OP_SIZE <63> OP_LESSTHAN OP_VERIFY`, and a minimally-encoded script number
+ * of at most 62 bytes is at most 2^495 - 1.
+ */
+const SQRT_DOMAIN_LIMIT = 1n << 495n;
+
+/**
+ * Upper end of the domain `pow` is exact on, shared with the emitted script
+ * and the reference interpreter. `passes/05-stack-lower.ts#lowerPow` unrolls
+ * exactly 32 conditional multiplies and enforces the bound with
+ * `OP_DUP <0> <33> OP_WITHIN OP_VERIFY`.
+ */
+const POW_EXPONENT_LIMIT = 32n;
+
 // ---------------------------------------------------------------------------
 // Binary operation evaluation
 // ---------------------------------------------------------------------------
@@ -156,7 +172,15 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
     case 'pow': {
       if (bigintArgs.length !== 2) return null;
       const [base, exp] = bigintArgs as [bigint, bigint];
-      if (exp < 0n || exp > 256n) return null;
+      // Decline outside the domain the emitted script GUARANTEES and ENFORCES
+      // (`passes/05-stack-lower.ts#lowerPow`): 0 <= exp <= 32, the number of
+      // unrolled conditional multiplies. The old bound was 256, which folded
+      // exponents the script CLAMPED to 32 — so for 33 <= exp <= 256 the
+      // fold-ON and fold-OFF scripts accepted mutually exclusive inputs
+      // (R-169, the `pow` half). Outside the bound the script now aborts, so
+      // declining here leaves the guarded script in place rather than
+      // substituting a value it would have refused.
+      if (exp < 0n || exp > POW_EXPONENT_LIMIT) return null;
       let result = 1n;
       for (let i = 0n; i < exp; i++) result *= base;
       return result;
@@ -174,7 +198,12 @@ function evalBuiltinCall(func: string, args: ConstValue[]): ConstValue | null {
     case 'sqrt': {
       if (bigintArgs.length !== 1) return null;
       const n = bigintArgs[0]!;
-      if (n < 0n) return null;
+      // Decline outside the domain the emitted script GUARANTEES and ENFORCES
+      // (`passes/05-stack-lower.ts#lowerSqrt`): n >= 0 and n encodable in <= 62
+      // script bytes. Outside it the compiled script aborts, so folding to a
+      // value here would make `sqrt(k)` mean one thing folded and another
+      // executed — R-169 exactly. Declining leaves the guarded script in place.
+      if (n < 0n || n >= SQRT_DOMAIN_LIMIT) return null;
       if (n === 0n) return 0n;
       let guess = n;
       for (let i = 0; i < 256; i++) {

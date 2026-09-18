@@ -595,11 +595,177 @@ class MultiSig2of3 extends SmartContract {
 }
 `;
 
+/**
+ * Stateful contracts whose single mutable property is a variable-length
+ * (push-data-framed) state type.
+ *
+ * `Sig` and `SigHashPreimage` are stored exactly like `ByteString` — all seven
+ * SDKs' `encodeStateValue` enumerate the fixed-size types and push-data-frame
+ * everything else — but three separate type lists in the stack-lowering pass
+ * disagreed, each in a different subset of tiers:
+ *
+ *   * the state WRITER (`add_output` / `compute_state_bytes`) framed only the
+ *     literal `ByteString`, so the continuation a mutating method built could
+ *     not be decoded by the next spend's reader — present in 6 tiers, Zig
+ *     alone was right;
+ *   * `computeUsesCodePart`'s var-length property set likewise, so a terminal
+ *     read of the field fell back to the deploy-time constructor placeholder —
+ *     present in 6 tiers, Rust alone was right (fixed by bc6cf19a / R-015);
+ *   * the TS reader's size table had no case at all and threw.
+ *
+ * Because every tier consumes the SAME ANF IR here, these four contracts pin
+ * the seven backends against each other on both faces of the bug: `*Write`
+ * exercises the writer, `*Read` the `_codePart` / deserialize path.
+ */
+const SIG_STATE_WRITE_SOURCE = `
+class SigStateWrite extends StatefulSmartContract {
+  tag: Sig;
+
+  constructor(tag: Sig) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: Sig) {
+    this.tag = next;
+  }
+}
+`;
+
+const SIG_STATE_READ_SOURCE = `
+class SigStateRead extends StatefulSmartContract {
+  tag: Sig;
+
+  constructor(tag: Sig) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
+const PREIMAGE_STATE_WRITE_SOURCE = `
+class PreimageStateWrite extends StatefulSmartContract {
+  tag: SigHashPreimage;
+
+  constructor(tag: SigHashPreimage) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: SigHashPreimage) {
+    this.tag = next;
+  }
+}
+`;
+
+const PREIMAGE_STATE_READ_SOURCE = `
+class PreimageStateRead extends StatefulSmartContract {
+  tag: SigHashPreimage;
+
+  constructor(tag: SigHashPreimage) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
+/**
+ * Stateful contracts whose single mutable property is a FIXED-width curve
+ * point — the mirror image of the `Sig` cases above.
+ *
+ * `P256Point` (64 bytes) and `P384Point` (96 bytes) are `ByteString` subtypes
+ * with a hard, compile-time-known width, exactly like `Point` (64). All seven
+ * backends serialize them raw, un-framed — `P256Point` lowers byte-identically
+ * to `Point` — and the TS-tier assertions plus the measured digests live in
+ * `curve-point-state-width.test.ts`.
+ *
+ * Nothing in the repo (no example, no conformance fixture) declares a
+ * curve-point state property, so these four contracts are the only thing
+ * holding the seven tiers together on this width. Without them a tier could
+ * silently start push-data-framing either type — the exact drift that made
+ * `Sig` a fund-loss bug in six tiers.
+ */
+const P256_STATE_WRITE_SOURCE = `
+class P256StateWrite extends StatefulSmartContract {
+  tag: P256Point;
+
+  constructor(tag: P256Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: P256Point) {
+    this.tag = next;
+  }
+}
+`;
+
+const P256_STATE_READ_SOURCE = `
+class P256StateRead extends StatefulSmartContract {
+  tag: P256Point;
+
+  constructor(tag: P256Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
+const P384_STATE_WRITE_SOURCE = `
+class P384StateWrite extends StatefulSmartContract {
+  tag: P384Point;
+
+  constructor(tag: P384Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public update(next: P384Point) {
+    this.tag = next;
+  }
+}
+`;
+
+const P384_STATE_READ_SOURCE = `
+class P384StateRead extends StatefulSmartContract {
+  tag: P384Point;
+
+  constructor(tag: P384Point) {
+    super(tag);
+    this.tag = tag;
+  }
+
+  public check(expected: bigint) {
+    assert(len(this.tag) === expected);
+  }
+}
+`;
+
 const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'P2PKH', source: P2PKH_SOURCE },
   { name: 'HashLock', source: HASHLOCK_SOURCE },
   { name: 'Escrow', source: ESCROW_SOURCE },
   { name: 'MultiSig2of3', source: MULTISIG_SOURCE },
+  { name: 'SigStateWrite', source: SIG_STATE_WRITE_SOURCE },
+  { name: 'SigStateRead', source: SIG_STATE_READ_SOURCE },
+  { name: 'PreimageStateWrite', source: PREIMAGE_STATE_WRITE_SOURCE },
+  { name: 'PreimageStateRead', source: PREIMAGE_STATE_READ_SOURCE },
+  { name: 'P256StateWrite', source: P256_STATE_WRITE_SOURCE },
+  { name: 'P256StateRead', source: P256_STATE_READ_SOURCE },
+  { name: 'P384StateWrite', source: P384_STATE_WRITE_SOURCE },
+  { name: 'P384StateRead', source: P384_STATE_READ_SOURCE },
 ];
 
 
@@ -1292,4 +1458,257 @@ describe.skipIf(!javaJarPath)('Cross-compiler: TS IR -> Java Script', () => {
       expect(javaHex.toLowerCase()).toBe(tsHex.toLowerCase());
     }, 60_000);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Mutable `RabinSig` / `RabinPubKey` state width — all seven tiers
+// ---------------------------------------------------------------------------
+//
+// `RabinSig` / `RabinPubKey` are `bigint` ALIASES: a mutable one is stored in
+// the state section as a bare 8-byte OP_NUM2BIN word. Every tier's READER says
+// so (`isNumericStateType` and its peers, the deserialize size table, the fixed
+// state-section length). Go, Rust, Python, Ruby and Java's state SERIALIZERS
+// did NOT — they tested the literal `bigint` — so those five wrote a MINIMAL
+// script-number encoding into a section their own script reads as fixed 8.
+//
+// For any value whose minimal encoding is not exactly 8 bytes the continuation
+// is unreadable by the next spend: deploy succeeds, the first spend succeeds,
+// and the UTXO that spend creates is dead. `31276a06` widened writer and reader
+// in TS; `e06f8c2c` widened only Go's reader, and four tiers followed Go.
+//
+// These cases lower the SAME TS-produced ANF through all seven backends, so a
+// divergence can only be the stack-lowering serializer. Every tier's own
+// `bigint` output is the reference, because that is the path whose writer and
+// reader are known to agree.
+// ---------------------------------------------------------------------------
+
+/** Mutating method, implicit continuation — the compute-state-bytes writer. */
+function rabinWriteSource(propType: string): string {
+  return `import { StatefulSmartContract } from 'runar-lang';
+class RabinStateWrite extends StatefulSmartContract {
+  tag: ${propType};
+  constructor(tag: ${propType}) { super(tag); this.tag = tag; }
+  public update(next: ${propType}): void { this.tag = next; }
+}
+`;
+}
+
+/** Mutating method with an EXPLICIT addOutput — the add-output writer. */
+function rabinAddOutputSource(propType: string): string {
+  return `import { StatefulSmartContract } from 'runar-lang';
+class RabinStateAddOutput extends StatefulSmartContract {
+  tag: ${propType};
+  constructor(tag: ${propType}) { super(tag); this.tag = tag; }
+  public update(next: ${propType}): void { this.tag = next; this.addOutput(1000n, next); }
+}
+`;
+}
+
+const RABIN_STATE_SHAPES = [
+  { label: 'implicit continuation', build: rabinWriteSource, file: 'RabinStateWrite' },
+  { label: 'explicit addOutput', build: rabinAddOutputSource, file: 'RabinStateAddOutput' },
+] as const;
+
+const RABIN_STATE_TIERS: { name: string; skip: boolean; run: (ir: string) => CompilerOutput }[] = [
+  { name: 'Go', skip: !hasGo, run: runGoCompiler },
+  { name: 'Rust', skip: !rustBinaryPath, run: runRustCompiler },
+  { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+  { name: 'Zig', skip: !zigBinaryPath, run: runZigCompiler },
+  { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+  { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
+];
+
+describe('Cross-compiler: mutable Rabin state is a fixed 8-byte word in all 7 tiers', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-rabin-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. */
+  function lowerToIr(source: string, name: string): { irPath: string; tsHex: string } {
+    const tsResult = compile(source);
+    if (!tsResult.success) {
+      throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+    }
+    const irPath = join(tempDir, `${name}.anf.json`);
+    writeFileSync(irPath, anfToJson(tsResult.anf!));
+    return { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+  }
+
+  for (const { label, build, file } of RABIN_STATE_SHAPES) {
+    for (const propType of ['RabinSig', 'RabinPubKey'] as const) {
+      it(`${label}: a mutable ${propType} field lowers to the bigint bytes in every tier`, () => {
+        const controlName = `${file}-bigint`;
+        const rabinName = `${file}-${propType}`;
+        const control = lowerToIr(build('bigint'), controlName);
+        const rabin = lowerToIr(build(propType), rabinName);
+
+        // TS is the reference. Its writer and reader were widened together in
+        // 31276a06, so its Rabin bytes ARE its bigint bytes.
+        expect(rabin.tsHex).toBe(control.tsHex);
+
+        for (const tier of RABIN_STATE_TIERS) {
+          if (tier.skip) continue;
+          const controlHex = requireHex(tier.run(control.irPath), tier.name, controlName)
+            .toLowerCase();
+          const rabinHex = requireHex(tier.run(rabin.irPath), tier.name, rabinName)
+            .toLowerCase();
+
+          // Each tier against its OWN bigint output: a tier whose serializer
+          // still tests the literal `bigint` fails here even if every tier
+          // fails together.
+          expect(
+            rabinHex,
+            `${tier.name}: a mutable ${propType} field is not serialized as the fixed ` +
+              `8-byte word its own reader splits (writer/reader split)`,
+          ).toBe(controlHex);
+
+          // And against TS, so the seven stay byte-identical.
+          expect(rabinHex, `${tier.name} diverges from the TS reference`).toBe(rabin.tsHex);
+        }
+      }, 180_000);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Terminal read of a fixed-size field with a variable-length SIBLING — 7 tiers
+// ---------------------------------------------------------------------------
+//
+// R-074. `lowerDeserializeState` picks its extraction strategy from a
+// CONTRACT-level fact — "does ANY mutable property carry a push-data length
+// prefix". When one does, the state section can only be located through the
+// `_codePart`-relative offset, so the whole deserialization is gated on
+// `_codePart` being on the stack; without it the pass drops the state section
+// and every `loadProp` resolves to the DEPLOY-TIME constructor placeholder
+// baked into the locking script.
+//
+// `computeUsesCodePart`, which decides whether `_codePart` is provisioned,
+// asked a strictly narrower METHOD-level question: "does THIS method read a
+// variable-length property". A terminal method reading only the `bigint`
+// sibling answered no, and read a value frozen at deploy time forever.
+//
+// All seven tiers agreed on the broken script, which is exactly why no parity
+// gate caught it — agreement is not correctness. So the assertion here is
+// STRUCTURAL, not merely mutual: every tier's probe must carry the BIP-143
+// scriptCode-varint-strip cascade `02fd009f63` (`<fd00> OP_LESSTHAN OP_IF`),
+// which `emitStripScriptCodeVarint` emits ONLY on the `_codePart`-relative
+// live-state path — never on the fixed-width path, never on the discard
+// shortcut. Its absence IS the finding.
+//
+// The matched control is the same contract with a `bigint` sibling: no
+// variable-length property, the fixed-width split path, correct all along, and
+// byte-identical across the seven both before and after.
+//
+// Executed companion (real @bsv/sdk Script VM, deploy → update → terminal
+// read): `packages/runar-testing/src/__tests__/stale-state-unrelated-varlen-vm.test.ts`.
+// ---------------------------------------------------------------------------
+
+/** Hex of `<fd00> OP_LESSTHAN OP_IF` — the live-state deserialization path. */
+const LIVE_STATE_MARKER_HEX = '02fd009f63';
+
+/**
+ * A single TERMINAL method reading only the fixed-size `count`. The contract
+ * carries no continuation builder, so the marker above appears if and only if
+ * this method reads live state.
+ */
+function staleStateProbeSource(siblingType: string): string {
+  const typeImport =
+    siblingType === 'ByteString' ? `import type { ByteString } from 'runar-lang';\n` : '';
+  return `import { StatefulSmartContract, assert } from 'runar-lang';
+${typeImport}class StaleStateProbe extends StatefulSmartContract {
+  count: bigint;
+  tag: ${siblingType};
+  constructor(count: bigint, tag: ${siblingType}) {
+    super(count, tag);
+    this.count = count;
+    this.tag = tag;
+  }
+  public check(expected: bigint): void { assert(this.count === expected); }
+}
+`;
+}
+
+const STALE_STATE_TIERS: { name: string; skip: boolean; run: (ir: string) => CompilerOutput }[] = [
+  { name: 'Go', skip: !hasGo, run: runGoCompiler },
+  { name: 'Rust', skip: !rustBinaryPath, run: runRustCompiler },
+  { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+  { name: 'Zig', skip: !zigBinaryPath, run: runZigCompiler },
+  { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+  { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
+];
+
+describe('Cross-compiler: a terminal read sees live state despite a var-length sibling', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-stale-state-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  /** Lower `source` to ANF with TS, write the IR, and return {irPath, tsHex}. */
+  function lowerProbeToIr(source: string, name: string): { irPath: string; tsHex: string } {
+    const tsResult = compile(source);
+    if (!tsResult.success) {
+      throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+    }
+    const irPath = join(tempDir, `${name}.anf.json`);
+    writeFileSync(irPath, anfToJson(tsResult.anf!));
+    return { irPath, tsHex: (tsResult.scriptHex as string).toLowerCase() };
+  }
+
+  it('every tier reads the live state section, not the deploy-time placeholder', () => {
+    const probe = lowerProbeToIr(staleStateProbeSource('ByteString'), 'StaleStateProbe-varlen');
+
+    expect(
+      probe.tsHex,
+      'TS: the terminal read of `count` skipped state deserialization entirely and ' +
+        'compiled to the deploy-time constructor placeholder',
+    ).toContain(LIVE_STATE_MARKER_HEX);
+
+    for (const tier of STALE_STATE_TIERS) {
+      if (tier.skip) continue;
+      const hex = requireHex(tier.run(probe.irPath), tier.name, 'StaleStateProbe-varlen')
+        .toLowerCase();
+      expect(
+        hex,
+        `${tier.name}: the terminal read of \`count\` skipped state deserialization ` +
+          'and compiled to the deploy-time constructor placeholder',
+      ).toContain(LIVE_STATE_MARKER_HEX);
+      expect(hex, `${tier.name} diverges from the TS reference`).toBe(probe.tsHex);
+    }
+  }, 180_000);
+
+  it('the control without a var-length sibling is byte-identical in all 7 tiers', () => {
+    const control = lowerProbeToIr(staleStateProbeSource('bigint'), 'StaleStateProbe-control');
+
+    // No variable-length property, so the fixed-width split path applies and
+    // `_codePart` is genuinely not needed. The marker must stay absent — the
+    // fix must not provision `_codePart` unconditionally.
+    expect(control.tsHex).not.toContain(LIVE_STATE_MARKER_HEX);
+
+    for (const tier of STALE_STATE_TIERS) {
+      if (tier.skip) continue;
+      const hex = requireHex(tier.run(control.irPath), tier.name, 'StaleStateProbe-control')
+        .toLowerCase();
+      expect(hex, `${tier.name} diverges from the TS reference`).toBe(control.tsHex);
+      expect(hex).not.toContain(LIVE_STATE_MARKER_HEX);
+    }
+  }, 180_000);
 });

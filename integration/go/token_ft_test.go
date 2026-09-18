@@ -69,6 +69,25 @@ func deployFungibleToken(t *testing.T, owner *helpers.Wallet, initialBalance int
 	return contract, provider, signer
 }
 
+func mergeParents(t *testing.T, provider *helpers.BatchRPCProvider, c1, c2 *runar.RunarContract) (parent1, parent2 string, utxo2 *runar.UTXO) {
+	t.Helper()
+	utxo1 := c1.GetCurrentUtxo()
+	utxo2 = c2.GetCurrentUtxo()
+	if utxo1 == nil || utxo2 == nil {
+		t.Fatalf("missing UTXO after deploy")
+	}
+	var err error
+	parent1, err = provider.GetRawTransaction(utxo1.Txid)
+	if err != nil {
+		t.Fatalf("parent1: %v", err)
+	}
+	parent2, err = provider.GetRawTransaction(utxo2.Txid)
+	if err != nil {
+		t.Fatalf("parent2: %v", err)
+	}
+	return parent1, parent2, utxo2
+}
+
 func TestFungibleToken_Compile(t *testing.T) {
 	artifact := getFTArtifact(t)
 	if artifact.ContractName != "FungibleToken" {
@@ -213,8 +232,11 @@ func TestFungibleToken_Transfer(t *testing.T) {
 }
 
 func TestFungibleToken_Merge(t *testing.T) {
-	// Merge consolidates 2 UTXOs into 1 output (same owner)
-	// Uses position-dependent balance slots for anti-inflation security
+	// Two-input merge. The Go native mock of extractScriptCode is empty;
+	// Call() walks the ANF interpreter (substr of empty is now empty, not
+	// a panic) and the node evaluates the real preimage. Solo-merge is
+	// pinned by Spend.validate() in
+	// packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts.
 	alice := helpers.NewWallet()
 	balance1 := int64(400)
 	balance2 := int64(600)
@@ -226,15 +248,10 @@ func TestFungibleToken_Merge(t *testing.T) {
 	contract1, _, aliceSigner := deployFungibleToken(t, alice, balance1, provider)
 	contract2, _, _ := deployFungibleToken(t, alice, balance2, provider)
 
-	utxo2 := contract2.GetCurrentUtxo()
-	if utxo2 == nil {
-		t.Fatalf("missing UTXO after deploy for contract2")
-	}
+	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
-	// merge(sig, otherBalance, allPrevouts, outputSatoshis)
-	// allPrevouts is nil (auto-computed by SDK from transaction inputs)
 	txid, _, err := contract1.Call("merge",
-		[]interface{}{nil, balance2, nil, outputSatoshis},
+		[]interface{}{nil, balance2, nil, parent2, outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
 			Outputs: []runar.OutputSpec{
 				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": balance2}},
@@ -243,7 +260,7 @@ func TestFungibleToken_Merge(t *testing.T) {
 				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
 			},
 			AdditionalContractInputArgs: [][]interface{}{
-				{nil, balance1, nil, outputSatoshis},
+				{nil, balance1, nil, parent1, outputSatoshis},
 			},
 		})
 	if err != nil {
@@ -253,9 +270,9 @@ func TestFungibleToken_Merge(t *testing.T) {
 }
 
 func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
-	// Attacker lies about otherBalance. With secure merge, each input writes its
-	// own verified balance to a position-dependent slot. hashOutputs forces both
-	// inputs to produce identical outputs, so lying causes a mismatch.
+	// Attacker lies about otherBalance. With TWO token inputs, each writes its
+	// own verified balance to a position-dependent slot and hashOutputs forces
+	// them to agree, so lying causes a mismatch. That is not a one-input check.
 	alice := helpers.NewWallet()
 	balance1 := int64(400)
 	balance2 := int64(600)
@@ -267,15 +284,10 @@ func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
 	contract1, _, aliceSigner := deployFungibleToken(t, alice, balance1, provider)
 	contract2, _, _ := deployFungibleToken(t, alice, balance2, provider)
 
-	utxo2 := contract2.GetCurrentUtxo()
-	if utxo2 == nil {
-		t.Fatalf("missing UTXO after deploy for contract2")
-	}
+	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
-	// Attacker: input 0 claims otherBalance=1600, input 1 claims otherBalance=1400
-	// Output from input 0: (400, 1600), from input 1: (1400, 600) → mismatch
 	_, _, err := contract1.Call("merge",
-		[]interface{}{nil, int64(1600), nil, outputSatoshis},
+		[]interface{}{nil, int64(1600), nil, parent2, outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
 			Outputs: []runar.OutputSpec{
 				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": int64(1600)}},
@@ -284,7 +296,7 @@ func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
 				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
 			},
 			AdditionalContractInputArgs: [][]interface{}{
-				{nil, int64(1400), nil, outputSatoshis},
+				{nil, int64(1400), nil, parent1, outputSatoshis},
 			},
 		})
 	if err == nil {
@@ -306,13 +318,10 @@ func TestFungibleToken_MergeNegativeOtherBalance(t *testing.T) {
 	contract1, _, aliceSigner := deployFungibleToken(t, alice, balance1, provider)
 	contract2, _, _ := deployFungibleToken(t, alice, balance2, provider)
 
-	utxo2 := contract2.GetCurrentUtxo()
-	if utxo2 == nil {
-		t.Fatalf("missing UTXO after deploy for contract2")
-	}
+	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
 	_, _, err := contract1.Call("merge",
-		[]interface{}{nil, int64(100), nil, outputSatoshis},
+		[]interface{}{nil, int64(100), nil, parent2, outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
 			Outputs: []runar.OutputSpec{
 				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": int64(100)}},
@@ -321,7 +330,7 @@ func TestFungibleToken_MergeNegativeOtherBalance(t *testing.T) {
 				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
 			},
 			AdditionalContractInputArgs: [][]interface{}{
-				{nil, int64(-1), nil, outputSatoshis},
+				{nil, int64(-1), nil, parent1, outputSatoshis},
 			},
 		})
 	if err == nil {
@@ -343,13 +352,10 @@ func TestFungibleToken_MergeZeroBalance(t *testing.T) {
 	contract1, _, aliceSigner := deployFungibleToken(t, alice, balance1, provider)
 	contract2, _, _ := deployFungibleToken(t, alice, balance2, provider)
 
-	utxo2 := contract2.GetCurrentUtxo()
-	if utxo2 == nil {
-		t.Fatalf("missing UTXO after deploy for contract2")
-	}
+	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
 	txid, _, err := contract1.Call("merge",
-		[]interface{}{nil, balance2, nil, outputSatoshis},
+		[]interface{}{nil, balance2, nil, parent2, outputSatoshis},
 		provider, aliceSigner, &runar.CallOptions{
 			Outputs: []runar.OutputSpec{
 				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": balance2}},
@@ -358,7 +364,7 @@ func TestFungibleToken_MergeZeroBalance(t *testing.T) {
 				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
 			},
 			AdditionalContractInputArgs: [][]interface{}{
-				{nil, balance1, nil, outputSatoshis},
+				{nil, balance1, nil, parent1, outputSatoshis},
 			},
 		})
 	if err != nil {
@@ -381,10 +387,7 @@ func TestFungibleToken_MergeWrongSigner(t *testing.T) {
 	contract1, _, _ := deployFungibleToken(t, alice, balance1, provider)
 	contract2, _, _ := deployFungibleToken(t, alice, balance2, provider)
 
-	utxo2 := contract2.GetCurrentUtxo()
-	if utxo2 == nil {
-		t.Fatalf("missing UTXO after deploy for contract2")
-	}
+	parent1, parent2, utxo2 := mergeParents(t, provider, contract1, contract2)
 
 	// Fund attacker wallet and create attacker signer
 	helpers.RPCCall("importaddress", attacker.Address, "", false)
@@ -398,7 +401,7 @@ func TestFungibleToken_MergeWrongSigner(t *testing.T) {
 	}
 
 	_, _, err = contract1.Call("merge",
-		[]interface{}{nil, balance2, nil, outputSatoshis},
+		[]interface{}{nil, balance2, nil, parent2, outputSatoshis},
 		provider, attackerSigner, &runar.CallOptions{
 			Outputs: []runar.OutputSpec{
 				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": balance2}},
@@ -407,7 +410,7 @@ func TestFungibleToken_MergeWrongSigner(t *testing.T) {
 				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
 			},
 			AdditionalContractInputArgs: [][]interface{}{
-				{nil, balance1, nil, outputSatoshis},
+				{nil, balance1, nil, parent1, outputSatoshis},
 			},
 		})
 	if err == nil {

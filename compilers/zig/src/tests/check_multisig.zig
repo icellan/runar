@@ -23,6 +23,8 @@
 
 const std = @import("std");
 const compiler_api = @import("../compiler_api.zig");
+const json_parser = @import("../ir/json.zig");
+const stack_lower = @import("../passes/stack_lower.zig");
 
 const MULTISIG_2OF3_SRC =
     \\const runar = @import("runar");
@@ -174,4 +176,125 @@ test "multiSig lowering is deterministic" {
     defer std.testing.allocator.free(b);
 
     try std.testing.expect(std.mem.eql(u8, a, b));
+}
+
+// -------------------- R-054: degenerate thresholds --------------------
+//
+// `checkMultiSig(&.{}, &.{pk})` lowers to
+//
+//   OP_0 OP_0 <pk> OP_1 OP_CHECKMULTISIG
+//
+// i.e. nSigs = 0. OP_CHECKMULTISIG with zero required signatures pops the
+// pubkeys, verifies nothing, and pushes TRUE — the deployed output is
+// ANYONE-CAN-SPEND while the source reads like an authorization check.
+// Confirmed byte-identically across all seven tiers before the guard landed:
+// every one emitted `0000007b51ae` for the equivalent contract.
+//
+// The mirror image, more signatures than public keys, can never be satisfied
+// by any witness: the output is permanently UNSPENDABLE.
+//
+// The guard lives in `stack_lower` rather than `typecheck` so it also covers
+// the `--ir` input path — which is what these tests drive, so the assertion
+// can name the exact refusal rather than a coarse "compile failed".
+
+const EMPTY_SIGS_SRC =
+    \\const runar = @import("runar");
+    \\
+    \\pub const EmptyMultiSig = struct {
+    \\    pub const Contract = runar.SmartContract;
+    \\
+    \\    pk1: runar.PubKey,
+    \\
+    \\    pub fn init(pk1: runar.PubKey) EmptyMultiSig {
+    \\        return .{ .pk1 = pk1 };
+    \\    }
+    \\
+    \\    pub fn unlock(self: *const EmptyMultiSig) void {
+    \\        runar.assert(runar.checkMultiSig(&.{}, &.{self.pk1}));
+    \\    }
+    \\};
+;
+
+/// ANF IR for a `checkMultiSig` gate over the named sig / pk params, built at
+/// comptime so the `--ir` path (which never runs a typecheck) can be driven
+/// directly and the assertion can name the exact refusal.
+fn thresholdIr(comptime sigs: []const []const u8, comptime pks: []const []const u8) []const u8 {
+    var params: []const u8 = "";
+    var body: []const u8 = "";
+    var sig_refs: []const u8 = "";
+    var pk_refs: []const u8 = "";
+    for (sigs) |s| {
+        if (params.len > 0) params = params ++ ", ";
+        params = params ++ "{\"name\": \"" ++ s ++ "\", \"type\": \"Sig\"}";
+        body = body ++ "{\"name\": \"b_" ++ s ++ "\", \"value\": {\"kind\": \"load_param\", \"name\": \"" ++ s ++ "\"}}, ";
+        if (sig_refs.len > 0) sig_refs = sig_refs ++ ", ";
+        sig_refs = sig_refs ++ "\"b_" ++ s ++ "\"";
+    }
+    for (pks) |k| {
+        if (params.len > 0) params = params ++ ", ";
+        params = params ++ "{\"name\": \"" ++ k ++ "\", \"type\": \"PubKey\"}";
+        body = body ++ "{\"name\": \"b_" ++ k ++ "\", \"value\": {\"kind\": \"load_param\", \"name\": \"" ++ k ++ "\"}}, ";
+        if (pk_refs.len > 0) pk_refs = pk_refs ++ ", ";
+        pk_refs = pk_refs ++ "\"b_" ++ k ++ "\"";
+    }
+    return "{\"contractName\": \"CheckMultiSigThresholdProbe\", \"properties\": [], \"methods\": [" ++
+        "{\"name\": \"unlock\", \"isPublic\": true, \"params\": [" ++ params ++ "], \"body\": [" ++ body ++
+        "{\"name\": \"sigs\", \"value\": {\"kind\": \"array_literal\", \"elements\": [" ++ sig_refs ++ "]}}, " ++
+        "{\"name\": \"pks\", \"value\": {\"kind\": \"array_literal\", \"elements\": [" ++ pk_refs ++ "]}}, " ++
+        "{\"name\": \"r\", \"value\": {\"kind\": \"call\", \"func\": \"checkMultiSig\", \"args\": [\"sigs\", \"pks\"]}}, " ++
+        "{\"name\": \"t\", \"value\": {\"kind\": \"assert\", \"value\": \"r\"}}]}]}";
+}
+
+const IR_0_OF_1 = thresholdIr(&.{}, &.{"k0"});
+const IR_1_OF_0 = thresholdIr(&.{"s0"}, &.{});
+const IR_2_OF_1 = thresholdIr(&.{ "s0", "s1" }, &.{"k0"});
+const IR_1_OF_1 = thresholdIr(&.{"s0"}, &.{"k0"});
+const IR_2_OF_3 = thresholdIr(&.{ "s0", "s1" }, &.{ "k0", "k1", "k2" });
+const IR_3_OF_3 = thresholdIr(&.{ "s0", "s1", "s2" }, &.{ "k0", "k1", "k2" });
+
+fn lowerIr(allocator: std.mem.Allocator, ir_json: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const program = try json_parser.parseANFProgram(alloc, ir_json);
+    _ = try stack_lower.lower(alloc, program);
+}
+
+test "R-054: an empty signature array is refused (anyone-can-spend)" {
+    try std.testing.expectError(
+        error.DegenerateMultiSigThreshold,
+        lowerIr(std.testing.allocator, IR_0_OF_1),
+    );
+}
+
+test "R-054: an empty public key array is refused" {
+    try std.testing.expectError(
+        error.DegenerateMultiSigThreshold,
+        lowerIr(std.testing.allocator, IR_1_OF_0),
+    );
+}
+
+test "R-054: more signatures than public keys is refused (unspendable)" {
+    try std.testing.expectError(
+        error.DegenerateMultiSigThreshold,
+        lowerIr(std.testing.allocator, IR_2_OF_1),
+    );
+}
+
+test "R-054: an empty signature array is refused from source syntax too" {
+    // The source path reaches the same refusal — `compileSourceToHex` maps a
+    // lowering refusal to StackLowerFailed, so this pins reachability rather
+    // than the specific error (the `--ir` tests above pin that).
+    try std.testing.expectError(
+        error.StackLowerFailed,
+        compiler_api.compileSourceToHex(std.testing.allocator, EMPTY_SIGS_SRC, "EmptyMultiSig.runar.zig"),
+    );
+}
+
+// Controls: the guard must not break any valid threshold.
+
+test "R-054 control: 1-of-1, 2-of-3 and m == n still lower" {
+    try lowerIr(std.testing.allocator, IR_1_OF_1);
+    try lowerIr(std.testing.allocator, IR_2_OF_3);
+    try lowerIr(std.testing.allocator, IR_3_OF_3);
 }

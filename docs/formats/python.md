@@ -164,7 +164,20 @@ for i in range(5):           # i = 0, 1, 2, 3, 4
 
 for i in range(a, b):        # i = a, a+1, ..., b-1
     ...
+
+for i in range(b, a, -1):    # i = b, b-1, ..., a+1  (counting DOWN)
+    ...
 ```
+
+The third argument is the step, and it must be `1` or `-1`. `range` is
+half-open at both ends in either direction, so `range(5, 1, -1)` yields
+5, 4, 3, 2 — exactly what it yields in Python.
+
+A non-unit step such as `range(0, 10, 2)` is a **compile error**, not a
+silently-rounded loop. The compiler unrolls a loop by synthesizing iteration
+`k` as `start + k*step`, so there is no representation for a step of 2; every
+tier refuses it with the same message rather than running the loop a different
+number of times than the source says.
 
 ---
 

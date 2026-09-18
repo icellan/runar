@@ -3,6 +3,7 @@ package frontend
 import (
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -690,6 +691,26 @@ func (p *rustMacroParser) parseRustType() TypeNode {
 	p.match(rustTokAmp)
 	p.match(rustTokMut)
 
+	// Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+	// `[[Bigint; 2]; 2]` surface produces the same
+	// FixedArrayType{Element: FixedArrayType{...}} shape the TS / Rust / Ruby
+	// tiers build.
+	if p.current().kind == rustTokLBracket {
+		p.advance()
+		element := p.parseRustType()
+		p.expect(rustTokSemi)
+		lengthTok := p.current()
+		p.expect(rustTokNumber)
+		length := 0
+		if lengthTok.kind == rustTokNumber {
+			if n, err := strconv.Atoi(lengthTok.value); err == nil {
+				length = n
+			}
+		}
+		p.expect(rustTokRBracket)
+		return FixedArrayType{Element: element, Length: length}
+	}
+
 	if p.current().kind == rustTokIdent {
 		name := p.current().value
 		p.advance()
@@ -707,12 +728,28 @@ func rustMapType(name string) string {
 	switch name {
 	case "Bigint", "Int", "i64", "u64", "i128", "u128":
 		return "bigint"
+	// BigintBig is packages/runar-rs's num_bigint::BigInt, the wide half of a
+	// pair whose narrow half (Bigint = i64) REFUSES what it cannot represent.
+	// A different Rust runtime type, the same Script primitive: reaching for
+	// it must not change one emitted byte. R-RustBigint.
+	case "BigintBig":
+		return "bigint"
 	case "Bool", "bool":
 		return "boolean"
 	case "ByteString", "Vec":
 		return "ByteString"
 	case "String":
 		return "ByteString"
+	case "Sha256Digest":
+		// N-108: runar-lang's cross-language spelling of `Sha256` (types.ts:
+		// `export type Sha256Digest = Sha256`). Resolved per SURFACE, and the
+		// Rust DSL surface spells it -- the reference tier maps it in
+		// 01-parse-rust.ts, as do Python, Ruby and Java. Go, Rust and Zig did
+		// not, so `current_hash: Sha256Digest` reached the validator as an
+		// opaque custom type and was refused in three tiers out of seven.
+		// parser_gocontract.go, parser_java.go, parser_python.go, parser_ruby.go
+		// and parser_zig.go all already carry this arm; this was the gap.
+		return "Sha256"
 	}
 	// Pass through Rúnar primitives: PubKey, Sig, Addr, Sha256, Ripemd160, etc.
 	return name
@@ -944,9 +981,62 @@ func (p *rustMacroParser) parseStatement() Statement {
 			p.advance()
 		}
 		p.match(rustTokIn)
-		startExpr := p.parseExpression()
+		// Two loop headers, both of them real Rust that iterates exactly these
+		// values:
+		//
+		//   for i in a..b         -> a, a+1, … b-1  (ascending)
+		//   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+		//
+		// `.rev()` is what lets the Rust surface spell a countdown. A Rust
+		// range only ever ascends — `(5..2)` is empty — so `step = -1` was
+		// unreachable from this surface and no fixture could exercise it
+		// across all nine. `Iterator::rev` reverses the half-open range: the
+		// descending loop starts at `b - 1` and ends at `a` INCLUSIVE, which
+		// is why the guard below is `>=` against `a`.
+		hasParen := p.current().kind == rustTokLParen
+		if hasParen {
+			p.advance()
+		}
+		rangeStart := p.parseExpression()
 		p.expect(rustTokDotDot)
-		endExpr := p.parseExpression()
+		rangeEnd := p.parseExpression()
+
+		descending := false
+		if hasParen {
+			p.expect(rustTokRParen)
+			p.expect(rustTokDot)
+			method := p.current()
+			if method.kind == rustTokIdent {
+				p.advance()
+			}
+			if method.value != "rev" {
+				p.errors = append(p.errors, Diagnostic{
+					Message:  fmt.Sprintf("line %d: unsupported range method '.%s()' in for loop — only '.rev()' is supported", method.line, method.value),
+					Severity: SeverityError,
+				})
+			}
+			p.expect(rustTokLParen)
+			p.expect(rustTokRParen)
+			descending = true
+		}
+
+		// `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs that
+		// start as a compile-time literal — it synthesizes iteration k as
+		// `start + k*step` — so fold the subtraction here when `b` is one, and
+		// otherwise hand the un-foldable expression straight through so ANF
+		// lowering raises its own "Cannot determine loop start" diagnostic
+		// rather than this parser inventing a second wording for the same rule.
+		startExpr := rangeStart
+		endExpr := rangeEnd
+		if descending {
+			if upper, ok := literalIntValue(rangeEnd); ok {
+				startExpr = BigIntLiteral{Value: new(big.Int).Sub(upper, big.NewInt(1))}
+			} else {
+				startExpr = rangeEnd
+			}
+			endExpr = rangeStart
+		}
+
 		p.expect(rustTokLBrace)
 		var body []Statement
 		for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
@@ -962,13 +1052,19 @@ func (p *rustMacroParser) parseStatement() Statement {
 			Init:           startExpr,
 			SourceLocation: loc,
 		}
+		condOp := "<"
+		var updateExpr Expression = IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
+		if descending {
+			condOp = ">="
+			updateExpr = DecrementExpr{Operand: Identifier{Name: varName}, Prefix: false}
+		}
 		cond := BinaryExpr{
-			Op:    "<",
+			Op:    condOp,
 			Left:  Identifier{Name: varName},
 			Right: endExpr,
 		}
 		update := ExpressionStmt{
-			Expr:           IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false},
+			Expr:           updateExpr,
 			SourceLocation: loc,
 		}
 		return ForStmt{
@@ -1395,6 +1491,15 @@ func rustMapBuiltin(name string) string {
 	case "bin_2_num":
 		return "bin2num"
 	case "num_2_bin":
+		return "num2bin"
+	// The arbitrary-precision encoder spellings from packages/runar-rs.
+	// Mapped here, BEFORE camelisation, so the answer does not depend on this
+	// tier's snakeToCamel. Without them the typechecker answers "unknown
+	// function" -- a TYPECHECK diagnostic, which --parse-only cannot see.
+	// R-RustBigint.
+	case "bin2num_big":
+		return "bin2num"
+	case "num2bin_big":
 		return "num2bin"
 	case "to_byte_string":
 		return "toByteString"

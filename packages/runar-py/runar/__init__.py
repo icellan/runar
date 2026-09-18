@@ -15,7 +15,7 @@ from runar.builtins import (
     hash160, hash256, sha256, ripemd160,
     extract_locktime, extract_output_hash, extract_amount,
     extract_version, extract_sequence,
-    extract_hash_prevouts, extract_outpoint,
+    extract_hash_prevouts, extract_outpoint, extract_script_code,
     extract_prev_output_script, require_output_p2pkh, current_block_height,
     num2bin, bin2num, int_to_str, cat, substr, reverse_bytes, len_,
     verify_rabin_sig,
@@ -108,7 +108,7 @@ __all__ = [
     # Preimage extraction
     'extract_locktime', 'extract_output_hash', 'extract_amount',
     'extract_version', 'extract_sequence',
-    'extract_hash_prevouts', 'extract_outpoint',
+    'extract_hash_prevouts', 'extract_outpoint', 'extract_script_code',
     # Intent sub-covenant intrinsics (BSVM Phase 13)
     'extract_prev_output_script', 'require_output_p2pkh', 'current_block_height',
     # Binary utilities

@@ -518,10 +518,24 @@ const PRIMITIVE_TYPES = new Set<string>([
 
 /**
  * Type-name aliases recognised by the TS parser. `Sha256Digest` is the
- * cross-language spelling exposed by runar-lang (`packages/runar-lang/src/types.ts`);
- * Go, Rust, Python, Zig, and Ruby parsers already map it to the canonical
- * `Sha256` primitive — the TS parser has to do the same so contracts can use
- * the alias in field/param annotations.
+ * cross-language spelling exposed by runar-lang (`packages/runar-lang/src/types.ts`),
+ * and the parser has to map it to the canonical `Sha256` primitive so
+ * contracts can use the alias in field/param annotations.
+ *
+ * N-104: this comment used to claim "Go, Rust, Python, Zig, and Ruby parsers
+ * already map it". That was true of those tiers' OTHER surface parsers and
+ * false of the two that matter here. Go's `.runar.ts` frontend
+ * (`compilers/go/frontend/parser.go`) resolved type identifiers through
+ * `IsPrimitiveType` with no alias table, and Rust's went through
+ * `PrimitiveTypeName::from_str`, which had no `Sha256Digest` arm — so on a
+ * `.runar.ts` source both tiers carried the alias through as an opaque custom
+ * type and refused `readonly digest: Sha256Digest` at the VALIDATOR, while
+ * TypeScript, Zig, Python, Ruby and Java compiled it. Both now resolve it;
+ * `conformance/subtype-parity/Sha256DigestAlias.runar.ts` is the gate.
+ *
+ * The lesson worth keeping: a cross-tier claim in a comment is not evidence.
+ * This one had been true of five surfaces and was written as if it were true
+ * of all of them.
  */
 const TYPE_ALIASES: Record<string, PrimitiveTypeName> = {
   Sha256Digest: 'Sha256',
@@ -544,6 +558,26 @@ function parseTypeNode(
   }
   if (nodeKind === SyntaxKind.VoidKeyword) {
     return { kind: 'primitive_type', name: 'void' };
+  }
+
+  // `number` is not a Rúnar type (R-301). It used to fall through to the
+  // "Unsupported type" WARNING at the bottom of this function and compile as an
+  // opaque custom type, which downstream treated as bigint — so a contract
+  // declaring `x: number` emitted the same script as one declaring `x: bigint`,
+  // with a warning nobody had to read. The go and rust tiers have always
+  // refused it here; ts, python, ruby, zig and java did not.
+  //
+  // The check has to live in the parser: by the time the validator sees a type
+  // it is a `PrimitiveTypeName`, and `number` is excluded from that union, so
+  // the validator's `checkNoNumberType` stub could never fire. That stub is
+  // gone; this is the check it was meant to be.
+  if (nodeKind === SyntaxKind.NumberKeyword || text === 'number') {
+    errors.push(makeDiagnostic(
+      "'number' type is not allowed in Rúnar contracts; use 'bigint' instead",
+      'error',
+      locFromNode(typeNode, file),
+    ));
+    return { kind: 'primitive_type', name: 'bigint' };
   }
 
   // Check for primitive types by text (covers TypeReference nodes like Sha256, PubKey, etc.)
@@ -688,6 +722,44 @@ function parseStatement(
   }
 }
 
+/**
+ * The diagnostic for a declaration list that declares more than one variable
+ * (W5 / LoopYoink). Shared verbatim by both sites that can see one.
+ *
+ * Both sites used to take `decls[0]` and discard the rest. In statement
+ * position that came with a WARNING, which `compile()` does not stop on; in a
+ * for-initializer it came with NO diagnostic at all, which makes the loop
+ * header the strictly worse of the two.
+ *
+ * What is lost is not always a value. Measured on the reference tier, a private
+ * helper carrying the contract's guard, called from a for-initializer's second
+ * declarator, compiled to nothing:
+ *
+ *   for (let i = 0n, k = this.guard(x); i < 2n; i++)   hex 008b519c77
+ *   for (let i = 0n;                    i < 2n; i++)   hex 008b519c77
+ *
+ * Byte-identical. `guard` asserts `x > 100n`, and `@bsv/sdk` `Spend.validate()`
+ * ACCEPTED `verify(5n)`; written as its own statement the same guard compiles
+ * to 23 bytes and `Spend.validate()` REJECTS it. `k` is never named again, so
+ * no pass downstream can catch this as an undeclared variable -- only the
+ * effect is lost.
+ *
+ * Failing closed rather than lowering every declarator: the subset is one
+ * declarator per statement, which is what `spec/grammar.md`'s
+ * VariableDeclaration production already says. Four of the seven tiers
+ * (python, zig, ruby, java) already refuse the shape at the comma, because
+ * their hand-written parsers have no production for it; only the three tiers
+ * driving a full TypeScript parser (ts-morph here, tree-sitter in go, swc in
+ * rust) could SEE the extra declarators, and all three dropped them.
+ */
+function extraDeclaratorError(count: number): string {
+  return `Multiple variable declarations in a single statement are not supported `
+    + `(${count} declared). Declare one variable per statement: every declarator after `
+    + `the first is discarded before the AST is built, so anything it calls -- a guard, `
+    + `an assert reached through a private helper -- is silently absent from the `
+    + `emitted script.`;
+}
+
 function parseVariableStatement(
   node: Node,
   file: string,
@@ -701,11 +773,17 @@ function parseVariableStatement(
     return null;
   }
 
-  // Warn about multiple declarations in a single statement
+  // W5: a declaration list declares exactly one variable, and extra
+  // declarators are an ERROR rather than a warning.
+  //
+  // This used to be a warning, and `compile()` stops only on
+  // `severity === 'error'` -- so the warning stopped nothing. The contract
+  // compiled, every declarator after the first was gone, and the caller got
+  // `success === true`. See `extraDeclaratorError` for the measurement.
   if (decls.length > 1) {
     errors.push(makeDiagnostic(
-      'Multiple variable declarations in a single statement are not supported. Declare one variable per statement.',
-      'warning',
+      extraDeclaratorError(decls.length),
+      'error',
       locFromNode(node, file),
     ));
   }
@@ -788,6 +866,7 @@ function parseExpressionStatement(
         op: compoundOp,
         left: target,
         right,
+        sourceLocation: locFromNode(node, file),
       };
       return {
         kind: 'assignment',
@@ -846,6 +925,15 @@ function parseForStatement(
   if (initNode && initNode.isKind(SyntaxKind.VariableDeclarationList)) {
     const declList = initNode.asKindOrThrow(SyntaxKind.VariableDeclarationList);
     const decls = declList.getDeclarations();
+    // W5: same rule as statement position, and this site used to emit nothing
+    // at all -- see `extraDeclaratorError`.
+    if (decls.length > 1) {
+      errors.push(makeDiagnostic(
+        extraDeclaratorError(decls.length),
+        'error',
+        locFromNode(initNode, file),
+      ));
+    }
     if (decls.length > 0) {
       const decl = decls[0]!;
       const name = decl.getName();
@@ -949,13 +1037,13 @@ function parseForUpdate(
     if (op === SyntaxKind.PlusPlusToken) {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'increment_expr', operand, prefix: false },
+        expression: { kind: 'increment_expr', operand, prefix: false, sourceLocation: loc },
         sourceLocation: loc,
       };
     } else {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'decrement_expr', operand, prefix: false },
+        expression: { kind: 'decrement_expr', operand, prefix: false, sourceLocation: loc },
         sourceLocation: loc,
       };
     }
@@ -970,13 +1058,13 @@ function parseForUpdate(
     if (op === SyntaxKind.PlusPlusToken) {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'increment_expr', operand, prefix: true },
+        expression: { kind: 'increment_expr', operand, prefix: true, sourceLocation: loc },
         sourceLocation: loc,
       };
     } else {
       return {
         kind: 'expression_statement',
-        expression: { kind: 'decrement_expr', operand, prefix: true },
+        expression: { kind: 'decrement_expr', operand, prefix: true, sourceLocation: loc },
         sourceLocation: loc,
       };
     }
@@ -1116,7 +1204,7 @@ function parseExpression(
     case SyntaxKind.ArrayLiteralExpression: {
       const arrayLit = node.asKindOrThrow(SyntaxKind.ArrayLiteralExpression);
       const elements = arrayLit.getElements().map(elem => parseExpression(elem, file, errors));
-      return { kind: 'array_literal', elements };
+      return { kind: 'array_literal', elements, sourceLocation: locFromNode(node, file) };
     }
 
     default:
@@ -1168,7 +1256,7 @@ function parseBinaryExpression(
       'warning',
       locFromNode(opToken, file),
     ));
-    return { kind: 'binary_expr', op: '===', left, right };
+    return { kind: 'binary_expr', op: '===', left, right, sourceLocation: locFromNode(node, file) };
   }
   if (opKind === SyntaxKind.ExclamationEqualsToken) {
     errors.push(makeDiagnostic(
@@ -1176,12 +1264,12 @@ function parseBinaryExpression(
       'warning',
       locFromNode(opToken, file),
     ));
-    return { kind: 'binary_expr', op: '!==', left, right };
+    return { kind: 'binary_expr', op: '!==', left, right, sourceLocation: locFromNode(node, file) };
   }
 
   const op = OP_MAP[opKind];
   if (op) {
-    return { kind: 'binary_expr', op, left, right };
+    return { kind: 'binary_expr', op, left, right, sourceLocation: locFromNode(node, file) };
   }
 
   errors.push(makeDiagnostic(
@@ -1189,7 +1277,7 @@ function parseBinaryExpression(
     'error',
     locFromNode(opToken, file),
   ));
-  return { kind: 'binary_expr', op: '+', left, right };
+  return { kind: 'binary_expr', op: '+', left, right, sourceLocation: locFromNode(node, file) };
 }
 
 function parsePrefixUnaryExpression(
@@ -1209,15 +1297,15 @@ function parsePrefixUnaryExpression(
 
   // ++ and --
   if (opToken === SyntaxKind.PlusPlusToken) {
-    return { kind: 'increment_expr', operand, prefix: true };
+    return { kind: 'increment_expr', operand, prefix: true, sourceLocation: locFromNode(node, file) };
   }
   if (opToken === SyntaxKind.MinusMinusToken) {
-    return { kind: 'decrement_expr', operand, prefix: true };
+    return { kind: 'decrement_expr', operand, prefix: true, sourceLocation: locFromNode(node, file) };
   }
 
   const op = UNARY_MAP[opToken];
   if (op) {
-    return { kind: 'unary_expr', op, operand };
+    return { kind: 'unary_expr', op, operand, sourceLocation: locFromNode(node, file) };
   }
 
   errors.push(makeDiagnostic(
@@ -1225,7 +1313,7 @@ function parsePrefixUnaryExpression(
     'error',
     locFromNode(node, file),
   ));
-  return { kind: 'unary_expr', op: '-', operand };
+  return { kind: 'unary_expr', op: '-', operand, sourceLocation: locFromNode(node, file) };
 }
 
 function parsePostfixUnaryExpression(
@@ -1238,10 +1326,10 @@ function parsePostfixUnaryExpression(
   const opToken = postfix.getOperatorToken();
 
   if (opToken === SyntaxKind.PlusPlusToken) {
-    return { kind: 'increment_expr', operand, prefix: false };
+    return { kind: 'increment_expr', operand, prefix: false, sourceLocation: locFromNode(node, file) };
   }
   if (opToken === SyntaxKind.MinusMinusToken) {
-    return { kind: 'decrement_expr', operand, prefix: false };
+    return { kind: 'decrement_expr', operand, prefix: false, sourceLocation: locFromNode(node, file) };
   }
 
   errors.push(makeDiagnostic(
@@ -1282,7 +1370,7 @@ function parseCallExpression(
     args.push(parseExpression(arg, file, errors));
   }
 
-  return { kind: 'call_expr', callee, args };
+  return { kind: 'call_expr', callee, args, sourceLocation: locFromNode(node, file) };
 }
 
 /**
@@ -1783,7 +1871,7 @@ function parseElementAccessExpression(
     index = { kind: 'bigint_literal', value: 0n };
   }
 
-  return { kind: 'index_access', object, index };
+  return { kind: 'index_access', object, index, sourceLocation: locFromNode(node, file) };
 }
 
 function parseTernaryExpression(
@@ -1796,7 +1884,7 @@ function parseTernaryExpression(
   const consequent = parseExpression(condExpr.getWhenTrue(), file, errors);
   const alternate = parseExpression(condExpr.getWhenFalse(), file, errors);
 
-  return { kind: 'ternary_expr', condition, consequent, alternate };
+  return { kind: 'ternary_expr', condition, consequent, alternate, sourceLocation: locFromNode(node, file) };
 }
 
 // ---------------------------------------------------------------------------

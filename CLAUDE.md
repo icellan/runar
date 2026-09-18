@@ -6,10 +6,16 @@ Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers
 
 Seven independent compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby, Java) ship in the repo. Two invariants are deliberately separate:
 
-1. **Frontend parity (no exceptions).** All seven compilers parse all nine `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` extensions for every fixture in the conformance suite. Contracts can be written in TypeScript, Solidity-like, Move-style, Go, Rust DSL, Python, Zig, Ruby, or Java syntax — every frontend lowers them to the same AST. Enforced in CI by `--parser-only` mode of `conformance/runner/runner.ts` (`runAllParserOnlyChecks` / CI step "Run all-tier parser-only coverage"): every available compiler runs `--parse-only` against every (fixture, format) pair, and the per-fixture `compilers` allowlist is intentionally ignored at this layer (the allowlist scopes Stack-IR / hex parity ONLY).
-2. **Stack-IR + hex parity (scoped).** For any conformance fixture whose `source.json` does **not** declare a `"compilers"` allowlist, all seven compilers produce byte-identical Stack IR and byte-identical Bitcoin Script hex. Fixtures that carry a `"compilers"` allowlist explicitly opt out of one or more tiers — the listed tiers are still required to match each other.
+1. **Frontend parity (no exceptions).** All seven compilers parse all nine `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` extensions for every fixture in the conformance suite. Contracts can be written in TypeScript, Solidity-like, Move-style, Go, Rust DSL, Python, Zig, Ruby, or Java syntax — every frontend lowers them to the same AST. Enforced in CI by `--parser-only` mode of `conformance/runner/runner.ts` (`runAllParserOnlyChecks` / CI step "Run all-tier parser-only coverage"): every available compiler runs `--parse-only` against every (fixture, format) pair, and the per-fixture `compilers` allowlist is intentionally ignored at this layer (the allowlist scopes ANF-IR / hex parity ONLY).
+2. **ANF-IR + hex parity (scoped).** For any conformance fixture whose `source.json` does **not** declare a `"compilers"` allowlist, all seven compilers produce byte-identical canonical **ANF** IR (pass 4) and byte-identical Bitcoin Script hex. Those two are what the runner captures and compares. **Stack IR is not serialized by any tier and is not compared** — the claim that it is was removed under R-096; closing that gap means agreeing a canonical Stack-IR serialization across seven CLIs, which is a deliberate piece of work and not done. Fixtures that carry a `"compilers"` allowlist explicitly opt out of one or more tiers — the listed tiers are still required to match each other.
 
-**EVM/STARK proof-system primitives are Go-only by project policy.** Baby Bear field, KoalaBear, Poseidon2 (KoalaBear + Merkle), BN254 + Groth16, Merkle / `merkleRootSha256`, SP1 FRI verifier, and FiatShamir-KB ship Stack-IR codegen in the **Go tier only**. They power Mode-3 STARK / FRI verification flows that the project has explicitly scoped to the Go reference compiler. Non-Go tiers may carry partial ports for historical reasons but are NOT conformance targets for these families. Fixtures that exercise these primitives carry an explicit `"compilers": ["go"]` allowlist in `source.json` (or a near-Go subset for hybrid fixtures); their parsers are still exercised by `multi-format.test.ts` and the all-tier parser-only matrix. See `conformance/README.md` ⇒ "Per-fixture compiler allowlist" for the current opt-outs. Every other codegen family (SLH-DSA, SHA-256, BLAKE3, EC/secp256k1, NIST P-256/P-384, WOTS+) MUST ship in all 7 tiers and is a real conformance gap if missing.
+**EVM/STARK proof-system primitives are scoped to the Go tier by project policy — which is a statement about what is CONFORMANCE-TESTED, not about where code exists (R-130).** Baby Bear field, KoalaBear, Poseidon2 (KoalaBear + Merkle), BN254 + Groth16, Merkle / `merkleRootSha256`, SP1 FRI verifier, and FiatShamir-KB power Mode-3 STARK / FRI verification flows that the project has explicitly scoped to the Go reference compiler, and only the Go tier is a conformance target for them.
+
+This paragraph used to say those families "ship Stack-IR codegen in the **Go tier only**", which is factually wrong and has been measured: compiling a BabyBear contract (`conformance/go-only-parity/GoOnlyBabyBear.runar.ts`) produces `9504010000789700…` — the SAME bytes — in go, rust, python, zig and ruby; only the Java tier refuses ("Java tier carries no BabyBear codegen"). TypeScript additionally ships `babybear-codegen.ts`, `koalabear-codegen.ts`, `merkle-codegen.ts`, `bn254-codegen.ts`, `poseidon2-*-codegen.ts` and `fiat-shamir-kb-codegen.ts`, each with its own unit tests. So five or six tiers carry real, agreeing implementations of families the doc called Go-only, and a reviewer taking the old wording at face value would have classified a divergence in them as out of scope.
+
+What the policy actually governs is the conformance ALLOWLIST: fixtures exercising these primitives carry an explicit `"compilers": ["go"]` entry in `source.json` (or a near-Go subset for hybrid fixtures), so cross-tier hex/ANF parity is not REQUIRED of the other tiers — while their parsers are still exercised by `multi-format.test.ts` and the all-tier parser-only matrix. The ports that exist are held to "refuse it, or match Go byte for byte" by `conformance/go-only-parity/` (R-037); whether to promote them to full conformance targets or delete them is an open policy question recorded there. See `conformance/README.md` ⇒ "Per-fixture compiler allowlist" for the current opt-outs.
+
+Every other codegen family (SLH-DSA, SHA-256, BLAKE3, EC/secp256k1, NIST P-256/P-384, WOTS+) MUST ship in all 7 tiers and is a real conformance gap if missing.
 
 ## Repository Structure
 
@@ -28,6 +34,7 @@ packages/
   runar-zig/           # Zig package: types, mock crypto, real hashes, deployment SDK
   runar-rb/            # Ruby gem: types, mock crypto, real hashes, deployment SDK
   runar-java/          # Java package: types, mock crypto, real hashes, deployment SDK, contract simulator
+  decompiler/          # Bitcoin Script -> Rúnar decompiler; powers `runar decompile` and the CI `decompiler-roundtrip` job
 compilers/
   go/                 # Go compiler implementation
   rust/               # Rust compiler implementation
@@ -68,13 +75,24 @@ cd examples/go && go test ./...                 # Run Go contract tests (busines
 cd examples/rust && cargo test                  # Run Rust contract tests (business logic + Rúnar compile check)
 cd packages/runar-py && python3 -m pytest       # Run Python SDK + package tests
 cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest  # Run Python contract tests
-cd compilers/zig && zig build test              # Run Zig compiler tests
-cd compilers/ruby && rake test                  # Run Ruby compiler tests
+cd compilers/zig && zig build test              # Run Zig compiler tests (cross-tier note below)
+cd compilers/ruby && rake test                  # Run Ruby compiler tests (Ruby >= 2.7; see RunarCompiler::MINIMUM_RUBY_VERSION)
 cd packages/runar-zig && zig build test         # Run Zig SDK + package tests
 cd compilers/java && ./gradlew test             # Run Java compiler tests (wrapper pinned at Gradle 8.5; first run downloads it)
 cd packages/runar-java && ./gradlew test        # Run Java SDK + package tests
 cd examples/java && ./gradlew test              # Run Java contract tests (business logic + Rúnar compile check)
 ```
+
+**No build order is required — each tier's suite stands alone.** One Zig test,
+`compilers/zig/src/tests/n086_cross_tier_sighash_fixed_array.zig`, additionally shells
+out to whichever peer compilers happen to be built and asserts every one of them emits a
+byte-identical script. Those peers are opportunistic, never required: when none is
+available the test reports itself as **skipped** — visible in the `zig build test
+--summary all` counts — and prints the build command for each tier it could not reach,
+rather than passing and certifying an agreement it never checked. A peer that IS built
+and then disagrees, refuses, or prints nothing still fails hard. Set
+`RUNAR_CROSS_TIER_MIN=<n>` to require n peers and fail instead of skip; a job that builds
+all six should set 6.
 
 ## Compiler Pipeline
 
@@ -88,9 +106,10 @@ Each pass is a pure function in `packages/runar-compiler/src/passes/`:
    - `.runar.java` → Java surface parser (`01-parse-java.ts`)
 2. **02-validate.ts** — Language subset constraints (no mutation of the AST)
 3. **03-typecheck.ts** — Type consistency verification. Rejects calls to non-Rúnar functions (Math.floor, console.log, etc.)
-4. **04-anf-lower.ts** — AST → A-Normal Form IR (flattened let-bindings)
-5. **05-stack-lower.ts** — ANF → Stack IR (Bitcoin Script stack operations)
-6. **06-emit.ts** — Stack IR → hex-encoded Bitcoin Script
+4. **03b-expand-fixed-arrays.ts** — Expands every `FixedArray<T, N>` property into N scalar siblings `<base>__<i>` (recursively for nested arrays) and rewrites `this.arr[i]` reads/writes; distributes array-literal initializers and validates their length AND element types. A real pass with its own diagnostics, run by `index.ts` between typecheck and ANF lowering, and ported to all seven tiers (R-196 — it used to be missing from this list, and from `packages/runar-compiler/README.md`, in a repo where "the documented pipeline" is what reviewers count passes from).
+5. **04-anf-lower.ts** — AST → A-Normal Form IR (flattened let-bindings)
+6. **05-stack-lower.ts** — ANF → Stack IR (Bitcoin Script stack operations)
+7. **06-emit.ts** — Stack IR → hex-encoded Bitcoin Script
 
 The constant folding optimizer (`src/optimizer/constant-fold.ts`) runs between passes 4 and 5 and is **enabled by default** in the user-facing TS / Go / Rust / Python / Zig / Ruby / Java compilers (every CLI ships a `--disable-constant-folding` opt-out for byte-exact replay against the checked-in fold-OFF goldens). The checked-in `expected-ir.json` and `expected-script.hex` files were stamped under fold-OFF. CI exercises **both modes**: the legacy multi-format step passes `--disable-constant-folding` (and verifies cross-tier hex + ANF parity *and* equality with the goldens), and a companion step (`RUNAR_DISABLE_CONSTANT_FOLDING=0`) re-runs the same fixtures with folding ON, enforces cross-tier parity across all 7 tiers, and skips the golden comparison. Any future fold-on cross-tier divergence must either (a) fix the divergent compiler or (b) be allowlisted with a per-fixture justification in `conformance/fold-on-allowlist.json` (see `conformance/README.md`).
 The peephole optimizer (`src/optimizer/peephole.ts`) runs on Stack IR between passes 5 and 6 (always enabled).
@@ -106,6 +125,24 @@ Go, Rust, Python, Zig, Ruby, and Java compilers have their own parser dispatch:
 
 ### AST Types Are Defined in Two Places
 `packages/runar-compiler/src/ir/runar-ast.ts` and `packages/runar-ir-schema/src/runar-ast.ts` must stay in sync. Both define `ContractNode`, `PropertyNode`, `MethodNode`, etc.
+
+### The Artifact Type Is Defined in THREE Places
+`RunarArtifact` and the ABI types are declared independently in:
+
+- `packages/runar-compiler/src/ir/artifact.ts`
+- `packages/runar-compiler/src/artifact/assembler.ts`
+- `packages/runar-ir-schema/src/artifact.ts`
+
+All three must declare the same fields. TypeScript will not tell you when they
+drift: it is structurally typed, so an object carrying a field still satisfies a
+narrower interface, and the field simply cannot be read or set through the view
+that is missing it — which is how `unsoundPrimitives` came to be declared in the
+schema and read by the SDKs while both compiler-side copies lacked it (R-245).
+
+The artifact is the wire format the seven SDKs read and the conformance suite
+compares across tiers, so a field that exists in one declaration and not the
+others is a cross-tier gap, not a local tidiness question.
+`tests/r245-artifact-definition-sync.test.ts` gates the three against each other.
 
 ### Adding a New ANF Value Kind
 When adding a new ANF IR node (like `add_output`), update ALL of these:
@@ -125,11 +162,11 @@ When adding a new ANF IR node (like `add_output`), update ALL of these:
 - `compilers/python/runar_compiler/frontend/anf_lower.py` — emit the new node
 - `compilers/python/runar_compiler/codegen/stack.py` — add to `collect_refs` + `lower_binding` dispatch
 - `compilers/zig/src/ir/types.zig` — add to ANF value types
-- `compilers/zig/src/frontend/anf_lower.zig` — emit the new node
-- `compilers/zig/src/codegen/stack.zig` — add to `collectRefs` + `lowerBinding` dispatch
-- `compilers/ruby/lib/ir/types.rb` — add to ANF value types
-- `compilers/ruby/lib/frontend/anf_lower.rb` — emit the new node
-- `compilers/ruby/lib/codegen/stack.rb` — add to `collect_refs` + `lower_binding` dispatch
+- `compilers/zig/src/passes/anf_lower.zig` — emit the new node
+- `compilers/zig/src/passes/stack_lower.zig` — add to `collectRefs` + `lowerBinding` dispatch
+- `compilers/ruby/lib/runar_compiler/ir/types.rb` — add to ANF value types
+- `compilers/ruby/lib/runar_compiler/frontend/anf_lower.rb` — emit the new node
+- `compilers/ruby/lib/runar_compiler/codegen/stack.rb` — add to `collect_refs` + `lower_binding` dispatch
 - `compilers/java/src/main/java/runar/compiler/ir/anf/` — add a new ANF node class (e.g. `AddOutput.java`) and add it to the `AnfValue` sealed interface
 - `compilers/java/src/main/java/runar/compiler/passes/AnfLower.java` — emit the new node
 - `compilers/java/src/main/java/runar/compiler/passes/StackLower.java` — handle in the `lowerBinding` dispatch + `collectRefs`
@@ -140,7 +177,7 @@ When adding a new frontend format parser:
 - Add the parser file in `packages/runar-compiler/src/passes/01-parse-{format}.ts`
 - Add dispatch case in `01-parse.ts` based on file extension
 - Export from `packages/runar-compiler/src/index.ts`
-- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`), Rust (`compilers/rust/src/frontend/parser_{format}.rs`), Python (`compilers/python/runar_compiler/frontend/parser_{format}.py`), Zig (`compilers/zig/src/frontend/parser_{format}.zig`), Ruby (`compilers/ruby/lib/frontend/parser_{format}.rb`), and Java (`compilers/java/src/main/java/runar/compiler/frontend/{Format}Parser.java` — the existing Java surface parser is `JavaParser.java`; add a peer for the new format)
+- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`), Rust (`compilers/rust/src/frontend/parser_{format}.rs`), Python (`compilers/python/runar_compiler/frontend/parser_{format}.py`), Zig (`compilers/zig/src/passes/parse_{format}.zig`), Ruby (`compilers/ruby/lib/runar_compiler/frontend/parser_{format}.rb`), and Java (`compilers/java/src/main/java/runar/compiler/frontend/{Format}Parser.java` — the existing Java surface parser is `JavaParser.java`; add a peer for the new format)
 - Add dispatch in Go `ParseSource()`, Rust `parse_source()`, Python `parse_source()`, Zig `parseSource()`, and Ruby `parse_source()`. For Java, add a case in `compilers/java/src/main/java/runar/compiler/Cli.java#compileSource` (or a new `ParserDispatch.java` helper if the cross-format dispatcher has landed by then — today `Cli` calls `JavaParser.parse` directly)
 - Auto-generated constructors MUST include `super()` as the first statement
 - Type names must map to Rúnar primitives (e.g., `int` → `bigint`, `Int` → `bigint`)
@@ -152,7 +189,7 @@ Any language feature change must be implemented in TypeScript, Go, Rust, Python,
 ### Seven SDKs Must Stay in Sync (wire-protocol primitives)
 The deployment SDKs in `packages/runar-{ts,go,rs,py,zig,rb,java}` are seven independent implementations of the same on-chain surface (deploy / call / state-serialize / sign / verify). **Wire-protocol primitives — anything whose bytes cross a tier boundary — must be byte-identical across all seven SDKs.** Today that covers:
 - **`canonicalJson`** — RFC 8785 / JCS-compliant serializer. Used to hash payloads before signing. Two implementations producing different bytes for the same JSON value silently break every cross-tier signature.
-- **`SignedEnvelope` + `signEnvelope` + `verifyEnvelope`** — the signed-broadcast wire protocol used by overlay apps (`runar-overlay-express` server, `runar-react` browser hooks, plus any non-TS overlay backend). All seven SDKs must accept the same envelope shape, produce signatures verifiable by every other tier, and return the same `VerifyEnvelopeReason` for the same rejection case.
+- **`SignedEnvelope` + `signEnvelope` + `verifyEnvelope`** — the signed-broadcast wire protocol. Any two tiers that sign and verify each other's envelopes must agree on the bytes; a divergence is a silent cross-tier signature failure, not a visible error. All seven SDKs must accept the same envelope shape, produce signatures verifiable by every other tier, and return the same `VerifyEnvelopeReason` for the same rejection case.
 
 Convenience wrappers around tier-local primitives (`pubkeyToPKH`, `estimateFeeForArtifact`, `LocalSigner`, provider classes) do NOT need cross-tier parity — they're per-tier ergonomic surface. Sync the **wire bytes**, not the API shape.
 
@@ -163,7 +200,8 @@ Cross-tier interop tests live in `conformance/sdk-envelope/` (a single TS-signed
 - `StatefulSmartContract` — compiler auto-injects `checkPreimage` at method entry and state continuation at exit
 - `this.addOutput(satoshis, ...values)` — multi-output intrinsic; values are positional matching mutable properties in declaration order
 - `this.addRawOutput(satoshis, scriptBytes)` — raw output intrinsic; creates an output with caller-specified script bytes instead of the contract's own codePart
-- `parentClass` field on `ContractNode` discriminates between the two base classes
+- `UnsafeSmartContract` — stateless, plus the `asm({ body, in_arity, out_arity })` escape hatch, which splices verbatim opcode bytes and lowers to a `raw_script` node the compiler does NOT interpret. DCE must not remove it, the stack model cannot verify its declared arity, and no type information crosses it. Exercised by the `asm-raw-script` example in all nine formats; see `docs/language-reference.md` and `spec/grammar.md`
+- `parentClass` field on `ContractNode` discriminates between the three base classes
 - Only Rúnar built-in functions and contract methods are allowed — the type checker rejects calls to unknown functions like `Math.floor()` or `console.log()`
 - **Property initializers**: Properties can have `= value` defaults (literal values only: BigIntLiteral, BoolLiteral, ByteStringLiteral). Initialized properties are excluded from auto-generated constructors. Go/Rust DSL formats use a private `init()` method pattern instead of inline syntax. The AST `PropertyNode` has an optional `initializer` field; ANF `initialValue` is populated from it.
 
@@ -247,7 +285,7 @@ void testCompile() throws Exception {
 }
 ```
 
-`TestContract` uses the interpreter (not the VM) — it tests business logic with mocked crypto (`checkSig` always true, `checkPreimage` always true). Go, Rust, Python, Zig, Ruby, and Java tests run contracts as native code with mock types from the `runar` package/crate/gem/jar. The Java SDK additionally ships an off-chain `ContractSimulator` (`packages/runar-java/src/main/java/runar/lang/runtime/ContractSimulator.java`) for running compiled artifacts against real hashes + real secp256k1 with mocked signature-verify.
+`TestContract` uses the interpreter (not the VM) — it tests business logic. Its crypto is a MIXTURE, not a blanket mock (R-112): `checkSig` and `verifyRabinSig` are REAL (ECDSA over a fixed test message; real Rabin), `checkPreimage` is stubbed to `true`, and `checkMultiSig` REFUSES — it throws rather than answer, because it cannot verify a signature set without array values. Use `ScriptVM` when you need the real OP_CHECKMULTISIG. Go, Rust, Python, Zig, Ruby, and Java tests run contracts as native code with mock types from the `runar` package/crate/gem/jar. The Java SDK additionally ships an off-chain `ContractSimulator` (`packages/runar-java/src/main/java/runar/lang/runtime/ContractSimulator.java`) for running compiled artifacts against real hashes + real secp256k1 with mocked signature-verify.
 
 The `CompileCheck` / `compile_check` functions run the contract through the Rúnar frontend (parse → validate → typecheck) to verify it's valid Rúnar that will compile to Bitcoin Script.
 
@@ -273,7 +311,7 @@ All seven languages have equivalent deployment SDKs for interacting with compile
 
 **Python** (`packages/runar-py/runar/sdk/`): `RunarContract`, `MockProvider`, `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization. Zero required dependencies (hashlib is stdlib). `LocalSigner` uses bsv-sdk if installed for speed; otherwise falls back to the bundled pure-Python ECDSA implementation. Python contracts use snake_case names which the parser converts to camelCase in the AST.
 
-**Zig** (`packages/runar-zig/src/sdk/`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`, `LocalSigner`/`MockSigner`/`ExternalSigner`, BSV-20/BSV-21 ordinals, `deployWithWallet`, ANF interpreter.
+**Zig** (`packages/runar-zig/src/sdk_*.zig`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`, `LocalSigner`/`MockSigner`/`ExternalSigner`, BSV-20/BSV-21 ordinals, `deployWithWallet`, ANF interpreter.
 
 **Ruby** (`packages/runar-rb/lib/runar/sdk/`): `RunarContract`, `MockProvider`, `LocalSigner`, `MockSigner`/`ExternalSigner`, deploy/call transaction builders, state serialization.
 
@@ -311,7 +349,7 @@ Key SDK concepts:
 - `this.addRawOutput(satoshis, scriptBytes)` creates outputs with arbitrary script bytes (not stateful continuations)
 - OP_CODESEPARATOR is automatically inserted for stateful contracts; artifact includes `codeSeparatorIndex` and `codeSeparatorIndices` fields
 - Post-quantum signature verification (experimental): `verifyWOTS` (one-time, ~10 KB script), `verifySLHDSA_SHA2_*` (6 FIPS 205 parameter sets, 200-900 KB scripts)
-- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python), `compilers/zig/src/codegen/slh_dsa.zig` (Zig), `compilers/ruby/lib/codegen/slh_dsa.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/SlhDsa.java` (Java)
-- EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python), `compilers/zig/src/codegen/ec.zig` (Zig), `compilers/ruby/lib/codegen/ec.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Ec.java` (Java)
-- SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python), `compilers/zig/src/codegen/sha256.zig` (Zig), `compilers/ruby/lib/codegen/sha256.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Sha256.java` (Java)
+- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python), `compilers/zig/src/passes/helpers/pq_emitters.zig` (Zig), `compilers/ruby/lib/runar_compiler/codegen/slh_dsa.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/SlhDsa.java` (Java)
+- EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python), `compilers/zig/src/passes/helpers/ec_emitters.zig` (Zig), `compilers/ruby/lib/runar_compiler/codegen/ec.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Ec.java` (Java)
+- SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python), `compilers/zig/src/passes/helpers/sha256_emitters.zig` (Zig), `compilers/ruby/lib/runar_compiler/codegen/sha256.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Sha256.java` (Java)
 - NIST P-256 / P-384 codegen (`compilers/java/src/main/java/runar/compiler/codegen/P256P384.java`) and Blake3 codegen (`compilers/java/src/main/java/runar/compiler/codegen/Blake3.java`) ship alongside their 6 peer-compiler equivalents. WOTS+ (`Wots.java`) and Rabin (`Rabin.java`) codegen modules also ship for the Java tier.

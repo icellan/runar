@@ -10,7 +10,10 @@ import (
 
 // DecodeStateFromScript extracts state via the real Go SDK codec.
 func DecodeStateFromScript(artifact *runar.RunarArtifact, scriptHex string) (map[string]interface{}, error) {
-	st := runar.ExtractStateFromScript(artifact, scriptHex)
+	st, err := runar.ExtractStateFromScript(artifact, scriptHex)
+	if err != nil {
+		return nil, fmt.Errorf("decoding state section of script (%d bytes): %w", len(scriptHex)/2, err)
+	}
 	if st == nil {
 		return nil, fmt.Errorf("no OP_RETURN state section in script (%d bytes)", len(scriptHex)/2)
 	}

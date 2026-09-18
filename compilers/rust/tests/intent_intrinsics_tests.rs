@@ -225,8 +225,9 @@ type Cov struct {
 }
 
 func (c *Cov) PayMulti() {
+    // W2: both calls name index 0 -- any literal index above 0 is refused now.
     runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
-    runar.RequireOutputP2PKH(1, c.BondPKH, c.Bond)
+    runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
 }
 "#;
     let p = lower_go(source);

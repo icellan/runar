@@ -92,10 +92,47 @@ public final class AnfLower {
     // bindings carry the {@code result_type: "bytes"} annotation.
     // ------------------------------------------------------------------
 
-    private static final Set<String> BYTE_TYPES = Set.of(
-        "ByteString", "PubKey", "Sig", "Sha256", "Ripemd160", "Addr",
-        "SigHashPreimage", "RabinSig", "RabinPubKey",
-        "Point", "P256Point", "P384Point"
+    // N-076: there is deliberately no list here. Typecheck.BYTESTRING_SUBTYPES
+    // is the authority. The second, hand-maintained copy this replaces carried
+    // "RabinSig" and "RabinPubKey", which Typecheck files under
+    // BIGINT_SUBTYPES -- so === on a Rabin value emitted OP_EQUAL and, far
+    // worse, + on one emitted OP_CAT where the source said addition.
+    //
+    // Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+    // with OP_ADD.
+    private static boolean isByteType(String typeName) {
+        return Typecheck.isByteStringFamily(typeName);
+    }
+
+    /**
+     * Preimage field extractors that return BYTES ({@code ByteString} /
+     * {@code Sha256}).
+     *
+     * <p>N-054: this list is a transcription of the return type the type
+     * checker already records for these builtins in {@code TypeCheck.java},
+     * and the stack lowerer agrees with it byte for byte: {@code lowerExtractor}
+     * ends the split sequence with OP_BIN2NUM for exactly the SIX extractors
+     * that are NOT listed here, and for none of the ones that are.
+     *
+     * <p>So an extractor listed here leaves a byte string on the stack and must
+     * be compared with OP_EQUAL and concatenated with OP_CAT; every other
+     * extractor leaves a minimally-encoded script NUMBER and must be compared
+     * with OP_NUMEQUAL and added with OP_ADD.
+     *
+     * <p>Getting it backwards is a correctness defect in both directions.
+     * OP_EQUAL on a number is over-strict — it rejects a witness that encodes
+     * the same value with different bytes ({@code 0400} for 4), i.e. it refuses
+     * a valid spend. OP_NUMEQUAL on a hash or a scriptCode is under-strict —
+     * trailing high-order zero bytes and negative zero compare equal to values
+     * they are not byte-equal to, i.e. a covenant bypass.
+     *
+     * <p>This replaces a {@code name.startsWith("extract")} prefix test that
+     * swept the six numeric extractors in with the byte ones.
+     */
+    private static final Set<String> BYTE_RETURNING_EXTRACTORS = Set.of(
+        "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
+        "extractScriptCode", "extractOutputHash", "extractOutputs",
+        "extractPrevOutputScript"
     );
 
     private static final Set<String> BYTE_RETURNING_FUNCTIONS = Set.of(
@@ -197,9 +234,30 @@ public final class AnfLower {
             ConstValue init = p.initializer() != null && !ctorAssigned.contains(p.name())
                 ? extractLiteralValue(p.initializer())
                 : null;
-            AnfProperty prop = new AnfProperty(p.name(), typeToString(p.type()), p.readonly(), init);
+            AnfProperty prop = new AnfProperty(
+                p.name(), typeToString(p.type()), p.readonly(), init, syntheticChain(p));
+            // R-144: publish the property's own position, so a refusal below
+            // names the declaration the author wrote rather than nothing.
+            PassLocation.set(p.sourceLocation());
             if (init != null) checkStateBigintMagnitude(prop);
             out.add(prop);
+        }
+        return out;
+    }
+
+    /**
+     * N-095: carry the expand-fixed-arrays chain from the AST onto the ANF
+     * property, so {@code --emit-ir} publishes it and every other tier can
+     * regroup the expanded leaves back into one {@code FixedArray} entry.
+     * Null for a property the pass did not mint, which keeps the field off the
+     * wire for every FixedArray-free contract.
+     */
+    private static List<AnfProperty.SyntheticArrayLevel> syntheticChain(PropertyNode p) {
+        List<PropertyNode.SyntheticArrayChainEntry> chain = p.syntheticArrayChain();
+        if (chain == null || chain.isEmpty()) return null;
+        List<AnfProperty.SyntheticArrayLevel> out = new ArrayList<>(chain.size());
+        for (PropertyNode.SyntheticArrayChainEntry e : chain) {
+            out.add(new AnfProperty.SyntheticArrayLevel(e.base(), e.index(), e.length()));
         }
         return out;
     }
@@ -251,6 +309,17 @@ public final class AnfLower {
             && u.op() == Expression.UnaryOp.NEG
             && u.operand() instanceof BigIntLiteral bil) {
             return new BigIntConst(bil.value().negate());
+        }
+        // `toByteString('<hex>')` IS the ByteStringLiteral production (see
+        // spec/grammar.md section 11 and the peer check in Validate.java).
+        // UNWRAP it so initialValue holds the bare value, byte-identical to
+        // what the bare `'<hex>'` spelling produces. Without this the
+        // validator would accept the property and this method would return
+        // null for it — silently DROPPING the default rather than storing a
+        // call node. Literal argument only.
+        if (Validate.isToByteStringLiteral(e)
+            && ((CallExpr) e).args().get(0) instanceof ByteStringLiteral tbs) {
+            return new BytesConst(tbs.value());
         }
         return null;
     }
@@ -521,7 +590,6 @@ public final class AnfLower {
     private static final class MethodScope {
         final List<AnfParam> autoInjectedParams = new ArrayList<>();
         final Set<String> autoInjectedSet = new HashSet<>();
-        boolean didEmitHashOutputsCheck = false;
 
         void recordAutoInjectedParam(String name, String type) {
             if (autoInjectedSet.add(name)) {
@@ -577,6 +645,25 @@ public final class AnfLower {
          * REWRITTEN at method top level.
          */
         boolean nested = false;
+        /**
+         * R-072. {@code requireOutputP2PKH} emits its
+         * {@code hash256(_serialisedOutputs) === extractOutputHash(txPreimage)}
+         * commitment at most once per CONTROL-FLOW PATH, so this lives on the
+         * context and deliberately NOT on {@link MethodScope} (which
+         * sub-contexts share by reference).
+         *
+         * <p>{@link #subContext()} copies the parent's value in, because a
+         * commitment on a dominating path really has been established by the
+         * time the nested block runs; the copy means writes inside the block
+         * stay there, so an {@code if}'s two arms cannot latch the flag for
+         * each other. Exactly one arm executes on chain, and the arm-local
+         * per-output assertion only compares a substring of the
+         * spender-supplied {@code _serialisedOutputs} witness: an arm without
+         * its own commitment constrains nothing about the transaction's real
+         * outputs, and the bond it claims to enforce can be satisfied with
+         * invented bytes.
+         */
+        boolean didEmitHashOutputsCheck = false;
 
         LowerCtx(ContractNode contract) {
             this.contract = contract;
@@ -612,6 +699,38 @@ public final class AnfLower {
                 }
             }
             return null;
+        }
+
+        /**
+         * Refuse a call to a private method whose argument count does not
+         * match that method's parameter count.
+         *
+         * <p>R-189: typecheck resolves a BARE-IDENTIFIER call against the
+         * builtin table first, while ANF lowering resolves it against the
+         * contract's private methods first. A private method that shadows a
+         * builtin name with a different arity — {@code private min(a, b, c)}
+         * called as {@code min(x, y)} — therefore passes the arity check for
+         * {@code min} the BUILTIN and then lowers as {@code min} the METHOD.
+         * Nothing forbids the shadowing.
+         *
+         * <p>Downstream, params and args were zipped up to the shorter of the
+         * two, so the surplus was dropped on the floor: the extra argument was
+         * evaluated and discarded, or the unbound parameter compiled to a
+         * dangling reference. When the unbound parameter happened to be UNUSED
+         * the contract compiled clean — an arity mismatch silently accepted.
+         * When it was used, it surfaced two passes later as "method parameter
+         * 'c' is not on the stack", naming a pass the author never wrote in.
+         *
+         * <p>Refused here, where both counts are known, on every call form
+         * and for both the inlined and the method_call lowering path.
+         */
+        void checkPrivateCallArity(String name, List<String> argRefs) {
+            MethodNode method = getPrivateMethod(name);
+            if (method == null) return;
+            if (method.params().size() == argRefs.size()) return;
+            throw new IllegalStateException(
+                "private method '" + name + "' expects " + method.params().size()
+                    + " argument(s), got " + argRefs.size() + ".");
         }
 
         // Return true iff `name` is a private method that (transitively)
@@ -672,8 +791,27 @@ public final class AnfLower {
             if (endIndex > startIndex) {
                 return bindings.get(endIndex - 1).name();
             }
-            // Empty body — emit a placeholder so the caller has a ref.
-            return emit(makeLoadConstString("@void"));
+            // R-290: the body emitted nothing, so there is no value for the
+            // caller to reference.
+            //
+            // Refuse it. The alternative is what was here before: a `load_const "@void"`
+            // sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+            // special-cased). It survived pass 4 and died in pass 6's hex decoder —
+            // "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+            // messages that name neither the method nor the problem, and that only fire
+            // because the string happens to be odd-length and non-hex. An even-length
+            // sentinel would decode to zeros in the Rust decoder's
+            // `from_str_radix(..).unwrap_or(0)` and reach the script.
+            //
+            // Reachable from source that parses, validates and type-checks: declare a public
+            // method BEFORE two same-named privates. The side-effect summary resolves the
+            // name through a last-wins map and caches the OUTPUT-EMITTING one, so
+            // `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+            // whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+            // IR, `--hex` exit 1 with the hex-decoder message.
+            throw new IllegalStateException(
+                "private method '" + methodName + "' was inlined but produced no "
+                    + "bindings, so the call site has no value to reference.");
         }
 
         String freshTemp() {
@@ -741,6 +879,20 @@ public final class AnfLower {
             sub.paramNames.addAll(this.paramNames);
             sub.localAliases.putAll(this.localAliases);
             sub.localByteVars.addAll(this.localByteVars);
+            // Deep-copy the inlined-param alias stack. inlinePrivateMethodCall
+            // pushes the caller's argument refs onto the CURRENT context before
+            // lowering the private body; without this, an if arm / loop body /
+            // ternary arm inside that body lowers with no aliases and falls
+            // through to load_param naming the PRIVATE's own parameter — which
+            // resolves to the CALLER's same-named parameter instead of the
+            // argument that was passed in. spec/semantics.md §6.3 makes inlining
+            // substitution, so the helper form and the hand-inlined form must
+            // compile to the same script. Copied (not shared) because push/pop
+            // inside the nested block are balanced there and must not disturb
+            // the parent's frames.
+            for (Map.Entry<String, List<String>> e : this.paramAliasStack.entrySet()) {
+                sub.paramAliasStack.put(e.getKey(), new ArrayList<>(e.getValue()));
+            }
             // Share the methodScope so intent-covenant intrinsics emitted
             // inside if/else branches or ternaries register their
             // auto-injected witness params on the parent method's ABI.
@@ -753,6 +905,10 @@ public final class AnfLower {
             // manual checkPreimage() inside an if/else / ternary / inlined
             // branch binds under the same mode instead of the default.
             sub.sighashFlag = this.sighashFlag;
+            // R-072: inherited by VALUE — a parent commitment dominates this
+            // block, but one emitted inside it must not flow back out to a
+            // sibling arm.
+            sub.didEmitHashOutputsCheck = this.didEmitHashOutputsCheck;
             // GAP-002: inherit the outer statement's source location so
             // bindings emitted inside an if/else / loop branch are still
             // mapped back to the originating AST statement.
@@ -787,8 +943,14 @@ public final class AnfLower {
                 // Early-return nesting: if an if-statement's then-block ends
                 // with return and no else-branch, the remaining statements
                 // logically belong in the else-branch.
+                // R-298: an EMPTY else-list means the same thing as no else,
+                // and at least one frontend emits it that way. Keying on null
+                // alone silently suppressed this rewrite for that whole
+                // surface, leaving the trailing statements AFTER the if — where
+                // the last one becomes the method's result. Ruby's lowerer
+                // already accepts both spellings (anf_lower.rb:884).
                 if (stmt instanceof IfStatement is
-                    && is.elseBody() == null
+                    && (is.elseBody() == null || is.elseBody().isEmpty())
                     && i + 1 < stmts.size()
                     && branchEndsWithReturn(is.thenBody())) {
                     List<Statement> remaining = stmts.subList(i + 1, stmts.size());
@@ -921,6 +1083,10 @@ public final class AnfLower {
                 if (stmt.sourceLocation() != null) {
                     currentSourceLoc = stmt.sourceLocation();
                 }
+                // R-144: the same position, published for the error path. The
+                // field above only reaches bindings that are successfully
+                // emitted; a refusal emits none.
+                PassLocation.set(currentSourceLoc);
                 if (stmt instanceof VariableDeclStatement v) {
                     lowerVariableDecl(v);
                 } else if (stmt instanceof AssignmentStatement a) {
@@ -1600,6 +1766,29 @@ public final class AnfLower {
         private String lowerCallExpr(CallExpr e) {
             Expression callee = e.callee();
 
+            // `toByteString('<hex>')` IS the ByteStringLiteral production — see
+            // spec/grammar.md section 11:
+            //
+            //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+            //
+            // so it must reach the IR as a literal, indistinguishable from the
+            // bare `'<hex>'` spelling the other surfaces use. Lowering it to a
+            // `toByteString` call node instead made the `.runar.rs` surface —
+            // where a bare literal is not valid Rust and this wrapper is the
+            // ONLY spelling that is both valid Rust and valid Rúnar — unable to
+            // match the one `expected-ir.json` every format is compared against.
+            //
+            // Literal argument only. `toByteString(x)` for a non-literal `x` is
+            // not this production; it stays an identity-cast call node (the
+            // typechecker types it ByteString -> ByteString and stack lowering
+            // already treats it as a no-op), so its behaviour is unchanged.
+            if (callee instanceof Identifier tbsId
+                && "toByteString".equals(tbsId.name())
+                && e.args().size() == 1
+                && e.args().get(0) instanceof ByteStringLiteral) {
+                return lowerExprToRef(e.args().get(0));
+            }
+
             // asm({...}) compiler intrinsic — the parser has already
             // normalised the object-literal argument into three positional
             // args (body, in_arity, out_arity). Lower to a single opaque
@@ -1698,8 +1887,11 @@ public final class AnfLower {
             // standard P2PKH paying `amount` satoshis to `pubkeyHash`.
             // Auto-injects `_serialisedOutputs` (once per method) and emits
             // hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
-            // first time the intrinsic is called; subsequent calls in the
-            // same method emit only the per-output substring assertion.
+            // first time the intrinsic is called on a given CONTROL-FLOW PATH;
+            // a later call on the same path emits only the per-output substring
+            // assertion, while a call on a path the commitment does not
+            // dominate emits its own (R-072 — the substring assertion alone
+            // only constrains the spender-supplied witness, not the tx).
             //
             // v1 assumes all outputs in the serialised set are exactly 34
             // bytes (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script).
@@ -1712,13 +1904,23 @@ public final class AnfLower {
                     return emit(makeLoadConstString(""));
                 }
                 long idx = idxLit.value().longValueExact();
+                // W2 backstop. The user-facing refusal lives in the typechecker, where a
+                // diagnostic carries a source location -- but ANF lowering is reachable from
+                // callers that run no typechecker, and R-012 is this repo's standing lesson about
+                // a security check that lives in exactly one pass. Unreachable in the normal
+                // pipeline: typecheck answers first.
+                if (idx != 0) {
+                    throw new IllegalStateException(
+                        "requireOutputP2PKH: outputIndex must be 0; got " + idx + ". The emitted assertion reads output i at byte offset i*34, which is an output boundary only if every earlier output is exactly 34 bytes -- an attacker sizes output 0 freely and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset.");
+                }
 
                 methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString");
                 addParam("_serialisedOutputs");
 
-                // Emit the hashOutputs(preimage) check exactly once per method.
-                if (!methodScope.didEmitHashOutputsCheck) {
-                    methodScope.didEmitHashOutputsCheck = true;
+                // Emit the hashOutputs(preimage) commitment once per
+                // control-flow path (R-072 — see LowerCtx.didEmitHashOutputsCheck).
+                if (!didEmitHashOutputsCheck) {
+                    didEmitHashOutputsCheck = true;
                     String serialisedRef = emit(new LoadParam("_serialisedOutputs"));
                     String actualOutHashRef = emit(new Call("hash256", List.of(serialisedRef)));
                     String preimageRef = emit(new LoadParam("txPreimage"));
@@ -1801,6 +2003,7 @@ public final class AnfLower {
             // this.method(...) via PropertyAccessExpr
             if (callee instanceof PropertyAccessExpr pa) {
                 List<String> argRefs = lowerArgs(e.args());
+                checkPrivateCallArity(pa.property(), argRefs);
                 if (shouldInlinePrivate(pa.property())) {
                     return inlinePrivateMethodCall(pa.property(), argRefs);
                 }
@@ -1813,6 +2016,7 @@ public final class AnfLower {
                 && me.object() instanceof Identifier oid
                 && "this".equals(oid.name())) {
                 List<String> argRefs = lowerArgs(e.args());
+                checkPrivateCallArity(me.property(), argRefs);
                 if (shouldInlinePrivate(me.property())) {
                     return inlinePrivateMethodCall(me.property(), argRefs);
                 }
@@ -1843,6 +2047,7 @@ public final class AnfLower {
             if (callee instanceof Identifier id3) {
                 List<String> argRefs = lowerArgs(e.args());
                 if (isPrivateMethod(id3.name())) {
+                    checkPrivateCallArity(id3.name(), argRefs);
                     if (shouldInlinePrivate(id3.name())) {
                         return inlinePrivateMethodCall(id3.name(), argRefs);
                     }
@@ -1987,21 +2192,21 @@ public final class AnfLower {
             if (expr instanceof ByteStringLiteral) return true;
             if (expr instanceof Identifier id) {
                 String t = getParamType(id.name());
-                if (t != null && BYTE_TYPES.contains(t)) return true;
+                if (t != null && isByteType(t)) return true;
                 t = getPropertyType(id.name());
-                if (t != null && BYTE_TYPES.contains(t)) return true;
+                if (t != null && isByteType(t)) return true;
                 if (localByteVars.contains(id.name())) return true;
                 return false;
             }
             if (expr instanceof PropertyAccessExpr pa) {
                 String t = getPropertyType(pa.property());
-                return t != null && BYTE_TYPES.contains(t);
+                return t != null && isByteType(t);
             }
             if (expr instanceof MemberExpr me
                 && me.object() instanceof Identifier id2
                 && "this".equals(id2.name())) {
                 String t = getPropertyType(me.property());
-                return t != null && BYTE_TYPES.contains(t);
+                return t != null && isByteType(t);
             }
             if (expr instanceof CallExpr ce) {
                 if (ce.callee() instanceof Identifier cid) {
@@ -2010,10 +2215,7 @@ public final class AnfLower {
                         return "ByteString".equals(ce.asmReturnType());
                     }
                     if (BYTE_RETURNING_FUNCTIONS.contains(cid.name())) return true;
-                    if (cid.name().length() >= 7
-                        && cid.name().substring(0, 7).equals("extract")) {
-                        return true;
-                    }
+                    if (BYTE_RETURNING_EXTRACTORS.contains(cid.name())) return true;
                 }
                 return false;
             }
@@ -2041,20 +2243,26 @@ public final class AnfLower {
     }
 
     /**
-     * Issue #109: emit the DCE-surviving preservation pair for each
+     * Issue #109: emit the DCE-surviving preservation {@code load_prop} for each
      * {@code @embedAlways} readonly field, into the given (public) method
-     * context. Reproduces exactly what a hand-written {@code const _bind =
-     * this.field;} lowers to: a {@code load_prop} followed by a
-     * {@code load_const("@ref:<t>")} alias. The alias marks the {@code load_prop}
-     * as referenced, so dead-binding DCE keeps it; stack lowering then emits the
-     * field's constructor-slot placeholder and NIPs the unused value off the
-     * stack at method end. The field's bytes therefore remain in the deployed
-     * locking script for downstream recovery.
+     * context. The injected node carries {@code preserve = true}, so
+     * {@code Dce.hasSideEffect} keeps it even though nothing references it;
+     * stack lowering then emits the field's constructor-slot placeholder and
+     * NIPs the unused value off the stack at method end. The field's bytes
+     * therefore remain in the deployed locking script for downstream recovery.
+     *
+     * <p>This used to emit an alias pair instead — the {@code load_prop} plus a
+     * {@code load_const("@ref:<t>")} whose only job was to make the
+     * {@code load_prop} look referenced. That survives ONE DCE sweep but not the
+     * fixed-point loop in {@link Dce}: sweep 1 drops the now-unreferenced alias,
+     * sweep 2 then drops the {@code load_prop} it was protecting, and both
+     * halves vanish. Marking the node itself does not depend on a referencing
+     * binding surviving. Mirrors the Zig reference
+     * ({@code compilers/zig/src/passes/anf_lower.zig}).
      */
     private static void emitEmbedAlwaysPreservation(LowerCtx ctx, List<PropertyNode> fields) {
         for (PropertyNode field : fields) {
-            String loadRef = ctx.emit(new LoadProp(field.name()));
-            ctx.emitNamed("__embedAlways_" + field.name(), makeLoadConstString("@ref:" + loadRef));
+            ctx.emit(new LoadProp(field.name(), /* preserve */ true));
         }
     }
 
@@ -2094,6 +2302,97 @@ public final class AnfLower {
         return null;
     }
 
+    // ------------------------------------------------------------------
+    // Continuation-shape AST descent (shared by all three effect walkers)
+    // ------------------------------------------------------------------
+    //
+    // Ports the descent of the reference side_effect_summary module
+    // (packages/runar-compiler/src/passes/side-effect-summary.ts and the Go /
+    // Rust / Python peers). CL-BUG-155: the walkers below used to visit only
+    // ExpressionStatement / IfStatement bodies / ForStatement body /
+    // ReturnStatement, so a side effect reachable through a
+    // variable-declaration initialiser, an if-condition, a loop header, an
+    // assignment's value or a call argument never reached the
+    // continuation-shape decision. Both failure modes are unsafe: an output
+    // intrinsic behind an initialiser makes the body load _changePKH that the
+    // header never declared (stack lowering refuses), and a state mutation
+    // behind one silently marks the method TERMINAL, so the deployed script
+    // carries no continuation covenant at all.
+
+    /** Child STATEMENTS of a statement, in reference-walk order. */
+    private static List<Statement> childStatements(Statement stmt) {
+        if (stmt instanceof IfStatement i) {
+            List<Statement> out = new ArrayList<>(i.thenBody());
+            if (i.elseBody() != null) out.addAll(i.elseBody());
+            return out;
+        }
+        if (stmt instanceof ForStatement f) {
+            List<Statement> out = new ArrayList<>();
+            // The loop header is walked too: an effect can hide in init or update.
+            if (f.init() != null) out.add(f.init());
+            if (f.update() != null) out.add(f.update());
+            out.addAll(f.body());
+            return out;
+        }
+        return List.of();
+    }
+
+    /** Child EXPRESSIONS carried directly by a statement. */
+    private static List<Expression> statementExpressions(Statement stmt) {
+        List<Expression> out = new ArrayList<>();
+        if (stmt instanceof AssignmentStatement a) {
+            if (a.target() != null) out.add(a.target());
+            if (a.value() != null) out.add(a.value());
+        } else if (stmt instanceof ExpressionStatement es) {
+            if (es.expression() != null) out.add(es.expression());
+        } else if (stmt instanceof IfStatement i) {
+            if (i.condition() != null) out.add(i.condition());
+        } else if (stmt instanceof ForStatement f) {
+            if (f.condition() != null) out.add(f.condition());
+        } else if (stmt instanceof ReturnStatement r) {
+            // RbParser promotes a private method's trailing ExpressionStatement
+            // to a ReturnStatement for implicit-return semantics.
+            if (r.value() != null) out.add(r.value());
+        } else if (stmt instanceof VariableDeclStatement v) {
+            if (v.init() != null) out.add(v.init());
+        }
+        return out;
+    }
+
+    /**
+     * Child EXPRESSIONS of an expression. Mirrors the reference
+     * {@code collectExpr} descent exactly — note that an increment/decrement
+     * operand is NOT descended into (the reference stops after its property
+     * check).
+     */
+    private static List<Expression> childExpressions(Expression expr) {
+        List<Expression> out = new ArrayList<>();
+        if (expr instanceof CallExpr c) {
+            out.addAll(c.args());
+            // The callee subexpression can hold nested calls / member chains.
+            // An Identifier callee has no children, so skip it.
+            if (c.callee() != null && !(c.callee() instanceof Identifier)) out.add(c.callee());
+        } else if (expr instanceof BinaryExpr b) {
+            out.add(b.left());
+            out.add(b.right());
+        } else if (expr instanceof UnaryExpr u) {
+            out.add(u.operand());
+        } else if (expr instanceof TernaryExpr t) {
+            out.add(t.condition());
+            out.add(t.consequent());
+            out.add(t.alternate());
+        } else if (expr instanceof IndexAccessExpr ia) {
+            out.add(ia.object());
+            out.add(ia.index());
+        } else if (expr instanceof MemberExpr me) {
+            out.add(me.object());
+        } else if (expr instanceof ArrayLiteralExpr al) {
+            out.addAll(al.elements());
+        }
+        out.removeIf(java.util.Objects::isNull);
+        return out;
+    }
+
     static boolean methodMutatesState(MethodNode method, ContractNode contract) {
         Set<String> mutable = new HashSet<>();
         for (PropertyNode p : contract.properties()) {
@@ -2113,25 +2412,16 @@ public final class AnfLower {
 
     private static boolean stmtMutatesState(
             Statement stmt, Set<String> mutable, ContractNode contract, Set<String> seen) {
-        if (stmt instanceof AssignmentStatement a) {
-            return a.target() instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
+        if (stmt instanceof AssignmentStatement a
+            && a.target() instanceof PropertyAccessExpr pa
+            && mutable.contains(pa.property())) {
+            return true;
         }
-        if (stmt instanceof ExpressionStatement es) {
-            return exprMutatesState(es.expression(), mutable, contract, seen);
+        for (Expression e : statementExpressions(stmt)) {
+            if (exprMutatesState(e, mutable, contract, seen)) return true;
         }
-        if (stmt instanceof IfStatement i) {
-            if (bodyMutatesState(i.thenBody(), mutable, contract, seen)) return true;
-            return i.elseBody() != null && bodyMutatesState(i.elseBody(), mutable, contract, seen);
-        }
-        if (stmt instanceof ForStatement f) {
-            if (f.update() != null && stmtMutatesState(f.update(), mutable, contract, seen)) return true;
-            return bodyMutatesState(f.body(), mutable, contract, seen);
-        }
-        // Ruby's RbParser promotes a private method's trailing
-        // ExpressionStatement to a ReturnStatement for implicit-return
-        // semantics. Walk the return value the same way.
-        if (stmt instanceof ReturnStatement r && r.value() != null) {
-            return exprMutatesState(r.value(), mutable, contract, seen);
+        for (Statement s : childStatements(stmt)) {
+            if (stmtMutatesState(s, mutable, contract, seen)) return true;
         }
         return false;
     }
@@ -2139,13 +2429,12 @@ public final class AnfLower {
     private static boolean exprMutatesState(
             Expression expr, Set<String> mutable, ContractNode contract, Set<String> seen) {
         if (expr == null) return false;
-        if (expr instanceof IncrementExpr ie
-            && ie.operand() instanceof PropertyAccessExpr pa) {
-            return mutable.contains(pa.property());
+        // The reference stops here — it does not descend into the operand.
+        if (expr instanceof IncrementExpr ie) {
+            return ie.operand() instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
         }
-        if (expr instanceof DecrementExpr de
-            && de.operand() instanceof PropertyAccessExpr pa) {
-            return mutable.contains(pa.property());
+        if (expr instanceof DecrementExpr de) {
+            return de.operand() instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
         }
         if (expr instanceof CallExpr c) {
             String name = calleeName(c.callee());
@@ -2155,6 +2444,9 @@ public final class AnfLower {
                 nextSeen.add(target.name());
                 if (bodyMutatesState(target.body(), mutable, contract, nextSeen)) return true;
             }
+        }
+        for (Expression child : childExpressions(expr)) {
+            if (exprMutatesState(child, mutable, contract, seen)) return true;
         }
         return false;
     }
@@ -2173,16 +2465,11 @@ public final class AnfLower {
     }
 
     private static boolean stmtHasAddOutput(Statement s, ContractNode contract, Set<String> seen) {
-        if (s instanceof ExpressionStatement es) return exprHasAddOutput(es.expression(), contract, seen);
-        if (s instanceof IfStatement i) {
-            if (bodyHasAddOutput(i.thenBody(), contract, seen)) return true;
-            return i.elseBody() != null && bodyHasAddOutput(i.elseBody(), contract, seen);
+        for (Expression e : statementExpressions(s)) {
+            if (exprHasAddOutput(e, contract, seen)) return true;
         }
-        if (s instanceof ForStatement f) return bodyHasAddOutput(f.body(), contract, seen);
-        // Ruby's RbParser promotes a private method's trailing
-        // ExpressionStatement to a ReturnStatement; walk the return value.
-        if (s instanceof ReturnStatement r && r.value() != null) {
-            return exprHasAddOutput(r.value(), contract, seen);
+        for (Statement inner : childStatements(s)) {
+            if (stmtHasAddOutput(inner, contract, seen)) return true;
         }
         return false;
     }
@@ -2208,6 +2495,9 @@ public final class AnfLower {
                 if (bodyHasAddOutput(target.body(), contract, nextSeen)) return true;
             }
         }
+        for (Expression child : childExpressions(e)) {
+            if (exprHasAddOutput(child, contract, seen)) return true;
+        }
         return false;
     }
 
@@ -2221,14 +2511,11 @@ public final class AnfLower {
     }
 
     private static boolean stmtHasAddDataOutput(Statement s, ContractNode contract, Set<String> seen) {
-        if (s instanceof ExpressionStatement es) return exprHasAddDataOutput(es.expression(), contract, seen);
-        if (s instanceof IfStatement i) {
-            if (bodyHasAddDataOutput(i.thenBody(), contract, seen)) return true;
-            return i.elseBody() != null && bodyHasAddDataOutput(i.elseBody(), contract, seen);
+        for (Expression e : statementExpressions(s)) {
+            if (exprHasAddDataOutput(e, contract, seen)) return true;
         }
-        if (s instanceof ForStatement f) return bodyHasAddDataOutput(f.body(), contract, seen);
-        if (s instanceof ReturnStatement r && r.value() != null) {
-            return exprHasAddDataOutput(r.value(), contract, seen);
+        for (Statement inner : childStatements(s)) {
+            if (stmtHasAddDataOutput(inner, contract, seen)) return true;
         }
         return false;
     }
@@ -2253,6 +2540,9 @@ public final class AnfLower {
                 nextSeen.add(target.name());
                 if (bodyHasAddDataOutput(target.body(), contract, nextSeen)) return true;
             }
+        }
+        for (Expression child : childExpressions(e)) {
+            if (exprHasAddDataOutput(child, contract, seen)) return true;
         }
         return false;
     }
@@ -2292,6 +2582,18 @@ public final class AnfLower {
                 "Cannot determine loop bound at compile time. For-loop bounds must be integer "
                     + "literals.");
         }
+        // W4 backstop. The user-facing refusal lives in the validator, which is
+        // where a located diagnostic belongs -- but ANF lowering is reachable
+        // without it, and then the count comes from `bound - start` while the
+        // condition tests something else entirely: `i + 1n < 2n` runs once in
+        // the source language and twice here.
+        String iterName = stmt.init() == null ? "" : stmt.init().name();
+        if (!(be.left() instanceof Identifier id) || !id.name().equals(iterName)) {
+            throw new IllegalStateException(
+                "For loop condition must compare the loop variable '" + iterName + "' to a "
+                    + "compile-time constant; the left-hand side is not the iterator, so the "
+                    + "unrolled trip count would not be the one the source asks for.");
+        }
         String op = be.op().canonical();
         BigInteger bound = extractBigintValue(be.right());
         if (bound == null) {
@@ -2324,6 +2626,17 @@ public final class AnfLower {
             }
         }
 
+        // Range-check the arbitrary-precision count BEFORE narrowing it.
+        // intValueExact() refuses rather than truncating, so this tier never
+        // emitted a loop of the wrong length — but its message names neither
+        // the loop nor a limit, and it says nothing at all about a count like
+        // 10001 that fits an int perfectly well and still unrolls further than
+        // any script can. CL-BUG-088.
+        if (count.compareTo(BigInteger.valueOf(Loop.MAX_LOOP_COUNT)) > 0) {
+            throw new IllegalStateException(
+                "For loop unrolls to " + count + " iterations, exceeding the maximum loop count of "
+                    + Loop.MAX_LOOP_COUNT + ".");
+        }
         int c = count.signum() <= 0 ? 0 : count.intValueExact();
         return new LoopShape(start, step, c);
     }
@@ -2740,6 +3053,29 @@ public final class AnfLower {
                     String newName = "t" + (nextIdx[0]++);
                     branchMap.put(vb.name(), newName);
                     thenBindings.add(new AnfBinding(newName, remapValueRefs(vb.value(), branchMap), null));
+                }
+
+                // An arm's VALUE is its LAST binding. valueBindings is
+                // everything before the original update_prop, which ends on the
+                // assigned value only when that value was computed INSIDE the
+                // arm. When the arm assigns something bound outside it — a
+                // local, or anything hoisted before the chain — valueBindings
+                // does not contain it and is usually empty, so the arm was
+                // emitted EMPTY and stack lowering padded it with a zero push:
+                // `if (p == 0n) { this.c0 = someLocal; }` compiled to
+                // `this.c0 = 0`, silently corrupting state on the MATCHED
+                // branch. (TicTacToe's `this.cN = this.turn` escapes only
+                // because its load_prop lands inside the arm.)
+                //
+                // Materialise the value explicitly whenever the arm does not
+                // already end on it. When it does — every shape that compiled
+                // correctly before — this is a no-op and no bytes move.
+                String mappedValueRef = branchMap.getOrDefault(branch.valueRef, branch.valueRef);
+                if (thenBindings.isEmpty()
+                    || !thenBindings.get(thenBindings.size() - 1).name().equals(mappedValueRef)) {
+                    String valueName = "t" + (nextIdx[0]++);
+                    thenBindings.add(new AnfBinding(valueName,
+                        makeLoadConstString("@ref:" + mappedValueRef), null));
                 }
 
                 String keepName = "t" + (nextIdx[0]++);

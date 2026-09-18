@@ -495,15 +495,53 @@ impl<'a> SolParser<'a> {
 
         self.expect(&Token::RBrace);
 
+        // R-114: a `.runar.sol` with no constructor is VALID — synthesise one
+        // from the declared properties, with super() first (CLAUDE.md,
+        // "Auto-generated constructors MUST include super() as the first
+        // statement"). This used to be a parse ERROR here, while ts/go/zig/ruby
+        // accepted the same file and python/java synthesised an empty
+        // constructor they then rejected themselves. Four tiers accepted, three
+        // refused — an accept/reject split is a frontend-parity breach.
+        // Mirrors compilers/go/frontend/parser_sol.go:495-530.
         let constructor = constructor.unwrap_or_else(|| {
-            self.errors
-                .push(Diagnostic::error("Contract must have a constructor", None));
+            let loc = self.loc();
+            let uninit: Vec<&PropertyNode> =
+                properties.iter().filter(|p| p.initializer.is_none()).collect();
+            let params: Vec<ParamNode> = uninit
+                .iter()
+                .map(|p| ParamNode {
+                    name: p.name.clone(),
+                    param_type: p.prop_type.clone(),
+                })
+                .collect();
+            let mut body: Vec<Statement> = vec![Statement::ExpressionStatement {
+                expression: Expression::CallExpr {
+                    callee: Box::new(Expression::Identifier {
+                        name: "super".to_string(),
+                    }),
+                    args: uninit
+                        .iter()
+                        .map(|p| Expression::Identifier { name: p.name.clone() })
+                        .collect(),
+                    asm_return_type: None,
+                },
+                source_location: loc.clone(),
+            }];
+            for p in &uninit {
+                body.push(Statement::Assignment {
+                    target: Expression::PropertyAccess {
+                        property: p.name.clone(),
+                    },
+                    value: Expression::Identifier { name: p.name.clone() },
+                    source_location: loc.clone(),
+                });
+            }
             MethodNode {
                 name: "constructor".to_string(),
-                params: Vec::new(),
-                body: Vec::new(),
+                params,
+                body,
                 visibility: Visibility::Public,
-                source_location: self.loc(),
+                source_location: loc,
                 sighash_type: None,
             }
         });

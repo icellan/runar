@@ -109,6 +109,12 @@ _SPECIAL_BUILTINS: dict[str, str] = {
     "verify_slh_dsa_sha2_256s": "verifySLHDSA_SHA2_256s",
     "verify_slh_dsa_sha2_256f": "verifySLHDSA_SHA2_256f",
     "bin_2_num": "bin2num",
+    # The arbitrary-precision encoder spellings from packages/runar-rs. Mapped
+    # here, BEFORE camelisation, so the answer does not depend on this tier's
+    # snake_to_camel. Without them the typechecker answers "unknown function"
+    # -- a TYPECHECK diagnostic, which --parse-only cannot see. R-RustBigint.
+    "bin2num_big": "bin2num",
+    "num2bin_big": "num2bin",
     "int_2_str": "int2str",
     "to_byte_string": "toByteString",
     # P-256 (NIST secp256r1)
@@ -128,6 +134,21 @@ _SPECIAL_BUILTINS: dict[str, str] = {
     "p384_encode_compressed": "p384EncodeCompressed",
     "verify_ecdsa_p384":      "verifyECDSA_P384",
 }
+
+
+def _literal_int_value(expr: Expression | None) -> int | None:
+    """The integer value of a literal expression, or None when it is not one.
+
+    A negative literal arrives either as a unary minus over a positive one or
+    as a directly-negative BigIntLiteral, so both shapes have to be walked --
+    the same walk ANF lowering does, for the same reason (N-138).
+    """
+    if isinstance(expr, BigIntLiteral):
+        return expr.value
+    if isinstance(expr, UnaryExpr) and expr.op == "-":
+        inner = _literal_int_value(expr.operand)
+        return None if inner is None else -inner
+    return None
 
 
 def _snake_to_camel(name: str) -> str:
@@ -174,6 +195,11 @@ def _map_rust_builtin(name: str) -> str:
 
 _TYPE_MAP: dict[str, str] = {
     "Bigint": "bigint",
+    # `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half of a
+    # pair whose narrow half (`Bigint` = i64) REFUSES what it cannot represent.
+    # A different Rust runtime type, the same Script primitive: reaching for it
+    # must not change one emitted byte. R-RustBigint.
+    "BigintBig": "bigint",
     "Int": "bigint",
     "i64": "bigint",
     "u64": "bigint",
@@ -510,6 +536,24 @@ class _RustParser:
 
     def parse_rust_type(self) -> TypeNode:
         tok = self.peek()
+
+        # Fixed-size array: `[T; N]`. Recurses on the element, so the nested
+        # `[[Bigint; 2]; 2]` surface produces the same
+        # FixedArrayType(element=FixedArrayType(...)) shape the TS / Rust /
+        # Ruby tiers build.
+        if tok.kind == TOK_LBRACKET:
+            self.advance()
+            element = self.parse_rust_type()
+            self.expect(TOK_SEMI)
+            length_tok = self.expect(TOK_NUMBER)
+            try:
+                length = int(length_tok.value)
+            except ValueError:
+                length = 0
+                self.add_error(f"line {length_tok.line}: array length must be integer")
+            self.expect(TOK_RBRACKET)
+            return FixedArrayType(element=element, length=length)
+
         if tok.kind == TOK_IDENT:
             name = tok.value
             self.advance()
@@ -948,12 +992,59 @@ class _RustParser:
                 self.advance()
 
             self.expect(TOK_IN)
-            start_expr = self.parse_expression()
+            # Two loop headers, both of them real Rust that iterates exactly
+            # these values:
+            #
+            #   for i in a..b         -> a, a+1, ... b-1  (ascending)
+            #   for i in (a..b).rev() -> b-1, b-2, ... a  (DESCENDING)
+            #
+            # ``.rev()`` is what lets the Rust surface spell a countdown. A
+            # Rust range only ever ascends -- ``(5..2)`` is empty -- so
+            # ``step = -1`` was unreachable from this surface and no fixture
+            # could exercise it across all nine. ``Iterator::rev`` reverses the
+            # half-open range: the descending loop starts at ``b - 1`` and ends
+            # at ``a`` INCLUSIVE, which is why the guard below is ``>=``.
+            has_paren = self.check(TOK_LPAREN)
+            if has_paren:
+                self.advance()
+
+            range_start = self.parse_expression()
 
             # Expect .. range operator (single DotDot token)
             self.expect(TOK_DOTDOT)
 
-            end_expr = self.parse_expression()
+            range_end = self.parse_expression()
+
+            descending = False
+            if has_paren:
+                self.expect(TOK_RPAREN)
+                self.expect(TOK_DOT)
+                method_tok = self.advance()
+                if method_tok.value != "rev":
+                    self.add_error(
+                        f"unsupported range method '.{method_tok.value}()' in for loop "
+                        "-- only '.rev()' is supported"
+                    )
+                self.expect(TOK_LPAREN)
+                self.expect(TOK_RPAREN)
+                descending = True
+
+            # ``(a..b).rev()`` starts at ``b - 1``. The unrolled loop model
+            # needs that start as a compile-time literal -- it synthesizes
+            # iteration k as ``start + k*step`` -- so fold the subtraction here
+            # when ``b`` is one, and otherwise hand the un-foldable expression
+            # straight through so ANF lowering raises its own "Cannot determine
+            # loop start" diagnostic rather than this parser inventing a second
+            # wording for the same rule.
+            if descending:
+                upper = _literal_int_value(range_end)
+                start_expr = (
+                    range_end if upper is None else BigIntLiteral(value=upper - 1)
+                )
+                end_expr = range_start
+            else:
+                start_expr = range_start
+                end_expr = range_end
 
             self.expect(TOK_LBRACE)
             loop_body: list[Statement] = []
@@ -971,14 +1062,16 @@ class _RustParser:
                 source_location=stmt_loc,
             )
             loop_condition = BinaryExpr(
-                op="<",
+                op=">=" if descending else "<",
                 left=Identifier(name=var_name),
                 right=end_expr,
             )
-            update = ExpressionStmt(
-                expr=IncrementExpr(operand=Identifier(name=var_name), prefix=False),
-                source_location=stmt_loc,
-            )
+            loop_update: Expression
+            if descending:
+                loop_update = DecrementExpr(operand=Identifier(name=var_name), prefix=False)
+            else:
+                loop_update = IncrementExpr(operand=Identifier(name=var_name), prefix=False)
+            update = ExpressionStmt(expr=loop_update, source_location=stmt_loc)
 
             return ForStmt(
                 init=init_stmt,

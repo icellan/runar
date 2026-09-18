@@ -76,6 +76,7 @@ fn make_intent_artifact(prev_out_inputs: &[usize], serialised: bool) -> RunarArt
         code_separator_index: Some(0),
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn deploy_helper(
         satoshis: 50_000,
         change_address: None,
         funding_signer: None,
+        acknowledge_unsound: vec![],
     }).unwrap();
     // Funding UTXO for the call
     provider.add_utxo(&address, Utxo {

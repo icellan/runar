@@ -16,8 +16,47 @@ type CompileOptions struct {
 	// Default (false) enables constant folding.
 	DisableConstantFolding bool
 
+	// DisableEcOptimizer skips the EC rewrite pass (pass 4.5), which also
+	// carries the dead-binding cleanup it triggers.
+	//
+	// DisablePeephole skips the Stack-IR peephole pass between lowering and
+	// emission.
+	//
+	// Both default to false — every optimizer on, which is what every golden in
+	// conformance/ was stamped under. They exist for the same reason the TS
+	// tier has them (`disableEcOptimizer`, `disablePeephole` in
+	// packages/runar-compiler/src/index.ts): when the seven tiers disagree on a
+	// byte, the first question is which PASS introduced it, and answering that
+	// meant editing and rebuilding this compiler (R-260).
+	DisableEcOptimizer bool
+	DisablePeephole    bool
+
 	// ParseOnly stops compilation after the parse pass (pass 1).
 	ParseOnly bool
+
+	// AcknowledgeUnsoundSP1Fri authorises compiling a program that reaches the
+	// known-unsound SP1 FRI verifier when there is no source to carry the
+	// `@acknowledgeUnsoundSP1FriVerifier` comment directive — i.e. on the
+	// `--ir` / CompileFromProgram paths, which never run frontend.Validate.
+	//
+	// The acknowledgement deliberately lives here, on the INVOKER's options,
+	// and not in the ANF IR: IR fed to `--ir` is untrusted input, so a flag
+	// inside it would be written by the same party that wrote the verifier call
+	// and would authorise nothing. Surfaced on the CLI as
+	// `--acknowledge-unsound-sp1-fri`. See R-012 / CL-BUG-093 and
+	// compiler/sp1_fri_ir_guard.go.
+	AcknowledgeUnsoundSP1Fri bool
+
+	// sp1FriAdjudicatedByFrontend is set only by the in-package
+	// CompileFromSource path, after frontend.Validate has accepted the
+	// contract. It tells guardUnsoundSP1FriIR that the SP1 FRI refusal has
+	// already been decided against the real source — directive included — so
+	// the IR-path guard must not second-guess it.
+	//
+	// Unexported deliberately: a caller outside this package cannot set it, so
+	// every externally-constructed CompileOptions arrives with it false and the
+	// guard fails closed.
+	sp1FriAdjudicatedByFrontend bool
 
 	// ValidateOnly stops compilation after the validate pass (pass 2).
 	ValidateOnly bool
@@ -75,18 +114,18 @@ type CompileOptions struct {
 // a named preset. The presets cover:
 //
 //   - "minimal-guest"   — PoC tuple, matches
-//                         tests/vectors/sp1/fri/minimal-guest/proof.postcard
-//                         (degreeBits=3, num_queries=2, log_blowup=2,
-//                         log_final_poly_len=2, commit/query_pow_bits=1).
+//     tests/vectors/sp1/fri/minimal-guest/proof.postcard
+//     (degreeBits=3, num_queries=2, log_blowup=2,
+//     log_final_poly_len=2, commit/query_pow_bits=1).
 //   - "evm-guest"       — production-scale tuple, matches
-//                         tests/vectors/sp1/fri/evm-guest/proof.postcard
-//                         (degreeBits=10, num_queries=100, log_blowup=1,
-//                         log_final_poly_len=0, commit/query_pow_bits=16).
+//     tests/vectors/sp1/fri/evm-guest/proof.postcard
+//     (degreeBits=10, num_queries=100, log_blowup=1,
+//     log_final_poly_len=0, commit/query_pow_bits=16).
 //   - "production-100"  — alias for "evm-guest".
 //   - "production-64"   — production-scale w/ num_queries=64 fallback
-//                         (per docs/sp1-fri-verifier.md §5).
+//     (per docs/sp1-fri-verifier.md §5).
 //   - "production-16"   — production-scale w/ num_queries=16 fallback
-//                         (per docs/sp1-fri-verifier.md §5).
+//     (per docs/sp1-fri-verifier.md §5).
 //
 // Returns an error when the preset name is unrecognised.
 func SP1FriPreset(name string) (codegen.SP1FriVerifierParams, error) {

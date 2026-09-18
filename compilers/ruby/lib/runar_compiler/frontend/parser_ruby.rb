@@ -225,16 +225,29 @@ module RunarCompiler
 
     # Convert a snake_case identifier to camelCase.
     #
-    # Only capitalizes lowercase letters and digits after underscores, matching
-    # the TS reference: +name.replace(/_([a-z0-9])/g, ...)+. This means
-    # +EC_P+ passes through unchanged (uppercase P is not matched).
+    # Split on +_+ and capitalize the first character of every following part,
+    # skipping empty parts. This is the shared R-113 rule — the same algorithm
+    # as +snakeToCamelCore+ (TS), +rbConvertName+ (Go), +snake_to_camel+
+    # (Rust) and +snakeToCamel+ (Zig).
+    #
+    # It used to be +gsub(/_([a-z0-9])/)+, which uppercases only a lower-case
+    # letter or digit after the underscore and leaves +_+ before a CAPITAL in
+    # place: a property +total_A+ reached the artifact as +total_A+ here and
+    # as +totalA+ in ts/go/rust/zig. The script hex is identical either way,
+    # so hex parity never saw it — but +serializeState+ looks state up by
+    # +field.name+, so the two spellings do not interoperate.
     #
     # Leading underscores are stripped so that +_require_owner+ becomes
-    # +requireOwner+ (not +RequireOwner+).
+    # +requireOwner+ (not +RequireOwner+). An all-underscore name has nothing
+    # left to convert and is returned unchanged, as in the Go tier.
     def self.snake_to_camel(name)
-      leading = name.length - name.sub(/\A_+/, "").length
-      stripped = leading > 0 ? name[leading..] : name
-      stripped.gsub(/_([a-z0-9])/) { ::Regexp.last_match(1).upcase }
+      stripped = name.sub(/\A_+/, "")
+      return name if stripped.empty?
+
+      parts = stripped.split("_", -1)
+      return stripped if parts.length <= 1
+
+      parts[0] + parts[1..].reject(&:empty?).map { |part| part[0].upcase + part[1..] }.join
     end
 
     # Map a Ruby snake_case name to its Runar AST callee name.
@@ -1266,6 +1279,21 @@ module RunarCompiler
         )
       end
 
+      # Destructure +<receiver>.downto(<bound>)+ -- the Ruby countdown header.
+      #
+      # Returns nil for every other expression, including +downto+ with the
+      # wrong arity, so a malformed header falls through to the range-operator
+      # branch and gets that branch's diagnostic rather than silently becoming
+      # a loop.
+      def match_downto_call(expr)
+        return nil unless expr.is_a?(CallExpr)
+        return nil unless expr.callee.is_a?(MemberExpr)
+        return nil unless expr.callee.property == "downto"
+        return nil unless expr.args.length == 1
+
+        [expr.callee.object, expr.args[0]]
+      end
+
       def parse_for_statement(current_loc)
         advance # 'for'
 
@@ -1276,24 +1304,44 @@ module RunarCompiler
 
         start_expr = parse_expression
 
-        # Expect range operator +..+ (inclusive) or +...+ (exclusive).
-        # Non-zero-start counting-up loops (e.g. +for i in 1...4+) are now
-        # supported by the ANF loop node's start/step fields (#121); a native
-        # countdown spelling for +.runar.rb+ is intentionally NOT added here —
-        # the TS reference Ruby-format parser has none, so introducing one only
-        # in this tier would break the cross-tier frontend-parity invariant.
+        # Three loop headers, all of them real Ruby that iterates exactly these
+        # values:
+        #
+        #   for i in 0...n       -> 0, 1, ... n-1  (exclusive, ascending)
+        #   for i in 0..n        -> 0, 1, ... n    (inclusive, ascending)
+        #   for i in n.downto(m) -> n, n-1, ... m  (inclusive, DESCENDING)
+        #
+        # +downto+ is what lets the Ruby surface spell a countdown. Ruby's
+        # range operators only ever ascend -- +(5..2)+ is empty -- so
+        # +step = -1+ was unreachable from this surface, and no fixture could
+        # exercise it across all nine. +Integer#downto+ is the language's own
+        # countdown verb, it returns an Enumerator, and +for x in enum+ is
+        # valid Ruby over one.
+        #
+        # +5.downto(2)+ is a postfix method call, so the start-expression
+        # parser has already consumed the whole header by the time we get here.
+        # Match on the shape it produced rather than on the tokens.
         is_exclusive = false
-        if peek.kind == TOK_DOTDOTDOT
-          is_exclusive = true
-          advance
-        elsif peek.kind == TOK_DOTDOT
-          is_exclusive = false
-          advance
+        descending = false
+        downto = match_downto_call(start_expr)
+        if downto
+          start_expr, end_expr = downto
+          descending = true
+          is_exclusive = false # downto's bound is inclusive
         else
-          @errors << "#{@file}:#{peek.line}: expected range operator '..' or '...' in for loop"
-        end
+          # Expect range operator +..+ (inclusive) or +...+ (exclusive).
+          if peek.kind == TOK_DOTDOTDOT
+            is_exclusive = true
+            advance
+          elsif peek.kind == TOK_DOTDOT
+            is_exclusive = false
+            advance
+          else
+            @errors << "#{@file}:#{peek.line}: expected range operator '..' or '...', or '.downto(n)', in for loop"
+          end
 
-        end_expr = parse_expression
+          end_expr = parse_expression
+        end
 
         # Optional +do+ keyword
         match_tok(TOK_DO)
@@ -1312,19 +1360,28 @@ module RunarCompiler
           source_location: loop_var_loc
         )
 
+        cmp_op =
+          if descending
+            ">="
+          elsif is_exclusive
+            "<"
+          else
+            "<="
+          end
+
         condition = BinaryExpr.new(
-          op: is_exclusive ? "<" : "<=",
+          op: cmp_op,
           left: Identifier.new(name: var_name),
           right: end_expr
         )
 
-        update = ExpressionStmt.new(
-          expr: IncrementExpr.new(
-            operand: Identifier.new(name: var_name),
-            prefix: false
-          ),
-          source_location: current_loc
-        )
+        update_expr =
+          if descending
+            DecrementExpr.new(operand: Identifier.new(name: var_name), prefix: false)
+          else
+            IncrementExpr.new(operand: Identifier.new(name: var_name), prefix: false)
+          end
+        update = ExpressionStmt.new(expr: update_expr, source_location: current_loc)
 
         ForStmt.new(
           init: init,

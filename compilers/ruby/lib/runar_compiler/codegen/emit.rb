@@ -359,11 +359,25 @@ module RunarCompiler
       bytes_str.unpack1("H*")
     end
 
-    # Convert a hex string to a binary string.
+    # Convert a hex string to a binary string, STRICTLY.
     #
-    # @param hex_str [String] hex-encoded string
+    # N-132. This is the SECOND definition of +RunarCompiler::Codegen.hex_to_bytes+
+    # in the tier — +codegen/stack.rb+ defines the same method on the same module,
+    # so whichever file loads last silently wins. Both are kept strict and
+    # identical rather than one being deleted, because which one is live depends
+    # on a require order that neither file states; a one-sided fix would be
+    # correct only by luck. See the note on the stack.rb copy for what +pack+
+    # does with a malformed input and why that reached a locking script.
+    #
+    # @param hex_str [String] hex-encoded string, even length, hex digits only
     # @return [String] binary string
+    # @raise [ArgumentError] if +hex_str+ is not well-formed hex
     def self.hex_to_bytes(hex_str)
+      unless hex_str.length.even?
+        raise ArgumentError, "invalid hex string length: #{hex_str.length}"
+      end
+      raise ArgumentError, "invalid hex string: #{hex_str.inspect}" unless hex_str.match?(/\A[0-9a-fA-F]*\z/)
+
       [hex_str].pack("H*")
     end
 
@@ -409,6 +423,9 @@ module RunarCompiler
         @code_separator_index = -1
         @code_separator_indices = []
         @raw_script_spans = []
+        # R-095 -- verify_code_part_len length fields awaiting back-patch.
+        # Each entry is { value_byte_offset:, asm_index:, delta: }.
+        @code_part_len_fixups = []
       end
 
       def set_source_loc(loc)
@@ -448,6 +465,38 @@ module RunarCompiler
           param_index: param_index,
           byte_offset: byte_offset
         )
+      end
+
+      # R-095 -- emit the 9-byte SIZE(_codePart) pin and register its length
+      # field for back-patching.
+      #
+      #   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+      #
+      # `LL LL LL LL` is a FIXED-WIDTH little-endian field, not a minimal Script
+      # number push: the value being patched IS the length of the script that
+      # contains it, so a width that varied with the value would be
+      # self-referential. OP_BIN2NUM normalises the fixed-width field back to a
+      # minimal Script number so the comparison is numeric.
+      #
+      # `exact` is known here (the stack lowerer resolved it once every method
+      # had been lowered), so only the four length bytes need patching.
+      #
+      # @param delta [Integer] deploy-time growth of the OP_0 placeholders
+      # @param exact [Boolean] true -> equality pin, false -> lower-bound pin
+      def emit_verify_code_part_len(delta, exact)
+        emit_opcode("OP_DUP")
+        # +1 skips the single-byte push header the 4-byte data push carries.
+        value_byte_offset = @byte_length + 1
+        asm_index = @asm_parts.length
+        emit_push({ kind: "bytes", bytes_val: "\x00\x00\x00\x00".b })
+        emit_opcode("OP_BIN2NUM")
+        emit_opcode(exact ? "OP_NUMEQUAL" : "OP_GREATERTHANOREQUAL")
+        emit_opcode("OP_VERIFY")
+        @code_part_len_fixups << {
+          value_byte_offset: value_byte_offset,
+          asm_index: asm_index,
+          delta: delta
+        }
       end
 
       def emit_code_sep_index_placeholder(code_sep_idx)
@@ -490,14 +539,71 @@ module RunarCompiler
       end
 
       def get_hex
+        apply_code_part_len_fixups
         @hex_parts.join
       end
 
       def get_asm
+        apply_code_part_len_fixups
         @asm_parts.join(" ")
       end
 
       private
+
+      # Deploy-time byte growth contributed by the codeSepIndex placeholders.
+      #
+      # Each is a 1-byte OP_0 in the template that the SDK replaces with a push
+      # of the adjusted codeSeparatorIndex. Post-R-010 that index is always 1
+      # (the separator sits at offset 1 and no constructor slot precedes it),
+      # which bakes as the single opcode byte OP_1 -- zero growth. The guard is
+      # not decoration: if the separator ever moves, the pin's arithmetic goes
+      # silently wrong and every honest spend of a variable-length-state
+      # contract becomes unspendable, so fail loudly instead.
+      def code_sep_index_growth
+        @code_sep_index_slots.each do |slot|
+          next if slot.code_sep_index == 1
+
+          raise RuntimeError,
+                "emit: codeSepIndex placeholder resolves to #{slot.code_sep_index}, not 1. " \
+                "The verify_code_part_len pin assumes the post-R-010 layout (a single " \
+                "OP_CODESEPARATOR at offset 1, so the placeholder bakes as OP_1 and adds " \
+                "no bytes). Recompute the placeholder growth before moving the separator."
+        end
+        0
+      end
+
+      # R-095 -- resolve every verify_code_part_len length field.
+      #
+      # Runs once the whole script has been emitted, because the value each
+      # field carries is the DEPLOYED length of the very script it sits in:
+      #
+      #     deployedCodeLen = emitted template length
+      #                     + growth of the constructor-arg placeholders (delta)
+      #                     + growth of the codeSepIndex placeholders (0)
+      #
+      # Idempotent: it overwrites a fixed-width field rather than splicing, so
+      # the script's length never changes and re-running produces the same
+      # bytes (get_hex and get_asm both call it).
+      def apply_code_part_len_fixups
+        return if @code_part_len_fixups.empty?
+
+        code_sep_growth = code_sep_index_growth
+        hex = @hex_parts.join
+        @code_part_len_fixups.each do |fixup|
+          deployed_len = @byte_length + fixup[:delta] + code_sep_growth
+          if deployed_len.negative? || deployed_len > 0x7fffffff
+            raise RuntimeError,
+                  "emit: code part length #{deployed_len} does not fit the 4-byte pin field"
+          end
+
+          le = (0..3).map { |i| format("%02x", (deployed_len >> (8 * i)) & 0xff) }.join
+          start = fixup[:value_byte_offset] * 2
+          hex = hex[0, start] + le + hex[(start + 8)..]
+          idx = fixup[:asm_index]
+          @asm_parts[idx] = "<#{le}>" if idx >= 0 && idx < @asm_parts.length
+        end
+        @hex_parts = [hex]
+      end
 
       def record_source_mapping
         return unless @pending_source_loc
@@ -568,6 +674,11 @@ module RunarCompiler
         # into the artifact's rawScriptSpans so the analyzer can treat the
         # span as one opaque stack-effect step.
         ctx.emit_raw_bytes(op[:raw_bytes], op[:in_arity] || 0, op[:out_arity] || 0)
+      when "verify_code_part_len"
+        # R-095: pin SIZE(_codePart) against the code part's own deployed byte
+        # length. Fixed-width field, back-patched after the whole script exists.
+        ctx.emit_verify_code_part_len(op[:code_part_len_delta] || 0,
+                                      op[:code_part_len_exact] || false)
       when "push_codesep_index"
         # Emit an OP_0 placeholder that the SDK will replace with the
         # adjusted codeSeparatorIndex at runtime.
@@ -660,6 +771,23 @@ module RunarCompiler
           constructor_slots: [],
           code_sep_index_slots: []
         )
+      end
+
+      # R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness
+      # gets ONE OP_CODESEPARATOR, at offset 1 of the locking script, behind a
+      # single OP_NOP. Contracts with no `_codePart` keep the pre-R-010
+      # per-method separators (emitted by _lower_check_preimage) instead. Emitting it per method (at the method's entry) hid the dispatch
+      # preamble and every preceding method body from scriptCode — exactly the
+      # bytes the spender-supplied `_codePart` witness claims to reproduce.
+      #
+      # Offset 1, not 0: implementations that store "index of the last executed
+      # OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+      # offset 0" from "no separator seen" and fall back to the whole script
+      # (the BSV go-sdk interpreter does exactly this). Offset 1 keeps every
+      # implementation on the same side of that guard, and costs one byte.
+      if public_methods.any? { |m| m[:needs_code_separator] }
+        ctx.emit_opcode("OP_NOP")
+        ctx.emit_opcode("OP_CODESEPARATOR")
       end
 
       if public_methods.length == 1

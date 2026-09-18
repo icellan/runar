@@ -283,7 +283,7 @@ test "StateCovenant_AdvanceState" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -322,7 +322,7 @@ test "StateCovenant_ChainAdvances" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -369,7 +369,7 @@ test "StateCovenant_WrongPreStateRootRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -394,6 +394,7 @@ test "StateCovenant_WrongPreStateRootRejected" {
     wrong_pre[1] = 'f';
     call.args[3] = .{ .bytes = wrong_pre };
 
+    const broadcasts_before = ctx.rpc_provider.broadcast_attempts;
     const result = ctx.contract.call(
         "advanceState",
         &call.args,
@@ -414,7 +415,7 @@ test "StateCovenant_WrongPreStateRootRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(ctx.rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(ctx.rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("StateCovenant correctly rejected wrong pre-state root", .{});
     }
 }
@@ -424,7 +425,7 @@ test "StateCovenant_InvalidBlockNumberRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -465,6 +466,7 @@ test "StateCovenant_InvalidBlockNumberRejected" {
     // Force block number to 0
     call2.args[1] = .{ .int = 0 };
 
+    const broadcasts_before = ctx.rpc_provider.broadcast_attempts;
     const result = ctx.contract.call(
         "advanceState",
         &call2.args,
@@ -485,7 +487,7 @@ test "StateCovenant_InvalidBlockNumberRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(ctx.rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(ctx.rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("StateCovenant correctly rejected non-increasing block number", .{});
     }
 }
@@ -495,7 +497,7 @@ test "StateCovenant_InvalidBabyBearProofRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -516,6 +518,7 @@ test "StateCovenant_InvalidBabyBearProofRejected" {
     // Set wrong proofFieldC
     call.args[6] = .{ .int = 99999 };
 
+    const broadcasts_before = ctx.rpc_provider.broadcast_attempts;
     const result = ctx.contract.call(
         "advanceState",
         &call.args,
@@ -536,7 +539,7 @@ test "StateCovenant_InvalidBabyBearProofRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(ctx.rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(ctx.rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("StateCovenant correctly rejected invalid Baby Bear proof", .{});
     }
 }
@@ -546,7 +549,7 @@ test "StateCovenant_InvalidMerkleProofRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var ctx = deployStateCovenant(allocator) catch return;
+    var ctx = try deployStateCovenant(allocator);
     defer ctx.contract.deinit();
     defer ctx.wallet.deinit();
     defer ctx.tree.deinit();
@@ -571,6 +574,7 @@ test "StateCovenant_InvalidMerkleProofRejected" {
     wrong_leaf[1] = 'a';
     call.args[7] = .{ .bytes = wrong_leaf };
 
+    const broadcasts_before = ctx.rpc_provider.broadcast_attempts;
     const result = ctx.contract.call(
         "advanceState",
         &call.args,
@@ -591,7 +595,7 @@ test "StateCovenant_InvalidMerkleProofRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(ctx.rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(ctx.rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("StateCovenant correctly rejected invalid Merkle proof", .{});
     }
 }

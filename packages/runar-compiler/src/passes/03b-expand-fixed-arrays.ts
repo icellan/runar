@@ -50,6 +50,15 @@
  *    statement chain: one branch per legal index assigning to the
  *    corresponding `Board__i`, with a final `else { assert(false); }`.
  *
+ *  - `this.Board[idx]++` / `--` in statement position is desugared to
+ *    `this.Board[idx] = this.Board[idx] +/- 1n` before the index rewrite,
+ *    so the write goes through the dispatch chain above. Downstream, both
+ *    `04-anf-lower` and `side-effect-summary` only recognise an increment as
+ *    a state mutation when its operand is a bare property access, so without
+ *    this the mutation is silently discarded AND the method is classified
+ *    terminal (no continuation assertion at all). The same shape in
+ *    expression position is a compile error.
+ *
  *  - Side-effectful index or value expressions are hoisted to fresh
  *    synthetic `const __idx_K = expr` / `const __val_K = expr`
  *    declarations before the containing statement, so each branch reads
@@ -86,6 +95,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { isBigintFamilyType, isByteStringFamilyType } from './03-typecheck.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -148,6 +158,32 @@ export function expandFixedArrays(contract: ContractNode): ExpandFixedArraysResu
  * tree. The `leaves` list is every fully-scalar descendant in traversal
  * order, with its flattened synthetic name.
  */
+/**
+ * N-133: which literal family a FixedArray element type demands, or null when
+ * the type is not one this pass can judge (it then declines to complain).
+ *
+ * The two predicates are 03-typecheck's, not copies: a second list is exactly
+ * how the ByteString family drifted once already (see the N-076 note there).
+ */
+type LiteralFamily = 'bigint' | 'boolean' | 'ByteString';
+
+function familyOfElementType(type: TypeNode): LiteralFamily | null {
+  if (type.kind !== 'primitive_type') return null;
+  if (type.name === 'boolean') return 'boolean';
+  if (isBigintFamilyType(type.name)) return 'bigint';
+  if (isByteStringFamilyType(type.name)) return 'ByteString';
+  return null;
+}
+
+function familyOfLiteral(expr: Expression): LiteralFamily | null {
+  switch (expr.kind) {
+    case 'bigint_literal': return 'bigint';
+    case 'bool_literal': return 'boolean';
+    case 'bytestring_literal': return 'ByteString';
+    default: return null;
+  }
+}
+
 interface ArrayMeta {
   rootName: string;
   /** The outer-most fixed_array_type node. Used to read the outer length. */
@@ -417,6 +453,25 @@ class ExpandContext {
         // levels that produced this leaf, outermost first. The
         // iterative re-grouper in the assembler consumes one level
         // at a time, innermost first, until the chain is exhausted.
+        // N-133: the element-type check. 03-typecheck's array_literal branch
+        // never sees a property initializer — it is consumed here — so before
+        // this every tier accepted `FixedArray<bigint, 2> = [1n, true]` and
+        // emitted a DIFFERENT program (the boolean became the number 1, a hex
+        // literal became a byte string under OP_ADD).
+        if (slotInit !== undefined) {
+          const want = familyOfElementType(meta.elementType);
+          const got = familyOfLiteral(slotInit);
+          if (want !== null && got !== null && want !== got) {
+            const declared = meta.elementType.kind === 'primitive_type' ? meta.elementType.name : 'FixedArray';
+            this.errors.push(makeDiagnostic(
+              `Property '${meta.rootName}' initializer element ${i} is a ${got} literal, ` +
+              `but the FixedArray element type is '${declared}'`,
+              'error',
+              loc,
+            ));
+          }
+        }
+
         out.push({
           kind: 'property',
           name: slot,
@@ -651,8 +706,94 @@ class ExpandContext {
 
   private rewriteExpressionStatement(stmt: ExpressionStatement): Statement[] {
     const prelude: Statement[] = [];
+
+    // `this.board[idx]++` / `--` in statement position. The generic expression
+    // rewrite below turns `this.board[idx]` into a read dispatch ternary, and
+    // both ANF lowering and the side-effect summary only recognise an
+    // increment as a state mutation when its operand is a bare
+    // `property_access`. Left alone, the new value is computed and DISCARDED:
+    // no `update_prop`, `mutatesState` stays false, and `continuationShape`
+    // calls the method terminal, so NO continuation assertion is injected for
+    // a method that does mutate state. Desugar to the assignment form, which
+    // already routes through `rewriteArrayWrite`. Statement position discards
+    // the expression's value, so prefix and postfix are equivalent here.
+    const expr = stmt.expression;
+    if (
+      (expr.kind === 'increment_expr' || expr.kind === 'decrement_expr') &&
+      expr.operand.kind === 'index_access'
+    ) {
+      // Bind every impure index to a `const` first: the desugar names the
+      // element twice (read + write) and each index must be evaluated once.
+      const target = this.stabilizeIndexChain(expr.operand, prelude, stmt.sourceLocation);
+      const assignment: AssignmentStatement = {
+        kind: 'assignment',
+        target,
+        value: {
+          kind: 'binary_expr',
+          op: expr.kind === 'increment_expr' ? '+' : '-',
+          left: cloneExpr(target),
+          right: {
+            kind: 'bigint_literal',
+            value: 1n,
+            sourceLocation: stmt.sourceLocation,
+          },
+          sourceLocation: stmt.sourceLocation,
+        },
+        sourceLocation: stmt.sourceLocation,
+      };
+      return [...prelude, ...this.rewriteAssignment(assignment)];
+    }
+
     const newExpr = this.rewriteExpression(stmt.expression, prelude);
     return [...prelude, { ...stmt, expression: newExpr }];
+  }
+
+  /**
+   * `this.board[idx]++` used for its VALUE (not in statement position) cannot
+   * be desugared to an assignment, and the increment lowering has no way to
+   * write back through a dispatch chain. Silently dropping the write is the
+   * dangerous outcome — reject it instead.
+   */
+  private rejectArrayElementMutationInExpression(
+    operand: Expression,
+    op: string,
+    loc: SourceLocation | undefined,
+  ): void {
+    if (operand.kind !== 'index_access') return;
+    let base: Expression = operand;
+    while (base.kind === 'index_access') base = base.object;
+    if (this.tryResolveArrayBase(base) !== null) {
+      this.errors.push(makeDiagnostic(
+        `\`${op}\` on a FixedArray element is only supported as a statement; ` +
+          `assign the result explicitly instead`,
+        'error',
+        loc,
+      ));
+    }
+  }
+
+  /**
+   * Rewrite every index in an index-access chain so the chain can be safely
+   * duplicated: impure indices are hoisted to a fresh `__idx_K` binding, pure
+   * ones are left in place. The base object is returned untouched —
+   * `rewriteAssignment` resolves it.
+   */
+  private stabilizeIndexChain(
+    expr: Expression,
+    prelude: Statement[],
+    loc: SourceLocation | undefined,
+  ): Expression {
+    if (expr.kind !== 'index_access') return cloneExpr(expr);
+    const object = this.stabilizeIndexChain(expr.object, prelude, loc);
+    const index = isPureReference(expr.index)
+      ? cloneExpr(expr.index)
+      : this.hoistIfImpure(
+          this.rewriteExpression(expr.index, prelude),
+          prelude,
+          expr.sourceLocation ?? loc,
+          'idx',
+        );
+    return { ...expr, object, index };
   }
 
   // -----------------------------------------------------------------------
@@ -703,6 +844,11 @@ class ExpandContext {
 
       case 'increment_expr':
       case 'decrement_expr': {
+        this.rejectArrayElementMutationInExpression(
+          expr.operand,
+          expr.kind === 'increment_expr' ? '++' : '--',
+          expr.sourceLocation,
+        );
         const operand = this.rewriteExpression(expr.operand, prelude);
         return { ...expr, operand };
       }

@@ -65,7 +65,9 @@ pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
 /// two or more locals, which used to compile to an unspendable script). This
 /// is the same wrapper the backend uses for pass 5 — see
 /// `codegen::stack::lower_to_stack` around `lower_to_stack_inner`.
-pub fn try_lower_to_anf(contract: &ContractNode) -> Result<ANFProgram, String> {
+pub fn try_lower_to_anf(
+    contract: &ContractNode,
+) -> Result<ANFProgram, crate::refusal::Refusal> {
     crate::refusal::catch_refusal("anf lowering", || lower_to_anf(contract))
 }
 
@@ -270,7 +272,7 @@ pub(crate) const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// `this.addOutput` is called as `this.addOutput(satoshis, .{ v1, v2, ... })`
 /// (the surface form Zig / Move tuple syntax produce), unwrap the trailing
 /// array literal so each element becomes an individual state value.
-fn flatten_add_output_args(args: &[Expression]) -> Vec<Expression> {
+pub(crate) fn flatten_add_output_args(args: &[Expression]) -> Vec<Expression> {
     if args.len() == 2 {
         if let Expression::ArrayLiteral { elements } = &args[1] {
             let mut out = Vec::with_capacity(1 + elements.len());
@@ -299,6 +301,23 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
                 Some(bigint_to_json(&(-value)))
             } else {
                 None
+            }
+        }
+        // `toByteString('<hex>')` IS the ByteStringLiteral production (see
+        // spec/grammar.md section 11 and the peer check in validator.rs).
+        // UNWRAP it so `initial_value` holds the bare value, byte-identical to
+        // what the bare `'<hex>'` spelling produces. Without this the validator
+        // would accept the property and this function would return `None` for
+        // it -- silently DROPPING the default rather than storing a call node.
+        // Literal argument only.
+        Expression::CallExpr { args, .. }
+            if super::validator::is_to_byte_string_literal(expr) =>
+        {
+            match &args[0] {
+                Expression::ByteStringLiteral { value } => {
+                    Some(serde_json::Value::String(value.clone()))
+                }
+                _ => None,
             }
         }
         _ => None,
@@ -716,26 +735,27 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
     result
 }
 
-/// Issue #109: emit the DCE-surviving preservation pair for each
+/// Issue #109: emit the DCE-surviving preservation `load_prop` for each
 /// `@embedAlways` readonly field into the given (public) method context.
 ///
-/// Reproduces exactly what a hand-written `const _bind = this.field;` lowers
-/// to: a `load_prop` followed by a `load_const("@ref:<t>")` alias. The alias
-/// marks the `load_prop` as referenced (see `collect_refs_from_value` in
-/// `frontend/dce.rs`), so dead-binding DCE keeps it; stack lowering then emits
-/// the field's constructor-slot placeholder and NIPs the unused value off the
-/// stack at method end, so the field's bytes remain in the deployed script.
+/// The injected `load_prop` carries `preserve = true`, so `dce::has_side_effect`
+/// keeps it even though nothing references it; stack lowering then emits the
+/// field's constructor-slot placeholder and NIPs the unused value off the stack
+/// at method end, so the field's bytes remain in the deployed script.
+///
+/// This used to emit an alias pair instead — the `load_prop` plus a
+/// `load_const("@ref:<t>")` whose only job was to make the `load_prop` look
+/// referenced. That survives ONE DCE sweep but not the fixed-point loop in
+/// `frontend::dce`: sweep 1 drops the now-unreferenced alias, sweep 2 then drops
+/// the `load_prop` it was protecting, and both halves vanish. Marking the node
+/// itself does not depend on a referencing binding surviving. Mirrors the Zig
+/// reference (`compilers/zig/src/passes/anf_lower.zig`).
 fn emit_embed_always_preservation(ctx: &mut LoweringContext, fields: &[&PropertyNode]) {
     for field in fields {
-        let load_ref = ctx.emit(ANFValue::LoadProp {
+        ctx.emit(ANFValue::LoadProp {
             name: field.name.clone(),
+            preserve: true,
         });
-        ctx.emit_named(
-            &format!("__embedAlways_{}", field.name),
-            ANFValue::LoadConst {
-                value: serde_json::Value::String(format!("@ref:{}", load_ref)),
-            },
-        );
     }
 }
 
@@ -774,9 +794,6 @@ struct MethodScope {
     auto_injected_params: Vec<ANFParam>,
     /// Dedup set for `auto_injected_params`.
     auto_injected_set: HashSet<String>,
-    /// requireOutputP2PKH emits its `hash256(serialisedOutputs) ==
-    /// extractOutputHash(txPreimage)` check at most once per method body.
-    did_emit_hash_outputs_check: bool,
 }
 
 impl MethodScope {
@@ -850,6 +867,20 @@ struct LoweringContext<'a> {
     /// loop body, or an inlined helper's block — and false only in the context a
     /// method's own body is lowered into.
     nested: bool,
+    /// R-072. `requireOutputP2PKH` emits its `hash256(_serialisedOutputs) ==
+    /// extractOutputHash(txPreimage)` commitment at most once per CONTROL-FLOW
+    /// PATH, so this lives on the context and deliberately NOT on
+    /// `method_scope` (which is shared through an `Rc`).
+    ///
+    /// `sub_context` copies the parent's value in, because a commitment on a
+    /// dominating path really has been established by the time the nested block
+    /// runs; the copy means writes inside the block stay there, so an `if`'s two
+    /// arms cannot latch the flag for each other. Exactly one arm executes on
+    /// chain, and the arm-local per-output assertion only compares a substring
+    /// of the spender-supplied `_serialisedOutputs` witness: an arm without its
+    /// own commitment constrains nothing about the transaction's real outputs,
+    /// and the bond it claims to enforce can be satisfied with invented bytes.
+    did_emit_hash_outputs_check: bool,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -875,6 +906,7 @@ impl<'a> LoweringContext<'a> {
             method_scope: Rc::new(RefCell::new(MethodScope::default())),
             sighash_flag: None,
             nested: false,
+            did_emit_hash_outputs_check: false,
         }
     }
 
@@ -937,6 +969,44 @@ impl<'a> LoweringContext<'a> {
         self.contract.methods.iter().find(|m| {
             m.name == name && !matches!(m.visibility, Visibility::Public)
         })
+    }
+
+    /// Refuse a call to a private method whose argument count does not match
+    /// that method's parameter count.
+    ///
+    /// R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+    /// table first, while ANF lowering resolves it against the contract's
+    /// private methods first. A private method that shadows a builtin name
+    /// with a different arity — `private min(a, b, c)` called as `min(x, y)` —
+    /// therefore passes the arity check for `min` the BUILTIN and then lowers
+    /// as `min` the METHOD. Nothing forbids the shadowing.
+    ///
+    /// Downstream, params and args were zipped with `i < params.len() && i <
+    /// args.len()`, so the surplus was dropped on the floor: the extra
+    /// argument was evaluated and discarded, or the unbound parameter compiled
+    /// to a dangling reference. When the unbound parameter happened to be
+    /// UNUSED the contract compiled clean — an arity mismatch silently
+    /// accepted. When it was used, it surfaced two passes later as "method
+    /// parameter 'c' is not on the stack", naming a pass the author never
+    /// wrote in.
+    ///
+    /// Refused here, where both counts are known, on every call form (`m(x)`,
+    /// `this.m(x)`, member `this.m(x)`) and for both the inlined and the
+    /// `method_call` lowering path.
+    fn check_private_call_arity(&self, name: &str, arg_refs: &[String]) {
+        let method = match self.get_private_method(name) {
+            Some(m) => m,
+            None => return,
+        };
+        if method.params.len() == arg_refs.len() {
+            return;
+        }
+        panic!(
+            "private method '{}' expects {} argument(s), got {}.",
+            name,
+            method.params.len(),
+            arg_refs.len()
+        );
     }
 
     /// Generate a fresh temporary name.
@@ -1039,6 +1109,9 @@ impl<'a> LoweringContext<'a> {
         // Issue #123: a manual checkPreimage inside a nested block must bind
         // under the method's declared @sighash mode.
         sub.sighash_flag = self.sighash_flag;
+        // R-072: inherited by VALUE — a parent commitment dominates this block,
+        // but one emitted inside it must not flow back out to a sibling arm.
+        sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check;
         // `lift_branch_update_props` walks method.body and does NOT recurse, so
         // an `if` its recogniser accepts is only actually REWRITTEN at method
         // top level. `lower_if_statement` needs the same distinction before it
@@ -1273,6 +1346,10 @@ fn lower_statement_with_reads(
         line: ast_loc.line,
         column: ast_loc.column,
     });
+    // R-138: and to the refusal channel, so a panic from any of this pass's ten
+    // refusal sites reports the statement it died on. Same position, two
+    // consumers; see `crate::refusal`.
+    crate::refusal::set_refusal_location(Some(ast_loc.clone()));
 
     match stmt {
         Statement::VariableDecl {
@@ -1647,7 +1724,10 @@ fn append_branch_results(
     for (i, name) in result_names.iter().enumerate() {
         let temp = format!("{}{}", MERGED_LOCAL_TEMP_PREFIX, i);
         if props.contains(name) {
-            branch_ctx.emit_named(&temp, ANFValue::LoadProp { name: name.clone() });
+            branch_ctx.emit_named(
+                &temp,
+                ANFValue::LoadProp { name: name.clone(), preserve: false },
+            );
         } else {
             branch_ctx.emit_named(
                 &temp,
@@ -1887,6 +1967,28 @@ fn extract_loop_shape(
         ),
     };
 
+    // W4 backstop, in the spirit of the doc comment above: the user-facing
+    // refusal lives in the validator, and this is the hard guard for callers
+    // that skip it. Without it the count comes from `bound - start` while the
+    // condition tests something else entirely -- `i + 1n < 2n` runs once in the
+    // source language and twice here.
+    let iter_name = match init {
+        Statement::VariableDecl { name, .. } => name.as_str(),
+        _ => "",
+    };
+    let left_is_iter = matches!(
+        condition,
+        Expression::BinaryExpr { left, .. }
+            if matches!(left.as_ref(), Expression::Identifier { name } if name == iter_name)
+    );
+    if !left_is_iter {
+        panic!(
+            "For loop condition must compare the loop variable '{iter_name}' to a \
+             compile-time constant; the left-hand side is not the iterator, so the unrolled \
+             trip count would not be the one the source asks for."
+        );
+    }
+
     let (op, bound) = match condition {
         Expression::BinaryExpr { op, right, .. } => match extract_bigint_value(right) {
             Some(b) => (op, BigInt::from(b)),
@@ -1916,6 +2018,21 @@ fn extract_loop_shape(
         }
     };
 
+    // Range-check the arbitrary-precision count BEFORE narrowing it.
+    // `to_i64()` returns `None` for anything outside i64, so `unwrap_or(0)`
+    // turned an astronomically large bound into ZERO iterations: the loop body
+    // — which may carry the contract's `assert(checkSig(..))` — vanished from
+    // the emitted script with no diagnostic (CL-BUG-088 / CL-BUG-151). The
+    // ceiling is what actually stops it: 10001, and 10^18, both fit an i64.
+    if count > BigInt::from(crate::ir::loader::MAX_LOOP_COUNT) {
+        panic!(
+            "For loop unrolls to {} iterations, exceeding the maximum loop count of {}.",
+            count,
+            crate::ir::loader::MAX_LOOP_COUNT
+        );
+    }
+    // Below the ceiling the narrowing cannot fail; a non-positive count is the
+    // "condition already false" case and unrolls zero times.
     let count = count.to_i64().unwrap_or(0).max(0) as usize;
     (start, step, count)
 }
@@ -1931,8 +2048,24 @@ fn extract_loop_step(condition: &Expression, update: &Statement) -> i64 {
             _ => {}
         }
     }
-    // Fall back to the comparison direction for other unit-step spellings
-    // (e.g. `i = i + 1n`): `<`/`<=` counts up, `>`/`>=` counts down.
+    // `i += 1` reaches the AST as `i = i + 1` from the solidity, zig and java
+    // frontends. Read the direction off the operator rather than guessing it
+    // from the comparison: a source that spells `i = i + 1n` against a `>`
+    // bound then reaches the count computation with step +1 and is refused
+    // there ("counting up must use '<' or '<='"), instead of quietly counting
+    // down in the opposite direction from what the source says (R-029).
+    if let Statement::Assignment { value, .. } = update {
+        if let Expression::BinaryExpr { op, .. } = value {
+            match op {
+                BinaryOp::Add => return 1,
+                BinaryOp::Sub => return -1,
+                _ => {}
+            }
+        }
+    }
+    // Fall back to the comparison direction for the effect-free no-op sentinel
+    // a while-shaped frontend synthesizes when the source carries no continue
+    // expression: `<`/`<=` counts up, `>`/`>=` counts down.
     if let Expression::BinaryExpr { op, .. } = condition {
         if *op == BinaryOp::Gt || *op == BinaryOp::Ge {
             return -1;
@@ -1983,6 +2116,7 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
             if ctx.is_property(property) {
                 return ctx.emit(ANFValue::LoadProp {
                     name: property.clone(),
+                    preserve: false,
                 });
             }
             // this.txPreimage in StatefulSmartContract -> load_param (it's an
@@ -1995,6 +2129,7 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
             // this.x -> load_prop
             ctx.emit(ANFValue::LoadProp {
                 name: property.clone(),
+                preserve: false,
             })
         }
 
@@ -2076,6 +2211,7 @@ fn lower_identifier(name: &str, ctx: &mut LoweringContext) -> String {
     if ctx.is_property(name) {
         return ctx.emit(ANFValue::LoadProp {
             name: name.to_string(),
+            preserve: false,
         });
     }
 
@@ -2101,6 +2237,7 @@ fn lower_member_expr(
             if ctx.is_property(property) {
                 return ctx.emit(ANFValue::LoadProp {
                     name: property.to_string(),
+                    preserve: false,
                 });
             }
             if ctx.is_param(property) {
@@ -2110,6 +2247,7 @@ fn lower_member_expr(
             }
             return ctx.emit(ANFValue::LoadProp {
                 name: property.to_string(),
+                preserve: false,
             });
         }
     }
@@ -2117,13 +2255,24 @@ fn lower_member_expr(
     // SigHash.ALL etc. -> load constant
     if let Expression::Identifier { name } = object {
         if name == "SigHash" {
+            // R-190: the match used to close with `_ => 0`, so `SigHash.All`
+            // — the real member in the wrong case — lowered to `load_const 0`.
+            // Zero is not a sighash flag and nothing downstream rejects it, so
+            // the contract compiled with the wrong constant baked in. The other
+            // six tiers refuse this source; this tier was the only one that
+            // accepted it. Refuse here, in the pass that can still see what the
+            // author wrote.
             let val = match property {
                 "ALL" => 0x01i64,
                 "NONE" => 0x02,
                 "SINGLE" => 0x03,
                 "FORKID" => 0x40,
                 "ANYONECANPAY" => 0x80,
-                _ => 0,
+                unknown => panic!(
+                    "SigHash has no member '{}'. The sighash flags are ALL, NONE, \
+                     SINGLE, FORKID and ANYONECANPAY — all upper case.",
+                    unknown
+                ),
             };
             return ctx.emit(ANFValue::LoadConst {
                 value: serde_json::Value::Number(serde_json::Number::from(val)),
@@ -2192,20 +2341,21 @@ fn lower_binary_expr(
     // can choose OP_EQUAL vs OP_NUMEQUAL.
     // For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
     // For bitwise &, |, ^, annotate byte-typed operands.
-    let result_type = if op.as_str() == "===" || op.as_str() == "!==" {
-        if is_byte_typed_expr(left, ctx) || is_byte_typed_expr(right, ctx) {
-            Some("bytes".to_string())
-        } else {
-            None
+    //
+    // N-076: "+" used to be named in the comment above and MISSING from the
+    // match below, so `s + t` on two ByteStrings lowered to OP_ADD in this
+    // tier and to OP_CAT in the other six. Executed: `"aa" + "bb" === "aabb"`
+    // was FALSE here and TRUE everywhere else. Keep the operator set here and
+    // the comment in step.
+    let result_type = match op.as_str() {
+        "===" | "!==" | "+" | "&" | "|" | "^" => {
+            if is_byte_typed_expr(left, ctx) || is_byte_typed_expr(right, ctx) {
+                Some("bytes".to_string())
+            } else {
+                None
+            }
         }
-    } else if op.as_str() == "&" || op.as_str() == "|" || op.as_str() == "^" {
-        if is_byte_typed_expr(left, ctx) || is_byte_typed_expr(right, ctx) {
-            Some("bytes".to_string())
-        } else {
-            None
-        }
-    } else {
-        None
+        _ => None,
     };
 
     ctx.emit(ANFValue::BinOp {
@@ -2240,6 +2390,30 @@ fn lower_call_expr(
     args: &[Expression],
     ctx: &mut LoweringContext,
 ) -> String {
+    // `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+    // spec/grammar.md section 11:
+    //
+    //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+    //
+    // so it must reach the IR as a literal, indistinguishable from the bare
+    // `'<hex>'` spelling the other surfaces use. Lowering it to a `toByteString`
+    // call node instead made the `.runar.rs` surface -- where a bare literal is
+    // not valid Rust and this wrapper is the ONLY spelling that is both valid
+    // Rust and valid Rúnar -- unable to match the one `expected-ir.json` every
+    // format is compared against.
+    //
+    // Literal argument only. `toByteString(x)` for a non-literal `x` is not this
+    // production; it stays an identity-cast call node (the typechecker types it
+    // ByteString -> ByteString and stack lowering already treats it as a no-op),
+    // so its behaviour is unchanged.
+    if let Expression::Identifier { name } = callee {
+        if name == "toByteString" && args.len() == 1 {
+            if let Expression::ByteStringLiteral { .. } = &args[0] {
+                return lower_expr_to_ref(&args[0], ctx);
+            }
+        }
+    }
+
     // super(...) call
     if let Expression::Identifier { name } = callee {
         if name == "super" {
@@ -2381,9 +2555,11 @@ fn lower_call_expr(
     // `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
     // (once per method) and emits hash256(serialisedOutputs) ==
     // extractOutputHash(txPreimage) the first time the intrinsic is called
-    // in a method body. Subsequent calls in the same method skip the
-    // hashOutputs check (already established) and emit only the per-output
-    // substring assertion.
+    // on a given CONTROL-FLOW PATH. A later call on the same path skips the
+    // commitment (already established there) and emits only the per-output
+    // substring assertion; a call on a path the commitment does not dominate
+    // emits its own (R-072 — the substring assertion alone only constrains the
+    // spender-supplied witness, not the transaction).
     //
     // v1 assumes all outputs in the serialised set are exactly 34 bytes
     // (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
@@ -2411,20 +2587,30 @@ fn lower_call_expr(
                 }
             };
 
+            // W2 backstop. The user-facing refusal lives in the typechecker, where a
+            // diagnostic carries a source location -- but ANF lowering is reachable from
+            // callers that run no typechecker, and R-012 is this repo's standing lesson about
+            // a security check that lives in exactly one pass. Unreachable in the normal
+            // pipeline: typecheck answers first.
+            if idx != 0 {
+                panic!(
+                    "requireOutputP2PKH: outputIndex must be 0; got {}. The emitted assertion reads output i at byte offset i*34, which is an output boundary only if every earlier output is exactly 34 bytes -- an attacker sizes output 0 freely and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset.",
+                    idx
+                );
+            }
+
             ctx.method_scope
                 .borrow_mut()
                 .record_auto_injected_param("_serialisedOutputs", "ByteString");
             ctx.add_param("_serialisedOutputs");
 
-            // Emit the hashOutputs(preimage) check exactly once per method.
-            let need_hash_check = {
-                let mut scope = ctx.method_scope.borrow_mut();
-                if !scope.did_emit_hash_outputs_check {
-                    scope.did_emit_hash_outputs_check = true;
-                    true
-                } else {
-                    false
-                }
+            // Emit the hashOutputs(preimage) commitment once per control-flow
+            // path (R-072 — see LoweringContext::did_emit_hash_outputs_check).
+            let need_hash_check = if ctx.did_emit_hash_outputs_check {
+                false
+            } else {
+                ctx.did_emit_hash_outputs_check = true;
+                true
             };
             if need_hash_check {
                 let serialised_ref = ctx.emit(ANFValue::LoadParam {
@@ -2627,6 +2813,7 @@ fn lower_call_expr(
     // side effects.
     if let Expression::PropertyAccess { property } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+        ctx.check_private_call_arity(property, &arg_refs);
         if ctx.should_inline_private(property) {
             return inline_private_method_call(property, &arg_refs, ctx);
         }
@@ -2646,6 +2833,7 @@ fn lower_call_expr(
             if name == "this" {
                 let arg_refs: Vec<String> =
                     args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+                ctx.check_private_call_arity(property, &arg_refs);
                 if ctx.should_inline_private(property) {
                     return inline_private_method_call(property, &arg_refs, ctx);
                 }
@@ -2699,6 +2887,7 @@ fn lower_call_expr(
         // the body. This keeps .runar.move, .runar.go, and .runar.ts lowering
         // in sync.
         if ctx.is_private_method(name) {
+            ctx.check_private_call_arity(name, &arg_refs);
             if ctx.should_inline_private(name) {
                 return inline_private_method_call(name, &arg_refs, ctx);
             }
@@ -2879,11 +3068,20 @@ fn lower_decrement_expr(
 // Type inference helpers for equality semantics
 // ---------------------------------------------------------------------------
 
-/// Byte-typed primitive names -- values that are already byte sequences.
-const BYTE_TYPES: &[&str] = &[
-    "ByteString", "PubKey", "Sig", "Sha256", "Ripemd160", "Addr", "SigHashPreimage",
-    "RabinSig", "RabinPubKey", "Point", "P256Point", "P384Point",
-];
+/// Does a value of this type sit on the stack as a BYTE STRING rather than as
+/// a script NUMBER?
+///
+/// N-076: there is deliberately no list here. `typecheck::is_bytestring_subtype`
+/// is the authority. The second, hand-maintained copy this replaces carried
+/// `RabinSig` and `RabinPubKey`, which the type checker files under
+/// `is_bigint_subtype` -- so `===` on a Rabin value emitted OP_EQUAL and, far
+/// worse, `+` on one emitted OP_CAT where the source said addition.
+///
+/// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+/// with OP_ADD.
+fn is_byte_type(type_name: &str) -> bool {
+    super::typecheck::is_bytestring_subtype(type_name)
+}
 
 /// Builtin functions that return byte-typed values.
 const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
@@ -2895,6 +3093,32 @@ const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
     "p384Add", "p384Mul", "p384MulGen", "p384Negate", "p384EncodeCompressed",
 ];
 
+/// Preimage field extractors that return BYTES (`ByteString` / `Sha256`).
+///
+/// N-054: this list is a transcription of the `return_type` the type checker
+/// already records for these builtins in `typecheck.rs`, and the stack lowerer
+/// agrees with it byte for byte: `lower_extractor` ends the split sequence with
+/// OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
+/// none of the ones that are.
+///
+/// So an extractor listed here leaves a byte string on the stack and must be
+/// compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+/// leaves a minimally-encoded script NUMBER and must be compared with
+/// OP_NUMEQUAL and added with OP_ADD.
+///
+/// Getting it backwards is a correctness defect in both directions. OP_EQUAL
+/// on a number is over-strict — it rejects a witness that encodes the same
+/// value with different bytes (`0400` for 4), i.e. it refuses a valid spend.
+/// OP_NUMEQUAL on a hash or a scriptCode is under-strict — trailing high-order
+/// zero bytes and negative zero compare equal to values they are not
+/// byte-equal to, i.e. a covenant bypass. This tier had NO extractor entry at
+/// all, so every byte extractor compared numerically.
+const BYTE_RETURNING_EXTRACTORS: &[&str] = &[
+    "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
+    "extractScriptCode", "extractOutputHash", "extractOutputs",
+    "extractPrevOutputScript",
+];
+
 /// Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).
 /// This is a best-effort heuristic used to annotate equality operators.
 fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
@@ -2904,12 +3128,12 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
         Expression::Identifier { name } => {
             // Check if it's a parameter or property with a byte type
             if let Some(t) = get_param_type(name, ctx) {
-                if BYTE_TYPES.contains(&t.as_str()) {
+                if is_byte_type(&t) {
                     return true;
                 }
             }
             if let Some(t) = get_property_type(name, ctx) {
-                if BYTE_TYPES.contains(&t.as_str()) {
+                if is_byte_type(&t) {
                     return true;
                 }
             }
@@ -2921,7 +3145,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
 
         Expression::PropertyAccess { property } => {
             if let Some(t) = get_property_type(property, ctx) {
-                if BYTE_TYPES.contains(&t.as_str()) {
+                if is_byte_type(&t) {
                     return true;
                 }
             }
@@ -2932,7 +3156,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
             if let Expression::Identifier { name } = object.as_ref() {
                 if name == "this" {
                     if let Some(t) = get_property_type(property, ctx) {
-                        if BYTE_TYPES.contains(&t.as_str()) {
+                        if is_byte_type(&t) {
                             return true;
                         }
                     }
@@ -2952,6 +3176,9 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
                     return asm_return_type.as_deref() == Some("ByteString");
                 }
                 if BYTE_RETURNING_FUNCTIONS.contains(&name.as_str()) {
+                    return true;
+                }
+                if BYTE_RETURNING_EXTRACTORS.contains(&name.as_str()) {
                     return true;
                 }
             }
@@ -3066,11 +3293,29 @@ fn inline_private_method_call(
     if end_index > start_index {
         return ctx.bindings[end_index - 1].name.clone();
     }
-    // Empty body — emit a load_const placeholder so the caller has
-    // a ref.
-    ctx.emit(ANFValue::LoadConst {
-        value: serde_json::Value::String("@void".to_string()),
-    })
+    // R-290: the body emitted nothing, so there is no value for the caller
+    // to reference.
+    //
+    // Refuse it. The alternative is what was here before: a `load_const "@void"`
+    // sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+    // special-cased). It survived pass 4 and died in pass 6's hex decoder —
+    // "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+    // messages that name neither the method nor the problem, and that only fire
+    // because the string happens to be odd-length and non-hex. An even-length
+    // sentinel would decode to zeros in the Rust decoder's
+    // `from_str_radix(..).unwrap_or(0)` and reach the script.
+    //
+    // Reachable from source that parses, validates and type-checks: declare a public
+    // method BEFORE two same-named privates. The side-effect summary resolves the
+    // name through a last-wins map and caches the OUTPUT-EMITTING one, so
+    // `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+    // whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+    // IR, `--hex` exit 1 with the hex-decoder message.
+    panic!(
+        "private method '{}' was inlined but produced no bindings, so the call \
+         site has no value to reference.",
+        method_name
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3532,6 +3777,7 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 name: old_prop_ref.clone(),
                 value: ANFValue::LoadProp {
                     name: branch.prop_name.clone(),
+                    preserve: false,
                 },
                 source_loc: None,
             });
@@ -3545,6 +3791,39 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
                 then_bindings.push(ANFBinding {
                     name: new_name,
                     value: remap_value_refs(&vb.value, &branch_map),
+                    source_loc: None,
+                });
+            }
+
+            // An arm's VALUE is its LAST binding. `value_bindings` is
+            // everything before the original `update_prop`, which ends on the
+            // assigned value only when that value was computed INSIDE the arm.
+            // When the arm assigns something bound outside it — a local, or
+            // anything hoisted before the chain — `value_bindings` does not
+            // contain it and is usually empty, so the arm was emitted EMPTY and
+            // stack lowering padded it with a zero push:
+            // `if (p == 0n) { this.c0 = someLocal; }` compiled to
+            // `this.c0 = 0`, silently corrupting state on the MATCHED branch.
+            // (TicTacToe's `this.cN = this.turn` escapes only because its
+            // `load_prop` lands inside the arm.)
+            //
+            // Materialise the value explicitly whenever the arm does not
+            // already end on it. When it does — every shape that compiled
+            // correctly before — this is a no-op and no bytes move.
+            let mapped_value_ref = branch_map
+                .get(&branch.value_ref)
+                .cloned()
+                .unwrap_or_else(|| branch.value_ref.clone());
+            let needs_value = match then_bindings.last() {
+                Some(last) => last.name != mapped_value_ref,
+                None => true,
+            };
+            if needs_value {
+                then_bindings.push(ANFBinding {
+                    name: fresh(),
+                    value: ANFValue::LoadConst {
+                        value: serde_json::Value::String(format!("@ref:{}", mapped_value_ref)),
+                    },
                     source_loc: None,
                 });
             }
@@ -4213,7 +4492,7 @@ class Countdown extends SmartContract {
         for b in bindings {
             match &b.value {
                 ANFValue::LoadParam { name: pn } if kind_is_param && pn == name => n += 1,
-                ANFValue::LoadProp { name: pn } if !kind_is_param && pn == name => n += 1,
+                ANFValue::LoadProp { name: pn, .. } if !kind_is_param && pn == name => n += 1,
                 ANFValue::If { then, else_branch, .. } => {
                     n += count_loads(then, kind_is_param, name);
                     n += count_loads(else_branch, kind_is_param, name);

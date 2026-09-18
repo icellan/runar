@@ -303,57 +303,109 @@ describe('RED-PROOF 4: OP_CODESEPARATOR relocated in the script, artifact unchan
     const input = clone(loadCase('codesep-tag-op-n'));
     const script = input.artifact.script;
     const seps = findCodeSeparators(script);
-    expect(seps[0]).toBe(6);
 
-    // Swap the OP_CODESEPARATOR at byte 6 with the 1-byte opcode before it, so
-    // the script still decodes cleanly but the separator now sits at byte 5.
-    // CodeSepMatrix has THREE public methods (bump/reseal/close), each with
-    // its own OP_CODESEPARATOR — only the first (bump's) moves; reseal's and
-    // close's (seps[1], seps[2]) sit well after byte 7 and are untouched by a
-    // same-length swap at bytes 5-6.
+    // R-010 (c2846d87, "authenticate `_codePart` against the executing
+    // script") moved code-separator emission out of `lowerCheckPreimage` and
+    // into the emitter: a contract in which any public method uses `_codePart`
+    // now gets ONE separator, prepended as `OP_NOP, OP_CODESEPARATOR` at byte
+    // offsets 0 and 1 (06-emit.ts:552-553), and NO per-method ones
+    // (05-stack-lower.ts:4098 suppresses those whenever the script-level
+    // separator is in play). CodeSepMatrix's three public methods therefore
+    // share the single separator at offset 1.
+    //
+    // The previous assertions here — `seps[0] === 6`, three separators, a
+    // same-length swap at bytes 5-6 — are not merely stale for this fixture,
+    // they are unreachable for EVERY input: only the offset-1 layout makes
+    // `scriptCode` start at a fixed, method-independent offset, which is the
+    // whole mechanism by which `_codePart` can be pinned byte for byte.
+    expect(seps).toEqual([1]);
+    expect(script.slice(0, 4)).toBe('61ab');
+
+    // The relocation trap survives intact, retargeted onto the one separator:
+    // OP_NOP (0x61) and OP_CODESEPARATOR (0xab) are both 1-byte opcodes, so
+    // swapping bytes 0 and 1 keeps the script decodable and every later offset
+    // unchanged while moving the separator from 1 to 0. Offset 0 is precisely
+    // the booby trap the offset-1 placement exists to avoid — go-sdk's
+    // `thread.subScript` reads `lastCodeSep > 0` as "no separator seen" — so a
+    // walker that trusted the artifact's claim of [1] would sign the wrong
+    // subscript.
     const at = (i: number) => script.slice(i * 2, i * 2 + 2);
-    const swapped = script.slice(0, 5 * 2) + at(6) + at(5) + script.slice(7 * 2);
-    expect(findCodeSeparators(swapped)).toEqual([5, seps[1], seps[2]]);
+    const swapped = at(1) + at(0) + script.slice(2 * 2);
+    expect(findCodeSeparators(swapped)).toEqual([0]);
     input.artifact.script = swapped;
 
     const v = deriveVertical(input.artifact, input.constructorArgs).violations;
     expect(codes(v)).toContain('T5-codesep-indices-mismatch');
+    // The slot targets go stale with it: both codeSepIndexSlots bake 1, which
+    // is no longer the offset of any real separator.
+    expect(codes(v)).toContain('T7-codesep-slot-target-missing');
   });
 
   it('a 0xab byte inside PUSH DATA is not mistaken for a separator', () => {
     // bytes-ab-trap bakes a 1-byte 0xab constructor arg; codesep-tag-ab-trap
     // bakes three. A naive `script.indexOf('ab')` scan reports those as
-    // separators. The walk must not. CodeSepMatrix has three public methods
-    // (bump/reseal/close), each auto-injecting its own OP_CODESEPARATOR.
+    // separators. The walk must not.
+    //
+    // R-010 (c2846d87): CodeSepMatrix's three public methods no longer carry
+    // one auto-injected separator each — the emitter prepends a single
+    // `OP_NOP, OP_CODESEPARATOR` at offsets 0/1 — so the expected separator
+    // count is 1, not 3, and no contract shape can raise it again. The trap
+    // itself is unchanged in kind: there are still strictly more 0xab BYTES in
+    // the script than there are separators, and the extra ones sit inside push
+    // data where only an opcode walk can tell them apart.
     const trap = loadCase('codesep-tag-ab-trap');
     const derived = deriveVertical(trap.artifact, trap.constructorArgs);
     expect(derived.violations).toEqual([]);
-    expect(derived.deployedCodeSeparators.length).toBe(3);
+    expect(derived.deployedCodeSeparators).toEqual([1]);
 
     const naive: number[] = [];
     for (let i = 0; i + 1 < derived.codePartHex.length; i += 2) {
       if (derived.codePartHex.slice(i, i + 2) === 'ab') naive.push(i / 2);
     }
     expect(naive.length).toBeGreaterThan(derived.deployedCodeSeparators.length);
+    // The one offset both scans agree on is the real separator; every other
+    // naive hit is a data byte the walk correctly declined to count.
+    expect(naive).toContain(1);
+    expect(naive.filter((o) => o !== 1).length).toBeGreaterThan(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// P0-1: codeSepIndexSlots must exercise a SHIFTED, MULTI-BYTE bake — the
-// matrix must not regress to "every row bakes the same constant".
+// P0-1: codeSepIndexSlots must exercise a SHIFTED, MULTI-BYTE SPLICE — the
+// matrix must not regress to "every row lays the slot out identically".
 // ---------------------------------------------------------------------------
 //
+// History, and why this block was retargeted.
+//
 // Before `reseal` was added to CodeSepMatrix.runar.ts, the artifact's ONLY
-// codeSepIndexSlot targeted `bump`'s own OP_CODESEPARATOR, which always sits
-// at template offset 6 — before EVERY constructor slot — so its baked value
-// was `6 + 0 = 6` on every single row, regardless of `tag`. `reseal` (added
-// after `bump`, before `close`) gives every codesep-tag-* case a SECOND
-// codeSepIndexSlot whose own separator sits AFTER the `tag` ctor slot, so its
-// baked value moves with `tag`'s encoded length — the first time any row
-// bakes a shifted, multi-byte codesep index.
+// codeSepIndexSlot targeted `bump`'s own OP_CODESEPARATOR, which always sat at
+// template offset 6 — before EVERY constructor slot — so its baked VALUE was
+// `6 + 0 = 6` on every row. `reseal` gave every codesep-tag-* case a SECOND
+// slot whose separator sat after the `tag` ctor slot, so its baked value moved
+// with `tag`'s encoded length.
+//
+// R-010 (c2846d87) ended that. Per-method separators are gone; a `_codePart`
+// contract carries exactly one separator, at byte offset 1, ahead of every
+// constructor slot. `codeSepIndexSlots` are emitted only by the variable-length
+// state deserializer (05-stack-lower.ts:3639), which runs only when `_codePart`
+// is on the stack — and `_codePart` is on the stack only when
+// `computeUsesCodePart` held for that method, which is exactly the condition
+// that puts the script-level separator at offset 1. So a slot's target is
+// ALWAYS 1, no constructor slot can precede it, and the baked value is a
+// constant 1 for every contract shape. Verified against the compiler, not just
+// the fixtures: recompiling contracts with 1-4 public methods, mixed fixed and
+// variable-length state, yields `codeSeparatorIndices: [1]` and
+// `codeSepIndexSlots[*].codeSepIndex === 1` every time.
+//
+// What is STILL live, and what these tests now pin, is the placeholder's
+// LOCATION: the slot's byte offset in the DEPLOYED script still moves with the
+// encoded length of every constructor arg spliced before it (C3xC4). The
+// baked-VALUE assertions are replaced by deployed-OFFSET assertions of the same
+// shape, plus the R-010 invariant block below, which pins the property the old
+// assertions can no longer observe.
 // ---------------------------------------------------------------------------
 
-describe('P0-1: codeSepIndexSlots exercise a shifted, multi-byte bake (not a constant)', () => {
+describe('P0-1: codeSepIndexSlot placeholders exercise a shifted, multi-byte splice (not a fixed layout)', () => {
   const codesepCases = CASES.filter((c) => c.startsWith('codesep-'));
   const allValues = codesepCases.flatMap((name) => {
     const input = loadCase(name);
@@ -366,30 +418,103 @@ describe('P0-1: codeSepIndexSlots exercise a shifted, multi-byte bake (not a con
     expect(codesepCases.length).toBeGreaterThan(0);
   });
 
-  it('at least one codeSepIndexSlot targets a separator AFTER the first ctor slot', () => {
+  // Was: "at least one codeSepIndexSlot targets a separator AFTER the first
+  // ctor slot". Unreachable post-R-010 — every slot targets offset 1, which
+  // precedes every constructor slot. The live half of that property is the
+  // PLACEHOLDER's own position: a slot sitting after a ctor slot is the
+  // precondition for its deployed offset to move at all.
+  it('at least one codeSepIndexSlot PLACEHOLDER sits after the first ctor slot', () => {
     const input = loadCase(codesepCases[0]!);
     const firstCtorOffset = Math.min(...input.artifact.constructorSlots!.map((s) => s.byteOffset));
-    const lateTargets = (input.artifact.codeSepIndexSlots ?? []).filter((s) => s.codeSepIndex > firstCtorOffset);
-    expect(lateTargets.length).toBeGreaterThan(0);
+    const lateSlots = (input.artifact.codeSepIndexSlots ?? []).filter((s) => s.byteOffset > firstCtorOffset);
+    expect(lateSlots.length).toBeGreaterThan(0);
   });
 
-  it('at least two rows bake DIFFERENT values for the SAME codeSepIndexSlot target', () => {
+  // Was: "at least two rows bake DIFFERENT values for the SAME
+  // codeSepIndexSlot target". The value is a constant 1 post-R-010; the
+  // resolved LOCATION still differs per row, and for the same reason (the
+  // encoded length of `tag`).
+  it('at least two rows resolve the SAME codeSepIndexSlot placeholder to DIFFERENT deployed offsets', () => {
     const byTemplateOffset = new Map<number, Set<number>>();
     for (const v of allValues) {
       const set = byTemplateOffset.get(v.templateByteOffset) ?? new Set<number>();
-      set.add(v.expectedBakedValue);
+      set.add(v.deployedByteOffset);
       byTemplateOffset.set(v.templateByteOffset, set);
     }
     const distinctCounts = [...byTemplateOffset.values()].map((s) => s.size);
     expect(Math.max(...distinctCounts)).toBeGreaterThanOrEqual(2);
   });
 
-  it('at least one baked value requires a multi-byte scriptnum push (> 16)', () => {
-    expect(allValues.some((v) => v.expectedBakedValue > 16)).toBe(true);
+  // Was: "at least one baked value requires a multi-byte scriptnum push
+  // (> 16)". A baked 1 is OP_1, one byte, forever. The multi-byte coverage
+  // that assertion bought — a constructor arg whose encoding is long enough
+  // that a tier computing the shift from the declared TYPE rather than the
+  // encoded BYTES gets it wrong — now lives on the shift itself
+  // (codesep-tag-pushdata1 moves its second placeholder by 77 bytes).
+  it('at least one row shifts a codeSepIndexSlot placeholder by more than one byte', () => {
+    expect(allValues.some((v) => v.deployedByteOffset - v.templateByteOffset > 1)).toBe(true);
   });
 
-  it('at least one row bakes a value DIFFERENT from its own templateCodeSepIndex — proving the shift-accumulation loop in collectSubstitutions/derive.ts:312-316 is live, not dead code', () => {
-    expect(allValues.some((v) => v.expectedBakedValue !== v.templateCodeSepIndex)).toBe(true);
+  // Was: "at least one row bakes a value DIFFERENT from its own
+  // templateCodeSepIndex — proving the shift-accumulation loop in
+  // collectSubstitutions/derive.ts:312-316 is live". No compiler output can
+  // satisfy that any more (see the block comment above), so the loop's own
+  // coverage moved to derive-shift-accumulation.test.ts, which drives it with
+  // a hand-built pre-R-010-shaped artifact. What remains observable from the
+  // matrix — and what the seven SDKs must reproduce — is that the placeholder
+  // does not stay where the template put it.
+  it('at least one codeSepIndexSlot resolves to a deployedByteOffset different from its templateByteOffset', () => {
+    expect(allValues.some((v) => v.deployedByteOffset !== v.templateByteOffset)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0-1b: the post-R-010 invariant itself.
+// ---------------------------------------------------------------------------
+//
+// R-010 (c2846d87) exists to make every byte of the spender-supplied
+// `_codePart` witness observable to the running script, and it does that by
+// fixing the separator at a known, method-independent offset. These pins state
+// that property directly, which the assertions they replace could only imply.
+// A regression to per-method separators — the shape that let a spender
+// substitute an arbitrary continuation script and drain the contract — turns
+// this block red immediately.
+// ---------------------------------------------------------------------------
+
+describe('P0-1b: every `_codePart` contract in the matrix carries exactly one OP_CODESEPARATOR, at byte 1', () => {
+  const codePartCases = CASES.filter((c) => (loadCase(c).artifact.codeSepIndexSlots ?? []).length > 0);
+
+  it('the matrix contains at least one `_codePart` contract (this block is not vacuous)', () => {
+    expect(codePartCases.length).toBeGreaterThan(0);
+  });
+
+  it.each(codePartCases)('%s: the template script begins OP_NOP OP_CODESEPARATOR and declares [1]', (name) => {
+    const { artifact } = loadCase(name);
+    // Offset 1, not 0: implementations that store "index of the last executed
+    // OP_CODESEPARATOR" in a zero-initialised field (go-sdk's
+    // `thread.subScript`: `if t.lastCodeSep > 0`) cannot tell a separator at 0
+    // from no separator at all. The leading OP_NOP buys that distinction.
+    expect(artifact.script.slice(0, 4)).toBe('61ab');
+    expect(findCodeSeparators(artifact.script)).toEqual([1]);
+    expect(artifact.codeSeparatorIndices).toEqual([1]);
+    expect(artifact.codeSeparatorIndex).toBe(1);
+  });
+
+  it.each(codePartCases)('%s: every codeSepIndexSlot targets offset 1 and bakes 1 in the deployed script', (name) => {
+    const input = loadCase(name);
+    for (const slot of input.artifact.codeSepIndexSlots ?? []) {
+      expect(slot.codeSepIndex).toBe(1);
+    }
+    const derived = deriveVertical(input.artifact, input.constructorArgs);
+    expect(derived.violations).toEqual([]);
+    // The separator precedes every constructor slot, so no constructor value
+    // can dislodge it: the deployed offset is 1 for every row of the matrix.
+    expect(derived.deployedCodeSeparators).toEqual([1]);
+    for (const v of derived.codeSepSlotValues) {
+      expect(v.templateCodeSepIndex).toBe(1);
+      expect(v.expectedBakedValue).toBe(1);
+      expect(v.actualBakedValue).toBe(1);
+    }
   });
 });
 

@@ -38,5 +38,8 @@
         "count": "0n"
       }
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "49867b0eacf6e417cebdf8c60dc6fc65f0d5d86bc7d5d288a657922c715daa3e"
+  }
 }

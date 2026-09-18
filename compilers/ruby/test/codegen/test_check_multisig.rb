@@ -158,6 +158,121 @@ class TestCheckMultiSigCodegen < Minitest::Test
 
   # -------------------- determinism --------------------
 
+  # -------------------- R-054: degenerate thresholds --------------------
+  #
+  # +checkMultiSig([], [pk])+ lowers to
+  # +OP_0 OP_0 <pk> OP_1 OP_CHECKMULTISIG+ -- nSigs = 0. OP_CHECKMULTISIG
+  # with zero required signatures verifies nothing and pushes TRUE, so the
+  # deployed output is ANYONE-CAN-SPEND while the source reads like an
+  # authorization check. The mirror image, more signatures than public keys,
+  # can never be satisfied by any witness: the output is permanently
+  # UNSPENDABLE.
+  #
+  # The guard lives in the lowerer rather than the typechecker so it also
+  # covers the +--ir+ input path, and it is a compile-time refusal rather
+  # than extra emitted opcodes so it moves no bytes for valid contracts.
+
+  EMPTY_SIGS_SRC = <<~TS
+    import { SmartContract, assert, PubKey, Sig, checkMultiSig } from 'runar-lang';
+
+    class EmptyMultiSig extends SmartContract {
+      readonly pk1: PubKey;
+
+      constructor(pk1: PubKey) {
+        super(pk1);
+        this.pk1 = pk1;
+      }
+
+      public unlock(): void {
+        assert(checkMultiSig([], [this.pk1]));
+      }
+    }
+  TS
+
+  OVER_THRESHOLD_SRC = <<~TS
+    import { SmartContract, assert, PubKey, Sig, checkMultiSig } from 'runar-lang';
+
+    class OverThreshold extends SmartContract {
+      readonly pk1: PubKey;
+
+      constructor(pk1: PubKey) {
+        super(pk1);
+        this.pk1 = pk1;
+      }
+
+      public unlock(sig1: Sig, sig2: Sig): void {
+        assert(checkMultiSig([sig1, sig2], [this.pk1]));
+      }
+    }
+  TS
+
+  ONE_OF_ONE_SRC = <<~TS
+    import { SmartContract, assert, PubKey, Sig, checkMultiSig } from 'runar-lang';
+
+    class OneOfOne extends SmartContract {
+      readonly pk1: PubKey;
+
+      constructor(pk1: PubKey) {
+        super(pk1);
+        this.pk1 = pk1;
+      }
+
+      public unlock(sig1: Sig): void {
+        assert(checkMultiSig([sig1], [this.pk1]));
+      }
+    }
+  TS
+
+  THREE_OF_THREE_SRC = <<~TS
+    import { SmartContract, assert, PubKey, Sig, checkMultiSig } from 'runar-lang';
+
+    class ThreeOfThree extends SmartContract {
+      readonly pk1: PubKey;
+      readonly pk2: PubKey;
+      readonly pk3: PubKey;
+
+      constructor(pk1: PubKey, pk2: PubKey, pk3: PubKey) {
+        super(pk1, pk2, pk3);
+        this.pk1 = pk1;
+        this.pk2 = pk2;
+        this.pk3 = pk3;
+      }
+
+      public unlock(sig1: Sig, sig2: Sig, sig3: Sig): void {
+        assert(checkMultiSig([sig1, sig2, sig3], [this.pk1, this.pk2, this.pk3]));
+      }
+    }
+  TS
+
+  def test_empty_signature_array_is_rejected
+    err = assert_raises(RuntimeError) do
+      compile_ts_source(EMPTY_SIGS_SRC, 'EmptyMultiSig.runar.ts')
+    end
+    assert_match(/at least one signature/, err.message)
+  end
+
+  def test_more_sigs_than_pubkeys_is_rejected
+    err = assert_raises(RuntimeError) do
+      compile_ts_source(OVER_THRESHOLD_SRC, 'OverThreshold.runar.ts')
+    end
+    assert_match(/cannot exceed/, err.message)
+  end
+
+  def test_control_one_of_one_still_compiles
+    artifact = compile_ts_source(ONE_OF_ONE_SRC, 'OneOfOne.runar.ts')
+    assert_match(/\bOP_CHECKMULTISIG(?:VERIFY)?\b/, artifact.asm)
+  end
+
+  def test_control_two_of_three_still_compiles
+    artifact = compile_ts_source(MULTISIG_2OF3_SRC, 'MultiSig2of3.runar.ts')
+    assert_match(/\bOP_CHECKMULTISIG(?:VERIFY)?\b/, artifact.asm)
+  end
+
+  def test_control_m_equals_n_still_compiles
+    artifact = compile_ts_source(THREE_OF_THREE_SRC, 'ThreeOfThree.runar.ts')
+    assert_match(/\bOP_CHECKMULTISIG(?:VERIFY)?\b/, artifact.asm)
+  end
+
   def test_multi_sig_lowering_is_deterministic
     a = compile_ts_source(MULTISIG_2OF3_SRC, 'MultiSig2of3.runar.ts')
     b = compile_ts_source(MULTISIG_2OF3_SRC, 'MultiSig2of3.runar.ts')

@@ -41,7 +41,8 @@ The Python compiler reads canonical ANF IR JSON and performs stack scheduling an
             Python pass 5      Optimize        Python pass 6
 ```
 
-The Python compiler supports **all six input formats** via hand-written recursive descent parsers — the most of any compiler:
+The Python compiler supports **all nine input formats** via hand-written
+recursive descent parsers:
 
 | Extension | Parser Module |
 |-----------|---------------|
@@ -51,6 +52,14 @@ The Python compiler supports **all six input formats** via hand-written recursiv
 | `.runar.go` | `frontend/parser_go.py` |
 | `.runar.rs` | `frontend/parser_rust.py` |
 | `.runar.py` | `frontend/parser_python.py` |
+| `.runar.rb` | `frontend/parser_ruby.py` |
+| `.runar.zig` | `frontend/parser_zig.py` |
+| `.runar.java` | `frontend/parser_java.py` |
+
+R-234: this said "all six input formats ... the most of any compiler" and
+listed six. Nine parser modules ship here, and every tier parses all nine — the
+"most of any compiler" was true once and is now just a claim that all seven
+tiers meet.
 
 All parsers produce the same Rúnar AST (`ContractNode`), and from that point the pipeline is identical.
 

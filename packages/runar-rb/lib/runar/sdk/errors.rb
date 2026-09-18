@@ -39,6 +39,49 @@ module Runar
       raise ScriptSizeExceededError.new(limit: limit, actual: actual_bytes, context: context)
     end
 
+    # Raised when an artifact reaches a builtin the compiler does not claim is
+    # sound and the caller has not acknowledged it (R-062 / CL-BUG-105).
+    class UnsoundPrimitiveError < StandardError
+      attr_reader :missing, :context
+
+      def initialize(missing:, context:)
+        @missing = missing
+        @context = context
+        plural = missing.length == 1 ? '' : 's'
+        quoted = missing.map { |m| "'#{m}'" }.join(', ')
+        super(
+          "#{context}: this artifact reaches #{missing.length} builtin#{plural} the compiler " \
+          "does not claim is sound: #{missing.join(', ')}. The compiler emitted it only " \
+          "because the gap was acknowledged at COMPILE time; funding it is a second " \
+          "decision, and this SDK will not make it for you. Pass " \
+          "DeployOptions.new(acknowledge_unsound: [#{quoted}]) to proceed"
+        )
+      end
+    end
+
+    # Raise UnsoundPrimitiveError unless every unsound primitive the artifact
+    # declares appears in +acknowledged+ (R-062).
+    #
+    # The compiler refuses to emit a script reaching +verifySP1FRI+ unless the
+    # author wrote +@acknowledgeUnsoundSP1FriVerifier+ or the invoker passed
+    # +--acknowledge-unsound-sp1-fri+ (R-012). That acknowledgement stopped at
+    # whoever ran the compiler: the artifact handed on afterwards looked like
+    # any other and every SDK funded it in silence. The compiler now stamps
+    # +unsoundPrimitives+ into the artifact, and this is the SDK half.
+    #
+    # Deploy only, deliberately. Spending an already-deployed contract is how
+    # funds are RECOVERED from one.
+    def self.assert_unsound_primitives_acknowledged(artifact, acknowledged, context)
+      declared = Array(artifact&.unsound_primitives)
+      return if declared.empty?
+
+      ok = Array(acknowledged)
+      missing = declared.reject { |p| ok.include?(p) }
+      return if missing.empty?
+
+      raise UnsoundPrimitiveError.new(missing: missing, context: context)
+    end
+
     # Raised when a method call requires a caller-supplied intent-intrinsic
     # witness value (auto-injected +_prevOutScript_<i>+ or +_serialisedOutputs+)
     # that has not been set on the RunarContract.

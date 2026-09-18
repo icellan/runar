@@ -17,7 +17,38 @@ pub use runar_lang_macros::{contract, stateful_contract, unsafe_contract};
 pub type Int = i64;
 
 /// Alias for Int.
+///
+/// A Bitcoin Script number is an arbitrary-width byte string and Rúnar's own
+/// `bigint` is arbitrary precision by specification, so this alias is NARROWER
+/// than the type it stands for. It stays `i64` deliberately: `Bigint` and `Int`
+/// are the same type here, every `.runar.rs` parser maps `Bigint`, `Int`,
+/// `i64`, `u64`, `i128`, `u128` and `BigintBig` to the same `bigint` primitive,
+/// and which one a contract spells is therefore a matter of taste. The values
+/// contracts actually declare `Bigint` are satoshi counts, loop indices and
+/// board cells; making all of them heap-allocated arbitrary precision to serve
+/// the handful of places that genuinely need 256 bits would cost every one of
+/// them `Copy` — `self.count + 1` on a borrowed field stops compiling — for no
+/// gain.
+///
+/// Use [`BigintBig`] where the width is real. The functions that cannot
+/// represent a value in an `i64` now REFUSE it rather than truncate, so the
+/// narrowness is loud instead of silent; see [`bin2num`] and [`num2bin`].
 pub type Bigint = i64;
+
+/// Arbitrary-precision Rúnar integer — the honest width of a Script number.
+///
+/// Reach for this wherever a value can exceed `i64`: a secp256k1 coordinate
+/// (256 bits), the output of `bin2num` on a wide push, the input to `num2bin`
+/// at a width past eight bytes. Every `.runar.rs` parser maps the spelling
+/// `BigintBig` to the same `bigint` primitive as `Bigint`, so reaching for it
+/// changes the emitted Script by not one byte.
+///
+/// Unlike the Go tier's `BigintBig` (`*big.Int`, where `==` silently degrades
+/// to pointer identity and every operator needs a helper function),
+/// `num_bigint::BigInt` implements `Add`/`Sub`/`Mul`/`PartialEq`/`PartialOrd`,
+/// so `a == b` and `a + b` keep working and keep meaning what they say. The Go
+/// tier needs `BigintBigEqual`; this tier does not.
+pub type BigintBig = num_bigint::BigInt;
 
 // ---------------------------------------------------------------------------
 // Byte-string types
@@ -522,6 +553,16 @@ pub fn extract_locktime(_p: &[u8]) -> Int {
     0
 }
 
+/// Returns 0xfffffffe in test mode. That is
+/// the SDK's own non-final default (`resolveInputSequence`), the value the
+/// TypeScript TestContract interpreter returns, and the value all the SDK ANF
+/// interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+/// one value that makes a #131 finality guard fail off-chain and makes
+/// nLockTime a consensus no-op on-chain (W7).
+pub fn extract_sequence(_p: &[u8]) -> Int {
+    0xfffffffe
+}
+
 /// Returns the first 32 bytes of the preimage in test mode.
 /// Tests set `tx_preimage = hash256(expected_output_bytes)` so the assertion
 /// `hash256(outputs) == extract_output_hash(tx_preimage)` passes.
@@ -546,6 +587,11 @@ pub fn extract_outpoint(_p: &[u8]) -> ByteString {
     vec![0u8; 36]
 }
 
+/// Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks.
+pub fn extract_script_code(_p: &[u8]) -> ByteString {
+    vec![]
+}
+
 /// Returns a mock state script (empty bytes).
 pub fn get_state_script<T>(_contract: &T) -> ByteString {
     vec![]
@@ -566,7 +612,7 @@ pub fn get_state_script<T>(_contract: &T) -> ByteString {
 /// see other inputs, so this returns an empty ByteString. `input_index` MUST
 /// be an integer literal in source — the Rúnar typechecker rejects non-literal
 /// indices.
-pub fn extract_prev_output_script(_input_index: i64, _expected_script_hash: ByteString) -> ByteString {
+pub fn extract_prev_output_script(_input_index: i64, _expected_script_hash: &[u8]) -> ByteString {
     Vec::new()
 }
 
@@ -642,24 +688,198 @@ pub fn substr(data: &[u8], start: i64, length: i64) -> ByteString {
     data[s..s + l].to_vec()
 }
 
+/// The length of a byte string in bytes — `OP_SIZE`.
+///
+/// `OP_SIZE` pushes the size of the top element and cannot fail, so neither can
+/// this.
+pub fn len(data: &[u8]) -> Int {
+    data.len() as Int
+}
+
+/// The bytes of `data` from `index` onwards — the RIGHT half of the cut.
+///
+/// `split` is SINGLE-VALUED. `spec/grammar.md` declares
+/// `split(data: ByteString, index: bigint): ByteString` and every tier emits
+/// `OP_SPLIT OP_NIP`, dropping the left half at the split site; `left(data,
+/// index)` is the other side of the same cut. A Rust mock returning a tuple or
+/// a pair would reintroduce a defect that was closed in `runar-lang` and
+/// `runar-java`, and no `.runar.rs` surface could name the pair anyway —
+/// Rúnar has no tuple type and no surface parser accepts destructuring.
+///
+/// `OP_SPLIT` FAILS when the position is negative or past the end of the
+/// element; it does not clamp. So this panics there rather than returning a
+/// value the emitted script can never produce. `index == len(data)` is legal
+/// and yields the empty byte string.
+pub fn split(data: &[u8], index: Int) -> ByteString {
+    let n = split_position(data, index, "split");
+    data[n..].to_vec()
+}
+
+/// The first `length` bytes of `data` — `OP_SPLIT OP_DROP`.
+///
+/// Fails on the same positions `OP_SPLIT` fails on; see [`split`].
+pub fn left(data: &[u8], length: Int) -> ByteString {
+    let n = split_position(data, length, "left");
+    data[..n].to_vec()
+}
+
+/// The last `length` bytes of `data` — `<size> <length> OP_SUB OP_SPLIT OP_NIP`.
+///
+/// The emitted cut is at `size - length`, so the same bounds apply: a `length`
+/// that is negative or larger than the element makes `OP_SPLIT` fail.
+pub fn right(data: &[u8], length: Int) -> ByteString {
+    let n = split_position(data, length, "right");
+    data[data.len() - n..].to_vec()
+}
+
+/// The cut position shared by `split`, `left` and `right`, with the bound
+/// `OP_SPLIT` itself enforces.
+fn split_position(data: &[u8], index: Int, who: &str) -> usize {
+    assert!(
+        index >= 0 && (index as u128) <= data.len() as u128,
+        "runar: {who} position {index} is outside a {}-byte value — OP_SPLIT fails on a \
+         position below zero or past the end of the element, it does not clamp",
+        data.len()
+    );
+    index as usize
+}
+
+/// The maximum number of bytes `reverseBytes` can reverse.
+///
+/// Every tier lowers `reverseBytes` to a bounded unrolled loop of exactly this
+/// many peel-one-byte iterations (`compilers/rust/src/codegen/stack.rs`
+/// `lower_reverse_bytes` and its six peers), then drops whatever is left. So
+/// past 520 bytes the SCRIPT returns the reverse of the first 520 bytes and
+/// silently discards the rest; it is the classic Bitcoin element-size bound.
+pub const REVERSE_BYTES_MAX: usize = 520;
+
+/// `data` with its bytes in the opposite order — `reverseBytes`.
+///
+/// Panics past [`REVERSE_BYTES_MAX`]. The emitted loop is unrolled a fixed 520
+/// times and drops the unconsumed remainder, so for a longer value the script
+/// produces the reverse of the first 520 bytes — reversing the whole thing here
+/// would hand the caller a value on-chain execution cannot produce, which is
+/// the failure mode `num2bin` had.
+pub fn reverse_bytes(data: &[u8]) -> ByteString {
+    assert!(
+        data.len() <= REVERSE_BYTES_MAX,
+        "runar: reverseBytes cannot reverse {} bytes — every tier unrolls exactly {} \
+         peel-one-byte iterations and drops the remainder, so the script would return the \
+         reverse of only the first {} bytes",
+        data.len(),
+        REVERSE_BYTES_MAX,
+        REVERSE_BYTES_MAX
+    );
+    let mut out = data.to_vec();
+    out.reverse();
+    out
+}
+
+/// A `ByteString` from its hex spelling — `toByteString`.
+///
+/// `spec/grammar.md` makes `toByteString '(' StringLiteral ')'` the
+/// ByteStringLiteral production: the hex is the VALUE, and at script level the
+/// builtin is the identity on bytes already pushed. This mock is therefore the
+/// hex decoder, and it is strict for the same reason the grammar is — an odd
+/// number of digits or a non-hex character has no byte string to denote.
+pub fn to_byte_string(hex: &str) -> ByteString {
+    assert!(
+        hex.len() % 2 == 0,
+        "runar: toByteString('{hex}') has an odd number of hex digits — a ByteString \
+         literal denotes whole bytes"
+    );
+    let bytes = hex.as_bytes();
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in bytes.chunks(2) {
+        let hi = hex_digit(pair[0], hex);
+        let lo = hex_digit(pair[1], hex);
+        out.push(hi << 4 | lo);
+    }
+    out
+}
+
+fn hex_digit(c: u8, whole: &str) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => panic!(
+            "runar: toByteString('{whole}') contains '{}', which is not a hex digit",
+            c as char
+        ),
+    }
+}
+
+/// Fixed-width little-endian sign-magnitude encoding — `int2str`.
+///
+/// `int2str` and `num2bin` are the SAME builtin: every frontend maps both
+/// spellings to `int2str`/`num2bin` and every tier emits `OP_NUM2BIN` for them
+/// (`compilers/rust/src/codegen/stack.rs` `builtin_opcodes`). Despite the name
+/// there is no radix and no decimal string; `byte_len` is a WIDTH in bytes.
+/// It delegates to [`num2bin`] so the two spellings cannot drift apart, and
+/// inherits its refusal when the width is too small for the value.
+pub fn int2str(value: Int, byte_len: Int) -> ByteString {
+    assert!(
+        byte_len >= 0,
+        "runar: int2str width {byte_len} is negative — OP_NUM2BIN fails on a negative size"
+    );
+    num2bin(&value, byte_len as usize)
+}
+
+/// The `int_2_str` spelling of [`int2str`].
+///
+/// `compilers/rust/src/frontend/parser_rustmacro.rs` maps `int_2_str` and
+/// `int2str` to the one `int2str` builtin, so a contract may spell it either
+/// way and both must answer identically. Two spellings, one emitter, and
+/// nothing but `tests/mock_script_agreement.rs` compares them.
+pub fn int_2_str(value: Int, byte_len: Int) -> ByteString {
+    int2str(value, byte_len)
+}
+
 /// Converts an integer to a byte string of the specified length
 /// using Bitcoin Script's little-endian signed magnitude encoding.
 /// Accepts a reference to match Rúnar contract calling convention.
+///
+/// `length` must be wide enough for the value INCLUDING its sign bit, or this
+/// panics, exactly as `OP_NUM2BIN` fails. It used to fill `length` bytes
+/// low-first and drop the rest, which is not what the opcode does: OP_NUM2BIN
+/// has no wrap-around, it FAILS when the number does not fit the size. The
+/// truncated bytes were a value the emitted script could never produce and
+/// nothing told the caller — `num2bin(1000, 1)` returned `e8`.
+///
+/// The sign occupies a bit, so 255 needs two bytes and 127 needs one. In
+/// particular `i64::MIN` needs NINE bytes, not eight: in eight the sign bit and
+/// the top magnitude bit are the same bit, so clearing the sign to read the
+/// magnitude leaves zero and the push decodes as 0 rather than as -2^63.
+///
+/// See [`num2bin_big`] for values past `i64`.
 pub fn num2bin(v: &Bigint, length: usize) -> ByteString {
+    num2bin_big(&BigintBig::from(*v), length)
+}
+
+/// The arbitrary-precision form of [`num2bin`].
+///
+/// The `.runar.rs` parsers lower `num2bin_big` to the same `num2bin` builtin as
+/// `num2bin`, so reaching for it costs no script bytes.
+pub fn num2bin_big(v: &BigintBig, length: usize) -> ByteString {
     let mut buf = vec![0u8; length];
-    if *v == 0 || length == 0 {
+    if v.sign() == num_bigint::Sign::NoSign {
         return buf;
     }
-    let abs = v.unsigned_abs();
-    let mut val = abs;
-    for byte in buf.iter_mut() {
-        if val == 0 {
-            break;
-        }
-        *byte = (val & 0xff) as u8;
-        val >>= 8;
+    let (_, mag) = v.clone().into_parts();
+    let be = mag.to_bytes_be();
+    // Minimal sign-magnitude width: the magnitude bytes, plus one more when the
+    // top magnitude byte already uses the bit the sign needs.
+    let need = be.len() + usize::from(be[0] & 0x80 != 0);
+    assert!(
+        need <= length,
+        "runar: num2bin cannot encode {v} in {length} byte(s) — it needs {need}; \
+         OP_NUM2BIN fails on a size too small for the number, it does not wrap"
+    );
+    for (i, b) in be.iter().enumerate() {
+        buf[be.len() - 1 - i] = *b;
     }
-    if *v < 0 {
+    if v.sign() == num_bigint::Sign::Minus {
         buf[length - 1] |= 0x80;
     }
     buf
@@ -667,20 +887,49 @@ pub fn num2bin(v: &Bigint, length: usize) -> ByteString {
 
 /// Converts a byte string (Bitcoin Script LE signed-magnitude) back to an integer.
 /// Inverse of `num2bin`.
+///
+/// A decoded value outside `i64` PANICS. It used to shift the decoded bytes
+/// into a `u64` and cast, so a push wider than eight bytes silently lost
+/// everything above bit 63: `bin2num` of 123456789012345678901234567890 in
+/// sixteen bytes returned -4362896299872285998 while `OP_BIN2NUM` left the
+/// whole value on the stack. The caller got a number, it was the wrong number,
+/// and the doc comment said only "Inverse of num2bin".
+///
+/// The boundary is the VALUE, not the push width: Script numbers are not
+/// required to be minimally encoded, a sixteen-byte push of 1000 is 1000, and
+/// the emitted opcodes accept it — so this decodes it and returns 1000.
+///
+/// Use [`bin2num_big`] for the wide answer.
 pub fn bin2num(data: &[u8]) -> Bigint {
+    let r = bin2num_big(data);
+    i64::try_from(&r).unwrap_or_else(|_| {
+        panic!(
+            "runar: bin2num decoded {r}, which does not fit i64 — OP_BIN2NUM has no such \
+             limit; use bin2num_big, which the .runar.rs parsers lower to the same bin2num \
+             builtin"
+        )
+    })
+}
+
+/// The arbitrary-precision form of [`bin2num`].
+///
+/// The `.runar.rs` parsers lower `bin2num_big` to the same `bin2num` builtin as
+/// `bin2num`, so reaching for it costs no script bytes.
+pub fn bin2num_big(data: &[u8]) -> BigintBig {
     if data.is_empty() {
-        return 0;
+        return BigintBig::from(0);
     }
     let last = data[data.len() - 1];
     let negative = (last & 0x80) != 0;
-    let mut result: u64 = (last & 0x7f) as u64;
-    for i in (0..data.len() - 1).rev() {
-        result = (result << 8) | data[i] as u64;
-    }
+    let mut le = data.to_vec();
+    let n = le.len() - 1;
+    le[n] = last & 0x7f;
+    le.reverse();
+    let magnitude = BigintBig::from_bytes_be(num_bigint::Sign::Plus, &le);
     if negative {
-        -(result as i64)
+        -magnitude
     } else {
-        result as i64
+        magnitude
     }
 }
 

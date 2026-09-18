@@ -88,6 +88,51 @@ fn outputFramingBytes(script_byte_len: usize) i64 {
 // RunarContract — main contract runtime wrapper
 // ---------------------------------------------------------------------------
 
+/// Decode the value of every EQUALITY `verify_code_part_len` pin in a compiled
+/// script.
+///
+/// The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+///
+///     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+///     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+///
+/// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
+/// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+/// satisfy, so it is deliberately not returned here.
+///
+/// Read from the emitted TEMPLATE rather than from a built code script: the
+/// template holds OP_0 placeholders where constructor args go, so no
+/// caller-supplied byte string can be mistaken for a pin.
+fn decodeExactCodePartLenPins(
+    allocator: std.mem.Allocator,
+    script_hex: []const u8,
+) !std.ArrayListUnmanaged(usize) {
+    var values: std.ArrayListUnmanaged(usize) = .empty;
+    errdefer values.deinit(allocator);
+
+    var i: usize = 0;
+    while (i + 18 <= script_hex.len) : (i += 2) {
+        const seq = script_hex[i .. i + 18];
+        if (!std.mem.eql(u8, seq[0..4], "7604")) continue;
+        if (!std.mem.eql(u8, seq[12..14], "81")) continue;
+        if (!std.mem.eql(u8, seq[14..16], "9c")) continue;
+        if (!std.mem.eql(u8, seq[16..18], "69")) continue;
+
+        var value: usize = 0;
+        var b: usize = 4;
+        while (b > 0) : (b -= 1) { // little-endian
+            const byte = std.fmt.parseInt(u8, seq[4 + 2 * (b - 1) .. 6 + 2 * (b - 1)], 16) catch {
+                value = 0;
+                break;
+            };
+            value = (value << 8) | byte;
+        } else {
+            try values.append(allocator, value);
+        }
+    }
+    return values;
+}
+
 pub const ContractError = error{
     NotDeployed,
     MethodNotFound,
@@ -150,7 +195,16 @@ pub const RunarContract = struct {
         if (artifact.state_fields.len > 0) {
             state_vals = try allocator.alloc(types.StateValue, artifact.state_fields.len);
             for (artifact.state_fields, 0..) |field, i| {
-                if (field.initial_value) |init_val| {
+                if (field.initial_array) |leaves| {
+                    // A FixedArray field's compile-time default. Parse each
+                    // leaf against the array's LEAF type and regroup into the
+                    // declared shape, so the serializer writes the values the
+                    // contract declared. This branch used to be unreachable —
+                    // the array was dropped on parse — and the field fell
+                    // through to `.int = 0`, deploying N zero words whatever
+                    // the source said.
+                    state_vals[i] = buildInitialArrayValue(allocator, field, leaves) catch .{ .int = 0 };
+                } else if (field.initial_value) |init_val| {
                     // Parse initial value string based on type
                     state_vals[i] = parseInitialValue(allocator, init_val, field.type_name) catch .{ .int = 0 };
                 } else if (field.index >= 0 and @as(usize, @intCast(field.index)) < constructor_args.len) {
@@ -268,12 +322,56 @@ pub const RunarContract = struct {
     /// envelope is injected into the locking script between the compiled code
     /// and the state section (if any). Once deployed, the inscription is
     /// immutable -- it persists identically across all state transitions.
+    ///
+    /// N-043 -- returns `error.CodePartLengthPinViolated` when the envelope
+    /// would break the contract's own `SIZE(_codePart)` pin. A stateful contract
+    /// with a variable-length state section carries an equality pin on the
+    /// deployed code-part length, and the envelope lands INSIDE the code part
+    /// (see `getCodePartHex`). The compiler bakes that number before any
+    /// inscription exists, so the pinned length and the real one differ by the
+    /// envelope's size and every honest spend aborts at OP_VERIFY -- with the
+    /// funds already committed. Refusing here turns a permanent, silent lock
+    /// into a loud error before a single satoshi moves. The pinned / actual
+    /// lengths are recorded in `sdk_errors.last_codepart_pin_error`.
     pub fn withInscription(self: *RunarContract, insc: ordinals.Inscription) !void {
-        if (self.inscription) |*old| {
+        const previous = self.inscription;
+        self.inscription = try insc.clone(self.allocator);
+        self.assertCodePartLengthPinHonoured() catch |err| {
+            if (self.inscription) |*attached| {
+                var mi = attached.*;
+                mi.deinit(self.allocator);
+            }
+            self.inscription = previous;
+            return err;
+        };
+        if (previous) |*old| {
             var mi = old.*;
             mi.deinit(self.allocator);
         }
-        self.inscription = try insc.clone(self.allocator);
+    }
+
+    /// Verify that every equality `verify_code_part_len` pin the compiler baked
+    /// into this artifact still describes the code part this contract produces.
+    ///
+    /// The check is the invariant itself, not a restatement of the compiler's
+    /// derivation: it decodes the pinned number straight out of the emitted
+    /// template and compares it to `getCodePartHex()`. So it permits every
+    /// combination that actually works -- a stateless contract or a fixed-size
+    /// state layout carries no pin at all, and a lower-bound pin is satisfied by
+    /// a longer code part -- and rejects only the shape that would lock funds.
+    fn assertCodePartLengthPinHonoured(self: *RunarContract) !void {
+        var pinned = try decodeExactCodePartLenPins(self.allocator, self.artifact.script);
+        defer pinned.deinit(self.allocator);
+        if (pinned.items.len == 0) return;
+
+        const code = try self.getCodePartHex();
+        defer self.allocator.free(code);
+        const actual = code.len / 2;
+
+        for (pinned.items) |value| {
+            if (value == actual) continue;
+            return errors_mod.raiseCodePartLengthPinViolated(value, actual, self.artifact.contract_name);
+        }
     }
 
     /// Returns the current inscription, if any.
@@ -304,6 +402,15 @@ pub const RunarContract = struct {
             var ctx_buf: [256]u8 = undefined;
             const ctx = std.fmt.bufPrint(&ctx_buf, "{s}.deploy", .{self.artifact.contract_name}) catch "RunarContract.deploy";
             try errors_mod.assertScriptHexUnderLimit(locking_script, errors_mod.MAX_SCRIPT_BYTES, ctx);
+
+            // R-062: and refuse to fund a script reaching a builtin the
+            // compiler does not claim is sound unless the caller says so here,
+            // in the same breath as the money.
+            try errors_mod.assertUnsoundPrimitivesAcknowledged(
+                self.artifact.unsound_primitives,
+                options.acknowledge_unsound,
+                ctx,
+            );
         }
 
         // Fetch fee rate and funding UTXOs
@@ -2787,6 +2894,39 @@ pub const RunarContract = struct {
     // ANF auto-state computation
     // ---------------------------------------------------------------------------
 
+    /// Populate the ANF interpreter's `property name -> ANFValue` map from
+    /// `self.state`.
+    ///
+    /// A `FixedArray` state field is keyed by its SYNTHETIC LEAF names, never
+    /// by its grouped one. Pass `03b-expand-fixed-arrays` runs before ANF
+    /// lowering, so the ANF program has no property called `table` at all — it
+    /// has `table__0`..`table__3`, and every `load_prop` / `update_prop` in the
+    /// method body names one of those. Keying the map by `field.name` left the
+    /// interpreter evaluating `this.table[i]++` against an ABSENT property.
+    ///
+    /// Mirrors `flattenFixedArrayState` in `packages/runar-sdk/src/contract.ts`
+    /// and `_flatten_fixed_array_state` in `packages/runar-py/runar/sdk/
+    /// contract.py`. Those two also copy the grouped entry through; this tier
+    /// does not, because nothing reads it and `stateValueToAnf` on an
+    /// `.array_value` allocates a slice the interpreter would never look at.
+    fn putCurrentState(
+        self: *RunarContract,
+        map: *std.StringHashMap(anf_interp.ANFValue),
+    ) void {
+        for (self.artifact.state_fields, 0..) |field, i| {
+            if (i >= self.state.len) continue;
+            if (field.fixed_array) |fa| {
+                // A non-array value cannot be spread over N leaves; leave the
+                // leaves absent rather than guess, as the TS/Python tiers do.
+                if (self.state[i] != .array_value) continue;
+                var next: usize = 0;
+                putSyntheticLeaves(map, fa.synthetic_names, self.state[i], &next);
+            } else {
+                map.put(field.name, stateValueToAnf(self.state[i])) catch continue;
+            }
+        }
+    }
+
     /// Auto-compute state transitions from the ANF IR embedded in the artifact.
     /// Also returns any data outputs declared via `this.addDataOutput(...)` in
     /// the method body, allocated from `self.allocator`. Caller owns both the
@@ -2823,13 +2963,11 @@ pub const RunarContract = struct {
         // peer tier swallows this.
         const anf_program = try anf_interp.parseANFFromJson(work, anf_json);
 
-        // Build current state map: property name -> ANFValue
+        // Build current state map: property name -> ANFValue. A FixedArray
+        // field is keyed by its SYNTHETIC leaf names, not its grouped one —
+        // see `putCurrentState`.
         var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
-        for (self.artifact.state_fields, 0..) |field, i| {
-            if (i < self.state.len) {
-                current_state.put(field.name, stateValueToAnf(self.state[i])) catch continue;
-            }
-        }
+        self.putCurrentState(&current_state);
 
         // Build named args map: param name -> ANFValue
         var named_args = std.StringHashMap(anf_interp.ANFValue).init(work);
@@ -2850,11 +2988,12 @@ pub const RunarContract = struct {
         // entries (current_state passthrough). State_delta updates were
         // duped into self.allocator and DO need freeing. We use this
         // snapshot to distinguish the two in the cleanup pass below.
+        // A FixedArray field passes its LEAVES through, so the walk has to
+        // descend into `.array_value` or those pointers look unborrowed and
+        // the cleanup frees memory `self.state` still owns.
         var borrowed_ptrs: std.ArrayListUnmanaged([*]const u8) = .empty;
         defer borrowed_ptrs.deinit(self.allocator);
-        for (self.state) |sv| {
-            if (sv == .bytes) borrowed_ptrs.append(self.allocator, sv.bytes.ptr) catch {};
-        }
+        for (self.state) |sv| collectBorrowedPtrs(&borrowed_ptrs, self.allocator, sv);
 
         // Compute new state AND data outputs.
         //
@@ -2893,7 +3032,23 @@ pub const RunarContract = struct {
         // pointer into the old self.state slot.
         for (self.artifact.state_fields, 0..) |field, i| {
             if (i < self.state.len) {
-                if (state_map.get(field.name)) |anf_val| {
+                // A FixedArray field's post-state lives under its synthetic
+                // leaf names; `field.name` is never a key of the result map.
+                if (field.fixed_array) |fa| {
+                    // Fail closed on an allocation failure here, same as the
+                    // interpreter call above: silently keeping the pre-call
+                    // array is exactly the defect this branch exists to fix.
+                    if (try regroupFromStateMap(
+                        self.allocator,
+                        field.type_name,
+                        fa.synthetic_names,
+                        state_map,
+                        self.state[i],
+                    )) |regrouped| {
+                        self.state[i].deinit(self.allocator);
+                        self.state[i] = regrouped;
+                    }
+                } else if (state_map.get(field.name)) |anf_val| {
                     const new_val = anfToStateValue(self.allocator, anf_val) catch types.StateValue{ .int = 0 };
                     self.state[i].deinit(self.allocator);
                     self.state[i] = new_val;
@@ -2946,11 +3101,7 @@ pub const RunarContract = struct {
         const anf_program = try anf_interp.parseANFFromJson(work, anf_json);
 
         var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
-        for (self.artifact.state_fields, 0..) |field, i| {
-            if (i < self.state.len) {
-                current_state.put(field.name, stateValueToAnf(self.state[i])) catch continue;
-            }
-        }
+        self.putCurrentState(&current_state);
 
         var named_args = std.StringHashMap(anf_interp.ANFValue).init(work);
         for (user_params, 0..) |param, i| {
@@ -2970,7 +3121,7 @@ pub const RunarContract = struct {
         var borrowed_ptrs: std.ArrayListUnmanaged([*]const u8) = .empty;
         defer borrowed_ptrs.deinit(self.allocator);
         for (self.state) |sv| {
-            if (sv == .bytes) borrowed_ptrs.append(self.allocator, sv.bytes.ptr) catch {};
+            collectBorrowedPtrs(&borrowed_ptrs, self.allocator, sv);
         }
 
         // FAIL CLOSED (NEW-006) — see the matching note in autoComputeState.
@@ -3273,6 +3424,133 @@ pub const RunarContract = struct {
 // ANFValue <-> StateValue conversion helpers
 // ---------------------------------------------------------------------------
 
+/// Walk a (possibly nested) FixedArray state value depth-first and bind each
+/// LEAF to the correspondingly-positioned synthetic property name. `next` is
+/// the running leaf index, shared across the recursion.
+///
+/// An existing entry is never overwritten — mirrors the TS tier's
+/// `if (!(synth in out))` guard, which keeps an explicitly-supplied scalar
+/// winning over the grouped array it was also spelled inside.
+fn putSyntheticLeaves(
+    map: *std.StringHashMap(anf_interp.ANFValue),
+    names: []const []const u8,
+    value: types.StateValue,
+    next: *usize,
+) void {
+    switch (value) {
+        .array_value => |items| {
+            for (items) |it| putSyntheticLeaves(map, names, it, next);
+        },
+        else => {
+            if (next.* >= names.len) return;
+            const name = names[next.*];
+            next.* += 1;
+            if (map.contains(name)) return;
+            map.put(name, stateValueToAnf(value)) catch {};
+        },
+    }
+}
+
+/// Collect the `.bytes` pointers a state value lends to the interpreter,
+/// descending into `.array_value` leaves. The cleanup pass after
+/// `computeNewStateAndDataOutputs` frees any `.bytes` in the result map whose
+/// pointer is NOT in this set, so a leaf that is missed here gets freed while
+/// `self.state` still owns it.
+fn collectBorrowedPtrs(
+    out: *std.ArrayListUnmanaged([*]const u8),
+    allocator: std.mem.Allocator,
+    sv: types.StateValue,
+) void {
+    switch (sv) {
+        .bytes => |b| out.append(allocator, b.ptr) catch {},
+        .array_value => |items| {
+            for (items) |it| collectBorrowedPtrs(out, allocator, it);
+        },
+        else => {},
+    }
+}
+
+/// Rebuild a FixedArray state field's grouped value from the interpreter's
+/// result map, which keys the post-call state by the synthetic leaf names.
+///
+/// Returns `null` when the map carries none of this field's leaves — the
+/// method did not touch the array, so the caller must leave `self.state` alone
+/// rather than overwrite it with a reconstruction. A leaf the method did not
+/// write falls back to its pre-call value in `prior`, so a partial write keeps
+/// the untouched slots instead of zeroing them.
+///
+/// Mirrors `regroupFixedArrayState` in `packages/runar-sdk/src/contract.ts` and
+/// `_regroup_fixed_array_state` in `packages/runar-py/runar/sdk/contract.py`.
+fn regroupFromStateMap(
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    names: []const []const u8,
+    state_map: std.StringHashMap(anf_interp.ANFValue),
+    prior: types.StateValue,
+) !?types.StateValue {
+    var saw_any = false;
+    for (names) |n| {
+        if (state_map.contains(n)) {
+            saw_any = true;
+            break;
+        }
+    }
+    if (!saw_any) return null;
+
+    const flat = try allocator.alloc(types.StateValue, names.len);
+    var filled: usize = 0;
+    defer {
+        for (flat[0..filled]) |v| v.deinit(allocator);
+        allocator.free(flat);
+    }
+    for (names, 0..) |name, i| {
+        if (state_map.get(name)) |anf_val| {
+            // anfToStateValue dupes `.bytes`, so `flat` never aliases the
+            // result map (which is freed by the caller's cleanup pass).
+            flat[filled] = try anfToStateValue(allocator, anf_val);
+        } else {
+            flat[filled] = try clonePriorLeaf(allocator, prior, i);
+        }
+        filled += 1;
+    }
+
+    var dims_buf: [state_mod.MAX_FIXED_ARRAY_DIMS]u32 = undefined;
+    const dims = state_mod.parseFixedArrayDims(type_name, &dims_buf);
+    // Same fallback as `buildInitialArrayValue`: a declared shape that does not
+    // multiply out to the leaf count means `type` and `fixedArray` disagree —
+    // keep the leaves flat rather than drop the whole update.
+    return state_mod.regroupStateValues(allocator, flat[0..filled], dims) catch
+        try state_mod.regroupStateValues(allocator, flat[0..filled], &[_]u32{@intCast(filled)});
+}
+
+/// The `index`-th depth-first leaf of `prior`, cloned; `.int = 0` when `prior`
+/// has no such leaf (a shorter or non-array pre-call value).
+fn clonePriorLeaf(
+    allocator: std.mem.Allocator,
+    prior: types.StateValue,
+    index: usize,
+) !types.StateValue {
+    var cursor: usize = 0;
+    if (findLeaf(prior, index, &cursor)) |leaf| return try leaf.clone(allocator);
+    return types.StateValue{ .int = 0 };
+}
+
+fn findLeaf(value: types.StateValue, index: usize, cursor: *usize) ?types.StateValue {
+    switch (value) {
+        .array_value => |items| {
+            for (items) |it| {
+                if (findLeaf(it, index, cursor)) |found| return found;
+            }
+            return null;
+        },
+        else => {
+            if (cursor.* == index) return value;
+            cursor.* += 1;
+            return null;
+        },
+    }
+}
+
 fn stateValueToAnf(sv: types.StateValue) anf_interp.ANFValue {
     return switch (sv) {
         .int => |n| .{ .int = n },
@@ -3333,6 +3611,35 @@ fn anfToStateValue(allocator: std.mem.Allocator, av: anf_interp.ANFValue) !types
 // ---------------------------------------------------------------------------
 // Helper: parse initial value string to StateValue
 // ---------------------------------------------------------------------------
+
+/// Build the grouped `.array_value` for a FixedArray state field from its
+/// flattened per-leaf default literals.
+fn buildInitialArrayValue(
+    allocator: std.mem.Allocator,
+    field: types.StateField,
+    leaves: []const []const u8,
+) !types.StateValue {
+    const leaf_type = state_mod.unwrapFixedArrayLeaf(field.type_name);
+
+    const flat = try allocator.alloc(types.StateValue, leaves.len);
+    var filled: usize = 0;
+    defer {
+        for (flat[0..filled]) |v| v.deinit(allocator);
+        allocator.free(flat);
+    }
+    for (leaves) |leaf| {
+        flat[filled] = parseInitialValue(allocator, leaf, leaf_type) catch types.StateValue{ .int = 0 };
+        filled += 1;
+    }
+
+    var dims_buf: [state_mod.MAX_FIXED_ARRAY_DIMS]u32 = undefined;
+    const dims = state_mod.parseFixedArrayDims(field.type_name, &dims_buf);
+    // A declared shape that does not multiply out to the leaf count means the
+    // artifact's `type` and its `initialValue` disagree; keep the leaves as one
+    // flat array rather than dropping the default entirely.
+    return state_mod.regroupStateValues(allocator, flat[0..filled], dims) catch
+        try state_mod.regroupStateValues(allocator, flat[0..filled], &[_]u32{@intCast(filled)});
+}
 
 fn parseInitialValue(allocator: std.mem.Allocator, init_str: []const u8, type_name: []const u8) !types.StateValue {
     if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "bigint")) {
@@ -3824,6 +4131,121 @@ test "RunarContract.withInscription on stateful contract injects between code an
 }
 
 // ---------------------------------------------------------------------------
+// N-043 — an ordinals inscription must not break the code-part length pin.
+//
+// A stateful contract with a variable-length state section carries an EQUALITY
+// pin on the deployed code-part length, emitted as a fixed-width nine-byte run:
+//
+//     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+//     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+//
+// `getCodePartHex` concatenates the inscription envelope INTO the code part, so
+// attaching one makes the real code part longer than the pinned number and every
+// honest spend aborts at OP_VERIFY with the funds already committed.
+//
+// Each template below is a 10-byte script — `OP_1` followed by the nine-byte pin
+// run — except the unpinned one. The inscription is a two-byte `text/plain`
+// payload whose envelope is exactly 23 bytes, so an inscribed code part is
+// 10 + 23 = 33 bytes.
+// ---------------------------------------------------------------------------
+
+fn pinFixtureArtifactJson(comptime script: []const u8) []const u8 {
+    return "{\"contractName\":\"PinFixture\",\"version\":\"runar-v1.0.0-rc.1\",\"compilerVersion\":\"1.0.0-rc.1\"," ++
+        "\"parentClass\":\"StatefulSmartContract\",\"script\":\"" ++ script ++ "\",\"asm\":\"\"," ++
+        "\"abi\":{\"constructor\":{\"params\":[{\"name\":\"memo\",\"type\":\"ByteString\"}]}," ++
+        "\"methods\":[{\"name\":\"post\",\"params\":[{\"name\":\"newMemo\",\"type\":\"ByteString\"}],\"isPublic\":true}]}," ++
+        "\"stateFields\":[{\"name\":\"memo\",\"type\":\"ByteString\",\"index\":0}],\"constructorSlots\":[]," ++
+        "\"buildTimestamp\":\"2024-01-01\"}";
+}
+
+const pin_fixture_inscription: ordinals.Inscription = .{ .content_type = "text/plain", .data = "6869" };
+
+/// Exact pin of 10: correct WITHOUT an envelope, violated by one. Refuse.
+const pin_template_exact_10 = "5176040a000000819c69";
+/// Exact pin of 33 (0x21): correct WITH the envelope attached. Accept — and a
+/// decoder that reads the length big-endian gets 0x21000000 here and wrongly
+/// refuses.
+const pin_template_exact_33 = "51760421000000819c69";
+/// LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra bytes satisfy it,
+/// so it must never trigger a refusal.
+const pin_template_lower_bound_10 = "5176040a00000081a269";
+/// No pin at all (a bare P2PKH template). Accept.
+const pin_template_none = "76a90088ac";
+
+test "N-043 withInscription refuses an envelope that breaks an exact pin" {
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_exact_10));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    errors_mod.last_codepart_pin_error = null;
+    const result = contract.withInscription(pin_fixture_inscription);
+    try std.testing.expectError(errors_mod.CodePartPinError.CodePartLengthPinViolated, result);
+
+    // Assert the REASON, not merely that something failed: a test that accepts
+    // any error passes when an unrelated one fires.
+    const rec = errors_mod.last_codepart_pin_error.?;
+    try std.testing.expectEqual(@as(usize, 10), rec.pinned);
+    try std.testing.expectEqual(@as(usize, 33), rec.actual);
+    try std.testing.expectEqualStrings("PinFixture", rec.contractName());
+
+    // The contract must be left un-inscribed rather than half-mutated.
+    try std.testing.expect(contract.getInscription() == null);
+    const code = try contract.getCodePartHex();
+    defer allocator.free(code);
+    try std.testing.expectEqual(@as(usize, 10), code.len / 2);
+}
+
+test "N-043 withInscription accepts a pin that already matches the inscribed length" {
+    // Control: a pin whose value already accounts for the envelope is honoured.
+    // Also pins the little-endian decode — a big-endian reader sees 0x21000000.
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_exact_33));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    try contract.withInscription(pin_fixture_inscription);
+    try std.testing.expect(contract.getInscription() != null);
+
+    const code = try contract.getCodePartHex();
+    defer allocator.free(code);
+    try std.testing.expectEqual(@as(usize, 33), code.len / 2);
+}
+
+test "N-043 withInscription accepts a lower-bound pin" {
+    // Control 1 (mandatory): a LOWER-BOUND pin is satisfied by the extra bytes,
+    // so an inscription must still be accepted. Guarding `a2` would turn this
+    // fix into an outage for every lower-bound contract.
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_lower_bound_10));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    try contract.withInscription(pin_fixture_inscription);
+    try std.testing.expect(contract.getInscription() != null);
+}
+
+test "N-043 withInscription accepts an unpinned contract" {
+    // Control 2 (mandatory): a contract with no pin at all (stateless, or a
+    // fixed-size state layout) must still accept an inscription.
+    const allocator = std.testing.allocator;
+    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_none));
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    defer contract.deinit();
+
+    try contract.withInscription(pin_fixture_inscription);
+    try std.testing.expect(contract.getInscription() != null);
+}
+
+// ---------------------------------------------------------------------------
 // prepareCall / finalizeCall round-trip — multi-signer support (parity with
 // Go/Ruby/Java/Rust/Python prepare_call / prepareCall).
 // ---------------------------------------------------------------------------
@@ -4304,7 +4726,14 @@ test "fromUtxo recovers real constructor args from the deployed script (#119)" {
 
     // Deployed script: OP_5 (owner=5, baked at byte 0), OP_EQUAL, then an
     // OP_RETURN state section.
-    const script = "5587" ++ "6a" ++ "0101";
+    //
+    // The state section is the NUM2BIN-8 word for count=1. It used to be the
+    // two bytes "0101", which is not a state section any contract declaring one
+    // `int` field can produce — an `int` is 8 raw bytes. The old decoder read it
+    // as int(0), advanced the nominal 8 bytes anyway and returned; this test
+    // only asserted the constructor args, so it passed on a blob the contract
+    // could never have written. C2's fail-closed decoder rejects it, correctly.
+    const script = "5587" ++ "6a" ++ "0100000000000000";
     const utxo = types.UTXO{ .txid = "bb" ** 32, .output_index = 0, .satoshis = 1000, .script = script };
 
     var contract = try RunarContract.fromUtxo(allocator, &artifact, utxo);

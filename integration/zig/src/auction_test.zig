@@ -261,6 +261,7 @@ test "Auction_WrongSignerRejected" {
 
     // Attempt to close with wrong signer -- should be rejected. locktime=1
     // satisfies the non-zero deadline, so the signature is the only failure.
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "close",
         &[_]runar.StateValue{
@@ -280,7 +281,7 @@ test "Auction_WrongSignerRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.warn("Auction correctly rejected close with wrong signer", .{});
     }
 }

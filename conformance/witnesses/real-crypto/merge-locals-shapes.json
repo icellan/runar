@@ -129,5 +129,8 @@
       "note": "tampered continuation output — the k=3 merged result block must be committed to by hashOutputs",
       "satoshis": 1000
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "4f96015972a493f6a69d25d86d47cc8e95b9bd28ac5fa59f51bc62777ccc72be"
+  }
 }

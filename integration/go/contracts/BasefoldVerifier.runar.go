@@ -33,17 +33,30 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //   - sumcheckRounds = 4 (production: log2(trace_length))
 //   - numPolynomials = 2 (production: varies per AIR)
 //
-// The Poseidon2 Merkle root comparison checks the first element of the
-// 8-element digest (collision resistance ~2^31). Production implementations
-// verify all 8 elements via the codegen layer (not the contract DSL).
+// # Poseidon2 Merkle root comparison
+//
+// merkleRootPoseidon2KB returns the base-2^32 packing of ALL EIGHT KoalaBear
+// root elements (root_7 most significant, see codegen EmitPoseidon2RootPack).
+// The packing is injective, so each `runar.Assert(qNRootN == v.CommitRootN)`
+// below authenticates the whole 8-element digest. Before CL-BUG-099 was fixed
+// the builtin returned root[7] alone and these comparisons were ~31-bit checks.
+//
+// Consequence for deployment: CommitRoot / FriCommitRoot must be supplied as
+// the PACKED root, not as a single field element. The packing is up to 256
+// bits, so these fields are typed `runar.BigintBig` (*big.Int) rather than
+// `runar.Bigint` (int64) — the same reason the BN254 `*Big` wrappers exist for
+// 254-bit field elements. `runar.BigintBig` maps to the Rúnar `bigint` and
+// `runar.BigintBigEqual` maps to `===`, so the emitted Script is unchanged;
+// the wider Go type is what lets the off-chain mock return the value the
+// script actually computes (N-090).
 type BasefoldVerifier struct {
 	runar.SmartContract
-	// CommitRoot0 is the first element of the Poseidon2 Merkle root for committed
-	// polynomial evaluations. In production all 8 elements would be verified.
-	CommitRoot0 runar.Bigint `runar:"readonly"`
-	// FriCommitRoot0 is the first element of the Poseidon2 Merkle root for FRI
-	// folded polynomial evaluations.
-	FriCommitRoot0 runar.Bigint `runar:"readonly"`
+	// CommitRoot is the PACKED Poseidon2 Merkle root (all 8 KoalaBear limbs,
+	// base-2^32, root_7 most significant) for committed polynomial evaluations.
+	CommitRoot runar.BigintBig `runar:"readonly"`
+	// FriCommitRoot is the PACKED Poseidon2 Merkle root for FRI folded
+	// polynomial evaluations.
+	FriCommitRoot runar.BigintBig `runar:"readonly"`
 }
 
 // Verify checks a Basefold/STARK proof.
@@ -225,41 +238,41 @@ func (v *BasefoldVerifier) Verify(
 	// =========================================================================
 	// Step 7: Verify Poseidon2 KoalaBear Merkle openings
 	// =========================================================================
-	q0Root0 := runar.MerkleRootPoseidon2KBv(
+	q0Root := runar.MerkleRootPoseidon2KBv(
 		q0L0, q0L1, q0L2, q0L3, q0L4, q0L5, q0L6, q0L7,
 		q0S00, q0S01, q0S02, q0S03, q0S04, q0S05, q0S06, q0S07,
 		q0S10, q0S11, q0S12, q0S13, q0S14, q0S15, q0S16, q0S17,
 		q0S20, q0S21, q0S22, q0S23, q0S24, q0S25, q0S26, q0S27,
 		q0S30, q0S31, q0S32, q0S33, q0S34, q0S35, q0S36, q0S37,
 		q0Index, 4)
-	runar.Assert(q0Root0 == v.CommitRoot0)
+	runar.Assert(runar.BigintBigEqual(q0Root, v.CommitRoot))
 
-	q1Root0 := runar.MerkleRootPoseidon2KBv(
+	q1Root := runar.MerkleRootPoseidon2KBv(
 		q1L0, q1L1, q1L2, q1L3, q1L4, q1L5, q1L6, q1L7,
 		q1S00, q1S01, q1S02, q1S03, q1S04, q1S05, q1S06, q1S07,
 		q1S10, q1S11, q1S12, q1S13, q1S14, q1S15, q1S16, q1S17,
 		q1S20, q1S21, q1S22, q1S23, q1S24, q1S25, q1S26, q1S27,
 		q1S30, q1S31, q1S32, q1S33, q1S34, q1S35, q1S36, q1S37,
 		q1Index, 4)
-	runar.Assert(q1Root0 == v.CommitRoot0)
+	runar.Assert(runar.BigintBigEqual(q1Root, v.CommitRoot))
 
-	q0FriRoot0 := runar.MerkleRootPoseidon2KBv(
+	q0FriRoot := runar.MerkleRootPoseidon2KBv(
 		q0FL0, q0FL1, q0FL2, q0FL3, q0FL4, q0FL5, q0FL6, q0FL7,
 		q0FS00, q0FS01, q0FS02, q0FS03, q0FS04, q0FS05, q0FS06, q0FS07,
 		q0FS10, q0FS11, q0FS12, q0FS13, q0FS14, q0FS15, q0FS16, q0FS17,
 		q0FS20, q0FS21, q0FS22, q0FS23, q0FS24, q0FS25, q0FS26, q0FS27,
 		q0FS30, q0FS31, q0FS32, q0FS33, q0FS34, q0FS35, q0FS36, q0FS37,
 		q0Index, 4)
-	runar.Assert(q0FriRoot0 == v.FriCommitRoot0)
+	runar.Assert(runar.BigintBigEqual(q0FriRoot, v.FriCommitRoot))
 
-	q1FriRoot0 := runar.MerkleRootPoseidon2KBv(
+	q1FriRoot := runar.MerkleRootPoseidon2KBv(
 		q1FL0, q1FL1, q1FL2, q1FL3, q1FL4, q1FL5, q1FL6, q1FL7,
 		q1FS00, q1FS01, q1FS02, q1FS03, q1FS04, q1FS05, q1FS06, q1FS07,
 		q1FS10, q1FS11, q1FS12, q1FS13, q1FS14, q1FS15, q1FS16, q1FS17,
 		q1FS20, q1FS21, q1FS22, q1FS23, q1FS24, q1FS25, q1FS26, q1FS27,
 		q1FS30, q1FS31, q1FS32, q1FS33, q1FS34, q1FS35, q1FS36, q1FS37,
 		q1Index, 4)
-	runar.Assert(q1FriRoot0 == v.FriCommitRoot0)
+	runar.Assert(runar.BigintBigEqual(q1FriRoot, v.FriCommitRoot))
 
 	// =========================================================================
 	// Step 8: FRI folding consistency check per query

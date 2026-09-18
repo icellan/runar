@@ -339,4 +339,22 @@ export interface RunarArtifact {
 
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
+
+  /**
+   * Builtins reached by this script that the project does not claim are sound
+   * (R-062 / CL-BUG-105). Today the only member is `verifySP1FRI`, whose
+   * codegen is a documented proof-of-concept with stubbed protocol algebra.
+   *
+   * The compiler already REFUSES to emit such a script unless the author wrote
+   * `@acknowledgeUnsoundSP1FriVerifier` or the invoker passed
+   * `--acknowledge-unsound-sp1-fri`. That acknowledgement stopped at whoever
+   * ran the compiler: the artifact handed on afterwards looked like any other,
+   * and every SDK funded it without a word. Present here, the fact travels with
+   * the artifact, and each SDK's deploy path refuses to fund it unless the
+   * caller acknowledges the same list.
+   *
+   * Absent (not empty) on every artifact that reaches no such builtin, so
+   * nothing else in the repo is affected.
+   */
+  unsoundPrimitives?: string[];
 }

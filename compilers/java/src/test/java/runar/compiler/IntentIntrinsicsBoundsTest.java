@@ -59,7 +59,7 @@ class IntentIntrinsicsBoundsTest {
             \trunar.RequireOutputP2PKH(2000, c.PKH, c.A)
             }
             """;
-        expectTypeError(src, "bound to <= 1000");
+        expectTypeError(src, "must be 0 in v1");
     }
 
     @Test

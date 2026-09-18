@@ -718,13 +718,20 @@ describe('Pass 6: Emit', () => {
 
     it('canonical stateful Counter (StatefulSmartContract + addOutput) emits exact bytes', () => {
       // Stateful contract with implicit txPreimage / state-continuation /
-      // change-output plumbing. The asserted hex covers OP_CODESEPARATOR
-      // injection (0xab at position 2), the BUG-100 on-chain OP_PUSH_TX
+      // change-output plumbing. The asserted hex covers the R-010 script
+      // prologue (OP_NOP OP_CODESEPARATOR — `61ab` — at offsets 0 and 1, one
+      // separator for the whole locking script rather than one per method),
+      // the `_codePart` authentication that the prologue enables (the
+      // `…0261ab7c7e88` tail that rebuilds the code part from the preimage's
+      // scriptCode and OP_EQUALVERIFYs it against the witness), the BUG-100
+      // on-chain OP_PUSH_TX
       // preimage-binding construction (the opaque 428-byte blob starting `76aa51…`
       // and ending `…ad` OP_CHECKSIGVERIFY — see oppushtx-codegen.ts; the BIP-143
       // generator pubkey 0279be…f81798 lives inside it), the GAP-302 sighash-type
-      // pin (OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM <0x41> OP_NUMEQUALVERIFY,
-      // right after checkPreimage), and the addOutput serialization path. A
+      // pin (OP_SIZE 4 OP_SUB OP_SPLIT OP_NIP <0x00> OP_CAT OP_BIN2NUM <0x41>
+      // OP_NUMEQUALVERIFY, right after checkPreimage — the `01007e81` is W1's
+      // zero-pad, which makes the unsigned 32-bit field decode as itself), and the
+      // addOutput serialization path. A
       // regression in any of these emits would shift the bytes here.
       const source = `
         import { StatefulSmartContract, assert } from 'runar-lang';
@@ -743,12 +750,14 @@ describe('Pass 6: Emit', () => {
       // … OP_ELSE `67007b7577687e` OP_ENDIF) around the P2PKH change output
       // instead of catting it unconditionally.
       expect(result.scriptHex).toBe(
-        '76ab' + CHECK_PREIMAGE_BINDING_HEX +
-        '69768254947f778101419d7601687f7782012c947f758258947f758258947f7781768b7702' +
-        'e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501' +
-        'fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c' +
-        '58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa' +
-        '7b820128947f7701207f75877777'
+        '61ab76' + CHECK_PREIMAGE_BINDING_HEX +
+        '7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f776776'+
+        '02ff009c6375587f776775527f7768686855798252947b7c7f82599d517f75016a880261ab7c'+
+        '7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781'+
+        '768b7702e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380'+
+        '527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868'+
+        '687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b75'+
+        '77687eaa7b820128947f7701207f75877777'
       );
     });
   });

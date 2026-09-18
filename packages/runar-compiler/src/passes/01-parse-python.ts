@@ -30,8 +30,10 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
+import { snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
+import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -67,7 +69,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['assert', 'assert'],
 ]);
 
-function tokenize(source: string): Token[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
   const lines = source.split('\n');
   const indentStack: number[] = [0];
@@ -355,7 +357,12 @@ function tokenize(source: string): Token[] {
         continue;
       }
 
-      // Skip unknown characters
+      // Unrecognized character — reject it rather than dropping it silently.
+      errors.push(makeDiagnostic(
+        `Unexpected character '${ch}'`,
+        'error',
+        { file, line: lineNum, column: col },
+      ));
       pos++;
     }
 
@@ -395,7 +402,7 @@ function snakeToCamel(name: string): string {
     n = n.slice(1);
   }
 
-  return n.replace(/_([a-z0-9])/g, (_, ch: string) => ch.toUpperCase());
+  return snakeToCamelCore(n);
 }
 
 /** Map Python built-in function names to AST callee names. */
@@ -453,6 +460,15 @@ function mapBuiltinName(name: string): string {
     'merkle_root_hash256': 'merkleRootHash256',
     'mul_div': 'mulDiv',
     'percent_of': 'percentOf',
+    // Names the mechanical snake -> camel rule cannot produce: a digit
+    // ('to' -> '2') or an all-lowercase builtin with no interior capital.
+    'int_to_str': 'int2str',
+    'safe_div': 'safediv',
+    'safe_mod': 'safemod',
+    'div_mod': 'divmod',
+    // The all-caps PKH token does not survive snake -> camel either
+    // (it would come back as `requireOutputP2pkh`).
+    'require_output_p2pkh': 'requireOutputP2PKH',
     'add_output': 'addOutput',
     'add_raw_output': 'addRawOutput',
     'add_data_output': 'addDataOutput',
@@ -512,15 +528,42 @@ function makePrimitiveOrCustom(name: string): TypeNode {
 // Parser
 // ---------------------------------------------------------------------------
 
+/**
+ * Emitted for a `range` step the unrolled loop model cannot represent.
+ *
+ * Shared verbatim with the Go, Rust, Python, Zig, Ruby and Java tiers.
+ */
+const RANGE_STEP_DIAGNOSTIC =
+  "range() step must be 1 or -1. The unrolled loop carries only a start value " +
+  "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be " +
+  "represented and would be discarded.";
+
+/**
+ * The integer value of a literal expression, or null when it is not one.
+ *
+ * A negative literal arrives as a unary minus over a positive one, so both
+ * shapes have to be walked — the same walk `extractBigIntValue` does in ANF
+ * lowering, for the same reason (N-138).
+ */
+function literalIntValue(expr: Expression): bigint | null {
+  if (expr.kind === 'bigint_literal') return expr.value;
+  if (expr.kind === 'unary_expr' && expr.op === '-') {
+    const inner = literalIntValue(expr.operand);
+    return inner === null ? null : -inner;
+  }
+  return null;
+}
+
 class PyParser {
   private tokens: Token[];
   private pos = 0;
   private file: string;
-  private errors: CompilerDiagnostic[] = [];
+  private errors: CompilerDiagnostic[];
 
-  constructor(tokens: Token[], file: string) {
+  constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
+    this.errors = errors;
   }
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
@@ -1067,14 +1110,41 @@ class PyParser {
     this.expect('range');
     this.expect('(');
 
-    // range(n) or range(a, b)
+    // range(n), range(a, b), or range(a, b, step) with step ∈ {1, -1}.
+    //
+    // The third argument is what lets the Python surface spell a COUNTDOWN.
+    // Until it existed, `range` was the surface's only loop syntax and it
+    // could only ascend, so `step = -1` — a shape the ANF loop node has
+    // carried since issue #121 and every tier lowers — was unreachable from
+    // Python, and no fixture could exercise it across all nine surfaces.
+    //
+    // Only ±1 is accepted: the ANF loop node synthesizes iteration k as
+    // `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+    // representation. Refusing it is the same rule the for-header surfaces
+    // enforce on `i += 2` (N-061), stated in Python's spelling.
     const firstArg = this.parseExpression();
     let startExpr: Expression;
     let endExpr: Expression;
+    let descending = false;
 
     if (this.match(',')) {
       startExpr = firstArg;
       endExpr = this.parseExpression();
+      if (this.match(',')) {
+        const stepExpr = this.parseExpression();
+        const step = literalIntValue(stepExpr);
+        if (step === 1n) {
+          descending = false;
+        } else if (step === -1n) {
+          descending = true;
+        } else {
+          this.errors.push(makeDiagnostic(
+            RANGE_STEP_DIAGNOSTIC,
+            'error',
+            loc,
+          ));
+        }
+      }
     } else {
       startExpr = { kind: 'bigint_literal', value: 0n };
       endExpr = firstArg;
@@ -1098,16 +1168,20 @@ class PyParser {
       sourceLocation: loc,
     };
 
+    // `range` is half-open at BOTH ends: `range(5, 1, -1)` yields 5, 4, 3, 2,
+    // so the descending guard is `i > stop`, exactly as `<` is for ascending.
     const condition: Expression = {
       kind: 'binary_expr',
-      op: '<' as BinaryOp,
+      op: (descending ? '>' : '<') as BinaryOp,
       left: { kind: 'identifier', name: varName },
       right: endExpr,
     };
 
     const update: Statement = {
       kind: 'expression_statement',
-      expression: { kind: 'increment_expr', operand: { kind: 'identifier', name: varName }, prefix: false },
+      expression: descending
+        ? { kind: 'decrement_expr', operand: { kind: 'identifier', name: varName }, prefix: false }
+        : { kind: 'increment_expr', operand: { kind: 'identifier', name: varName }, prefix: false },
       sourceLocation: loc,
     };
 
@@ -1642,7 +1716,11 @@ class PyParser {
 // ---------------------------------------------------------------------------
 
 export function parsePythonSource(source: string, fileName: string): ParseResult {
-  const tokens = tokenize(source);
-  const parser = new PyParser(tokens, fileName);
+  // R-146: this function is exported from the package index, so the
+  // dispatcher's size guard has to be here too — see ./source-limits.ts.
+  assertSourceWithinLimits(source, 'parsePythonSource');
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, fileName, errors);
+  const parser = new PyParser(tokens, fileName, errors);
   return parser.parse();
 }

@@ -75,7 +75,7 @@ func (c *Cov) PayBond() {
     runar.RequireOutputP2PKH(1001, c.BondPKH, c.Bond)
 }
 """
-        _expect_typecheck_error(source, "bound to <= 1000")
+        _expect_typecheck_error(source, "must be 0 in v1")
 
 
 # ---------------------------------------------------------------------------

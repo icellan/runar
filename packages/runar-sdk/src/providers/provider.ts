@@ -38,6 +38,25 @@ export interface Provider {
   getRawTransaction(txid: string): Promise<string>;
 }
 
+
+/**
+ * Report a failure that is deliberately non-fatal (R-273).
+ *
+ * Four paths in this SDK — two overlay submissions, the funding broadcast and
+ * the BEEF parse after deploy — are fire-and-forget by design: the caller's
+ * transaction is already broadcast, and an indexing or caching failure must not
+ * turn a successful spend into a thrown error. They were written as
+ * `.catch(() => {})` and `catch { /* non-fatal *\/ }`, which is the intent
+ * correctly expressed and the evidence thrown away: an overlay that is down
+ * looks exactly like an overlay that is fine.
+ *
+ * `console.warn` is what the rest of this SDK already uses for advisory
+ * failures (contract.ts and providers/mock.ts), so these now match.
+ */
+export function warnNonFatal(context: string, err: unknown): void {
+  console.warn(`runar-sdk: ${context} (non-fatal):`, err);
+}
+
 /**
  * Audit finding C4: project a locally-held @bsv/sdk `Transaction` into the
  * plain `TransactionData` shape `getTransaction()` returns.

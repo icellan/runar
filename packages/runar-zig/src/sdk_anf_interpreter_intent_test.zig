@@ -54,6 +54,23 @@ fn freeResult(allocator: std.mem.Allocator, result: *NewStateResult) void {
     allocator.free(result.outputs);
 }
 
+/// `result.state` is a MIXED-ownership map. `runMethod` dupes every `.bytes`
+/// value that the method's state delta produced into the caller allocator,
+/// while properties the method left alone are put back by alias, still owned
+/// by the caller's `current_state`. `NewStateResult` does not record which is
+/// which, so `freeResult` cannot free either kind safely and a test that
+/// mutates a byte-string property has to name that property here.
+fn freeOwnedStateBytes(
+    allocator: std.mem.Allocator,
+    result: *NewStateResult,
+    mutated_byte_props: []const []const u8,
+) void {
+    for (mutated_byte_props) |name| {
+        const v = result.state.get(name) orelse continue;
+        allocator.free(@constCast(v.bytes));
+    }
+}
+
 fn hexEncode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, bytes.len * 2);
     const charset = "0123456789abcdef";
@@ -721,6 +738,7 @@ test "branched-readonly-len — then-branch: len(scratch) > 0 → count += 1, ta
         allocator, &anf, "spend", current_state, args, &.{}, &mock,
     );
     defer freeResult(allocator, &result);
+    defer freeOwnedStateBytes(allocator, &result, &.{"tag"});
 
     try std.testing.expectEqual(@as(i64, 11), result.state.get("count").?.int);
     try std.testing.expectEqualStrings("aabbcc", result.state.get("tag").?.bytes);
@@ -746,6 +764,7 @@ test "branched-readonly-len — else-branch: len(scratch) == 0 → count -= 1, t
         allocator, &anf, "spend", current_state, args, &.{}, &mock,
     );
     defer freeResult(allocator, &result);
+    defer freeOwnedStateBytes(allocator, &result, &.{"tag"});
 
     try std.testing.expectEqual(@as(i64, 9), result.state.get("count").?.int);
     try std.testing.expectEqualStrings("3030", result.state.get("tag").?.bytes);

@@ -24,6 +24,7 @@
 //!   - `#` line comments
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -74,14 +75,6 @@ pub fn parsePython(allocator: Allocator, source: []const u8, file_name: []const 
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -585,6 +578,11 @@ fn pyConvertName(allocator: Allocator, name: []const u8) []const u8 {
         .{ "bin2num", "bin2num" },
         .{ "log2", "log2" },
         .{ "div_mod", "divmod" },
+        // 'to' collapses to the digit '2', which no mechanical rule produces.
+        .{ "int_to_str", "int2str" },
+        // The all-caps PKH token does not survive snake -> camel either
+        // (it would come back as `requireOutputP2pkh`).
+        .{ "require_output_p2pkh", "requireOutputP2PKH" },
         .{ "tx_preimage", "txPreimage" },
         .{ "sha256_compress", "sha256Compress" },
         .{ "sha256_finalize", "sha256Finalize" },
@@ -959,6 +957,10 @@ const Parser = struct {
             .type_info = type_info,
             .readonly = is_readonly,
             .initializer = initializer,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = types.typeNodeName(type_node),
+            .source_loc = self.tokenSourceLoc(name_tok),
             .fixed_array_length = fa_len,
             .fixed_array_element = fa_elem,
             .fixed_array_nested_length = fa_nested_len,
@@ -1052,6 +1054,9 @@ const Parser = struct {
     fn methodToConstructor(self: *Parser, m: MethodNode) ConstructorNode {
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        // R-040: see parse_ts.methodToConstructor — the full body minus the
+        // `super().__init__(...)` call, so nothing is silently discarded.
+        var body: std.ArrayListUnmanaged(Statement) = .empty;
 
         for (m.body) |stmt| {
             switch (stmt) {
@@ -1072,13 +1077,15 @@ const Parser = struct {
                         }
                         continue;
                     }
+                    body.append(self.allocator, stmt) catch {};
                 },
                 .assign => |assign| {
                     // self.x = value -> target = x, value = ...
                     assignments.append(self.allocator, .{ .target = assign.target, .value = assign.value }) catch {};
+                    body.append(self.allocator, stmt) catch {};
                     continue;
                 },
-                else => {},
+                else => body.append(self.allocator, stmt) catch {},
             }
         }
 
@@ -1086,6 +1093,7 @@ const Parser = struct {
             .params = m.params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = body.items,
         };
     }
 
@@ -1347,6 +1355,14 @@ const Parser = struct {
         return .{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Emitted for a `range` step the unrolled loop model cannot represent.
+    ///
+    /// Shared verbatim with the other six tiers.
+    const range_step_diagnostic =
+        "range() step must be 1 or -1. The unrolled loop carries only a start value " ++
+        "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be " ++
+        "represented and would be discarded.";
+
     fn parsePyFor(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
         _ = self.bump(); // consume 'for'
@@ -1371,25 +1387,50 @@ const Parser = struct {
 
         _ = self.expect(.lparen);
 
-        // range(n) or range(a, b)
+        // range(n), range(a, b), or range(a, b, step) with step in {1, -1}.
+        //
+        // The third argument is what lets the Python surface spell a
+        // COUNTDOWN. Until it existed, `range` was the surface's only loop
+        // syntax and it could only ascend, so `step = -1` — a shape this
+        // tier's ANF lowering has carried since issue #121 — was unreachable
+        // from Python, and no fixture could exercise it across all nine
+        // surfaces.
+        //
+        // Only ±1 is accepted: the unrolled loop synthesizes iteration k as
+        // `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+        // representation. Refusing it is the same rule N-061 enforces on
+        // `i += 2` in the for-header surfaces, in Python's spelling.
         const first = self.parseExpression() orelse return null;
         var init_value: i64 = 0;
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
         var bound: i64 = 0;
+        var descending = false;
 
         if (self.match(.comma)) {
             // range(a, b)
             const second = self.parseExpression() orelse return null;
-            switch (first) {
-                .literal_int => |v| {
-                    init_value = v;
-                },
-                else => {},
+            // N-138: `.literal_int` alone missed a negated literal, so
+            // `range(-1, 5)` started at 0.
+            if (loopStartLiteral(first)) |v| init_value = v else {
+                init_is_const = false;
             }
             switch (second) {
                 .literal_int => |v| {
                     bound = v;
                 },
                 else => {},
+            }
+            if (self.match(.comma)) {
+                const step_expr = self.parseExpression() orelse return null;
+                const step = loopStartLiteral(step_expr);
+                if (step != null and step.? == 1) {
+                    descending = false;
+                } else if (step != null and step.? == -1) {
+                    descending = true;
+                } else {
+                    self.addError(range_step_diagnostic);
+                }
             }
         } else {
             // range(n) — init = 0, limit = n
@@ -1406,10 +1447,15 @@ const Parser = struct {
         _ = self.expect(.colon);
         const body = self.parsePyBlock();
 
+        // `range` is half-open at BOTH ends: `range(5, 1, -1)` yields
+        // 5, 4, 3, 2, so the descending guard is `i > stop`, exactly as `<` is
+        // for ascending — i.e. NOT inclusive.
         return .{ .for_stmt = .{
             .var_name = var_name,
             .init_value = init_value,
+            .init_is_const = init_is_const,
             .bound = bound,
+            .descending = descending,
             .body = body,
             .source_loc = loc,
         } };
@@ -1866,8 +1912,11 @@ const Parser = struct {
                     // Oversize decimal literal — carry the canonical decimal
                     // text on a `literal_bigint` node so codegen emits the
                     // correct push bytes (matches TS / Go / Python).
-                    if (isAllAsciiDigits(stripped)) {
-                        const decimal = self.allocator.dupe(u8, stripped) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
@@ -2322,4 +2371,26 @@ test "python byte string to hex" {
     const allocator = arena.allocator();
     const result = pyByteStringToHex(allocator, "\\xde\\xad");
     try std.testing.expectEqualStrings("dead", result);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// discard path, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

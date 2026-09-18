@@ -1,13 +1,29 @@
 //go:build ignore
 
-// The malleability gate `runar.Within(s, 1, <secp256k1-n>)` requires the
-// secp256k1 group order as a third argument. That value is 256 bits wide
-// and does not fit in a Go int64 (the type `runar.Bigint` aliases), so
-// `go build` and `go vet` would reject the literal as an integer overflow.
-// The Rúnar conformance suite consumes this file as text via the Rúnar
-// frontend, not as a Go-buildable package, so we exclude it from the Go
-// workspace build via `//go:build ignore` (mirroring `ec-primitives` and
-// the other EC-heavy Go DSL fixtures).
+// EXCLUDED FROM THE GO BUILD — the secp256k1 group order does not fit an int64.
+//
+//	cannot use 115792089237316195423570985008687907852837564279074904382605163141518161494337
+//	(untyped int constant) as int64 value in argument to runar.Within (overflows)
+//
+// The malleability gate `runar.Within(s, 1, <secp256k1-n>)` needs the group
+// order as its third argument, inlined as a bare decimal literal so all nine
+// formats lower it to the same bigint_literal node. That value is 256 bits, and
+// Go has no spelling for such a literal: constants are exact and must fit their
+// type, and `runar.BigintBig` is *big.Int, which no constant converts to. The
+// Rúnar conformance suite consumes this file as text through the frontend,
+// where `bigint` is arbitrary precision and the literal is ordinary.
+//
+// The response `s` and the Fiat-Shamir challenge `e` are 256-bit too, and the
+// body computes `e*k mod n` on them, so even a wide `s` parameter would not be
+// enough: the arithmetic would have to go through runar.BigintBig* helpers
+// while the bound stays unspellable.
+//
+// Shares a root cause with integer-boundary and go-dsl-bytestring-literal.
+// (This note used to add "and the two NIST primitive ports". Those were a
+// different problem — a scalar that only had to REACH a *big.Int parameter —
+// and both build now. An earlier version of the note also claimed kinship with
+// `ec-primitives`, whose exclusion turned out to be a dead `import "runar"`
+// path.)
 
 package contract
 

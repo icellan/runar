@@ -25,6 +25,37 @@ function hash256(hexData: string): Uint8Array {
   return new Uint8Array(sha2);
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  return new Uint8Array(Buffer.from(hex, 'hex'));
+}
+
+function u16le(n: number): string {
+  const buf = Buffer.alloc(2);
+  buf.writeUInt16LE(n);
+  return buf.toString('hex');
+}
+
+function u64le(n: bigint): string {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(n);
+  return buf.toString('hex');
+}
+
+function compactSizeHex(n: number): string {
+  if (n < 253) return n.toString(16).padStart(2, '0');
+  if (n <= 0xffff) return 'fd' + u16le(n);
+  throw new Error(`CompactSize ${n} too large for this test`);
+}
+
+function buildParentTx(outCount: number, output0ScriptHex: string): string {
+  const version = '01000000';
+  const input = '00'.repeat(36) + '00' + 'ffffffff';
+  const dummyOut = '00'.repeat(8) + '00';
+  const out0 = u64le(1n) + compactSizeHex(output0ScriptHex.length / 2) + output0ScriptHex;
+  if (outCount < 1) throw new Error('need output 0');
+  return version + '01' + input + compactSizeHex(outCount) + out0 + dummyOut.repeat(outCount - 1) + '00000000';
+}
+
 const MOCK_HASH_PREVOUTS = hash256(MOCK_PREVOUTS);
 
 describe('FungibleToken', () => {
@@ -118,22 +149,20 @@ describe('FungibleToken', () => {
   });
 
   describe('merge', () => {
-    it('creates one output with position-dependent balances', () => {
+    it('rejects the mock-zero prevouts path (W8: that was the solo-merge hole)', () => {
+      // INTERPRETER-ONLY. The 72-zero allPrevouts trick is the exploit the
+      // companion-parent walk now refuses. Honest two-input Spend is pinned
+      // by w8-token-ft-solo-merge-known-broken.test.ts.
       const token = makeToken(ALICE.pubKey, 30n);
-      // Set up mock preimage so hash256(allPrevouts) matches extractHashPrevouts
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
         sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: MOCK_PREVOUTS,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
-      expect(result.success).toBe(true);
-      expect(result.outputs).toHaveLength(1);
-      // Mock outpoint is 36 zero bytes, first 36 bytes of prevouts is also zeros → isFirst=true
-      expect(result.outputs[0]!.balance).toBe(30n);
-      expect(result.outputs[0]!.mergeBalance).toBe(70n);
-      expect(result.outputs[0]!.owner).toBe(ALICE.pubKey);
+      expect(result.success).toBe(false);
     });
 
     it('rejects merge with negative otherBalance', () => {
@@ -143,6 +172,7 @@ describe('FungibleToken', () => {
         sig: ALICE_SIG,
         otherBalance: -1n,
         allPrevouts: MOCK_PREVOUTS,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
       expect(result.success).toBe(false);
@@ -156,30 +186,48 @@ describe('FungibleToken', () => {
         sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: tamperedPrevouts,
+        otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });
       expect(result.success).toBe(false);
     });
 
-    it('merge with pre-existing mergeBalance uses total', () => {
-      const token = TestContract.fromSource(source, {
-        owner: ALICE.pubKey,
-        balance: 20n,
-        mergeBalance: 10n,
-        tokenId: TOKEN_ID,
+    it('parses a companion parent whose outCount CompactSize is 0xfd + LE16', () => {
+      // 253 outputs force a 3-byte CompactSize. A 1-byte read then treats
+      // off+9 as the script marker and lands inside the 8-byte amount.
+      const otherPrimary = 70n;
+      const otherMerge = 0n;
+      const postCodeSepLen = 300;
+      const filler = '51'.repeat(postCodeSepLen - 49);
+      const tail = ALICE.pubKey + u64le(otherPrimary) + u64le(otherMerge);
+      const postCodeSep = filler + tail;
+      expect(postCodeSep.length / 2).toBe(postCodeSepLen);
+      const companionScript = '61ab' + postCodeSep;
+      const scriptCodeHex = compactSizeHex(postCodeSepLen) + postCodeSep;
+
+      const parentHex = buildParentTx(253, companionScript);
+      const companionTxid = Buffer.from(hash256(parentHex)).toString('hex');
+      const myOutpoint = '11'.repeat(36);
+      const companionOutpoint = companionTxid + '00000000';
+      const allPrevouts = myOutpoint + companionOutpoint;
+
+      const token = makeToken(ALICE.pubKey, 30n);
+      token.setMockPreimageBytes({
+        hashPrevouts: hash256(allPrevouts),
+        outpoint: hexToBytes(myOutpoint),
+        scriptCode: hexToBytes(scriptCodeHex),
       });
-      token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
         sig: ALICE_SIG,
-        otherBalance: 50n,
-        allPrevouts: MOCK_PREVOUTS,
+        otherBalance: otherPrimary + otherMerge,
+        allPrevouts,
+        otherParentTx: parentHex,
         outputSatoshis: SATS,
       });
-      expect(result.success).toBe(true);
+      expect(result.success, result.error).toBe(true);
       expect(result.outputs).toHaveLength(1);
-      // myBalance = balance + mergeBalance = 20 + 10 = 30
       expect(result.outputs[0]!.balance).toBe(30n);
-      expect(result.outputs[0]!.mergeBalance).toBe(50n);
+      expect(result.outputs[0]!.mergeBalance).toBe(70n);
     });
   });
 

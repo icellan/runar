@@ -33,16 +33,40 @@ import (
 // object keys (UTF-16 code-unit order), no whitespace, ES-style number
 // formatting. Returns an error for unsupported inputs (NaN, +Inf, -Inf,
 // channels, functions, circular references).
+// MaxWireNesting bounds the nesting CanonicalJSON will EMIT: the number of
+// containers enclosing a value, 1-based, outermost = 1. 100 is accepted, 101
+// is rejected.
+//
+// It is deliberately the same number VerifyEnvelope enforces on the parse side
+// (MaxEnvelopePayloadDepth) — if emit allowed more than parse, this tier could
+// produce a legal, correctly-signed envelope another tier is physically unable
+// to read, which is the cross-tier signature break from the other direction.
+// It is NOT the compilers' MaxIRNesting (512): that bound serves the --ir
+// loader, which reads a trusted local file rather than unauthenticated wire
+// input. R-260.
+const MaxWireNesting = 100
+
+// CanonicalJSON's byte guards reuse the envelope caps rather than restating
+// the numbers, so emit and parse cannot drift apart: a single string field is
+// bounded by MaxEnvelopeFieldBytes (4 MiB) and the finished document by
+// MaxEnvelopePayloadBytes (16 MiB).
+
 func CanonicalJSON(value any) (string, error) {
 	var out []byte
-	out, err := canonicalAppend(out, value, make(map[uintptr]bool))
+	out, err := canonicalAppend(out, value, make(map[uintptr]bool), 1)
 	if err != nil {
 		return "", err
+	}
+	// G3: total output guard, on the finished buffer.
+	if len(out) > MaxEnvelopePayloadBytes {
+		return "", fmt.Errorf("canonical JSON: output exceeds %d bytes (actual %d)", MaxEnvelopePayloadBytes, len(out))
 	}
 	return string(out), nil
 }
 
-func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, error) {
+// canonicalAppend serialises value. depth is the 1-based nesting level of the
+// container being written (outermost = 1); scalars ignore it.
+func canonicalAppend(out []byte, value any, seen map[uintptr]bool, depth int) ([]byte, error) {
 	if value == nil {
 		return append(out, "null"...), nil
 	}
@@ -81,19 +105,27 @@ func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, erro
 	case json.Number:
 		return append(out, v.String()...), nil
 	case []any:
+		// G1: depth guard on entry to the container, before iterating children.
+		if depth > MaxWireNesting {
+			return nil, fmt.Errorf("canonical JSON: nesting exceeds %d", MaxWireNesting)
+		}
 		out = append(out, '[')
 		for i, e := range v {
 			if i > 0 {
 				out = append(out, ',')
 			}
 			var err error
-			out, err = canonicalAppend(out, e, seen)
+			out, err = canonicalAppend(out, e, seen, depth+1)
 			if err != nil {
 				return nil, err
 			}
 		}
 		return append(out, ']'), nil
 	case map[string]any:
+		// G1: depth guard on entry to the container, before iterating children.
+		if depth > MaxWireNesting {
+			return nil, fmt.Errorf("canonical JSON: nesting exceeds %d", MaxWireNesting)
+		}
 		keys := make([]string, 0, len(v))
 		for k := range v {
 			keys = append(keys, k)
@@ -120,7 +152,7 @@ func canonicalAppend(out []byte, value any, seen map[uintptr]bool) ([]byte, erro
 				return nil, err
 			}
 			out = append(out, ':')
-			out, err = canonicalAppend(out, elem, seen)
+			out, err = canonicalAppend(out, elem, seen, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -284,6 +316,13 @@ func utf16Less(a, b string) bool {
 // walk the bytes manually to detect the surrogate pattern verbatim
 // regardless of how the caller constructed the string.
 func appendJSONString(out []byte, s string) ([]byte, error) {
+	// G2: string-byte guard on the RAW input, before escaping, so the bound is
+	// about the caller's data rather than about how much the escaper inflated
+	// it. Object KEYS route through here too, so an oversized key is rejected
+	// the same way an oversized value is.
+	if len(s) > MaxEnvelopeFieldBytes {
+		return nil, fmt.Errorf("canonical JSON: string exceeds %d bytes (actual %d)", MaxEnvelopeFieldBytes, len(s))
+	}
 	out = append(out, '"')
 	i := 0
 	for i < len(s) {
@@ -502,13 +541,105 @@ const (
 	MaxEnvelopeFieldBytes   = MaxScriptBytes     // 4 MiB — matches MAX_STRING_BYTES
 )
 
+// Maximum payload nesting VerifyEnvelope will parse: the number of containers
+// enclosing a value, 1-based, outermost = 1. 100 is accepted, 101 is rejected.
+// R-260.
+//
+// Without an explicit bound the limit was whatever each tier's stock JSON library
+// imposed, and those differ. Measured on ONE envelope, payload
+// {"deep":<N-deep array>,...}: ruby flipped to bad-json at total depth 101
+// (JSON.parse default max_nesting: 100) and rust at 128 (serde_json
+// RECURSION_LIMIT); ts, go, python and zig accepted every depth probed (zig's
+// iterative scanner took 100001 without complaint); and java threw
+// StackOverflowError straight OUT of verify -- its hand-written parser is
+// recursive with no cap and verify catches Exception, not Error -- at ~5000 deep
+// on a default JVM stack and ~1000 deep under -Xss512k, i.e. a contract escape on
+// unauthenticated input whose threshold was a JVM launch flag rather than a
+// protocol property.
+//
+// 100 is Ruby's native JSON.parse default EXACTLY and sits 27 below rust's 127,
+// so no tier has to hand-roll or reconfigure its parser to stay inside it. It is
+// also far above what the wire needs: the deepest of the 165 checked-in
+// conformance artifacts is depth 15 and conformance/sdk-envelope/fixtures.json
+// tops out at 6. The number is deliberately the SAME as canonicalJson's emit-side
+// bound: if parse were the smaller of the two, a tier could emit a legal,
+// correctly-signed envelope that another tier is physically unable to parse.
+//
+// The guard runs on the payload TEXT, immediately before the stock parser, and is
+// a flat non-recursive bracket scan so the guard itself cannot overflow.
+const MaxEnvelopePayloadDepth = 100
+
+// Does the payload text nest deeper than MaxEnvelopePayloadDepth?
+//
+// Counts the maximum number of simultaneously-open {/[ containers, skipping
+// anything inside a JSON string (so a value of "[[[[..." is not nesting). The
+// scan is FLAT -- no recursion -- which is the point: a guard that recursed
+// would overflow on exactly the input it exists to reject. It bails out the
+// instant the bound is passed, so a 200 KB bracket bomb costs a few hundred
+// bytes of scanning.
+//
+// This does not validate JSON; malformed input still falls through to the real
+// parser and its own bad-json rejection.
+func payloadExceedsMaxDepth(payload string) bool {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(payload); i++ {
+		c := payload[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > MaxEnvelopePayloadDepth {
+				return true
+			}
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
+}
+
 // VerifyEnvelopeOpts captures the input to VerifyEnvelope.
 type VerifyEnvelopeOpts struct {
 	Envelope     SignedEnvelope
 	ExpectedKeys []string // optional pubkey allowlist (66-char hex)
-	ClockSkewMs  int64    // defaults to 5_000 when zero
-	NowMs        int64    // override Now() for deterministic tests; zero = wall clock
+	// ClockSkewMs is the allowed wall-clock skew in ms when checking
+	// expiresAt. NIL means the caller supplied nothing and the 5_000 ms
+	// default applies; a non-nil pointer is used AS GIVEN, so an explicit
+	// 0 means zero tolerance.
+	//
+	// R-261: this was an int64 documented as "defaults to 5_000 when zero",
+	// which made Go the only tier unable to express strict expiry — a caller
+	// asking for 0 silently got a five-second replay window, while the other
+	// six tiers honoured the explicit 0. Use Int64Ptr to supply a value.
+	ClockSkewMs *int64
+	// NowMs overrides the wall clock used to check expiry. NIL means the
+	// caller supplied nothing and time.Now() is used; a non-nil pointer is
+	// used AS GIVEN, so an explicit 0 means the Unix epoch — under which
+	// nothing has expired yet — rather than "fall back to the wall clock".
+	// Same R-261 zero-value-sentinel defect as ClockSkewMs.
+	NowMs *int64
 }
+
+// Int64Ptr returns a pointer to v. VerifyEnvelopeOpts.ClockSkewMs and .NowMs
+// are pointers so that an explicit zero is distinguishable from "not
+// supplied"; Go has no literal address-of for constants, so callers need this.
+func Int64Ptr(v int64) *int64 { return &v }
 
 // VerifyEnvelopeResult mirrors the TypeScript shape. Data is populated
 // when JSON parsing succeeded, so callers can apply app-specific checks
@@ -522,13 +653,13 @@ type VerifyEnvelopeResult struct {
 // VerifyEnvelope mirrors the six-reason rejection ladder of the TS impl.
 func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	env := opts.Envelope
-	clockSkew := opts.ClockSkewMs
-	if clockSkew == 0 {
-		clockSkew = 5_000
+	clockSkew := int64(5_000)
+	if opts.ClockSkewMs != nil {
+		clockSkew = *opts.ClockSkewMs
 	}
-	now := opts.NowMs
-	if now == 0 {
-		now = time.Now().UnixMilli()
+	now := time.Now().UnixMilli()
+	if opts.NowMs != nil {
+		now = *opts.NowMs
 	}
 
 	// 0. DoS-bound size guard. Reject envelopes whose string fields exceed
@@ -557,6 +688,21 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	}
 
 	// 3. Parse payload.
+	//
+	// R-115: an unpaired surrogate makes the payload ill-formed Unicode, and
+	// the seven tiers' JSON parsers disagree about it. Decide it here, on the
+	// TEXT — `encoding/json` accepts `\ud800` and rewrites it to U+FFFD, so a
+	// post-parse check in this tier can never see it. See
+	// sdk_envelope_lone_surrogate.go.
+	if payloadHasLoneSurrogate(env.Payload) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
+	// R-260: bound nesting on the TEXT, before the stock parser, so the answer
+	// does not depend on encoding/json's recursion behaviour. Same bound and
+	// same reason in all seven tiers.
+	if payloadExceedsMaxDepth(env.Payload) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadJSON}
+	}
 	var parsed map[string]any
 	dec := json.NewDecoder(stringReader(env.Payload))
 	dec.UseNumber()

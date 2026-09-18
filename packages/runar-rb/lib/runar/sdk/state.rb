@@ -21,7 +21,13 @@ module Runar
         'Addr'      => 20,
         'Ripemd160' => 20,
         'Sha256'    => 32,
-        'Point'     => 64
+        'Point'     => 64,
+        # runar-lang's P256Point / P384Point cast constructors hard-assert
+        # 64 / 96 bytes and all seven compilers emit them as fixed raw slices;
+        # framing them instead deploys a state section 1-2 bytes long and the
+        # first spend fails.
+        'P256Point' => 64,
+        'P384Point' => 96
       }.freeze
 
       # Wrap hex-encoded data in a Bitcoin Script push data opcode.
@@ -204,10 +210,33 @@ module Runar
       # +state["board"] = [0, 1, 2, ...]+ instead of the underlying flat
       # scalar slots.
       #
+      # FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out
+      # of a locking script any third party can construct, so it is untrusted
+      # input, and the caller then builds and SIGNS a continuation output
+      # committing to the restored state. A state section that does not
+      # describe EXACTLY the artifact's +state_fields+ is rejected:
+      #
+      # - truncation — a field running past the end of the blob raises instead
+      #   of yielding a default. Every arm used to return +false+ / +0+ / +''+
+      #   and advance the nominal width ANYWAY (Ruby's +str[offset, n]+ gives a
+      #   SHORT string, not nil), desynchronising every later field;
+      # - overlong tails — bytes left over after the last declared field raise
+      #   instead of being silently dropped.
+      #
+      # Restoring wrong-but-plausible state from a corrupted continuation is
+      # worse than not restoring it at all.
+      #
       # @param state_fields [Array<StateField>] field descriptors from the artifact
       # @param state_hex [String] hex-encoded state bytes (no push opcodes)
       # @return [Hash] map of field name → decoded value
+      # @raise [ArgumentError] if the blob does not match +state_fields+ exactly
       def deserialize_state(state_fields, state_hex)
+        if state_hex.length.odd?
+          raise ArgumentError,
+                "deserialize_state: state blob is #{state_hex.length} hex chars — " \
+                'not a whole number of bytes'
+        end
+
         sorted_fields = state_fields.sort_by(&:index)
         result = {}
         offset = 0
@@ -218,17 +247,25 @@ module Runar
             dims = parse_fixed_array_dims(field.type)
             total = field.fixed_array[:synthetic_names].length
             flat = []
-            total.times do
-              v, chars_read = decode_state_value(state_hex, offset, leaf_type)
+            total.times do |i|
+              v, chars_read = decode_state_value(state_hex, offset, leaf_type, "#{field.name}[#{i}]")
               flat << v
               offset += chars_read
             end
             result[field.name] = regroup_flat_value(flat, dims)
           else
-            value, chars_read = decode_state_value(state_hex, offset, field.type)
+            value, chars_read = decode_state_value(state_hex, offset, field.type, field.name)
             result[field.name] = value
             offset += chars_read
           end
+        end
+
+        unless offset == state_hex.length
+          raise ArgumentError,
+                "deserialize_state: #{(state_hex.length - offset) / 2} unexpected trailing " \
+                "byte(s) after the last state field (consumed #{offset / 2} of " \
+                "#{state_hex.length / 2} bytes) — the state section does not match the " \
+                "artifact's state_fields"
         end
 
         result
@@ -396,11 +433,24 @@ module Runar
         when 'bool', 'boolean'
           value ? '01' : '00'
         else
-          hex = value.is_a?(String) ? value : ''
           if TYPE_WIDTHS.key?(field_type)
             # Known fixed-width type — raw hex, no push opcode.
-            hex
+            #
+            # A MISSING value is refused rather than coerced. Ruby wrote '' —
+            # zero bytes for a field the artifact declares N bytes wide — where
+            # Go wrote '<nil>', Java 'null' and TS 'undefined': four different
+            # non-hex placeholders for the same mistake, a silent byte
+            # divergence on a path whose bytes are committed on chain. Refusing
+            # is the only answer that is the same in every tier.
+            unless value.is_a?(String)
+              raise ArgumentError,
+                    "serialize_state: state field '#{label}' (#{field_type}) has no value. " \
+                    "Writing a placeholder would deploy a state section the contract's own " \
+                    'on-chain reader cannot parse, leaving the output unspendable'
+            end
+            value
           else
+            hex = value.is_a?(String) ? value : ''
             # Variable-width type (ByteString, Sig, etc.) — state framing.
             encode_push_data_state(hex)
           end
@@ -414,32 +464,47 @@ module Runar
       # @param offset  [Integer] current hex-char offset
       # @param field_type [String] Runar type name
       # @return [Array(Object, Integer)] [decoded_value, hex_chars_consumed]
-      def decode_state_value(hex_str, offset, field_type)
+      def decode_state_value(hex_str, offset, field_type, label = '?')
+        width = state_field_byte_width(field_type)
+        return decode_push_data(hex_str, offset, label) if width.nil?
+
+        hex_width = width * 2
+        if offset + hex_width > hex_str.length
+          raise ArgumentError,
+                "deserialize_state: truncated state — field '#{label}' (#{field_type}) " \
+                "needs #{width} byte(s) at offset #{offset / 2} but only " \
+                "#{(hex_str.length - offset) / 2} byte(s) remain"
+        end
+
+        data = hex_str[offset, hex_width]
         case field_type
         when 'bool', 'boolean'
-          return [false, 2] if offset + 2 > hex_str.length
-
-          byte = hex_str[offset, 2]
-          [byte != '00', 2]
+          # 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+          # encode_state_value — a reader that knows only 'bool' walks a real
+          # boolean field as push data and desynchronises every field after it.
+          [data != '00', hex_width]
         when 'int', 'bigint'
-          hex_width = 16 # 8 bytes × 2 hex chars
-          return [0, hex_width] if offset + hex_width > hex_str.length
-
-          data = hex_str[offset, hex_width]
+          # 8 raw bytes LE sign-magnitude (NUM2BIN 8)
           [decode_num2bin(data), hex_width]
         else
-          width = TYPE_WIDTHS[field_type]
-          if width
-            hex_chars = width * 2
-            data = offset + hex_chars <= hex_str.length ? hex_str[offset, hex_chars] : ''
-            [data, hex_chars]
-          else
-            # Unknown type: fall back to push-data decoding.
-            decode_push_data(hex_str, offset)
-          end
+          # Raw fixed-size byte types.
+          [data, hex_width]
         end
       end
       private_class_method :decode_state_value
+
+      # Fixed on-wire width of a state field type in bytes, or nil if the type
+      # is variable-width. The single table encode_state_value's raw branch and
+      # decode_state_value's bounds check both read, so the writer and the
+      # reader cannot drift.
+      def state_field_byte_width(field_type)
+        case field_type
+        when 'bool', 'boolean' then 1
+        when 'int', 'bigint' then 8
+        else TYPE_WIDTHS[field_type]
+        end
+      end
+      private_class_method :state_field_byte_width
 
       # Decode a push-data item from hex_str at the given offset.
       #
@@ -454,30 +519,57 @@ module Runar
       # @param hex_str [String]
       # @param offset  [Integer]
       # @return [Array(String, Integer)] [data_hex, hex_chars_consumed]
-      def decode_push_data(hex_str, offset)
-        return ['', 0] if offset >= hex_str.length
+      def decode_push_data(hex_str, offset, label = '?')
+        # Assert +chars+ hex chars are available from +offset+, else fail closed.
+        need = lambda do |chars, what|
+          next if offset + chars <= hex_str.length
 
-        opcode = hex_str[offset, 2].to_i(16)
+          raise ArgumentError,
+                "deserialize_state: field '#{label}' — truncated state: #{what} runs past " \
+                "the end of the state section (needs #{chars / 2} byte(s) at offset " \
+                "#{offset / 2}, only #{(hex_str.length - offset) / 2} remain)"
+        end
+
+        need.call(2, 'push opcode')
+        opcode_hex = hex_str[offset, 2]
+        unless opcode_hex.match?(/\A[0-9a-fA-F]{2}\z/)
+          raise ArgumentError,
+                "deserialize_state: field '#{label}' — non-hex byte at offset #{offset / 2} " \
+                'in the state section'
+        end
+        opcode = opcode_hex.to_i(16)
 
         if opcode <= 75
           data_len = opcode * 2
-          [hex_str[offset + 2, data_len] || '', 2 + data_len]
+          need.call(2 + data_len, 'push payload')
+          [hex_str[offset + 2, data_len], 2 + data_len]
         elsif opcode == 0x4C
+          need.call(4, 'OP_PUSHDATA1 length prefix')
           length   = hex_str[offset + 2, 2].to_i(16)
           data_len = length * 2
-          [hex_str[offset + 4, data_len] || '', 4 + data_len]
+          need.call(4 + data_len, 'OP_PUSHDATA1 payload')
+          [hex_str[offset + 4, data_len], 4 + data_len]
         elsif opcode == 0x4D
+          need.call(6, 'OP_PUSHDATA2 length prefix')
           lo       = hex_str[offset + 2, 2].to_i(16)
           hi       = hex_str[offset + 4, 2].to_i(16)
           length   = lo | (hi << 8)
           data_len = length * 2
-          [hex_str[offset + 6, data_len] || '', 6 + data_len]
+          need.call(6 + data_len, 'OP_PUSHDATA2 payload')
+          [hex_str[offset + 6, data_len], 6 + data_len]
         elsif opcode == 0x4E
+          need.call(10, 'OP_PUSHDATA4 length prefix')
           length   = [hex_str[offset + 2, 8]].pack('H*').unpack1('V')
           data_len = length * 2
-          [hex_str[offset + 10, data_len] || '', 10 + data_len]
+          need.call(10 + data_len, 'OP_PUSHDATA4 payload')
+          [hex_str[offset + 10, data_len], 10 + data_len]
         else
-          ['', 2]
+          # Not a push opcode at all — encode_push_data_state can never emit
+          # one, so the state section is malformed. This used to consume one
+          # byte and return an empty value, desynchronising every later field.
+          raise ArgumentError,
+                "deserialize_state: field '#{label}' — byte 0x#{format('%02x', opcode)} at " \
+                "offset #{offset / 2} is not a push opcode; the state section is malformed"
         end
       end
       private_class_method :decode_push_data

@@ -280,6 +280,47 @@ def _bb_field_neg(t: BBTracker, a_name: str, result_name: str) -> None:
 # Public emit functions -- entry points called from stack.py
 # ===========================================================================
 
+def _bb_emit_canon_verify(t: "BBTracker", *names: str) -> None:
+    """R-119 -- a witness-supplied field element must BE a field element.
+
+    Nothing in this module or its KoalaBear twin ever compared anything: the
+    OP_LESSTHAN / OP_WITHIN / OP_GREATERTHANOREQUAL count in both was zero.
+    Every operand of the four scalar builtins and the eight ext4 entry points is
+    an unlock argument and went straight into OP_ADD / OP_SUB / OP_MUL / OP_MOD.
+
+    The ``v`` vs ``v + p`` half of the finding did NOT reproduce -- every
+    emitter reduces its result mod p, so ``bbFieldAdd(5+p, 0)`` and
+    ``bbFieldAdd(5, 0)`` both returned 5. The NEGATIVE half did: field_add and
+    field_mul reduce with a BARE OP_MOD on the documented assumption that both
+    operands are already in [0, p-1], and OP_MOD takes the sign of the dividend.
+    Measured before this gate, ``bbFieldAdd(-1, 0)`` returned -1 where
+    ``bbFieldAdd(p-1, 0)`` returned 2013265920 -- two different script numbers
+    for one residue, out of a builtin whose declared codomain is the field.
+    Script equality is numeric, so the escaped spelling breaks every downstream
+    comparison and every serialisation of the element.
+
+    REJECT, not reduce, and gate the INPUT: a reduce would leave ``v`` and
+    ``v + p`` as two accepted spellings of one element, which is the aliasing
+    this finding is about. Gating the input makes the builtins canonical-in /
+    canonical-out, so the gate is idempotent under composition. ABORTING because
+    these are VALUE builtins -- the split R-117 drew for EC and CL-BUG-095 set
+    for the Point width. Public entry points only; the internal helpers run
+    hundreds of times on values canonical by construction.
+    """
+    for n in names:
+        t.copy_to_top(n, "_cv")
+        t.raw_block(
+            ["_cv"],
+            None,
+            lambda e: (
+                e(_make_stack_op(op="push", value=_big_int_push(0))),
+                e(_make_stack_op(op="push", value=_big_int_push(BB_P))),
+                e(_make_stack_op(op="opcode", code="OP_WITHIN")),
+                e(_make_stack_op(op="opcode", code="OP_VERIFY")),
+            ),
+        )
+
+
 def emit_bb_field_add(emit: Callable[["StackOp"], None]) -> None:
     """Baby Bear field addition.
 
@@ -287,6 +328,7 @@ def emit_bb_field_add(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a + b) mod p]
     """
     t = BBTracker(["a", "b"], emit)
+    _bb_emit_canon_verify(t, "a", "b")
     _bb_field_add(t, "a", "b", "result")
 
 
@@ -297,6 +339,7 @@ def emit_bb_field_sub(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a - b) mod p]
     """
     t = BBTracker(["a", "b"], emit)
+    _bb_emit_canon_verify(t, "a", "b")
     _bb_field_sub(t, "a", "b", "result")
 
 
@@ -307,6 +350,7 @@ def emit_bb_field_mul(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a * b) mod p]
     """
     t = BBTracker(["a", "b"], emit)
+    _bb_emit_canon_verify(t, "a", "b")
     _bb_field_mul(t, "a", "b", "result")
 
 
@@ -317,6 +361,7 @@ def emit_bb_field_inv(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., a^(p-2) mod p]
     """
     t = BBTracker(["a"], emit)
+    _bb_emit_canon_verify(t, "a")
     _bb_field_inv(t, "a", "result")
 
 
@@ -356,6 +401,7 @@ def emit_bb_ext4_mul_0(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r0]
     """
     t = BBTracker(["a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
     # r0 = a0*b0 + 11*(a1*b3 + a2*b2 + a3*b1)
     t.copy_to_top("a0", "_a0"); t.copy_to_top("b0", "_b0")
@@ -386,6 +432,7 @@ def emit_bb_ext4_mul_1(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r1]
     """
     t = BBTracker(["a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
     # r1 = a0*b1 + a1*b0 + 11*(a2*b3 + a3*b2)
     t.copy_to_top("a0", "_a0"); t.copy_to_top("b1", "_b1")
@@ -416,6 +463,7 @@ def emit_bb_ext4_mul_2(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r2]
     """
     t = BBTracker(["a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
     # r2 = a0*b2 + a1*b1 + a2*b0 + 11*(a3*b3)
     t.copy_to_top("a0", "_a0"); t.copy_to_top("b2", "_b2")
@@ -446,6 +494,7 @@ def emit_bb_ext4_mul_3(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r3]
     """
     t = BBTracker(["a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
     # r3 = a0*b3 + a1*b2 + a2*b1 + a3*b0
     t.copy_to_top("a0", "_a0"); t.copy_to_top("b3", "_b3")
@@ -553,6 +602,7 @@ def emit_bb_ext4_inv_0(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r0]
     """
     t = BBTracker(["a0", "a1", "a2", "a3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
     _bb_ext4_inv_common(t)
     # r0 = out_even[0] = a0*inv_n0 + W*a2*inv_n1
     t.copy_to_top("a0", "_ea0")
@@ -579,6 +629,7 @@ def emit_bb_ext4_inv_1(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r1]
     """
     t = BBTracker(["a0", "a1", "a2", "a3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
     _bb_ext4_inv_common(t)
     # odd0 = a1*inv_n0 + W*a3*inv_n1
     t.copy_to_top("a1", "_oa1")
@@ -608,6 +659,7 @@ def emit_bb_ext4_inv_2(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r2]
     """
     t = BBTracker(["a0", "a1", "a2", "a3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
     _bb_ext4_inv_common(t)
     # r2 = out_even[1] = a0*inv_n1 + a2*inv_n0
     t.copy_to_top("a0", "_ea0")
@@ -633,6 +685,7 @@ def emit_bb_ext4_inv_3(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., r3]
     """
     t = BBTracker(["a0", "a1", "a2", "a3"], emit)
+    _bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
     _bb_ext4_inv_common(t)
     # odd1 = a1*inv_n1 + a3*inv_n0
     t.copy_to_top("a1", "_oa1")

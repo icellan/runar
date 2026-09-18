@@ -239,27 +239,54 @@ inputs". It is reachable at `k = 0`; the comment has been corrected.
 Measured cost on `bn254G1ScalarMul`: **134,181 → 134,245 bytes (+64, +0.048%)**,
 decomposing as +41 for the reduce and +23 for the strict test at `i = 0`.
 Applying the strict test at all 255 steps instead would have cost +5,865 bytes,
-which is what the `i = 0` localisation buys. `bn254G1Add` is unchanged. No
+which is what the `i = 0` localisation buys. `bn254G1Add` was unchanged by that
+pass (see the R-035 note below). No
 conformance fixture exercises BN254, so no golden moved; the gate is
 `compilers/go/codegen/bn254_scalar_domain_test.go`, which runs eight scalars
 through the go-sdk interpreter and failed six of them before the fix.
 
-### What was NOT changed in BN254, and why
+### What was NOT changed in BN254 at the time, and what changed later
 
 `bn254G1AffineAdd` uses the unified slope `s = (px² + px·qx + qx²) / (py + qy)`,
 which is already correct for doubling — it never had the `ecAdd` bug. Its
-`py + qy == 0` case produces an off-curve blob via `inv(0) = 0`, and it was
-tempting to mask that to the all-zero point for consistency with the secp256k1 /
-NIST convention. **That would have been a regression.** BN254 has j-invariant 0
-and `p ≡ 1 (mod 3)`, so `F_p` contains a primitive cube root of unity `ω`; for
-any curve point `(x, y)` the point `(ωx, y)` is also on the curve, so
-`Q = (ωx, -y)` gives `py + qy == 0` while `Q != -P` — and the true sum `P + Q` is
-an **ordinary point**, not `O`. Masking would answer "point at infinity" for
-those inputs: on-curve, plausible, and wrong, which is precisely the failure
-mode `03f50d48` introduced on the NIST curves and `f16790a9` had to undo. The
-zero-denominator case keeps its fail-**closed** behaviour and the
-`assert(bn254G1OnCurve(r))` idiom rejects it. Pinned by
-`TestBN254G1AffineAdd_NegatedOperandStaysOffCurve`.
+`py + qy == 0` case produces an off-curve blob via `inv(0) = 0`, and masking
+**a zero denominator** to the all-zero point would have been a regression:
+BN254 has j-invariant 0 and `p ≡ 1 (mod 3)`, so `F_p` contains a primitive cube
+root of unity `ω`; for any curve point `(x, y)` the point `(ωx, y)` is also on
+the curve, so `Q = (ωx, -y)` gives `py + qy == 0` while `Q != -P` — and the true
+sum `P + Q` is an **ordinary point**, not `O`. That would answer "point at
+infinity" for those inputs: plausible and wrong, precisely the failure mode
+`03f50d48` introduced on the NIST curves and `f16790a9` had to undo.
+
+**Superseded for `P == -Q` (R-035).** The conclusion above was drawn about the
+denominator test, and it was over-applied to the case the sibling curves
+actually mask. secp256k1 and both NIST curves key their mask on the PRECISE
+predicate `px == qx AND py != qy`, which on this curve holds only when
+`Q == -P` (`py² = qy² = px³ + 3`), and never for `(ωpx, -py)` because
+`ωpx != px`. `bn254G1Add` is a general contract-callable builtin with no
+Groth16-shaped restriction on its operands, so it now returns the all-zero `O`
+blob for `P + (-P)`, exactly like the other three families. The mask lives in
+the builtin entry point (`bn254G1InfinityFlag` / `bn254G1MaskInfinity`), NOT in
+`bn254G1AffineAdd`, so the Groth16 MSM bind that shares that helper keeps its
+fail-closed behaviour and its bytes unchanged. Cost: **+25 bytes** on the
+`bn254G1Add` builtin (4,482 → 4,507 standalone; 4,271 → 4,294 in the
+`bn254G1OnCurve(bn254G1Add(a, b))` probe contract), byte-identical across all
+six tiers that ship BN254 codegen. No conformance fixture exercises BN254, so
+no golden moved. Pinned by `TestBN254G1Add_PointAtInfinity` (executed through
+the go-sdk interpreter: `G + (-G)`, `(-G) + G`, `2G + (-2G)`, plus `G + 2G` and
+`G + G` controls).
+
+**Still open: the zero-denominator answer is WRONG, not fail-closed.** The
+paragraph above claimed `(ωpx, -py)` fails closed. It does not. Both the
+numerator and the denominator vanish (`ω² + ω + 1 = 0` makes
+`px² + px·qx + qx² = 0`), so `s = 0`, and the result `(-(px + qx), -py)`
+satisfies `y² = x³ + 3` because `(1 + ω)³ = -1`: `bn254G1Add` answers with a
+plausible, on-curve, **wrong** point that `assert(bn254G1OnCurve(r))` does not
+reject. Verified against the go-sdk interpreter. Fixing it means replacing the
+unified slope with the chord/tangent selection secp256k1 and the NIST curves
+use, which also moves the shared Groth16 MSM path — a separate change. The
+current behaviour is pinned, and the mask's precision is guarded, by
+`TestBN254G1AffineAdd_ZeroDenominatorIsNotMaskedToInfinity`.
 
 ## Found on the way in: five off-chain mocks disagreed with the script
 

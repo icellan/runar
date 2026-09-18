@@ -174,7 +174,7 @@ class FungibleToken extends StatefulSmartContract {
 1. Each UTXO tracks an `owner` and a `balance` — the number of tokens it holds.
 2. **Split (transfer)**: The owner signs and specifies a recipient and amount. `addOutput` registers two outputs: one for the recipient with the transferred amount, and one for the sender with the remaining balance. The compiler verifies both outputs against the transaction's `hashOutputs`.
 3. **Send**: Transfers the full balance to a new owner in a single output.
-4. **Merge**: Multiple UTXOs can be combined. Each input independently verifies the same output (with `totalBalance`). Since all inputs check the same `hashOutputs`, they must agree — if any input lies about the total, the hash check fails.
+4. **Merge**: Multiple UTXOs can be combined. The `token-ft` example authenticates the companion via `otherParentTx` (companion-parent merge, W8). Input count is not identity. Pin: `packages/runar-testing/src/__tests__/w8-token-ft-solo-merge-known-broken.test.ts`.
 
 The `tokenId` is `readonly` and baked into the locking script at deploy time.
 
@@ -316,7 +316,7 @@ A stateful auction where bidders can submit increasing bids, and the auctioneer 
 ```typescript
 import {
   StatefulSmartContract, assert, PubKey, Sig,
-  checkSig, extractLocktime
+  checkSig, extractLocktime, extractSequence
 } from 'runar-lang';
 
 class Auction extends StatefulSmartContract {
@@ -340,7 +340,7 @@ class Auction extends StatefulSmartContract {
 
   public bid(bidder: PubKey, bidAmount: bigint) {
     assert(bidAmount > this.highestBid);
-    assert(extractLocktime(this.txPreimage) < this.deadline);
+    // No deadline check — see "Why bid has no deadline" below.
     this.highestBidder = bidder;
     this.highestBid = bidAmount;
     // State continuation is auto-injected because state was mutated
@@ -349,6 +349,7 @@ class Auction extends StatefulSmartContract {
   public close(sig: Sig) {
     assert(checkSig(sig, this.auctioneer));
     assert(extractLocktime(this.txPreimage) >= this.deadline);
+    assert(extractSequence(this.txPreimage) !== 0xffffffffn);
     // No state continuation injected -- no state mutation
   }
 }
@@ -356,21 +357,49 @@ class Auction extends StatefulSmartContract {
 
 **How it works:**
 
-- **`bid`**: Anyone can bid. The bid must exceed the current highest bid. The `extractLocktime` check ensures the auction has not passed its deadline. State is updated with the new highest bidder and bid amount.
-- **`close`**: Only the auctioneer can close. The locktime check ensures the deadline has passed. No state is propagated -- the auction UTXO is consumed, and the auctioneer receives the funds.
+- **`bid`**: Anyone can bid, for as long as the auction UTXO is unspent. The bid must exceed the current highest bid. State is updated with the new highest bidder and bid amount.
+- **`close`**: Only the auctioneer can close, and only once the chain has reached the deadline. No state is propagated -- the auction UTXO is consumed, and the auctioneer receives the funds.
 
-This pattern demonstrates combining multiple stateful fields, time-based conditions via locktime, and two distinct spending paths with different authorization rules.
+This pattern demonstrates combining multiple stateful fields, a one-directional
+time condition via locktime, and two distinct spending paths with different
+authorization rules.
+
+### Why `bid` has no deadline
+
+`nLockTime` is chosen by the **spender** and enforced by consensus as a
+NOT-BEFORE: the transaction becomes mineable once the chain has reached it.
+Nothing about it bounds the chain from above.
+
+So `assert(extractLocktime(p) >= T)` is sound — the spend cannot confirm before
+T — while `assert(extractLocktime(p) < T)` proves nothing whatsoever. A bidder
+at height T + 1000 writes `nLockTime = T - 1`, the node mines it (T - 1 is long
+past), and the script happily sees `T - 1 < T`. The check reads like a deadline
+and enforces nothing. `currentBlockHeight()` is sugar for the same field and
+carries the same caveat despite its name; read it as `txLocktime()`.
+
+A contract that genuinely needs "before T" needs a time source it can read as
+**state** — an oracle, or a tick transaction the contract can verify — not the
+spending transaction's own locktime. v1 ships no such source, so the canonical
+auction drops the exclusive bidding window and documents that late bids land
+until the auctioneer closes.
 
 > **Pair `extractLocktime` with an `extractSequence` finality guard.** A
 > transaction's `nLockTime` is only enforced by consensus when at least one
 > input is *non-final* — i.e. its `nSequence` is below `0xffffffff`. If every
 > input is final, miners ignore `nLockTime` entirely, so a
-> `extractLocktime(preimage) >= deadline` (or `< deadline`) assertion can be
-> bypassed by a hand-built all-final-sequence spend. To make a locktime gate
+> `extractLocktime(preimage) >= deadline` assertion can be bypassed by a
+> hand-built all-final-sequence spend — which is exactly why `close` above
+> carries both asserts, not just the locktime one. To make a locktime gate
 > consensus-enforced, also assert the spend is non-final:
-> `assert(extractSequence(this.txPreimage) < 0xffffffffn);`. The compiler emits
+> `assert(extractSequence(this.txPreimage) !== 0xffffffffn);`. The compiler emits
 > an advisory warning for any method that reads `extractLocktime` without such a
-> guard. The SDK's `CallOptions` help on the tx side: when you set a non-zero
+> guard. `extractSequence` returns the UNSIGNED 32-bit wire field, so the
+> comparison means what it reads as. (Before the W1 fix the four 32-bit
+> extractors ended in a bare `OP_BIN2NUM` and decoded sign-magnitude, which made
+> the sentinel read as a negative script number — a `< 0xffffffffn` guard was
+> then true for exactly the value it excluded. A `<=` bound on the sentinel is
+> still a tautology and is not accepted as a guard.) The SDK's `CallOptions`
+> help on the tx side: when you set a non-zero
 > `locktime`, `sequence` defaults to `0xfffffffe` (non-final) automatically — but
 > the covenant itself must still assert the sequence bound so no other unlocking
 > path can supply an all-final tx.
@@ -449,7 +478,7 @@ In the Bitcoin contract context, the prover provides `(R, s, e)` in the unlockin
 | NFT | Yes | Transfer + burn (no state continuation) |
 | Oracle | No | Rabin signatures, `verifyRabinSig`, `num2bin` |
 | Covenant | No | `checkPreimage` for transaction introspection |
-| Auction | Yes | Multiple stateful fields, locktime checks, two spending paths |
+| Auction | Yes | Multiple stateful fields, a NOT-BEFORE locktime gate + finality guard, two spending paths |
 | PostQuantumWallet | No | `verifyWOTS` — WOTS+ one-time PQ signature (~10 KB script) |
 | SPHINCSWallet | No | `verifySLHDSA_SHA2_128s` — SLH-DSA stateless PQ signature (~203 KB script) |
 | SchnorrZKP | No | `ecMulGen`, `ecMul`, `ecAdd`, `ecOnCurve` — on-chain Schnorr ZKP via EC arithmetic |

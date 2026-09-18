@@ -2,6 +2,16 @@
 
 require_relative 'test_helper'
 
+# The Go surface parser is required LAZILY, by
+# RunarCompiler::Compiler#_parse_source, only once a `.runar.go` source is
+# actually parsed. Tests that read its constants rather than parsing something
+# therefore depend on some earlier test having triggered that require — and
+# Minitest randomises order, so `test_cast_types_and_builtin_map_are_disjoint`
+# errored with `uninitialized constant GO_CAST_TYPES` on some seeds and passed
+# on others. It is the guard for a fund bug (a hash spelling resolving as a
+# cast, so its opcode vanishes), so it has to run every time.
+require 'runar_compiler/frontend/parser_go'
+
 class TestParserGo < Minitest::Test
   def parse(source, file_name = 'Test.runar.go')
     RunarCompiler.send(:_parse_source, source, file_name)
@@ -93,6 +103,61 @@ class TestParserGo < Minitest::Test
 
     assert contains_plain_data_ident?(result.contract.methods.first.body),
            "runar.ByteString(data) should unwrap to identifier 'data'"
+  end
+
+  # ---------------------------------------------------------------------------
+  # F1 -- the Go surface spells a type conversion and a builtin call
+  # identically, so a name in BOTH tables silently becomes whichever branch runs
+  # first. `Sha256` and `Ripemd160` were in both, the cast branch ran first, and
+  # `runar.Sha256(preimage)` unwrapped to its own argument: the hash opcode was
+  # never emitted and `assert(sha256(x) == digest)` shipped as
+  # `assert(x == digest)`.
+  #
+  # Resolution: in CALL position the FUNCTION wins. These tests hold the two
+  # tables disjoint and pin the resolution for each hash spelling, so the next
+  # name that is both a type and a function fails here instead of on chain.
+  # ---------------------------------------------------------------------------
+
+  def test_cast_types_and_builtin_map_are_disjoint
+    cast = RunarCompiler::Frontend::GO_CAST_TYPES
+    builtins = RunarCompiler::Frontend::GO_BUILTIN_MAP
+    both = cast.select { |n| builtins.key?(n) }.sort
+    assert_empty both,
+                 "these names are BOTH a Go-surface cast type and a Go-surface builtin: " \
+                 "#{both.join(', ')}. The cast branch runs first, so every call to them " \
+                 "compiles to an identity binding and its opcode disappears. Remove them " \
+                 "from GO_CAST_TYPES -- a cast to a ByteString subtype is a no-op, a " \
+                 "vanished hash is a fund bug."
+  end
+
+  def test_hash_spellings_parse_as_calls_not_casts
+    %w[Sha256 Ripemd160 Sha256Hash Hash160 Hash256].each do |spelling|
+      source = <<~GO
+        package contract
+
+        import "github.com/icellan/runar/packages/runar-go"
+
+        type HashSpelling struct {
+          runar.SmartContract
+          Expected runar.ByteString `runar:"readonly"`
+        }
+
+        func (c *HashSpelling) Unlock(data runar.ByteString) {
+          h := runar.#{spelling}(data)
+          runar.Assert(h == c.Expected)
+        }
+      GO
+
+      result = parse(source, 'HashSpelling.runar.go')
+      assert_empty result.errors.map(&:format_message), "runar.#{spelling} should parse"
+
+      decl = result.contract.methods[0].body[0]
+      assert_instance_of RunarCompiler::Frontend::CallExpr, decl.init,
+                         "runar.#{spelling}(data) parsed as a #{decl.init.class}, not a " \
+                         "CallExpr -- the call was unwrapped to its own argument and the " \
+                         "opcode will never be emitted."
+      assert_equal RunarCompiler::Frontend::GO_BUILTIN_MAP[spelling], decl.init.callee.name
+    end
   end
 
   private

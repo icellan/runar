@@ -4,7 +4,15 @@
  * Rúnar SDK Usage Examples -- TypeScript
  *
  * Comprehensive examples showing how to compile, deploy, and spend/unlock
- * all 8 Rúnar example contracts using the runar-compiler and runar-sdk packages.
+ * EIGHT REPRESENTATIVE Rúnar example contracts using the runar-compiler and
+ * runar-sdk packages.
+ *
+ * R-243: this used to say "all 8 Rúnar example contracts". Eight is the right
+ * count for this file — P2PKH, Escrow, Counter, FungibleToken, NFT, Auction,
+ * OraclePriceFeed, CovenantVault — but "all" was wrong about the world: the
+ * catalogue is roughly eighty contract directories per tree across nine
+ * surfaces. See examples/README.md for the measured count and the curated
+ * starting set.
  *
  * Each section follows the same pattern:
  *   1. Compile the contract source to a RunarArtifact
@@ -1109,7 +1117,7 @@ OP_PUSH_TX reference: https://wiki.bitcoinsv.io/index.php/OP_PUSH_TX
 async function main() {
   console.log('Rúnar SDK Usage Examples');
   console.log('======================');
-  console.log('Running all 8 contract examples...\n');
+  console.log('Running 8 representative contract examples...\n');
 
   try {
     await exampleP2PKH();

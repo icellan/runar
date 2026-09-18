@@ -36,19 +36,51 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	}
 }
 
-var byteTypes = map[string]bool{
-	"ByteString":      true,
-	"PubKey":          true,
-	"Sig":             true,
-	"Sha256":          true,
-	"Ripemd160":       true,
-	"Addr":            true,
-	"SigHashPreimage": true,
-	"RabinSig":        true,
-	"RabinPubKey":     true,
-	"Point":           true,
-	"P256Point":       true,
-	"P384Point":       true,
+// isByteType reports whether a value of this type sits on the stack as a BYTE
+// STRING rather than as a script NUMBER.
+//
+// N-076: there is deliberately no list here. typecheck.go's
+// byteStringSubtypes is the authority. The second, hand-maintained copy this
+// replaces carried "RabinSig" and "RabinPubKey", which typecheck.go files
+// under bigintSubtypes — so `===` on a Rabin value emitted OP_EQUAL and, far
+// worse, `+` on one emitted OP_CAT where the source said addition.
+//
+// Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added
+// with OP_ADD.
+func isByteType(typeName string) bool {
+	return byteStringSubtypes[typeName]
+}
+
+// Preimage field extractors that return BYTES (ByteString / Sha256).
+//
+// N-054: this list is a transcription of the returnType the type checker
+// already records for these builtins in typecheck.go, and the stack lowerer
+// agrees with it byte for byte: lowerExtractor ends the split sequence with
+// OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
+// none of the ones that are.
+//
+// So an extractor listed here leaves a byte string on the stack and must be
+// compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+// leaves a minimally-encoded script NUMBER and must be compared with
+// OP_NUMEQUAL and added with OP_ADD.
+//
+// Getting it backwards is a correctness defect in both directions. OP_EQUAL
+// on a number is over-strict -- it rejects a witness that encodes the same
+// value with different bytes (0400 for 4), i.e. it refuses a valid spend.
+// OP_NUMEQUAL on a hash or a scriptCode is under-strict -- trailing high-order
+// zero bytes and negative zero compare equal to values they are not
+// byte-equal to, i.e. a covenant bypass.
+//
+// This replaces a strings.HasPrefix(name, "extract") test that swept the six
+// numeric extractors in with the byte ones.
+var byteReturningExtractors = map[string]bool{
+	"extractHashPrevouts":     true,
+	"extractHashSequence":     true,
+	"extractOutpoint":         true,
+	"extractScriptCode":       true,
+	"extractOutputHash":       true,
+	"extractOutputs":          true,
+	"extractPrevOutputScript": true,
 }
 
 var byteReturningFunctions = map[string]bool{
@@ -93,10 +125,10 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 		return true
 
 	case Identifier:
-		if t, ok := ctx.getParamType(e.Name); ok && byteTypes[t] {
+		if t, ok := ctx.getParamType(e.Name); ok && isByteType(t) {
 			return true
 		}
-		if t, ok := ctx.getPropertyType(e.Name); ok && byteTypes[t] {
+		if t, ok := ctx.getPropertyType(e.Name); ok && isByteType(t) {
 			return true
 		}
 		if ctx.localByteVars[e.Name] {
@@ -105,14 +137,14 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 		return false
 
 	case PropertyAccessExpr:
-		if t, ok := ctx.getPropertyType(e.Property); ok && byteTypes[t] {
+		if t, ok := ctx.getPropertyType(e.Property); ok && isByteType(t) {
 			return true
 		}
 		return false
 
 	case MemberExpr:
 		if id, ok := e.Object.(Identifier); ok && id.Name == "this" {
-			if t, found := ctx.getPropertyType(e.Property); found && byteTypes[t] {
+			if t, found := ctx.getPropertyType(e.Property); found && isByteType(t) {
 				return true
 			}
 		}
@@ -127,7 +159,7 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 			if byteReturningFunctions[id.Name] {
 				return true
 			}
-			if len(id.Name) >= 7 && id.Name[:7] == "extract" {
+			if byteReturningExtractors[id.Name] {
 				return true
 			}
 		}
@@ -295,6 +327,17 @@ func extractLiteralValue(expr Expression) interface{} {
 			if lit, ok := e.Operand.(BigIntLiteral); ok {
 				return new(big.Int).Neg(lit.Value)
 			}
+		}
+	case CallExpr:
+		// `toByteString('<hex>')` IS the ByteStringLiteral production (see
+		// spec/grammar.md section 11 and the peer check in validator.go).
+		// UNWRAP it so InitialValue holds the bare value, byte-identical to
+		// what the bare `'<hex>'` spelling produces. Without this the
+		// validator would accept the property and this function would return
+		// nil for it -- silently DROPPING the default rather than storing a
+		// call node. Literal argument only.
+		if isToByteStringLiteral(e) {
+			return e.Args[0].(ByteStringLiteral).Value
 		}
 	}
 	return nil
@@ -602,19 +645,24 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 	return result
 }
 
-// emitEmbedAlwaysPreservation emits the DCE-surviving preservation pair for
-// each `@embedAlways` readonly field into the given (public) method context
-// (issue #109). Reproduces exactly what a hand-written `const _bind =
-// this.field;` lowers to: a load_prop followed by a load_const("@ref:<t>")
-// alias. The alias marks the load_prop as referenced (see dce.go), so
-// dead-binding DCE keeps it; stack lowering then emits the field's
-// constructor-slot placeholder and NIPs the unused value off the stack at
-// method end. The field's bytes therefore remain in the deployed locking
-// script for downstream recovery.
+// emitEmbedAlwaysPreservation emits the DCE-surviving preservation load_prop
+// for each `@embedAlways` readonly field into the given (public) method
+// context (issue #109). The injected load_prop carries Preserve = true, so
+// HasSideEffect (dce.go) keeps it even though nothing references it; stack
+// lowering then emits the field's constructor-slot placeholder and NIPs the
+// unused value off the stack at method end. The field's bytes therefore remain
+// in the deployed locking script for downstream recovery.
+//
+// This used to emit an alias pair instead — the load_prop plus a
+// load_const("@ref:<t>") whose only job was to make the load_prop look
+// referenced. That survives ONE DCE sweep but not the fixed-point loop in
+// EliminateDeadBindings: sweep 1 drops the now-unreferenced alias, sweep 2 then
+// drops the load_prop it was protecting, and both halves vanish. Marking the
+// node itself does not depend on a referencing binding surviving. Mirrors the
+// Zig reference (compilers/zig/src/passes/anf_lower.zig).
 func emitEmbedAlwaysPreservation(ctx *lowerCtx, fields []PropertyNode) {
 	for _, field := range fields {
-		loadRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: field.Name})
-		ctx.emitNamed("__embedAlways_"+field.Name, makeLoadConstString("@ref:"+loadRef))
+		ctx.emit(ir.ANFValue{Kind: "load_prop", Name: field.Name, Preserve: true})
 	}
 }
 
@@ -682,6 +730,21 @@ type lowerCtx struct {
 	// only actually REWRITTEN at method top level; lowerIfStatement needs the
 	// same distinction before it defers to that pass.
 	nested bool
+
+	// didEmitHashOutputsCheck — R-072. requireOutputP2PKH emits its
+	// hash256(_serialisedOutputs) === extractOutputHash(txPreimage) commitment
+	// at most once per CONTROL-FLOW PATH, so this lives on the context and
+	// deliberately NOT on methodScope (which is shared by pointer).
+	//
+	// subContext copies the parent's value in, because a commitment on a
+	// dominating path really has been established by the time the nested block
+	// runs; the copy means writes inside the block stay there, so an `if`'s two
+	// arms cannot latch the flag for each other. Exactly one arm executes on
+	// chain, and the arm-local per-output assertion only compares a substring of
+	// the spender-supplied _serialisedOutputs witness: an arm without its own
+	// commitment constrains nothing about the transaction's real outputs, and
+	// the bond it claims to enforce can be satisfied with invented bytes.
+	didEmitHashOutputsCheck bool
 }
 
 // methodScopeT holds per-method bookkeeping shared by parent and
@@ -689,9 +752,8 @@ type lowerCtx struct {
 // reads autoInjectedParams to append witness params to the final method
 // param list.
 type methodScopeT struct {
-	autoInjectedParams      []ir.ANFParam   // append-only, insertion order
-	autoInjectedSet         map[string]bool // dedup
-	didEmitHashOutputsCheck bool            // requireOutputP2PKH emits its hashOutputs(preimage) check at most once per method
+	autoInjectedParams []ir.ANFParam   // append-only, insertion order
+	autoInjectedSet    map[string]bool // dedup
 }
 
 func newMethodScope() *methodScopeT {
@@ -780,6 +842,40 @@ func (ctx *lowerCtx) shouldInlinePrivate(name string) bool {
 		return false
 	}
 	return eff.HasStateOutput || eff.HasDataOutput
+}
+
+// checkPrivateCallArity refuses a call to a private method whose argument
+// count does not match that method's parameter count.
+//
+// R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin table
+// first (typecheck.go: `if sig, ok := builtinFunctions[id.Name]`), while ANF
+// lowering resolves it against the contract's private methods first. A private
+// method that shadows a builtin name with a different arity — `private min(a,
+// b, c)` called as `min(x, y)` — therefore passes the arity check for `min` the
+// BUILTIN and then lowers as `min` the METHOD. Nothing forbids the shadowing.
+//
+// Downstream, params and args were zipped with `i < len(params) && i <
+// len(args)`, so the surplus was dropped on the floor: the extra argument was
+// evaluated and discarded, or the unbound parameter compiled to a dangling
+// reference. When the unbound parameter happened to be UNUSED the contract
+// compiled clean — an arity mismatch silently accepted. When it was used, it
+// surfaced two passes later as "method parameter 'c' is not on the stack",
+// naming a pass the author never wrote in.
+//
+// The mismatch is refused here, where both counts are known, on every call
+// form (`m(x)`, `this.m(x)`, member `this.m(x)`) and for both the inlined and
+// the method_call lowering path.
+func (ctx *lowerCtx) checkPrivateCallArity(name string, argRefs []string) {
+	method, ok := ctx.getPrivateMethod(name)
+	if !ok {
+		return
+	}
+	if len(argRefs) == len(method.Params) {
+		return
+	}
+	panic(fmt.Sprintf(
+		"private method '%s' expects %d argument(s), got %d.",
+		name, len(method.Params), len(argRefs)))
 }
 
 // getPrivateMethod looks up a private method by name. Returns the method
@@ -940,9 +1036,14 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 		methodParamTypes: make(map[string]string),
 		localAliases:     make(map[string]string),
 		localByteVars:    make(map[string]bool),
+		paramAliasStack:  make(map[string][]string),
+		sideEffects:      ctx.sideEffects, // read-only summary — a nested call site must make the same inlining decision as a top-level one
 		methodScope:      ctx.methodScope, // shared pointer — auto-injection registers propagate up
 		sighashFlag:      ctx.sighashFlag, // #123: nested manual checkPreimage inherits the method's mode
-		nested:           true,
+		// R-072: inherited by VALUE — a parent commitment dominates this block,
+		// but one emitted inside it must not flow back out to a sibling arm.
+		didEmitHashOutputsCheck: ctx.didEmitHashOutputsCheck,
+		nested:                  true,
 	}
 	// Share local name set
 	for k := range ctx.localNames {
@@ -964,6 +1065,16 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 	// Share local aliases
 	for k, v := range ctx.localAliases {
 		sub.localAliases[k] = v
+	}
+	// Deep-copy the inlined-param alias stack. inlinePrivateMethodCall pushes
+	// the caller's arg refs on the CURRENT context before lowering the private
+	// body; without this, an if/for/ternary inside that body would lower with
+	// no aliases and fall through to load_param naming the private's own
+	// parameter — a name the caller's ABI does not declare. Copied (not
+	// shared) because push/pop inside the nested block are balanced there and
+	// must not disturb the parent's frames.
+	for k, v := range ctx.paramAliasStack {
+		sub.paramAliasStack[k] = append([]string(nil), v...)
 	}
 	return sub
 }
@@ -1690,6 +1801,16 @@ func extractLoopShape(stmt ForStmt) (*big.Int, int, int) {
 	if !ok {
 		panic("Cannot determine loop bound at compile time. For-loop bounds must be integer literals.")
 	}
+	// W4 backstop. The user-facing refusal lives in the validator, which is
+	// where a located diagnostic belongs -- but ANF lowering is reachable
+	// without it, and then the count would come from `bound - start` while the
+	// condition tested something else entirely: `i + 1n < 2n` runs once in the
+	// source language and twice here.
+	if id, isIdent := bin.Left.(Identifier); !isIdent || id.Name != stmt.Init.Name {
+		panic("For loop condition must compare the loop variable '" + stmt.Init.Name +
+			"' to a compile-time constant; the left-hand side is not the iterator, so the " +
+			"unrolled trip count would not be the one the source asks for.")
+	}
 	bound := extractBigIntValue(bin.Right)
 	if bound == nil {
 		panic("Cannot determine loop bound at compile time. For-loop bounds must be integer literals.")
@@ -1719,9 +1840,23 @@ func extractLoopShape(stmt ForStmt) (*big.Int, int, int) {
 		}
 	}
 
+	// Narrow the iteration count only AFTER range-checking the *big.Int.
+	// `int(count.Int64())` truncates modulo 2^64, so a bound of 2^63 used to
+	// yield a negative count (loop body silently dropped), 2^64+10 used to
+	// yield 10 (a script of the wrong length, no diagnostic), and 10^20 used
+	// to yield ~7.77e18 (unbounded-memory unrolling). CL-BUG-127.
 	n := 0
 	if count.Sign() > 0 {
-		n = int(count.Int64())
+		n = ir.MustIntValueExact(count, "for loop iteration count")
+		// ir.MaxLoopCount already bounds loop counts arriving on the `--ir`
+		// input path; a loop written in source deserves the same ceiling.
+		// Without it an in-int64 bound like 10^18 still wedges the unroller.
+		if n > ir.MaxLoopCount {
+			panic(fmt.Sprintf(
+				"For loop unrolls to %d iterations, exceeding the maximum loop count of %d.",
+				n, ir.MaxLoopCount,
+			))
+		}
 	}
 	return start, step, n
 }
@@ -1979,6 +2114,28 @@ func (ctx *lowerCtx) lowerMemberExpr(e MemberExpr) string {
 func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	callee := e.Callee
 
+	// `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+	// spec/grammar.md section 11:
+	//
+	//     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+	//
+	// so it must reach the IR as a literal, indistinguishable from the bare
+	// `'<hex>'` spelling the other surfaces use. Lowering it to a `toByteString`
+	// call node instead made the `.runar.rs` surface -- where a bare literal is
+	// not valid Rust and this wrapper is the ONLY spelling that is both valid
+	// Rust and valid Rúnar -- unable to match the one `expected-ir.json` every
+	// format is compared against.
+	//
+	// Literal argument only. `toByteString(x)` for a non-literal `x` is not this
+	// production; it stays an identity-cast call node (the typechecker types it
+	// ByteString -> ByteString and stack lowering already treats it as a no-op),
+	// so its behaviour is unchanged.
+	if id, ok := callee.(Identifier); ok && id.Name == "toByteString" && len(e.Args) == 1 {
+		if lit, isLit := e.Args[0].(ByteStringLiteral); isLit {
+			return ctx.lowerExprToRef(lit)
+		}
+	}
+
 	// super(...) call
 	if id, ok := callee.(Identifier); ok && id.Name == "super" {
 		argRefs := ctx.lowerArgs(e.Args)
@@ -2032,7 +2189,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		if !ok || idxLit.Value == nil {
 			return ctx.emit(makeLoadConstString(""))
 		}
-		idx := idxLit.Value.Int64()
+		idx := ir.MustIntValueExact(idxLit.Value, "extractPrevOutputScript: input index")
 		paramName := fmt.Sprintf("_prevOutScript_%d", idx)
 		ctx.methodScope.recordAutoInjectedParam(paramName, "ByteString")
 		ctx.addParam(paramName)
@@ -2070,9 +2227,11 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	// `amount` satoshis to `pubkeyHash`. Auto-injects `_serialisedOutputs`
 	// (once per method) and emits hash256(serialisedOutputs) ==
 	// extractOutputHash(txPreimage) the first time the intrinsic is called
-	// in a method body. Subsequent calls in the same method skip the
-	// hashOutputs check (already established) and emit only the per-output
-	// substring assertion.
+	// on a given CONTROL-FLOW PATH. A later call on the same path skips the
+	// commitment (already established there) and emits only the per-output
+	// substring assertion; a call on a path the commitment does not dominate
+	// emits its own (R-072 — the substring assertion alone only constrains the
+	// spender-supplied witness, not the transaction).
 	//
 	// v1 assumes all outputs in the serialised set are exactly 34 bytes
 	// (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). Byte offset
@@ -2087,14 +2246,23 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		if !ok || idxLit.Value == nil {
 			return ctx.emit(makeLoadConstString(""))
 		}
-		idx := idxLit.Value.Int64()
+		idx := ir.MustIntValueExact(idxLit.Value, "requireOutputP2PKH: output index")
+		// W2 backstop. The user-facing refusal lives in the typechecker, where a
+		// diagnostic carries a source location -- but ANF lowering is reachable from
+		// callers that run no typechecker, and R-012 is this repo's standing lesson about
+		// a security check that lives in exactly one pass. Unreachable in the normal
+		// pipeline: typecheck answers first.
+		if idx != 0 {
+			panic(fmt.Sprintf("requireOutputP2PKH: outputIndex must be 0; got %d. The emitted assertion reads output i at byte offset i*34, which is an output boundary only if every earlier output is exactly 34 bytes -- an attacker sizes output 0 freely and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset.", idx))
+		}
 
 		ctx.methodScope.recordAutoInjectedParam("_serialisedOutputs", "ByteString")
 		ctx.addParam("_serialisedOutputs")
 
-		// Emit the hashOutputs(preimage) check exactly once per method.
-		if !ctx.methodScope.didEmitHashOutputsCheck {
-			ctx.methodScope.didEmitHashOutputsCheck = true
+		// Emit the hashOutputs(preimage) commitment once per control-flow path
+		// (R-072 — see lowerCtx.didEmitHashOutputsCheck).
+		if !ctx.didEmitHashOutputsCheck {
+			ctx.didEmitHashOutputsCheck = true
 			serialisedRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_serialisedOutputs"})
 			actualOutHashRef := ctx.emit(makeCall("hash256", []string{serialisedRef}))
 			preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
@@ -2125,7 +2293,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 
 		// Substring extract at idx*34 length 34, assert equal.
 		serialisedRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_serialisedOutputs"})
-		offsetRef := ctx.emit(makeLoadConstInt(big.NewInt(idx * 34)))
+		offsetRef := ctx.emit(makeLoadConstInt(big.NewInt(int64(idx) * 34)))
 		lengthRef := ctx.emit(makeLoadConstInt(big.NewInt(34)))
 		extractedRef := ctx.emit(makeCall("substr", []string{serialisedRef, offsetRef, lengthRef}))
 		outEqRef := ctx.emit(ir.ANFValue{
@@ -2226,6 +2394,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	// is a private method with continuation-relevant side effects).
 	if pa, ok := callee.(PropertyAccessExpr); ok {
 		argRefs := ctx.lowerArgs(e.Args)
+		ctx.checkPrivateCallArity(pa.Property, argRefs)
 		if ctx.shouldInlinePrivate(pa.Property) {
 			return ctx.inlinePrivateMethodCall(pa.Property, argRefs)
 		}
@@ -2237,6 +2406,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	if me, ok := callee.(MemberExpr); ok {
 		if id, ok := me.Object.(Identifier); ok && id.Name == "this" {
 			argRefs := ctx.lowerArgs(e.Args)
+			ctx.checkPrivateCallArity(me.Property, argRefs)
 			if ctx.shouldInlinePrivate(me.Property) {
 				return ctx.inlinePrivateMethodCall(me.Property, argRefs)
 			}
@@ -2262,12 +2432,12 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		}
 		if len(e.Args) >= 2 {
 			if bi, ok := e.Args[1].(BigIntLiteral); ok && bi.Value != nil {
-				inArity = int(bi.Value.Int64())
+				inArity = ir.MustIntValueExact(bi.Value, "asm() in_arity")
 			}
 		}
 		if len(e.Args) >= 3 {
 			if bi, ok := e.Args[2].(BigIntLiteral); ok && bi.Value != nil {
-				outArity = int(bi.Value.Int64())
+				outArity = ir.MustIntValueExact(bi.Value, "asm() out_arity")
 			}
 		}
 		return ctx.emit(ir.ANFValue{
@@ -2288,6 +2458,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		// inline the body. This keeps .runar.move, .runar.go, and .runar.ts
 		// lowering in sync.
 		if ctx.isPrivateMethod(id.Name) {
+			ctx.checkPrivateCallArity(id.Name, argRefs)
 			if ctx.shouldInlinePrivate(id.Name) {
 				return ctx.inlinePrivateMethodCall(id.Name, argRefs)
 			}
@@ -2539,8 +2710,27 @@ func (ctx *lowerCtx) inlinePrivateMethodCall(methodName string, argRefs []string
 	if endIndex > startIndex {
 		return ctx.bindings[endIndex-1].Name
 	}
-	// Empty body — emit a load_const placeholder so the caller has a ref.
-	return ctx.emit(makeLoadConstString("@void"))
+	// R-290: the body emitted nothing, so there is no value for the caller
+	// to reference.
+	//
+	// Refuse it. The alternative is what was here before: a `load_const "@void"`
+	// sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+	// special-cased). It survived pass 4 and died in pass 6's hex decoder —
+	// "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+	// messages that name neither the method nor the problem, and that only fire
+	// because the string happens to be odd-length and non-hex. An even-length
+	// sentinel would decode to zeros in the Rust decoder's
+	// `from_str_radix(..).unwrap_or(0)` and reach the script.
+	//
+	// Reachable from source that parses, validates and type-checks: declare a public
+	// method BEFORE two same-named privates. The side-effect summary resolves the
+	// name through a last-wins map and caches the OUTPUT-EMITTING one, so
+	// `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+	// whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+	// IR, `--hex` exit 1 with the hex-decoder message.
+	panic(fmt.Sprintf(
+		"private method '%s' was inlined but produced no bindings, so the call "+
+			"site has no value to reference.", methodName))
 }
 
 // flattenAddOutputArgs mirrors flattenAddOutputArgs in 04-anf-lower.ts:
@@ -2622,19 +2812,39 @@ func maxTempIndex(bindings []ir.ANFBinding) int {
 	return max
 }
 
-// isSideEffectFree checks if an ANF value kind is side-effect-free.
-// Both sides of the discriminant are enumerated explicitly so an
-// unknown kind cannot silently default to "has side effect" (which
-// would conservatively preserve the binding but mask a missing
-// dispatch wire-up in the rest of the pipeline).
+// isSideEffectFree reports whether a binding may sit in the value-prefix of an
+// arm that `liftBranchUpdateProps` hoists. Its only caller is
+// `allBindingsSideEffectFree`, and that is called only at the two lift gates
+// (`extractBranchUpdate`, `collectUpdateBranches`) — dead-code elimination
+// asks `HasSideEffect` in dce.go instead, which is recursive over `if` / `loop`
+// and is not affected by this list.
+//
+// R-293: the list used to ALSO return true for "if", "loop",
+// "get_state_script" and "array_literal". The lift hoists an admitted prefix
+// under FRESH names and rewrites its refs with `remapValueRefs`, which
+// rewrites an `if`'s `cond` and nothing else — it never descends into `Then` /
+// `Else`, rewrites nothing at all for a `loop`, and has no case for
+// "array_literal" at all, so that kind reaches its exhaustiveness panic. The
+// four extra kinds were therefore exactly the ones the remapper cannot handle.
+//
+// The six peer tiers gate on the five pure kinds below, so an arm carrying
+// nested control flow is simply not lifted there. Before this narrowing, a
+// contract with a nested `if` in an arm's value prefix compiled in every peer
+// tier and died HERE, in pass 5, with `value "t" not found on stack` — the
+// hoisted body still naming a temp the hoist had renamed. Matching the peers
+// closes a seven-tier parity break; it cannot move a golden, because any
+// fixture reaching the wider list would already have diverged from them.
+//
+// Both sides of the discriminant stay enumerated explicitly so an unknown kind
+// cannot silently default to "pure".
 func isSideEffectFree(v *ir.ANFValue) bool {
 	switch v.Kind {
-	case "load_prop", "load_param", "load_const", "bin_op", "unary_op",
-		"get_state_script", "if", "loop", "array_literal":
+	case "load_prop", "load_param", "load_const", "bin_op", "unary_op":
 		return true
 	case "assert", "update_prop", "check_preimage", "deserialize_state",
 		"add_output", "add_raw_output", "add_data_output",
-		"call", "method_call", "raw_script":
+		"call", "method_call", "raw_script",
+		"get_state_script", "if", "loop", "array_literal":
 		return false
 	default:
 		// Exhaustiveness guard. A silent default here would either
@@ -3062,6 +3272,38 @@ func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
 				thenBindings = append(thenBindings, ir.ANFBinding{
 					Name:  newName,
 					Value: remapValueRefs(vb.Value, branchMap),
+				})
+			}
+
+			// An arm's VALUE is its LAST binding. valueBindings is everything
+			// before the original update_prop, which ends on the assigned value
+			// only when that value was computed INSIDE the arm. When the arm
+			// assigns something bound outside it — a local, or anything hoisted
+			// before the chain — valueBindings does not contain it and is
+			// usually empty, so the arm was emitted EMPTY and stack lowering
+			// padded it with a zero push: `if (p == 0n) { this.c0 = someLocal }`
+			// compiled to `this.c0 = 0`, silently corrupting state on the
+			// MATCHED branch. (TicTacToe's `this.cN = this.turn` escapes only
+			// because its load_prop lands inside the arm.)
+			//
+			// Materialise the value explicitly whenever the arm does not
+			// already end on it. When it does — every shape that compiled
+			// correctly before — this is a no-op and no bytes move.
+			mappedValueRef := branch.valueRef
+			if mapped, ok := branchMap[mappedValueRef]; ok {
+				mappedValueRef = mapped
+			}
+			if len(thenBindings) == 0 || thenBindings[len(thenBindings)-1].Name != mappedValueRef {
+				valueName := fresh()
+				valueRefStr := "@ref:" + mappedValueRef
+				valueRaw, _ := json.Marshal(valueRefStr)
+				thenBindings = append(thenBindings, ir.ANFBinding{
+					Name: valueName,
+					Value: ir.ANFValue{
+						Kind:        "load_const",
+						RawValue:    valueRaw,
+						ConstString: &valueRefStr,
+					},
 				})
 			}
 

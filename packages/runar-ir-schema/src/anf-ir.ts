@@ -20,11 +20,33 @@ export interface ANFProgram {
   methods: ANFMethod[];
 }
 
+/**
+ * One FixedArray nesting level on a synthetic scalar leaf. Outermost level
+ * first. `base` is the property name one level up (`grid`, then `grid__0`),
+ * `index` this leaf's position at that level, `length` that level's arity.
+ */
+export interface ANFSyntheticArrayLevel {
+  base: string;
+  index: number;
+  length: number;
+}
+
 export interface ANFProperty {
   name: string;
   type: string;
   readonly: boolean;
   initialValue?: string | bigint | boolean;
+  /**
+   * N-095: present only on a scalar leaf minted by the expand-fixed-arrays
+   * pass. The artifact assembler consumes one level per pass to regroup the
+   * synthetic siblings back into a single FixedArray state/ABI entry, so this
+   * is load-bearing wire data: an ANF that drops it still compiles to the same
+   * script bytes but degrades the SDK's `state.grid` accessor into N raw
+   * scalars. The TS frontend reads the chain off the AST
+   * (`PropertyNode.__syntheticArrayChain`) instead and has no ANF-input mode,
+   * so it is the one tier that need not emit it.
+   */
+  syntheticArrayChain?: ANFSyntheticArrayLevel[];
 }
 
 export interface ANFMethod {
@@ -154,6 +176,14 @@ export interface GetStateScript {
 export interface CheckPreimage {
   kind: 'check_preimage';
   preimage: string; // reference to a temp name
+  /**
+   * Issue #123: BIP-143 sighash flag the on-chain OP_PUSH_TX binding appends to
+   * the derived signature (so the node re-derives the tx sighash under this
+   * flag). Absent = default `ALL|FORKID` (0x41), byte-identical to the pinned
+   * cross-tier binding blob. Only set for a method that declares a non-default
+   * `@sighash` mode, keeping golden ANF unchanged for every existing contract.
+   */
+  sighashFlag?: number;
 }
 
 export interface DeserializeState {

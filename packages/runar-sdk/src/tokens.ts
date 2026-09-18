@@ -199,13 +199,30 @@ export class TokenWallet {
     const address = await this.signer.getAddress();
     const allUtxos = await this.provider.getUtxos(address);
 
-    // Filter to only UTXOs whose script matches the token contract's
-    // locking script prefix (the code portion, before state).
-    const scriptPrefix = this.artifact.script;
+    // Filter to UTXOs whose script begins like this token contract's.
+    //
+    // R-274: this used to compare against `this.artifact.script` whole. That
+    // is the TEMPLATE — each constructor slot holds a one-byte OP_0 that
+    // deployment replaces with the encoded argument — so for any contract with
+    // a constructorSlot inside its code part, no deployed instance starts with
+    // it and this returned EMPTY. Silently: getBalance() answered 0n for a
+    // wallet holding tokens, and transfer() reported "no token UTXOs found".
+    //
+    // The comparison cannot run past the first slot: the substituted argument
+    // is variable-length, so every byte after it sits at a shifted offset.
+    // Matching the template up to the first slot is what every deployed
+    // instance of this contract genuinely shares. It is a FILTER, not proof of
+    // identity — callers that need certainty read the artifact's slot layout.
+    const firstSlotByteOffset = (this.artifact.constructorSlots ?? [])
+      .map((slot) => slot.byteOffset)
+      .reduce((lowest, offset) => Math.min(lowest, offset), Number.POSITIVE_INFINITY);
+    const scriptPrefix = Number.isFinite(firstSlotByteOffset)
+      ? this.artifact.script.slice(0, firstSlotByteOffset * 2)
+      : this.artifact.script;
 
     return allUtxos.filter((utxo) => {
-      // If we have the script, check it starts with the contract code.
-      // Otherwise, include all UTXOs (caller can filter further).
+      // With no script to compare, or a template that is all slot from byte 0,
+      // include everything and let the caller filter further.
       if (utxo.script && scriptPrefix) {
         return utxo.script.startsWith(scriptPrefix);
       }

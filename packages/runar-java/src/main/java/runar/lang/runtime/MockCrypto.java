@@ -639,14 +639,25 @@ public final class MockCrypto {
         return new ByteString(Arrays.copyOfRange(all, all.length - l, all.length));
     }
 
-    /** Returns [left, right] split at byte index {@code index}. */
-    public static ByteString[] split(ByteString bs, BigInteger index) {
+    /**
+     * Returns the bytes from {@code index} onwards -- the RIGHT half of the cut
+     * at {@code index}, which is what the Rúnar builtin binds.
+     *
+     * <p>{@code OP_SPLIT} leaves both halves on the stack, but {@code split} is
+     * single-valued: the compiler emits {@code OP_SPLIT OP_NIP} and drops the
+     * left half, because Rúnar has no tuple type and no surface parser accepts
+     * array destructuring, so a pair would be unnameable. Use
+     * {@link #left(ByteString, BigInteger)} for the other side of the cut.
+     *
+     * <p>This used to return a {@code ByteString[]} pair. Nothing could consume
+     * the second element from contract source, and the signature disagreed with
+     * the frontend's own -- which is why
+     * {@code examples/java/.../byte-builtins} could not be compiled by javac.
+     */
+    public static ByteString split(ByteString bs, BigInteger index) {
         int i = index.intValueExact();
         byte[] all = bs.toByteArray();
-        return new ByteString[] {
-            new ByteString(Arrays.copyOfRange(all, 0, i)),
-            new ByteString(Arrays.copyOfRange(all, i, all.length)),
-        };
+        return new ByteString(Arrays.copyOfRange(all, i, all.length));
     }
 
     public static ByteString reverseBytes(ByteString bs) {

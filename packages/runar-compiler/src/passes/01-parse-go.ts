@@ -31,6 +31,9 @@ import type {
 import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
+import type { CompilerDiagnostic } from '../errors.js';
+import { makeDiagnostic } from '../errors.js';
+import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -67,7 +70,7 @@ const KEYWORDS = new Map<string, TokenType>([
   ['true', 'true'], ['false', 'false'],
 ]);
 
-function tokenize(source: string): GoToken[] {
+function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): GoToken[] {
   const tokens: GoToken[] = [];
   let pos = 0;
   let line = 1;
@@ -220,7 +223,12 @@ function tokenize(source: string): GoToken[] {
       continue;
     }
 
-    // Skip unknown
+    // Unrecognized character — reject it rather than dropping it silently.
+    errors.push(makeDiagnostic(
+      `Unexpected character '${ch}'`,
+      'error',
+      { file, line: l, column: c },
+    ));
     advance();
   }
 
@@ -256,7 +264,7 @@ const GO_TYPE_MAP: Record<string, string> = {
   Bool: 'boolean', bool: 'boolean', int: 'bigint',
   ByteString: 'ByteString',
   PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
-  Ripemd160: 'Ripemd160', Addr: 'Addr',
+  Ripemd160: 'Ripemd160', Ripemd160Hash: 'Ripemd160', Addr: 'Addr',
   SigHashPreimage: 'SigHashPreimage',
   RabinSig: 'RabinSig', RabinPubKey: 'RabinPubKey',
   Point: 'Point',
@@ -285,7 +293,15 @@ function makePrimitiveOrCustom(name: string): TypeNode {
 // Builtin mapping: Go PascalCase → Rúnar camelCase
 // ---------------------------------------------------------------------------
 
-const GO_BUILTIN_MAP: Record<string, string> = {
+export const GO_BUILTIN_MAP: Record<string, string> = {
+  // the *Big peers of num2bin / bin2num. They lower to the SAME builtins as Num2Bin / Bin2Num, exactly as compilers/go has always done: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not truncate), not a different Script operation. Six tiers fell through to the default rule and produced `num2BinBig` / `bin2NumBig`, names no builtin registry has (R-Bigint)
+  Num2BinBig: 'num2bin',
+  Bin2NumBig: 'bin2num',
+
+  // the *Big peers of abs / gcd. Same rule as Num2BinBig / Bin2NumBig above: the suffix names a different Go RUNTIME type (*big.Int, so the Go-side mock does not narrow at MinInt64), not a different Script operation — OP_ABS and the gcd builtin are arbitrary-width after Genesis. These were mapped in ZERO tiers while `Abs(math.MinInt64)` and `Gcd(math.MinInt64, 0)` in packages/runar-go panic telling the author to use them, naming the .runar.go parser as the thing that lowers them
+  AbsBig: 'abs',
+  GcdBig: 'gcd',
+
   // Assertions
   Assert: 'assert',
   // Hashing
@@ -354,12 +370,62 @@ const GO_BUILTIN_MAP: Record<string, string> = {
   Sha256Compress: 'sha256Compress', Sha256Finalize: 'sha256Finalize',
 };
 
-/** Known type names used for type cast detection. */
-const GO_CAST_TYPES = new Set([
-  'Int', 'Bigint', 'BigintBig', 'Bool', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
+/**
+ * Known type names used for type cast detection.
+ *
+ * MUST stay disjoint from `GO_BUILTIN_MAP`. `Sha256` and `Ripemd160` are both
+ * Rúnar type names and Rúnar builtin names, and the Go surface spells a cast
+ * and a call identically — `runar.Sha256(x)`. While both names sat here the
+ * cast branch ran first and `runar.Sha256(preimage)` unwrapped to an identity
+ * binding: `assert(sha256(x) === digest)` compiled to `assert(x === digest)`,
+ * with the digest in the locking script for anyone to read and push back.
+ *
+ * In call position the FUNCTION wins. `docs/formats/go.md` has documented
+ * `runar.Sha256(data)` -> `sha256(data)` since the surface shipped, five of the
+ * seven tiers already implemented it, and the cast reading loses nothing:
+ * `Sha256` and `Ripemd160` are ByteString subtypes, so the conversion was an
+ * identity on the value and a no-op on the bytes. Both names still resolve as
+ * TYPES — that is `GO_TYPE_MAP`, consulted from type position only.
+ *
+ * The disjointness is asserted in `01-parse-go.test.ts`; adding a name to both
+ * tables is what reintroduces the bug.
+ */
+export const GO_CAST_TYPES = new Set([
+  'Int', 'Bigint', 'BigintBig', 'Bool', 'ByteString', 'PubKey', 'Sig',
+  'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
   'Point', 'P256Point', 'P384Point',
 ]);
+
+/**
+ * BigintBig operator helpers → the Rúnar binary operator each one stands for.
+ *
+ * `runar.BigintBig` is `*big.Int` in packages/runar-go, and Go has no operator
+ * overloading: `a < b` does not compile on two of them and `a == b` compiles
+ * into POINTER IDENTITY, which is worse. So a `.runar.go` contract carrying
+ * arbitrary-precision values spells its arithmetic as `runar.BigintBigLess(a, b)`
+ * and the parser rewrites the call back into the operator. The emitted script is
+ * identical to the one the operator itself produces — that is the point.
+ *
+ * This table has to agree with `bigintBigOpFor` in
+ * compilers/go/frontend/parser_gocontract.go and with the eleven helpers in
+ * packages/runar-go/runar.go. It lived ONLY in the Go compiler until R-Bigint:
+ * the other six tiers parse `.runar.go` as well (frontend parity, no
+ * exceptions) and rejected `bigintBigEqual` as an unknown function, which no
+ * fixture had ever exercised.
+ */
+export const GO_BIGINTBIG_OPS: Record<string, string> = {
+  BigintBigLess: '<',
+  BigintBigLessEq: '<=',
+  BigintBigGreater: '>',
+  BigintBigGreaterEq: '>=',
+  BigintBigEqual: '===',
+  BigintBigNotEqual: '!==',
+  BigintBigAdd: '+',
+  BigintBigSub: '-',
+  BigintBigMul: '*',
+  BigintBigMod: '%',
+  BigintBigDiv: '/',
+};
 
 function mapGoBuiltin(name: string): string {
   if (GO_BUILTIN_MAP[name]) return GO_BUILTIN_MAP[name]!;
@@ -1202,6 +1268,18 @@ class GoParser extends ParserCore<GoToken> {
           return inner; // unwrap type cast
         }
 
+        // BigintBig operator helper: runar.BigintBigEqual(a, b) === a === b.
+        // See GO_BIGINTBIG_OPS for why contract source needs the spelling.
+        const bigOp = GO_BIGINTBIG_OPS[memberName];
+        if (bigOp !== undefined && this.current().type === '(') {
+          this.advance(); // '('
+          const left = this.parseExpression();
+          this.expect(',');
+          const right = this.parseExpression();
+          this.expect(')');
+          return { kind: 'binary_expr', op: bigOp, left, right } as Expression;
+        }
+
         // Map to builtin name
         const builtinName = mapGoBuiltin(memberName);
         return { kind: 'identifier', name: builtinName };
@@ -1216,9 +1294,16 @@ class GoParser extends ParserCore<GoToken> {
       return { kind: 'identifier', name: goToCamel(t.value) };
     }
 
-    // Fallback
+    // Nothing in the Go surface syntax can start an expression with this
+    // token. Report it instead of inventing an identifier named after it —
+    // a fabricated identifier turns a syntax error into a wrong program.
+    this.errors.push(makeDiagnostic(
+      `Unexpected token in expression: '${t.value || t.type}'`,
+      'error',
+      this.loc(),
+    ));
     this.advance();
-    return { kind: 'identifier', name: t.value };
+    return { kind: 'bigint_literal', value: 0n };
   }
 
   /**
@@ -1246,8 +1331,12 @@ class GoParser extends ParserCore<GoToken> {
 // ---------------------------------------------------------------------------
 
 export function parseGoSource(source: string, fileName?: string): ParseResult {
+  // R-146: this function is exported from the package index, so the
+  // dispatcher's size guard has to be here too — see ./source-limits.ts.
+  assertSourceWithinLimits(source, 'parseGoSource');
   const file = fileName ?? 'contract.runar.go';
-  const tokens = tokenize(source);
-  const parser = new GoParser(tokens, file);
+  const errors: CompilerDiagnostic[] = [];
+  const tokens = tokenize(source, file, errors);
+  const parser = new GoParser(tokens, file, errors);
   return parser.parse();
 }

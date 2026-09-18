@@ -336,7 +336,7 @@ func TestSp1FriVerifier_TruncatedFailsPushAndHashBinding(t *testing.T) {
 	ops = append(ops, pushBytes(full)) // proofBlob the covenant committed to
 
 	ops = append(ops, gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, len(chunks))
+		EmitProofBlobBindingHash(emit, len(chunks), 0)
 	})...)
 	for range chunks {
 		ops = append(ops, opcode("OP_DROP"))
@@ -357,7 +357,7 @@ func TestSp1FriVerifier_TruncatedFailsPushAndHashBinding(t *testing.T) {
 	}
 	okOps = append(okOps, pushBytes(full))
 	okOps = append(okOps, gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, len(honest))
+		EmitProofBlobBindingHash(emit, len(honest), 0)
 	})...)
 	for range honest {
 		okOps = append(okOps, opcode("OP_DROP"))
@@ -378,7 +378,21 @@ func TestSp1FriVerifier_TruncatedFailsPushAndHashBinding(t *testing.T) {
 // validated PoC parameter set encodes exactly that — SP1VKeyHashByteSize == 0,
 // at which the sp1VKeyHash argument is dropped by the compiler and never
 // absorbed into the transcript, so no VK hash value can change any verifier
-// decision.
+// decision AT THIS TUPLE.
+//
+// Scope note (R-057). "At this tuple" is load-bearing and did not used to be.
+// The verifying key reached no transcript at ANY parameter set: the Step 2b
+// absorb in emitTranscriptInit looked up an `_obs_sp1_vk_hash` slot that
+// sp1FriPrePushedFieldNames never allocated, so SP1VKeyHashByteSize > 0
+// panicked the compiler instead of binding the key, and every named preset
+// leaves the field at 0. SP1VKeyHashByteSize > 0 now absorbs the contract's
+// readonly Sp1VKeyHash property — a locking-script constant — at the head of
+// the transcript; the adversarial proof of that lives in
+// compilers/go/compiler.TestSp1FriVerifier_VerifyingKeyBindsTheProgram.
+//
+// So the assertion below is NOT "the VK is unbindable". It is "the PoC tuple
+// used by the fixtures in this directory is VK-blind, which is why a bad_vk
+// fixture would be inert here".
 //
 // This test exists so the gap stays honest in both directions: it fails if
 // someone drops fixture bytes into bad_vk/ without wiring a real assertion,
@@ -409,8 +423,10 @@ func TestSp1FriVerifier_BadVkCorruptionIsDocumentedAbsent(t *testing.T) {
 	// The claim above is only true while the PoC parameter set really does
 	// disable the VK-hash absorb. Pin it.
 	if got := DefaultSP1FriParams().SP1VKeyHashByteSize; got != 0 {
-		t.Fatalf("DefaultSP1FriParams().SP1VKeyHashByteSize == %d, not 0. The VK hash is now "+
-			"bound, so bad_vk/ is testable — generate the fixture and assert rejection.", got)
+		t.Fatalf("DefaultSP1FriParams().SP1VKeyHashByteSize == %d, not 0. The PoC tuple now "+
+			"binds a VK hash, so bad_vk/ is testable — generate the fixture and assert rejection.", got)
 	}
-	t.Log("bad_vk correctly absent: SP1VKeyHashByteSize==0 means no VK hash is bound at the PoC parameter set")
+	t.Log("bad_vk correctly absent: SP1VKeyHashByteSize==0 means no VK hash is bound at the PoC " +
+		"parameter set (SP1VKeyHashByteSize>0 does bind one — see " +
+		"compiler.TestSp1FriVerifier_VerifyingKeyBindsTheProgram)")
 }

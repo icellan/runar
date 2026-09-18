@@ -148,11 +148,32 @@ public final class AnfOptimize {
         return false;
     }
 
+    /**
+     * Iteration bound for the EC rewrite fixed point (R-264). Exhausting it is
+     * a refusal, not a quiet stop — see optimizeEcMethod.
+     */
+    private static final int EC_FIXED_POINT_LIMIT = 64;
+
     private static AnfMethod optimizeEcMethod(AnfMethod method) {
         // Fixed-point: each pass may unblock further optimizations (e.g. one
         // rule produces an aliased value that matches another rule).
+        // R-264: the seven tiers do not agree on how many times to iterate.
+        // The TypeScript reference makes ONE pass (optimizeMethodEC has no
+        // outer loop at all); Go, Zig and Ruby loop to a fixed point with no
+        // bound; this tier stops at 64. Cross-tier byte-identity survives that
+        // only because one pass already reaches the fixed point for everything
+        // in the corpus — if a second pass ever changed a program, TS would
+        // diverge from Go/Zig/Ruby immediately, with or without this cap.
+        //
+        // The cap itself is not the hazard; stopping QUIETLY is. A program that
+        // reached iteration 64 here would be emitted partially optimised while
+        // the unbounded tiers kept going, and the two would disagree on bytes
+        // with nothing said. So the bound is kept (an unbounded loop on a
+        // non-converging rule set is its own failure) and exhausting it is now
+        // a refusal.
         List<AnfBinding> body = new ArrayList<>(method.body());
-        for (int iter = 0; iter < 64; iter++) {
+        boolean converged = false;
+        for (int iter = 0; iter < EC_FIXED_POINT_LIMIT; iter++) {
             // value_map maps binding name → its current ANFValue. We rebuild
             // the body in order, allowing each subsequent binding to see the
             // optimized form of earlier ones.
@@ -170,7 +191,19 @@ public final class AnfOptimize {
                 next.add(rebound);
             }
             body = next;
-            if (!changed) break;
+            if (!changed) {
+                converged = true;
+                break;
+            }
+        }
+        if (!converged) {
+            throw new IllegalStateException(
+                "EC optimiser did not reach a fixed point for method '" + method.name()
+                    + "' within " + EC_FIXED_POINT_LIMIT + " iterations. The Go, Zig and "
+                    + "Ruby tiers iterate without a bound and would keep going, so "
+                    + "emitting this program here would diverge from them. Either the "
+                    + "rule set does not converge for this input, or the limit is too "
+                    + "low.");
         }
         // Dead-binding elimination after fixed-point.
         body = eliminateDead(body);
@@ -227,6 +260,24 @@ public final class AnfOptimize {
             AnfValue neg = resolveValue(args.get(1), vm);
             if (neg instanceof Call nc && "ecNegate".equals(nc.func()) && nc.args() != null && nc.args().size() == 1) {
                 if (sameBinding(args.get(0), nc.args().get(0), vm)) {
+                    return makeConstHex(INFINITY_HEX);
+                }
+            }
+        }
+        // Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+        //
+        // The mirror of Rule 8. It has always been in optimizer/ec-rules.json and
+        // the Go tier -- whose rule engine executes that file directly --
+        // performed it; the six hand-ported tiers implemented only the forward
+        // direction, so the same ANF compiled to a 1808-byte script in Go and a
+        // 26140-byte one everywhere else (R-034 / CL-BUG-028).
+        //
+        // Placed after Rule 8 and before Rules 9/10/11 to match the JSON's rule
+        // order, which is the order the Go engine tries them in.
+        if ("ecAdd".equals(func) && args.size() == 2) {
+            AnfValue neg = resolveValue(args.get(0), vm);
+            if (neg instanceof Call nc && "ecNegate".equals(nc.func()) && nc.args() != null && nc.args().size() == 1) {
+                if (sameBinding(args.get(1), nc.args().get(0), vm)) {
                     return makeConstHex(INFINITY_HEX);
                 }
             }
@@ -371,32 +422,21 @@ public final class AnfOptimize {
         return name;
     }
 
-    @SuppressWarnings("unused")
-    private static AnfProgram runFullOptimizer(AnfProgram program) {
-        List<AnfMethod> opts = new ArrayList<>(program.methods().size());
-        for (AnfMethod m : program.methods()) {
-            opts.add(optimizeMethod(m));
-        }
-        return new AnfProgram(program.contractName(), program.properties(), opts);
-    }
+    // R-261: ~250 lines of a SECOND optimizer used to sit here —
+    // `runFullOptimizer` -> `optimizeMethod` -> `collapseTautologicalIfs`, all
+    // private, all referenced only by each other, and marked
+    // @SuppressWarnings("unused") to keep the compiler quiet about it. The live
+    // entry point is `run` above, which goes through `optimizeEcMethod`.
+    //
+    // It is deleted rather than commented, because of what earlier work already
+    // had to do to it: `collapseTautologicalIfs` carried a rule that hoisted a
+    // then-arm's bindings — property writes included — out of any `if` whose
+    // else arm was empty, which is EVERY `if` without an else. That rule was
+    // removed with a note saying it "had to go before someone re-enables the
+    // optimiser". Keeping the rest of an unreachable optimizer in the
+    // production pass file is the same hazard one step back.
 
-    private static AnfMethod optimizeMethod(AnfMethod method) {
-        List<AnfBinding> body = method.body();
 
-        // Iterate to fixed point: each pass may unblock further optimizations.
-        for (int i = 0; i < 64; i++) {
-            int before = bodyFingerprint(body);
-
-            body = collapseTautologicalIfs(body);
-            body = propagateAliases(body);
-            body = eliminateDead(body);
-
-            int after = bodyFingerprint(body);
-            if (before == after) break;
-        }
-
-        return new AnfMethod(method.name(), method.params(), body, method.isPublic());
-    }
 
     /** Cheap structural fingerprint used as a fixed-point sentinel. */
     private static int bodyFingerprint(List<AnfBinding> body) {
@@ -428,64 +468,6 @@ public final class AnfOptimize {
     // 1. Tautological-branch removal
     // ---------------------------------------------------------------
 
-    /**
-     * If a binding {@code t = if(cond) {then} else {else}} has both branches
-     * after constant-folding such that exactly one is non-empty, splice that
-     * branch into the surrounding body, dropping the {@code If} wrapper.
-     *
-     * <p>This makes constant folding visible across the ANF pipeline:
-     * after this pass, {@code if (true) { ... }} becomes a flat block.
-     * Note that we only collapse when the surviving branch ends in a
-     * binding whose name we can map back to {@code t}.  If the branch is
-     * empty (both then and else, e.g. when both bodies were entirely dead),
-     * we drop the binding outright.
-     */
-    private static List<AnfBinding> collapseTautologicalIfs(List<AnfBinding> body) {
-        List<AnfBinding> out = new ArrayList<>(body.size());
-        for (AnfBinding b : body) {
-            if (b.value() instanceof If ifv) {
-                List<AnfBinding> then = orEmpty(ifv.thenBranch());
-                List<AnfBinding> els = orEmpty(ifv.elseBranch());
-
-                // Recurse into surviving branches first.
-                List<AnfBinding> thenOpt = collapseTautologicalIfs(then);
-                List<AnfBinding> elsOpt = collapseTautologicalIfs(els);
-
-                boolean thenEmpty = thenOpt.isEmpty();
-                boolean elsEmpty = elsOpt.isEmpty();
-
-                if (thenEmpty && elsEmpty) {
-                    // Whole branch evaporated; binding is dead. Skip.
-                    continue;
-                }
-                // NOTE: an earlier version spliced the surviving arm in place of
-                // the `If` whenever exactly one arm was empty. That is unsound
-                // for any condition that is not a compile-time constant, and
-                // this pass has no constant information: EVERY `if` without an
-                // else has an empty else arm, so the rule would hoist the
-                // then-arm's bindings — property writes included — out of the
-                // conditional and run them unconditionally. It is unreachable
-                // today (`runFullOptimizer` is unused; `Cli.optimizeAnf` calls
-                // `AnfOptimize.run`), which is exactly why it had to go before
-                // someone re-enables the optimiser.
-                //
-                // Keep the `If` with optimised children instead — including
-                // when one arm is empty, which is a legitimate shape the
-                // lowerer handles (`lowerIf`'s preserve-the-old-value path).
-                // Both branches non-empty: keep the If, but with optimized children.
-                out.add(new AnfBinding(b.name(),
-                    new If(ifv.cond(), thenOpt, elsOpt, ifv.results()), b.sourceLoc()));
-                continue;
-            }
-            if (b.value() instanceof Loop lp) {
-                List<AnfBinding> bodyOpt = collapseTautologicalIfs(orEmpty(lp.body()));
-                out.add(new AnfBinding(b.name(), new Loop(lp.count(), bodyOpt, lp.iterVar(), lp.start(), lp.step()), b.sourceLoc()));
-                continue;
-            }
-            out.add(b);
-        }
-        return out;
-    }
 
     // ---------------------------------------------------------------
     // 2. Constant propagation through @ref: aliases

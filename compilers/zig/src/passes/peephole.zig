@@ -23,7 +23,9 @@ const max_iterations = 100;
 fn isPush(inst: Inst) bool {
     return switch (inst) {
         .push_int, .push_data, .push_bool, .push_big_int_decimal, .push_codesep_index, .placeholder => true,
-        .op, .raw_bytes => false,
+        // R-095: verify_code_part_len is a self-contained, stack-neutral
+        // verify sequence, not a push — no rewrite window may treat it as one.
+        .op, .raw_bytes, .verify_code_part_len => false,
     };
 }
 
@@ -129,6 +131,8 @@ fn instEql(a: Inst, b: Inst) bool {
         .push_data => |da| std.mem.eql(u8, da, b.push_data),
         .push_big_int_decimal => |sa| std.mem.eql(u8, sa, b.push_big_int_decimal),
         .push_codesep_index => true,
+        .verify_code_part_len => |va| va.delta == b.verify_code_part_len.delta and
+            va.exact == b.verify_code_part_len.exact,
         .placeholder => |pa| pa.param_index == b.placeholder.param_index,
         // raw_bytes is opaque; we never compare or rewrite across it, so
         // equality here is purely for completeness.
@@ -166,19 +170,25 @@ pub fn optimize(allocator: Allocator, methods: []const types.StackMethod) ![]typ
             .instruction_source_locs = opt.locs,
             .ops = method.ops,
             .max_stack_depth = method.max_stack_depth,
+            .needs_code_separator = method.needs_code_separator,
         };
     }
     return result;
 }
 
-const OptOut = struct {
+pub const OptOut = struct {
     insts: []Inst,
     locs: []?types.SourceLocation,
 };
 
 /// Run the iterative peephole pass while keeping a parallel
 /// source-location array aligned with the instruction stream.
-fn optimizeOpsAndLocs(
+///
+/// Public because stack lowering optimizes each branch arm separately (N-100),
+/// and an arm's instructions are spliced into the enclosing method WITH their
+/// locations -- dropping them there is what desynchronised the two arrays and
+/// mis-attributed every opcode after the first conditional.
+pub fn optimizeOpsAndLocs(
     allocator: Allocator,
     ops: []const Inst,
     src_locs: []const ?types.SourceLocation,

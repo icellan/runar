@@ -1,49 +1,49 @@
 {
   "mappings": [
     {
-      "opcodeIndex": 38,
+      "opcodeIndex": 107,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 36,
       "column": 1
     },
     {
-      "opcodeIndex": 40,
+      "opcodeIndex": 109,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 36,
       "column": 1
     },
     {
-      "opcodeIndex": 188,
+      "opcodeIndex": 324,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 189,
+      "opcodeIndex": 325,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 190,
+      "opcodeIndex": 326,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 191,
+      "opcodeIndex": 327,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 42,
       "column": 1
     },
     {
-      "opcodeIndex": 192,
+      "opcodeIndex": 328,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 43,
       "column": 1
     },
     {
-      "opcodeIndex": 194,
+      "opcodeIndex": 330,
       "sourceFile": "examples/go/stateful-counter/Counter.runar.go",
       "line": 43,
       "column": 1

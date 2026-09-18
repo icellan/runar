@@ -6,7 +6,7 @@ use sha2::{Sha256, Digest};
 use bsv::transaction::Transaction as BsvTransaction;
 use bsv::transaction::beef::Beef;
 use super::types::*;
-use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return};
+use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return, flatten_fixed_array_state, regroup_fixed_array_state};
 use super::oppushtx::compute_op_push_tx_with_code_sep_sighash;
 use super::deployment::{
     build_deploy_transaction, select_utxos,
@@ -18,6 +18,7 @@ use super::script_utils::extract_constructor_args;
 use super::provider::Provider;
 use super::signer::Signer;
 use super::errors::{assert_script_hex_under_limit, WitnessValueMissingError, MAX_SCRIPT_BYTES};
+use super::unsound_primitives::assert_unsound_primitives_acknowledged;
 use super::anf_interpreter;
 use super::ordinals::{Inscription, build_inscription_envelope, parse_inscription_envelope};
 use crate::prelude::hash160 as compute_hash160;
@@ -74,6 +75,61 @@ fn normalize_witness_hex(s: &str) -> Result<String, String> {
         }
     }
     Ok(trimmed.to_ascii_lowercase())
+}
+
+/// Decode the value of every EQUALITY `verify_code_part_len` pin in a compiled
+/// script.
+///
+/// The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+///
+/// ```text
+///     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+///     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+/// ```
+///
+/// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
+/// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+/// satisfy, so it is deliberately not returned here.
+///
+/// Read from the emitted TEMPLATE rather than from a built code script: the
+/// template holds OP_0 placeholders where constructor args go, so no
+/// caller-supplied byte string can be mistaken for a pin.
+fn decode_exact_code_part_len_pins(script_hex: &str) -> Vec<usize> {
+    let mut values = Vec::new();
+    let bytes = script_hex.as_bytes();
+    let mut i = 0;
+    while i + 18 <= bytes.len() {
+        let seq = &script_hex[i..i + 18];
+        i += 2;
+        if &seq[0..4] != "7604" {
+            continue;
+        }
+        if &seq[12..14] != "81" {
+            continue;
+        }
+        if &seq[14..16] != "9c" {
+            continue;
+        }
+        if &seq[16..18] != "69" {
+            continue;
+        }
+        let mut value: usize = 0;
+        let mut ok = true;
+        for b in (0..4).rev() {
+            // little-endian
+            match usize::from_str_radix(&seq[4 + 2 * b..6 + 2 * b], 16) {
+                Ok(n) => value = (value << 8) | n,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            values.push(value);
+        }
+    }
+    values
 }
 
 /// The well-known ByteString parameter the SDK fills in with the transaction's
@@ -449,6 +505,15 @@ impl RunarContract {
             &format!("{}.deploy", self.artifact.contract_name),
         )?;
 
+        // R-062: and refuse to fund a script reaching a builtin the compiler
+        // does not claim is sound unless the caller says so here, in the same
+        // breath as the money.
+        assert_unsound_primitives_acknowledged(
+            &self.artifact,
+            &options.acknowledge_unsound,
+            &format!("{}.deploy", self.artifact.contract_name),
+        )?;
+
         // Fetch fee rate and funding UTXOs
         let fee_rate = provider.get_fee_rate()?;
         let all_utxos = provider.get_utxos(&address)?;
@@ -469,7 +534,7 @@ impl RunarContract {
             change_address,
             &change_script,
             Some(fee_rate),
-        );
+        )?;
 
         // Sign all inputs. Funding inputs are signed by funding_signer when set
         // (issue #134): the deploy signer may not own the funding coins.
@@ -842,9 +907,19 @@ impl RunarContract {
                 // addDataOutput/addRawOutput payloads, so there is nothing to
                 // fall back TO: an explicit `new_state` covers only the state
                 // field and still leaves the outputs missing.
+                // The interpreter knows only the EXPANDED scalar property
+                // names, so a grouped FixedArray entry has to be spread over
+                // its synthetic leaves first — see `flatten_fixed_array_state`.
+                let empty_fields: Vec<StateField> = Vec::new();
+                let state_fields: &[StateField] = self
+                    .artifact
+                    .state_fields
+                    .as_deref()
+                    .unwrap_or(&empty_fields);
+                let flat_state = flatten_fixed_array_state(&self.state, state_fields);
                 let (state, data_outs, _raw_outs, ordered_outs) =
                     anf_interpreter::compute_new_state_and_data_outputs(
-                        anf, method_name, &self.state, &named_args,
+                        anf, method_name, &flat_state, &named_args,
                         &self.constructor_args,
                     )
                     .map_err(|e| {
@@ -856,7 +931,12 @@ impl RunarContract {
                             method_name, e
                         )
                     })?;
-                auto_computed_state = Some(state);
+                // ...and the post-state comes back under those same
+                // synthetic names. `serialize_state` reads a FixedArray field
+                // from its GROUPED entry ONLY, so without regrouping the
+                // continuation commits the pre-call array and the covenant's
+                // hashOutputs binding rejects the spend.
+                auto_computed_state = Some(regroup_fixed_array_state(&state, state_fields));
                 anf_ordered_outputs = ordered_outs;
                 resolved_data_outputs = data_outs.into_iter().map(|d| ContractOutput {
                     script: d.script,
@@ -1902,9 +1982,56 @@ impl RunarContract {
     /// envelope is injected into the locking script between the compiled code
     /// and the state section (if any). Once deployed, the inscription is
     /// immutable -- it persists identically across all state transitions.
-    pub fn with_inscription(&mut self, inscription: Inscription) -> &mut Self {
+    ///
+    /// N-043 -- returns `Err` when the envelope would break the contract's own
+    /// `SIZE(_codePart)` pin. A stateful contract with a variable-length state
+    /// section carries an equality pin on the deployed code-part length, and the
+    /// envelope lands INSIDE the code part (see `get_code_part_hex`). The
+    /// compiler bakes that number before any inscription exists, so the pinned
+    /// length and the real one differ by the envelope's size and every honest
+    /// spend aborts at OP_VERIFY -- with the funds already committed. Refusing
+    /// here turns a permanent, silent lock into a loud error before a single
+    /// satoshi moves.
+    pub fn with_inscription(&mut self, inscription: Inscription) -> Result<&mut Self, String> {
+        let previous = self.inscription.take();
         self.inscription = Some(inscription);
-        self
+        if let Err(e) = self.assert_code_part_length_pin_honoured() {
+            self.inscription = previous;
+            return Err(e);
+        }
+        Ok(self)
+    }
+
+    /// Verify that every equality `verify_code_part_len` pin the compiler baked
+    /// into this artifact still describes the code part this contract produces.
+    ///
+    /// The check is the invariant itself, not a restatement of the compiler's
+    /// derivation: it decodes the pinned number straight out of the emitted
+    /// template and compares it to `get_code_part_hex()`. So it permits every
+    /// combination that actually works -- a stateless contract or a fixed-size
+    /// state layout carries no pin at all, and a lower-bound pin is satisfied by
+    /// a longer code part -- and rejects only the shape that would lock funds.
+    fn assert_code_part_length_pin_honoured(&self) -> Result<(), String> {
+        let pinned = decode_exact_code_part_len_pins(&self.artifact.script);
+        if pinned.is_empty() {
+            return Ok(());
+        }
+        let actual = self.get_code_part_hex().len() / 2;
+        for value in pinned {
+            if value == actual {
+                continue;
+            }
+            return Err(format!(
+                "RunarContract::with_inscription: {} pins SIZE(_codePart) == {}, but \
+                 with this inscription attached the code part is {} bytes. Deploying \
+                 it would make every spend fail OP_VERIFY and lock the contract's \
+                 funds permanently. An inscription cannot be attached to a stateful \
+                 contract with a variable-length state section: the envelope is part \
+                 of the code part, and its length is not known when the pin is compiled",
+                self.artifact.contract_name, value, actual,
+            ));
+        }
+        Ok(())
     }
 
     /// Returns the current inscription, if any.
@@ -2084,7 +2211,7 @@ impl RunarContract {
     pub fn from_utxo(
         artifact: RunarArtifact,
         utxo: &Utxo,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // Recover the real constructor args baked into the deployed script
         // (issue #119). Filling zeros made restored stateful spends compute the
         // wrong state continuation and codesep/OP_PUSH_TX offset — unspendable.
@@ -2123,16 +2250,24 @@ impl RunarContract {
         // Set the current UTXO
         contract.current_utxo = Some(utxo.clone());
 
-        // Extract state if this is a stateful contract
+        // Extract state if this is a stateful contract.
+        //
+        // FAILS CLOSED (C2). `utxo.script` is a locking script any third party
+        // can construct, and the state decoded from it is what the next `call`
+        // commits to in the continuation output. A blob that does not decode
+        // EXACTLY as the artifact's `state_fields` describe is an error, not a
+        // panic and not constructor-initial values dressed up as live state.
         if let Some(ref state_fields) = contract.artifact.state_fields {
             if !state_fields.is_empty() {
-                if let Some(state) = extract_state_from_script(&contract.artifact, &utxo.script) {
-                    contract.state = state;
+                match extract_state_from_script(&contract.artifact, &utxo.script) {
+                    Ok(Some(state)) => contract.state = state,
+                    Ok(None) => {}
+                    Err(e) => return Err(format!("RunarContract::from_utxo: {e}")),
                 }
             }
         }
 
-        contract
+        Ok(contract)
     }
 
     /// Reconnect to an existing deployed contract from its deployment transaction.
@@ -2154,12 +2289,12 @@ impl RunarContract {
 
         let output = &tx.outputs[output_index];
 
-        Ok(RunarContract::from_utxo(artifact, &Utxo {
+        RunarContract::from_utxo(artifact, &Utxo {
             txid: txid.to_string(),
             output_index: output_index as u32,
             satoshis: output.satoshis,
             script: output.script.clone(),
-        }))
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -2527,7 +2662,7 @@ fn encode_arg(value: &SdkValue) -> String {
 }
 
 /// Encode an integer as a Bitcoin Script number opcode or push data.
-fn encode_script_number(n: i64) -> String {
+pub(crate) fn encode_script_number(n: i64) -> String {
     if n == 0 {
         return "00".to_string(); // OP_0
     }
@@ -2562,7 +2697,7 @@ fn encode_script_number(n: i64) -> String {
 /// Encode an arbitrary-precision BigInt as a Bitcoin Script number push.
 /// Uses LE sign-magnitude encoding, same as encode_script_number but for
 /// values that may exceed i64 range.
-fn encode_bigint_script_number(n: &num_bigint::BigInt) -> String {
+pub(crate) fn encode_bigint_script_number(n: &num_bigint::BigInt) -> String {
     use num_bigint::Sign;
 
     if n.sign() == Sign::NoSign {
@@ -2750,6 +2885,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         }
     }
 
@@ -2842,6 +2978,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         RunarContract::new(artifact, vec![]);
     }
@@ -2882,6 +3019,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(
@@ -2922,6 +3060,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(
@@ -2958,6 +3097,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let pub_key_hash = "ab".repeat(20);
@@ -2995,6 +3135,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
@@ -3024,6 +3165,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(42)]);
@@ -3238,6 +3380,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         assert_eq!(txid.len(), 64);
@@ -3271,6 +3414,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         // Call should succeed (not throw "not deployed")
@@ -3335,6 +3479,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let broadcast_count_after_deploy = provider.get_broadcasted_txs().len();
@@ -3367,16 +3512,24 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no UTXOs"));
     }
 
     // Row 332: Error on insufficient funds — a UTXO that is too small to
-    // cover both the requested satoshis and the fee causes a panic from
-    // build_deploy_transaction.
+    // cover both the requested satoshis and the fee must be reported as an
+    // `Err` VALUE carrying the needed and available amounts, not a panic.
+    //
+    // R-043: this test previously asserted `#[should_panic(expected =
+    // "insufficient funds")]`, i.e. it encoded the bug (a library crate
+    // aborting its caller's process on the single most predictable runtime
+    // condition in a deployment path) as intended behaviour. `deploy` returns
+    // `Result`, the Go tier returns an error for the same condition, and a
+    // caller must be able to handle it and keep running — so the assertion is
+    // inverted here.
     #[test]
-    #[should_panic(expected = "insufficient funds")]
     fn deploy_fails_insufficient_funds() {
         let artifact = make_artifact("51", simple_abi());
         let mut contract = RunarContract::new(artifact, vec![]);
@@ -3392,12 +3545,32 @@ mod tests {
             script: format!("76a914{}88ac", "00".repeat(20)),
         });
 
-        // This will panic inside build_deploy_transaction with "insufficient funds".
-        let _ = contract.deploy(&mut provider, &signer, &DeployOptions {
+        let result = contract.deploy(&mut provider, &signer, &DeployOptions {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         });
+
+        // The caller gets a VALUE back, so this line is reached at all.
+        let err = result.expect_err("deploy must return Err on insufficient funds, not panic");
+        assert!(
+            err.contains("insufficient funds"),
+            "error should name the condition, got: {err}"
+        );
+        // The error must carry both amounts: need = 50_000 + fee(21) = 50_021,
+        // have = the single 1-satoshi UTXO.
+        assert!(
+            err.contains("50021"),
+            "error should carry the needed amount (50021), got: {err}"
+        );
+        assert!(
+            err.contains("have 1"),
+            "error should carry the available amount (1), got: {err}"
+        );
+
+        // Nothing was signed or broadcast, and the caller can continue.
+        assert!(provider.get_broadcasted_txs().is_empty());
     }
 
     #[test]
@@ -3448,6 +3621,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let result = contract.call("nonexistent", &[], &mut provider, &signer, None);
@@ -3485,6 +3659,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let result = contract.call(
@@ -3547,6 +3722,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::from_txid(artifact, &fake_txid, 0, &provider).unwrap();
@@ -3626,6 +3802,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
@@ -3670,6 +3847,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(
@@ -3741,6 +3919,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let payout_script = format!("76a914{}88ac", "bb".repeat(20));
@@ -3777,6 +3956,7 @@ mod tests {
             satoshis: 10_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         contract.call("spend", &[], &mut provider, &signer, Some(&CallOptions {
@@ -3814,6 +3994,7 @@ mod tests {
             satoshis: 20_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         let (txid, _) = contract.call("settle", &[], &mut provider, &signer, Some(&CallOptions {
@@ -3849,6 +4030,7 @@ mod tests {
             satoshis: 50_000,
             change_address: None,
             funding_signer: None,
+            acknowledge_unsound: vec![],
         }).unwrap();
 
         contract.call("cancel", &[], &mut provider, &signer, Some(&CallOptions {
@@ -3897,6 +4079,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -3926,6 +4109,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -3955,6 +4139,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -3984,6 +4169,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -4038,6 +4224,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         }
     }
 
@@ -4050,7 +4237,8 @@ mod tests {
         contract.with_inscription(Inscription {
             content_type: "image/png".to_string(),
             data: "ff00ff".to_string(),
-        });
+        })
+            .expect("with_inscription");
         let insc = contract.inscription().unwrap();
         assert_eq!(insc.content_type, "image/png");
         assert_eq!(insc.data, "ff00ff");
@@ -4060,10 +4248,11 @@ mod tests {
     fn with_inscription_returns_self_for_chaining() {
         let artifact = make_artifact("51", simple_abi());
         let mut contract = RunarContract::new(artifact, vec![]);
-        let _ = contract.with_inscription(Inscription {
+        contract.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: "".to_string(),
-        });
+        })
+            .expect("with_inscription");
         // If it compiles and the inscription is set, chaining works
         assert!(contract.inscription().is_some());
     }
@@ -4076,7 +4265,8 @@ mod tests {
         contract.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: data.clone(),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = contract.get_locking_script();
 
@@ -4106,7 +4296,8 @@ mod tests {
         contract.with_inscription(Inscription {
             content_type: "application/bsv-20".to_string(),
             data: json_data.clone(),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = contract.get_locking_script();
         let envelope = super::super::ordinals::build_inscription_envelope("application/bsv-20", &json_data);
@@ -4126,7 +4317,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "image/png".to_string(),
             data: "deadbeef".to_string(),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4134,7 +4326,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script,
-        });
+        })
+        .expect("from_utxo");
 
         let insc = reconnected.inscription().unwrap();
         assert_eq!(insc.content_type, "image/png");
@@ -4168,6 +4361,7 @@ mod tests {
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
+            unsound_primitives: None,
         };
         // Deployed script bakes tag = 42 at the slot (push 1 byte 0x2a).
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4175,7 +4369,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: "012a93".to_string(),
-        });
+        })
+        .expect("from_utxo");
         assert_eq!(reconnected.constructor_args, vec![SdkValue::Int(42)]);
     }
 
@@ -4186,7 +4381,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: utf8_to_hex("my counter"),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4194,7 +4390,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script,
-        });
+        })
+        .expect("from_utxo");
 
         // Inscription round-trips
         let insc = reconnected.inscription().unwrap();
@@ -4212,7 +4409,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: utf8_to_hex("persisted"),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let reconnected = RunarContract::from_utxo(artifact, &Utxo {
@@ -4220,7 +4418,8 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script.clone(),
-        });
+        })
+        .expect("from_utxo");
 
         // Reconnected contract should produce the same locking script
         assert_eq!(reconnected.get_locking_script(), locking_script);
@@ -4237,9 +4436,29 @@ mod tests {
             output_index: 0,
             satoshis: 1,
             script: locking_script,
-        });
+        })
+        .expect("from_utxo");
 
         assert!(reconnected.inscription().is_none());
+    }
+
+    #[test]
+    fn from_utxo_hostile_state_is_an_error() {
+        let artifact = make_stateful_artifact("00");
+        let err = RunarContract::from_utxo(
+            artifact,
+            &Utxo {
+                txid: "00".repeat(32),
+                output_index: 0,
+                satoshis: 1,
+                script: "6a55".to_string(),
+            },
+        )
+        .expect_err("hostile state must be an error, not a panic or a live contract");
+        assert!(
+            err.to_lowercase().contains("from_utxo"),
+            "error must name from_utxo: {err}"
+        );
     }
 
     #[test]
@@ -4249,7 +4468,8 @@ mod tests {
         original.with_inscription(Inscription {
             content_type: "text/plain".to_string(),
             data: utf8_to_hex("via txid"),
-        });
+        })
+            .expect("with_inscription");
 
         let locking_script = original.get_locking_script();
         let fake_txid = "bb".repeat(32);
@@ -4270,7 +4490,8 @@ mod tests {
         let artifact = make_artifact("aabbccdd", simple_abi());
         let mut contract = RunarContract::new(artifact, vec![]);
         let inscription = super::super::ordinals::bsv20_deploy("RUNAR", "21000000", None, None);
-        contract.with_inscription(inscription);
+        contract.with_inscription(inscription)
+            .expect("with_inscription");
 
         let locking_script = contract.get_locking_script();
         let parsed = super::super::ordinals::parse_inscription_envelope(&locking_script).unwrap();
@@ -4368,6 +4589,7 @@ mod tests {
             code_separator_index: Some(1),
             code_separator_indices: Some(vec![1, 3]),
             anf: None,
+            unsound_primitives: None,
         };
 
         let mut real = RunarContract::new(artifact.clone(), vec![SdkValue::Int(500)]);
@@ -4380,5 +4602,109 @@ mod tests {
         assert_eq!(real.get_code_sep_index(1), 3);
         assert_eq!(placeholder.get_code_sep_index(0), real.get_code_sep_index(0));
         assert_eq!(placeholder.get_code_sep_index(1), real.get_code_sep_index(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // N-043 — an ordinals inscription must not break the code-part length pin
+    // -----------------------------------------------------------------------
+    //
+    // A stateful contract with a variable-length state section carries an
+    // EQUALITY pin on the deployed code-part length, emitted as a fixed-width
+    // nine-byte run:
+    //
+    //     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+    //     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+    //
+    // `get_code_part_hex` concatenates the inscription envelope INTO the code
+    // part, so attaching one makes the real code part longer than the pinned
+    // number and every honest spend aborts at OP_VERIFY with the funds already
+    // committed.
+    //
+    // Each template below is a 10-byte script — `OP_1` followed by the nine-byte
+    // pin run — except the unpinned one. The inscription is a two-byte
+    // `text/plain` payload whose envelope is exactly 23 bytes, so an inscribed
+    // code part is 10 + 23 = 33 bytes.
+
+    /// Exact pin of 10: correct WITHOUT an envelope, violated by one. Refuse.
+    const PIN_TEMPLATE_EXACT_10: &str = "5176040a000000819c69";
+    /// Exact pin of 33 (0x21): correct WITH the envelope attached. Accept — and
+    /// a decoder that reads the length big-endian gets 0x21000000 here and
+    /// wrongly refuses.
+    const PIN_TEMPLATE_EXACT_33: &str = "51760421000000819c69";
+    /// LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra bytes satisfy
+    /// it, so it must never trigger a refusal.
+    const PIN_TEMPLATE_LOWER_BOUND_10: &str = "5176040a00000081a269";
+    /// No pin at all (a bare P2PKH template). Accept.
+    const PIN_TEMPLATE_NONE: &str = "76a90088ac";
+
+    fn pin_fixture_contract(script: &str) -> RunarContract {
+        RunarContract::new(make_artifact(script, simple_abi()), vec![])
+    }
+
+    fn pin_fixture_inscription() -> Inscription {
+        Inscription {
+            content_type: "text/plain".to_string(),
+            data: "6869".to_string(),
+        }
+    }
+
+    #[test]
+    fn with_inscription_refuses_when_envelope_breaks_exact_pin() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_EXACT_10);
+
+        let err = contract
+            .with_inscription(pin_fixture_inscription())
+            .expect_err("an exact pin of 10 cannot survive a 23-byte envelope");
+
+        // Assert the REASON, not merely that something failed: a test that
+        // accepts any error passes when an unrelated one fires.
+        for want in ["pins SIZE(_codePart) == 10", "code part is 33 bytes", "inscription"] {
+            assert!(err.contains(want), "refusal message missing {want:?}:\n  {err}");
+        }
+
+        // The contract must be left un-inscribed rather than half-mutated.
+        assert!(contract.inscription().is_none(), "refused attach left the inscription applied");
+        assert_eq!(contract.get_code_part_hex().len() / 2, 10);
+    }
+
+    /// Control: a pin whose value already accounts for the envelope is honoured,
+    /// so the attach must be ACCEPTED. Also pins the little-endian decode.
+    #[test]
+    fn with_inscription_accepts_when_exact_pin_matches_inscribed_length() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_EXACT_33);
+
+        contract
+            .with_inscription(pin_fixture_inscription())
+            .expect("pin equals the inscribed code-part length, must be accepted");
+
+        assert!(contract.inscription().is_some());
+        assert_eq!(contract.get_code_part_hex().len() / 2, 33);
+    }
+
+    /// Control 1 (mandatory): a LOWER-BOUND pin is satisfied by the extra bytes,
+    /// so an inscription must still be accepted. Guarding `a2` would turn this
+    /// fix into an outage for every lower-bound contract.
+    #[test]
+    fn with_inscription_accepts_lower_bound_pin() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_LOWER_BOUND_10);
+
+        contract
+            .with_inscription(pin_fixture_inscription())
+            .expect("a lower-bound pin must not be guarded");
+
+        assert!(contract.inscription().is_some());
+    }
+
+    /// Control 2 (mandatory): a contract with no pin at all (stateless, or a
+    /// fixed-size state layout) must still accept an inscription.
+    #[test]
+    fn with_inscription_accepts_unpinned_contract() {
+        let mut contract = pin_fixture_contract(PIN_TEMPLATE_NONE);
+
+        contract
+            .with_inscription(pin_fixture_inscription())
+            .expect("an unpinned contract must accept an inscription");
+
+        assert!(contract.inscription().is_some());
     }
 }

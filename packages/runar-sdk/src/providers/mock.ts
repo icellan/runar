@@ -42,6 +42,7 @@ function validateBroadcastTx(
   knownOutpoints: ReadonlyMap<string, { script: string; satoshis: number }>,
   feeRate: number,
   enforceFeeFloor: boolean,
+  requireKnownInputs: boolean,
 ): { valid: boolean; error?: string; validated: number; skipped: number } {
   // P2: @bsv/sdk's `Spend.isRelaxed()` returns true whenever
   // `transactionVersion > 1`, which silently disables push-only,
@@ -122,6 +123,33 @@ function validateBroadcastTx(
   // on `allInputsKnown`, so an entirely-unregistered-input broadcast was
   // acked exactly like a genuinely-validated one. Fail closed instead and
   // name the offending outpoint + how to register it.
+  //
+  // M-1 (round-three audit): `validated === 0` was too narrow a trigger.
+  // Both the conservation check and the fee floor below are gated on
+  // `allInputsKnown`, so ONE unregistered input among many switched both off
+  // while P1-1 stayed satisfied by the others. Measured on the same
+  // overspend, the only difference being one extra unregistered input:
+  // all-known rejected ("fee too low: paid -999000 sats"), partially-known
+  // ACCEPTED. A transaction creating 999,000 satoshis from nothing was
+  // acked. Since the value of an unregistered input is unknowable, there is
+  // no sound weaker check to fall back to — either every input is known and
+  // conservation is enforced, or the broadcast is refused. A test that
+  // genuinely needs an input this provider was never told about must say so
+  // explicitly (`allowUnknownInputs()` / `{ allowUnknownInputs: true }`)
+  // rather than acquire the weaker validation by omission.
+  if (skipped > 0 && requireKnownInputs) {
+    return {
+      valid: false,
+      error:
+        `${skipped} of ${tx.inputs.length} input(s) spend an unregistered outpoint ` +
+        `(e.g. ${firstUnknownOutpoint}), so neither value conservation nor the fee ` +
+        'floor can be evaluated — register the funding UTXO via addUtxo() / ' +
+        'addContractUtxo() / addTransaction() before broadcasting, or opt out ' +
+        'explicitly with allowUnknownInputs() / { allowUnknownInputs: true }',
+      validated,
+      skipped,
+    };
+  }
   if (tx.inputs.length > 0 && validated === 0) {
     return {
       valid: false,
@@ -221,6 +249,19 @@ export class MockProvider implements Provider {
    * from the always-ack escape hatches so it isn't mistaken for one.
    */
   private enforceFeeFloor = true;
+  /**
+   * Round-three audit M-1: an input whose outpoint this provider was never
+   * told about makes BOTH the conservation check and the fee floor
+   * un-evaluable (the input's value is unknown), and before M-1 it silently
+   * switched both off — one unregistered input among many was enough to ack
+   * a tx creating satoshis from nothing. Default-ON: an unregistered input
+   * is a rejection. Tests that legitimately spend an outpoint the provider
+   * doesn't model must opt out explicitly and visibly via
+   * `allowUnknownInputs()` / `{ allowUnknownInputs: true }` — at which point
+   * `getValidationStats().skipped` is the auditable record of what went
+   * unchecked.
+   */
+  private requireKnownInputs = true;
   /** outpoint ("txid:vout") -> { script, satoshis } for every UTXO this
    * provider has been told about (via addUtxo/addContractUtxo/addTransaction)
    * or has itself produced via a prior broadcast(). Used by
@@ -236,7 +277,11 @@ export class MockProvider implements Provider {
 
   constructor(
     network: 'mainnet' | 'testnet' = 'testnet',
-    opts?: { validateBroadcasts?: boolean; enforceFeeFloor?: boolean },
+    opts?: {
+      validateBroadcasts?: boolean;
+      enforceFeeFloor?: boolean;
+      allowUnknownInputs?: boolean;
+    },
   ) {
     this.network = network;
     if (opts?.validateBroadcasts !== undefined) {
@@ -244,6 +289,9 @@ export class MockProvider implements Provider {
     }
     if (opts?.enforceFeeFloor !== undefined) {
       this.enforceFeeFloor = opts.enforceFeeFloor;
+    }
+    if (opts?.allowUnknownInputs !== undefined) {
+      this.requireKnownInputs = !opts.allowUnknownInputs;
     }
   }
 
@@ -320,6 +368,27 @@ export class MockProvider implements Provider {
     this.enforceFeeFloor = false;
   }
 
+  /**
+   * Opt out of the unregistered-input gate (M-1) only: `Spend` still runs on
+   * every input this provider DOES know, and the all-inputs-unknown P1-1
+   * backstop still fires — but a broadcast that spends an outpoint the
+   * provider was never told about is acked instead of refused, with neither
+   * value conservation nor the fee floor evaluated (they cannot be: the
+   * unknown input's value is unknown). Assert on
+   * `getValidationStats().skipped` so the gap is pinned rather than assumed.
+   */
+  allowUnknownInputs(): void {
+    this.requireKnownInputs = false;
+  }
+
+  /**
+   * Re-arm the unregistered-input gate (M-1, the default). Kept for
+   * back-compat symmetry with the other toggles.
+   */
+  requireAllInputsKnown(enabled = true): void {
+    this.requireKnownInputs = enabled;
+  }
+
   /** Get all raw tx hexes that were broadcast through this provider. */
   getBroadcastedTxs(): readonly string[] {
     return this.broadcastedTxs;
@@ -357,7 +426,13 @@ export class MockProvider implements Provider {
 
   async broadcast(tx: Transaction): Promise<string> {
     if (this.validateBroadcasts) {
-      const result = validateBroadcastTx(tx, this.knownOutpoints, this.feeRate, this.enforceFeeFloor);
+      const result = validateBroadcastTx(
+        tx,
+        this.knownOutpoints,
+        this.feeRate,
+        this.enforceFeeFloor,
+        this.requireKnownInputs,
+      );
       this.validatedInputCount += result.validated;
       this.skippedInputCount += result.skipped;
       if (!result.valid) {
@@ -372,12 +447,15 @@ export class MockProvider implements Provider {
     this.broadcastedTxObjects.push(tx);
     this.broadcastCount++;
 
-    // Generate a deterministic fake txid purely from the raw tx hex.
-    // Same transaction → same txid (real Bitcoin semantics: txid = hash of tx bytes).
-    const fakeTxid = sha256Hex(`mock-broadcast-${rawTx}`);
+    // Real Bitcoin txid: double-SHA256 of the serialized tx, display order.
+    // BIP-143 outpoints store the internal (byte-reversed) form; the SDK
+    // reverses `sourceTXID` when it builds `allPrevouts`. A fake txid here
+    // made `hash256(parentTx) === companionTxid` unsatisfiable, which is
+    // exactly the W8 companion-parent bind.
+    const txid = tx.id('hex') as string;
 
     // Auto-store raw hex for subsequent getRawTransaction lookups
-    this.rawTransactions.set(fakeTxid, rawTx);
+    this.rawTransactions.set(txid, rawTx);
 
     // Audit finding C4: register the broadcast tx so `getTransaction()`
     // resolves it. Previously only `rawTransactions` + `knownOutpoints` were
@@ -386,20 +464,20 @@ export class MockProvider implements Provider {
     // `finalizeCall()` caught that and returned an empty-`inputs`/`outputs`
     // shell, making every post-broadcast `result.tx.outputs` assertion in the
     // suite vacuous. Unknown txids still throw — see `getTransaction`.
-    this.transactions.set(fakeTxid, txToTransactionData(fakeTxid, tx));
+    this.transactions.set(txid, txToTransactionData(txid, tx));
 
     // Register this tx's own outputs as known outpoints so a subsequent
     // chained call (spending the continuation this broadcast just created)
     // can also be validated.
     for (let i = 0; i < tx.outputs.length; i++) {
       const out = tx.outputs[i]!;
-      this.knownOutpoints.set(`${fakeTxid}:${i}`, {
+      this.knownOutpoints.set(`${txid}:${i}`, {
         script: out.lockingScript.toHex(),
         satoshis: out.satoshis ?? 0,
       });
     }
 
-    return fakeTxid;
+    return txid;
   }
 
   async getUtxos(address: string): Promise<UTXO[]> {
@@ -466,27 +544,4 @@ export class MockProvider implements Provider {
  */
 export function newAlwaysAckMockProvider(network: 'mainnet' | 'testnet' = 'testnet'): MockProvider {
   return new MockProvider(network, { validateBroadcasts: false });
-}
-
-// ---------------------------------------------------------------------------
-// Minimal hex sha256 for deterministic fake txids (no external deps)
-// ---------------------------------------------------------------------------
-
-function sha256Hex(input: string): string {
-  // Simple deterministic hash for mock purposes — not cryptographically
-  // secure. Produces a 64-char hex string that looks like a txid.
-  let h0 = 0x6a09e667;
-  let h1 = 0xbb67ae85;
-  let h2 = 0x3c6ef372;
-  let h3 = 0xa54ff53a;
-  for (let i = 0; i < input.length; i++) {
-    const c = input.charCodeAt(i);
-    h0 = Math.imul(h0 ^ c, 0x01000193) >>> 0;
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
-    h2 = Math.imul(h2 ^ c, 0x01000193) >>> 0;
-    h3 = Math.imul(h3 ^ c, 0x01000193) >>> 0;
-  }
-  return [h0, h1, h2, h3, h0 ^ h2, h1 ^ h3, h0 ^ h1, h2 ^ h3]
-    .map((n) => (n >>> 0).toString(16).padStart(8, '0'))
-    .join('');
 }

@@ -8,15 +8,18 @@
  *   - deadline: bigint (readonly)
  *
  * Methods:
- *   - bid(sig: Sig, bidder: PubKey, bidAmount: bigint) — requires bidder's Sig + extractLocktime
- *   - close(sig: Sig) — requires auctioneer's Sig
+ *   - bid(sig: Sig, bidder: PubKey, bidAmount: bigint) — requires bidder's Sig
+ *   - close(sig: Sig) — requires auctioneer's Sig + a consensus-enforced deadline
  *
- * The bid() method requires the bidder's signature (prevents griefing) and checks
- * extractLocktime(this.txPreimage) < this.deadline, which constrains the
- * transaction's nLockTime. The close() method requires the auctioneer's Sig. Both
- * bid paths are complex enough to warrant raw tx construction for spending. We test
- * compile + deploy via the SDK. Full spending tests are covered by the Go
- * integration suite (auction_test.go).
+ * The bid() method requires the bidder's signature (prevents griefing) and reads
+ * no preimage field: nLockTime is a spender-chosen NOT-BEFORE and cannot bound
+ * the chain from above, so v1 has no deadline on bidding (W7). The close()
+ * method requires the auctioneer's Sig, `extractLocktime >= deadline`, and
+ * `extractSequence !== 0xffffffff` — without the second the first is a no-op
+ * on an all-final transaction. Both bid paths are complex enough to warrant raw
+ * tx construction for spending. We test compile + deploy via the SDK. Full
+ * spending tests are covered by the Go integration suite (auction_test.go and
+ * auction_locktime_test.go).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -92,9 +95,8 @@ describe('Auction', () => {
     expect(deployTxid).toBeTruthy();
   });
 
-  // NOTE: bid() spending tests require raw transaction construction because
-  // extractLocktime checks nLockTime against the deadline. The Go integration
-  // tests cover the bid scenario.
+  // NOTE: bid() spending tests require raw transaction construction. The Go
+  // integration tests cover the bid scenario.
 
   it('should close the auction with auctioneer signature', async () => {
     const artifact = compileContract('examples/ts/auction/Auction.runar.ts');

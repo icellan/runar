@@ -39,6 +39,34 @@ public final class ContractScript {
         Map<String, Object> initialState,
         Inscription inscription
     ) {
+        StringBuilder script = new StringBuilder(renderCodePart(artifact, constructorArgs, inscription));
+        if (artifact.isStateful()) {
+            String stateHex = initialState == null
+                ? ""
+                : StateSerializer.serialize(artifact.stateFields(), initialState);
+            // Stateful template already includes trailing state handling in the code part.
+            // M8 scope emits code + OP_RETURN + state to match Go's GetLockingScript layout.
+            script.append("6a").append(stateHex);
+        }
+        return script.toString();
+    }
+
+    /**
+     * Renders the CODE PART of the locking script: the template with every
+     * constructor-arg / codeSepIndex placeholder spliced in, followed by the
+     * ordinals envelope when one is attached, and nothing else.
+     *
+     * <p>The envelope belongs to the code part — a stateful contract's on-chain
+     * output reconstruction treats it as part of the immutable code — which is
+     * why it lands before the {@code OP_RETURN || state} section and why
+     * attaching one changes {@code SIZE(_codePart)}. Parity target: Go
+     * {@code getCodePartHex}, Rust {@code get_code_part_hex}.
+     */
+    public static String renderCodePart(
+        RunarArtifact artifact,
+        List<Object> constructorArgs,
+        Inscription inscription
+    ) {
         String tpl = artifact.scriptHex();
 
         // Build the unified list of template slot substitutions (constructor args
@@ -72,14 +100,6 @@ public final class ContractScript {
         // Inject ordinals envelope between code and state (matches Go/Rust/Python/Zig/Ruby SDKs).
         if (inscription != null) {
             script.append(inscription.toEnvelopeHex());
-        }
-        if (artifact.isStateful()) {
-            String stateHex = initialState == null
-                ? ""
-                : StateSerializer.serialize(artifact.stateFields(), initialState);
-            // Stateful template already includes trailing state handling in the code part.
-            // M8 scope emits code + OP_RETURN + state to match Go's GetLockingScript layout.
-            script.append("6a").append(stateHex);
         }
         return script.toString();
     }
@@ -239,6 +259,34 @@ public final class ContractScript {
     }
 
     /**
+     * ABI type name -> how the constructor-slot value is encoded in the script.
+     *
+     * <p>TABLE, not a chain of {@code equals} predicates: the spellings missing
+     * from the old predicates — the {@code bigint} aliases {@code RabinSig} /
+     * {@code RabinPubKey} — silently turned a modulus into a hex string on the
+     * way back off chain. Mirrors
+     * {@code packages/runar-ir-schema/src/abi-type-encoding.ts}, the same table
+     * the compiler stamps {@code ConstructorSlot.valueEncoding} from.
+     */
+    private static final Map<String, String> ABI_VALUE_ENCODINGS = Map.of(
+        "bigint", "scriptnum",
+        "int", "scriptnum",
+        // RabinSig / RabinPubKey are bigint aliases; verifyRabinSig lowers to
+        // OP_MOD, which reads its operand as a little-endian sign-magnitude
+        // Script number — exactly what bigint gets.
+        "RabinSig", "scriptnum",
+        "RabinPubKey", "scriptnum",
+        // "boolean" is canonical; "bool" is the alias several frontends spell.
+        "boolean", "bool",
+        "bool", "bool");
+
+    /** Classify an ABI type name: {@code scriptnum}, {@code bool}, or
+     *  {@code data} (ByteString and every fixed-width byte type). */
+    private static String abiValueEncoding(String type) {
+        return ABI_VALUE_ENCODINGS.getOrDefault(type, "data");
+    }
+
+    /**
      * Decode the value pushed at {@code offset} in the deployed script into the
      * positional constructor argument, using the ABI {@code type} to pick the
      * representation (script number for {@code int}/{@code bigint}, boolean for
@@ -246,8 +294,9 @@ public final class ContractScript {
      * {@link #encodeConstructorArg}.
      */
     private static Object decodeSlotValue(String deployed, int offset, int opcode, String type) {
-        boolean isBool = "bool".equals(type) || "boolean".equals(type);
-        boolean isInt = "int".equals(type) || "bigint".equals(type);
+        String encoding = abiValueEncoding(type);
+        boolean isBool = "bool".equals(encoding);
+        boolean isInt = "scriptnum".equals(encoding);
         if (opcode == 0x00) {                       // OP_0
             return isBool ? Boolean.FALSE : (isInt ? BigInteger.ZERO : "");
         }

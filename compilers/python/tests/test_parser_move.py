@@ -122,3 +122,37 @@ module Multi {
         c = result.contract
         assert c is not None
         assert len(c.methods) == 2
+
+
+# ---------------------------------------------------------------------------
+# R-183 (CL-BUG-063): the seven tiers' Move type tables had drifted.
+#
+# Measured before the fix, across all seven Move frontends:
+#
+#   Bigint  -> bigint      accepted by 3 of 7 (python, ruby, java)
+#   Bytes   -> ByteString  accepted by 2 of 7 (go, rust)
+#   address -> Addr        accepted by 4 of 7 (ts, go, rust, ruby)
+#
+# The same .runar.move source therefore parsed in some tiers and silently
+# degraded to a custom type in others. This tier was missing `Bytes` and
+# `address`.
+# ---------------------------------------------------------------------------
+import pytest
+
+from runar_compiler.frontend.parser_move import _move_map_type
+
+
+@pytest.mark.parametrize(
+    "alias,want",
+    [
+        ("Int", "bigint"), ("Bigint", "bigint"), ("u64", "bigint"),
+        ("Bool", "boolean"), ("bool", "boolean"),
+        ("vector", "ByteString"), ("Bytes", "ByteString"),
+        ("address", "Addr"),
+    ],
+)
+def test_r183_move_type_alias_parity(alias, want):
+    mapped = _move_map_type(alias)
+    assert getattr(mapped, "name", None) == want, (
+        f"{alias} mapped to {mapped!r}; every tier must map it to {want}"
+    )

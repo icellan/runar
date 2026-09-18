@@ -42,5 +42,8 @@
       "expect": "reject",
       "note": "tampered continuation output: recomputed sighash no longer matches the on-stack preimage"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "98a2ebe512253a48f8ca6f1e01edd94257c66aea0d82cbc5bad18af583ff57d4"
+  }
 }

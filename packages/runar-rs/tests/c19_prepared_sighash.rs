@@ -118,6 +118,7 @@ fn deploy() -> (RunarContract, MockProvider, LocalSigner) {
                 satoshis: 50_000,
                 change_address: None,
                 funding_signer: None,
+                acknowledge_unsound: vec![],
             },
         )
         .expect("deploy should succeed");

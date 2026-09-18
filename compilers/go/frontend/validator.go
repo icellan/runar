@@ -200,8 +200,41 @@ func isLiteralExpression(expr Expression) bool {
 				return true
 			}
 		}
+	case CallExpr:
+		// `toByteString('<hex>')` IS the ByteStringLiteral production -- see
+		// spec/grammar.md section 11:
+		//
+		//     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+		//
+		// 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+		// position. This check runs on the AST, BEFORE ANF lowering, so an
+		// initializer still arrives here as a call node and was refused -- in
+		// the one position the `.runar.rs` surface needs it, since the Rust
+		// DSL writes initializers as assignments inside `init()` that the
+		// parser LIFTS into PropertyNode.Initializer, and a bare `"1976a914"`
+		// is a `&str` that cannot be assigned to a `ByteString` (`Vec<u8>`).
+		//
+		// Accepting it here is only half the job: extractLiteralValue in
+		// anf_lower.go must UNWRAP the same shape, or the property validates
+		// and then loses its default entirely.
+		//
+		// Literal argument ONLY. `toByteString(x)` for a non-literal `x` is
+		// not this production and stays a non-literal initializer.
+		return isToByteStringLiteral(e)
 	}
 	return false
+}
+
+// isToByteStringLiteral reports whether e is the `toByteString(<literal>)`
+// ByteStringLiteral production. Peer of the TS helper of the same name in
+// 02-validate.ts.
+func isToByteStringLiteral(e CallExpr) bool {
+	id, ok := e.Callee.(Identifier)
+	if !ok || id.Name != "toByteString" || len(e.Args) != 1 {
+		return false
+	}
+	_, isLit := e.Args[0].(ByteStringLiteral)
+	return isLit
 }
 
 // isArrayLiteralOfLiterals returns true if the expression is an array
@@ -230,6 +263,14 @@ func (ctx *validationContext) validatePropertyType(t TypeNode, loc SourceLocatio
 		if !validPropTypes[t.Name] {
 			if t.Name == "void" {
 				ctx.addErrorWithLoc(fmt.Sprintf("property type 'void' is not valid at %s:%d", loc.File, loc.Line), &loc)
+			} else {
+				// R-246: any other unrecognised primitive name used to fall
+				// through in silence, while the identical name arriving as a
+				// CustomType is refused below. No parser produces a
+				// PrimitiveType with an unknown name today — they all map an
+				// unrecognised name to CustomType — but Validate takes an AST,
+				// and the frontend is not the only thing that builds one.
+				ctx.addErrorWithLoc(fmt.Sprintf("unsupported type '%s' in property declaration at %s:%d", t.Name, loc.File, loc.Line), &loc)
 			}
 		}
 	case FixedArrayType:
@@ -546,7 +587,7 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 	}
 
 	// #131: warn when a public method gates on extractLocktime but never asserts
-	// the spending tx is non-final (extractSequence < 0xffffffff). Advisory only.
+	// the spending tx is non-final (extractSequence !== 0xffffffff). Advisory only.
 	if method.Visibility == "public" {
 		ctx.warnLocktimeWithoutSequenceGuard(method)
 	}
@@ -724,51 +765,57 @@ func endsWithTerminalAsm(body []Statement) bool {
 // that runs even when the parser shape is well-formed and is the only layer
 // that knows about the contract's parentClass.
 func (ctx *validationContext) validateAsmUsage(method MethodNode) {
-	walkExpressionsInBody(method.Body, func(expr Expression) {
+	// R-136 / R-233: all nine diagnostics below used the locationless
+	// ctx.addError while every other validator diagnostic in this file carries
+	// a SourceLocation — including the "must end with an assert() call or a
+	// terminal asm({...})" one a few dozen lines up, which uses
+	// addErrorWithLoc. An asm() mistake is a hand-written opcode string, which
+	// is exactly the diagnostic a reader most needs a line number for.
+	walkExpressionsInBodyWithLoc(method.Body, func(expr Expression, loc *SourceLocation) {
 		if !isAsmCall(expr) {
 			return
 		}
 		call := expr.(CallExpr)
 
 		if ctx.contract.ParentClass != "UnsafeSmartContract" {
-			ctx.addError(fmt.Sprintf("'asm' is only available in contracts extending UnsafeSmartContract; got %s. Move the call into a class that extends UnsafeSmartContract (and import { UnsafeSmartContract } from 'runar-lang').", ctx.contract.ParentClass))
+			ctx.addErrorWithLoc(fmt.Sprintf("'asm' is only available in contracts extending UnsafeSmartContract; got %s. Move the call into a class that extends UnsafeSmartContract (and import { UnsafeSmartContract } from 'runar-lang').", ctx.contract.ParentClass), loc)
 			return
 		}
 
 		if len(call.Args) != 3 {
-			ctx.addError("asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }")
+			ctx.addErrorWithLoc("asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }", loc)
 			return
 		}
 
 		bodyArg, bodyOk := call.Args[0].(ByteStringLiteral)
 		if !bodyOk {
-			ctx.addError("asm() body must be a hex string literal")
+			ctx.addErrorWithLoc("asm() body must be a hex string literal", loc)
 			return
 		}
 		body := bodyArg.Value
 		if len(body) == 0 {
-			ctx.addError("asm() body must be a non-empty hex string literal")
+			ctx.addErrorWithLoc("asm() body must be a non-empty hex string literal", loc)
 		} else if len(body)%2 != 0 {
-			ctx.addError(fmt.Sprintf("asm() body has odd hex length (%d); each opcode byte requires two hex characters", len(body)))
+			ctx.addErrorWithLoc(fmt.Sprintf("asm() body has odd hex length (%d); each opcode byte requires two hex characters", len(body)), loc)
 		} else if !isHexString(body) {
-			ctx.addError("asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed")
+			ctx.addErrorWithLoc("asm() body contains non-hex characters; only 0-9, a-f, A-F are allowed", loc)
 		}
 
 		inArity, inOk := call.Args[1].(BigIntLiteral)
 		if !inOk || inArity.Value == nil || inArity.Value.Sign() < 0 {
-			ctx.addError("asm() in_arity must be a non-negative integer literal")
+			ctx.addErrorWithLoc("asm() in_arity must be a non-negative integer literal", loc)
 		}
 
 		outArity, outOk := call.Args[2].(BigIntLiteral)
 		if !outOk || outArity.Value == nil || outArity.Value.Sign() < 0 {
-			ctx.addError("asm() out_arity must be a non-negative integer literal")
+			ctx.addErrorWithLoc("asm() out_arity must be a non-negative integer literal", loc)
 		}
 
 		// Expression-form asm<T>({...}) returns a value that flows into a
 		// let-binding — exactly ONE stack value, so out_arity must be 1.
 		if call.AsmReturnType != "" && outOk && outArity.Value != nil &&
 			outArity.Value.Cmp(big.NewInt(1)) != 0 {
-			ctx.addError(fmt.Sprintf("Expression-form asm<%s>() must have out_arity 1 (got %s); only a single stack value can be bound to the result variable.", call.AsmReturnType, outArity.Value.String()))
+			ctx.addErrorWithLoc(fmt.Sprintf("Expression-form asm<%s>() must have out_arity 1 (got %s); only a single stack value can be bound to the result variable.", call.AsmReturnType, outArity.Value.String()), loc)
 		}
 	})
 }
@@ -917,10 +964,362 @@ func (ctx *validationContext) validateForStatement(stmt ForStmt) {
 		}
 	}
 
+	ctx.validateForConditionTestsIterator(stmt)
+
 	ctx.validateExpression(stmt.Init.Init)
+	ctx.validateForUpdate(stmt)
+	ctx.validateNoOutputIntrinsicInLoop(stmt)
 	for _, s := range stmt.Body {
 		ctx.validateStatement(s)
 	}
+}
+
+// validateForConditionTestsIterator rejects any for-loop whose condition does
+// not test the iterator itself (W4 / PhantomLap).
+//
+// The comment above this function's caller used to say the condition compares
+// the iter var to a constant, and then the code read only `Condition.Right`.
+// Nothing required `Condition.Left` to BE the iterator, and extractLoopShape
+// ignores left entirely: it computes `count = bound - start`. So
+//
+//	for (let i = 0n; i + 1n < 2n; i++) { ... }
+//
+// runs ONCE in the source language and TWICE in the emitted script
+// (count = 2 - 0). The extra lap executes the `else` arm the source can never
+// reach. Measured on @bsv/sdk Spend.validate() with a vault whose signature
+// check sits in the first lap and whose second lap sets `authorized = true`:
+// the phantom-lap loop ACCEPTED an empty signature, while the semantically
+// identical `i < 1n` rejected it.
+//
+// Refusal rather than lowering: evaluating a general condition per iteration
+// means unrolling against a real interpreter at ANF time, a language extension
+// with no golden behind it. The diagnostic text is shared verbatim with the
+// other six tiers.
+func (ctx *validationContext) validateForConditionTestsIterator(stmt ForStmt) {
+	if bin, ok := stmt.Condition.(BinaryExpr); ok {
+		if id, ok := bin.Left.(Identifier); ok && id.Name == stmt.Init.Name {
+			return
+		}
+	}
+	ctx.addErrorWithLoc(forConditionIteratorError(stmt.Init.Name), &stmt.SourceLocation)
+}
+
+func forConditionIteratorError(iter string) string {
+	return "For loop condition must compare the loop variable '" + iter +
+		"' to a compile-time constant (`" + iter + " < 10n`). The unrolled loop binds " +
+		"the iterator as `start + k*step` and takes its trip count from the bound alone, " +
+		"so a condition whose left-hand side is anything else -- a computed expression, " +
+		"or a different variable -- is not the condition the loop actually evaluates"
+}
+
+// loopOutputIntrinsicMsg builds the R-127 rejection. Shared verbatim
+// with the other six tiers (same mirror list as loopUpdateDiagnosticMsg).
+func loopOutputIntrinsicMsg(intrinsic, via string) string {
+	viaClause := ""
+	if via != "" {
+		viaClause = " (reached through private method '" + via + "')"
+	}
+	return "Output intrinsic '" + intrinsic + "'" + viaClause +
+		" cannot be called inside a loop body. A loop body lowers into its own scope whose " +
+		"declared outputs never reach the method's output list, so the continuation hash would " +
+		"commit to fewer outputs than the transaction actually creates: the spend is rejected by " +
+		"every shipped SDK and any successor it produces is unspendable. Move the call out of the loop."
+}
+
+// outputIntrinsicNames are the three intrinsics that register an output ref.
+var outputIntrinsicNames = map[string]bool{
+	"addOutput": true, "addRawOutput": true, "addDataOutput": true,
+}
+
+// validateNoOutputIntrinsicInLoop rejects an output intrinsic called inside a
+// loop body (R-127).
+//
+// anf_lower lowers a loop body into its own sub-context, which starts with a
+// fresh empty add-output ref list, and nothing propagates that list back to the
+// method context — unlike the if-statement lowering, which concatenates each
+// arm's outputs into one ref precisely so the parent sees them. The
+// continuation hash is then built from whatever addOutput calls sit at the
+// method's TOP level while the loop's outputs are still emitted into the
+// transaction. Measured on a two-iteration loop before this check existed:
+//
+//   - loop only: ts/go/rust/python blew up inside stack lowering ("method
+//     parameter '_newAmount' is not on the stack at a post-consumption
+//     reference"), zig/ruby emitted a covenant over the WRONG output set, java
+//     emitted none.
+//   - loop + one top-level call: compiled clean in every tier, and the ANF
+//     continuation hashed exactly ONE leaf while three outputs were built.
+//
+// A continuation committing to fewer outputs than the transaction creates is
+// spendable only by a hand-crafted transaction, is rejected by every shipped
+// SDK, and the successor it produces is permanently unspendable (CL-BUG-164).
+//
+// Refusal rather than lowering: propagating the refs cannot work by name,
+// because the loop is unrolled at stack-lowering time and one body binding name
+// denotes N physical slots. A correct lowering means unrolling at ANF time, a
+// language feature with no golden behind it; refusing removes nothing that
+// works today — no fixture or example in the repo declares an output inside a
+// loop.
+func (ctx *validationContext) validateNoOutputIntrinsicInLoop(stmt ForStmt) {
+	intrinsic, via, loc, found := ctx.findOutputIntrinsic(stmt.Body, map[string]bool{})
+	if !found {
+		return
+	}
+	if loc == nil {
+		l := stmt.SourceLocation
+		loc = &l
+	}
+	ctx.addErrorWithLoc(loopOutputIntrinsicMsg(intrinsic, via), loc)
+}
+
+// calleeProperty returns the property/function name a call names, if any.
+func calleeProperty(expr Expression) string {
+	call, ok := expr.(CallExpr)
+	if !ok {
+		return ""
+	}
+	switch c := call.Callee.(type) {
+	case PropertyAccessExpr:
+		return c.Property
+	case MemberExpr:
+		return c.Property
+	case Identifier:
+		return c.Name
+	}
+	return ""
+}
+
+// privateMethodNamed reports whether name is a private method on the contract.
+func (ctx *validationContext) privateMethodNamed(name string) *MethodNode {
+	if ctx.contract == nil {
+		return nil
+	}
+	for i := range ctx.contract.Methods {
+		m := &ctx.contract.Methods[i]
+		if m.Name == name && m.Visibility == "private" {
+			return m
+		}
+	}
+	return nil
+}
+
+// findOutputIntrinsic returns the first output intrinsic reachable from stmts,
+// following calls to private methods: a public method that delegates addOutput
+// to a private helper has that helper INLINED at ANF time, so a helper called
+// in a loop lands its outputs in the loop's sub-context exactly as a direct
+// call would.
+func (ctx *validationContext) findOutputIntrinsic(
+	stmts []Statement, seen map[string]bool,
+) (string, string, *SourceLocation, bool) {
+	for _, stmt := range stmts {
+		intrinsic, via, loc, found := ctx.findOutputIntrinsicInStatement(stmt, seen)
+		if found {
+			return intrinsic, via, loc, true
+		}
+	}
+	return "", "", nil, false
+}
+
+func (ctx *validationContext) findOutputIntrinsicInStatement(
+	stmt Statement, seen map[string]bool,
+) (string, string, *SourceLocation, bool) {
+	var loc SourceLocation
+	var expr Expression
+	switch s := stmt.(type) {
+	case ExpressionStmt:
+		loc, expr = s.SourceLocation, s.Expr
+	case VariableDeclStmt:
+		loc, expr = s.SourceLocation, s.Init
+	case AssignmentStmt:
+		loc, expr = s.SourceLocation, s.Value
+	case ReturnStmt:
+		if s.Value == nil {
+			return "", "", nil, false
+		}
+		loc, expr = s.SourceLocation, s.Value
+	case IfStmt:
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInExpr(s.Condition, &s.SourceLocation, seen); found {
+			return intrinsic, via, l, true
+		}
+		body := append(append([]Statement{}, s.Then...), s.Else...)
+		return ctx.findOutputIntrinsic(body, seen)
+	case ForStmt:
+		return ctx.findOutputIntrinsic(s.Body, seen)
+	default:
+		return "", "", nil, false
+	}
+	return ctx.findOutputIntrinsicInExpr(expr, &loc, seen)
+}
+
+func (ctx *validationContext) findOutputIntrinsicInExpr(
+	expr Expression, loc *SourceLocation, seen map[string]bool,
+) (string, string, *SourceLocation, bool) {
+	if expr == nil {
+		return "", "", nil, false
+	}
+	if name := calleeProperty(expr); name != "" {
+		if outputIntrinsicNames[name] {
+			return name, "", loc, true
+		}
+		if m := ctx.privateMethodNamed(name); m != nil && !seen[name] {
+			seen[name] = true
+			if intrinsic, _, _, found := ctx.findOutputIntrinsic(m.Body, seen); found {
+				return intrinsic, name, loc, true
+			}
+		}
+	}
+	for _, child := range subExpressions(expr) {
+		if intrinsic, via, l, found := ctx.findOutputIntrinsicInExpr(child, loc, seen); found {
+			return intrinsic, via, l, true
+		}
+	}
+	return "", "", nil, false
+}
+
+// subExpressions returns the direct sub-expressions of expr, for the intrinsic
+// search above. An intrinsic can sit inside an argument list or an operand, not
+// only as a bare expression statement.
+func subExpressions(expr Expression) []Expression {
+	switch e := expr.(type) {
+	case CallExpr:
+		return e.Args
+	case BinaryExpr:
+		return []Expression{e.Left, e.Right}
+	case UnaryExpr:
+		return []Expression{e.Operand}
+	case TernaryExpr:
+		return []Expression{e.Condition, e.Consequent, e.Alternate}
+	case IndexAccessExpr:
+		return []Expression{e.Object, e.Index}
+	}
+	return nil
+}
+
+// loopUpdateDiagnosticMsg is shared verbatim with the other six tiers. Per-tier
+// diagnostic drift on the same rejection is a recurring defect in this repo, so
+// the string is pinned here and mirrored, character for character, in
+// packages/runar-compiler/src/passes/02-validate.ts,
+// compilers/rust/src/frontend/validator.rs,
+// compilers/python/runar_compiler/frontend/validator.py,
+// compilers/zig/src/frontend/validator.zig,
+// compilers/ruby/lib/frontend/validator.rb and
+// compilers/java/src/main/java/runar/compiler/passes/Validate.java.
+const loopUpdateDiagnosticMsg = "For loop update must advance the loop variable by one (`i++`, `i--`, " +
+	"`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a " +
+	"unit step, so any other update clause -- a function call, a state mutation, or a " +
+	"non-unit step such as `i += 2` -- cannot be represented and would be discarded"
+
+// validateForUpdate rejects any for-loop update clause the loop model cannot
+// represent (R-065).
+//
+// The ANF `loop` node carries exactly `{count, iterVar, start, step, body}` and
+// synthesizes the iterator on unrolled iteration k as `start + k*step`. There
+// is no slot for an arbitrary update statement, and extractLoopStep only ever
+// understood a unit step — everything else was silently coerced to `+1` (or
+// `-1` from the comparison direction) and the clause itself was discarded. That
+// made three distinct failures indistinguishable from a correct compile:
+//
+//   - `for (let i = 0n; i < 3n; undefinedFn())` produced byte-identical output.
+//     A nonexistent function name raised nothing.
+//   - `for (let i = 0n; i < 3n; this.count++)` dropped the state write.
+//   - `for (let i = 0n; i < 5n; i += 2n)` unrolled 5 times over i = 0..4 instead
+//     of 3 times over i = 0,2,4.
+//
+// spec/grammar.md's ForStatement production admits only
+// `Identifier ('++' | '--')`, and its Statement Restrictions say "The loop
+// variable MUST use simple increment (`++`) or decrement (`--`)". So rejecting
+// is the fix rather than lowering: appending the update's lowering to the loop
+// body would re-emit `i++` as a dead binding on every loop that already
+// compiles correctly, moving bytes across the whole corpus to express nothing.
+//
+// The accepted set is every shape the nine frontends actually synthesize:
+// `i++`/`i--`/`++i`/`--i`; the assignment spelling `i = i + 1` / `i = i - 1` /
+// `i = 1 + i` that `i += 1` becomes in the Solidity, Zig and Java parsers; and
+// the effect-free no-op sentinel (a literal or a bare identifier) that the
+// while-shaped parsers synthesize when the source has no continue expression at
+// all.
+//
+// The advanced variable must be the declared iterator or the identifier the
+// condition tests. Both are needed: the Zig parser only folds
+// `var i = 0; while (i < N) : (i += 1)` into a single ForStmt when the
+// declaration is the immediately preceding statement, so an unfolded loop
+// carries a placeholder init while the update advances the real `i` named in
+// the condition.
+func (ctx *validationContext) validateForUpdate(stmt ForStmt) {
+	// Names the update is allowed to advance: the declared iterator, plus the
+	// identifier the condition tests (see the doc comment's Zig case).
+	allowed := []string{stmt.Init.Name}
+	if bin, ok := stmt.Condition.(BinaryExpr); ok {
+		if id, ok := bin.Left.(Identifier); ok {
+			allowed = append(allowed, id.Name)
+		}
+	}
+
+	if isRepresentableForUpdate(allowed, stmt.Update) {
+		return
+	}
+
+	loc := stmt.SourceLocation
+	ctx.addErrorWithLoc(loopUpdateDiagnosticMsg, &loc)
+}
+
+// isAllowedLoopVar reports whether expr names one of the identifiers the update
+// is allowed to advance. A property access, an index access or anything else is
+// never accepted: those are the side effects that used to be dropped.
+func isAllowedLoopVar(allowed []string, expr Expression) bool {
+	id, ok := expr.(Identifier)
+	if !ok {
+		return false
+	}
+	for _, a := range allowed {
+		if a == id.Name {
+			return true
+		}
+	}
+	return false
+}
+
+func isLiteralOne(expr Expression) bool {
+	lit, ok := expr.(BigIntLiteral)
+	return ok && lit.Value != nil && lit.Value.IsInt64() && lit.Value.Int64() == 1
+}
+
+func isRepresentableForUpdate(allowed []string, update Statement) bool {
+	switch u := update.(type) {
+	case ExpressionStmt:
+		switch e := u.Expr.(type) {
+		case IncrementExpr:
+			return isAllowedLoopVar(allowed, e.Operand)
+		case DecrementExpr:
+			return isAllowedLoopVar(allowed, e.Operand)
+		case BigIntLiteral, BoolLiteral, Identifier:
+			// The no-op sentinel a while-shaped frontend synthesizes when the
+			// source carries no continue expression: zig's `while (c) {}`,
+			// move's `while (c) {}`, go's `for c {}`. Reading a literal or a
+			// bare identifier has no effect, so discarding it loses nothing.
+			return true
+		}
+		return false
+
+	case AssignmentStmt:
+		// `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+		if !isAllowedLoopVar(allowed, u.Target) {
+			return false
+		}
+		bin, ok := u.Value.(BinaryExpr)
+		if !ok {
+			return false
+		}
+		switch bin.Op {
+		case "+":
+			return (isAllowedLoopVar(allowed, bin.Left) && isLiteralOne(bin.Right)) ||
+				(isLiteralOne(bin.Left) && isAllowedLoopVar(allowed, bin.Right))
+		case "-":
+			return isAllowedLoopVar(allowed, bin.Left) && isLiteralOne(bin.Right)
+		}
+		return false
+	}
+
+	return false
 }
 
 // isCompileTimeConstant reports whether a for-loop bound can be unrolled into
@@ -1046,26 +1445,71 @@ func isLocktimeRead(expr Expression) bool {
 	return isCallToNamed(expr, "extractLocktime") || isCallToNamed(expr, "currentBlockHeight")
 }
 
-// isSequenceFinalityGuard reports whether expr is an
-// `extractSequence(...) < <final>`-style comparison (the guard that makes a
-// locktime gate consensus-enforced). Accepts the two natural spellings:
-// `extractSequence(pre) < N` / `<= N`, and the reversed `N > extractSequence(pre)`
-// / `>= ...`. N must be a bigint literal no greater than the finality sentinel,
-// so the guard genuinely forces non-finality.
+// isSequenceFinalityGuard reports whether expr is a comparison on
+// extractSequence(...) that genuinely EXCLUDES the finality sentinel
+// 0xffffffff, reading the field as the unsigned 32-bit wire value it is
+// (see emitUnsignedBin2Num in codegen/stack.go).
+//
+// Accepted:
+//
+//	extractSequence(pre) !== 0xffffffff   and the reversed spelling
+//	extractSequence(pre) <  N, 0 < N <= 0xffffffff   (reversed: N > ...)
+//	extractSequence(pre) <= N, N <  0xffffffff   (reversed: N >= ...)
+//
+// Deliberately NOT accepted: <= 0xffffffff and >= 0xffffffff. nSequence cannot
+// exceed 0xffffffff, so those are true for every transaction including the
+// final one — a tautology that used to silence this warning on a contract with
+// no guard at all (W1 / FinalCountdown).
+//
+// Also NOT accepted: extractSequence(pre) < 0. Unsigned nSequence is never
+// negative, so that comparison is vacuous.
 func isSequenceFinalityGuard(expr Expression) bool {
 	bin, ok := expr.(BinaryExpr)
 	if !ok {
 		return false
 	}
-	boundOk := func(e Expression) bool {
+	isFinalSentinel := func(e Expression) bool {
 		lit, ok := e.(BigIntLiteral)
-		return ok && lit.Value != nil && lit.Value.Cmp(sequenceFinal) <= 0
+		return ok && lit.Value != nil && lit.Value.Cmp(sequenceFinal) == 0
 	}
-	if (bin.Op == "<" || bin.Op == "<=") && isCallToNamed(bin.Left, "extractSequence") && boundOk(bin.Right) {
+	strictBoundOk := func(e Expression) bool {
+		lit, ok := e.(BigIntLiteral)
+		return ok && lit.Value != nil && lit.Value.Sign() > 0 && lit.Value.Cmp(sequenceFinal) <= 0
+	}
+	nonStrictBoundOk := func(e Expression) bool {
+		lit, ok := e.(BigIntLiteral)
+		return ok && lit.Value != nil && lit.Value.Cmp(sequenceFinal) < 0
+	}
+	switch bin.Op {
+	case "!==":
+		return (isCallToNamed(bin.Left, "extractSequence") && isFinalSentinel(bin.Right)) ||
+			(isCallToNamed(bin.Right, "extractSequence") && isFinalSentinel(bin.Left))
+	case "<":
+		return isCallToNamed(bin.Left, "extractSequence") && strictBoundOk(bin.Right)
+	case "<=":
+		return isCallToNamed(bin.Left, "extractSequence") && nonStrictBoundOk(bin.Right)
+	case ">":
+		return isCallToNamed(bin.Right, "extractSequence") && strictBoundOk(bin.Left)
+	case ">=":
+		return isCallToNamed(bin.Right, "extractSequence") && nonStrictBoundOk(bin.Left)
+	}
+	return false
+}
+
+// assertionImpliesSequenceGuard reports whether asserting expr logically
+// implies a sequence-finality guard. A matching comparison nested under
+// `!` (or `||`) does not count: assert(!(extractSequence !== 0xffffffff))
+// requires a FINAL sequence. `&&` implies each conjunct.
+func assertionImpliesSequenceGuard(expr Expression) bool {
+	if isSequenceFinalityGuard(expr) {
 		return true
 	}
-	if (bin.Op == ">" || bin.Op == ">=") && isCallToNamed(bin.Right, "extractSequence") && boundOk(bin.Left) {
-		return true
+	bin, ok := expr.(BinaryExpr)
+	if !ok {
+		return false
+	}
+	if bin.Op == "&&" {
+		return assertionImpliesSequenceGuard(bin.Left) || assertionImpliesSequenceGuard(bin.Right)
 	}
 	return false
 }
@@ -1073,7 +1517,7 @@ func isSequenceFinalityGuard(expr Expression) bool {
 // warnLocktimeWithoutSequenceGuard warns when method (transitively, through the
 // private-helper call graph) reads the tx locktime but never asserts the tx is
 // non-final. A locktime gate is not consensus-enforced unless
-// extractSequence < 0xffffffff is also asserted — otherwise an all-final-sequence
+// extractSequence !== 0xffffffff is also asserted — otherwise an all-final-sequence
 // spend bypasses it. Advisory (warning) only — no effect on emitted bytecode.
 func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode) {
 	privateMethods := make(map[string]MethodNode)
@@ -1095,8 +1539,13 @@ func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode
 			if isLocktimeRead(expr) {
 				readsLocktime = true
 			}
-			if isSequenceFinalityGuard(expr) {
-				hasSequenceGuard = true
+			if isAssertCall(expr) {
+				call := expr.(CallExpr)
+				for _, arg := range call.Args {
+					if assertionImpliesSequenceGuard(arg) {
+						hasSequenceGuard = true
+					}
+				}
 			}
 		})
 		// Follow calls into private helpers so a guard (or locktime read) supplied
@@ -1116,9 +1565,9 @@ func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode
 
 	if readsLocktime && !hasSequenceGuard {
 		ctx.addWarningWithLoc(fmt.Sprintf(
-			"method '%s' reads extractLocktime but does not assert extractSequence < 0xffffffff; "+
+			"method '%s' reads extractLocktime but does not assert extractSequence is not 0xffffffff; "+
 				"a locktime gate is not consensus-enforced unless the tx is non-final — add "+
-				"assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+				"assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
 			method.Name), &method.SourceLocation)
 	}
 }
@@ -1127,6 +1576,52 @@ func walkExpressionsInBody(stmts []Statement, visitor func(Expression)) {
 	for _, stmt := range stmts {
 		walkExpressionsInStatement(stmt, visitor)
 	}
+}
+
+// walkExpressionsInBodyWithLoc is walkExpressionsInBody plus the location of the
+// STATEMENT each expression came from (R-136 / R-233).
+//
+// Expressions in this AST carry no SourceLocation of their own — CallExpr has
+// Callee, Args and AsmReturnType and nothing else — so a diagnostic about an
+// expression has nowhere to point unless the walker hands down the enclosing
+// statement's position. Statements all carry one.
+func walkExpressionsInBodyWithLoc(stmts []Statement, visitor func(Expression, *SourceLocation)) {
+	for _, stmt := range stmts {
+		walkExpressionsInStatementWithLoc(stmt, visitor)
+	}
+}
+
+func walkExpressionsInStatementWithLoc(stmt Statement, visitor func(Expression, *SourceLocation)) {
+	switch s := stmt.(type) {
+	case ExpressionStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Expr, &loc, visitor)
+	case VariableDeclStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Init, &loc, visitor)
+	case AssignmentStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Target, &loc, visitor)
+		walkExprWithLoc(s.Value, &loc, visitor)
+	case IfStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Condition, &loc, visitor)
+		walkExpressionsInBodyWithLoc(s.Then, visitor)
+		walkExpressionsInBodyWithLoc(s.Else, visitor)
+	case ForStmt:
+		loc := s.SourceLocation
+		walkExprWithLoc(s.Condition, &loc, visitor)
+		walkExpressionsInBodyWithLoc(s.Body, visitor)
+	case ReturnStmt:
+		if s.Value != nil {
+			loc := s.SourceLocation
+			walkExprWithLoc(s.Value, &loc, visitor)
+		}
+	}
+}
+
+func walkExprWithLoc(expr Expression, loc *SourceLocation, visitor func(Expression, *SourceLocation)) {
+	walkExpr(expr, func(e Expression) { visitor(e, loc) })
 }
 
 func walkExpressionsInStatement(stmt Statement, visitor func(Expression)) {

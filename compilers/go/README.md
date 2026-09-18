@@ -116,22 +116,41 @@ emits a Rúnar artifact whose locking script is a witness-assisted BN254
 Groth16 verifier with that VK pre-baked in. Changing the VK requires
 regenerating the artifact.
 
+The **public inputs are baked in too**, via `--pub`, and the command fails
+without them. A Groth16 verifier that does not fix its public inputs proves
+only that *some* statement was satisfied: the spender picks a public-input
+vector they can satisfy, mints an honest proof for it, and the script
+accepts. The emitted verifier recomputes `IC[0] + Σ pub_j·IC[j+1]` on-chain
+and requires it to equal the prover-supplied `prepared_inputs`, then
+requires each `pub_j` to equal the pinned value.
+
 ```bash
 runar-compiler-go groth16-wa \
   --vk examples/go/SP1Verifier.groth16.vk.json \
-  --out examples/go/SP1Verifier.runar.json
+  --out examples/go/SP1Verifier.runar.json \
+  --pub 66357586313644860799771794752501372267945898538662503063451090361394363786 \
+  --pub 847835036251654310728024989634801415315612733526607753937102182742950003855 \
+  --pub 0 \
+  --pub 248831628400185611740479071450564250193912070693925013182243127282342200944 \
+  --pub 0
 ```
 
 Options:
 
 - `--vk <path>`: path to the input VK JSON (required).
 - `--out <path>`: path for the generated artifact JSON (required).
+- `--pub <scalar>`: a public-input scalar to pin into the verifier, as a decimal integer. Repeat once per public input; the count must match `vk.numPubInputs`, which the on-chain MSM binding currently fixes at 5 (the SP1 Groth16 arity). Required.
 - `--name <ContractName>`: contract name to record in the artifact (default: `Groth16Verifier`).
-- `--modulo-threshold <int>`: bytes threshold for deferred mod reduction. Default `0` produces a ~703 KB script (strict mod reduction — recommended). The 2048-byte value from the nChain paper is not recommended on today's go-sdk interpreter.
+- `--modulo-threshold <int>`: bytes threshold for deferred mod reduction. Default `0` produces a ~1.4 MB script (strict mod reduction — recommended). The 2048-byte value from the nChain paper is not recommended on today's go-sdk interpreter.
 
-The emitted artifact has `groth16WA.numPubInputs` and `groth16WA.vkDigest`
-fields so downstream consumers can sanity-check which VK was baked in
-without having to re-derive it from the script bytes.
+The emitted artifact has `groth16WA.numPubInputs`, `groth16WA.vkDigest` and
+`groth16WA.publicInputs` fields so downstream consumers can sanity-check
+which VK and which statement were baked in without having to re-derive them
+from the script bytes.
+
+Spenders must build the unlocking witness with
+`bn254witness.BuildFromProofWithInputs` (not `GenerateWitness`) — the
+verifier reads the five public-input scalars off the witness stack.
 
 ---
 

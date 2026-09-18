@@ -43,7 +43,7 @@ This harness uses the TypeScript implementation as the baseline. It reports `sou
 Build the Zig binary in release mode first:
 
 ```bash
-cd /Users/satchmo/code/runar/compilers/zig
+cd compilers/zig
 zig build -Doptimize=ReleaseFast
 ```
 
@@ -55,17 +55,20 @@ pnpm --filter runar-compiler build
 
 ## Run Instructions
 
+Every command below runs **from the repository root**, and the `cd compilers/zig`
+in Prerequisites is relative to it. (R-280: these instructions used to open by
+`cd`-ing into an absolute path under the original author's home directory, so
+the first line of every one of them failed for every other reader.)
+
 Run the default full-source comparison suite:
 
 ```bash
-cd /Users/satchmo/code/runar
 python3 compilers/zig/scripts/benchmark_compare.py source
 ```
 
 Run the shared Zig/Rust/TypeScript source suite:
 
 ```bash
-cd /Users/satchmo/code/runar
 python3 compilers/zig/scripts/benchmark_compare.py source \
   --with-rust \
   --contracts-file compilers/zig/benchmarks/contracts-source-cross-impl.txt
@@ -74,7 +77,6 @@ python3 compilers/zig/scripts/benchmark_compare.py source \
 Run the default backend-only comparison suite:
 
 ```bash
-cd /Users/satchmo/code/runar
 python3 compilers/zig/scripts/benchmark_compare.py ir
 ```
 
@@ -171,7 +173,6 @@ node compilers/zig/scripts/ts_compile_ir_hex.mjs conformance/tests/basic-p2pkh/e
 For a compact, repeatable run that is easy to share in a PR or issue:
 
 ```bash
-cd /Users/satchmo/code/runar
 python3 compilers/zig/scripts/benchmark_compare.py source \
   --contract basic-p2pkh \
   --warmup 2 \
@@ -183,7 +184,6 @@ python3 compilers/zig/scripts/benchmark_compare.py source \
 For a broader exploratory sweep:
 
 ```bash
-cd /Users/satchmo/code/runar
 python3 compilers/zig/scripts/benchmark_compare.py source \
   --keep-going \
   --allow-failures \

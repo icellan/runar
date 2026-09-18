@@ -1,6 +1,6 @@
 # Rúnar Opcode Reference
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document provides a complete reference for Bitcoin SV opcodes used by Rúnar, including their hex values, stack effects, and how they map from Rúnar operations.
@@ -363,7 +363,7 @@ These opcodes were disabled in BTC but are **re-enabled in BSV**:
 | Rúnar Operation | Opcode |
 |---|---|
 | `a + b` (ByteString) | `OP_CAT` |
-| `split(data, index)` | `OP_SPLIT` |
+| `split(data, index)` | `OP_SPLIT OP_NIP` |
 | `left(data, len)` | `OP_SPLIT OP_DROP` |
 | `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` |
 | `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` |
@@ -387,10 +387,10 @@ Without `OP_CAT`, stateful contracts and many advanced patterns would be impossi
 
 | Hex | Name | Description |
 |-----|------|-------------|
-| `0x61` | `OP_NOP` | No operation |
-| `0xb0`-`0xb9` | `OP_NOP1`-`OP_NOP10` | Reserved no-ops (for soft-fork upgrades in BTC; no special meaning in BSV) |
+| `0x61` | `OP_NOP` | No operation. **Emitted by Rúnar** — see below |
+| `0xb0`-`0xb9` | `OP_NOP1`-`OP_NOP10` | Reserved no-ops in pre-Chronicle policy. Under Chronicle, `0xb6` and `0xb7` are `OP_LSHIFTNUM` / `OP_RSHIFTNUM` and Rúnar emits both — see §13 |
 
-Rúnar does not generate NOP opcodes in normal compilation.
+Every stateful contract's locking script begins `0x61 0xab` — `OP_NOP` followed by `OP_CODESEPARATOR`. The `OP_NOP` is deliberate and costs one byte: it puts the separator at offset **1** rather than offset 0. Implementations that store "index of the last executed `OP_CODESEPARATOR`" in a zero-initialised field cannot distinguish a separator at offset 0 from having seen none, and fall back to hashing the whole script — the BSV go-sdk interpreter does exactly this. Emitting at offset 1 keeps every interpreter on the same side of that guard. See `packages/runar-compiler/src/passes/06-emit.ts` (`emitOpcode('OP_NOP')`).
 
 ---
 
@@ -403,7 +403,8 @@ The following opcodes exist in the Bitcoin Script specification but are **not us
 | `0x65` | `OP_VERIF` | Always fails (reserved) |
 | `0x66` | `OP_VERNOTIF` | Always fails (reserved) |
 | `0xa7` | `OP_SHA1` | Not used by Rúnar (weak hash) |
-| `0xab` | `OP_CODESEPARATOR` | Not used by Rúnar |
+
+`OP_CODESEPARATOR` (`0xab`) used to be listed here as "not used by Rúnar". It is used: the compiler inserts exactly one, at byte offset 1, in every contract with a public method that needs a BIP-143 sighash subscript — that is, every stateful contract. The artifact records its position in `codeSeparatorIndex` / `codeSeparatorIndices` (see `artifact-format.md` §3.15).
 
 ---
 
@@ -471,20 +472,22 @@ All EC operations are built on secp256k1 field arithmetic over `F_p` where `p = 
 
 | Rúnar Function | Synthesized From | Approximate Script Size |
 |---------------|------------------|------------------------|
-| `ecAdd(a, b)` | Field arithmetic: slope computation, point formula | ~2-5 KB |
-| `ecMul(p, k)` | 256-iteration double-and-add loop (Jacobian coordinates) | ~50-100 KB |
-| `ecMulGen(k)` | Same as `ecMul` but with hardcoded generator G | ~50-100 KB |
-| `ecNegate(p)` | `OP_SPLIT` (extract y), `PUSH p`, `OP_SWAP`, `OP_SUB` | ~100 B |
-| `ecOnCurve(p)` | Range-check `x < p`, `y < p`, then compute `y^2` and `x^3 + 7` and compare mod p | ~730 B |
-| `ecModReduce(v, m)` | `OP_MOD` with negative correction | ~20 B |
-| `ecEncodeCompressed(p)` | Extract x, compute parity of y, prefix with 02/03 | ~200 B |
-| `ecMakePoint(x, y)` | `OP_NUM2BIN` (32 bytes each), `OP_CAT` | ~50 B |
-| `ecPointX(p)` | `PUSH 0`, `PUSH 32`, `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | ~20 B |
-| `ecPointY(p)` | `PUSH 32`, `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | ~20 B |
+| `ecAdd(a, b)` | Field arithmetic: slope computation, point formula | ~24.6 KB |
+| `ecMul(p, k)` | 257-iteration double-and-add loop over `k + 3n` (Jacobian coordinates) | ~425 KB |
+| `ecMulGen(k)` | Same as `ecMul` but with hardcoded generator G | ~425 KB |
+| `ecNegate(p)` | `OP_SPLIT` (extract y), `PUSH p`, `OP_SWAP`, `OP_SUB` | ~1.1 KB |
+| `ecOnCurve(p)` | Range-check `x < p`, `y < p`, then compute `y^2` and `x^3 + 7` and compare mod p | ~800 B |
+| `ecModReduce(v, m)` | `OP_MOD` with negative correction | ~10 B |
+| `ecEncodeCompressed(p)` | Extract x, compute parity of y, prefix with 02/03 | ~20 B |
+| `ecMakePoint(x, y)` | `OP_NUM2BIN` (32 bytes each), `OP_CAT` | ~550 B |
+| `ecPointX(p)` | `PUSH 0`, `PUSH 32`, `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | ~240 B |
+| `ecPointY(p)` | `PUSH 32`, `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | ~240 B |
 
 ### 12.3 Jacobian Coordinate Optimization
 
-`ecMul` and `ecMulGen` use Jacobian projective coordinates internally to avoid expensive modular inversions during the 256-iteration double-and-add loop. A single affine conversion (one modular inverse) is performed at the end. This is a standard optimization for EC scalar multiplication.
+`ecMul` and `ecMulGen` use Jacobian projective coordinates internally to avoid expensive modular inversions during the double-and-add loop. A single affine conversion (one modular inverse) is performed at the end. This is a standard optimization for EC scalar multiplication.
+
+The loop runs **257** iterations, not 256, because the ladder multiplies `k + 3n` rather than `k` — see `semantics.md` §8.5. A 256-iteration ladder over `k + 3n` drops the top set bit and returns the wrong multiple of `P` for roughly half of all scalars; do not implement this from the iteration count alone.
 
 ---
 
@@ -492,9 +495,22 @@ All EC operations are built on secp256k1 field arithmetic over `F_p` where `p = 
 
 The following notes document potential future opcodes or extensions that may be available on Chronicle (BSV-derived chains) but are **not part of BSV consensus as of this specification**.
 
-### 13.1 BSV-Native (Available Now)
+### 13.1 Chronicle, not pre-Genesis BSV
 
-All opcodes listed in sections 2-11 are BSV-native and available on mainnet.
+Rúnar compiles for the **Chronicle** opcode policy introduced by SV Node v1.2.0, which activated on BSV mainnet at block 943,816 on 7 April 2026. Sections 2-11 are not uniformly "BSV-native since Genesis", and reading them that way is how a script gets validated by something that silently disagrees with a miner.
+
+Two opcodes Rúnar emits heavily carry a different meaning — or none — under the pre-Chronicle policy:
+
+| Opcode | Byte | Pre-Chronicle | Emitted by |
+|---|---|---|---|
+| `OP_2MUL` | `0x8d` | disabled | `ecMul` (773 occurrences in one call), `ecMulGen`, the NIST ladders |
+| `OP_2DIV` | `0x8e` | disabled | the same ladders |
+| `OP_LSHIFTNUM` | `0xb6` | `OP_NOP7` | numeric shift helpers |
+| `OP_RSHIFTNUM` | `0xb7` | `OP_NOP8` | `ecMul` (255 occurrences in one call) |
+
+The `OP_NOP7`/`OP_NOP8` case is the dangerous one: a pre-Chronicle validator does not fail, it treats the opcode as a no-op, so **the shift silently does not happen** and the script evaluates to a different result rather than an error. `OP_LSHIFT` (`0x98`) and `OP_RSHIFT` (`0x99`), which the ordinary `<<` and `>>` operators compile to, are Genesis-era and unaffected.
+
+`docs/chronicle-opcode-policy.md` is the authority on this; it lists the full emitter table and the tooling that has not upgraded. Contracts Rúnar compiles are spendable on mainnet today — the concern is off-chain libraries and older node builds, not consensus.
 
 ### 13.2 Potential Chronicle Extensions
 
@@ -560,12 +576,12 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `bool(n)` | `OP_0NOTEQUAL` | `0x92` |
 | `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` | `0x7f 0x77 ... 0x7f 0x75` |
 | `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` | `0x7c 0x82 0x7b 0x94 0x7f 0x77` |
-| `split(data, index)` | `OP_SPLIT` | `0x7f` |
+| `split(data, index)` | `OP_SPLIT OP_NIP` | `0x7f 0x77` |
 | `left(data, len)` | `OP_SPLIT OP_DROP` | `0x7f 0x75` |
 | `if/else` | `OP_IF OP_ELSE OP_ENDIF` | `0x63 0x67 0x68` |
 | `ecAdd(a, b)` | Synthesized (field arithmetic) | — |
-| `ecMul(p, k)` | Synthesized (256-iter double-and-add) | — |
-| `ecMulGen(k)` | Synthesized (256-iter double-and-add) | — |
+| `ecMul(p, k)` | Synthesized (257-iter double-and-add) | — |
+| `ecMulGen(k)` | Synthesized (257-iter double-and-add) | — |
 | `ecNegate(p)` | `OP_SPLIT`, `OP_SUB` | — |
 | `ecOnCurve(p)` | Synthesized (field arithmetic) | — |
 | `ecModReduce(v, m)` | `OP_MOD`, `OP_ADD`, `OP_MOD` | — |

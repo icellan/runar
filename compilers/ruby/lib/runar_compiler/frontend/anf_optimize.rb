@@ -14,6 +14,9 @@ require "json"
 require "set"
 require_relative "../ir/types"
 require_relative "dce"
+# Frontend._bigint_json_value — the canonical IR-JSON encoding for an integer,
+# used by make_const_int for the folded EC scalars this pass emits.
+require_relative "anf_lower"
 
 module RunarCompiler
   module Frontend
@@ -94,33 +97,30 @@ module RunarCompiler
       end
       private_class_method :deep_copy_binding
 
+      # The FIELDS that hold nested ANFBindings rather than scalars.
+      NESTED_BINDING_FIELDS = %i[then else_ body].freeze
+
+      # Copy every declared FIELD, then deep-copy the three that hold nested
+      # bindings.
+      #
+      # This used to be a hand-written field-by-field list, and a hand-written
+      # list is a list that silently loses fields as the IR grows: it was
+      # missing +results+, +start+, +step+, +bytes+, +in_arity+, +out_arity+
+      # and +is_auto_injected_state_check+. The +results+ drop was the one with
+      # teeth (N-140) -- an EC-optimized contract lost its `if`'s declared
+      # multi-result contract, and stack lowering then refused the node
+      # ("declares no results") the moment DCE stopped deleting it outright.
+      # Driving the copy off IR::ANFValue::FIELDS makes that class of loss
+      # impossible rather than merely fixed once. (That is also what now
+      # carries +preserve+ across -- issue #109's @embedAlways DCE opt-out
+      # flag, which dead-binding elimination reads off THIS copy.)
       def self.deep_copy_value(v)
         nv = IR::ANFValue.new(kind: v.kind)
-        nv.name         = v.name
-        nv.raw_value    = v.raw_value
-        nv.const_string = v.const_string
-        nv.const_big_int = v.const_big_int
-        nv.const_bool   = v.const_bool
-        nv.const_int    = v.const_int
-        nv.op           = v.op
-        nv.left         = v.left
-        nv.right        = v.right
-        nv.result_type  = v.result_type
-        nv.operand      = v.operand
-        nv.func         = v.func
-        nv.args         = v.args&.dup
-        nv.object       = v.object
-        nv.method       = v.method
-        nv.cond         = v.cond
-        nv.count        = v.count
-        nv.iter_var     = v.iter_var
-        nv.value_ref    = v.value_ref
-        nv.preimage     = v.preimage
-        nv.sighash_flag = v.sighash_flag
-        nv.satoshis     = v.satoshis
-        nv.state_values = v.state_values&.dup
-        nv.script_bytes = v.script_bytes
-        nv.elements     = v.elements&.dup
+        IR::ANFValue::FIELDS.each do |f|
+          next if NESTED_BINDING_FIELDS.include?(f)
+          val = v.public_send(f)
+          nv.public_send(:"#{f}=", val.is_a?(Array) ? val.dup : val)
+        end
         nv.then  = v.then&.map  { |b| deep_copy_binding(b) }
         nv.else_ = v.else_&.map { |b| deep_copy_binding(b) }
         nv.body  = v.body&.map  { |b| deep_copy_binding(b) }
@@ -150,7 +150,10 @@ module RunarCompiler
           changed = false
           new_body = []
           method.body.each do |binding|
-            optimized = try_optimize(binding.value, value_map)
+            # +new_body+ doubles as the prelude list: a rule that folds a new
+            # constant appends its binding here, i.e. immediately BEFORE the
+            # binding being rewritten (see fresh_const_name).
+            optimized = try_optimize(binding.value, value_map, new_body)
             if optimized
               binding = IR::ANFBinding.new(
                 name: binding.name,
@@ -174,7 +177,7 @@ module RunarCompiler
       # Optimization rules
       # -----------------------------------------------------------------
 
-      def self.try_optimize(v, vm)
+      def self.try_optimize(v, vm, prelude)
         return nil unless v.kind == "call" && v.func && v.args
 
         func = v.func
@@ -226,6 +229,23 @@ module RunarCompiler
           end
         end
 
+        # Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+        #
+        # The mirror of Rule 8. It has always been in optimizer/ec-rules.json and
+        # the Go tier -- whose rule engine executes that file directly --
+        # performed it; the six hand-ported tiers implemented only the forward
+        # direction, so the same ANF compiled to a 1808-byte script in Go and a
+        # 26140-byte one everywhere else (R-034 / CL-BUG-028).
+        #
+        # Placed after Rule 8 and before Rules 9/10/11 to match the JSON's rule
+        # order, which is the order the Go engine tries them in.
+        if func == "ecAdd" && args.size == 2
+          neg = resolve(args[0], vm)
+          if neg && neg.kind == "call" && neg.func == "ecNegate" && neg.args && neg.args.size == 1
+            return make_const_hex(INFINITY_HEX) if same_binding?(args[1], neg.args[0], vm)
+          end
+        end
+
         # Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
         if func == "ecMul" && args.size == 2
           inner = resolve(args[0], vm)
@@ -234,7 +254,7 @@ module RunarCompiler
             k1 = get_const_int(inner.args[1], vm)
             if k1
               combined = (k1 * k2) % CURVE_N
-              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm)])
+              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm, prelude)])
             end
           end
         end
@@ -250,7 +270,7 @@ module RunarCompiler
             k2 = get_const_int(right_v.args[0], vm)
             if k1 && k2
               combined = (k1 + k2) % CURVE_N
-              return make_call("ecMulGen", [fresh_const_name(combined, vm)])
+              return make_call("ecMulGen", [fresh_const_name(combined, vm, prelude)])
             end
           end
         end
@@ -267,7 +287,7 @@ module RunarCompiler
               k2 = get_const_int(right_v.args[1], vm)
               if k1 && k2
                 combined = (k1 + k2) % CURVE_N
-                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm)])
+                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm, prelude)])
               end
             end
           end
@@ -286,21 +306,23 @@ module RunarCompiler
       # Helpers -- value inspection
       # -----------------------------------------------------------------
 
-      # Resolve a binding name to its ANFValue, following @ref: aliases.
+      # Resolve a binding name to its ANFValue.
+      #
+      # R-263: this used to carry an alias-chasing loop guarded on
+      # `val.kind == "load_param" && val.name.start_with?("@ref:")`. No such
+      # value exists. Aliases are created as load_const carrying the reference
+      # in `const_string` (see make_alias below, and anf_lower's
+      # `_make_load_const_string("@ref:...")`); `load_param` values carry real
+      # parameter names like "txPreimage". The branch could not fire, and the
+      # loop around it did nothing but walk one step and return.
+      #
+      # Not repaired into a working chase, which would be a behaviour change:
+      # the TypeScript reference's `resolveArg` is a plain map lookup too, so
+      # following aliases here would enable rewrites no other tier performs.
+      # Where alias-following genuinely belongs, dce.rb:98 already does it
+      # correctly, through `const_string`.
       def self.resolve(name, vm)
-        seen = Set.new
-        current = name
-        while vm.key?(current)
-          break if seen.include?(current)
-          seen.add(current)
-          val = vm[current]
-          if val.kind == "load_param" && val.name && val.name.start_with?("@ref:")
-            current = val.name[5..]
-            next
-          end
-          return val
-        end
-        vm[current]
+        vm[name]
       end
       private_class_method :resolve
 
@@ -338,21 +360,13 @@ module RunarCompiler
       end
       private_class_method :same_binding?
 
-      # Follow @ref: chains to get the canonical binding name.
-      def self.canonical(name, vm)
-        seen = Set.new
-        current = name
-        while vm.key?(current)
-          break if seen.include?(current)
-          seen.add(current)
-          val = vm[current]
-          if val.kind == "load_param" && val.name && val.name.start_with?("@ref:")
-            current = val.name[5..]
-            next
-          end
-          break
-        end
-        current
+      # The canonical binding name.
+      #
+      # R-263: the @ref: chain this claimed to follow was guarded on the same
+      # impossible `load_param` shape as `resolve` above, so every call already
+      # returned its argument unchanged.
+      def self.canonical(name, _vm)
+        name
       end
       private_class_method :canonical
 
@@ -381,7 +395,15 @@ module RunarCompiler
         v = IR::ANFValue.new(kind: "load_const")
         v.const_big_int = n
         v.const_int = n
-        v.raw_value = n
+        # A folded EC scalar is a value mod n, routinely far beyond
+        # Number.MAX_SAFE_INTEGER, and it now reaches the emitted IR JSON. Use
+        # the tier's canonical encoding (bare number when a double carries it
+        # losslessly, else the decimal digits with the JS BigInt `n` suffix, as
+        # a string) rather than a bare Integer, which --emit-ir would write as
+        # an unquoted 256-bit JSON number that every double-based consumer
+        # silently truncates. Same encoding as
+        # frontend/anf_lower.rb::_make_load_const_int.
+        v.raw_value = JSON.generate(Frontend._bigint_json_value(n))
         v
       end
       private_class_method :make_const_int
@@ -394,14 +416,25 @@ module RunarCompiler
       end
       private_class_method :make_call
 
-      # Insert a fresh constant binding into the value map and return its name.
+      # Bind a freshly folded constant and return its name.
       #
       # This is needed when optimization produces a new constant (e.g. k1*k2)
       # that needs to be referenced by name in a call.
-      def self.fresh_const_name(value, vm)
+      #
+      # The binding is appended to +prelude+ -- the rebuilt method body, at the
+      # point just before the binding currently being rewritten -- as well as
+      # registered in the value map. Registering it in the value map alone is
+      # not enough: stack lowering walks the body, so a call referencing a name
+      # that never got a binding dies with
+      # <tt>value "__ec_opt_N" not found on stack</tt>. Mirrors
+      # AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
+      # +newBindings+ list in anf-ec.ts (TypeScript).
+      def self.fresh_const_name(value, vm, prelude)
         self.fresh_counter += 1
         name = "__ec_opt_#{fresh_counter}"
-        vm[name] = make_const_int(value)
+        const = make_const_int(value)
+        vm[name] = const
+        prelude << IR::ANFBinding.new(name: name, value: const)
         name
       end
       private_class_method :fresh_const_name

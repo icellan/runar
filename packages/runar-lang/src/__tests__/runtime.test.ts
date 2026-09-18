@@ -151,10 +151,15 @@ describe('runtime builtins', () => {
       expect(right(toByteString('aabbccdd'), 2n)).toBe('ccdd');
     });
 
-    it('split at position', () => {
-      const [l, r] = split(toByteString('aabbccdd'), 2n);
-      expect(l).toBe('aabb');
-      expect(r).toBe('ccdd');
+    it('split binds the RIGHT half; left binds the other side of the same cut', () => {
+      // `split` is single-valued. Rúnar has no tuple type and no surface parser
+      // accepts array destructuring, so the pair this used to return was
+      // unnameable from contract source and disagreed with every typechecker.
+      // Asserting BOTH halves is what makes the row able to fail: a `split`
+      // that returned the left half would still look like a plausible
+      // single-valued function.
+      expect(split(toByteString('aabbccdd'), 2n)).toBe('ccdd');
+      expect(left(toByteString('aabbccdd'), 2n)).toBe('aabb');
     });
 
     it('reverseBytes', () => {

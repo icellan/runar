@@ -257,9 +257,14 @@ describe('refinement strategy 3 — branch-swap', () => {
     //   public unlock(cond: boolean): void {
     //     assert(cond ? true : false);
     //   }
-    // (byte hex 6351670068), but with branches INVERTED in the ANF.
-    // The refinement loop's branch-swap strategy should restore byte-identity.
-    const targetHex = '6351670068';
+    // but with branches INVERTED in the ANF. The refinement loop's branch-swap
+    // strategy should restore byte-identity.
+    //
+    // W3 / BoolBamboozle: the target bytes carry the compiler's `boolean`
+    // ABI-domain prologue ahead of the OP_IF — `assert(cond ? ...)` on a
+    // boolean param does not compile to a bare `6351670068` any more, so a
+    // pin without it could never be reached by any candidate source.
+    const targetHex = '767600877c51879b696351670068';
     const targetBytes = hexToBytes(targetHex);
 
     // The lifter's "correct" output for these bytes is a single if-binding

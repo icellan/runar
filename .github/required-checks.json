@@ -1,0 +1,142 @@
+{
+  "_comment": [
+    "R-104. Branch protection lives in GitHub settings, not in the checkout, so",
+    "from the repository alone every gate in ci.yml is advisory: nothing here",
+    "could prove that a red conformance run stops a merge.",
+    "",
+    "This file is the project's CLAIM about which ci.yml jobs must be required",
+    "status checks on the protected branch. Two things check it:",
+    "",
+    "  * .github/scripts/check-required-checks.mjs, run by the",
+    "    'required-checks' workflow, asks the GitHub API for the branch's",
+    "    ACTUAL required checks and fails if any name below is missing;",
+    "  * tests/required-checks-manifest.test.ts keeps the claim honest without",
+    "    any network: every `job` must exist in ci.yml, every `check` must match",
+    "    that job's display name, and every job in ci.yml must appear in exactly",
+    "    one of the two lists.",
+    "",
+    "`check` is the name GitHub shows (a job's `name:` if it has one, otherwise",
+    "its id) — that string, not the job id, is what branch protection matches.",
+    "",
+    "Moving an entry into `not_required` is a deliberate decision and needs a",
+    "reason. Deleting one is not a way to make the checker pass."
+  ],
+  "branch": "main",
+  "required": [
+    {
+      "job": "lint-no-silent-skips",
+      "check": "Lint — no silent test skips, no active TODO markers"
+    },
+    {
+      "job": "conformance-allowlist-audit",
+      "check": "Lint — conformance allowlist audit"
+    },
+    {
+      "job": "golden-provenance-gate",
+      "check": "Lint — golden-regeneration provenance gate"
+    },
+    {
+      "job": "go-only-crypto-vectors",
+      "check": "Test — Go-only crypto research vectors"
+    },
+    {
+      "job": "wire-format-must-move-golden",
+      "check": "Lint — wire-format must-move-a-golden gate"
+    },
+    {
+      "job": "sdk-envelope-fixtures",
+      "check": "Lint — SDK envelope fixture drift + interop coverage"
+    },
+    {
+      "job": "sdk-bip143-fixtures",
+      "check": "Lint — SDK BIP-143 fixture drift + interop coverage"
+    },
+    {
+      "job": "ts-compiler",
+      "check": "TypeScript Compiler"
+    },
+    {
+      "job": "go-compiler",
+      "check": "Go Compiler"
+    },
+    {
+      "job": "rust-compiler",
+      "check": "Rust Compiler"
+    },
+    {
+      "job": "python-compiler",
+      "check": "Python Compiler"
+    },
+    {
+      "job": "zig-compiler",
+      "check": "Zig Compiler"
+    },
+    {
+      "job": "java-compiler",
+      "check": "Java Compiler"
+    },
+    {
+      "job": "ruby-compiler",
+      "check": "Ruby Compiler"
+    },
+    {
+      "job": "go-sdk",
+      "check": "Go SDK"
+    },
+    {
+      "job": "rust-sdk",
+      "check": "Rust SDK"
+    },
+    {
+      "job": "python-sdk",
+      "check": "Python SDK"
+    },
+    {
+      "job": "zig-sdk",
+      "check": "Zig SDK"
+    },
+    {
+      "job": "ruby-sdk",
+      "check": "Ruby SDK"
+    },
+    {
+      "job": "java-sdk",
+      "check": "Java SDK"
+    },
+    {
+      "job": "conformance",
+      "check": "Conformance Tests"
+    },
+    {
+      "job": "conformance-anf-parity",
+      "check": "Conformance — ANF interpreter parity"
+    },
+    {
+      "job": "runar-verification",
+      "check": "Runar Verification (Lean 4)"
+    },
+    {
+      "job": "decompiler-roundtrip",
+      "check": "Decompiler — round-trip + fingerprint regression"
+    },
+    {
+      "job": "sdk-conformance",
+      "check": "SDK Output Conformance"
+    },
+    {
+      "job": "script-execution",
+      "check": "Script Execution Oracle"
+    },
+    {
+      "job": "integration",
+      "check": "Integration Tests"
+    }
+  ],
+  "not_required": [
+    {
+      "job": "integration-teranode",
+      "check": "Integration Tests (Teranode — opt-in)",
+      "reason": "Guarded by `if: github.event_name == 'workflow_dispatch' && inputs.run_teranode`, so it does not run on a pull request at all. A required check that never reports blocks every merge forever, which is why an opt-in job must stay out of the list."
+    }
+  ]
+}

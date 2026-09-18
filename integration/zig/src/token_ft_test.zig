@@ -15,6 +15,22 @@ fn hexEncodeAscii(allocator: std.mem.Allocator, ascii: []const u8) ![]u8 {
     return hex_buf;
 }
 
+const MergeParents = struct {
+    parent1: []u8,
+    parent2: []u8,
+    utxo2: runar.UTXO,
+};
+
+/// Companion-parent raw txs for merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis).
+fn mergeParents(allocator: std.mem.Allocator, provider: runar.Provider, c1: *runar.RunarContract, c2: *runar.RunarContract) !MergeParents {
+    const utxo1 = c1.getCurrentUtxo() orelse return error.TestUnexpectedResult;
+    const utxo2 = c2.getCurrentUtxo() orelse return error.TestUnexpectedResult;
+    const parent1 = try provider.getRawTransaction(allocator, utxo1.txid);
+    errdefer allocator.free(parent1);
+    const parent2 = try provider.getRawTransaction(allocator, utxo2.txid);
+    return .{ .parent1 = parent1, .parent2 = parent2, .utxo2 = utxo2 };
+}
+
 test "FungibleToken_Compile" {
     const allocator = std.testing.allocator;
 
@@ -277,6 +293,7 @@ test "FungibleToken_WrongOwnerRejected" {
     var wrong_signer = try wrong_signer_wallet.localSigner();
 
     // Call send with wrong signer -- checkSig should fail on-chain
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "send",
         &[_]runar.StateValue{
@@ -301,7 +318,7 @@ test "FungibleToken_WrongOwnerRejected" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected wrong owner", .{});
     }
 }
@@ -496,6 +513,7 @@ test "FungibleToken_TransferDeflatedBalance" {
 
     // Attacker deflates output balances: claims recipient gets 300, sender keeps 200 = 500 (from 1000)
     // hashOutputs mismatch should reject this on-chain
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -521,7 +539,7 @@ test "FungibleToken_TransferDeflatedBalance" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer with deflated balance", .{});
     }
 }
@@ -570,6 +588,7 @@ test "FungibleToken_TransferInflatedBalance" {
 
     // Attacker inflates output balances: claims recipient gets 800, sender keeps 500 = 1300 (from 1000)
     // hashOutputs mismatch should reject this on-chain
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -595,7 +614,7 @@ test "FungibleToken_TransferInflatedBalance" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer with inflated balance", .{});
     }
 }
@@ -643,6 +662,7 @@ test "FungibleToken_TransferExceedsBalanceRejected" {
     std.log.info("FungibleToken deployed for exceeds-balance test: {s}", .{deploy_txid});
 
     // Transfer 2000 when balance is only 1000 -- should fail assert(amount <= totalBalance)
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -668,7 +688,7 @@ test "FungibleToken_TransferExceedsBalanceRejected" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer exceeding balance", .{});
     }
 }
@@ -725,6 +745,7 @@ test "FungibleToken_TransferWrongSigner" {
     var wrong_signer = try wrong_signer_wallet.localSigner();
 
     // Wrong signer tries to transfer -- checkSig should fail
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -750,7 +771,7 @@ test "FungibleToken_TransferWrongSigner" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer with wrong signer", .{});
     }
 }
@@ -798,6 +819,7 @@ test "FungibleToken_TransferZeroAmountRejected" {
     std.log.info("FungibleToken deployed for zero-amount transfer test: {s}", .{deploy_txid});
 
     // Transfer of zero amount -- should fail assert(amount > 0)
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -823,7 +845,7 @@ test "FungibleToken_TransferZeroAmountRejected" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected transfer of zero amount", .{});
     }
 }
@@ -881,20 +903,23 @@ test "FungibleToken_Merge" {
     defer allocator.free(deploy_txid2);
     std.log.info("FungibleToken contract2 deployed for merge test: {s}", .{deploy_txid2});
 
-    // merge(sig, otherBalance, allPrevouts, outputSatoshis)
+    // merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)
     // Merges two UTXOs (contract1 + contract2) into one output with the
     // combined balance. The on-chain semantics (mirrors the Go SDK):
-    //   - input 0: contract1, otherBalance = balance2
-    //   - input 1: contract2, otherBalance = balance1
+    //   - input 0: contract1, otherBalance = balance2, otherParentTx = parent2
+    //   - input 1: contract2, otherBalance = balance1, otherParentTx = parent1
     //   - allPrevouts: auto-resolved by SDK from the actual tx input list
     //   - one continuation output carrying the merged balance.
-    const utxo2 = contract2.getCurrentUtxo() orelse return error.TestUnexpectedResult;
+    const parents = try mergeParents(allocator, rpc_provider.provider(), &contract1, &contract2);
+    defer allocator.free(parents.parent1);
+    defer allocator.free(parents.parent2);
     const txid = try contract1.call(
         "merge",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
             .{ .int = balance2 }, // otherBalance for input 0
             .{ .int = 0 }, // allPrevouts: auto-fill
+            .{ .bytes = parents.parent2 },
             .{ .int = output_sats },
         },
         rpc_provider.provider(),
@@ -907,12 +932,13 @@ test "FungibleToken_Merge" {
                     .{ .int = balance2 },
                 } },
             },
-            .additional_contract_inputs = &[_]runar.UTXO{utxo2},
+            .additional_contract_inputs = &[_]runar.UTXO{parents.utxo2},
             .additional_contract_input_args = &[_][]const runar.StateValue{
                 &[_]runar.StateValue{
                     .{ .int = 0 }, // sig (auto-sign for input 1)
                     .{ .int = balance1 }, // otherBalance for input 1 = balance of input 0
                     .{ .int = 0 }, // allPrevouts auto-fill (same value as input 0)
+                    .{ .bytes = parents.parent1 },
                     .{ .int = output_sats },
                 },
             },
@@ -988,13 +1014,17 @@ test "FungibleToken_MergeDeflated" {
     // explicit addOutput(outputSatoshis) (4000), so hashOutputs mismatched for
     // a reason unrelated to the attack. Fixing that SDK bug removed the
     // accidental failure and exposed the test as vacuous.
-    const utxo2 = contract2.getCurrentUtxo() orelse return error.TestUnexpectedResult;
+    const parents = try mergeParents(allocator, rpc_provider.provider(), &contract1, &contract2);
+    defer allocator.free(parents.parent1);
+    defer allocator.free(parents.parent2);
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract1.call(
         "merge",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
             .{ .int = 100 }, // deflated otherBalance (really 600)
             .{ .int = 0 }, // allPrevouts: auto-computed
+            .{ .bytes = parents.parent2 },
             .{ .int = output_sats },
         },
         rpc_provider.provider(),
@@ -1007,12 +1037,13 @@ test "FungibleToken_MergeDeflated" {
                     .{ .int = 100 },
                 } },
             },
-            .additional_contract_inputs = &[_]runar.UTXO{utxo2},
+            .additional_contract_inputs = &[_]runar.UTXO{parents.utxo2},
             .additional_contract_input_args = &[_][]const runar.StateValue{
                 &[_]runar.StateValue{
                     .{ .int = 0 }, // sig (auto-sign for input 1)
                     .{ .int = balance1 }, // input 1 reports input 0 honestly
                     .{ .int = 0 }, // allPrevouts auto-fill
+                    .{ .bytes = parents.parent1 },
                     .{ .int = output_sats },
                 },
             },
@@ -1032,7 +1063,7 @@ test "FungibleToken_MergeDeflated" {
         try std.testing.expectEqual(error.CallFailed, err);
         // The SDK must have reached the node, so the rejection is consensus's
         // and not a build-time refusal.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         // And nothing was spent: the contract UTXO must survive the rejection.
         const still = contract1.getCurrentUtxo() orelse return error.TestUnexpectedResult;
         try std.testing.expect(still.satoshis == deploy_sats);
@@ -1103,13 +1134,17 @@ test "FungibleToken_MergeInflatedTotal" {
     // FungibleToken_MergeDeflated: a lone input at position 0 writing
     // (400, 1600) is self-consistent and the covenant rightly accepts it. The
     // test only "passed" because of an unrelated continuation-satoshis bug.
-    const utxo2 = contract2.getCurrentUtxo() orelse return error.TestUnexpectedResult;
+    const parents = try mergeParents(allocator, rpc_provider.provider(), &contract1, &contract2);
+    defer allocator.free(parents.parent1);
+    defer allocator.free(parents.parent2);
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract1.call(
         "merge",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
             .{ .int = 1600 }, // inflated otherBalance (really 600)
             .{ .int = 0 }, // allPrevouts: auto-computed
+            .{ .bytes = parents.parent2 },
             .{ .int = output_sats },
         },
         rpc_provider.provider(),
@@ -1122,12 +1157,13 @@ test "FungibleToken_MergeInflatedTotal" {
                     .{ .int = 1600 },
                 } },
             },
-            .additional_contract_inputs = &[_]runar.UTXO{utxo2},
+            .additional_contract_inputs = &[_]runar.UTXO{parents.utxo2},
             .additional_contract_input_args = &[_][]const runar.StateValue{
                 &[_]runar.StateValue{
                     .{ .int = 0 }, // sig (auto-sign for input 1)
                     .{ .int = 1400 }, // input 1 also lies (really 400)
                     .{ .int = 0 }, // allPrevouts auto-fill
+                    .{ .bytes = parents.parent1 },
                     .{ .int = output_sats },
                 },
             },
@@ -1142,7 +1178,7 @@ test "FungibleToken_MergeInflatedTotal" {
         // only meaningful because FungibleToken_Merge is the honest-balance
         // control over the same setup and it succeeds.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         const still = contract1.getCurrentUtxo() orelse return error.TestUnexpectedResult;
         try std.testing.expect(still.satoshis == deploy_sats);
         std.log.info("FungibleToken correctly rejected merge with inflated total", .{});
@@ -1208,21 +1244,40 @@ test "FungibleToken_MergeWrongSigner" {
     var wrong_signer = try wrong_signer_wallet.localSigner();
 
     // Wrong signer tries to merge -- checkSig should fail
+    const parents = try mergeParents(allocator, rpc_provider.provider(), &contract1, &contract2);
+    defer allocator.free(parents.parent1);
+    defer allocator.free(parents.parent2);
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract1.call(
         "merge",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign (wrong key)
             .{ .int = balance2 },
             .{ .int = 0 }, // allPrevouts: auto-computed
+            .{ .bytes = parents.parent2 },
             .{ .int = output_sats },
         },
         rpc_provider.provider(),
         wrong_signer.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = owner_pk },
-            .{ .int = balance1 },
-            .{ .int = balance2 },
-        } },
+        .{
+            .outputs = &[_]runar.OutputSpec{
+                .{ .satoshis = output_sats, .state = &[_]runar.StateValue{
+                    .{ .bytes = owner_pk },
+                    .{ .int = balance1 },
+                    .{ .int = balance2 },
+                } },
+            },
+            .additional_contract_inputs = &[_]runar.UTXO{parents.utxo2},
+            .additional_contract_input_args = &[_][]const runar.StateValue{
+                &[_]runar.StateValue{
+                    .{ .int = 0 },
+                    .{ .int = balance1 },
+                    .{ .int = 0 },
+                    .{ .bytes = parents.parent1 },
+                    .{ .int = output_sats },
+                },
+            },
+        },
     );
 
     if (result) |txid| {
@@ -1233,7 +1288,7 @@ test "FungibleToken_MergeWrongSigner" {
         // The SDK must have reached the node — otherwise this test would pass
         // just as happily if the call had been refused before a transaction
         // was ever built, which proves nothing about the covenant.
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         std.log.info("FungibleToken correctly rejected merge with wrong signer", .{});
     }
 }

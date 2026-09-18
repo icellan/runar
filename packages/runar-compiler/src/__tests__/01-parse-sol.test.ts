@@ -7,6 +7,7 @@ import type {
   BigIntLiteral,
   BoolLiteral,
   UnaryExpr,
+  TernaryExpr,
   IfStatement,
   ForStatement,
   VariableDeclStatement,
@@ -583,6 +584,102 @@ contract Arithmetic is SmartContract {
       expect(contract.methods).toHaveLength(1);
       expect(contract.methods[0]!.params).toHaveLength(2);
       expect(contract.methods[0]!.body.length).toBeGreaterThanOrEqual(6);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Ternary conditional `cond ? a : b`
+  //
+  // The other six tiers (Go `parseSolTernary`, Rust, Python, Zig, Ruby, Java)
+  // all parse this; the TS reference frontend did not, which broke the
+  // "all seven compilers parse all nine extensions" parity invariant.
+  // ---------------------------------------------------------------------------
+
+  describe('ternary conditional', () => {
+    /** Parse a method body containing `stmts` and return the statement list. */
+    function parseBody(stmts: string) {
+      const sol = `
+pragma runar ^0.1.0;
+
+contract Ternary is SmartContract {
+    bigint immutable target;
+
+    constructor(bigint _target) {
+        target = _target;
+    }
+
+    function verify(bigint a, bigint b, bigint c) public {
+${stmts}
+    }
+}
+`;
+      const result = parseSolSource(sol);
+      return result;
+    }
+
+    it('parses a ternary as a variable initializer', () => {
+      const result = parseBody('        bigint r = a > 0 ? b : c;\n        require(r == target);');
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      expect(decl.kind).toBe('variable_decl');
+      expect(decl.init.kind).toBe('ternary_expr');
+    });
+
+    it('binds the condition at comparison precedence, not just a bare operand', () => {
+      const result = parseBody('        bigint r = a > 0 ? b : c;\n        require(r == target);');
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      const tern = decl.init as TernaryExpr;
+      // Condition must be the whole `a > 0`, not just `a`.
+      expect(tern.condition.kind).toBe('binary_expr');
+      expect((tern.condition as BinaryExpr).op).toBe('>');
+      expect((tern.consequent as Identifier).name).toBe('b');
+      expect((tern.alternate as Identifier).name).toBe('c');
+    });
+
+    it('is right-associative: `a ? b : c ? d : e` nests in the alternate', () => {
+      const result = parseBody(
+        '        bigint r = a > 0 ? b : c > 0 ? a : b;\n        require(r == target);',
+      );
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      const outer = decl.init as TernaryExpr;
+      expect(outer.kind).toBe('ternary_expr');
+      // Right-associative => the nested ternary is the ALTERNATE, not the consequent.
+      expect(outer.consequent.kind).not.toBe('ternary_expr');
+      expect(outer.alternate.kind).toBe('ternary_expr');
+      const inner = outer.alternate as TernaryExpr;
+      expect((inner.condition as BinaryExpr).op).toBe('>');
+      expect((inner.consequent as Identifier).name).toBe('a');
+      expect((inner.alternate as Identifier).name).toBe('b');
+    });
+
+    it('parses a ternary nested inside a larger expression', () => {
+      const result = parseBody(
+        '        bigint r = (a > 0 ? b : c) + 1;\n        require(r == target);',
+      );
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const decl = result.contract!.methods[0]!.body[0] as VariableDeclStatement;
+      const sum = decl.init as BinaryExpr;
+      expect(sum.kind).toBe('binary_expr');
+      expect(sum.op).toBe('+');
+      expect(sum.left.kind).toBe('ternary_expr');
+    });
+
+    it('parses a ternary as a call argument', () => {
+      const result = parseBody('        require(target == (a > 0 ? b : c));');
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const stmt = result.contract!.methods[0]!.body[0] as ExpressionStatement;
+      const call = stmt.expression as CallExpr;
+      const cmp = call.args[0] as BinaryExpr;
+      expect(cmp.right.kind).toBe('ternary_expr');
+    });
+
+    it('rejects a malformed ternary with no `:` branch', () => {
+      const result = parseBody('        bigint r = a > 0 ? b;\n        require(r == target);');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.some(e => e.message.includes("Expected ':'"))).toBe(true);
     });
   });
 });

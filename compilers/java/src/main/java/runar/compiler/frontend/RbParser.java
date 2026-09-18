@@ -26,6 +26,7 @@ import runar.compiler.ir.ast.Identifier;
 import runar.compiler.ir.ast.IfStatement;
 import runar.compiler.ir.ast.IncrementExpr;
 import runar.compiler.ir.ast.IndexAccessExpr;
+import runar.compiler.ir.ast.DecrementExpr;
 import runar.compiler.ir.ast.MemberExpr;
 import runar.compiler.ir.ast.MethodNode;
 import runar.compiler.ir.ast.ParamNode;
@@ -251,29 +252,42 @@ public final class RbParser {
     );
 
     /**
-     * Convert a snake_case identifier to camelCase. Only capitalises
-     * lower-case letters or digits following an underscore (so {@code EC_P}
-     * is left untouched). Strips leading underscores so {@code _foo_bar}
-     * becomes {@code fooBar}.
+     * Convert a snake_case identifier to camelCase: split on {@code _} and
+     * capitalise the first character of every following part, skipping empty
+     * parts. This is the shared R-113 rule — the same algorithm as
+     * {@code snakeToCamelCore} (TS), {@code rbConvertName} (Go),
+     * {@code snake_to_camel} (Rust) and {@code snakeToCamel} (Zig), and the
+     * one {@link MoveParser} and {@link RustParser} already used here.
+     *
+     * <p>This method used to walk the characters and uppercase only a
+     * lower-case letter or digit following the underscore, leaving {@code _}
+     * before a CAPITAL in place — the {@code /_([a-z0-9])/} rule spelled out
+     * by hand, which is why grepping for that pattern did not find it. A
+     * property {@code total_A} reached the artifact as {@code total_A} here
+     * and as {@code totalA} in ts/go/rust/zig. The script hex is identical
+     * either way, so hex parity never saw it — but {@code serializeState}
+     * looks state up by {@code field.name}, so the two spellings do not
+     * interoperate.
+     *
+     * <p>Strips leading underscores so {@code _foo_bar} becomes
+     * {@code fooBar}. An all-underscore name has nothing left to convert and
+     * is returned unchanged, as in the Go tier.
      */
     static String snakeToCamel(String name) {
         int leading = 0;
         while (leading < name.length() && name.charAt(leading) == '_') {
             leading++;
         }
-        String s = name.substring(leading);
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '_' && i + 1 < s.length()) {
-                char next = s.charAt(i + 1);
-                if ((next >= 'a' && next <= 'z') || (next >= '0' && next <= '9')) {
-                    sb.append(Character.toUpperCase(next));
-                    i++;
-                    continue;
-                }
-            }
-            sb.append(c);
+        String stripped = name.substring(leading);
+        if (stripped.isEmpty()) return name;
+        String[] parts = stripped.split("_", -1);
+        if (parts.length <= 1) return stripped;
+        StringBuilder sb = new StringBuilder(stripped.length());
+        sb.append(parts[0]);
+        for (int i = 1; i < parts.length; i++) {
+            String part = parts[i];
+            if (part.isEmpty()) continue;
+            sb.append(Character.toUpperCase(part.charAt(0))).append(part.substring(1));
         }
         return sb.toString();
     }
@@ -1110,6 +1124,23 @@ public final class RbParser {
             return new IfStatement(cond, body, new ArrayList<>(), l);
         }
 
+        /**
+         * Destructure {@code <receiver>.downto(<bound>)} — the Ruby countdown
+         * header — into {@code {receiver, bound}}.
+         *
+         * <p>Returns {@code null} for every other expression, including
+         * {@code downto} with the wrong arity, so a malformed header falls
+         * through to the range-operator branch and gets that branch's
+         * diagnostic rather than silently becoming a loop.
+         */
+        private static Expression[] matchDowntoCall(Expression expr) {
+            if (!(expr instanceof CallExpr call)) return null;
+            if (call.args().size() != 1) return null;
+            if (!(call.callee() instanceof MemberExpr member)) return null;
+            if (!"downto".equals(member.property())) return null;
+            return new Expression[] { member.object(), call.args().get(0) };
+        }
+
         Statement parseForStatement(SourceLocation l) {
             advance(); // 'for'
             Token iterTok = advance();
@@ -1117,17 +1148,44 @@ public final class RbParser {
             expect(TK.IN, "in");
             Expression startExpr = parseExpression();
 
+            // Three loop headers, all of them real Ruby that iterates exactly
+            // these values:
+            //
+            //   for i in 0...n       -> 0, 1, … n-1  (exclusive, ascending)
+            //   for i in 0..n        -> 0, 1, … n    (inclusive, ascending)
+            //   for i in n.downto(m) -> n, n-1, … m  (inclusive, DESCENDING)
+            //
+            // `downto` is what lets the Ruby surface spell a countdown.
+            // Ruby's range operators only ever ascend — `(5..2)` is empty —
+            // so `step = -1` was unreachable from this surface, and no fixture
+            // could exercise it across all nine. `Integer#downto` is the
+            // language's own countdown verb, it returns an Enumerator, and
+            // `for x in enum` is valid Ruby over one.
+            //
+            // `5.downto(2)` is a postfix method call, so the start-expression
+            // parser has already consumed the whole header by the time we get
+            // here. Match on the shape it produced rather than on the tokens.
             boolean isExclusive = false;
-            if (peek().kind == TK.DOTDOTDOT) {
-                isExclusive = true;
-                advance();
-            } else if (peek().kind == TK.DOTDOT) {
-                advance();
+            boolean descending = false;
+            Expression endExpr;
+            Expression[] downto = matchDowntoCall(startExpr);
+            if (downto != null) {
+                startExpr = downto[0];
+                endExpr = downto[1];
+                descending = true;
+                isExclusive = false; // downto's bound is inclusive
             } else {
-                errors.add(file + ":" + peek().line
-                    + ": expected range operator '..' or '...' in for loop");
+                if (peek().kind == TK.DOTDOTDOT) {
+                    isExclusive = true;
+                    advance();
+                } else if (peek().kind == TK.DOTDOT) {
+                    advance();
+                } else {
+                    errors.add(file + ":" + peek().line
+                        + ": expected range operator '..' or '...', or '.downto(n)', in for loop");
+                }
+                endExpr = parseExpression();
             }
-            Expression endExpr = parseExpression();
 
             match(TK.DO);
             skipNewlines();
@@ -1141,13 +1199,19 @@ public final class RbParser {
                 startExpr,
                 varLoc
             );
-            Expression cond = new BinaryExpr(
-                isExclusive ? Expression.BinaryOp.LT : Expression.BinaryOp.LE,
-                new Identifier(varName),
-                endExpr
-            );
+            Expression.BinaryOp cmpOp;
+            if (descending) {
+                cmpOp = Expression.BinaryOp.GE;
+            } else if (isExclusive) {
+                cmpOp = Expression.BinaryOp.LT;
+            } else {
+                cmpOp = Expression.BinaryOp.LE;
+            }
+            Expression cond = new BinaryExpr(cmpOp, new Identifier(varName), endExpr);
             Statement update = new ExpressionStatement(
-                new IncrementExpr(new Identifier(varName), false),
+                descending
+                    ? new DecrementExpr(new Identifier(varName), false)
+                    : new IncrementExpr(new Identifier(varName), false),
                 l
             );
             return new ForStatement(init, cond, update, body, l);

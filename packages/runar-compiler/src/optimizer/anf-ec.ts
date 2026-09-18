@@ -175,7 +175,12 @@ function tryRewrite(
         const k1 = k1Val ? getConstInt(k1Val) : undefined;
         const k2 = getConstInt(k2Val);
         if (k1 !== undefined && k2 !== undefined) {
-          const product = (k1 * k2) % CURVE_N;
+          // Normalise into [0, CURVE_N). JavaScript's `%` is truncated, so a
+          // negative constant scalar would otherwise fuse to a negative value
+          // while every other tier (Go/Rust/Python/Zig/Ruby/Java) reduces
+          // Euclidean-style — a cross-tier hex divergence. Rules 10 and 11
+          // below use the same normalisation.
+          const product = ((k1 * k2) % CURVE_N + CURVE_N) % CURVE_N;
           const newScalarName = `${binding.name}_k`;
           newBindings.push({ name: newScalarName, value: makeLoadConst(product) });
           return { kind: 'call', func: 'ecMul', args: [innerPoint, newScalarName] };
@@ -208,8 +213,30 @@ function tryRewrite(
         }
       }
 
-      // Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) → ecMulGen(k1+k2)
       const leftVal = resolveArg(leftArg, valueMap);
+
+      // Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) → INFINITY
+      //
+      // The mirror of Rule 8. It was in optimizer/ec-rules.json from the start
+      // and the Go tier — whose engine executes that file directly — performed
+      // it; the six hand-ported tiers implemented only the forward direction,
+      // so the same ANF compiled to a 1808-byte script in Go and a 26140-byte
+      // one everywhere else (R-034 / CL-BUG-028).
+      //
+      // Placed AFTER Rule 8 and BEFORE Rules 10/11 to match the JSON's rule
+      // order, which is the order the Go engine tries them in. The shapes do
+      // not overlap (the left operand here must be an ecNegate call), but rule
+      // order is the thing that decides output bytes when they ever do.
+      //
+      // Name equality, not value equality, exactly as Rule 8 above: $x must
+      // bind to the same ANF binding on both sides.
+      if (leftVal && isCallTo(leftVal, 'ecNegate') && leftVal.args.length === 1) {
+        if (leftVal.args[0] === rightArg) {
+          return makeLoadConst(INFINITY_HEX);
+        }
+      }
+
+      // Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) → ecMulGen(k1+k2)
       if (leftVal && rightVal && isCallTo(leftVal, 'ecMulGen') && isCallTo(rightVal, 'ecMulGen')
           && leftVal.args.length === 1 && rightVal.args.length === 1) {
         const k1Val = resolveArg(leftVal.args[0]!, valueMap);

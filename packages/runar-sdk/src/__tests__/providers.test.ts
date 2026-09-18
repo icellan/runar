@@ -171,6 +171,7 @@ describe('MockProvider: broadcast', () => {
     expect(txid).toBeDefined();
     expect(typeof txid).toBe('string');
     expect(txid.length).toBe(64); // txid should be 64 hex chars
+    expect(txid).toBe(tx.id('hex'));
     expect(provider.getValidationStats().validated).toBeGreaterThan(0);
   });
 

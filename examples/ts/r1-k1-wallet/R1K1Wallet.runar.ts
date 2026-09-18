@@ -8,6 +8,7 @@ import {
   len,
   substr,
   sha256,
+  toByteString,
   verifyECDSA_P256,
 } from 'runar-lang';
 import type {
@@ -77,7 +78,7 @@ class R1K1Wallet extends SmartContract {
   ) {
     assert(len(r1Salt) === 32n);
     assert(hash160(cat(r1PubKey, r1Salt)) === this.r1SaltedPubKeyHash);
-    assert(substr(txPreimage, len(txPreimage) - 4n, 4n) === '41000000');
+    assert(substr(txPreimage, len(txPreimage) - 4n, 4n) === toByteString('41000000'));
     assert(checkPreimage(txPreimage));
 
     // verifyECDSA_P256 hashes its message once. Passing SHA256(preimage)

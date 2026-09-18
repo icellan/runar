@@ -272,7 +272,15 @@ private def fromJsonANFValueAux? (fuel : Nat) (j : Json) : Except String ANFValu
       let bodyArr ← bodyJ.getArr?
       let body ← bodyArr.toList.mapM (fromJsonANFBindingAux? f)
       let iterVar ← j.getObjValAs? String "iterVar"
-      return .loop count body iterVar
+      let start : Int :=
+        match j.getObjValAs? Int "start" with
+        | .ok n => n
+        | .error _ => 0
+      let step : Int :=
+        match j.getObjValAs? Int "step" with
+        | .ok n => n
+        | .error _ => 1
+      return .loop count body iterVar start step
   | "assert" =>
       let value ← j.getObjValAs? String "value"
       return .assert value
@@ -379,10 +387,12 @@ private def toJsonANFValue : ANFValue → Json
               ("else", .arr (e.map toJsonANFBinding).toArray)]
              ++ (if results.isEmpty then []
                  else [("results", .arr ((results.map Json.str)).toArray)]))
-  | .loop count body iter =>
-      mkObj [("kind", .str "loop"), ("count", .num ⟨count, 0⟩),
-             ("body", .arr (body.map toJsonANFBinding).toArray),
-             ("iterVar", .str iter)]
+  | .loop count body iter start step =>
+      mkObj ([("kind", .str "loop"), ("count", .num ⟨count, 0⟩),
+              ("body", .arr (body.map toJsonANFBinding).toArray),
+              ("iterVar", .str iter)]
+             ++ (if start == 0 then [] else [("start", .num ⟨start, 0⟩)])
+             ++ (if step == 1 then [] else [("step", .num ⟨step, 0⟩)]))
   | .assert value => mkObj [("kind", .str "assert"), ("value", .str value)]
   | .updateProp name value =>
       mkObj [("kind", .str "update_prop"), ("name", .str name), ("value", .str value)]

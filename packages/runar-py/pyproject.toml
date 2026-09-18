@@ -15,7 +15,15 @@ Repository = "https://github.com/icellan/runar"
 Issues = "https://github.com/icellan/runar/issues"
 
 [project.optional-dependencies]
-crypto = ["coincurve>=20.0"]
+# R-213: this used to read `crypto = ["coincurve>=20.0"]`. Nothing in the
+# package has ever imported coincurve, so `pip install runar[crypto]` installed
+# a C extension and changed nothing — while the README sold it as "Optional
+# secp256k1 backend". The backend LocalSigner actually consults is bsv-sdk
+# (see runar/sdk/local_signer.py, which falls back to the bundled pure-Python
+# runar.ecdsa when it is absent), so the extra now installs that and the
+# promise is true. Same distribution as `script-vm`, kept as a separate name
+# because the two answer different questions: "sign faster" vs "run Script".
+crypto = ["bsv-sdk>=1.0"]
 # Test dependencies. bsv-sdk is REQUIRED to run the suite: MockProvider's
 # fail-closed broadcast validation (testing-gap remediation Phase A5) executes
 # every known input through its Spend interpreter, and raises

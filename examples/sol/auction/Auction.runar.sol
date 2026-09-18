@@ -9,7 +9,8 @@ pragma runar ^0.1.0;
 ///   1. The auctioneer deploys the contract with themselves as the initial
 ///      highest bidder, a highest bid of 0, and a block-height deadline.
 ///   2. Anyone calls `bid()` to outbid the current leader. Each successful bid
-///      creates a new UTXO carrying the updated state.
+///      creates a new UTXO carrying the updated state. Bidding stays open for
+///      as long as that UTXO is unspent — see Time enforcement below.
 ///   3. Once the deadline has passed, the auctioneer calls `close()` to
 ///      finalize the auction and spend the UTXO.
 ///
@@ -19,10 +20,24 @@ pragma runar ^0.1.0;
 ///   state-mutating methods. Each continuation UTXO encodes state as:
 ///     OP_RETURN <auctioneer> <highestBidder> <highestBid> <deadline>
 ///
-/// Time enforcement:
-///   Uses Bitcoin's native nLockTime mechanism via extractLocktime(). Miners
-///   will not include a transaction whose locktime is in the future, so the
-///   deadline is enforced at the consensus level.
+/// Time enforcement — read this before copying the pattern:
+///   nLockTime is chosen by the SPENDER and enforced by consensus as a
+///   NOT-BEFORE: the transaction becomes mineable once the chain has reached
+///   it. Nothing about it bounds the chain from above. A script can therefore
+///   assert "not before T" and can NEVER assert "before T" — a bidder at
+///   height T+1 simply stamps a stale nLockTime of T-1 and the node mines it.
+///
+///   So bid() carries no deadline check at all: bidding is open until the
+///   auctioneer closes. close() uses the direction that does work,
+///   nLockTime >= deadline, paired with extractSequence != 0xffffffff. That
+///   second assert is load-bearing, not decoration: consensus ignores
+///   nLockTime entirely when every input is final, so without it the
+///   auctioneer could stamp nLockTime = deadline on an all-final transaction
+///   and close at any height, before anyone had a chance to bid.
+///
+///   A trustless "bids only before T" window needs a time source the contract
+///   can read as state — an oracle or a tick — not the spending transaction's
+///   own locktime. v1 does not ship one.
 contract Auction is StatefulSmartContract {
     PubKey immutable auctioneer;    /// @dev Auction creator's public key. Immutable — baked into script at deploy time.
     PubKey highestBidder;           /// @dev Current highest bidder. Mutable state persisted across transactions.
@@ -43,15 +58,14 @@ contract Auction is StatefulSmartContract {
     /// @param sig Bidder's signature proving they authorized this bid.
     /// @param bidder Public key of the new bidder.
     /// @param bidAmount Bid in satoshis; must exceed the current highest bid.
+    /// @dev There is deliberately no deadline check here — see Time enforcement
+    /// on the contract. A bid lands whenever the contract's UTXO is unspent.
     function bid(Sig sig, PubKey bidder, bigint bidAmount) public {
         // Verify the bidder authorized this bid (prevents griefing)
         require(checkSig(sig, bidder));
 
         // Reject bids that do not exceed the current highest
         require(bidAmount > this.highestBid);
-
-        // Enforce that the auction is still open: nLockTime must be before the deadline
-        require(extractLocktime(this.txPreimage) < this.deadline);
 
         // Persist new leader into on-chain state
         this.highestBidder = bidder;
@@ -69,5 +83,11 @@ contract Auction is StatefulSmartContract {
 
         // Enforce that the deadline has passed: nLockTime must be >= deadline
         require(extractLocktime(this.txPreimage) >= this.deadline);
+
+        // ...and that consensus actually enforces that nLockTime. A transaction
+        // whose inputs are all final (nSequence 0xffffffff) is mineable at any
+        // height with nLockTime ignored, so without this the require above is
+        // script-only theatre and the auctioneer can close immediately.
+        require(extractSequence(this.txPreimage) != 4294967295); // 4294967295 == 0xffffffff
     }
 }

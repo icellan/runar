@@ -66,6 +66,30 @@ pub fn parse_python(source: &str, file_name: Option<&str>) -> ParseResult {
 
 /// Convert snake_case to camelCase. Single words pass through unchanged.
 /// Strips trailing underscore (e.g. `sum_` -> `sum`, `assert_` -> `assert`).
+/// Emitted for a `range` step the unrolled loop model cannot represent.
+///
+/// Shared verbatim with the other six tiers.
+const RANGE_STEP_DIAGNOSTIC: &str = concat!(
+    "range() step must be 1 or -1. The unrolled loop carries only a start value ",
+    "and a unit step, so any other step -- range(0, 10, 2), say -- cannot be ",
+    "represented and would be discarded."
+);
+
+/// The integer value of a literal expression, or `None` when it is not one.
+///
+/// A negative literal arrives as a unary minus over a positive one, so both
+/// shapes have to be walked — the same walk `extract_big_int_value` does in
+/// ANF lowering, for the same reason (N-138).
+fn literal_int_value(expr: &Expression) -> Option<BigInt> {
+    match expr {
+        Expression::BigIntLiteral { value } => Some(value.clone()),
+        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+            literal_int_value(operand).map(|v| -v)
+        }
+        _ => None,
+    }
+}
+
 fn snake_to_camel(name: &str) -> String {
     // Preserve dunder names (__init__, __foo__) unchanged
     if name.len() >= 4 && name.starts_with("__") && name.ends_with("__") {
@@ -141,6 +165,15 @@ fn map_builtin_name(name: &str) -> String {
         "ec_point_y" => return "ecPointY".to_string(),
         "mul_div" => return "mulDiv".to_string(),
         "percent_of" => return "percentOf".to_string(),
+        // Names the mechanical snake -> camel rule cannot produce: a digit
+        // ('to' -> '2') or an all-lowercase builtin with no interior capital.
+        "int_to_str" => return "int2str".to_string(),
+        "safe_div" => return "safediv".to_string(),
+        "safe_mod" => return "safemod".to_string(),
+        "div_mod" => return "divmod".to_string(),
+        // The all-caps PKH token does not survive snake -> camel either
+        // (it would come back as `requireOutputP2pkh`).
+        "require_output_p2pkh" => return "requireOutputP2PKH".to_string(),
         "add_output" => return "addOutput".to_string(),
         "add_raw_output" => return "addRawOutput".to_string(),
         "add_data_output" => return "addDataOutput".to_string(),
@@ -1313,10 +1346,35 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::Range);
         self.expect(&Token::LParen);
 
-        // range(n) or range(a, b)
+        // range(n), range(a, b), or range(a, b, step) with step in {1, -1}.
+        //
+        // The third argument is what lets the Python surface spell a
+        // COUNTDOWN. Until it existed, `range` was the surface's only loop
+        // syntax and it could only ascend, so `step = -1` — a shape the ANF
+        // loop node has carried since issue #121 and every tier lowers — was
+        // unreachable from Python, and no fixture could exercise it across all
+        // nine surfaces.
+        //
+        // Only ±1 is accepted: the ANF loop node synthesizes iteration k as
+        // `start + k*step` with a unit step, so `range(0, 10, 2)` has no
+        // representation. Refusing it is the same rule the for-header surfaces
+        // enforce on `i += 2` (N-061), stated in Python's spelling.
         let first_arg = self.parse_expression();
+        let mut descending = false;
         let (start_expr, end_expr) = if self.match_tok(&Token::Comma) {
             let second_arg = self.parse_expression();
+            if self.match_tok(&Token::Comma) {
+                let step_expr = self.parse_expression();
+                match literal_int_value(&step_expr) {
+                    Some(step) if step == BigInt::from(1) => descending = false,
+                    Some(step) if step == BigInt::from(-1) => descending = true,
+                    _ => {
+                        let loc = self.loc();
+                        self.errors
+                            .push(Diagnostic::error(RANGE_STEP_DIAGNOSTIC.to_string(), Some(loc)));
+                    }
+                }
+            }
             (first_arg, second_arg)
         } else {
             (Expression::BigIntLiteral { value: BigInt::from(0) }, first_arg)
@@ -1339,18 +1397,23 @@ impl<'a> PyParser<'a> {
             source_location: self.loc(),
         };
 
+        // `range` is half-open at BOTH ends: `range(5, 1, -1)` yields
+        // 5, 4, 3, 2, so the descending guard is `i > stop`, exactly as `<` is
+        // for ascending.
         let condition = Expression::BinaryExpr {
-            op: BinaryOp::Lt,
+            op: if descending { BinaryOp::Gt } else { BinaryOp::Lt },
             left: Box::new(Expression::Identifier {
                 name: var_name.clone(),
             }),
             right: Box::new(end_expr),
         };
 
+        let update_operand = Box::new(Expression::Identifier { name: var_name });
         let update = Statement::ExpressionStatement {
-            expression: Expression::IncrementExpr {
-                operand: Box::new(Expression::Identifier { name: var_name }),
-                prefix: false,
+            expression: if descending {
+                Expression::DecrementExpr { operand: update_operand, prefix: false }
+            } else {
+                Expression::IncrementExpr { operand: update_operand, prefix: false }
             },
             source_location: self.loc(),
         };

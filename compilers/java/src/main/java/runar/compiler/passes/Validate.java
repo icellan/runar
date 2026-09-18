@@ -567,7 +567,7 @@ public final class Validate {
 
             // #131: warn when a public method gates on extractLocktime but
             // never asserts the spending tx is non-final
-            // (extractSequence < 0xffffffff). Advisory only — no effect on the
+            // (extractSequence !== 0xffffffff). Advisory only — no effect on the
             // emitted bytecode.
             if (m.visibility() == Visibility.PUBLIC) {
                 warnLocktimeWithoutSequenceGuard(m, this);
@@ -941,13 +941,291 @@ public final class Validate {
                     f.sourceLocation());
             }
 
+            validateForConditionTestsIterator(f);
+
             validateExpression(f.condition());
             if (f.init() != null) {
                 validateExpression(f.init().init());
             }
+            validateForUpdate(f);
+            validateNoOutputIntrinsicInLoop(f);
             for (Statement s : f.body()) {
                 validateStatement(s);
             }
+        }
+
+        /**
+         * Reject any for-loop whose condition does not test the iterator itself
+         * (W4 / PhantomLap).
+         *
+         * <p>The bound check above reads only {@code condition.right}. Nothing required
+         * {@code condition.left} to BE the iterator, and {@code extractLoopShape} ignores
+         * left entirely: it computes {@code count = bound - start}. So
+         *
+         * <pre>{@code for (let i = 0n; i + 1n < 2n; i++) { ... }}</pre>
+         *
+         * runs ONCE in the source language and TWICE in the emitted script
+         * (count = 2 - 0). The extra lap executes the {@code else} arm the source can
+         * never reach. Measured on {@code @bsv/sdk} {@code Spend.validate()} with a vault
+         * whose signature check sits in the first lap and whose second lap sets
+         * {@code authorized = true}: the phantom-lap loop ACCEPTED an empty signature,
+         * while the semantically identical {@code i < 1n} rejected it.
+         *
+         * <p>Refusal rather than lowering: evaluating a general condition per iteration
+         * means unrolling against a real interpreter at ANF time, a language extension
+         * with no golden behind it. The diagnostic text is shared verbatim with the other
+         * six tiers.
+         */
+        private void validateForConditionTestsIterator(ForStatement f) {
+            String iter = f.init() == null ? "" : f.init().name();
+            if (f.condition() instanceof BinaryExpr be
+                && be.left() instanceof Identifier id
+                && id.name().equals(iter)) {
+                return;
+            }
+            error("For loop condition must compare the loop variable '" + iter
+                + "' to a compile-time constant (`" + iter + " < 10n`). The unrolled loop "
+                + "binds the iterator as `start + k*step` and takes its trip count from the "
+                + "bound alone, so a condition whose left-hand side is anything else -- a "
+                + "computed expression, or a different variable -- is not the condition the "
+                + "loop actually evaluates", f.sourceLocation());
+        }
+
+        /** The three intrinsics that register an output ref. */
+        private static final Set<String> OUTPUT_INTRINSIC_NAMES =
+            Set.of("addOutput", "addRawOutput", "addDataOutput");
+
+        /**
+         * Build the R-127 rejection. Shared verbatim with the other six tiers.
+         */
+        private static String loopOutputIntrinsicMsg(String intrinsic, String via) {
+            String viaClause =
+                via == null ? "" : " (reached through private method '" + via + "')";
+            return "Output intrinsic '" + intrinsic + "'" + viaClause
+                + " cannot be called inside a loop body. A loop body lowers into its own scope"
+                + " whose declared outputs never reach the method's output list, so the"
+                + " continuation hash would commit to fewer outputs than the transaction actually"
+                + " creates: the spend is rejected by every shipped SDK and any successor it"
+                + " produces is unspendable. Move the call out of the loop.";
+        }
+
+        /** Where an output intrinsic was found, and how it was reached. */
+        private record IntrinsicSite(String intrinsic, String via, SourceLocation location) {}
+
+        /**
+         * Reject an output intrinsic called inside a loop body (R-127).
+         *
+         * <p>{@code AnfLower} lowers a loop body into its own sub-context, which starts with a
+         * fresh empty add-output ref list, and nothing propagates that list back to the method
+         * context — unlike the if-statement lowering, which concatenates each arm's outputs into
+         * one ref precisely so the parent sees them. The continuation hash is then built from
+         * whatever {@code addOutput} calls sit at the method's TOP level while the loop's outputs
+         * are still emitted into the transaction. Measured on a two-iteration loop before this
+         * check existed:
+         *
+         * <ul>
+         *   <li>loop only — ts/go/rust/python blew up inside stack lowering ("method parameter
+         *       '_newAmount' is not on the stack at a post-consumption reference"), zig/ruby
+         *       emitted a covenant over the WRONG output set, java emitted none.
+         *   <li>loop + one top-level call — compiled clean in every tier, and the ANF continuation
+         *       hashed exactly ONE leaf while three outputs were built.
+         * </ul>
+         *
+         * <p>A continuation committing to fewer outputs than the transaction creates is spendable
+         * only by a hand-crafted transaction, is rejected by every shipped SDK, and the successor
+         * it produces is permanently unspendable (CL-BUG-164).
+         *
+         * <p>Refusal rather than lowering: propagating the refs cannot work by name, because the
+         * loop is unrolled at stack-lowering time and one body binding name denotes N physical
+         * slots. A correct lowering means unrolling at ANF time, a language feature with no golden
+         * behind it; refusing removes nothing that works today.
+         */
+        private void validateNoOutputIntrinsicInLoop(ForStatement f) {
+            IntrinsicSite site = findOutputIntrinsic(f.body(), new HashSet<>());
+            if (site == null) {
+                return;
+            }
+            SourceLocation loc = site.location() != null ? site.location() : f.sourceLocation();
+            error(loopOutputIntrinsicMsg(site.intrinsic(), site.via()), loc);
+        }
+
+        /** The property/function name a call names, or null. */
+        private static String calleeName(Expression expr) {
+            if (!(expr instanceof CallExpr call)) {
+                return null;
+            }
+            Expression callee = call.callee();
+            if (callee instanceof PropertyAccessExpr pa) {
+                return pa.property();
+            }
+            if (callee instanceof MemberExpr me) {
+                return me.property();
+            }
+            if (callee instanceof Identifier id) {
+                return id.name();
+            }
+            return null;
+        }
+
+        private MethodNode privateMethodNamed(String name) {
+            for (MethodNode m : contract.methods()) {
+                if (m.name().equals(name) && m.visibility() == Visibility.PRIVATE) {
+                    return m;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * First output intrinsic reachable from {@code stmts}, following calls to private methods:
+         * a public method that delegates {@code addOutput} to a private helper has that helper
+         * INLINED at ANF time, so a helper called in a loop lands its outputs in the loop's
+         * sub-context exactly as a direct call would.
+         */
+        private IntrinsicSite findOutputIntrinsic(List<Statement> stmts, Set<String> seen) {
+            for (Statement stmt : stmts) {
+                IntrinsicSite found = findOutputIntrinsicInStatement(stmt, seen);
+                if (found != null) {
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        private IntrinsicSite findOutputIntrinsicInStatement(Statement stmt, Set<String> seen) {
+            if (stmt instanceof ExpressionStatement es) {
+                return findOutputIntrinsicInExpr(es.expression(), es.sourceLocation(), seen);
+            }
+            if (stmt instanceof VariableDeclStatement vd) {
+                return findOutputIntrinsicInExpr(vd.init(), vd.sourceLocation(), seen);
+            }
+            if (stmt instanceof AssignmentStatement as) {
+                return findOutputIntrinsicInExpr(as.value(), as.sourceLocation(), seen);
+            }
+            if (stmt instanceof ReturnStatement rs) {
+                return findOutputIntrinsicInExpr(rs.value(), rs.sourceLocation(), seen);
+            }
+            if (stmt instanceof IfStatement is) {
+                IntrinsicSite inCond =
+                    findOutputIntrinsicInExpr(is.condition(), is.sourceLocation(), seen);
+                if (inCond != null) {
+                    return inCond;
+                }
+                List<Statement> both = new ArrayList<>(is.thenBody());
+                if (is.elseBody() != null) {
+                    both.addAll(is.elseBody());
+                }
+                return findOutputIntrinsic(both, seen);
+            }
+            if (stmt instanceof ForStatement fs) {
+                return findOutputIntrinsic(fs.body(), seen);
+            }
+            return null;
+        }
+
+        private IntrinsicSite findOutputIntrinsicInExpr(
+            Expression expr, SourceLocation loc, Set<String> seen) {
+            if (expr == null) {
+                return null;
+            }
+            String name = calleeName(expr);
+            if (name != null) {
+                if (OUTPUT_INTRINSIC_NAMES.contains(name)) {
+                    return new IntrinsicSite(name, null, loc);
+                }
+                MethodNode helper = privateMethodNamed(name);
+                if (helper != null && seen.add(name)) {
+                    IntrinsicSite nested = findOutputIntrinsic(helper.body(), seen);
+                    if (nested != null) {
+                        return new IntrinsicSite(nested.intrinsic(), name, loc);
+                    }
+                }
+            }
+            for (Expression child : subExpressions(expr)) {
+                IntrinsicSite found = findOutputIntrinsicInExpr(child, loc, seen);
+                if (found != null) {
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Direct sub-expressions of {@code expr}, for the intrinsic search above. An intrinsic can
+         * sit inside an argument list or an operand, not only as a bare expression statement.
+         */
+        private static List<Expression> subExpressions(Expression expr) {
+            if (expr instanceof CallExpr c) {
+                return c.args();
+            }
+            if (expr instanceof BinaryExpr b) {
+                return List.of(b.left(), b.right());
+            }
+            if (expr instanceof UnaryExpr u) {
+                return List.of(u.operand());
+            }
+            if (expr instanceof TernaryExpr t) {
+                return List.of(t.condition(), t.consequent(), t.alternate());
+            }
+            if (expr instanceof IndexAccessExpr ia) {
+                return List.of(ia.object(), ia.index());
+            }
+            return List.of();
+        }
+
+        /**
+         * Reject any for-loop update clause the loop model cannot represent (R-065).
+         *
+         * <p>The ANF {@code loop} node carries exactly {@code {count, iterVar, start, step, body}}
+         * and synthesizes the iterator on unrolled iteration k as {@code start + k*step}. There is
+         * no slot for an arbitrary update statement, and {@code AnfLower}'s
+         * {@code extractLoopStep} only ever understood a unit step — everything else was silently
+         * coerced to {@code +1} (or {@code -1} from the comparison direction) and the clause itself
+         * was discarded. That made three distinct failures indistinguishable from a correct
+         * compile:
+         *
+         * <ul>
+         *   <li>{@code for (let i = 0n; i < 3n; undefinedFn())} produced byte-identical output. A
+         *       nonexistent function name raised nothing.
+         *   <li>{@code for (let i = 0n; i < 3n; this.count++)} dropped the state write.
+         *   <li>{@code while (i < 5) : (i += 2)} unrolled 5 times over i = 0..4 instead of 3 times
+         *       over i = 0,2,4.
+         * </ul>
+         *
+         * <p>{@code spec/grammar.md}'s ForStatement production admits only
+         * {@code Identifier ('++' | '--')}, and its Statement Restrictions say "The loop variable
+         * MUST use simple increment ({@code ++}) or decrement ({@code --})". So rejecting is the
+         * fix rather than lowering: appending the update's lowering to the loop body would re-emit
+         * {@code i++} as a dead binding on every loop that already compiles correctly, moving bytes
+         * across the whole corpus to express nothing.
+         *
+         * <p>The accepted set is every shape the nine frontends actually synthesize:
+         * {@code i++}/{@code i--}/{@code ++i}/{@code --i}; the assignment spelling
+         * {@code i = i + 1} / {@code i = i - 1} / {@code i = 1 + i} that {@code i += 1} becomes in
+         * the Solidity, Zig and Java parsers; and the effect-free no-op sentinel (a literal or a
+         * bare identifier) that the while-shaped parsers synthesize when the source has no continue
+         * expression at all.
+         *
+         * <p>The advanced variable must be the declared iterator or the identifier the condition
+         * tests. Both are needed: the Zig parser only folds
+         * {@code var i = 0; while (i < N) : (i += 1)} into a single ForStatement when the
+         * declaration is the immediately preceding statement, so an unfolded loop carries a
+         * placeholder init while the update advances the real {@code i} named in the condition.
+         */
+        private void validateForUpdate(ForStatement f) {
+            List<String> allowed = new ArrayList<>();
+            if (f.init() != null) {
+                allowed.add(f.init().name());
+            }
+            if (f.condition() instanceof BinaryExpr be && be.left() instanceof Identifier id) {
+                allowed.add(id.name());
+            }
+
+            if (isRepresentableForUpdate(allowed, f.update())) {
+                return;
+            }
+
+            error(LOOP_UPDATE_DIAGNOSTIC, f.sourceLocation());
         }
 
         // --------------------------------------------------------------
@@ -1129,7 +1407,39 @@ public final class Validate {
             && u.operand() instanceof BigIntLiteral) {
             return true;
         }
-        return false;
+        // `toByteString('<hex>')` IS the ByteStringLiteral production — see
+        // spec/grammar.md section 11:
+        //
+        //     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        //
+        // 0e192af6 folded it in ANF lowering, which covers every EXPRESSION
+        // position. This check runs on the AST, BEFORE ANF lowering, so an
+        // initializer still arrives here as a call node and was refused — in
+        // the one position the `.runar.rs` surface needs it, since the Rust
+        // DSL writes initializers as assignments inside `init()` that the
+        // parser LIFTS into PropertyNode.initializer, and a bare "1976a914"
+        // is a &str that cannot be assigned to a ByteString (Vec<u8>).
+        //
+        // Accepting it here is only half the job: extractLiteralValue in
+        // AnfLower.java must UNWRAP the same shape, or the property validates
+        // and then loses its default entirely.
+        return isToByteStringLiteral(e);
+    }
+
+    /**
+     * Whether the expression is the {@code toByteString(<literal>)}
+     * ByteStringLiteral production.
+     *
+     * <p>Literal argument ONLY. {@code toByteString(x)} for a non-literal
+     * {@code x} is not this production and stays a non-literal initializer.
+     * Peer of the TS helper of the same name in {@code 02-validate.ts}.
+     */
+    public static boolean isToByteStringLiteral(Expression e) {
+        return e instanceof CallExpr c
+            && c.callee() instanceof Identifier id
+            && "toByteString".equals(id.name())
+            && c.args().size() == 1
+            && c.args().get(0) instanceof ByteStringLiteral;
     }
 
     private static boolean isArrayLiteralOfLiterals(Expression e) {
@@ -1225,6 +1535,72 @@ public final class Validate {
         if (e instanceof UnaryExpr u && u.op() == Expression.UnaryOp.NEG) {
             return isCompileTimeConstant(u.operand());
         }
+        return false;
+    }
+
+    /**
+     * Shared verbatim with the other six tiers. Per-tier diagnostic drift on the same rejection is
+     * a recurring defect in this repo, so the string is mirrored, character for character, in
+     * {@code packages/runar-compiler/src/passes/02-validate.ts},
+     * {@code compilers/go/frontend/validator.go},
+     * {@code compilers/rust/src/frontend/validator.rs},
+     * {@code compilers/python/runar_compiler/frontend/validator.py},
+     * {@code compilers/zig/src/frontend/validator.zig} and
+     * {@code compilers/ruby/lib/runar_compiler/frontend/validator.rb}.
+     */
+    private static final String LOOP_UPDATE_DIAGNOSTIC =
+        "For loop update must advance the loop variable by one (`i++`, `i--`, "
+            + "`i = i + 1n`, `i = i - 1n`). The unrolled loop carries only a start value and a "
+            + "unit step, so any other update clause -- a function call, a state mutation, or a "
+            + "non-unit step such as `i += 2` -- cannot be represented and would be discarded";
+
+    /**
+     * True when {@code e} names one of the identifiers the update is allowed to advance. A property
+     * access, an index access or anything else is never accepted: those are the side effects that
+     * used to be dropped.
+     */
+    private static boolean isAllowedLoopVar(List<String> allowed, Expression e) {
+        return e instanceof Identifier id && allowed.contains(id.name());
+    }
+
+    private static boolean isLiteralOne(Expression e) {
+        return e instanceof BigIntLiteral b && b.value() != null
+            && b.value().equals(java.math.BigInteger.ONE);
+    }
+
+    private static boolean isRepresentableForUpdate(List<String> allowed, Statement update) {
+        if (update instanceof ExpressionStatement es) {
+            Expression e = es.expression();
+            if (e instanceof IncrementExpr inc) {
+                return isAllowedLoopVar(allowed, inc.operand());
+            }
+            if (e instanceof DecrementExpr dec) {
+                return isAllowedLoopVar(allowed, dec.operand());
+            }
+            // The no-op sentinel a while-shaped frontend synthesizes when the source carries no
+            // continue expression: zig's `while (c) {}`, move's `while (c) {}`, go's `for c {}`.
+            // Reading a literal or a bare identifier has no effect, so discarding it loses nothing.
+            return e instanceof BigIntLiteral || e instanceof BoolLiteral || e instanceof Identifier;
+        }
+
+        if (update instanceof AssignmentStatement as) {
+            // `i += 1` / `i -= 1` arrive here as `i = i + 1` / `i = i - 1`.
+            if (!isAllowedLoopVar(allowed, as.target())) {
+                return false;
+            }
+            if (!(as.value() instanceof BinaryExpr be)) {
+                return false;
+            }
+            if (be.op() == Expression.BinaryOp.ADD) {
+                return (isAllowedLoopVar(allowed, be.left()) && isLiteralOne(be.right()))
+                    || (isLiteralOne(be.left()) && isAllowedLoopVar(allowed, be.right()));
+            }
+            if (be.op() == Expression.BinaryOp.SUB) {
+                return isAllowedLoopVar(allowed, be.left()) && isLiteralOne(be.right());
+            }
+            return false;
+        }
+
         return false;
     }
 
@@ -1358,36 +1734,79 @@ public final class Validate {
     }
 
     /**
-     * True when {@code expr} is an {@code extractSequence(...) < <final>}-style
-     * comparison (the guard that makes a locktime gate consensus-enforced).
-     * Accepts the two natural spellings: {@code extractSequence(pre) < N} /
-     * {@code <= N}, and the reversed {@code N > extractSequence(pre)} /
-     * {@code >= ...}. {@code N} must be a bigint literal no greater than the
-     * finality sentinel, so the guard genuinely forces non-finality.
+     * True when {@code expr} is a comparison on {@code extractSequence(...)}
+     * that genuinely EXCLUDES the finality sentinel {@code 0xffffffff},
+     * reading the field as the unsigned 32-bit wire value it is (see
+     * {@code emitUnsignedBin2Num} in {@code StackLower}).
+     *
+     * <p>Accepted: {@code extractSequence(pre) !== 0xffffffff} (and reversed);
+     * {@code < N} with 0 &lt; N &lt;= 0xffffffff (reversed {@code N > ...});
+     * {@code <= N} with N &lt; 0xffffffff (reversed {@code N >= ...}).
+     *
+     * <p>Deliberately NOT accepted: {@code <= 0xffffffff} and
+     * {@code >= 0xffffffff}. nSequence cannot exceed 0xffffffff, so those are
+     * true for every transaction including the final one — a tautology that
+     * used to silence this warning on a contract with no guard at all
+     * (W1 / FinalCountdown).
+     *
+     * <p>Also NOT accepted: {@code extractSequence(pre) < 0}. Unsigned nSequence
+     * is never negative, so that comparison is vacuous.
      */
     private static boolean isSequenceFinalityGuard(Expression expr) {
         if (!(expr instanceof BinaryExpr be)) return false;
         Expression.BinaryOp op = be.op();
-        if ((op == Expression.BinaryOp.LT || op == Expression.BinaryOp.LE)
-            && isCallToNamed(be.left(), "extractSequence") && isSequenceBound(be.right())) {
-            return true;
+        if (op == Expression.BinaryOp.NEQ) {
+            return (isCallToNamed(be.left(), "extractSequence") && isFinalSentinel(be.right()))
+                || (isCallToNamed(be.right(), "extractSequence") && isFinalSentinel(be.left()));
         }
-        if ((op == Expression.BinaryOp.GT || op == Expression.BinaryOp.GE)
-            && isCallToNamed(be.right(), "extractSequence") && isSequenceBound(be.left())) {
-            return true;
+        if (op == Expression.BinaryOp.LT) {
+            return isCallToNamed(be.left(), "extractSequence") && isStrictSequenceBound(be.right());
+        }
+        if (op == Expression.BinaryOp.LE) {
+            return isCallToNamed(be.left(), "extractSequence") && isNonStrictSequenceBound(be.right());
+        }
+        if (op == Expression.BinaryOp.GT) {
+            return isCallToNamed(be.right(), "extractSequence") && isStrictSequenceBound(be.left());
+        }
+        if (op == Expression.BinaryOp.GE) {
+            return isCallToNamed(be.right(), "extractSequence") && isNonStrictSequenceBound(be.left());
         }
         return false;
     }
 
-    private static boolean isSequenceBound(Expression e) {
-        return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) <= 0;
+    /**
+     * True when asserting {@code expr} logically implies a sequence-finality
+     * guard. A matching comparison nested under {@code !} (or {@code ||})
+     * does not count. {@code &&} implies each conjunct.
+     */
+    private static boolean assertionImpliesSequenceGuard(Expression expr) {
+        if (isSequenceFinalityGuard(expr)) return true;
+        if (expr instanceof BinaryExpr be && be.op() == Expression.BinaryOp.AND) {
+            return assertionImpliesSequenceGuard(be.left())
+                || assertionImpliesSequenceGuard(be.right());
+        }
+        return false;
+    }
+
+    private static boolean isFinalSentinel(Expression e) {
+        return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) == 0;
+    }
+
+    private static boolean isStrictSequenceBound(Expression e) {
+        return e instanceof BigIntLiteral lit
+            && lit.value().signum() > 0
+            && lit.value().compareTo(SEQUENCE_FINAL) <= 0;
+    }
+
+    private static boolean isNonStrictSequenceBound(Expression e) {
+        return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) < 0;
     }
 
     /**
      * #131: warn when {@code method} (transitively, through the private-helper
      * call graph) reads the tx locktime but never asserts the tx is non-final.
      * A locktime gate is not consensus-enforced unless
-     * {@code extractSequence < 0xffffffff} is also asserted — otherwise an
+     * {@code extractSequence !== 0xffffffff} is also asserted — otherwise an
      * all-final-sequence spend bypasses it. Advisory (warning) only — no effect
      * on emitted bytecode.
      */
@@ -1410,7 +1829,11 @@ public final class Validate {
             MethodNode current = queue.poll();
             Ctx.walkExpressionsInBody(current.body(), expr -> {
                 if (isLocktimeRead(expr)) readsLocktime[0] = true;
-                if (isSequenceFinalityGuard(expr)) hasSequenceGuard[0] = true;
+                if (isAssertCall(expr) && expr instanceof CallExpr call) {
+                    for (Expression arg : call.args()) {
+                        if (assertionImpliesSequenceGuard(arg)) hasSequenceGuard[0] = true;
+                    }
+                }
             });
             // Follow calls into private helpers so a guard (or locktime read)
             // supplied by an inlined helper is seen by the public entry point.
@@ -1427,9 +1850,9 @@ public final class Validate {
         if (readsLocktime[0] && !hasSequenceGuard[0]) {
             ctx.warn(
                 "method '" + method.name() + "' reads extractLocktime but does not assert "
-                    + "extractSequence < 0xffffffff; a locktime gate is not consensus-enforced "
+                    + "extractSequence is not 0xffffffff; a locktime gate is not consensus-enforced "
                     + "unless the tx is non-final — add "
-                    + "assert(extractSequence(this.txPreimage) < 0xffffffffn)",
+                    + "assert(extractSequence(this.txPreimage) !== 0xffffffffn)",
                 method.sourceLocation());
         }
     }

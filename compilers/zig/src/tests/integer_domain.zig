@@ -18,11 +18,14 @@
 //!       diagnostic, no source location).
 //!   D2  a bare JSON number beyond i64 in an ANF-IR `load_const` -> the
 //!       loader returns `InvalidConstValue` where Go compiles.
-//!   D3  `builtin_pow` folded with Zig's WRAPPING `*%` on `i128`, so
-//!       `pow(2n, 200n)` folded to `2^200 mod 2^128` == 0 and the tier
-//!       silently emitted `OP_0` in place of a 26-byte push. No abort, no
-//!       error, a different locking script — a miscompile, not an
-//!       availability bug.
+//!   D3  `builtin_pow` folded with Zig's WRAPPING `*%` on `i128`, so a power
+//!       divisible by `2^128` folded to `0` and the tier silently emitted
+//!       `OP_0` in place of a multi-byte push. No abort, no error, a
+//!       different locking script — a miscompile, not an availability bug.
+//!       The vector was `pow(2n, 200n)`; R-169 moved it to `pow(256n, 32n)`,
+//!       which has the same residue and the same trap but an exponent inside
+//!       the domain the emitted script can compute. 200 is no longer folded
+//!       by any tier — its companion test pins that instead.
 //!   D4  operands ABOVE i64 arrive as `big_integer`, which `evalBinOp` did
 //!       not recognise, so the fold was skipped entirely and Zig emitted a
 //!       runtime `OP_MUL` where the other six tiers emit a folded push.
@@ -95,11 +98,44 @@ test "D1: product of two i64-max literals compiles instead of aborting" {
 // D3 — wrapping fold silently emitted the wrong constant
 // ---------------------------------------------------------------------------
 
-test "D3: pow(2n, 200n) folds to 2^200, not the mod-2^128 residue" {
-    // 2^200 mod 2^128 == 0 exactly, so the wrapping fold emitted a bare OP_0
+test "D3: pow(256n, 32n) folds to 2^256, not the mod-2^128 residue" {
+    // 2^256 mod 2^128 == 0 exactly, so the wrapping fold emitted a bare OP_0
     // (`00`) here and the contract compared its argument against zero. This
     // is the reachable silent-miscompile path: no abort, no diagnostic, just
     // a different locking script from the other six tiers.
+    //
+    // R-169 (pow half) moved this vector from pow(2n, 200n) to pow(256n, 32n).
+    // Same trap, same residue, same 33-byte push — but an exponent INSIDE the
+    // domain the emitted script can compute. 200 is no longer foldable by any
+    // tier (see the companion test below), so a fold-result assertion on it
+    // would have been asserting something that never happens.
+    try expectHex(
+        \\import { SmartContract, assert, pow } from 'runar-lang';
+        \\
+        \\export class Probe extends SmartContract {
+        \\  readonly target: bigint;
+        \\  constructor(target: bigint) { super(target); this.target = target; }
+        \\  public check() {
+        \\    assert(pow(256n, 32n) === this.target);
+        \\  }
+        \\}
+    ,
+        "020001012021000000000000000000000000000000000000000000000000000000000000000001009c7777",
+    );
+}
+
+test "D3: pow(2n, 200n) is NOT folded — it is outside the domain the script computes" {
+    // R-169, the pow half. `lowerPow` unrolls exactly 32 conditional
+    // multiplies, so it computes base^min(exp, 32); until the guard landed it
+    // returned that CLAMPED value with no error, while the folder computed the
+    // TRUE power for any exp <= 256. Inside 33..256 the fold-ON and fold-OFF
+    // scripts therefore accepted MUTUALLY EXCLUSIVE inputs.
+    //
+    // The folder now declines outside 0..32, so this compiles to the guarded
+    // 32-round fragment rather than to a 2^200 push, and the guard
+    // (76 00 0121 a5 69 = OP_DUP <0> <33> OP_WITHIN OP_VERIFY) makes the method
+    // unspendable instead of silently answering 2^32. Pinned as full hex, and
+    // cross-checked byte-for-byte against the go and rust tiers when written.
     try expectHex(
         \\import { SmartContract, assert, pow } from 'runar-lang';
         \\
@@ -111,7 +147,7 @@ test "D3: pow(2n, 200n) folds to 2^200, not the mod-2^128 residue" {
         \\  }
         \\}
     ,
-        "5202c8001a0000000000000000000000000000000000000000000000000001009c7777",
+        "5202c80076000121a5697c51527900a063789568527951a063789568527952a063789568527953a063789568527954a063789568527955a063789568527956a063789568527957a063789568527958a063789568527959a06378956852795aa06378956852795ba06378956852795ca06378956852795da06378956852795ea06378956852795fa063789568527960a06378956852790111a06378956852790112a06378956852790113a06378956852790114a06378956852790115a06378956852790116a06378956852790117a06378956852790118a06378956852790119a0637895685279011aa0637895685279011ba0637895685279011ca0637895685279011da0637895685279011ea0637895685279011fa0637895687777009c",
     );
 }
 

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/byte-builtins/ByteBuiltins.runar.ts",
+    ".runar.sol": "../../../examples/sol/byte-builtins/ByteBuiltins.runar.sol",
+    ".runar.move": "../../../examples/move/byte-builtins/ByteBuiltins.runar.move",
+    ".runar.go": "../../../examples/go/byte-builtins/ByteBuiltins.runar.go",
+    ".runar.rs": "../../../examples/rust/byte-builtins/ByteBuiltins.runar.rs",
+    ".runar.py": "../../../examples/python/byte-builtins/ByteBuiltins.runar.py",
+    ".runar.zig": "../../../examples/zig/byte-builtins/ByteBuiltins.runar.zig",
+    ".runar.rb": "../../../examples/ruby/byte-builtins/ByteBuiltins.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/byte-builtins/ByteBuiltins.runar.java"
+  }
+}

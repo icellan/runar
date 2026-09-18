@@ -19,7 +19,7 @@ impl R1K1Wallet {
     ) {
         assert!(len(r1_salt) == 32);
         assert!(hash160(&cat(r1_pub_key, r1_salt)) == self.r1_salted_pub_key_hash);
-        assert!(substr(tx_preimage, len(tx_preimage) - 4, 4) == "41000000");
+        assert!(substr(tx_preimage, len(tx_preimage) - 4, 4) == to_byte_string("41000000"));
         assert!(check_preimage(tx_preimage));
         assert!(verify_ecdsa_p256(&sha256(tx_preimage), r1_sig, r1_pub_key));
     }

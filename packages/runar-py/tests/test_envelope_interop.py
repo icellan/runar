@@ -79,12 +79,87 @@ def test_signing_vectors(fixture: dict) -> None:
 def test_canonical_json_rejection_vectors(fixture: dict) -> None:
     """RFC 8785 §3.2.2.2: canonical_json MUST reject malformed Unicode
     (lone surrogate). See audits/canonical-json-rfc8785-parity.md §3 rec 6 (D6).
+
+    R-262: this used to assert ``pytest.raises(Exception)`` — ANY error. That
+    passes for any reason at all, proven by neutering canonical_json to raise
+    an unrelated ValueError on every input: the test stayed green. It now
+    asserts the tier's specific error type AND a message discriminator, and
+    pairs each vector with a control whose ONLY difference is that the
+    surrogate is PAIRED, so a rejection can be attributed to the lone
+    surrogate rather than to the harness's string construction or to a guard
+    that rejects everything.
     """
     for v in fixture["canonical_json_rejection_vectors"]:
+        vid = v.get("_vector_id", "?")
+        key = v["input_object_key"]
         # Build the input string from UTF-16 code units so we don't rely on
         # the JSON parser's lone-surrogate handling (which diverges by tier).
         units = v["input_value_utf16_units"]
         bad_str = "".join(chr(u) for u in units)
-        input_obj = {v["input_object_key"]: bad_str}
-        with pytest.raises(Exception):  # noqa: B017 — any error is acceptable
-            canonical_json(input_obj)
+        with pytest.raises(ValueError, match="lone surrogate") as exc:
+            canonical_json({key: bad_str})
+        assert "U+D800" in str(exc.value), f"{vid}: {exc.value}"
+
+        # CONTROL: the same object, same key, same code path — the only change
+        # is that U+D800 is now the HIGH half of a valid pair (U+1F600). It
+        # must serialise, and byte-identically to every other tier.
+        good = canonical_json({key: "\ud83d\ude00".encode("utf-16", "surrogatepass").decode("utf-16")})
+        assert good == '{"' + key + '":"\U0001F600"}', f"{vid}: control produced {good!r}"
+
+
+def test_payload_depth_vectors(fixture: dict) -> None:
+    """R-260. verify_envelope must bound payload nesting ITSELF rather than
+    inherit whatever cap the stock JSON library happens to impose, because
+    that cap differs per tier (ruby 100, rust 127, ts/go/python/zig none,
+    java a StackOverflowError whose threshold is the JVM's -Xss flag). All
+    seven tiers enforce MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT, so the
+    same bytes get the same VerifyEnvelopeReason everywhere.
+    """
+    vectors = fixture["depth_vectors"]
+    assert vectors, "depth_vectors missing or empty"
+    for v in vectors:
+        vid = v.get("_vector_id", "?")
+        env = SignedEnvelope.from_dict(v["envelope"])
+        r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
+        if v["expect_ok"]:
+            assert r.ok, f"{vid}: expected ok=True, got reason={r.reason}"
+        else:
+            assert not r.ok, f"{vid}: expected ok=False"
+            assert r.reason == VerifyEnvelopeReason(v["reason"]), (
+                f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )
+
+
+def test_payload_depth_limit_matches_fixture(fixture: dict) -> None:
+    """The bound is part of the wire contract, so the fixture pins it and
+    every tier asserts its own constant against the fixture's number."""
+    from runar.sdk.envelope import MAX_ENVELOPE_PAYLOAD_DEPTH
+
+    assert fixture["payload_depth_limit"] == MAX_ENVELOPE_PAYLOAD_DEPTH
+
+
+def test_clock_skew_vectors(fixture: dict) -> None:
+    """R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied".
+
+    Six tiers already distinguished the two; Go conflated them and silently
+    gave a caller asking for strict expiry a five-second replay window, and
+    both Go and Java did the same with the now-override. A ``None`` in the
+    vector means the caller supplies no value and the tier default applies --
+    that is the control: an over-strict fix reddens on cs2/cs3, not cs1.
+    """
+    env = SignedEnvelope.from_dict(fixture["valid_envelope"])
+    vectors = fixture["clock_skew_vectors"]
+    assert vectors, "clock_skew_vectors missing or empty"
+    for v in vectors:
+        vid = v.get("_vector_id", "?")
+        kwargs = {"now_ms": v["now_ms"]}
+        if v["clock_skew_ms"] is not None:
+            kwargs["clock_skew_ms"] = v["clock_skew_ms"]
+        r = verify_envelope(env, **kwargs)
+        if v["expect_ok"]:
+            assert r.ok, f"{vid}: expected ok=True, got reason={r.reason}"
+        else:
+            assert not r.ok, f"{vid}: expected ok=False"
+            assert r.reason == VerifyEnvelopeReason(v["reason"]), (
+                f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )

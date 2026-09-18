@@ -24,8 +24,21 @@ const koalabear_emitters = @import("helpers/koalabear_emitters.zig");
 const bn254_emitters = @import("helpers/bn254_emitters.zig");
 const poseidon2_merkle = @import("helpers/poseidon2_merkle.zig");
 const merkle_emitters = @import("helpers/merkle_emitters.zig");
+// N-100: the branch arms are peepholed HERE, while each arm is still a separate
+// instruction stream, because whether an `else` CLAUSE exists at all is decided
+// from the arm's post-optimization body. See `lowerIfExprImpl`.
+const peephole = @import("peephole.zig");
 const Allocator = std.mem.Allocator;
 const Opcode = types.Opcode;
+
+/// The largest exponent `pow(base, exp)` computes, and therefore the largest
+/// one the emitted script ACCEPTS — `lowerPow` unrolls exactly this many
+/// conditional multiplies and refuses anything outside
+/// `0 <= exp <= pow_exponent_limit`. The same number lives in
+/// `passes/constant_fold.zig` (which must decline to fold outside it); they
+/// have to move together or `pow` means different things folded and executed
+/// (R-169).
+const pow_exponent_limit: u32 = 32;
 
 // ============================================================================
 // StackMap — tracks named variables at stack positions
@@ -217,6 +230,13 @@ const LowerError = error{
     DuplicateDeclaredResults,
     VariableNotFound,
     InvalidBuiltin,
+    /// R-238: a Merkle builtin's compile-time `depth` argument is outside the
+    /// range the emitter unrolls. It used to share `InvalidBuiltin` with "this
+    /// builtin does not exist here", so an author who wrote a legal
+    /// `merkleRootSha256` with depth 65 was told the BUILTIN was invalid — and
+    /// went looking for a misspelled name or a missing port, which is the one
+    /// thing that was not wrong. Five peer tiers name the depth and the range.
+    MerkleDepthOutOfRange,
     UnsupportedOperation,
     BranchStackMismatch,
     /// A ref (method param or @ref: value) is no longer on the stack at a
@@ -237,6 +257,24 @@ const LowerError = error{
     /// whole 2026-08 branch/loop miscompile family. Silent until the UTXO is
     /// already locked, so we fail loudly at compile time instead.
     BranchResultDepthMismatch,
+    /// N-111: a `method_call` passing MORE arguments than the callee declares.
+    /// Surplus args were skipped by the binding loop, which is not the same as
+    /// ignoring them: an unbound ref is never consumed, so it stays live on the
+    /// stack and shifts every later depth. Measured on the `multi-method`
+    /// golden, one surplus arg rewrote the locking script from
+    /// 76009c637552958b5aa06900ac67519d00ac68 to
+    /// 76009c637552787c958b5aa0697c00ac7767519d00ac68, silently, in all seven
+    /// tiers at once. Zig's lowerer is an error-enum channel, so the name is
+    /// the diagnostic.
+    MethodCallArityMismatch,
+    /// R-054: `checkMultiSig` with a degenerate threshold. An empty signature
+    /// array lowers to a 0-of-N check, which OP_CHECKMULTISIG accepts
+    /// unconditionally — an anyone-can-spend output produced from source that
+    /// reads like an authorization check. More signatures than public keys is
+    /// the opposite sign: an output no witness can ever satisfy. Both are
+    /// refused at compile time rather than defended against with extra
+    /// opcodes, which would move bytes for every existing valid contract.
+    DegenerateMultiSigThreshold,
 };
 
 const LowerCtx = struct {
@@ -277,6 +315,11 @@ const LowerCtx = struct {
     renamed_params: std.StringHashMapUnmanaged([]const u8),
     /// Current ANF binding's source location — set before processing each binding.
     current_source_loc: ?types.SourceLocation = null,
+    /// R-010, contract-level: true when ANY public method of this contract
+    /// authenticates a `_codePart` witness, so the emitter puts ONE
+    /// OP_CODESEPARATOR at offset 1 of the locking script and
+    /// `lowerCheckPreimage` must NOT emit a per-method one.
+    script_level_code_separator: bool = false,
 
     fn init(allocator: Allocator, program: types.ANFProgram) LowerCtx {
         return .{
@@ -409,8 +452,57 @@ const LowerCtx = struct {
         try self.stack.push(self.allocator, next);
     }
 
-    fn appendInstructions(self: *LowerCtx, insts: []const types.StackInstruction) !void {
+    /// Splice a branch arm's instruction stream into this context.
+    ///
+    /// The arm's source locations come with it. `emit` maintains
+    /// `instructions` and `instruction_source_locs` as two arrays of equal
+    /// length read by index, and this is the only other writer: appending the
+    /// instructions alone left the arrays desynchronised from the first
+    /// conditional onward, so `emitArtifact` zipped each later opcode against
+    /// some earlier opcode's location. `IfElse.runar.ts` mapped its then-arm's
+    /// `OP_DUP OP_NIP` (line 14) to line 18.
+    fn appendInstructions(
+        self: *LowerCtx,
+        insts: []const types.StackInstruction,
+        locs: []const ?types.SourceLocation,
+    ) !void {
+        std.debug.assert(insts.len == locs.len);
         try self.instructions.appendSlice(self.allocator, insts);
+        try self.instruction_source_locs.appendSlice(self.allocator, locs);
+    }
+
+    /// N-100: run the peephole over ONE branch arm, while the arm is still a
+    /// separate instruction stream. See the call site in `lowerIfExprImpl` for
+    /// why the `else` clause's existence has to be decided on the optimized
+    /// body.
+    ///
+    /// `peephole.optimizeOpsAndLocs` carries the arbitrary-precision constant
+    /// folder's
+    /// error set, which is wider than `LowerError`. Only `OutOfMemory` is
+    /// reachable from here — the folder's `InvalidBase` comes from a `setString`
+    /// call this module always makes in base 10 — so the rest is funnelled into
+    /// `UnsupportedOperation` rather than widening `LowerError`, and logged so
+    /// it cannot vanish silently.
+    fn optimizeArm(
+        allocator: Allocator,
+        ctx: *const LowerCtx,
+        arm_label: []const u8,
+        bind_name: []const u8,
+    ) LowerError!peephole.OptOut {
+        return peephole.optimizeOpsAndLocs(
+            allocator,
+            ctx.instructions.items,
+            ctx.instruction_source_locs.items,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => {
+                std.log.warn(
+                    "stack lowering: peephole failed on the {s}-arm of conditional '{s}': {s}",
+                    .{ arm_label, bind_name, @errorName(err) },
+                );
+                return LowerError.UnsupportedOperation;
+            },
+        };
     }
 
     fn cloneVoidMap(
@@ -585,6 +677,67 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// W3 / BoolBamboozle — enforce the `boolean` ABI domain on-chain.
+    ///
+    /// The source type `boolean` denotes {true, false}, but a witness item is
+    /// arbitrary bytes. Nothing used to check the domain, and comparisons lower
+    /// to OP_NUMEQUAL, so a raw spender pushing OP_2 matched neither
+    /// `=== true` nor `=== false`: an exhaustive-looking two-arm split took
+    /// NEITHER arm and every guard inside both arms was skipped.
+    ///
+    /// Emitted once per `boolean` parameter of a PUBLIC method, at the
+    /// unlocking boundary, before any of the method body runs. Private helpers
+    /// inherit the guarantee because their arguments come from an already-gated
+    /// caller.
+    ///
+    ///     <copy of param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+    ///                      OP_BOOLOR OP_VERIFY
+    ///
+    /// OP_EQUAL (bytewise), not OP_NUMEQUAL: the ABI encoding is exactly the
+    /// empty item or {0x01}, so non-minimal spellings of 0/1 are rejected too,
+    /// and an over-long witness item fails cleanly instead of overflowing the
+    /// script-number decoder.
+    ///
+    /// Deliberately NOT OP_0NOTEQUAL: canonicalising to truthiness would map 2
+    /// onto true and silently run an arm the author never authorised for it.
+    ///
+    /// Net stack effect is zero.
+    fn emitBooleanParamGate(self: *LowerCtx, name: []const u8) !void {
+        const slot = self.renamed_params.get(name) orelse name;
+
+        // Copy of the witness value on top; the original stays in its slot.
+        try self.bringToTop(slot, false);
+
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, null);
+
+        try self.emitPushInt(0);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_equal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // isFalse
+
+        try self.emitOp(.op_swap);
+
+        try self.emitPushInt(1);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_equal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // isTrue
+
+        try self.emitOp(.op_boolor);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        try self.emitOp(.op_verify);
+        _ = self.stack.pop();
+
+        self.trackDepth();
+    }
+
     fn isLastUse(self: *const LowerCtx, name: []const u8) bool {
         if (self.last_uses.get(name)) |last_idx| {
             return self.current_idx >= last_idx;
@@ -686,7 +839,7 @@ const LowerCtx = struct {
                 .array_literal => continue,
                 else => {},
             }
-            self.scanValueForRefs(binding.value, idx, &array_elems);
+            try self.scanValueForRefs(binding.value, idx, &array_elems);
         }
     }
 
@@ -695,11 +848,11 @@ const LowerCtx = struct {
         name: []const u8,
         idx: usize,
         array_elems: *const std.StringHashMapUnmanaged([]const []const u8),
-    ) void {
-        self.last_uses.put(self.allocator, name, idx) catch return;
+    ) Allocator.Error!void {
+        try self.last_uses.put(self.allocator, name, idx);
         if (array_elems.get(name)) |elems| {
             for (elems) |e| {
-                self.last_uses.put(self.allocator, e, idx) catch return;
+                try self.last_uses.put(self.allocator, e, idx);
             }
         }
     }
@@ -709,100 +862,100 @@ const LowerCtx = struct {
         value: types.ANFValue,
         idx: usize,
         array_elems: *const std.StringHashMapUnmanaged([]const []const u8),
-    ) void {
+    ) Allocator.Error!void {
         switch (value) {
             .load_param => |lp| {
-                self.putLastUseExpanding(lp.name, idx, array_elems);
+                try self.putLastUseExpanding(lp.name, idx, array_elems);
             },
             .load_prop, .get_state_script => {},
             .load_const => |lc| {
                 switch (lc.value) {
                     .string => |s| {
                         if (std.mem.startsWith(u8, s, "@ref:")) {
-                            self.putLastUseExpanding(s[5..], idx, array_elems);
+                            try self.putLastUseExpanding(s[5..], idx, array_elems);
                         }
                     },
                     else => {},
                 }
             },
             .bin_op => |bop| {
-                self.putLastUseExpanding(bop.left, idx, array_elems);
-                self.putLastUseExpanding(bop.right, idx, array_elems);
+                try self.putLastUseExpanding(bop.left, idx, array_elems);
+                try self.putLastUseExpanding(bop.right, idx, array_elems);
             },
             .unary_op => |uop| {
-                self.putLastUseExpanding(uop.operand, idx, array_elems);
+                try self.putLastUseExpanding(uop.operand, idx, array_elems);
             },
             .call => |c| {
                 for (c.args) |arg| {
-                    self.putLastUseExpanding(arg, idx, array_elems);
+                    try self.putLastUseExpanding(arg, idx, array_elems);
                 }
             },
             .method_call => |mc| {
                 if (mc.object.len > 0) {
-                    self.putLastUseExpanding(mc.object, idx, array_elems);
+                    try self.putLastUseExpanding(mc.object, idx, array_elems);
                 }
                 for (mc.args) |arg| {
-                    self.putLastUseExpanding(arg, idx, array_elems);
+                    try self.putLastUseExpanding(arg, idx, array_elems);
                 }
             },
             .@"if" => |ie| {
-                self.putLastUseExpanding(ie.cond, idx, array_elems);
+                try self.putLastUseExpanding(ie.cond, idx, array_elems);
                 for (ie.then) |binding| {
-                    self.scanValueForRefs(binding.value, idx, array_elems);
+                    try self.scanValueForRefs(binding.value, idx, array_elems);
                 }
                 for (ie.@"else") |binding| {
-                    self.scanValueForRefs(binding.value, idx, array_elems);
+                    try self.scanValueForRefs(binding.value, idx, array_elems);
                 }
             },
             .loop => |lp| {
                 for (lp.body) |binding| {
-                    self.scanValueForRefs(binding.value, idx, array_elems);
+                    try self.scanValueForRefs(binding.value, idx, array_elems);
                 }
             },
             .assert => |a| {
-                self.putLastUseExpanding(a.value, idx, array_elems);
+                try self.putLastUseExpanding(a.value, idx, array_elems);
             },
             .update_prop => |up| {
-                self.putLastUseExpanding(up.value, idx, array_elems);
+                try self.putLastUseExpanding(up.value, idx, array_elems);
             },
             .check_preimage => |cp| {
-                self.putLastUseExpanding(cp.preimage, idx, array_elems);
+                try self.putLastUseExpanding(cp.preimage, idx, array_elems);
             },
             .deserialize_state => |ds| {
-                self.putLastUseExpanding(ds.preimage, idx, array_elems);
+                try self.putLastUseExpanding(ds.preimage, idx, array_elems);
             },
             .add_output => |ao| {
                 if (ao.satoshis.len > 0) {
-                    self.putLastUseExpanding(ao.satoshis, idx, array_elems);
+                    try self.putLastUseExpanding(ao.satoshis, idx, array_elems);
                 }
                 if (ao.preimage.len > 0) {
-                    self.putLastUseExpanding(ao.preimage, idx, array_elems);
+                    try self.putLastUseExpanding(ao.preimage, idx, array_elems);
                 }
                 for (ao.state_values) |sv| {
                     if (sv.len > 0) {
-                        self.putLastUseExpanding(sv, idx, array_elems);
+                        try self.putLastUseExpanding(sv, idx, array_elems);
                     }
                 }
                 for (ao.state_refs) |sr| {
                     if (sr.len > 0) {
-                        self.putLastUseExpanding(sr, idx, array_elems);
+                        try self.putLastUseExpanding(sr, idx, array_elems);
                     }
                 }
             },
             .add_raw_output => |aro| {
                 if (aro.satoshis.len > 0) {
-                    self.putLastUseExpanding(aro.satoshis, idx, array_elems);
+                    try self.putLastUseExpanding(aro.satoshis, idx, array_elems);
                 }
                 if (aro.script_bytes.len > 0) {
-                    self.putLastUseExpanding(aro.script_bytes, idx, array_elems);
+                    try self.putLastUseExpanding(aro.script_bytes, idx, array_elems);
                 }
             },
             .add_data_output => |ado| {
                 if (ado.satoshis.len > 0) {
-                    self.putLastUseExpanding(ado.satoshis, idx, array_elems);
+                    try self.putLastUseExpanding(ado.satoshis, idx, array_elems);
                 }
                 if (ado.script_bytes.len > 0) {
-                    self.putLastUseExpanding(ado.script_bytes, idx, array_elems);
+                    try self.putLastUseExpanding(ado.script_bytes, idx, array_elems);
                 }
             },
             .array_literal => {
@@ -1194,6 +1347,32 @@ const LowerCtx = struct {
             shadowed.deinit(self.allocator);
         }
 
+        // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
+        // checks its own -- checking in the lowerer rather than the typechecker also
+        // covers the `--ir` input path, which never runs a typecheck.
+        //
+        // The binding loop below skips every argument past the last parameter. Skipped
+        // is not the same as ignored: a surplus argument never reaches
+        // operandConsume/bringToTop, so a ref that would otherwise have been CONSUMED
+        // at this call site stays live on the stack and every later depth shifts under
+        // it. The emitted script changes, with no diagnostic.
+        //
+        // Measured on the checked-in `multi-method` golden, whose `computeThreshold`
+        // takes two parameters:
+        //
+        //   args ["t0","t1"]        76009c637552958b5aa06900ac67519d00ac68
+        //   args ["t0","t1","t0"]   76009c637552787c958b5aa0697c00ac7767519d00ac68
+        //
+        // All seven tiers agreed on BOTH, which is why no parity gate saw it -- the
+        // tiers were identical and identically wrong. A surplus ref naming a binding
+        // that does not exist at all (`tZZZ`) was likewise accepted silently.
+        //
+        // Only the surplus side is checked. Too FEW arguments already fails, naming
+        // the unbound parameter ("method parameter 'b' is not on the stack at a
+        // post-consumption reference"); that path works and is pinned by existing
+        // tests.
+        if (args.len > method.params.len) return LowerError.MethodCallArityMismatch;
+
         for (args, 0..) |arg, idx| {
             if (idx >= method.params.len) break;
             const param_name = method.params[idx].name;
@@ -1551,11 +1730,26 @@ const LowerCtx = struct {
         clamp,
         checkPreimage,
         deserializeState,
+        // R-069: `exit` and the `pack` / `toByteString` casts were absent from
+        // `builtin_map`, so contracts the other six tiers compile were
+        // rejected here with InvalidBuiltin.
+        exit_builtin,
+        byte_string_cast,
+        right,
         extractHashPrevouts,
         extractLocktime,
         extractOutpoint,
         extractOutputHash,
         extractSigHashType,
+        // R-069: the remaining BIP-143 field extractors. Only five of the
+        // twelve were mapped; the other seven failed to lower at all.
+        extractVersion,
+        extractHashSequence,
+        extractInputIndex,
+        extractScriptCode,
+        extractAmount,
+        extractSequence,
+        extractOutputs,
         buildChangeOutput,
         getStateScript,
         buildStateOutput,
@@ -1578,9 +1772,7 @@ const LowerCtx = struct {
         blake3,
         ecAdd,
         ecMul,
-        ecPairing,
         slhDsaVerify,
-        schnorrVerify,
         // NIST P-256
         verifyECDSA_P256,
         p256Add,
@@ -1680,11 +1872,22 @@ const LowerCtx = struct {
         .{ "clamp", .clamp },
         .{ "checkPreimage", .checkPreimage },
         .{ "deserializeState", .deserializeState },
+        .{ "exit", .exit_builtin },
+        .{ "pack", .byte_string_cast },
+        .{ "toByteString", .byte_string_cast },
+        .{ "right", .right },
         .{ "extractHashPrevouts", .extractHashPrevouts },
         .{ "extractLocktime", .extractLocktime },
         .{ "extractOutpoint", .extractOutpoint },
         .{ "extractOutputHash", .extractOutputHash },
         .{ "extractSigHashType", .extractSigHashType },
+        .{ "extractVersion", .extractVersion },
+        .{ "extractHashSequence", .extractHashSequence },
+        .{ "extractInputIndex", .extractInputIndex },
+        .{ "extractScriptCode", .extractScriptCode },
+        .{ "extractAmount", .extractAmount },
+        .{ "extractSequence", .extractSequence },
+        .{ "extractOutputs", .extractOutputs },
         .{ "buildChangeOutput", .buildChangeOutput },
         .{ "getStateScript", .getStateScript },
         .{ "buildStateOutput", .buildStateOutput },
@@ -1708,7 +1911,6 @@ const LowerCtx = struct {
         .{ "blake3", .blake3 },
         .{ "ecAdd", .ecAdd },
         .{ "ecMul", .ecMul },
-        .{ "ecPairing", .ecPairing },
         .{ "verifySLHDSA_SHA2_128s", .slhDsaVerify },
         .{ "verifySLHDSA_SHA2_128f", .slhDsaVerify },
         .{ "verifySLHDSA_SHA2_192s", .slhDsaVerify },
@@ -1716,7 +1918,6 @@ const LowerCtx = struct {
         .{ "verifySLHDSA_SHA2_256s", .slhDsaVerify },
         .{ "verifySLHDSA_SHA2_256f", .slhDsaVerify },
         .{ "slhDsaVerify", .slhDsaVerify },
-        .{ "schnorrVerify", .schnorrVerify },
         .{ "bbFieldAdd", .bbFieldAdd },
         .{ "bbFieldSub", .bbFieldSub },
         .{ "bbFieldMul", .bbFieldMul },
@@ -1816,7 +2017,22 @@ const LowerCtx = struct {
             // sighash flag). Default flag (0 = ALL|FORKID) is correct here.
             .checkPreimage => try self.lowerCheckPreimage(bind_name, args, 0),
             .deserializeState => try self.lowerDeserializeState(bind_name, args),
-            .extractHashPrevouts, .extractLocktime, .extractOutpoint, .extractOutputHash, .extractSigHashType => try self.lowerExtractor(bind_name, id, args),
+            .exit_builtin => try self.lowerExitBuiltin(bind_name, args),
+            .byte_string_cast => try self.lowerByteStringCast(bind_name, args),
+            .right => try self.lowerRight(bind_name, args),
+            .extractHashPrevouts,
+            .extractLocktime,
+            .extractOutpoint,
+            .extractOutputHash,
+            .extractSigHashType,
+            .extractVersion,
+            .extractHashSequence,
+            .extractInputIndex,
+            .extractScriptCode,
+            .extractAmount,
+            .extractSequence,
+            .extractOutputs,
+            => try self.lowerExtractor(bind_name, id, args),
             .sign => try self.lowerSign(bind_name, args),
             .buildChangeOutput => try self.lowerBuildChangeOutput(bind_name, args),
             .getStateScript => try self.lowerGetStateScript(bind_name),
@@ -1909,16 +2125,6 @@ const LowerCtx = struct {
             .p384EncodeCompressed => try self.lowerNistEcBuiltin(bind_name, args, .p384_encode_compressed),
             // super() is the constructor superclass call — no-op in Bitcoin Script
             .super_call => {
-                try self.stack.push(self.allocator, bind_name);
-                self.trackDepth();
-            },
-            // Wave 3 placeholders — consume args and push placeholder
-            .ecPairing, .schnorrVerify => {
-                for (args) |arg| {
-                    try self.bringToTopOperand(arg, args);
-                    _ = self.stack.pop();
-                }
-                try self.emitPushInt(0);
                 try self.stack.push(self.allocator, bind_name);
                 self.trackDepth();
             },
@@ -2068,6 +2274,7 @@ const LowerCtx = struct {
                 },
                 .integer => |n| try self.emitPushInt(n),
                 .boolean => |b| try self.emitPushBool(b),
+                .big_int_decimal => |d| try self.emitPushBigIntDecimal(d),
             },
             .dup => try self.emitOp(.op_dup),
             .swap => try self.emitOp(.op_swap),
@@ -2295,12 +2502,28 @@ const LowerCtx = struct {
         // args: [leaf, proof, index, depth]
         // depth must be a compile-time constant
         if (args.len != 4) return LowerError.InvalidBuiltin;
-        _ = func_name;
 
         // Extract depth constant from ANF binding
         const depth_arg = args[3];
-        const depth_value = self.findConstantInt(depth_arg) orelse return LowerError.InvalidBuiltin;
-        if (depth_value < 1 or depth_value > 64) return LowerError.InvalidBuiltin;
+        const depth_value = self.findConstantInt(depth_arg) orelse {
+            // R-238: not "unknown builtin" either — the builtin is fine, its
+            // depth is not a compile-time constant.
+            std.log.warn(
+                "{s}: depth (4th argument) must be a compile-time constant integer literal",
+                .{func_name},
+            );
+            return LowerError.MerkleDepthOutOfRange;
+        };
+        if (depth_value < 1 or depth_value > 64) {
+            // R-238: same wording the go / rust / ruby / ts / python tiers use,
+            // so a cross-tier diff of the diagnostics is about the tiers rather
+            // than about five spellings of one sentence.
+            std.log.warn(
+                "{s}: depth must be between 1 and 64, got {d}",
+                .{ func_name, depth_value },
+            );
+            return LowerError.MerkleDepthOutOfRange;
+        }
 
         // Remove depth from the real stack FIRST (compile-time constant, not runtime).
         if (self.stack.findDepth(depth_arg) != null) {
@@ -2399,6 +2622,36 @@ const LowerCtx = struct {
         const sig_elems = self.array_elements.get(sigs_ref) orelse return LowerError.InvalidBuiltin;
         const pk_elems = self.array_elements.get(pks_ref) orelse return LowerError.InvalidBuiltin;
 
+        // Degenerate thresholds are rejected here, not defended against with
+        // extra opcodes — emitting a runtime guard would move bytes for every
+        // existing valid contract. Checking in the lowerer (rather than the
+        // typechecker) also covers the `--ir` input path, which never runs a
+        // typecheck.
+        if (sig_elems.len == 0) {
+            std.log.warn(
+                "checkMultiSig requires at least one signature: the signature array is " ++
+                    "empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts " ++
+                    "unconditionally (anyone-can-spend)",
+                .{},
+            );
+            return LowerError.DegenerateMultiSigThreshold;
+        }
+        if (pk_elems.len == 0) {
+            std.log.warn(
+                "checkMultiSig requires at least one public key: the public key array is empty",
+                .{},
+            );
+            return LowerError.DegenerateMultiSigThreshold;
+        }
+        if (sig_elems.len > pk_elems.len) {
+            std.log.warn(
+                "checkMultiSig signature count ({d}) cannot exceed public key count ({d}): " ++
+                    "the resulting script is unspendable",
+                .{ sig_elems.len, pk_elems.len },
+            );
+            return LowerError.DegenerateMultiSigThreshold;
+        }
+
         // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
         try self.emitPushInt(0);
         try self.stack.push(self.allocator, null);
@@ -2478,16 +2731,77 @@ const LowerCtx = struct {
         _ = bind_name;
     }
 
+    /// `exit(cond)` — the same OP_VERIFY as `assert`, but the binding stays in
+    /// the stack map as a dummy result.
+    ///
+    /// This is NOT `lowerAssertBuiltin` with a different name: every peer tier
+    /// (`05-stack-lower.ts` `func === 'exit'`, and the Go / Rust / Python /
+    /// Ruby ports) records a result slot for the call, and dropping it here
+    /// cost the tier the trailing OP_NIP the peers emit. Byte parity, not the
+    /// tidier stack model, is the contract.
+    fn lowerExitBuiltin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 1) return LowerError.InvalidBuiltin;
+        try self.bringToTopAuto(args[0]);
+        try self.emitOp(.op_verify);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
     fn lowerSplit(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 2) return LowerError.InvalidBuiltin;
         try self.bringToTopOperand(args[0], args); // data
         try self.bringToTopOperand(args[1], args); // position
         try self.emitOp(.op_split);
-        // OP_SPLIT consumes data + position, produces left + right (two outputs)
+        // OP_SPLIT consumes data + position and produces left + right.
+        // OP_SPLIT leaves [left, right]. `split(data, index)` is single-valued -- it
+        // binds the RIGHT half (spec/grammar.md, spec/type-system.md, and all seven
+        // typecheckers) -- so the left half is dropped here, exactly as `substr`,
+        // `right` and `__array_access` already drop the halves they do not bind.
+        //
+        // It used to be recorded as an anonymous slot instead. Nothing ever consumed
+        // that slot -- it is unnameable, because no surface parser accepts array
+        // destructuring -- so every later bringToTop had to step over it and any read
+        // after a split resolved to the wrong slot.
+        // conformance/split_residue_execution_test.go spends the result.
         _ = self.stack.pop();
         _ = self.stack.pop();
-        try self.stack.push(self.allocator, null); // left part
-        try self.stack.push(self.allocator, bind_name); // right part (top)
+        try self.emitOp(.op_nip);
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    /// `pack(v)` / `toByteString(v)` — type-level casts that emit no opcodes.
+    /// The argument is brought to the top of the stack and its slot is renamed
+    /// to the binding, exactly as `05-stack-lower.ts` does for both names.
+    fn lowerByteStringCast(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 1) return LowerError.InvalidBuiltin;
+        try self.bringToTopAuto(args[0]);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    /// `right(data, n)` — the LAST `n` bytes of `data`.
+    /// OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP, byte-identical to
+    /// `05-stack-lower.ts#lowerRight` and its Go / Rust / Python / Ruby peers.
+    fn lowerRight(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 2) return LowerError.InvalidBuiltin;
+        try self.bringToTopOperand(args[0], args); // data
+        try self.bringToTopOperand(args[1], args); // length
+
+        // Stack: <data> <len>
+        _ = self.stack.pop(); // len
+        _ = self.stack.pop(); // data
+
+        try self.emitOp(.op_swap); // <len> <data>
+        try self.emitOp(.op_size); // <len> <data> <size>
+        try self.emitOp(.op_rot); // <data> <size> <len>
+        try self.emitOp(.op_sub); // <data> <size-len>
+        try self.emitOp(.op_split); // <left> <right>
+        try self.emitOp(.op_nip); // <right>
+
+        try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }
 
@@ -2523,12 +2837,50 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// Variable-length byte reversal, byte-identical to the other six tiers
+    /// (see `compilers/go/codegen/stack.go#lowerReverseBytes`).
+    ///
+    /// Algorithm: split off the first byte repeatedly and prepend it to an
+    /// accumulator, unrolled 520 times (the maximum BSV stack-element size) so
+    /// any legal ByteString is fully reversed:
+    ///
+    ///     OP_0 OP_SWAP                       [result, data]
+    ///     520x OP_DUP OP_SIZE OP_NIP         push len(data)
+    ///          OP_IF                         while data is non-empty
+    ///            OP_1 OP_SPLIT               [result, head, tail]
+    ///            OP_SWAP OP_ROT OP_CAT       [tail, head||result]
+    ///            OP_SWAP                     [head||result, tail]
+    ///          OP_ENDIF
+    ///     OP_DROP                            drop the empty remainder
+    ///
+    /// This used to emit nothing at all, which made `reverseBytes` a silent
+    /// identity in this tier: `assert(reverseBytes(a) === b)` passed exactly
+    /// when `a === b`.
     fn lowerReverseBytes(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         try self.bringToTopAuto(args[0]);
-        // reverseBytes is typically unrolled at compile time for known sizes.
-        // For generic use, the value is left as-is (future optimization pass).
         _ = self.stack.pop();
+
+        try self.emitPushInt(0);
+        try self.emitOp(.op_swap);
+
+        var i: usize = 0;
+        while (i < 520) : (i += 1) {
+            try self.emitOp(.op_dup);
+            try self.emitOp(.op_size);
+            try self.emitOp(.op_nip);
+            try self.emitOp(.op_if);
+            try self.emitPushInt(1);
+            try self.emitOp(.op_split);
+            try self.emitOp(.op_swap);
+            try self.emitOp(.op_rot);
+            try self.emitOp(.op_cat);
+            try self.emitOp(.op_swap);
+            try self.emitOp(.op_endif);
+        }
+
+        try self.emitOp(.op_drop);
+
         try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
     }
@@ -2562,10 +2914,24 @@ const LowerCtx = struct {
         _ = self.stack.pop();
         _ = self.stack.pop();
 
+        // THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the `pow` half).
+        // The 32 rounds below compute base^min(exp, 32). Before this guard an
+        // exponent outside 0..32 returned that CLAMPED value with no error,
+        // while passes/constant_fold.zig computed the true power for
+        // exp <= 256 — so for 33 <= exp <= 256 the fold-ON and fold-OFF
+        // scripts accepted mutually exclusive inputs. A negative exponent was
+        // a third disagreement: script returned 1, interpreter threw, folder
+        // declined. Six bytes per callsite refuse the whole outside.
+        try self.emitOp(.op_dup); // base exp exp
+        try self.emitPushInt(0); // base exp exp 0
+        try self.emitPushInt(pow_exponent_limit + 1); // ... 33
+        try self.emitOp(.op_within); // base exp (0<=exp<33)
+        try self.emitOp(.op_verify); // base exp
+
         try self.emitOp(.op_swap);
         try self.emitPushInt(1);
         var iter: u32 = 0;
-        while (iter < 32) : (iter += 1) {
+        while (iter < pow_exponent_limit) : (iter += 1) {
             try self.emitPushInt(2);
             try self.emitOp(.op_pick);
             try self.emitPushInt(iter);
@@ -2614,21 +2980,72 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// sqrt(n) — integer square root via Newton's method, 256 rounds.
+    ///
+    /// Algorithm, identical to the constant folder and the reference
+    /// interpreter so that all three agree at every input (R-169):
+    ///
+    ///     guess = n
+    ///     repeat 256 times:
+    ///       next  = (guess + n / guess) / 2
+    ///       guess = min(guess, next)        // the convergence break
+    ///
+    /// OP_MIN IS the break. Bitcoin Script has no loops, so the rounds are
+    /// unrolled and unconditional; what stops them changing the answer is that
+    /// the Newton sequence seeded at guess = n is strictly DECREASING while
+    /// guess > isqrt(n) and non-decreasing once guess == isqrt(n). Clamping
+    /// each round to the running minimum makes isqrt(n) a fixed point and every
+    /// post-convergence round a no-op. Without the clamp the iteration reaches
+    /// isqrt(n) and then OSCILLATES between it and isqrt(n)+1, so a fixed round
+    /// count returns whichever side the parity lands on — sqrt(8) = 3.
+    ///
+    /// 256 matches the folder's bound, because seeded at guess = n the iterate
+    /// only halves per round until it nears sqrt(n): a correct answer needs
+    /// ~log2(n)/2 rounds (20 for 32-bit, 37 for 64-bit, 135 for 256-bit). The
+    /// previous 16 was short by an unbounded margin, not a tuning margin —
+    /// sqrt(10^12) came out as 15280627.
+    ///
+    /// DOMAIN: exact for every 0 <= n < 2^497, and both ends are ENFORCED,
+    /// because outside them the iteration returns a wrong number rather than
+    /// failing:
+    ///
+    ///     OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+    ///     OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n fits in 62 bytes
+    ///
+    /// A minimally-encoded script number of at most 62 bytes is at most
+    /// 2^495 - 1, so the enforced domain is 0 <= n < 2^495. The upper guard is
+    /// not theoretical: a 500-byte n ran to completion on the real ScriptVM and
+    /// returned a wrong root with no error. A negative n is a fixed point of
+    /// the min-clamped recurrence and would come back as n itself, so it is
+    /// refused too — the folder declines and the interpreter throws on the same
+    /// bound, leaving all three in agreement.
     fn lowerSqrt(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         try self.bringToTopAuto(args[0]);
         _ = self.stack.pop();
+        // Domain guards; both leave n on the stack.
+        try self.emitOp(.op_dup);
+        try self.emitPushInt(0);
+        try self.emitOp(.op_greaterthanorequal);
+        try self.emitOp(.op_verify);
+        try self.emitOp(.op_size);
+        try self.emitPushInt(63);
+        try self.emitOp(.op_lessthan);
+        try self.emitOp(.op_verify);
+
         try self.emitOp(.op_dup);
         try self.emitOp(.op_if);
         try self.emitOp(.op_dup);
         var iter: u32 = 0;
-        while (iter < 16) : (iter += 1) {
+        while (iter < 256) : (iter += 1) {
             try self.emitOp(.op_over);
             try self.emitOp(.op_over);
             try self.emitOp(.op_div);
+            try self.emitOp(.op_over);
             try self.emitOp(.op_add);
             try self.emitPushInt(2);
             try self.emitOp(.op_div);
+            try self.emitOp(.op_min);
         }
         try self.emitOp(.op_nip);
         try self.emitOp(.op_endif);
@@ -2759,6 +3176,334 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// Strip the BIP-143 scriptCode varint length prefix.
+    ///
+    ///     [..., varint || scriptCode]  ->  [..., scriptCode]
+    ///
+    /// All four varint shapes must be handled; stripping only the 1- and
+    /// 3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+    /// 65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+    /// `Invalid OP_SPLIT range` on regtest.
+    fn emitStripScriptCodeVarint(self: *LowerCtx) !void {
+        // SPLIT 1 -> [..., firstByte, rest]
+        try self.emitPushInt(1);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // firstByte
+        try self.stack.push(self.allocator, null); // rest
+        // SWAP -> [..., rest, firstByte]
+        try self.emitOp(.op_swap);
+        const vt_top = self.stack.pop();
+        const vt_next = self.stack.pop();
+        try self.stack.push(self.allocator, vt_top);
+        try self.stack.push(self.allocator, vt_next);
+        // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        // as negative script numbers.
+        try self.emitPushData(&.{0x00});
+        try self.stack.push(self.allocator, null);
+        // CAT -> [..., rest, firstByte||0x00]
+        try self.emitOp(.op_cat);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        // BIN2NUM -> [..., rest, fb_num]
+        try self.emitOp(.op_bin2num);
+
+        // IF fb_num < 253: 1-byte varint, drop fb_num.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        try self.emitPushInt(253);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_lessthan);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_1byte_if = try self.stack.clone(self.allocator);
+        // THEN: 1-byte varint
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_1byte_if;
+        sm_at_1byte_if = .{};
+
+        // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        try self.emitPushInt(254);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_numequal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_fe_if = try self.stack.clone(self.allocator);
+        // THEN: 5-byte varint (0xfe + 4 bytes LE).
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitDropMoreVarintBytes(4);
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_fe_if;
+        sm_at_fe_if = .{};
+
+        // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        try self.emitPushInt(255);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_numequal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_ff_if = try self.stack.clone(self.allocator);
+        // THEN: 9-byte varint (0xff + 8 bytes LE).
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitDropMoreVarintBytes(8);
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_ff_if;
+        sm_at_ff_if = .{};
+
+        // ELSE: fb_num must be 253 (0xfd) -- 3-byte varint.
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        try self.emitDropMoreVarintBytes(2);
+        try self.emitOp(.op_endif);
+        try self.emitOp(.op_endif);
+        try self.emitOp(.op_endif);
+    }
+
+    /// Whether the deployed locking script carries a trailing
+    /// `OP_RETURN || state` section at all (R-010).
+    ///
+    /// NOT the same question as "is the state section empty". A
+    /// StatefulSmartContract with zero mutable properties compiles to an
+    /// artifact with no state fields, and the SDK's `getLockingScript` appends
+    /// neither the separator nor any payload — the deployed script IS the code
+    /// part. `fixedStateSectionLength` answers 0 for that shape, which reads as
+    /// "a fixed section of length zero" and made clause 8a pin
+    /// `SIZE(rest) == 1` for a remainder that is always empty, locking the
+    /// contract's funds.
+    fn hasStateSection(self: *const LowerCtx) bool {
+        for (self.program.properties) |prop| {
+            if (!prop.readonly) return true;
+        }
+        return false;
+    }
+
+    /// Byte length of the serialized state section (excluding the OP_RETURN
+    /// separator) when every mutable property is fixed-size, and `null`
+    /// otherwise. Mirrors the size table in `lowerDeserializeState`; a
+    /// ByteString property makes the section variable-length and its exact
+    /// length un-pinnable at compile time.
+    ///
+    /// Only meaningful when `hasStateSection()` is true: with no mutable
+    /// properties the sum is vacuously 0, which means "no section", not "an
+    /// empty section".
+    fn fixedStateSectionLength(self: *const LowerCtx) ?i64 {
+        var total: i64 = 0;
+        for (self.program.properties) |prop| {
+            if (prop.readonly) continue;
+            const sz = statePropSize(prop) catch return null;
+            if (sz < 0) return null;
+            total += sz;
+        }
+        return total;
+    }
+
+    /// Bind the spender-supplied `_codePart` witness to the script that is
+    /// actually executing (R-010 / CL-BUG-091).
+    ///
+    /// `_codePart` is the locking script minus the trailing
+    /// `OP_RETURN || state` section. It is pushed by the spender and OP_CAT'd
+    /// verbatim as the script prefix of every reconstructed
+    /// state-continuation output, so an unauthenticated `_codePart` is a
+    /// complete break: the spender picks the script the contract's own funds
+    /// move to.
+    ///
+    /// With the OP_CODESEPARATOR hoisted to offset 1 of the locking script,
+    /// the BIP-143 scriptCode carried in the (already tx-bound) preimage is
+    ///
+    ///     scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state
+    ///
+    /// so the whole of `_codePart` is recoverable from it:
+    ///
+    ///     codePart == 0x61ab || scriptCode[0 : SIZE(codePart)-2]
+    ///
+    /// plus a pin on the split point, without which a spender could claim a
+    /// SHORTER code part whose bytes are a genuine prefix — in the degenerate
+    /// case just the two prologue bytes, which turns the continuation output
+    /// into a bare OP_RETURN that anyone can spend.
+    ///
+    /// Consumes nothing: [..., preimage] in, [..., preimage] out, aborting
+    /// the script via OP_EQUALVERIFY when the witness does not match.
+    fn emitCodePartAuthentication(self: *LowerCtx) !void {
+        // 1. Work on a copy — the caller still needs the preimage.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+        self.trackDepth();
+
+        // 2. Drop the fixed 104-byte BIP-143 header.
+        try self.emitPushInt(104);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_nip);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        // 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+        //    hashOutputs 32 + nLocktime 4 + sighashType 4).
+        try self.emitOp(.op_size);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(52);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_sub);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+
+        // 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+        try self.emitStripScriptCodeVarint();
+
+        // 5. Copy the witness code part up.
+        try self.bringToTop("_codePart", false);
+        try self.stack.renameAtDepth(self.allocator, 0, null);
+
+        // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode omits).
+        try self.emitOp(.op_size);
+        try self.stack.push(self.allocator, null);
+
+        // 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state
+        //     path.
+        //
+        //     Clause 8a pins the split point through the REMAINDER's length,
+        //     which only works while the state section is a compile-time
+        //     constant. With a ByteString state field it is not, 8a is
+        //     skipped, and the only surviving constraint on where the code
+        //     part ENDS is 8b's `rest[0] == 0x6a` — which a genuine PREFIX of
+        //     the executing script satisfies at any offset whose byte happens
+        //     to be 0x6a. The state's length is unknown at compile time; the
+        //     CODE's is not, so pin that instead. See the TypeScript tier for
+        //     the full argument.
+        if (self.hasStateSection() and self.fixedStateSectionLength() == null) {
+            // delta/exact are refined by pinCodePartLength once every method
+            // has been lowered; the defaults are the sound ones (a lower bound
+            // of emittedLength + 0 holds for any deployment).
+            try self.emit(.{ .verify_code_part_len = .{ .delta = 0, .exact = false } });
+        }
+
+        try self.emitPushInt(2);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_sub);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        // 7. Reorder to [..., codePart, scriptCode, n].
+        try self.emitOp(.op_rot);
+        const rotated = self.stack.peekAtDepth(2);
+        try self.stack.removeAtDepth(self.allocator, 2);
+        try self.stack.push(self.allocator, rotated);
+        try self.emitOp(.op_swap);
+        {
+            const top = self.stack.pop();
+            const next = self.stack.pop();
+            try self.stack.push(self.allocator, top);
+            try self.stack.push(self.allocator, next);
+        }
+
+        // 8. Split scriptCode at n into the claimed code tail and the rest.
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+
+        // 8a. Pin the split point. R-010: with no mutable properties there is
+        //     no state section and no separator — the deployed script is
+        //     exactly the code part, so the remainder must be EMPTY.
+        const has_state = self.hasStateSection();
+        const fixed_state_len: ?i64 = if (has_state) self.fixedStateSectionLength() else 0;
+        if (fixed_state_len) |len| {
+            const rest_len: i64 = if (has_state) 1 + len else 0;
+            try self.emitOp(.op_size);
+            try self.stack.push(self.allocator, null);
+            try self.emitPushInt(rest_len);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_numequalverify);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+        }
+        // 8b. When a state section exists, the byte immediately after the code
+        //     part must be the OP_RETURN separator. With no state section
+        //     clause 8a has already pinned the remainder to zero bytes, which
+        //     is strictly stronger than any byte test.
+        if (has_state) {
+            try self.emitPushInt(1);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_split);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+            try self.emitPushData(&.{0x6a});
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_equalverify);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+        } else {
+            // Clause 8a consumed the remainder's SIZE but not the remainder;
+            // with 8b skipped it is dead and must still be dropped so the stack
+            // shape matches the state-bearing path.
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+        }
+
+        // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+        try self.emitPushData(&.{ 0x61, 0xab });
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_swap);
+        {
+            const top = self.stack.pop();
+            const next = self.stack.pop();
+            try self.stack.push(self.allocator, top);
+            try self.stack.push(self.allocator, next);
+        }
+        try self.emitOp(.op_cat);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        // 10. Byte-for-byte or the script dies here.
+        try self.emitOp(.op_equalverify);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        self.trackDepth();
+    }
+
     fn lowerCheckPreimage(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, sighash_flag: i32) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
@@ -2769,9 +3514,23 @@ const LowerCtx = struct {
         // The unlocking script pushes ONLY <preimage> (no witness signature).
         // See emitCheckPreimageBinding for the construction.
 
-        // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is only
-        // the code after this point (smaller preimage; required for large scripts).
-        try self.emitOp(.op_codeseparator);
+        // R-010 / CL-BUG-091: where a `_codePart` witness exists ANYWHERE in
+        // this contract, NO separator is emitted here. It used to sit at each
+        // method's entry, so the BIP-143 scriptCode covered only the code
+        // AFTER it — leaving the dispatch preamble and every preceding method
+        // body invisible to the running script, and those are exactly the
+        // bytes the spender-supplied `_codePart` claims to reproduce. The
+        // emitter instead places one at offset 1 of the locking script (see
+        // emitCodeSeparatorPrologue in emit.zig).
+        if (!self.script_level_code_separator) {
+            // No `_codePart` anywhere in this contract, so nothing needs
+            // authenticating: keep the pre-R-010 layout — a separator right
+            // here, at the method's entry, which keeps scriptCode (and the
+            // preimage) small. Hoisting it would also move it ahead of any
+            // user `checkSig` in a stateless contract, whose signature
+            // packages/runar-sdk produces over the FULL locking script.
+            try self.emitOp(.op_codeseparator);
+        }
 
         // Bring the preimage to the top (kept for field extractors below).
         try self.bringToTopAuto(args[0]);
@@ -2782,6 +3541,13 @@ const LowerCtx = struct {
         // method declare a different mode, which only changes the appended
         // sighash flag byte. Net stack effect is zero.
         try self.emitCheckPreimageBinding(sighash_flag);
+
+        // R-010: the preimage is now proven to be THIS transaction's preimage,
+        // so its scriptCode field is authentic. Pin the spender-supplied
+        // `_codePart` to it before any continuation output is built from it.
+        if (self.stack.findDepth("_codePart") != null) {
+            try self.emitCodePartAuthentication();
+        }
 
         // Preimage remains on top. Rename for field extractors.
         try self.stack.renameAtDepth(self.allocator, 0, bind_name);
@@ -2945,101 +3711,7 @@ const LowerCtx = struct {
             // silently strip too few varint bytes and corrupt the subsequent
             // state-extraction OP_SPLITs.
 
-            // SPLIT 1 -> [..., firstByte, rest]
-            try self.emitPushInt(1);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_split);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null); // firstByte
-            try self.stack.push(self.allocator, null); // rest
-            // SWAP -> [..., rest, firstByte]
-            try self.emitOp(.op_swap);
-            const vt_top = self.stack.pop();
-            const vt_next = self.stack.pop();
-            try self.stack.push(self.allocator, vt_top);
-            try self.stack.push(self.allocator, vt_next);
-            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
-            // as negative script numbers.
-            try self.emitPushData(&.{0x00});
-            try self.stack.push(self.allocator, null);
-            // CAT -> [..., rest, firstByte||0x00]
-            try self.emitOp(.op_cat);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            // BIN2NUM -> [..., rest, fb_num]
-            try self.emitOp(.op_bin2num);
-
-            // IF fb_num < 253: 1-byte varint, drop fb_num.
-            try self.emitOp(.op_dup);
-            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
-            try self.emitPushInt(253);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_lessthan);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_if);
-            _ = self.stack.pop();
-            var sm_at_1byte_if = try self.stack.clone(self.allocator);
-            // THEN: 1-byte varint
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitOp(.op_else);
-            self.stack.deinit(self.allocator);
-            self.stack = sm_at_1byte_if;
-            sm_at_1byte_if = .{};
-
-            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-            try self.emitOp(.op_dup);
-            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
-            try self.emitPushInt(254);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_numequal);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_if);
-            _ = self.stack.pop();
-            var sm_at_fe_if = try self.stack.clone(self.allocator);
-            // THEN: 5-byte varint (0xfe + 4 bytes LE).
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitDropMoreVarintBytes(4);
-            try self.emitOp(.op_else);
-            self.stack.deinit(self.allocator);
-            self.stack = sm_at_fe_if;
-            sm_at_fe_if = .{};
-
-            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-            try self.emitOp(.op_dup);
-            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
-            try self.emitPushInt(255);
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_numequal);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            try self.emitOp(.op_if);
-            _ = self.stack.pop();
-            var sm_at_ff_if = try self.stack.clone(self.allocator);
-            // THEN: 9-byte varint (0xff + 8 bytes LE).
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitDropMoreVarintBytes(8);
-            try self.emitOp(.op_else);
-            self.stack.deinit(self.allocator);
-            self.stack = sm_at_ff_if;
-            sm_at_ff_if = .{};
-
-            // ELSE: fb_num must be 253 (0xfd) -- 3-byte varint.
-            try self.emitOp(.op_drop);
-            _ = self.stack.pop();
-            try self.emitDropMoreVarintBytes(2);
-            try self.emitOp(.op_endif);
-            try self.emitOp(.op_endif);
-            try self.emitOp(.op_endif);
+            try self.emitStripScriptCodeVarint();
 
             // Compute skip = SIZE(_codePart) - codeSepIdx
             // PICK _codePart (non-consuming)
@@ -3844,7 +4516,7 @@ const LowerCtx = struct {
                 try self.stack.push(self.allocator, null);
                 try self.emitOp(.op_drop);
                 _ = self.stack.pop();
-                try self.emitOp(.op_bin2num);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
             },
             .extractSigHashType => {
                 // End-relative: last 4 bytes -> number.
@@ -3868,7 +4540,7 @@ const LowerCtx = struct {
                 _ = self.stack.pop();
                 _ = self.stack.pop();
                 try self.stack.push(self.allocator, null);
-                try self.emitOp(.op_bin2num);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
             },
             .extractOutputHash => {
                 try self.emitOp(.op_size);
@@ -3899,11 +4571,170 @@ const LowerCtx = struct {
                 try self.emitOp(.op_drop);
                 _ = self.stack.pop();
             },
+            // R-069: the seven extractors the Zig tier used to reject.
+            // Each mirrors `05-stack-lower.ts#lowerExtractor` opcode for
+            // opcode; the peer tiers' bytes are the contract, not merely a
+            // semantically equivalent slice.
+            .extractVersion => {
+                // nVersion is the LEADING 4 bytes:
+                // <4> OP_SPLIT OP_DROP OP_BIN2NUM
+                try self.emitLeadingExtract(4, false);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
+            },
+            .extractHashSequence => {
+                // Skip 4 + 32, take 32.
+                try self.emitAbsoluteExtract(36, 32, false);
+            },
+            .extractInputIndex => {
+                // The outpoint's vout field: 4 bytes at absolute offset 100.
+                try self.emitAbsoluteExtract(100, 4, true);
+            },
+            .extractAmount => {
+                // amount(8) sits 52 bytes from the end
+                // (8 + nSequence 4 + hashOutputs 32 + nLocktime 4 + sighashType 4).
+                try self.emitTrailingExtract(52, 8, true);
+            },
+            .extractSequence => {
+                // nSequence(4) sits 44 bytes from the end.
+                try self.emitTrailingExtract(44, 4, false);
+                try self.emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
+            },
+            .extractOutputs => {
+                // Alias of extractOutputHash: hashOutputs(32), 40 bytes from the end.
+                try self.emitTrailingExtract(40, 32, false);
+            },
+            .extractScriptCode => {
+                // Variable-length field at absolute offset 104, ending 52
+                // bytes before the end of the preimage.
+                try self.emitPushInt(104);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_split);
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_nip);
+                _ = self.stack.pop();
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_size);
+                try self.stack.push(self.allocator, null);
+                try self.emitPushInt(52);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_sub);
+                _ = self.stack.pop();
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_split);
+                _ = self.stack.pop();
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_drop);
+                _ = self.stack.pop();
+            },
             else => return LowerError.InvalidBuiltin,
         }
 
         try self.stack.renameAtDepth(self.allocator, 0, bind_name);
         self.trackDepth();
+    }
+
+    /// Convert the 4-byte little-endian field on top of the stack to an
+    /// UNSIGNED script number.
+    ///
+    /// nVersion, nSequence, nLockTime and the trailing sighash type are
+    /// unsigned 32-bit wire fields, but a Bitcoin script number is
+    /// sign-magnitude: the high bit of the LAST byte is the sign. A bare
+    /// OP_BIN2NUM therefore reads `feffffff` (0xfffffffe, the SDK's non-final
+    /// default) as -2147483646 and `ffffffff` (the finality sentinel) as
+    /// -2147483647, which makes `extractSequence(p) < 0xffffffff` true for the
+    /// exact value it exists to exclude (W1 / FinalCountdown). Appending a
+    /// zero byte first makes the value a five-byte non-negative number, so the
+    /// whole 0..2^32-1 range reads as itself. Same trick
+    /// emitStripScriptCodeVarint already uses for 0xfd/0xfe/0xff.
+    fn emitUnsignedBin2Num(self: *LowerCtx) !void {
+        try self.emitPushData(&.{0x00});
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_cat);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_bin2num);
+    }
+
+    /// Slice the LEADING `length` bytes off the value on top of the stack:
+    /// <length> OP_SPLIT OP_DROP [OP_BIN2NUM].
+    fn emitLeadingExtract(self: *LowerCtx, length: i64, bin2num: bool) !void {
+        try self.emitPushInt(length);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // left  (the field)
+        try self.stack.push(self.allocator, null); // right (the rest)
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        if (bin2num) try self.emitOp(.op_bin2num);
+    }
+
+    /// Slice the absolute byte range [start, start + length) out of the value
+    /// on top of the stack: <start> OP_SPLIT OP_NIP <length> OP_SPLIT OP_DROP
+    /// [OP_BIN2NUM].
+    fn emitAbsoluteExtract(self: *LowerCtx, start: i64, length: i64, bin2num: bool) !void {
+        try self.emitPushInt(start);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_nip);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(length);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        if (bin2num) try self.emitOp(.op_bin2num);
+    }
+
+    /// Slice an end-relative field: OP_SIZE <trailing_offset> OP_SUB OP_SPLIT
+    /// OP_NIP <inner_length> OP_SPLIT OP_DROP [OP_BIN2NUM].
+    fn emitTrailingExtract(self: *LowerCtx, trailing_offset: i64, inner_length: i64, bin2num: bool) !void {
+        try self.emitOp(.op_size);
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(trailing_offset);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_sub);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_nip);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        if (inner_length > 0) {
+            try self.emitPushInt(inner_length);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_split);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+        }
+        if (bin2num) try self.emitOp(.op_bin2num);
     }
 
     // emitVarintEncoding encodes a script number length on top of the stack
@@ -4226,6 +5057,7 @@ const LowerCtx = struct {
         then_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
         then_ctx.in_branch = true;
         then_ctx.copy_ref_aliases = self.copy_ref_aliases;
+        then_ctx.script_level_code_separator = self.script_level_code_separator;
         then_ctx.max_depth = self.max_depth;
         then_ctx.outer_protected_refs = &protected_refs;
         try then_ctx.lowerBindings(ie.then_bindings, terminal_assert);
@@ -4246,6 +5078,7 @@ const LowerCtx = struct {
         else_ctx.force_copy_bindings = try cloneVoidMap(self.allocator, self.force_copy_bindings);
         else_ctx.in_branch = true;
         else_ctx.copy_ref_aliases = self.copy_ref_aliases;
+        else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.max_depth = self.max_depth;
         else_ctx.outer_protected_refs = &protected_refs;
         const else_bindings = ie.else_bindings orelse &.{};
@@ -4456,11 +5289,56 @@ const LowerCtx = struct {
             return LowerError.BranchStackMismatch;
         }
 
+        // N-100: an `else` CLAUSE exists only if the else arm still has a body
+        // once the peephole has run over it.
+        //
+        // The other six tiers keep a branch STRUCTURED all the way to the
+        // emitter (`StackOp{Op:"if", Then, Else}`); their optimizer recurses
+        // into each arm (`compilers/go/codegen/optimizer.go`:
+        // `optimizedElse = OptimizeStackOps(op.Else)`) and their emitter asks
+        // the question afterwards (`compilers/go/codegen/emit.go#emitIf`:
+        // `if len(elseOps) > 0`). Zig flattens the branch into a linear
+        // instruction stream right here, so asking `else_ctx.instructions.len`
+        // asked it BEFORE the peephole — and the peephole runs later, over the
+        // already-flattened stream, where it can delete the arm's body but not
+        // the `OP_ELSE` this function had already committed to.
+        //
+        // A trivial private helper is the commonest producer: the `@this`
+        // receiver marker lowers to `push 0` and `lowerMethodCall` drops it
+        // again, leaving `push_int 0, OP_DROP` — peephole rule 1 — as the arm's
+        // entire body. `assert((f ? this.a : this.hx(x)) === this.a)` then came
+        // out `7c 63 00 77 67 68 00 9c` against the six-tier
+        // `7c 63 00 77 68 00 9c`. It is not about calls, though: `p + 0n`
+        // (rule 6) and `p - 0n` (rule 7) erase the same way.
+        //
+        // Optimizing here is byte-neutral for every other program. No peephole
+        // rule names `op_if` / `op_else` / `op_endif` in any window position, so
+        // no rewrite can ever span an arm boundary — the arm-local pass and the
+        // later whole-method pass reach the same fixed point on the same
+        // subsequence. The arms must be REPLACED by their optimized form, not
+        // just measured: dropping the `OP_ELSE` while appending the unoptimized
+        // body would splice that body onto the end of the THEN arm.
+        //
+        // Both `OptOut`s are freed once `appendInstructions` has COPIED their
+        // elements into `self.instructions`; the compile path runs on an arena,
+        // but `lowerIfExpr` is also exercised directly under the leak-checking
+        // test allocator.
+        const then_arm = try optimizeArm(self.allocator, &then_ctx, "then", bind_name);
+        defer {
+            self.allocator.free(then_arm.insts);
+            self.allocator.free(then_arm.locs);
+        }
+        const else_arm = try optimizeArm(self.allocator, &else_ctx, "else", bind_name);
+        defer {
+            self.allocator.free(else_arm.insts);
+            self.allocator.free(else_arm.locs);
+        }
+
         try self.emitOp(.op_if);
-        try self.appendInstructions(then_ctx.instructions.items);
-        if (else_ctx.instructions.items.len > 0) {
+        try self.appendInstructions(then_arm.insts, then_arm.locs);
+        if (else_arm.insts.len > 0) {
             try self.emitOp(.op_else);
-            try self.appendInstructions(else_ctx.instructions.items);
+            try self.appendInstructions(else_arm.insts, else_arm.locs);
         }
         try self.emitOp(.op_endif);
 
@@ -5105,12 +5983,18 @@ const LowerCtx = struct {
             self.last_uses.deinit(self.allocator);
             self.last_uses = enclosing_last_uses;
 
-            // Remove iteration variable if still on stack
+            // Remove iteration variable if still on stack.
+            //
+            // R-186 / R-292: it is not always on TOP when the body leaves it
+            // behind. A body whose last binding LEAVES a value — the
+            // accumulator `sum = sum + x`, which rebinds `sum` in place and ends
+            // holding it — buries the iteration variable one slot down. Dropping
+            // only at depth 0 left one slot behind per iteration, until the leak
+            // alone crossed the peers' MAX_STACK_DEPTH and they refused a
+            // contract with a working set of three. `removeBranchValueAtDepth`
+            // is the same removal `drainBranchPrivateResidue` uses.
             if (self.stack.findDepth(fl.var_name)) |d| {
-                if (d == 0) {
-                    try self.emitOp(.op_drop);
-                    _ = self.stack.pop();
-                }
+                try removeBranchValueAtDepth(self, d);
             }
         }
 
@@ -5135,12 +6019,19 @@ const LowerCtx = struct {
         }
 
         try self.bringToTop("_codePart", false);
-        try self.emitPushData(&.{0x6a});
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_cat);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
+        // Append the OP_RETURN separator only when there is a state section for
+        // it to separate. R-010: with zero mutable properties the SDK's
+        // getLockingScript emits the bare code and stops, so a separator here
+        // would make the continuation output one byte longer than the script
+        // the SDK deploys.
+        if (state_prop_count > 0) {
+            try self.emitPushData(&.{0x6a});
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_cat);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+        }
         self.trackDepth();
 
         var state_index: usize = 0;
@@ -5280,6 +6171,20 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
     var owned_push_data = std.ArrayListUnmanaged([]u8).empty;
     defer owned_push_data.deinit(allocator);
 
+    // R-010: decide ONCE, before lowering anything, whether this contract
+    // authenticates a `_codePart` witness. The predicate is exactly the one
+    // `setupMethodStack` uses to push the implicit `_codePart` slot, so the
+    // emitter's offset-1 separator and `emitCodePartAuthentication` can never
+    // disagree about which layout a method was lowered for.
+    var script_level_code_separator = false;
+    for (program.methods) |method| {
+        if (!method.is_public) continue;
+        if (methodUsesCodePartFull(methodBindings(method), program.properties, program.methods)) {
+            script_level_code_separator = true;
+            break;
+        }
+    }
+
     for (program.methods) |method| {
         if (!method.is_public) continue;
 
@@ -5288,6 +6193,17 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
 
         try setupMethodStack(&ctx, program, method);
         ctx.copy_ref_aliases = false;
+        ctx.script_level_code_separator = script_level_code_separator;
+
+        // W3 / BoolBamboozle: a public method's `boolean` parameters arrive
+        // from the unlocking script as arbitrary bytes. Pin each of them to the
+        // ABI domain {empty, 0x01} before a single body opcode runs — see
+        // `emitBooleanParamGate`. Constructor args are baked into the locking
+        // script by the assembler, never pushed by a spender, so only public
+        // methods need the gate (and `lower` only visits public ones anyway).
+        for (method.params) |param| {
+            if (paramIsBoolean(param)) try ctx.emitBooleanParamGate(param.name);
+        }
 
         // Use body or bindings (whichever is populated)
         const bindings = if (method.body.len > 0) method.body else method.bindings;
@@ -5309,11 +6225,14 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
             .instructions = instructions,
             .max_stack_depth = ctx.max_depth,
             .instruction_source_locs = src_locs,
+            .needs_code_separator = script_level_code_separator,
         });
         try owned_push_data.appendSlice(allocator, ctx.owned_push_data.items);
         ctx.owned_push_data.deinit(allocator);
         ctx.owned_push_data = .empty;
     }
+
+    pinCodePartLength(methods.items, program.properties);
 
     return .{
         .methods = try allocator.dupe(types.StackMethod, methods.items),
@@ -5322,6 +6241,111 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         .constructor_params = program.constructor.params,
         .owned_push_data = try allocator.dupe([]u8, owned_push_data.items),
     };
+}
+
+/// Baked value width, in bytes, of every fixed-size constructor-arg type.
+/// Mirrors the `raw`-encoded entries of the shared STATE_FIELD_WIDTHS table.
+fn constructorSlotValueBytes(type_name: []const u8) ?i64 {
+    if (std.mem.eql(u8, type_name, "PubKey")) return 33;
+    if (std.mem.eql(u8, type_name, "Sha256")) return 32;
+    if (std.mem.eql(u8, type_name, "Addr")) return 20;
+    if (std.mem.eql(u8, type_name, "Ripemd160")) return 20;
+    if (std.mem.eql(u8, type_name, "Point")) return 64;
+    if (std.mem.eql(u8, type_name, "P256Point")) return 64;
+    if (std.mem.eql(u8, type_name, "P384Point")) return 96;
+    return null;
+}
+
+/// Byte length of the push header `encodePushData` puts in front of an N-byte
+/// payload: the length byte itself up to 75, then OP_PUSHDATA1 / 2 / 4.
+fn pushHeaderLen(value_bytes: i64) i64 {
+    if (value_bytes <= 75) return 1;
+    if (value_bytes <= 0xff) return 2;
+    if (value_bytes <= 0xffff) return 3;
+    return 5;
+}
+
+/// Deploy-time byte GROWTH of the single OP_0 placeholder a constructor slot
+/// of this type occupies in the template, or null when the type has no
+/// compile-time width.
+///
+/// Mirrors the SDK's `encodeArg`: a fixed-size data type bakes as
+/// `<push header><N value bytes>` over a 1-byte placeholder, so it grows the
+/// script by `pushHeaderLen(N) + N - 1`.
+///
+/// The header is NOT always one byte, and this function used to assume it was.
+/// `P384Point` is 96 bytes — past the 75-byte direct-push ceiling — so the SDK
+/// bakes it through OP_PUSHDATA1 as `4c 60 || <96>` and it grows the script by
+/// 97, not 96. Under-counting by one emits an `exact` pin one byte short, and
+/// every honest spend of such a contract fails OP_VERIFY with the funds already
+/// locked. Deriving the header from the width keeps the next type above 75
+/// bytes from repeating that silently.
+///
+/// A boolean bakes as one OP_TRUE/OP_0 opcode byte, the same width as the
+/// placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
+/// Script number) and `ByteString` (arbitrary-length data push) depend on the
+/// VALUE, which the compiler never sees.
+fn constructorSlotGrowth(type_name: []const u8) ?i64 {
+    if (std.mem.eql(u8, type_name, "boolean")) return 0;
+    const value_bytes = constructorSlotValueBytes(type_name) orelse return null;
+    return pushHeaderLen(value_bytes) + value_bytes - 1;
+}
+
+/// R-095 — resolve delta/exact on every `verify_code_part_len` instruction.
+///
+/// A constructor slot exists only where a property is actually LOADED, and a
+/// method is lowered before the methods after it, so no single method knows
+/// the contract's full placeholder set. This runs once the whole program is
+/// lowered and counts the placeholders that were really emitted —
+/// over-counting would inflate the pin and make every honest spend
+/// unspendable. `lower` only ever appends PUBLIC methods, so the constructor's
+/// placeholders (which the emitter never writes) are already excluded.
+fn pinCodePartLength(methods: []types.StackMethod, properties: []const types.ANFProperty) void {
+    var pin_count: usize = 0;
+    var delta: i64 = 0;
+    var exact = true;
+
+    for (methods) |m| {
+        for (m.instructions) |inst| {
+            switch (inst) {
+                .verify_code_part_len => pin_count += 1,
+                .placeholder => |ph| {
+                    // Matches the paramIndex space lowerLoadProp assigns.
+                    var ctor_index: u32 = 0;
+                    var type_name: ?[]const u8 = null;
+                    for (properties) |prop| {
+                        if (prop.initial_value != null) continue;
+                        if (ctor_index == ph.param_index) {
+                            type_name = prop.type_name;
+                            break;
+                        }
+                        ctor_index += 1;
+                    }
+                    if (type_name) |t| {
+                        if (constructorSlotGrowth(t)) |growth| {
+                            delta += growth;
+                        } else {
+                            // No compile-time width. Growth is never negative,
+                            // so the running sum stays a sound lower bound.
+                            exact = false;
+                        }
+                    } else {
+                        exact = false;
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+    if (pin_count == 0) return;
+
+    for (methods) |m| {
+        for (m.instructions) |*inst| {
+            if (inst.* == .verify_code_part_len) {
+                inst.* = .{ .verify_code_part_len = .{ .delta = delta, .exact = exact } };
+            }
+        }
+    }
 }
 
 fn countPublicMethods(methods: []const types.ANFMethod) usize {
@@ -5385,9 +6409,15 @@ fn setupMethodStack(ctx: *LowerCtx, program: types.ANFProgram, method: types.ANF
     }
 }
 
-fn setupPropertyStack(ctx: *LowerCtx, program: types.ANFProgram) !void {
-    _ = ctx;
-    _ = program;
+// R-295: `setupPropertyStack` used to live here. Its entire body was
+// `_ = ctx; _ = program;` — it took two parameters, discarded both, and had no
+// callers.
+
+/// W3: a parameter's declared type is `boolean`. The `--source` path fills
+/// `type_info` from the surface parser; the `--ir` path (`ir/json.zig`
+/// `parseParams`) only carries the textual `type`, so both spellings count.
+fn paramIsBoolean(param: types.ANFParam) bool {
+    return param.type_info == .boolean or std.mem.eql(u8, param.type_name, "boolean");
 }
 
 pub fn methodBindings(method: types.ANFMethod) []const types.ANFBinding {
@@ -5483,11 +6513,16 @@ fn methodUsesCodePart(bindings: []const types.ANFBinding) bool {
     for (bindings) |binding| {
         switch (binding.value) {
             .add_output, .add_raw_output, .add_data_output => return true,
+            // R-287: `buildChangeOutput` / `buildStateOutput` used to be listed
+            // here and in no other tier. Neither reads `_codePart` — the change
+            // output is a plain P2PKH built from a pubkey hash and an amount —
+            // and both only ever appear beside the `computeStateOutput` call
+            // that already trips this predicate, so dropping them moves no
+            // source-derived byte. On the `--ir` front door, where that
+            // coupling does not hold, keeping them made Zig the odd tier out.
             .call => |call| {
                 if (std.mem.eql(u8, call.func, "computeStateOutput") or
-                    std.mem.eql(u8, call.func, "computeStateOutputHash") or
-                    std.mem.eql(u8, call.func, "buildChangeOutput") or
-                    std.mem.eql(u8, call.func, "buildStateOutput"))
+                    std.mem.eql(u8, call.func, "computeStateOutputHash"))
                 {
                     return true;
                 }
@@ -5504,11 +6539,29 @@ fn methodUsesCodePart(bindings: []const types.ANFBinding) bool {
     return false;
 }
 
-/// Whether a method READS a mutable variable-length (ByteString) state field's
-/// value (via load_prop). Issue #100: such a terminal method needs _codePart for
-/// the preimage-relative state offset. Narrowed to the live var-length read so
-/// methods that only read readonly fields (baked into the locking script) or
-/// fixed-size fields keep their original terminal codegen.
+/// Whether a method reads a mutable state field whose `load_prop` can only be
+/// answered from the `_codePart`-relative live-state path (issue #100).
+///
+/// The question is deliberately NOT "does this method read a var-length
+/// property". It MUST agree with the branch `lowerDeserializeState` actually
+/// takes, and that branch keys off a CONTRACT-level fact: `has_variable_length`
+/// — does ANY mutable property carry a push-data length prefix. When one does,
+/// the state section can only be located via the `_codePart`-relative offset, so
+/// the WHOLE deserialization is gated on `_codePart`; without it the pass hits
+/// its "no `_codePart`" shortcut, pushes NO mutable property, and every
+/// `load_prop` falls through to the DEPLOY-TIME constructor placeholder instead
+/// of the live on-chain value.
+///
+/// Two narrower versions of this question have already been wrong here:
+///   R-015 (CL-BUG-138) asked the wrong TYPE question — "is it literally
+///   `.byte_string`" rather than what `isVariableLengthStateType` says.
+///   R-074 asked the wrong SCOPE question — "does THIS method read a var-length
+///   property", when reading the fixed-size SIBLING of one is just as gated. A
+///   terminal read of a `bigint` next to a `ByteString` authorised against the
+///   deploy-time value forever.
+/// So ask the deserializer's own question: if the contract has var-length state,
+/// EVERY mutable-property read needs `_codePart`; otherwise none does, and
+/// readonly-only reads plus the fixed-width path stay byte-unchanged.
 ///
 /// C18: the read may live entirely inside a private helper reached via
 /// `method_call`. `lowerMethodCall` INLINES private methods into the caller's
@@ -5523,13 +6576,22 @@ fn methodReadsVarLenState(
     properties: []const types.ANFProperty,
     methods: []const types.ANFMethod,
 ) bool {
-    return methodReadsVarLenStateRec(bindings, properties, methods, 0);
+    var has_var_len = false;
+    for (properties) |prop| {
+        if (!prop.readonly and LowerCtx.isVariableLengthStateType(prop.type_info)) {
+            has_var_len = true;
+            break;
+        }
+    }
+    if (!has_var_len) return false;
+    return methodReadsVarLenStateRec(bindings, properties, methods, has_var_len, 0);
 }
 
 fn methodReadsVarLenStateRec(
     bindings: []const types.ANFBinding,
     properties: []const types.ANFProperty,
     methods: []const types.ANFMethod,
+    has_var_len: bool,
     depth: u32,
 ) bool {
     if (depth > MAX_PREIMAGE_RECURSION_DEPTH) return false;
@@ -5537,19 +6599,24 @@ fn methodReadsVarLenStateRec(
         switch (binding.value) {
             .load_prop => |lp| {
                 for (properties) |prop| {
-                    if (!prop.readonly and prop.type_info == .byte_string and std.mem.eql(u8, prop.name, lp.name)) return true;
+                    // `has_var_len` is the contract-level fact the deserializer
+                    // itself branches on — see the doc comment above. A read of
+                    // ANY mutable property is gated once it is true.
+                    if (!prop.readonly and
+                        has_var_len and
+                        std.mem.eql(u8, prop.name, lp.name)) return true;
                 }
             },
             .@"if" => |ie| {
-                if (methodReadsVarLenStateRec(ie.then, properties, methods, depth) or
-                    methodReadsVarLenStateRec(ie.@"else", properties, methods, depth)) return true;
+                if (methodReadsVarLenStateRec(ie.then, properties, methods, has_var_len, depth) or
+                    methodReadsVarLenStateRec(ie.@"else", properties, methods, has_var_len, depth)) return true;
             },
             .loop => |loop| {
-                if (methodReadsVarLenStateRec(loop.body, properties, methods, depth)) return true;
+                if (methodReadsVarLenStateRec(loop.body, properties, methods, has_var_len, depth)) return true;
             },
             .method_call => |mc| {
                 if (findPrivateMethod(methods, mc.method)) |target| {
-                    if (methodReadsVarLenStateRec(methodBindings(target), properties, methods, depth + 1)) return true;
+                    if (methodReadsVarLenStateRec(methodBindings(target), properties, methods, has_var_len, depth + 1)) return true;
                 }
             },
             else => {},
@@ -5579,94 +6646,11 @@ fn findPrivateMethod(methods: []const types.ANFMethod, name: []const u8) ?types.
     return null;
 }
 
-fn emitDispatchTable(ctx: *LowerCtx, program: types.ANFProgram) !void {
-    var public_indices = std.ArrayListUnmanaged(usize).empty;
-    defer public_indices.deinit(ctx.allocator);
-
-    for (program.methods, 0..) |method, idx| {
-        if (method.is_public) {
-            try public_indices.append(ctx.allocator, idx);
-        }
-    }
-
-    if (public_indices.items.len == 0) return;
-
-    const last_pub = public_indices.items.len - 1;
-
-    for (public_indices.items, 0..) |method_idx, pub_idx| {
-        const method = program.methods[method_idx];
-        const bindings = if (method.body.len > 0) method.body else method.bindings;
-
-        const ensureMethodPrelude = struct {
-            fn apply(inner_ctx: *LowerCtx, inner_bindings: []const types.ANFBinding, inner_method: types.ANFMethod) !void {
-                if (methodUsesCodePart(inner_bindings) and inner_ctx.stack.findDepth("_codePart") == null) {
-                    try inner_ctx.stack.push(inner_ctx.allocator, "_codePart");
-                    inner_ctx.trackDepth();
-                }
-                // BUG-100 fix: no _opPushTxSig — signature derived on-chain from
-                // the preimage (see lowerCheckPreimage).
-                for (inner_method.params) |param| {
-                    try inner_ctx.stack.push(inner_ctx.allocator, param.name);
-                }
-                inner_ctx.trackDepth();
-            }
-        };
-
-        if (pub_idx < last_pub) {
-            try ctx.emitOp(.op_dup);
-            try ctx.emitPushInt(@intCast(pub_idx));
-            try ctx.emitOp(.op_numequal);
-            try ctx.emitOp(.op_if);
-            try ctx.emitOp(.op_drop);
-
-            var branch_stack = try ctx.stack.clone(ctx.allocator);
-            const saved_stack = ctx.stack;
-            const saved_force_copy_bindings = ctx.force_copy_bindings;
-            ctx.stack = branch_stack;
-            ctx.force_copy_bindings = .empty;
-            try ensureMethodPrelude.apply(ctx, bindings, method);
-
-            try ctx.lowerBindings(bindings, method.is_public);
-            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
-            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
-            // every public method also fixes all-readonly stateful methods.
-            if (method.is_public) {
-                try ctx.cleanupExcessStack();
-            }
-            if (!endsWithAssert(bindings)) {
-                try ctx.emitOp(.op_1);
-            }
-
-            branch_stack = ctx.stack;
-            branch_stack.deinit(ctx.allocator);
-            ctx.stack = saved_stack;
-            ctx.force_copy_bindings.deinit(ctx.allocator);
-            ctx.force_copy_bindings = saved_force_copy_bindings;
-
-            try ctx.emitOp(.op_else);
-        } else {
-            try ctx.emitPushInt(@intCast(pub_idx));
-            try ctx.emitOp(.op_numequalverify);
-            try ensureMethodPrelude.apply(ctx, bindings, method);
-
-            try ctx.lowerBindings(bindings, method.is_public);
-            // CLEANSTACK: drop excess items left below the top-of-stack boolean.
-            // cleanupExcessStack() is a no-op when depth <= 1, so running it for
-            // every public method also fixes all-readonly stateful methods.
-            if (method.is_public) {
-                try ctx.cleanupExcessStack();
-            }
-            if (!endsWithAssert(bindings)) {
-                try ctx.emitOp(.op_1);
-            }
-        }
-    }
-
-    var endif_count: usize = 0;
-    while (endif_count < last_pub) : (endif_count += 1) {
-        try ctx.emitOp(.op_endif);
-    }
-}
+// R-295: an 88-line `emitDispatchTable` used to live here — a copy of the live
+// method-lowering loop with no callers, which had already drifted away from it
+// (it never gained the `endsWithTerminalRawScript` companion the live path
+// uses). A second copy of the dispatch loop is the shape that absorbs a fix
+// silently: the tests would all still pass.
 
 // ============================================================================
 // Tests

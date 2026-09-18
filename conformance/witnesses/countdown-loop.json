@@ -1,0 +1,37 @@
+{
+  "fixture": "countdown-loop",
+  "_note": "R-102, the descending half. `loop-shapes` covers a non-zero START; every loop in the 81-fixture corpus before this one ascended, so `(start, step)` took exactly two values repo-wide — (0,1) and (3,1) — and `step = -1` shipped in all seven tiers with its cross-tier parity never once measured. Three defects were living in that gap: the Move `while`-fold matched `i = i + …` only, so a counting-down Move loop unrolled ZERO times (body and every assertion in it absent from the locking script, exit 0, no diagnostic); the `.runar.zig` surface never set `descending` from its comparison in the Zig tier, so the same bytes compiled to a real countdown in six tiers and to nothing in the seventh; and three of the nine surfaces could not spell a countdown at all. The spends below are the independent execution oracle for these goldens — the interpreter and the @bsv/sdk script engine both have to reach the same verdict, and both have to reach the DECLARED one, so a compiler that agrees with itself does not settle it.",
+  "goldenHashes": {
+    "expected-script.hex": "bab744df9181a6e742d817c8d1ef257c713da16c83988b05238ac8ca9f981fb3",
+    "expected-ir.json": "1bc42d8c596cfae4f7e6625b09980dcb622555ddd491220a6845a3c6278116a4"
+  },
+  "constructorArgs": {
+    "target": "14n"
+  },
+  "spends": [
+    {
+      "method": "verify",
+      "args": ["0n"],
+      "expect": "accept",
+      "note": "seed 0 + (5+4+3+2) = 14. The DIRECTION is what makes this 14: the ascending loop of the same length sums 0+1+2+3 = 6, and a dropped body leaves acc at 0."
+    },
+    {
+      "method": "verify",
+      "args": ["6n"],
+      "expect": "reject",
+      "note": "6 is the ascending loop's total. Reaching it here means seed 6 + 14 = 20 != 14 — but the row is chosen so that a regression which flips the iterator to ascending lands on the ACCEPTING side of the row above instead, and this pair pins which."
+    },
+    {
+      "method": "verify",
+      "args": ["14n"],
+      "expect": "reject",
+      "note": "14 is the target itself. A loop whose body was dropped computes acc = seed, so a zero-trip regression ACCEPTS exactly this — which is the shape the Move fold and the Zig surface both produced."
+    },
+    {
+      "method": "verify",
+      "args": ["-1n"],
+      "expect": "reject",
+      "note": "13 != 14; an off-by-one in the trip count lands one term away and this catches it from below."
+    }
+  ]
+}

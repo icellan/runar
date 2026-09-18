@@ -270,6 +270,15 @@ export function liftStraightLine(
   const className  = opts.className  ?? '_Recovered';
   const methodName = opts.methodName ?? '_method0';
 
+  // W3 / BoolBamboozle: strip the compiler's `boolean` ABI-domain prologue
+  // before anything else looks at the stream. It is emitted by the stack
+  // lowerer, not written by the author, so re-emitting it as recovered source
+  // would both mangle the body and make re-compilation add a SECOND copy.
+  // `gatedParamDepths` remembers which entry-stack slots it guarded, which is
+  // exactly the set of parameters declared `boolean`.
+  const gate = stripBooleanParamGates(ops);
+  ops = gate.ops;
+
   // Pre-scan: compute required param count + reject control flow / large pushes.
   const scan = preScanArity(ops);
   if (!scan.ok) return scan;
@@ -353,6 +362,15 @@ export function liftStraightLine(
   // in operand-ref order — exactly the shape the stack-lower's DUP-first
   // codegen path expects.
   state.bindings = reorderConsumerOperands(state.bindings);
+
+  // W3: a stripped gate is direct evidence of the declared type, stronger than
+  // any use-site inference — the compiler emits it for `boolean` parameters and
+  // for nothing else. Depth is measured from the top of the entry stack, where
+  // the LAST parameter sits, so depth d is parameter `paramCount - 1 - d`.
+  for (const depth of gate.gatedParamDepths) {
+    const idx = scan.paramCount - 1 - depth;
+    if (idx >= 0 && idx < scan.paramCount) state.types.set(`_v${idx}`, 'boolean');
+  }
 
   // Build params with inferred types.
   const paramTypes: InferredType[] = state.paramNames.map((_p, idx) => {
@@ -1562,6 +1580,56 @@ function scrubBindings(state: LiftState, names: string[]): void {
 // ---------------------------------------------------------------------------
 
 interface PreScanOk { ok: true; paramCount: number }
+/**
+ * W3 / BoolBamboozle — recognise and remove the `boolean` ABI-domain prologue
+ * that `05-stack-lower.ts` (and its six peers) emit at the head of every public
+ * method, once per `boolean` parameter:
+ *
+ *     <copy of the param>  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+ *                          OP_BOOLOR OP_VERIFY
+ *
+ * where the copy is `OP_DUP` (depth 0), `OP_OVER` (depth 1), or
+ * `<push depth> OP_PICK` (deeper). The sequence is stack-neutral, so removing
+ * it leaves the rest of the stream liftable exactly as before, and re-compiling
+ * the recovered source puts it back byte-for-byte.
+ *
+ * Only a run of these at the very START of the method's op stream is stripped —
+ * that is the only place the lowerer can emit them, so a later coincidental
+ * match is left alone rather than silently deleted from a contract's body.
+ */
+function stripBooleanParamGates(ops: Op[]): { ops: Op[]; gatedParamDepths: number[] } {
+  const BODY = [0x76, 0x00, 0x87, 0x7c, 0x51, 0x87, 0x9b, 0x69];
+
+  const depths: number[] = [];
+  let i = 0;
+  for (;;) {
+    // The copy that puts the parameter on top of the stack.
+    let depth: number;
+    let after: number;
+    const b = ops[i]?.byte;
+    if (b === 0x76 /* OP_DUP */) {
+      depth = 0;
+      after = i + 1;
+    } else if (b === 0x78 /* OP_OVER */) {
+      depth = 1;
+      after = i + 1;
+    } else if (b !== undefined && b >= 0x52 && b <= 0x60 && ops[i + 1]?.byte === 0x79 /* OP_PICK */) {
+      depth = b - 0x50;
+      after = i + 2;
+    } else {
+      break;
+    }
+
+    if (!BODY.every((byte, k) => ops[after + k]?.byte === byte)) break;
+
+    depths.push(depth);
+    i = after + BODY.length;
+  }
+
+  if (depths.length === 0) return { ops, gatedParamDepths: [] };
+  return { ops: ops.slice(i), gatedParamDepths: depths };
+}
+
 function preScanArity(ops: Op[]): PreScanOk | LiftFailure {
   // For pre-scan we walk the WHOLE script accounting for OP_IF / OP_ELSE /
   // OP_ENDIF as bracket-matched control flow. The condition-pop happens at

@@ -6,7 +6,7 @@ Rúnar is a strict subset of TypeScript designed for compilation to Bitcoin SV S
 
 ## Contract Structure
 
-A Rúnar source file contains exactly one contract class that extends `SmartContract` (stateless) or `StatefulSmartContract` (stateful):
+A Rúnar source file contains exactly one contract class. It extends `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `UnsafeSmartContract` (stateless, plus the raw `asm()` escape hatch — see [Raw script: `UnsafeSmartContract` and `asm()`](#raw-script-unsafesmartcontract-and-asm)):
 
 **Stateless contract** — all properties are `readonly`:
 
@@ -50,9 +50,47 @@ class Counter extends StatefulSmartContract {
 
 `StatefulSmartContract` automatically handles the OP_PUSH_TX pattern: preimage verification at method entry and state continuation at exit for any method that modifies state. Access preimage fields via `this.txPreimage`.
 
+### Raw script: `UnsafeSmartContract` and `asm()`
+
+`UnsafeSmartContract` is `SmartContract` plus one extra builtin, `asm()`, which
+splices verbatim opcode bytes into the emitted script:
+
+```typescript
+import { UnsafeSmartContract, asm } from 'runar-lang';
+
+class Anyone extends UnsafeSmartContract {
+  constructor() {
+    super();
+  }
+
+  public unlock() {
+    asm({ body: '51', in_arity: 0, out_arity: 1 });   // OP_1
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `body` | The opcode bytes, as a hex string (an array form built from opcode helpers is also accepted) |
+| `in_arity` | How many stack elements the span consumes |
+| `out_arity` | How many it produces |
+
+**The compiler does not interpret `body`.** It lowers to a `raw_script` IR node
+(`spec/ir-format.md` §4.19) that is opaque to every analysis:
+
+- dead-code elimination must not remove it, so it is always emitted;
+- the stack model cannot verify `in_arity` / `out_arity` — it trusts them, and a
+  wrong number silently corrupts the stack shape of everything after it;
+- no type information crosses it.
+
+This is the one place where the compiler's guarantees stop and the burden of
+stack-shape correctness moves entirely to the contract author. Use it when you
+need an opcode sequence the language does not express, and check the result with
+`runar debug` or a ScriptVM test rather than by inspection.
+
 ### Rules
 
-- One class per file, extending `SmartContract` or `StatefulSmartContract`.
+- One class per file, extending `SmartContract`, `StatefulSmartContract` or `UnsafeSmartContract`.
 - No decorators, no generics on the class.
 - Imports are restricted to `runar-lang` (or `runar` / `runar/builtins`).
 
@@ -178,6 +216,14 @@ private square(x: bigint): bigint {
 
 `bigint` literals use the `n` suffix: `0n`, `42n`, `-1n`.
 
+A `boolean` parameter of a public method arrives from the unlocking script,
+where the spender can write any bytes at all. The compiler therefore emits a
+domain check at method entry — `OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+OP_BOOLOR OP_VERIFY` over a copy of the parameter — so the only values that
+reach your code are the empty item and `{0x01}`. Anything else aborts the
+script. This is what makes `if (b === true) ... else if (b === false) ...`
+actually exhaustive on-chain; see `spec/type-system.md` § 2 for why.
+
 ### ByteString Types
 
 | Type | Size (bytes) | Description |
@@ -212,6 +258,54 @@ const first: PubKey = keys[0n];
 - `N` must be a compile-time constant positive integer literal.
 - Represented as N consecutive stack items in Script.
 - Supports index read (`arr[i]`), index write (`arr[i] = val`), and `.length`.
+
+#### Out-of-range indices
+
+A **literal** index outside `0..N-1` is a compile error, in every tier.
+
+A **runtime** index is not bounds-checked, and this is the one place where
+Rúnar's behaviour is not what a TypeScript author expects. Measured on
+`FixedArray<bigint, 4> = [10n, 20n, 30n, 40n]`:
+
+| shape | index | result |
+|-------|-------|--------|
+| read, in an expression (`arr[i] + 0n`) | `0n` | `10n` |
+| read, in an expression | `3n` | `40n` |
+| read, in an expression | `4n` | **`40n`** — the last element |
+| read, in an expression | `99n` | **`40n`** — the last element |
+
+The out-of-range read does not fail. The spend is accepted by the AST
+interpreter, by the `@bsv/sdk` ScriptVM, and by the full-consensus
+`Spend.validate()` leg, so nothing downstream rejects it either: a contract that
+reads past the end silently computes with the last element.
+
+The reason is structural. A runtime-indexed read lowers to a nested ternary
+chain, `(i === 0n) ? a0 : ((i === 1n) ? a1 : ... : a{N-1})`, whose terminal arm
+is the last slot. An expression cannot run `assert(false)`, so there is nowhere
+in the chain to put the refusal.
+
+**Bounds-check runtime indices yourself** when the index can exceed `N-1`:
+
+```typescript
+assert(within(i, 0n, 4n));   // then arr[i] is safe
+```
+
+Two related behaviours, recorded because they are easy to assume otherwise:
+
+- A runtime-indexed read in *statement* position (the direct right-hand side of
+  an assignment, a variable declaration, or an expression statement) lowers to an
+  `if`/`else` chain instead, which the compiler can and does terminate with a
+  refusal.
+- A runtime-indexed **write** out of range does not fail in the AST interpreter
+  either — it silently writes nothing. The source comments in
+  `03b-expand-fixed-arrays.ts` describe the emitted script's write chain as
+  ending in `else { assert(false); }`; that claim is about the Script path and is
+  not what the interpreter does.
+
+This is a v1 limitation, not a design goal — `03b-expand-fixed-arrays.ts` calls
+the clamping read "wrong" in its own comments. Enforcing it would add a bounds
+check to every runtime-indexed read, which moves script bytes, so it is deferred
+rather than papered over.
 
 ### Disallowed Types
 
@@ -293,7 +387,7 @@ Bitwise operators work on both `bigint` and `ByteString` operands. When both ope
 | `a << b` | Left shift | `OP_LSHIFT` |
 | `a >> b` | Right shift | `OP_RSHIFT` |
 
-> **Warning: byte-array semantics.** In the BSV runtime (`@bsv/sdk` v2.0.5), `OP_LSHIFT` and `OP_RSHIFT` operate on **raw byte arrays** (big-endian unsigned shift), not on script numbers. They preserve the input byte length. This means that for multi-byte script numbers (which use sign-magnitude little-endian encoding), the result of `OP_RSHIFT` may differ from the expected arithmetic right-shift. If you need numeric right-shift behaviour, prefer `a / pow(2n, b)` (which compiles to `OP_DIV`-based sequences) instead of `a >> b`. The numeric variant `OP_RSHIFTNUM` (opcode 0xb7) is planned for the BSV 2026 CHRONICLE upgrade but is not yet widely available.
+> **Warning: byte-array semantics.** In the BSV runtime (`@bsv/sdk` v2.0.5), `OP_LSHIFT` and `OP_RSHIFT` operate on **raw byte arrays** (big-endian unsigned shift), not on script numbers. They preserve the input byte length. This means that for multi-byte script numbers (which use sign-magnitude little-endian encoding), the result of `OP_RSHIFT` may differ from the expected arithmetic right-shift. If you need numeric right-shift behaviour, prefer `a / pow(2n, b)` (which compiles to `OP_DIV`-based sequences) instead of `a >> b`. The numeric variant `OP_RSHIFTNUM` (opcode 0xb7) arrived with the BSV Chronicle upgrade, live on mainnet since block 943,816 (7 April 2026); it is not reachable from the `>>` operator, but the EC, NIST P-256/P-384 and Merkle primitives emit it internally — see [Chronicle Opcode Policy](./chronicle-opcode-policy.md).
 
 ### Unary
 
@@ -322,6 +416,22 @@ let y = hash160(pubKey);  // mutable, type inferred
 ```
 
 Type annotations can be omitted when an initializer is present (the type is inferred).
+
+**One variable per statement.** A comma-separated declaration list is a
+compile-time error, both on its own line and in a `for` initializer:
+
+```typescript
+let a: bigint = 1n, b: bigint = 2n;              // error
+for (let i: bigint = 0n, k: bigint = f(); ; ) {} // error
+```
+
+This is a spending-condition rule, not a style preference. Every declarator
+after the first used to be discarded before the AST was built, and what is lost
+is not always a value -- a private helper carrying the contract's guard, called
+from a for-initializer's second declarator, compiled to byte-identical output to
+the same loop with the declarator deleted, and the guard was simply absent from
+the locking script. The dropped name is never referenced again, so nothing
+downstream catches it as an undeclared variable. Split the declarations.
 
 ### Assignment
 
@@ -354,8 +464,42 @@ for (let i: bigint = 0n; i < 10n; i++) {
 ```
 
 - The bound (right side of the comparison) must be a compile-time constant.
-- Only simple increment (`++`) or decrement (`--`) is allowed.
+- The **left** side of the comparison must be the loop variable itself.
+- Only simple increment (`++`) or decrement (`--`) is allowed, and the
+  comparison direction must agree with it (`<`/`<=` with `++`, `>`/`>=` with
+  `--`).
 - Loops are unrolled at compile time -- there are no runtime loops in Bitcoin Script.
+- **A computed left-hand side is rejected, and the reason is spending
+  conditions rather than style.** The unroll binds the iterator as
+  `start + k*step` and takes the trip count from the bound alone, so
+
+  ```typescript
+  for (let i: bigint = 0n; i + 1n < 2n; i++) { /* ... */ }
+  ```
+
+  runs ONCE if you read it as TypeScript and TWICE in the emitted script. A
+  contract whose first lap checks a signature and whose second lap overwrites
+  that result spends on an EMPTY signature -- measured through `@bsv/sdk`
+  `Spend.validate()`. Testing anything but the iterator (`j < 3n` where the
+  iterator is `i`) is rejected for the same reason. Write the bound you mean:
+  `i < 1n`.
+- **Output intrinsics may not appear in a loop body.** `this.addOutput`,
+  `this.addRawOutput` and `this.addDataOutput` are rejected inside a loop --
+  directly, nested in an `if`, or reached through a private helper called
+  there. The loop body lowers into its own scope whose declared outputs never
+  reach the method's output list, so the state continuation would commit to
+  fewer outputs than the transaction actually creates: a covenant no shipped
+  SDK can spend, whose successor is permanently unspendable. Declare the
+  outputs at the method's top level instead. Reading state written in a loop
+  and declaring the output afterwards is fine:
+
+  ```typescript
+  let total: bigint = 0n;
+  for (let i: bigint = 0n; i < 3n; i++) {
+    total = total + i;
+  }
+  this.addOutput(1000n, total);   // OK -- outside the loop
+  ```
 
 ### Assert
 
@@ -403,7 +547,7 @@ private helper(x: bigint): bigint {
 | `toByteString` | `(hex: string) => ByteString` | Compile-time literal construction |
 | `cat` | `(a: ByteString, b: ByteString) => ByteString` | `OP_CAT` |
 | `substr` | `(data: ByteString, start: bigint, length: bigint) => ByteString` | `OP_SPLIT` (twice) |
-| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT` — produces two stack values (left and right). The type checker returns `ByteString` because the language has no tuple type; at the Bitcoin Script level, `OP_SPLIT` pushes two separate items onto the stack. |
+| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT OP_NIP` — the bytes from `pos` onwards (the RIGHT half). `OP_SPLIT` leaves two items on the stack; `split` is single-valued, so the left half is dropped. Rúnar has no tuple type and no surface accepts array destructuring, so a pair would be unnameable — use `left(data, pos)` for the other side of the same cut. |
 | `left` | `(data: ByteString, n: bigint) => ByteString` | `OP_SPLIT OP_DROP` — returns the leftmost n bytes |
 | `right` | `(data: ByteString, n: bigint) => ByteString` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` — returns the rightmost n bytes |
 | `int2str` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |
@@ -449,13 +593,17 @@ private helper(x: bigint): bigint {
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `sign` | `(n: bigint) => bigint` | `OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF` — returns -1, 0, or 1 (guards against div-by-zero when n=0) |
-| `pow` | `(base: bigint, exp: bigint) => bigint` | 32-iteration bounded conditional multiply loop |
-| `sqrt` | `(n: bigint) => bigint` | 16-iteration Newton's method: `guess = (guess + n/guess) / 2` |
+| `pow` | `(base: bigint, exp: bigint) => bigint` | 32-iteration bounded conditional multiply loop. **Domain: `0 <= exp <= 32`, enforced.** An exponent outside it makes the script FAIL (`OP_DUP <0> <33> OP_WITHIN OP_VERIFY`) rather than return `base ** 32`. The constant folder and the reference interpreter refuse on the same bound. |
+| `sqrt` | `(n: bigint) => bigint` | 256-round Newton's method with a convergence break: `next = (guess + n/guess) / 2; guess = min(guess, next)`. `OP_MIN` is the break — integer Newton reaches `floor(sqrt(n))` and then oscillates between it and `floor+1`, so clamping to the running minimum makes `floor(sqrt(n))` a fixed point. **Domain: `0 <= n < 2^495`, enforced.** A negative `n`, or one needing more than 62 script bytes, makes the script FAIL rather than return a wrong root (`OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY` and `OP_SIZE <63> OP_LESSTHAN OP_VERIFY`). The constant folder and the reference interpreter refuse on the same bound. |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | 256-iteration Euclidean algorithm |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — **Warning:** Despite the name, `divmod` only returns the quotient. The remainder is computed internally but discarded. |
 | `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop using `PUSH 2 OP_DIV` for numeric halving — exact floor(log2(n)) |
 
-> **Note on `pow`:** For compile-time constant exponents (e.g. `pow(x, 3n)`), the constant folder evaluates the result at compile time. For runtime exponents, a bounded 32-iteration loop is emitted, supporting exponents up to 32.
+> **Note on `pow`:** The compiler emits 32 unrolled conditional multiplies, so **32 is the largest exponent it can compute**, and that bound is ENFORCED rather than documented: `pow(base, exp)` with `exp < 0` or `exp > 32` makes the script FAIL. It does **not** return `base ** 32`.
+>
+> That distinction is the whole point of the guard. Until it was added, `pow(2n, 40n)` ran to completion and returned `2 ** 32` with no error anywhere, while the constant folder computed the true `2 ** 40` for any `exp <= 256` — so the same expression meant two different things depending on whether the folder had run. For compile-time constant exponents the folder still evaluates `pow` at compile time, but only inside `0 <= exp <= 32`; outside it the folder declines, leaving the guarded script in place, so a constant and a runtime exponent now fail identically.
+>
+> If you need a larger exponent, compose: `pow(pow(x, 32n), 2n)` is `x ** 64`, and each `pow` costs roughly 280 script bytes.
 >
 > **Note on `sqrt`:** Returns the integer (floor) square root. For `sqrt(10n)`, the result is `3n`.
 >
@@ -612,6 +760,76 @@ These primitives are synthesized from base opcodes, so they are **large** — la
 The BSV node default is `DEFAULT_MAX_SCRIPT_SIZE_POLICY_AFTER_GENESIS = 500 * ONE_KILOBYTE` (500,000 B), applied **per script** — the locking script and each unlocking script are checked separately (`src/policy/policy.h`). So a single `verifyECDSA_P256` call puts the locking script over the default on its own, before any contract logic; `verifyECDSA_P384` puts it 4× over. Even one `ecMul` plus modest surrounding logic will exceed it. There is no consensus limit in play here (`maxscriptsizepolicy` is unlimited within consensus, and `maxtxsizepolicy` defaults to 10 MB), so acceptance depends entirely on the receiving miner: a node on stock policy rejects the transaction as non-standard, a node running `maxscriptsizepolicy ≥ 2 MB` accepts and mines it. Coordinate with the target pool before the first mainnet broadcast, the same way [`docs/fri-verifier-measurements.md`](fri-verifier-measurements.md) does for the SP1 FRI verifier.
 
 > **The in-tree on-chain evidence does not test this.** `integration/regtest.sh` starts its node with `maxscriptsizepolicy=0` (unlimited), so every regtest broadcast these primitives have ever passed was against a node with the limit **disabled**. Broadcast success in the integration suite is evidence that the script is *valid*, not that it is *relayable*.
+
+---
+
+## Compiler Directives
+
+Two comment directives change what the compiler emits. Both are read **only on
+the `.runar.ts` surface** — the other eight parsers reject a source carrying
+either one rather than ignoring it, because silently dropping a directive would
+change signing or dead-code semantics without saying so.
+
+### `@embedAlways`
+
+A readonly property that no method body references is eliminated: its
+`load_prop` is dead, so no constructor slot is emitted and the value never
+reaches the locking script. That is usually what you want, and wrong for
+deploy-time metadata you intend to read back off the script later.
+
+```typescript
+class Directives extends SmartContract {
+  readonly ownerPKH: Addr;
+
+  /** @embedAlways */
+  readonly deployTag: ByteString;
+  ...
+}
+```
+
+Without the directive the compiler emits a warning naming it:
+
+```
+warning: readonly field 'deployTag' is not referenced in any method body
+and was eliminated by DCE; annotate it /** @embedAlways */ to preserve it
+in the on-chain script
+```
+
+The effect is visible in the artifact's `constructorSlots` — the byte offsets
+deploy-time values are spliced into — and **not** in `abi.constructor.params`,
+which lists the declared signature and keeps the parameter either way:
+
+| | `constructorSlots` |
+|---|---|
+| with `@embedAlways` | `["deployTag", "ownerPKH", "ownerPKH"]` |
+| without | `["ownerPKH", "ownerPKH"]` |
+
+So the constructor still takes the argument; the value just never reaches the
+script.
+
+### `@sighash`
+
+A public method's auto-injected covenant — and the preimage the SDK builds for
+it — commits to `ALL|FORKID` (`0x41`) by default. `@sighash` declares a
+different BIP-143 mode for that method alone.
+
+```typescript
+/** @sighash SINGLE|FORKID */
+public spendSingle(sig: Sig, pubKey: PubKey) { ... }
+```
+
+Exactly one base type must appear — `ALL` (`0x01`), `NONE` (`0x02`) or `SINGLE`
+(`0x03`) — and `FORKID` (`0x40`) and `ANYONECANPAY` (`0x80`) are modifiers. The
+combined value is published on the method's ABI entry as `sigHashType`; the
+default is omitted rather than written out, so a method with no directive has no
+`sigHashType` field.
+
+`SINGLE|FORKID` commits to only the output at the same index as the input being
+signed, which is what lets one party fix their own output and leave the rest of
+the transaction open for a counterparty to complete.
+
+Worked example, with both directives and their falsifications:
+[`examples/ts/compiler-directives/`](../examples/ts/compiler-directives/).
 
 ---
 

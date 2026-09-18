@@ -46,14 +46,21 @@ def test_bip143_preimage_and_signature(fixture: dict) -> None:
 
     for s in scenarios:
         name = s["scenario"]
-        assert s["sighashFlags"] == 0x41, f"{name}: only SIGHASH_ALL|FORKID supported"
-
-        # 1. Independently recompute the BIP-143 preimage (hand-written impl).
+        # 1. Independently recompute the BIP-143 preimage (hand-written impl)
+        #    under the scenario's OWN sighash flags.
+        #
+        #    R-206: this used to reject anything but 0x41, and every scenario in
+        #    the fixture was ALL|FORKID — so the per-mode zeroing rules
+        #    (hashPrevouts under ANYONECANPAY, hashSequence unless pure ALL,
+        #    hashOutputs under NONE and the single-output rule under SINGLE)
+        #    were implemented seven times and compared zero times.
         _sig_hex, got_preimage = compute_op_push_tx(
             s["unsignedTxHex"],
             s["inputIndex"],
             s["prevScriptHex"],
             s["prevValueSats"],
+            -1,
+            s["sighashFlags"],
         )
         assert got_preimage == s["preimageHex"], (
             f"{name}: BIP-143 PREIMAGE DIVERGENCE from TS reference\n"

@@ -17,7 +17,7 @@ import type {
 } from '../ir/index.js';
 import { computeSideEffectSummary, continuationShape } from '../passes/side-effect-summary.js';
 import { SIGHASH_DEFAULT } from '../passes/sighash-directive.js';
-import { annotateStateFieldLayout, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
+import { abiValueEncoding, annotateStateFieldLayout, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Artifact types (mirroring runar-ir-schema/artifact.ts)
@@ -246,6 +246,20 @@ export interface RunarArtifact {
 
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
+
+  /**
+   * Unsound primitives this artifact's script reaches, if any.
+   *
+   * R-245: declared in `runar-ir-schema` and read by the SDKs
+   * (`runar-sdk/src/unsound-primitives.ts`) and by all six native tiers, and
+   * MISSING from this declaration and its sibling — three copies of one wire
+   * type, two of them narrower than the format. A narrower interface does not
+   * fail to compile in TypeScript: an object carrying the field still satisfies
+   * it, and the field just cannot be read or set through this view.
+   *
+   * Absent (not empty) on every artifact that reaches no such builtin.
+   */
+  unsoundPrimitives?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +290,31 @@ export interface AssembleOptions {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+
+/**
+ * The artifact build time, as an ISO-8601 string.
+ *
+ * Honours SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/):
+ * when it holds a Unix seconds value, that instant is stamped instead of the
+ * clock, so two builds of the same source produce byte-identical artifacts.
+ * Without it, the wall clock, exactly as before.
+ *
+ * R-212: the Go tier honoured this and the other six did not, so six of seven
+ * artifacts could not be reproduced — and reproducing the artifact is how
+ * someone other than the author checks that a published locking script is what
+ * the published source compiles to. A malformed value is ignored rather than
+ * failing the build: the variable is an environment convention, not input.
+ */
+function buildTimestamp(): string {
+  const raw = process.env.SOURCE_DATE_EPOCH;
+  if (raw !== undefined && /^\d+$/.test(raw.trim())) {
+    const seconds = Number(raw.trim());
+    if (Number.isSafeInteger(seconds)) {
+      return new Date(seconds * 1000).toISOString();
+    }
+  }
+  return new Date().toISOString();
+}
 
 const ARTIFACT_VERSION = 'runar-v1.0.0-rc.1';
 const DEFAULT_COMPILER_VERSION = '1.0.0-rc.1';
@@ -383,9 +422,17 @@ function regroupOnePass(entries: RegroupEntry[]): { out: RegroupEntry[]; changed
     }
     const marker = entry.chain[chainLen - 1]!;
     if (marker.index !== 0) {
-      out.push(entry);
-      i++;
-      continue;
+      // R-289: a sibling that reaches the head of the loop has no run head
+      // before it — the head consumes its whole run and advances past it, so
+      // index != 0 here means the chain did not come from pass 3b. Pushing it
+      // through as a scalar publishes an ABI the SDK reads as N independent
+      // fields instead of one array, with no diagnostic.
+      throw new Error(
+        `malformed synthetic-array chain on '${entry.name}': element ${marker.index} ` +
+          `of '${marker.base}' appears without the element 0 that starts its run. ` +
+          `Synthetic-array chains are written by the expand-fixed-arrays pass; ` +
+          `this IR did not come from it.`,
+      );
     }
 
     // Greedily extend: every follower must share the same innermost
@@ -413,12 +460,17 @@ function regroupOnePass(entries: RegroupEntry[]): { out: RegroupEntry[]; changed
     }
 
     if (runEntries.length !== marker.length) {
-      // Partial or broken run — defensive. A well-formed expansion
-      // always emits all N siblings contiguously, so this only fires
-      // on bugs/malformed inputs. Leave them ungrouped.
-      out.push(entry);
-      i++;
-      continue;
+      // R-289: a well-formed expansion always emits all N siblings
+      // contiguously, so a short run means the chain was not written by pass
+      // 3b. Leaving them ungrouped published an ABI the SDK reads as N
+      // independent fields instead of one array — a wrong state layout from an
+      // artifact the compiler called valid.
+      throw new Error(
+        `malformed synthetic-array chain on '${entry.name}': '${marker.base}' declares ` +
+          `${marker.length} elements but the contiguous run has ${runEntries.length}. ` +
+          `Synthetic-array chains are written by the expand-fixed-arrays pass; ` +
+          `this IR did not come from it.`,
+      );
     }
 
     // Collapse this run into one intermediate entry. The parent chain
@@ -679,13 +731,6 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
 // Verification-descriptor enrichment
 // ---------------------------------------------------------------------------
 
-/** Classify how a constructor arg of the given ABI type is encoded when
- *  spliced into its slot (see ConstructorSlot.valueEncoding). */
-function slotValueEncoding(type: string): 'data' | 'scriptnum' | 'bool' {
-  if (type === 'int' || type === 'bigint') return 'scriptnum';
-  if (type === 'bool' || type === 'boolean') return 'bool';
-  return 'data';
-}
 
 /**
  * Enrich raw emitter constructor slots with value-INDEPENDENT verification
@@ -705,12 +750,14 @@ function enrichConstructorSlots(
     if (!param) return out;
     out.name = param.name;
     out.type = param.type;
-    out.valueEncoding = slotValueEncoding(param.type);
+    out.valueEncoding = abiValueEncoding(param.type);
     if (out.valueEncoding === 'data') {
       const width = STATE_FIELD_WIDTHS[param.type];
       if (width && width.encoding === 'raw') {
         out.fixedValueByteLength = width.size;
-        out.fixedPushHeaderBytes = 1; // direct push: all fixed types are <= 75 bytes
+        // <= 75 bytes is a direct push (1 header byte); wider needs
+        // OP_PUSHDATA1 (2). P384Point is 96, so this cannot be hardcoded to 1.
+        out.fixedPushHeaderBytes = width.size <= 75 ? 1 : 2;
       }
     }
     return out;
@@ -762,6 +809,32 @@ export function assembleArtifact(
   options?: AssembleOptions,
 ): RunarArtifact {
   const abi = extractABI(contract);
+  // Propagate ANF lowering's auto-injected witness params into the ABI.
+  //
+  // `extractABI` builds each method's param list from the AST, which predates
+  // pass 04. `requireOutputP2PKH` / `extractPrevOutputScript` inject
+  // `_serialisedOutputs` and `_prevOutScript_<i>` DURING that pass, so those
+  // params were in the emitted script and in the ANF but absent from the ABI
+  // the SDK reads to decide which witness values a caller must supply — a
+  // caller following the TS artifact could not know to supply them, and the
+  // script's `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
+  // commitment then fails. Go, Rust, Python, Ruby and Zig all listed them;
+  // only this tier did not.
+  //
+  // The ANF is the authority: it is byte-identical across all seven tiers.
+  // Restricted to the two auto-injected witness prefixes on purpose — the ANF
+  // also carries the EXPANDED `x__0..x__N` form of FixedArray params, which
+  // `regroupAbiParams` has deliberately collapsed back to `x` above.
+  for (const m of abi.methods) {
+    const anfMethod = anfProgram.methods.find(a => a.name === m.name);
+    if (!anfMethod?.params) continue;
+    const present = new Set(m.params.map(p => p.name));
+    for (const p of anfMethod.params) {
+      if (present.has(p.name)) continue;
+      if (p.name !== '_serialisedOutputs' && !p.name.startsWith('_prevOutScript_')) continue;
+      m.params.push({ name: p.name, type: p.type });
+    }
+  }
   // Propagate stack-lowering's authoritative `_codePart` decision into the ABI
   // so the SDK can supply `_codePart` for terminal var-length reads (issue #100).
   for (const m of abi.methods) {
@@ -786,7 +859,7 @@ export function assembleArtifact(
     abi,
     script: scriptHex,
     asm: scriptAsm,
-    buildTimestamp: new Date().toISOString(),
+    buildTimestamp: buildTimestamp(),
   };
 
   // Optional source map

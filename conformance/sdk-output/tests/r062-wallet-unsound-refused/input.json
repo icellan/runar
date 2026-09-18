@@ -1,0 +1,79 @@
+{
+  "$comment": "R-062 cross-tier verdict fixture. HAND-AUTHORED, not emitted by generate-inputs.ts: only the Go compiler stamps `unsoundPrimitives`, and only for verifySP1FRI behind an explicit compile-time acknowledgement, so there is no .runar.ts in this repo the generator could compile into this shape. The SDK gate reads ONLY the artifact's `unsoundPrimitives` field, so the script body is deliberately the ordinary P2PKH template every tier already agrees on \u2014 what is under test is the funding VERDICT on the wallet path, not the codegen. Sibling fixtures r062-wallet-ordinary and r062-wallet-unsound-acknowledged are the two controls that keep this gate from becoming an outage for every legitimate wallet deploy.",
+  "artifact": {
+    "version": "runar-v1.0.0-rc.1",
+    "compilerVersion": "1.0.0-rc.1",
+    "contractName": "Sp1Rollup",
+    "parentClass": "SmartContract",
+    "abi": {
+      "constructor": {
+        "params": [
+          {
+            "name": "pubKeyHash",
+            "type": "Addr"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "name": "unlock",
+          "params": [
+            {
+              "name": "sig",
+              "type": "Sig"
+            },
+            {
+              "name": "pubKey",
+              "type": "PubKey"
+            }
+          ],
+          "isPublic": true
+        }
+      ]
+    },
+    "script": "76a90088ac",
+    "constructorSlots": [
+      {
+        "paramIndex": 0,
+        "byteOffset": 2,
+        "name": "pubKeyHash",
+        "type": "Addr",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 20,
+        "fixedPushHeaderBytes": 1
+      }
+    ],
+    "templateDigest": {
+      "algorithm": "hash256-excised-slots",
+      "pieces": [
+        {
+          "kind": "code"
+        },
+        {
+          "kind": "slot",
+          "byteOffset": 2,
+          "slot": "pubKeyHash"
+        },
+        {
+          "kind": "code"
+        }
+      ]
+    },
+    "unsoundPrimitives": [
+      "verifySP1FRI"
+    ]
+  },
+  "constructorArgs": [
+    {
+      "type": "Addr",
+      "value": "89abcdefabbaabbaabbaabbaabbaabbaabbaabba"
+    }
+  ],
+  "walletDeploy": {
+    "satoshis": 1
+  },
+  "expectRefusal": {
+    "pattern": "does not claim is sound: verifySP1FRI",
+    "reason": "R-062. The artifact declares unsoundPrimitives, and the caller funding it through the tier's WALLET path acknowledged nothing. deploy() has refused this since R-062 landed; the wallet path is a SECOND funding path that skipped the gate in five of the seven SDKs (TS, Ruby, Python, Go, Rust), so a Go-compiled SP1-FRI artifact was funded in silence. All seven must now refuse, and name the primitive."
+  }
+}

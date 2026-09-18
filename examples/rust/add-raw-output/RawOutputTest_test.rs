@@ -17,3 +17,13 @@ fn test_compile() {
     )
     .unwrap();
 }
+
+#[path = "RawOutputTest.runar.rs"]
+mod contract;
+
+#[test]
+fn native_add_output_methods_compile_and_run() {
+    let mut c = contract::RawOutputTest { count: 0 };
+    c.send_to_script(vec![0x51]);
+    assert_eq!(c.count, 1);
+}

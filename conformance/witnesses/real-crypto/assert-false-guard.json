@@ -83,5 +83,8 @@
       "note": "tampered continuation output",
       "satoshis": 1000
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "a9886d06c273e807baf6d1c2e8936b83484cd25db1aa9cdda045eb633b8d9d2e"
+  }
 }

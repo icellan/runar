@@ -4,6 +4,15 @@
 //! preserving bindings with observable side effects (assert, update_prop,
 //! check_preimage, add_output, etc.).
 //!
+//! "Results" is plural on purpose (N-140). A binding does not only define its
+//! own `name`: an `if` that merges branch locals also defines every name in
+//! `results`, and both an `if` and a `loop` define the names their nested
+//! bindings bind. Liveness used to test `used.contains(binding.name)` alone,
+//! so an `if` named `t9` carrying `results` `["a","b"]` -- a name nothing ever
+//! references, because callers reference `a` and `b` -- was deleted whenever
+//! its arms happened to be pure, and the merged locals kept their pre-branch
+//! values. See `conformance/dce/live-if.test.ts`.
+//!
 //! Runs as a standalone pass after constant folding (pass 4.25) and before
 //! EC optimization (pass 4.5). Also used internally by the EC optimizer
 //! to clean up temporaries created during algebraic simplification.
@@ -65,16 +74,36 @@ pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]
 
     while (changed) {
         changed = false;
-        var used = std.StringHashMap(void).init(allocator);
-        defer used.deinit();
 
-        for (current) |binding| try collectRefs(binding.value, &used);
+        // Per-binding ref sets, plus how many DISTINCT bindings reference each
+        // name. Subtracting a binding's own contribution below is what keeps
+        // the liveness rule from degenerating into "never delete an `if` or a
+        // `loop`" -- an arm's bindings almost always reference each other.
+        const own_refs = try allocator.alloc(std.StringHashMap(void), current.len);
+        defer {
+            for (own_refs) |*m| m.deinit();
+            allocator.free(own_refs);
+        }
+        var ref_count = std.StringHashMap(usize).init(allocator);
+        defer ref_count.deinit();
+
+        for (current, 0..) |binding, i| {
+            own_refs[i] = std.StringHashMap(void).init(allocator);
+            try collectRefs(binding.value, &own_refs[i]);
+            var it = own_refs[i].keyIterator();
+            while (it.next()) |name| {
+                const gop = try ref_count.getOrPut(name.*);
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* += 1;
+            }
+        }
 
         var filtered = std.ArrayListUnmanaged(types.ANFBinding).empty;
         defer filtered.deinit(allocator);
 
-        for (current) |binding| {
-            if (used.contains(binding.name) or hasSideEffect(binding.value)) {
+        for (current, 0..) |binding, i| {
+            const live = try isReferencedExternally(allocator, binding, &own_refs[i], &ref_count);
+            if (live or hasSideEffect(binding.value)) {
                 try filtered.append(allocator, binding);
             } else {
                 changed = true;
@@ -88,6 +117,53 @@ pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]
     }
 
     return current;
+}
+
+/// Every SSA name a binding brings into scope: its own `name`, plus -- for the
+/// two nesting kinds -- an `if`'s declared `results` (the merged branch locals
+/// / property slots both arms leave behind) and the names bound inside `then`,
+/// `else` and a `loop` body, recursively.
+///
+/// `iter_var` is deliberately absent: it is the loop's own induction variable,
+/// referenced only from inside the body, so counting it as defined would make
+/// every non-trivial loop unconditionally live.
+fn collectDefinedNames(binding: types.ANFBinding, out: *std.StringHashMap(void)) !void {
+    try out.put(binding.name, {});
+    switch (binding.value) {
+        .@"if" => |if_val| {
+            for (if_val.results) |r| try out.put(r, {});
+            for (if_val.then) |b| try collectDefinedNames(b, out);
+            for (if_val.@"else") |b| try collectDefinedNames(b, out);
+        },
+        .loop => |loop_val| {
+            for (loop_val.body) |b| try collectDefinedNames(b, out);
+        },
+        else => {},
+    }
+}
+
+/// Is any name this binding defines referenced by some OTHER binding?
+///
+/// For a non-nesting binding this is exactly the old
+/// `used.contains(binding.name)`: ANF has no self-reference, so `own_refs`
+/// never holds the binding's own name and the subtraction is a no-op.
+fn isReferencedExternally(
+    allocator: Allocator,
+    binding: types.ANFBinding,
+    own_refs: *const std.StringHashMap(void),
+    ref_count: *const std.StringHashMap(usize),
+) !bool {
+    var defined = std.StringHashMap(void).init(allocator);
+    defer defined.deinit();
+    try collectDefinedNames(binding, &defined);
+
+    var it = defined.keyIterator();
+    while (it.next()) |name| {
+        const total = ref_count.get(name.*) orelse 0;
+        const own: usize = if (own_refs.contains(name.*)) 1 else 0;
+        if (total > own) return true;
+    }
+    return false;
 }
 
 /// Walk an ANFValue and collect all binding name references.
@@ -159,11 +235,44 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
 pub fn hasSideEffect(v: types.ANFValue) bool {
     return switch (v) {
         .assert, .update_prop, .check_preimage, .deserialize_state,
-        .add_output, .add_raw_output, .add_data_output, .@"if", .loop, .call, .method_call,
+        .add_output, .add_raw_output, .add_data_output, .call, .method_call,
         // raw_script bytes are opaque — DCE must never eliminate them, even
         // when the binding is unreferenced.
         .raw_script,
         => true,
+        // R-140: `if` / `loop` are effectful IFF some NESTED binding is.
+        //
+        // They used to sit in the unconditional list above, so an unreferenced
+        // branch or loop whose bodies are entirely pure was kept here and
+        // deleted by the Go, Java, Rust and TypeScript tiers — three tiers
+        // against four on the same predicate. Measured on the predicate
+        // itself, since no shipped path reaches DCE with that shape today and
+        // the conformance suite therefore cannot see it:
+        //
+        //     go  HasSideEffect(pure if)   = false   zig (before) = true
+        //     go  HasSideEffect(pure loop) = false   zig (before) = true
+        //
+        // Recursion is what makes retention both safe and precise: nested
+        // bindings live inside the parent node rather than flattened into the
+        // method body, so dropping an effectful `if` would take every nested
+        // assert / check_preimage / add_output with it — retention is
+        // all-or-nothing. Mirrors packages/runar-compiler/src/optimizer/dce.ts
+        // and compilers/go/frontend/dce.go.
+        .@"if" => |iv| blk: {
+            for (iv.then) |b| {
+                if (hasSideEffect(b.value)) break :blk true;
+            }
+            for (iv.@"else") |b| {
+                if (hasSideEffect(b.value)) break :blk true;
+            }
+            break :blk false;
+        },
+        .loop => |lv| blk: {
+            for (lv.body) |b| {
+                if (hasSideEffect(b.value)) break :blk true;
+            }
+            break :blk false;
+        },
         // Issue #109 (@embedAlways): a load_prop injected to force a readonly
         // field into the deployed locking script carries `preserve = true`, so
         // DCE must keep it even though nothing references it. Ordinary
@@ -233,4 +342,38 @@ test "eliminateDeadBindings preserves side-effecting bindings" {
 
     // Both kept: t0 is referenced by t1, t1 has side effect
     try std.testing.expectEqual(@as(usize, 2), result.len);
+}
+
+// R-140: the predicate itself, pinned. No shipped path reaches DCE with an
+// unreferenced pure branch today, so an end-to-end hex test cannot see this
+// divergence — the predicate is the only place it is observable, and it is
+// where the three tiers disagreed with the other four.
+test "R-140 hasSideEffect recurses into if / loop bodies" {
+    var then_b = [_]types.ANFBinding{.{ .name = "t1", .value = .{ .load_const = .{ .value = .{ .integer = 1 } } }, .source_loc = null }};
+    var else_b = [_]types.ANFBinding{.{ .name = "t2", .value = .{ .load_const = .{ .value = .{ .integer = 2 } } }, .source_loc = null }};
+    var pure_if = types.ANFIf{ .cond = "c", .then = then_b[0..], .@"else" = else_b[0..] };
+    try std.testing.expect(!hasSideEffect(.{ .@"if" = &pure_if }));
+
+    var body_b = [_]types.ANFBinding{.{ .name = "t3", .value = .{ .load_const = .{ .value = .{ .integer = 3 } } }, .source_loc = null }};
+    var pure_loop = types.ANFLoop{ .count = 2, .body = body_b[0..], .iter_var = "i" };
+    try std.testing.expect(!hasSideEffect(.{ .loop = &pure_loop }));
+
+    // An effect in EITHER arm keeps the node.
+    var eff_b = [_]types.ANFBinding{.{ .name = "t4", .value = .{ .assert = .{ .value = "c" } }, .source_loc = null }};
+    var eff_then = types.ANFIf{ .cond = "c", .then = eff_b[0..], .@"else" = else_b[0..] };
+    try std.testing.expect(hasSideEffect(.{ .@"if" = &eff_then }));
+    var eff_else = types.ANFIf{ .cond = "c", .then = then_b[0..], .@"else" = eff_b[0..] };
+    try std.testing.expect(hasSideEffect(.{ .@"if" = &eff_else }));
+
+    var eff_loop = types.ANFLoop{ .count = 2, .body = eff_b[0..], .iter_var = "i" };
+    try std.testing.expect(hasSideEffect(.{ .loop = &eff_loop }));
+
+    // And an effect two levels down — the case a top-level-only scan misses.
+    var inner_holder = [_]types.ANFBinding{.{ .name = "t5", .value = .{ .@"if" = &eff_then }, .source_loc = null }};
+    var outer = types.ANFIf{ .cond = "c", .then = inner_holder[0..], .@"else" = else_b[0..] };
+    try std.testing.expect(hasSideEffect(.{ .@"if" = &outer }));
+
+    // An empty `if` carries nothing, so it carries no effect.
+    var empty = types.ANFIf{ .cond = "c", .then = &.{}, .@"else" = &.{} };
+    try std.testing.expect(!hasSideEffect(.{ .@"if" = &empty }));
 }

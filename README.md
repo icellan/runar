@@ -13,7 +13,7 @@
 
 ## Write Once, Compile Anywhere
 
-Rúnar lets you write Bitcoin SV smart contracts in the language you already know. All formats compile through the same pipeline and produce identical Bitcoin Script.
+Rúnar lets you write Bitcoin SV smart contracts in the language you already know. All nine surface formats parse into the same AST and run the same pipeline, and every compiler produces byte-identical Bitcoin Script for every contract that is not explicitly scoped to one tier.
 
 <table>
 <tr>
@@ -188,10 +188,26 @@ Bitcoin Script development today forces a choice between hand-writing opcodes (e
 - **No decorators** — uses native language keywords (`readonly`, `public`, `immutable`, `#[readonly]`, `prop`)
 - **Write in your language** — TypeScript, Go, Rust, Ruby, Python, Zig, Java, Solidity-like, or Move-style
 - **Test natively** — `vitest` for TS, `go test` for Go, `cargo test` for Rust, `rspec` for Ruby, `pytest` for Python, `zig build test` for Zig, JUnit for Java examples
-- **Seven compilers** — TypeScript (reference), Go, Rust, Python, Zig, Ruby, Java — all produce byte-identical output
+- **Seven compilers** — TypeScript (reference), Go, Rust, Python, Zig, Ruby, Java — byte-identical output, with one stated exception: the EVM/STARK proof-system primitives (BN254/Groth16, BabyBear, KoalaBear, Poseidon2, Merkle, SP1 FRI) are Go-only by project policy, and the 4 conformance fixtures that use them carry an explicit `"compilers": ["go"]` allowlist. The other 78 are byte-identical across all seven. See [CLAUDE.md](CLAUDE.md) for the two invariants stated exactly, and `conformance/README.md` for the per-fixture allowlist.
 - **Post-quantum (experimental)** — WOTS+ and SLH-DSA (FIPS 205) signature verification in Bitcoin Script. The shipped wallet examples are deliberately naive constructions (see `examples/ts/post-quantum-*-naive-INSECURE*`); treat the PQ surface as experimental, not production-ready.
 - **Nanopass architecture** — 6 small passes, each auditable in a single sitting
 - **Full IDE support** — type checking, autocompletion, go-to-definition in every language
+
+---
+
+## Node Requirement: the Chronicle Opcode Policy
+
+Rúnar emits Bitcoin Script for the **Chronicle** opcode policy (SV Node v1.2.0),
+which activated on BSV mainnet at block **943,816** on 7 April 2026. Every
+stateful contract carries `OP_2MUL` inside its `checkPreimage` binding blob, and
+the EC / NIST P-256 / P-384 / Merkle primitives also emit `OP_2DIV` and
+`OP_RSHIFTNUM`. Plain stateless contracts — P2PKH, multisig, escrow, tokens,
+the hash and post-quantum helpers — use none of these.
+
+Mainnet is past activation, so this is a tooling concern rather than a
+deployment blocker: a library still on the pre-Chronicle policy will not
+evaluate these scripts the way a miner does. The Rust `bsv-sdk` is one such
+library. See [Chronicle Opcode Policy](docs/chronicle-opcode-policy.md).
 
 ---
 
@@ -450,6 +466,7 @@ The Zig example tree is backed by `packages/runar-zig` and a shared runner at `e
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | Installation, first contract, compile, test, deploy |
 | [Language Reference](docs/language-reference.md) | Types, operators, built-in functions |
+| [Chronicle Opcode Policy](docs/chronicle-opcode-policy.md) | Which node policy compiled contracts require, and what stale tooling does with them |
 | [Contract Patterns](docs/contract-patterns.md) | P2PKH, escrow, tokens, auctions, covenants |
 | [1sat Ordinals & Tokens](docs/ordinals-guide.md) | NFT inscriptions, BSV-20/BSV-21 fungible tokens |
 | [Integration Guide](docs/integration-guide.md) | Full lifecycle: local dev, deploy, interact on-chain |
@@ -479,10 +496,10 @@ The constant folding optimizer (+ dead binding elimination) is available between
 
 Rúnar defines a **canonical IR conformance boundary** at the ANF level. The seven reference compilers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) each accept all nine source formats (`.runar.{ts,sol,move,go,rs,py,zig,rb,java}`) and target two layers of conformance:
 
-- **Frontend parity (mandatory for every tier).** Every fixture must parse cleanly through every compiler in every one of the nine source formats. There are no per-tier carve-outs at the parser layer. Enforced in CI by the `--parser-only` runner mode (`pnpm --filter runar-conformance test:parser-only` locally; CI step "Run all-tier parser-only coverage"): every available compiler runs `--parse-only` against every (fixture, format) pair, ignoring the per-fixture `compilers` allowlist (which only scopes Stack-IR / hex parity).
-- **Stack-IR + hex parity (scoped per fixture).** Fixtures without a `compilers` allowlist in `source.json` must produce byte-identical Stack IR + Bitcoin Script hex across all seven tiers. Fixtures that opt out — the four Go-only fixtures `babybear`, `babybear-ext4`, `merkle-proof`, and `state-covenant` — carry an explicit `compilers` array + `compilersJustification` rationale string.
+- **Frontend parity (mandatory for every tier).** Every fixture must parse cleanly through every compiler in every one of the nine source formats. There are no per-tier carve-outs at the parser layer. Enforced in CI by the `--parser-only` runner mode (`pnpm --filter runar-conformance test:parser-only` locally; CI step "Run all-tier parser-only coverage"): every available compiler runs `--parse-only` against every (fixture, format) pair, ignoring the per-fixture `compilers` allowlist (which only scopes ANF-IR / hex parity).
+- **ANF-IR + hex parity (scoped per fixture).** Fixtures without a `compilers` allowlist in `source.json` must produce byte-identical canonical ANF IR (pass 4) + Bitcoin Script hex across all seven tiers. Stack IR itself is neither serialized nor compared (R-096). Fixtures that opt out — the four Go-only fixtures `babybear`, `babybear-ext4`, `merkle-proof`, and `state-covenant` — carry an explicit `compilers` array + `compilersJustification` rationale string.
 
-The TypeScript compiler is the reference implementation; Go, Rust, Python, Zig, Ruby, and Java are full peers. The conformance suite in `conformance/` contains 64 fixtures spanning P2PKH, stateful counters, escrow, oracle covenants, WOTS+/SLH-DSA, SHA-256, BLAKE3, EC, NIST P-256/P-384, BabyBear / KoalaBear / Merkle / FRI primitives. The cross-tier audit (`conformance/runner/__tests__/allowlist-audit.test.ts`) gates the allowlist set so opt-outs don't grow silently.
+The TypeScript compiler is the reference implementation; Go, Rust, Python, Zig, Ruby, and Java are full peers. The conformance suite in `conformance/` contains 82 fixtures spanning P2PKH, stateful counters, escrow, oracle covenants, WOTS+/SLH-DSA, SHA-256, BLAKE3, EC, NIST P-256/P-384, BabyBear / Merkle primitives. The cross-tier audit (`conformance/runner/__tests__/allowlist-audit.test.ts`) gates the allowlist set so opt-outs don't grow silently.
 
 ### Contract Model
 
@@ -547,15 +564,52 @@ docs/                 # Documentation + format guides
 - **Node.js** >= 20, **pnpm** 9.15+
 - **Go** 1.26+ (for Go compiler and Go contract tests)
 - **Rust** 1.75+ (for Rust compiler and Rust contract tests)
-- **Ruby** 3.0+ (optional, for Ruby contract tests)
-- **Python** 3.10+ (for Python compiler and Python contract tests)
+- **Ruby** 3.0+ (for the Ruby compiler and Ruby contract tests)
+- **Python** 3.10+ (for the Python compiler and Python contract tests)
+- **Zig** 0.16 (for the Zig compiler and Zig contract tests)
+- **Java** 17+ (for the Java compiler and Java contract tests; the Gradle
+  wrapper is pinned at 8.5 and downloads itself on first run)
 
 ### Build & Test
 
 ```bash
 git clone https://github.com/icellan/runar.git && cd runar
 pnpm install && pnpm build
+cd conformance && npm ci && cd ..   # second npm root — see below
 ```
+
+#### `pnpm build` may report FULL TURBO and replay another worktree's log
+
+turbo's cache is shared across every checkout and worktree on the machine, so a
+build here can be served from a compile that happened somewhere else, and the
+replayed log lines cite that other path. It looks like your tree was not built.
+
+It was. The cache key is content-addressed — measured, not assumed (R-227):
+
+```
+first run                    0 cached, 1 total
+repeat                       1 cached, 1 total   (FULL TURBO)
+append one comment line      0 cached, 1 total   <- a MISS
+revert that line             1 cached, 1 total   <- a HIT again
+```
+
+A hit means the inputs are byte-identical to the inputs that produced those
+outputs, whichever worktree ran the compile, so the artifacts are this commit's.
+
+When you need to SEE it compile — a release build, or a review where the build
+log is the evidence:
+
+```bash
+turbo run build --force        # ignore the cache, compile every package here
+```
+
+`conformance/` is **not** a pnpm workspace member. It has its own
+`package.json` and `package-lock.json` (`tsx`, `typescript`, `fast-check`), so
+`pnpm install` does not install it and every conformance script fails to resolve
+`tsx` until you run `npm ci` there. CI does the same thing in three jobs. The
+non-TS tiers additionally need their own toolchains built (`cd compilers/go && go
+build`, `cargo build --release`, `zig build`, `./gradlew build`) before the
+cross-tier runner can find them.
 
 Three layered local-test entry points — pick the one matching your loop:
 

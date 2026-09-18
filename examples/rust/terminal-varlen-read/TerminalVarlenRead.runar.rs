@@ -13,6 +13,6 @@ impl TerminalVarlenRead {
     }
 
     pub fn reveal(&self, min_len: Bigint) {
-        assert!(len(self.message) > min_len);
+        assert!(len(&self.message) > min_len);
     }
 }

@@ -139,6 +139,20 @@ public final class RpcProvider implements Provider {
         return 100L;
     }
 
+    /**
+     * Fetches the raw (non-verbose) transaction hex by txid. Mirrors
+     * Go {@code GetRawTransaction} / Python {@code get_raw_transaction}.
+     */
+    public String getRawTransaction(String txid) {
+        Object verboseFlag = rpc.isTeranode() ? Integer.valueOf(0) : Boolean.FALSE;
+        String result = rpc.call("getrawtransaction", txid, verboseFlag);
+        String hex = result.trim();
+        if (hex.startsWith("\"") && hex.endsWith("\"") && hex.length() >= 2) {
+            hex = hex.substring(1, hex.length() - 1);
+        }
+        return hex;
+    }
+
     private static long satoshisFromAmount(Object amount) {
         if (amount == null) return 0L;
         if (amount instanceof Number n) {

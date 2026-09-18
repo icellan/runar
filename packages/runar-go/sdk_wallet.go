@@ -96,19 +96,26 @@ type WalletProvider struct {
 	client        *http.Client
 }
 
+// mainnetArcURL is the default ARC broadcaster. It is a MAINNET endpoint —
+// see R-179 for why that matters when Network is not "mainnet".
+const mainnetArcURL = "https://arc.gorillapool.io"
+
 // NewWalletProvider creates a new WalletProvider with the given options.
 func NewWalletProvider(opts WalletProviderOptions) *WalletProvider {
 	fundingTag := opts.FundingTag
 	if fundingTag == "" {
 		fundingTag = "funding"
 	}
-	arcUrl := opts.ArcUrl
-	if arcUrl == "" {
-		arcUrl = "https://arc.gorillapool.io"
-	}
 	network := opts.Network
 	if network == "" {
 		network = "mainnet"
+	}
+	// R-179: only mainnet has a default ARC endpoint, because the default IS a
+	// mainnet endpoint. A non-mainnet provider that names none is left with an
+	// empty arcUrl and refuses in Broadcast.
+	arcUrl := opts.ArcUrl
+	if arcUrl == "" && network == "mainnet" {
+		arcUrl = mainnetArcURL
 	}
 	feeRate := opts.FeeRate
 	if feeRate == 0 {
@@ -184,6 +191,16 @@ func (p *WalletProvider) GetUtxos(address string) ([]UTXO, error) {
 // Broadcast sends a raw transaction to the ARC service.
 // Posts the raw bytes to arcUrl/v1/tx with Content-Type application/octet-stream.
 func (p *WalletProvider) Broadcast(tx *transaction.Transaction) (string, error) {
+	// R-179: ArcUrl and Network used to be defaulted independently, so a
+	// provider configured for testnet reported GetNetwork() == "testnet" and
+	// broadcast to the MAINNET ARC. There is no canonical testnet ARC endpoint
+	// to default to, so a non-mainnet provider that named no endpoint is left
+	// with an empty one and refuses here, rather than reaching real money.
+	if p.arcUrl == "" {
+		return "", fmt.Errorf(
+			"WalletProvider.Broadcast: no ARC endpoint for network %q — %q is a MAINNET "+
+				"broadcaster; set WalletProviderOptions.ArcUrl explicitly", p.network, mainnetArcURL)
+	}
 	rawHex := tx.Hex()
 	rawBytes, err := hex.DecodeString(rawHex)
 	if err != nil {
@@ -473,6 +490,11 @@ type DeployWithWalletOptions struct {
 	Description string
 	Basket      string
 	Tags        []string
+	// AcknowledgeUnsound names the builtins the caller accepts despite the
+	// compiler not claiming they are sound (R-062). Required — naming each one
+	// — when the artifact declares UnsoundPrimitives; ignored otherwise. Same
+	// mechanism and same error as DeployOptions.AcknowledgeUnsound on Deploy.
+	AcknowledgeUnsound []string
 }
 
 // DeployWithWalletResult is the result of a wallet-based deployment.
@@ -495,6 +517,26 @@ func (c *RunarContract) DeployWithWallet(options *DeployWithWalletOptions) (*Dep
 	lockingScript := c.GetLockingScript()
 	if lockingScript == "" {
 		return nil, fmt.Errorf("RunarContract.DeployWithWallet: empty locking script")
+	}
+
+	// DoS-bound: reject pathological scripts BEFORE involving the wallet. Deploy
+	// has run this since it was added; the wallet path never did.
+	if guardErr := assertScriptHexUnderLimit(
+		lockingScript, MaxScriptBytes,
+		c.Artifact.ContractName+".DeployWithWallet",
+	); guardErr != nil {
+		return nil, guardErr
+	}
+
+	// R-062: the wallet is a SECOND funding path, and it must make the same
+	// decision Deploy makes — refuse to fund a script reaching a builtin the
+	// compiler does not claim is sound unless the caller says so here. Before
+	// CreateAction, so no wallet is ever asked for the coins.
+	if guardErr := assertUnsoundPrimitivesAcknowledged(
+		c.Artifact, options.AcknowledgeUnsound,
+		c.Artifact.ContractName+".DeployWithWallet",
+	); guardErr != nil {
+		return nil, guardErr
 	}
 
 	satoshis := options.Satoshis

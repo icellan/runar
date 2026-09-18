@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "R-101 ratchet. Every diagnostic in 02-validate.ts / 03-typecheck.ts that no",
+    "negative fixture reaches, with the reason it is not reachable. The gate in",
+    "diagnostic-coverage.test.ts fails if an entry here becomes covered (delete it),",
+    "if an entry names a diagnostic that no longer exists (delete it), or if a",
+    "diagnostic is uncovered and absent from this list (write a fixture, or justify).",
+    "The list may only shrink."
+  ],
+  "uncovered": [
+    {
+      "id": "02-validate.ts:Contract name must not be empty",
+      "reason": "No surface can produce an anonymous contract: every frontend derives the name from a class/module declaration, and a class with no name is a syntax error in all nine. Defence-in-depth against a hand-written AST, not reachable from source."
+    },
+    {
+      "id": "02-validate.ts:Constructor parameter '*' must have a type annotation",
+      "reason": "Shadowed by 01-parse.ts, which rejects an untyped constructor parameter first with 'Parameter <n> must have an explicit type annotation'. Unreachable through the TypeScript surface; kept for AST inputs that skip the parser."
+    },
+    {
+      "id": "02-validate.ts:Parameter '*' in method '*' must have a type annotation",
+      "reason": "Shadowed by 01-parse.ts, same as the constructor-parameter case above: the parse pass rejects an untyped method parameter before validation runs."
+    },
+    {
+      "id": "02-validate.ts:FixedArray length must be a positive integer",
+      "reason": "Shadowed by 01-parse.ts, which rejects 'FixedArray size must be a positive integer literal, got <n>' while building the type node."
+    },
+    {
+      "id": "02-validate.ts:For loop bound must be a compile-time constant (literal or const variable)",
+      "reason": "Shadowed by 01-parse.ts ('Cannot determine loop bound at compile time. For-loop bounds must be integer literals.'), which runs on the for-statement before validation."
+    },
+    {
+      "id": "02-validate.ts:asm() expects exactly one object-literal argument { body, in_arity?, out_arity? }",
+      "reason": "Shadowed by 01-parse.ts, which emits a longer message for the same shape ('asm() argument must be an object literal { body: <hex>, in_arity?: <int>, out_arity?: <int> }, got ...')."
+    },
+    {
+      "id": "02-validate.ts:asm() body must be a hex string literal",
+      "reason": "Shadowed by 01-parse.ts ('asm() body must be a hex string literal or an array of opcode names / push() calls'). The body-shape checks that the parser does NOT make (empty, odd length, non-hex) are covered by fixtures."
+    },
+    {
+      "id": "02-validate.ts:asm() in_arity must be a non-negative integer literal",
+      "reason": "Shadowed by 01-parse.ts, which emits the same sentence with the offending node kind appended, so the validate copy never runs on a TypeScript source."
+    },
+    {
+      "id": "02-validate.ts:asm() out_arity must be a non-negative integer literal",
+      "reason": "Shadowed by 01-parse.ts, exactly as the in_arity case above."
+    },
+    {
+      "id": "03-typecheck.ts:Property or method '*' does not exist on the contract",
+      "reason": "Lives on the member_expr branch (object typed <this>). The TypeScript frontend lowers 'this.x' to property_access, whose own missing-property diagnostic IS covered; member_expr over 'this' is produced only by other frontends or by a hand-built AST."
+    }
+  ]
+}

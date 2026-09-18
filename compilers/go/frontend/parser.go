@@ -12,6 +12,7 @@ import (
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 
 	"github.com/icellan/runar/compilers/go/codegen"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------
@@ -86,7 +87,13 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		if msg := unsupportedDirectiveError(source, "Solidity"); msg != "" {
 			return directiveGuardResult(msg)
 		}
-		return ParseSolidity(source, fileName)
+		// R-147: stamped like every other surface. Two branches used to return
+		// without it, so `@acknowledgeUnsoundSP1FriVerifier` could never be
+		// honoured on .runar.sol or .runar.rs — the SP1-FRI refusal was
+		// unbypassable there and bypassable on the other seven. Safe, but a
+		// per-surface difference in a security gate, and frontend parity is
+		// this project's first invariant whichever way the odd ones lean.
+		return stampSP1FriAck(ParseSolidity(source, fileName), source)
 	case strings.HasSuffix(lower, ".runar.move"):
 		if msg := unsupportedDirectiveError(source, "Move"); msg != "" {
 			return directiveGuardResult(msg)
@@ -106,7 +113,8 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		if msg := unsupportedDirectiveError(source, "Rust"); msg != "" {
 			return directiveGuardResult(msg)
 		}
-		return ParseRustMacro(source, fileName)
+		// R-147: see the .runar.sol branch above.
+		return stampSP1FriAck(ParseRustMacro(source, fileName), source)
 	case strings.HasSuffix(lower, ".runar.rb"):
 		if msg := unsupportedDirectiveError(source, "Ruby"); msg != "" {
 			return directiveGuardResult(msg)
@@ -651,9 +659,11 @@ func (p *parseContext) parseTypeExpr(node *sitter.Node) TypeNode {
 	case "type_identifier":
 		fallthrough
 	default:
-		// Try text match for primitive types
-		if IsPrimitiveType(text) {
-			return PrimitiveType{Name: text}
+		// Try text match for primitive types, after resolving alternative
+		// spellings (N-104: `Sha256Digest` is runar-lang's name for `Sha256`,
+		// and every other surface parser in this package already maps it).
+		if canonical := ResolveTypeAlias(text); IsPrimitiveType(canonical) {
+			return PrimitiveType{Name: canonical}
 		}
 		return CustomType{Name: text}
 	}
@@ -808,6 +818,34 @@ func (p *parseContext) parseVariableDecl(node *sitter.Node) Statement {
 		if child.Type() == "const" {
 			isConst = true
 		}
+	}
+
+	// W5: a declaration list declares exactly one variable.
+	//
+	// `findChildByType` returns the FIRST `variable_declarator` and ignores
+	// every later one. This tier did not even warn about it -- the reference
+	// tier at least emitted a warning in statement position, which `compile()`
+	// does not stop on, while a for-initializer emitted nothing anywhere.
+	//
+	// What is lost is not always a value. Measured on the reference tier, a
+	// private helper carrying the contract's guard, called from a
+	// for-initializer's second declarator, compiled to nothing:
+	//
+	//	for (let i = 0n, k = this.guard(x); i < 2n; i++)   hex 008b519c77
+	//	for (let i = 0n;                    i < 2n; i++)   hex 008b519c77
+	//
+	// Byte-identical. `guard` asserts `x > 100n` and @bsv/sdk
+	// Spend.validate() ACCEPTED verify(5n). `k` is never named again, so no
+	// later pass can catch this as an undeclared variable; only the effect is
+	// lost. Both this tier's sites route through here, since
+	// parseVariableDeclFromForInit calls parseVariableDecl.
+	//
+	// The subset is one declarator per statement (spec/grammar.md's
+	// VariableDeclaration production), and python/zig/ruby/java already refuse
+	// the shape at the comma. The diagnostic text is shared verbatim with the
+	// other tiers that can see a declaration list.
+	if n := p.countChildrenByType(node, "variable_declarator"); n > 1 {
+		p.addError(extraDeclaratorError(n))
 	}
 
 	// Find variable_declarator
@@ -1127,6 +1165,25 @@ func (p *parseContext) parseVariableDeclFromForInit(node *sitter.Node) *Variable
 }
 
 func (p *parseContext) parseForUpdate(node *sitter.Node, loc SourceLocation) Statement {
+	// R-065: `parseExpression` has no case for `assignment_expression` or
+	// `augmented_assignment_expression`, so `i = i + 2n` and `i += 2n` both
+	// returned nil and fell through to the no-op sentinel below -- the update
+	// clause was DISCARDED at parse time and the loop then unrolled with the
+	// step the comparison direction implied. Route both through the same
+	// desugaring an assignment in statement position gets (`i += 2n` becomes
+	// `i = i + 2n`), so the validator sees the real update and can accept the
+	// unit step / reject everything else.
+	switch node.Type() {
+	case "assignment_expression":
+		if stmt := p.parseAssignment(node, loc); stmt != nil {
+			return stmt
+		}
+	case "augmented_assignment_expression":
+		if stmt := p.parseAugmentedAssignment(node, loc); stmt != nil {
+			return stmt
+		}
+	}
+
 	expr := p.parseExpression(node)
 	if expr == nil {
 		return ExpressionStmt{Expr: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc}
@@ -1743,7 +1800,15 @@ func (p *parseContext) parseArityLiteral(node *sitter.Node, fieldName string) (i
 			p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal, got '%s'", fieldName, text))
 			return 0, false
 		}
-		return bi.Int64(), true
+		// Range-check BEFORE narrowing: bi.Int64() truncates modulo 2^64, so
+		// `in_arity: 18446744073709551618` used to become 2 and compile to
+		// exactly the same bytes as `in_arity: 2`. CL-BUG-127.
+		n, err := ir.IntValueExact(bi, fmt.Sprintf("asm() %s", fieldName))
+		if err != nil {
+			p.addError(err.Error())
+			return 0, false
+		}
+		return int64(n), true
 	case "unary_expression":
 		p.addError(fmt.Sprintf("asm() %s must be a non-negative integer literal", fieldName))
 		return 0, false
@@ -1864,6 +1929,35 @@ func (p *parseContext) parseParenExpression(node *sitter.Node) Expression {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// countChildrenByType counts direct children of the given tree-sitter type.
+//
+// The declaration-list rule (W5) needs to know that a SECOND declarator exists,
+// which findChildByType cannot express: it stops at the first match, which is
+// exactly how every later declarator used to disappear without a diagnostic.
+func (p *parseContext) countChildrenByType(node *sitter.Node, typeName string) int {
+	n := 0
+	for i := 0; i < int(node.ChildCount()); i++ {
+		if node.Child(i).Type() == typeName {
+			n++
+		}
+	}
+	return n
+}
+
+// extraDeclaratorError is the W5 diagnostic, shared verbatim with the other
+// tiers that drive a full TypeScript parser and can therefore SEE a declaration
+// list at all (ts-morph in the reference tier, swc in rust).
+func extraDeclaratorError(count int) string {
+	return fmt.Sprintf(
+		"Multiple variable declarations in a single statement are not supported "+
+			"(%d declared). Declare one variable per statement: every declarator after "+
+			"the first is discarded before the AST is built, so anything it calls -- a guard, "+
+			"an assert reached through a private helper -- is silently absent from the "+
+			"emitted script.",
+		count,
+	)
+}
 
 func (p *parseContext) findChildByType(node *sitter.Node, typeName string) *sitter.Node {
 	for i := 0; i < int(node.ChildCount()); i++ {

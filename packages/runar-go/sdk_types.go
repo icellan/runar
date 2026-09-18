@@ -50,6 +50,11 @@ type DeployOptions struct {
 	// signer, set this so the funding inputs are signed by their real owner.
 	// nil → the connected signer (zero behaviour change).
 	FundingSigner Signer `json:"-"`
+
+	// AcknowledgeUnsound names the builtins the caller accepts despite the
+	// compiler not claiming they are sound (R-062). Required — naming each one
+	// — when the artifact declares UnsoundPrimitives; ignored otherwise.
+	AcknowledgeUnsound []string `json:"acknowledgeUnsound,omitempty"`
 }
 
 // CallOptions specifies options for calling a contract method.
@@ -261,6 +266,11 @@ type RunarArtifact struct {
 	// `runarc groth16-wa` backend. Nil for normal Rúnar contract
 	// compilations.
 	Groth16WA *Groth16WAMeta `json:"groth16WA,omitempty"`
+
+	// UnsoundPrimitives names the builtins this script reaches that the
+	// compiler does not claim are sound (R-062). Empty for every ordinary
+	// contract; see sdk_unsound_primitives.go.
+	UnsoundPrimitives []string `json:"unsoundPrimitives,omitempty"`
 }
 
 // ABI describes the contract's public interface.

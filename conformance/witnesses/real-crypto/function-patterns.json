@@ -79,5 +79,8 @@
         "balance": "150n"
       }
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "bf314625263245608ae915d1a5ccdf6312c5a0971f9b8e93b2569f1567178e9c"
+  }
 }

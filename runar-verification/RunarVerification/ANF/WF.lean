@@ -170,7 +170,7 @@ def valueIsWFAux (fuel : Nat) (env : ScopeEnv) : ANFValue → Bool
       | 0 => false
       | f + 1 =>
           env.resolves cond && bindingsAreWFAux f env t && bindingsAreWFAux f env e
-  | .loop _ body iterVar =>
+  | .loop _ body iterVar _ _ =>
       match fuel with
       | 0 => false
       | f + 1 => bindingsAreWFAux f (env.addParam iterVar) body
@@ -265,7 +265,7 @@ private def collectAllBindingNamesAux : Nat → List ANFBinding → List String
             let dropPhi (bs : List ANFBinding) : List ANFBinding :=
               bs.filter (fun bi => !isPhi bi.name)
             collectAllBindingNamesAux f (dropPhi t) ++ collectAllBindingNamesAux f (dropPhi e)
-        | .loop _ body _ => collectAllBindingNamesAux f body
+        | .loop _ body _ _ _ => collectAllBindingNamesAux f body
         | _ => []
       b.name :: (here ++ collectAllBindingNamesAux f rest)
 

@@ -95,10 +95,28 @@ public final class Typecheck {
     // Type families
     // ------------------------------------------------------------------
 
-    private static final Set<String> BYTESTRING_SUBTYPES = Set.of(
+    /**
+     * N-076: this is the SINGLE source of truth for "is a value of this type a
+     * byte string or a script number?", and {@code AnfLower} consults it
+     * through {@link #isByteStringFamily} rather than keeping a second copy.
+     * The copy it replaces carried {@code RabinSig} and {@code RabinPubKey},
+     * which {@link #BIGINT_SUBTYPES} right below files as NUMBERS -- so
+     * {@code ===} on a Rabin value emitted OP_EQUAL and, far worse, {@code +}
+     * on one emitted OP_CAT where the source said addition.
+     */
+    static final Set<String> BYTESTRING_SUBTYPES = Set.of(
         "ByteString", "PubKey", "Sig", "Sha256", "Ripemd160", "Addr",
         "SigHashPreimage", "Point", "P256Point", "P384Point"
     );
+
+    /**
+     * Whether a value of this type sits on the stack as a BYTE STRING rather
+     * than as a script NUMBER. Anything NOT in this family is numeric:
+     * compared with OP_NUMEQUAL, added with OP_ADD.
+     */
+    static boolean isByteStringFamily(String typeName) {
+        return BYTESTRING_SUBTYPES.contains(typeName);
+    }
 
     private static final Set<String> BIGINT_SUBTYPES = Set.of(
         "bigint", "RabinSig", "RabinPubKey"
@@ -120,12 +138,44 @@ public final class Typecheck {
         "checkPreimage", new int[]{0}
     );
 
+    /**
+     * Whether a value of type {@code actual} may be used where {@code expected}
+     * is required. The port of {@code isSubtype} in
+     * {@code packages/runar-compiler/src/passes/03-typecheck.ts}; it must stay
+     * clause-for-clause identical to it.
+     *
+     * <p>N-104: this tier used to carry only the {@code subtype -> base}
+     * direction of each family, so assignment inside a family worked one way
+     * and not the other — {@code const b: ByteString = pkh} compiled and
+     * {@code const h: Sha256 = pkh} did not, while the reference tier accepted
+     * both. Measured as a full bidirectional matrix over every ordered pair of
+     * family members in all seven tiers, 85 of 196 cells disagreed. The
+     * asymmetry was already known to be wrong at the callsites that tripped
+     * over it — this class used to carry a private
+     * {@code outputStateValueMatches} that re-added the missing clauses just
+     * for {@code addOutput}'s state values, and four tiers had independently
+     * grown the same patch. The general predicate carries them now, and the
+     * patches are gone.
+     *
+     * <p>Cross-family moves (a ByteString into a bigint slot or the reverse)
+     * are still refused, in every tier; that is what
+     * {@code conformance/negatives} N02/N16/N17/N19/N21 pin.
+     */
     private static boolean isSubtype(String actual, String expected) {
         if (actual.equals(expected)) return true;
         if ("<unknown>".equals(actual) || "<inferred>".equals(actual)) return true;
         if ("<unknown>".equals(expected) || "<inferred>".equals(expected)) return true;
+        // ByteString subtypes. BIDIRECTIONAL, and both-in-family — an Addr
+        // value satisfies a Ripemd160 slot and vice versa.
         if ("ByteString".equals(expected) && BYTESTRING_SUBTYPES.contains(actual)) return true;
+        if ("ByteString".equals(actual) && BYTESTRING_SUBTYPES.contains(expected)) return true;
+        if (BYTESTRING_SUBTYPES.contains(actual) && BYTESTRING_SUBTYPES.contains(expected)) {
+            return true;
+        }
+        // bigint subtypes — same shape.
         if ("bigint".equals(expected) && BIGINT_SUBTYPES.contains(actual)) return true;
+        if ("bigint".equals(actual) && BIGINT_SUBTYPES.contains(expected)) return true;
+        if (BIGINT_SUBTYPES.contains(actual) && BIGINT_SUBTYPES.contains(expected)) return true;
         if (actual.endsWith("[]") && expected.endsWith("[]")) {
             return isSubtype(
                 actual.substring(0, actual.length() - 2),
@@ -135,7 +185,29 @@ public final class Typecheck {
         return false;
     }
 
-    private static boolean isBigintFamily(String t) {
+    /**
+     * R-092: there is deliberately NO {@code <unknown>} escape here, and none at
+     * any callsite. {@code isSubtype} treats {@code <unknown>} as top-of-lattice
+     * (compatible with everything), which is what {@code ===} and argument
+     * passing want. The operand positions that demand a NUMBER — arithmetic,
+     * relational, shift, bitwise, unary {@code -}, unary {@code ~},
+     * {@code ++}/{@code --} and array index — go through this predicate instead,
+     * and they want the opposite: an operand whose type the frontend could not
+     * pin down must not silently become a script number.
+     *
+     * <p>This tier used to carry {@code && !"<unknown>".equals(t)} at all eight,
+     * so Java alone accepted programs the other six tiers reject — including
+     * {@code helperReturningPubKey() > x}, which pushes 33 bytes into
+     * OP_GREATERTHAN. Post-Genesis that succeeds and computes a meaningless
+     * comparison, so the guard the author wrote is not the guard that reaches
+     * the chain. `conformance/negatives/N15-unknown-operand-type.runar.ts` is
+     * the cross-tier gate; {@code R092UnknownOperandRejectionTest} is the unit
+     * gate.
+     */
+    // Package-visible (N-133): ExpandFixedArrays needs the same question
+    // answered for FixedArray initializer elements, and must not keep a
+    // second copy of BIGINT_SUBTYPES.
+    static boolean isBigintFamily(String t) {
         return BIGINT_SUBTYPES.contains(t);
     }
 
@@ -185,6 +257,20 @@ public final class Typecheck {
     // ------------------------------------------------------------------
     // Checker
     // ------------------------------------------------------------------
+
+    /**
+     * Names that are legal without being a local, a builtin, a method or a
+     * property: the {@code SigHash} namespace object and the three secp256k1
+     * constants from runar-lang. Every frontend hands them to the typechecker
+     * as bare identifiers. They used to be carried by the {@code "<unknown>"}
+     * fall-through; once that fall-through raises they have to be listed,
+     * exactly as the TS reference tier lists them in KNOWN_GLOBALS.
+     */
+    private static final Map<String, String> KNOWN_GLOBALS = Map.of(
+            "SigHash", "<namespace>",
+            "EC_P", "bigint",
+            "EC_N", "bigint",
+            "EC_G", "Point");
 
     private static final class Checker {
         final ContractNode contract;
@@ -306,15 +392,38 @@ public final class Typecheck {
             // be a 34-byte P2PKH is impossible (codePart >= 253 bytes forces a
             // 3-byte CompactSize length prefix, never the P2PKH template's
             // 0x19), so the contract is PERMANENTLY unspendable. The terminal
-            // case (no state mutation -> no continuation) stays valid, and
-            // addOutput/addRawOutput layouts are left to the developer. Mirrors
-            // the guard in packages/runar-compiler/src/passes/03-typecheck.ts.
+            // case (no state mutation -> no continuation) stays valid.
+            //
+            // R-300: "addOutput/addRawOutput layouts are left to the developer"
+            // used to finish that sentence, and it was wrong — no layout the
+            // developer can pick makes the offsets work. this.addOutput(...)
+            // writes the continuation (codePart plus serialised state, hundreds
+            // of bytes) at output 0, so outputIndex*34 lands INSIDE that script
+            // for every index. addRawOutput's length is a runtime value, so the
+            // stride cannot be proven there either. See
+            // conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
+            // Mirrors the guard in
+            // packages/runar-compiler/src/passes/03-typecheck.ts.
             if (contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT) {
                 Set<String> mutableProps = new HashSet<>();
                 for (PropertyNode p : contract.properties()) {
                     if (!p.readonly()) mutableProps.add(p.name());
                 }
                 MethodOutputSignals sig = analyzeMethodOutputSignals(m.body(), mutableProps);
+                if (hasRequireP2PKH && sig.hasStateOutput) {
+                    errors.add(format(
+                        "method '" + m.name() + "' mixes requireOutputP2PKH() with "
+                            + "this.addOutput()/addRawOutput() — the intrinsic reads output i "
+                            + "at byte offset i*34, which is only correct when every earlier "
+                            + "output is exactly 34 bytes, and a state-continuation output "
+                            + "never is (codePart plus serialised state). The assertion would "
+                            + "read bytes from the middle of the contract's own locking "
+                            + "script, so the contract would be permanently unspendable. "
+                            + "Assert the payment from a separate method that emits no output "
+                            + "of its own",
+                        m.sourceLocation()
+                    ));
+                }
                 if (sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput) {
                     errors.add(format(
                         "method '" + m.name() + "' calls requireOutputP2PKH(0, ...) but also "
@@ -639,7 +748,18 @@ public final class Typecheck {
                 }
             } else if (s instanceof IfStatement i) {
                 String cond = inferExpr(i.condition(), env);
-                if (!"boolean".equals(cond) && !"<unknown>".equals(cond)) {
+                // N-101: no <unknown> escape here, and none on the for-loop or
+                // ternary condition below. TS, Go, Rust, Python, Zig and Ruby all
+                // leave these three strict; this tier alone carried
+                // `&& !"<unknown>".equals(cond)` and alone ACCEPTED
+                // `if (this.hp())` for a private helper whose return type no tier
+                // derives. That lowered a 33-byte PubKey into a branch condition,
+                // where post-Genesis it is simply truthy. Ninth instance of the
+                // class R-092 (bca3bb4f) closed eight of, and the one it filed.
+                //
+                // assert()'s escape is NOT part of this: all seven tiers carry it
+                // and all seven compile `assert(this.hp())` to the same bytes.
+                if (!"boolean".equals(cond)) {
                     error("if condition must be boolean, got '" + cond + "'");
                 }
                 env.push();
@@ -656,8 +776,22 @@ public final class Typecheck {
                     checkStatement(f.init(), env);
                 }
                 String cond = inferExpr(f.condition(), env);
-                if (!"boolean".equals(cond) && !"<unknown>".equals(cond)) {
+                // N-101 (see the `if` above). Deleted as DEAD CODE rather than as
+                // a behaviour change: Validate refuses a for-loop condition that
+                // is not a comparison against a compile-time constant, three
+                // passes before this runs, so no source reaches here with an
+                // <unknown> condition. Characterised in
+                // N101UnknownBooleanConditionTest#forConditionNeverReachesTheTypechecker.
+                if (!"boolean".equals(cond)) {
                     error("for-loop condition must be boolean, got '" + cond + "'");
+                }
+                // R-065: the update clause used to be skipped entirely, so
+                // `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole in the
+                // rule that only Rúnar builtins and contract methods are callable (CLAUDE.md
+                // names `console.log` explicitly). Validate separately restricts the clause to
+                // a unit-step advance; this is the type-level half of the same guard.
+                if (f.update() != null) {
+                    checkStatement(f.update(), env);
                 }
                 checkStatements(f.body(), env);
                 env.pop();
@@ -686,11 +820,39 @@ public final class Typecheck {
             if (e instanceof Identifier id) {
                 if ("this".equals(id.name())) return "<this>";
                 if ("super".equals(id.name())) return "<super>";
+                if ("true".equals(id.name()) || "false".equals(id.name())) return "boolean";
+                // The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+                // the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+                // identifier arm as a name to be typed. It is a discard, not a reference:
+                // nothing is being looked up, so `undefined` is the wrong word for it.
+                // Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+                // `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+                // "Undefined variable '_'" — invariant 1 (all seven parse all nine
+                // surfaces) already broken for this shape. Listing it here rather than
+                // letting the new fall-through reject it keeps the six tiers' bytes and
+                // brings the seventh into line.
+                if ("_".equals(id.name())) return "<unknown>";
                 String t = env.lookup(id.name());
                 if (t != null) return t;
                 if (BuiltinRegistry.isBuiltin(id.name())) return "<builtin>";
                 if (methodSigs.containsKey(id.name())) return "<method>";
                 if (propTypes.containsKey(id.name())) return propTypes.get(id.name());
+                String global = KNOWN_GLOBALS.get(id.name());
+                if (global != null) return global;
+                // GK-BUG-009 -- a name that resolves to nothing is an error HERE,
+                // at the only pass that can see the binding environment. It used
+                // to return "<unknown>" silently, and "<unknown>" is compatible
+                // with everything under isSubtype by design (R-092), so
+                // `notAThing === 1n` raised nothing. `notAThing > 1n` did raise
+                // -- the bigint-family check does not admit "<unknown>" -- which
+                // is why R-085's `>` pin read as closed while the `===` path was
+                // wide open. Where the reference is reachable from codegen,
+                // stack lowering later refuses to emit an OP_0 placeholder and
+                // the compile still fails, but for the wrong reason; where it is
+                // NOT reachable (an uncalled private helper, a zero-iteration
+                // loop) nothing fired at all and the contract compiled to a
+                // locking script.
+                error("Undefined variable '" + id.name() + "'");
                 return "<unknown>";
             }
 
@@ -730,7 +892,8 @@ public final class Typecheck {
 
             if (e instanceof TernaryExpr te) {
                 String cond = inferExpr(te.condition(), env);
-                if (!"boolean".equals(cond) && !"<unknown>".equals(cond)) {
+                // N-101 (see the `if` above). Six tiers leave this strict.
+                if (!"boolean".equals(cond)) {
                     error("ternary condition must be boolean, got '" + cond + "'");
                 }
                 String cons = inferExpr(te.consequent(), env);
@@ -750,7 +913,7 @@ public final class Typecheck {
             if (e instanceof IndexAccessExpr ia) {
                 String objType = inferExpr(ia.object(), env);
                 String indexType = inferExpr(ia.index(), env);
-                if (!isBigintFamily(indexType) && !"<unknown>".equals(indexType)) {
+                if (!isBigintFamily(indexType)) {
                     error("array index must be bigint, got '" + indexType + "'");
                 }
                 if (objType.endsWith("[]")) {
@@ -761,14 +924,14 @@ public final class Typecheck {
 
             if (e instanceof IncrementExpr ie) {
                 String t = inferExpr(ie.operand(), env);
-                if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                if (!isBigintFamily(t)) {
                     error("++ operator requires bigint, got '" + t + "'");
                 }
                 return "bigint";
             }
             if (e instanceof DecrementExpr de) {
                 String t = inferExpr(de.operand(), env);
-                if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                if (!isBigintFamily(t)) {
                     error("-- operator requires bigint, got '" + t + "'");
                 }
                 return "bigint";
@@ -804,29 +967,31 @@ public final class Typecheck {
 
             switch (op) {
                 case ADD, SUB, MUL, DIV, MOD -> {
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
                     }
                     return "bigint";
                 }
                 case LT, LE, GT, GE -> {
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
                     }
                     return "boolean";
                 }
                 case EQ, NEQ -> {
-                    boolean compatible =
-                        isSubtype(lt, rt)
-                            || isSubtype(rt, lt)
-                            || (BYTESTRING_SUBTYPES.contains(lt) && BYTESTRING_SUBTYPES.contains(rt))
-                            || (BIGINT_SUBTYPES.contains(lt) && BIGINT_SUBTYPES.contains(rt));
+                    // Exactly the reference tier's rule: each side is tried as
+                    // a subtype of the other, and nothing else. The
+                    // both-in-family clauses that used to sit here were this
+                    // tier's local patch for an isSubtype that lacked them
+                    // (N-104); isSubtype carries them now, so repeating them
+                    // here would be a second copy of the lattice to drift.
+                    boolean compatible = isSubtype(lt, rt) || isSubtype(rt, lt);
                     if (!compatible && !"<unknown>".equals(lt) && !"<unknown>".equals(rt)) {
                         error("cannot compare '" + lt + "' and '" + rt + "' with '" + op.canonical() + "'");
                     }
@@ -842,23 +1007,23 @@ public final class Typecheck {
                     return "boolean";
                 }
                 case SHL, SHR -> {
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error("left operand of '" + op.canonical() + "' must be bigint, got '" + lt + "'");
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error("right operand of '" + op.canonical() + "' must be bigint, got '" + rt + "'");
                     }
                     return "bigint";
                 }
                 case BIT_AND, BIT_OR, BIT_XOR -> {
                     if (isByteFamily(lt) && isByteFamily(rt)) return "ByteString";
-                    if (!isBigintFamily(lt) && !"<unknown>".equals(lt)) {
+                    if (!isBigintFamily(lt)) {
                         error(
                             "left operand of '" + op.canonical()
                                 + "' must be bigint or ByteString, got '" + lt + "'"
                         );
                     }
-                    if (!isBigintFamily(rt) && !"<unknown>".equals(rt)) {
+                    if (!isBigintFamily(rt)) {
                         error(
                             "right operand of '" + op.canonical()
                                 + "' must be bigint or ByteString, got '" + rt + "'"
@@ -880,14 +1045,14 @@ public final class Typecheck {
                     return "boolean";
                 }
                 case NEG -> {
-                    if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                    if (!isBigintFamily(t)) {
                         error("operand of unary '-' must be bigint, got '" + t + "'");
                     }
                     return "bigint";
                 }
                 case BIT_NOT -> {
                     if (isByteFamily(t)) return "ByteString";
-                    if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                    if (!isBigintFamily(t)) {
                         error("operand of '~' must be bigint or ByteString, got '" + t + "'");
                     }
                     return "bigint";
@@ -969,11 +1134,10 @@ public final class Typecheck {
                         error(".equals() takes exactly 1 argument, got " + e.args().size());
                     } else {
                         String argType = inferExpr(e.args().get(0), env);
+                        // Same rule as `===` above, for the same reason: the
+                        // both-in-family clauses are `isSubtype`'s job (N-104).
                         boolean compatible =
-                            isSubtype(argType, objType)
-                                || isSubtype(objType, argType)
-                                || (isByteFamily(objType) && isByteFamily(argType))
-                                || (isBigintFamily(objType) && isBigintFamily(argType));
+                            isSubtype(argType, objType) || isSubtype(objType, argType);
                         if (!compatible && !"<unknown>".equals(objType) && !"<unknown>".equals(argType)) {
                             error(
                                 ".equals(): cannot compare '" + objType + "' with '" + argType + "'"
@@ -997,26 +1161,212 @@ public final class Typecheck {
             return "<unknown>";
         }
 
+        /**
+         * Type-check the FIRST argument of an output intrinsic — the output's
+         * SATOSHI AMOUNT.
+         *
+         * <p>N-098: this tier used to accept any type there. That is not a
+         * missing lint. {@code lowerAddOutput} prepends the operand as
+         * {@code OP_8 OP_NUM2BIN}, so a ByteString in that slot is
+         * reinterpreted as a script number with no conversion and becomes the
+         * amount the covenant commits to: {@code blob: ByteString} and
+         * {@code blob: bigint} compiled to the SAME script, byte for byte. On
+         * the real {@code @bsv/sdk} Spend engine with {@code blob = 0x2a} only
+         * a 42-satoshi continuation validates, and blobs wider than 8 bytes
+         * abort at {@code OP_NUM2BIN}, making the UTXO unspendable.
+         *
+         * <p>Ported from the TypeScript reference, wording included.
+         *
+         * <p>{@code <unknown>} is escaped exactly as TS escapes it — a private
+         * helper's declared return type is discarded at parse time in every
+         * tier, so {@code this.sats()} infers as {@code <unknown>} and must
+         * keep compiling. This is the one escape R-092 did NOT delete, because
+         * the reference tier has it too.
+         */
+        private void checkSatoshisArg(String prop, Expression arg, Env env) {
+            String t = inferExpr(arg, env);
+            if (!isBigintFamily(t) && !"<unknown>".equals(t)) {
+                error(prop + "() first argument (satoshis) must be bigint, got '" + t + "'");
+            }
+        }
+
+        /**
+         * Type-check the SECOND argument of addRawOutput / addDataOutput — the
+         * created output's LOCKING SCRIPT.
+         *
+         * <p>N-105: this tier used to accept any type there too.
+         * {@code lowerAddRawOutput} takes {@code OP_SIZE} of the operand,
+         * varint-prefixes it and concatenates it after the amount — no
+         * conversion — so {@code n: bigint} and {@code n: ByteString} compiled
+         * to the SAME script, byte for byte. A script number on the stack is
+         * its minimal little-endian encoding, so the covenant commits to an
+         * output whose locking script IS those bytes. Executed on the real
+         * {@code @bsv/sdk} Spend engine against the exact opcode window this
+         * tier emits: n=0 gives an EMPTY locking script, n=81 gives
+         * {@code OP_1} and n=118 gives {@code OP_DUP} — all three
+         * anyone-can-spend — while n=1000 gives {@code 0xe8 0x03}, an invalid
+         * opcode, and the output is unspendable.
+         *
+         * <p>Ported from the TypeScript reference, wording included. TS uses
+         * {@code isSubtype} against ByteString, not equality, so every
+         * ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted, and
+         * {@code <unknown>} is escaped exactly as TS escapes it.
+         */
+        private void checkScriptBytesArg(String prop, Expression arg, Env env) {
+            String t = inferExpr(arg, env);
+            if (!isSubtype(t, "ByteString") && !"<unknown>".equals(t)) {
+                error(prop + "() second argument (scriptBytes) must be ByteString, got '" + t + "'");
+            }
+        }
+
+        /**
+         * N-105 (2/2): addOutput's arity and state-value types, and the
+         * StatefulSmartContract gate shared by all three intrinsics.
+         *
+         * <p>Each was a hole with an executed consequence:
+         * {@code addOutput(1000n)} dropped the state value from the
+         * continuation entirely, a surplus value was appended to a state
+         * serialization the next spend deserializes by fixed offsets, a
+         * ByteString state value was serialized where an 8-byte LE number
+         * belongs, and addRawOutput in a stateless SmartContract emitted a
+         * "continuation" for a contract with no state.
+         *
+         * <p>Ported from the TypeScript reference, wording included.
+         */
+        private String checkAddOutputArgs(List<Expression> args, Env env) {
+            // Mirror flattenAddOutputArgs in AnfLower: when addOutput is called
+            // as `this.addOutput(satoshis, .{ v1, v2, ... })` (the surface form
+            // Zig / Move tuple syntax produce), unwrap the trailing array
+            // literal so each element is type-checked individually instead of
+            // triggering ArrayLiteralExpr's homogeneous-element rule (state
+            // values intentionally have heterogeneous types — owner: PubKey,
+            // balance: bigint, ...). The satoshis argument is args.get(0) in
+            // BOTH forms.
+            List<Expression> normalized = args;
+            if (args.size() == 2 && args.get(1) instanceof ArrayLiteralExpr al) {
+                normalized = new ArrayList<>(1 + al.elements().size());
+                normalized.add(args.get(0));
+                normalized.addAll(al.elements());
+            }
+
+            // N-107: count the state slots the continuation will actually
+            // carry, not the DECLARED mutable properties. ExpandFixedArrays
+            // splits `board: FixedArray<bigint, 3>` into `board__0 .. board__2`,
+            // so a contract declaring `board` and `n` emits FOUR state values.
+            // addOutput is positional against the emitted values, which is why
+            // the declared count answers the wrong question.
+            //
+            // Until N-106 this tier got the right number for the wrong reason:
+            // ExpandFixedArrays ran BEFORE Typecheck here and AFTER it in the
+            // other six, so the properties reaching this method were already
+            // scalar and the ported `shapeCheckable` opt-out never fired. That
+            // pass order is now aligned with the six, so the count has to be
+            // computed here — the two findings are one root cause, and fixing
+            // the ordering without this would have made Java start rejecting
+            // Boardy (in
+            // compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py),
+            // which every tier compiles. Gate:
+            // conformance/negatives/N26-addoutput-arity-fixedarray and
+            // conformance/subtype-parity/FixedArrayOutputShape.
+            List<StateSlot> mutableProps = expandedStateSlots(contract.properties());
+            int expected = 1 + mutableProps.size();
+            if (normalized.size() != expected) {
+                error("addOutput() expects " + expected + " argument(s): satoshis + "
+                    + mutableProps.size() + " state value(s), got " + normalized.size());
+            }
+            if (!normalized.isEmpty()) {
+                checkSatoshisArg("addOutput", normalized.get(0), env);
+            }
+            // Every state value is inferred, surplus ones included, so a type
+            // error inside one is not swallowed by the arity diagnostic.
+            for (int i = 1; i < normalized.size(); i++) {
+                String argType = inferExpr(normalized.get(i), env);
+                if (i - 1 >= mutableProps.size()) continue;
+                if ("<unknown>".equals(argType)) continue;
+                StateSlot slot = mutableProps.get(i - 1);
+                String propType = typeToString(slot.type());
+                if (!isSubtype(argType, propType)) {
+                    error("addOutput() argument " + (i + 1) + " (" + slot.name() + ") must be '"
+                        + propType + "', got '" + argType + "'");
+                }
+            }
+            return "void";
+        }
+
+        /** One emitted state value: what the state continuation actually carries. */
+        private record StateSlot(String name, TypeNode type) {}
+
+        /**
+         * The mutable state as {@code addOutput} sees it — one slot per value
+         * the continuation carries, NOT one per declared property.
+         *
+         * <p>N-107: {@code ExpandFixedArrays} splits a FixedArray property into
+         * one scalar sibling per element, so the DECLARED property list is not
+         * the emitted state. The flattening mirrors that pass's own naming
+         * ({@code <root>__<i>}, recursing through nested arrays) so a diagnostic
+         * names the synthetic property the expansion will create.
+         *
+         * <p>A non-positive length is already a parse/validate error; the
+         * property is kept whole in that case so this rule never fires on a
+         * contract that is going to be rejected for a better reason.
+         */
+        private static List<StateSlot> expandedStateSlots(List<PropertyNode> properties) {
+            List<StateSlot> slots = new ArrayList<>();
+            for (PropertyNode p : properties) {
+                if (!p.readonly()) pushStateSlot(p.name(), p.type(), slots);
+            }
+            return slots;
+        }
+
+        private static void pushStateSlot(String name, TypeNode type, List<StateSlot> out) {
+            if (type instanceof FixedArrayType fa && fa.length() > 0) {
+                for (int i = 0; i < fa.length(); i++) {
+                    pushStateSlot(name + "__" + i, fa.element(), out);
+                }
+                return;
+            }
+            out.add(new StateSlot(name, type));
+        }
+
         private String checkBuiltinThisCall(String prop, List<Expression> args, Env env) {
             if ("getStateScript".equals(prop)) {
+                // R-173: the builtin takes none — it returns the contract's own
+                // state script, a property of the contract rather than of
+                // anything a caller could pass. Five tiers used to accept
+                // arguments and DISCARD them, emitting hex byte-identical to
+                // the zero-argument spelling, so an author who believed the
+                // arguments meant something got a script that ignored them with
+                // no diagnostic. Message is the reference tier's.
+                if (args != null && !args.isEmpty()) {
+                    error("getStateScript() takes no arguments");
+                }
                 return "ByteString";
             }
             if ("addOutput".equals(prop) || "addRawOutput".equals(prop) || "addDataOutput".equals(prop)) {
-                // Mirror flattenAddOutputArgs in AnfLower: when addOutput is
-                // called as `this.addOutput(satoshis, .{ v1, v2, ... })`
-                // (the surface form Zig / Move tuple syntax produce), unwrap
-                // the trailing array literal so each element is type-checked
-                // individually instead of triggering ArrayLiteralExpr's
-                // homogeneous-element rule (state values intentionally have
-                // heterogeneous types — owner: PubKey, balance: bigint, ...).
-                if ("addOutput".equals(prop)
-                        && args.size() == 2
-                        && args.get(1) instanceof ArrayLiteralExpr al) {
-                    inferExpr(args.get(0), env);
-                    for (Expression el : al.elements()) inferExpr(el, env);
-                } else {
-                    for (Expression a : args) inferExpr(a, env);
+                // N-105: all three intrinsics build an OUTPUT, and an output
+                // only exists in a stateful contract. TS refuses the call
+                // outright and checks nothing else, so the early return is part
+                // of the ported behaviour.
+                if (contract == null
+                        || contract.parentClass() != ParentClass.STATEFUL_SMART_CONTRACT) {
+                    error(prop + "() is only available in StatefulSmartContract");
+                    return "void";
                 }
+                if ("addOutput".equals(prop)) {
+                    return checkAddOutputArgs(args, env);
+                }
+                // addRawOutput / addDataOutput — (satoshis, scriptBytes).
+                if (args.size() != 2) {
+                    error(prop + "() expects 2 arguments (satoshis, scriptBytes), got "
+                        + args.size());
+                }
+                if (!args.isEmpty()) {
+                    checkSatoshisArg(prop, args.get(0), env);
+                }
+                if (args.size() >= 2) {
+                    checkScriptBytesArg(prop, args.get(1), env);
+                }
+                for (int i = 2; i < args.size(); i++) inferExpr(args.get(i), env);
                 return "void";
             }
             if (methodSigs.containsKey(prop)) {
@@ -1084,7 +1434,17 @@ public final class Typecheck {
                     } else if (idxArg instanceof UnaryExpr u
                         && u.op() == Expression.UnaryOp.NEG
                         && u.operand() instanceof BigIntLiteral inner
-                        && inner.value() != null) {
+                        && inner.value() != null
+                        // N-060: this arm exists ONLY to reach the
+                        // "must be >= 0" message below, so it must surrender
+                        // anything that is not actually negative. `-0`
+                        // negates to 0 and would sail past that bound check,
+                        // but AnfLower matches on a bare BigIntLiteral: on a
+                        // UnaryExpr it falls through to `load_const ""` and
+                        // the covenant the intrinsic was supposed to install
+                        // is silently absent. Let it fall to the
+                        // non-literal-index diagnostic instead.
+                        && inner.value().negate().signum() < 0) {
                         // Accept `-N` so the bounds check below produces a
                         // clear "must be >= 0" rather than the misleading
                         // "must be an integer literal" message.
@@ -1108,12 +1468,8 @@ public final class Typecheck {
                             if (idx < 0) {
                                 error(name + "() argument 1 (index) must be >= 0; got " + idx);
                             }
-                            if ("requireOutputP2PKH".equals(name) && idx > 1000) {
-                                error("requireOutputP2PKH() argument 1 (outputIndex) "
-                                    + "bound to <= 1000; got " + idx
-                                    + " (the emitted Stack-IR computes byte-offset = "
-                                    + "idx*34; unrealistic indexes indicate a "
-                                    + "programming error)");
+                            if ("requireOutputP2PKH".equals(name) && idx > 0) {
+                                error("requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got " + idx + ". The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit");
                             }
                         }
                     }
@@ -1385,13 +1741,4 @@ public final class Typecheck {
         }
     }
 
-    // Unused, retained to keep the import surface stable. The fields
-    // below intentionally reference ArrayList / Set / Deque so static
-    // analyzers don't flag them as dead.
-    @SuppressWarnings("unused")
-    private static final Object _anchor = new Object() {
-        final ArrayList<String> _a = new ArrayList<>();
-        final HashSet<String> _b = new HashSet<>();
-        final ArrayDeque<String> _c = new ArrayDeque<>();
-    };
 }

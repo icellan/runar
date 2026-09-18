@@ -1280,7 +1280,7 @@ public final class AnfInterpreter {
     // Built-in calls
     // ------------------------------------------------------------------
 
-    private static Object evalCall(String func, List<Object> args, OnChainCryptoContext realCrypto, WitnessContext witness) {
+    static Object evalCall(String func, List<Object> args, OnChainCryptoContext realCrypto, WitnessContext witness) {
         switch (func) {
             // Mocked crypto unless real-crypto context is supplied.
             case "checkSig": {
@@ -1316,8 +1316,17 @@ public final class AnfInterpreter {
                 String h = asString(args.get(0));
                 int s = toBigInt(args.get(1)).intValueExact();
                 int len = toBigInt(args.get(2)).intValueExact();
+                // Empty extractScriptCode (SDK mock) + substr(sc, 0, len-49)
+                // produces a negative length. String.substring throws; Bitcoin
+                // Script and the TS interpreter yield empty. Match Go.
+                if (s < 0 || len <= 0) {
+                    return "";
+                }
                 int lo = Math.min(s * 2, h.length());
                 int hi = Math.min((s + len) * 2, h.length());
+                if (hi < lo) {
+                    return "";
+                }
                 return h.substring(lo, hi);
             }
             case "reverseBytes": {

@@ -14,7 +14,14 @@ const TX_OVERHEAD: i64 = 10;
 /// output first, and sends any remaining value (minus fees) to a change
 /// address.
 ///
-/// Returns the unsigned transaction hex and the number of inputs.
+/// Returns the unsigned transaction hex and the number of inputs, or an
+/// `Err` describing why the transaction could not be built.
+///
+/// R-043: insufficient funding is a predictable runtime condition, not a
+/// programming error — a library crate must not abort its caller's process
+/// over it. The error string matches the Go tier's
+/// `BuildDeployTransaction` verbatim so the two SDKs report the same
+/// condition the same way.
 pub fn build_deploy_transaction(
     locking_script: &str,
     utxos: &[Utxo],
@@ -22,7 +29,7 @@ pub fn build_deploy_transaction(
     _change_address: &str,
     change_script: &str,
     fee_rate: Option<i64>,
-) -> (String, usize) {
+) -> Result<(String, usize), String> {
     if utxos.is_empty() {
         panic!("buildDeployTransaction: no UTXOs provided");
     }
@@ -32,11 +39,11 @@ pub fn build_deploy_transaction(
     let change = total_input - satoshis - fee;
 
     if change < 0 {
-        panic!(
+        return Err(format!(
             "buildDeployTransaction: insufficient funds. Need {} sats, have {}",
             satoshis + fee,
             total_input
-        );
+        ));
     }
 
     let mut tx = String::new();
@@ -79,7 +86,7 @@ pub fn build_deploy_transaction(
     // Locktime (4 bytes LE)
     tx.push_str(&to_little_endian_32(0));
 
-    (tx, utxos.len())
+    Ok((tx, utxos.len()))
 }
 
 /// Estimate the fee for a deploy transaction given the number of P2PKH
@@ -154,7 +161,7 @@ pub fn select_utxos(
         }
     }
 
-    // Return all UTXOs; build_deploy_transaction will panic if still insufficient
+    // Return all UTXOs; build_deploy_transaction reports an Err if still insufficient
     selected
 }
 
@@ -368,7 +375,8 @@ mod tests {
         let utxos = vec![make_utxo(100_000, 0)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, input_count) =
-            build_deploy_transaction(&locking_script, &utxos, 50_000, "addr", &change_script, None);
+            build_deploy_transaction(&locking_script, &utxos, 50_000, "addr", &change_script, None)
+                .unwrap();
 
         assert!(!tx_hex.is_empty());
         assert_eq!(input_count, 1);
@@ -381,7 +389,8 @@ mod tests {
         let utxos = vec![make_utxo(100_000, 0)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, _) =
-            build_deploy_transaction(locking_script, &utxos, 50_000, "addr", &change_script, None);
+            build_deploy_transaction(locking_script, &utxos, 50_000, "addr", &change_script, None)
+                .unwrap();
 
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.version, 1);
@@ -399,7 +408,7 @@ mod tests {
         let utxos = vec![make_utxo(30_000, 0), make_utxo(40_000, 1), make_utxo(50_000, 2)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, input_count) =
-            build_deploy_transaction("51", &utxos, 50_000, "addr", &change_script, None);
+            build_deploy_transaction("51", &utxos, 50_000, "addr", &change_script, None).unwrap();
 
         assert_eq!(input_count, 3);
         let parsed = parse_tx_hex(&tx_hex);
@@ -409,14 +418,57 @@ mod tests {
     #[test]
     #[should_panic(expected = "no UTXOs provided")]
     fn throws_no_utxos() {
-        build_deploy_transaction("51", &[], 50_000, "addr", "51", None);
+        let _ = build_deploy_transaction("51", &[], 50_000, "addr", "51", None);
     }
 
+    /// R-043: insufficient funds is an `Err` VALUE carrying both amounts, not
+    /// a panic. This test previously asserted
+    /// `#[should_panic(expected = "insufficient funds")]`.
     #[test]
-    #[should_panic(expected = "insufficient funds")]
-    fn throws_insufficient_funds() {
+    fn insufficient_funds_returns_err() {
         let utxos = vec![make_utxo(100, 0)];
-        build_deploy_transaction("51", &utxos, 50_000, "addr", "51", None);
+        let err = build_deploy_transaction("51", &utxos, 50_000, "addr", "51", None)
+            .expect_err("insufficient funds must be an Err, not a panic");
+        // Need = 50_000 + fee(21) = 50_021; have = the single 100-sat UTXO.
+        assert_eq!(
+            err,
+            "buildDeployTransaction: insufficient funds. Need 50021 sats, have 100",
+        );
+    }
+
+    /// R-043: an insufficient-funds rejection leaves the caller running, so a
+    /// subsequent well-funded build on the same code path still succeeds.
+    #[test]
+    fn caller_survives_insufficient_funds_and_can_retry() {
+        let change_script = format!("76a914{}88ac", "ff".repeat(20));
+        let poor = vec![make_utxo(100, 0)];
+        assert!(
+            build_deploy_transaction("51", &poor, 50_000, "addr", &change_script, None).is_err()
+        );
+
+        // ...and execution continues here.
+        let rich = vec![make_utxo(100_000, 0)];
+        let (tx_hex, input_count) =
+            build_deploy_transaction("51", &rich, 50_000, "addr", &change_script, None).unwrap();
+        assert_eq!(input_count, 1);
+        assert!(!tx_hex.is_empty());
+    }
+
+    /// R-043 control: the well-funded path must produce the SAME bytes it did
+    /// before the panic-to-Err change. This hex was captured from the
+    /// pre-change implementation.
+    #[test]
+    fn sufficient_funds_tx_bytes_unchanged() {
+        let change_script = format!("76a914{}88ac", "ff".repeat(20));
+        let utxos = vec![make_utxo(100_000, 0), make_utxo(40_000, 1)];
+        let (tx_hex, input_count) =
+            build_deploy_transaction("52", &utxos, 50_000, "addr", &change_script, Some(250))
+                .unwrap();
+        assert_eq!(input_count, 2);
+        assert_eq!(
+            tx_hex,
+            "0100000002ddccbbaaddccbbaaddccbbaaddccbbaaddccbbaaddccbbaaddccbbaaddccbbaa0000000000ffffffffddccbbaaddccbbaaddccbbaaddccbbaaddccbbaaddccbbaaddccbbaaddccbbaa0100000000ffffffff0250c30000000000000152385f0100000000001976a914ffffffffffffffffffffffffffffffffffffffff88ac00000000"
+        );
     }
 
     #[test]
@@ -424,7 +476,8 @@ mod tests {
         // txSize: TX_OVERHEAD(10) + 1 * P2PKH(148) + contract output(8 + 1 + 1) + change(34) = 202
         // Fee: ceil(202 * 100 / 1000) = 21
         let utxos = vec![make_utxo(50_021, 0)];
-        let (tx_hex, _) = build_deploy_transaction("51", &utxos, 50_000, "addr", "51", None);
+        let (tx_hex, _) =
+            build_deploy_transaction("51", &utxos, 50_000, "addr", "51", None).unwrap();
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.output_count, 1);
     }

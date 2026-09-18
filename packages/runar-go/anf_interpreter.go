@@ -1135,6 +1135,9 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		h := anfToString(args[0])
 		start := int(anfToBigInt(args[1]).Int64())
 		length := int(anfToBigInt(args[2]).Int64())
+		if start < 0 || length <= 0 {
+			return ""
+		}
 		lo := start * 2
 		hi := (start + length) * 2
 		if lo > len(h) {
@@ -1142,6 +1145,12 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		}
 		if hi > len(h) {
 			hi = len(h)
+		}
+		if lo < 0 {
+			lo = 0
+		}
+		if hi < lo {
+			return ""
 		}
 		return h[lo:hi]
 

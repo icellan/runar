@@ -591,7 +591,8 @@ header .subtitle {
 }
 
 .pg-hex,
-.pg-asm {
+.pg-asm,
+.pg-ir {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -603,4 +604,24 @@ header .subtitle {
   word-break: break-all;
   max-height: 260px;
   overflow: auto;
+}
+
+/* R-214: collapsed ANF IR panel in the playground result. */
+.pg-anf {
+  margin-top: 8px;
+}
+
+.pg-anf > summary {
+  cursor: pointer;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  padding: 4px 0;
+}
+
+.pg-ir {
+  margin-top: 6px;
+  word-break: normal;
+  max-height: 360px;
 }

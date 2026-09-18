@@ -1,6 +1,6 @@
 # Rúnar Frontend Specification
 
-**Version:** 0.1.0
+**Version:** 1.0.0-rc.1
 **Status:** Draft
 
 This document specifies the **language-agnostic contract** of Rúnar frontend parsers. Every parser -- regardless of input format (TypeScript, Solidity-like, Move-like, Go, Rust, Python, Zig, Ruby) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
@@ -215,10 +215,17 @@ PrimitiveTypeName =
     | "Addr"
     | "SigHashPreimage"
     | "Point"
+    | "P256Point"
+    | "P384Point"
     | "RabinSig"
     | "RabinPubKey"
     | "void"
 ```
+
+`Point` is the secp256k1 point type; `P256Point` and `P384Point` are its NIST
+peers, consumed by the `p256*` / `p384*` builtins. All three are ByteString
+subtypes carrying `x ‖ y` big-endian unsigned with no prefix byte, at 32, 32
+and 48 bytes per coordinate respectively.
 
 ### Type Normalization Rules
 
@@ -295,13 +302,26 @@ All parsers must produce statements using these exact `kind` values.
 }
 ```
 
-| Format | Loop syntax |
-|--------|-------------|
-| TypeScript | `for (let i = 0n; i < 10n; i++)` |
-| Solidity | `for (int256 i = 0; i < 10; i++)` |
-| Move | `let i = 0; while (i < 10) { ... i = i + 1; }` (desugared to for) |
-| Go | `for i := 0; i < 10; i++` |
-| Rust | `for i in 0..10` |
+All nine surfaces, ascending and descending. Every row in a column lowers to
+the same ANF `loop` node, which carries `{count, iterVar, start, step}` and
+synthesizes iteration `k` as `start + k*step` with `step` of `+1` or `-1`.
+
+| Format | Counting up | Counting down |
+|--------|-------------|---------------|
+| TypeScript | `for (let i = 0n; i < 10n; i++)` | `for (let i = 10n; i > 0n; i--)` |
+| Solidity | `for (int256 i = 0; i < 10; i++)` | `for (int256 i = 10; i > 0; i--)` |
+| Move | `let i = 0; while (i < 10) { ... i = i + 1; }` (desugared to for) | `let i = 10; while (i > 0) { ... i = i - 1; }` |
+| Go | `for i := 0; i < 10; i++` | `for i := 10; i > 0; i--` |
+| Rust | `for i in 0..10` | `for i in (0..10).rev()` |
+| Python | `for i in range(0, 10)` | `for i in range(10, 0, -1)` |
+| Zig | `while (i < 10) : (i += 1)` | `while (i > 0) : (i -= 1)` |
+| Ruby | `for i in 0...10` | `for i in 10.downto(1)` |
+| Java | `for (Bigint i = ...; i.lt(...); i = i.plus(Bigint.ONE))` | `for (Bigint i = ...; i.gt(...); i = i.minus(Bigint.ONE))` |
+
+Only a **unit** step is representable, in either direction. A non-unit step —
+`i += 2`, `range(0, 10, 2)`, a Move body ending `i = i + 2` — is a compile
+error in every tier rather than a loop silently rounded to `i++`, and so is a
+step whose sign disagrees with the comparison direction.
 
 ### ReturnStatement
 
@@ -438,7 +458,7 @@ All integer literals from all formats (with or without `n` suffix) must be repre
 | Solidity | `cond ? a : b` |
 | Move | `if (cond) a else b` (expression) |
 | Go | Not supported (use if/else statement) |
-| Rust | `if cond { a } else { b }` (expression) |
+| Rust | Not supported (use if/else statement) |
 
 ### PropertyAccessExpr
 
@@ -490,6 +510,21 @@ Represents `this.x` access. The `this`/`self`/`c.` prefix is stripped; only the 
 ```
 
 Same pattern as IncrementExpr, with `--` / `-= 1` / `x = x - 1`.
+
+### ArrayLiteralExpr
+
+```
+{
+    kind: "array_literal",
+    elements: Expression[]
+}
+```
+
+The initializer for a `FixedArray<T, N>` property. Element count and element
+types are validated in `03b-expand-fixed-arrays`, not by the parser: the
+parser's job is to produce the node with `elements` in source order. A literal
+whose length does not match the declared `N` is a compile-time diagnostic, not
+a parse error.
 
 ---
 

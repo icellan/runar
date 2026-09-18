@@ -30,6 +30,106 @@
       }
     },
     {
+      "method": "squareRoot",
+      "args": [],
+      "constructorArgs": [
+        "99n"
+      ],
+      "expect": "accept",
+      "note": "R-169: sqrt(99) = 9. The emitted script returned 10 until the Newton rounds got a convergence break — integer Newton reaches floor(sqrt(n)) and then oscillates, so a fixed round count landed on the wrong side of the bounce. 99 is chosen because the two spends above and the fixture's own 100n constructor are all values where the BUGGY script happened to agree.",
+      "expectedState": {
+        "value": "9n"
+      }
+    },
+    {
+      "method": "squareRoot",
+      "args": [],
+      "constructorArgs": [
+        "1000000000000n"
+      ],
+      "expect": "accept",
+      "note": "R-169: sqrt(10^12) = 1000000. The emitted script returned 15280627 — three orders of magnitude out, because 16 rounds seeded at guess = n only halve per round and never reach sqrt(n) for a large n. Pins the round count, not just the break: restore 16 rounds WITH the break and this row still reddens.",
+      "expectedState": {
+        "value": "1000000n"
+      }
+    },
+    {
+      "method": "squareRoot",
+      "args": [],
+      "constructorArgs": [
+        "0n"
+      ],
+      "expect": "accept",
+      "note": "Control: the n == 0 guard still skips the iteration rather than dividing by zero.",
+      "expectedState": {
+        "value": "0n"
+      }
+    },
+    {
+      "method": "exponentiate",
+      "args": [
+        "32n"
+      ],
+      "constructorArgs": [
+        "2n"
+      ],
+      "expect": "accept",
+      "note": "R-169 (pow half) CONTROL: 32 is the number of conditional multiplies lowerPow unrolls, so 2^32 is the largest power the script can compute and the guard OP_DUP <0> <33> OP_WITHIN OP_VERIFY must ADMIT it. This row is what an over-strict guard reddens: move the bound to exp < 32 and this fails while every reject below stays green, so the two halves cannot both be satisfied by a guard in the wrong place.",
+      "expectedState": {
+        "value": "4294967296n"
+      }
+    },
+    {
+      "method": "exponentiate",
+      "args": [
+        "0n"
+      ],
+      "constructorArgs": [
+        "7n"
+      ],
+      "expect": "accept",
+      "note": "R-169 (pow half) CONTROL at the other end: exp = 0 takes no branch in any of the 32 rounds, and 1 is the RIGHT answer there. A guard written 0 < exp rather than 0 <= exp reddens this row.",
+      "expectedState": {
+        "value": "1n"
+      }
+    },
+    {
+      "method": "exponentiate",
+      "args": [
+        "33n"
+      ],
+      "constructorArgs": [
+        "1n"
+      ],
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "note": "R-169 (pow half): 33 is the SMALLEST exponent the 32-round unroll cannot compute -- it returned base^32 with no error. base = 1 is chosen deliberately, and it is the only choice that makes this row DISCRIMINATING. For any other base the covenant rejects a past-bound spend anyway, for the wrong reason: the SDK predicts base^exp for the continuation output while the script computes base^32, the two disagree and hashOutputs fails -- so a row at base = 2 passes with the guard AND without it, and proves nothing. At base = 1 (and 0) the clamp is invisible to the state check because 1^33 == 1^32, so the ONLY thing that can reject this spend is the exponent guard. Measured with the guard removed: vmAccepted = true, continuation state value = 1. cryptoNearMiss is set for its runtime effect, not its name -- it asserts the rejection REACHED the Spend engine rather than failing earlier in the SDK."
+    },
+    {
+      "method": "exponentiate",
+      "args": [
+        "40n"
+      ],
+      "constructorArgs": [
+        "1n"
+      ],
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "note": "R-169 (pow half): well past the bound, and inside the 33..256 window where the constant folder computed the TRUE power while the script clamped to base^32 -- the window in which one source compiled fold-ON and fold-OFF produced scripts accepting mutually exclusive inputs. Same base-1 reasoning as the row above: measured with the guard removed, vmAccepted = true, continuation state value = 1."
+    },
+    {
+      "method": "exponentiate",
+      "args": [
+        "33n"
+      ],
+      "constructorArgs": [
+        "0n"
+      ],
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "note": "R-169 (pow half): the second base at which the clamp is invisible to the state check, 0^33 == 0^32 == 0. Measured with the guard removed: vmAccepted = true, continuation state value = 0. Two independent bases so a single arithmetic accident cannot carry the discrimination."
+    },
+    {
       "method": "divideBy",
       "args": [
         "2n"
@@ -39,5 +139,8 @@
       "expect": "reject",
       "note": "tampered continuation output"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "890b52f54a8adb05b3ee1ecaf265ba986911d71c26496660484de6f3a0b60c6a"
+  }
 }

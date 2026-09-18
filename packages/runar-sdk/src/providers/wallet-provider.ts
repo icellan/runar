@@ -8,8 +8,9 @@
 // ---------------------------------------------------------------------------
 
 import type { Provider } from './provider.js';
+import { txToTransactionData, warnNonFatal } from './provider.js';
 import type { Signer } from '../signers/signer.js';
-import type { TransactionData, TxInput, TxOutput, UTXO } from '../types.js';
+import type { TransactionData, UTXO } from '../types.js';
 import { buildP2PKHScript } from '../script-utils.js';
 import {
   Transaction,
@@ -21,6 +22,12 @@ import {
 // Options
 // ---------------------------------------------------------------------------
 
+/**
+ * The default ARC broadcaster. This is a MAINNET endpoint — see R-179 for why
+ * that matters at construction time.
+ */
+const MAINNET_ARC_URL = 'https://arc.gorillapool.io';
+
 export interface WalletProviderOptions {
   /** BRC-100 WalletClient instance. */
   wallet: WalletClient;
@@ -30,7 +37,11 @@ export interface WalletProviderOptions {
   basket: string;
   /** Tag for funding UTXOs within the basket (default: 'funding'). */
   fundingTag?: string;
-  /** ARC broadcast endpoint (default: 'https://arc.gorillapool.io'). */
+  /**
+   * ARC broadcast endpoint. Defaults to the MAINNET endpoint
+   * ('https://arc.gorillapool.io') and is therefore REQUIRED when `network` is
+   * anything other than 'mainnet' — see R-179.
+   */
   arcUrl?: string;
   /** Overlay service URL for tx submission and raw tx lookups (optional). */
   overlayUrl?: string;
@@ -73,10 +84,26 @@ export class WalletProvider implements Provider {
     this.signer = options.signer;
     this.basket = options.basket;
     this.fundingTag = options.fundingTag ?? 'funding';
-    this.arcUrl = options.arcUrl ?? 'https://arc.gorillapool.io';
+    this._network = options.network ?? 'mainnet';
+    // R-179: arcUrl and network used to be defaulted independently, so a
+    // provider configured for testnet reported getNetwork() === 'testnet' and
+    // broadcast every transaction to the MAINNET ARC, with nothing to say so.
+    // There is no canonical testnet ARC endpoint in this repo to default to,
+    // so a testnet provider has to name its own rather than inherit one that
+    // points at real money. The sibling GorillaPoolProvider derives its base
+    // URL from the network for the same reason.
+    if (options.arcUrl) {
+      this.arcUrl = options.arcUrl;
+    } else if (this._network === 'mainnet') {
+      this.arcUrl = MAINNET_ARC_URL;
+    } else {
+      throw new Error(
+        `WalletProvider: no default ARC endpoint for network '${this._network}' — ` +
+          `${MAINNET_ARC_URL} is a MAINNET broadcaster. Pass arcUrl explicitly.`,
+      );
+    }
     this.overlayUrl = options.overlayUrl;
     this.overlayTopics = options.overlayTopics;
-    this._network = options.network ?? 'mainnet';
     this._feeRate = options.feeRate ?? 100;
     this.broadcaster = options.broadcaster;
   }
@@ -166,7 +193,7 @@ export class WalletProvider implements Provider {
       const txid = result.txid;
       this.txCache.set(txid, tx.toHex());
       if (this.overlayUrl && this.overlayTopics && this.overlayTopics.length > 0) {
-        this.submitToOverlay(tx).catch(() => {});
+        this.submitToOverlay(tx).catch((e) => warnNonFatal('overlay submission', e));
       }
       return txid;
     }
@@ -190,7 +217,7 @@ export class WalletProvider implements Provider {
 
     // Fire-and-forget: submit to overlay for indexing
     if (this.overlayUrl && this.overlayTopics && this.overlayTopics.length > 0) {
-      this.submitToOverlay(tx).catch(() => {});
+      this.submitToOverlay(tx).catch((e) => warnNonFatal('overlay submission', e));
     }
 
     return txid;
@@ -254,26 +281,32 @@ export class WalletProvider implements Provider {
   }
 
   async getTransaction(txid: string): Promise<TransactionData> {
+    // R-151: this used to fall back to
+    //   { txid, version: 1, inputs: [], outputs: [], locktime: 0 }
+    // on a cache miss OR a parse failure, so a caller could not tell "this
+    // transaction has no outputs" from "I could not find this transaction".
+    // The same shape was already fixed once in this SDK — txToTransactionData
+    // in providers/provider.ts is that remediation — and never applied here.
     const cached = this.txCache.get(txid);
-    if (cached) {
-      try {
-        const tx = Transaction.fromHex(cached);
-        const inputs: TxInput[] = tx.inputs.map((inp) => ({
-          txid: inp.sourceTXID || '',
-          outputIndex: inp.sourceOutputIndex,
-          script: inp.unlockingScript?.toHex() || '',
-          sequence: inp.sequence ?? 0xffffffff,
-        }));
-        const outputs: TxOutput[] = tx.outputs.map((out) => ({
-          satoshis: out.satoshis ?? 0,
-          script: out.lockingScript?.toHex() || '',
-        }));
-        return { txid, version: tx.version, inputs, outputs, locktime: tx.lockTime, raw: cached };
-      } catch { /* fall through */ }
+    if (cached === undefined) {
+      throw new Error(
+        `WalletProvider.getTransaction: transaction ${txid} is not in the provider's ` +
+          `cache. A wallet provider only knows transactions it has broadcast or been ` +
+          `given via cacheTx().`,
+      );
     }
 
-    // Minimal fallback
-    return { txid, version: 1, inputs: [], outputs: [], locktime: 0 };
+    let tx: Transaction;
+    try {
+      tx = Transaction.fromHex(cached);
+    } catch (e) {
+      throw new Error(
+        `WalletProvider.getTransaction: cached hex for ${txid} did not parse as a ` +
+          `transaction: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    return txToTransactionData(txid, tx);
   }
 
   async broadcast(tx: any): Promise<string> {
@@ -339,8 +372,12 @@ export class WalletProvider implements Provider {
         if (txid) this.txCache.set(txid, rawHex);
 
         // Broadcast to ARC (may already be known — non-fatal)
-        await this.broadcastTx(Transaction.fromHex(rawHex)).catch(() => {});
-      } catch { /* funding tx parse failure is non-fatal */ }
+        await this.broadcastTx(Transaction.fromHex(rawHex)).catch((e) =>
+          warnNonFatal('funding-tx broadcast', e),
+        );
+      } catch (e) {
+        warnNonFatal('funding-tx parse', e);
+      }
     }
   }
 }

@@ -1,0 +1,56 @@
+{
+  "fixture": "state-covenant-mechanics",
+  "kind": "stateful",
+  "signerKey": "alice",
+  "note": "R-192. `state-covenant` carries a fixture-wide `\"compilers\": [\"go\"]` allowlist, justified by two Go-only builtins (bbFieldMul, merkleRootSha256). But the allowlist is FIXTURE-wide, so the covenant's state-continuation lowering, its OP_CODESEPARATOR handling and its output construction were excused from cross-tier parity too — mechanics that have nothing to do with the STARK families. This is the same contract with the two builtin calls removed, as a full seven-tier fixture, so the mechanics are checked and only the two builtins stay isolated.",
+  "goldenHashes": {
+    "expected-script.hex": "93fdb80e7fa556140b2458575a15795f946a0795acb1e5e7425b2a7f05b3b6ac",
+    "expected-ir.json": "90f2cc46b4226a897d735ca9252cdb28ed7a3069ddb840dff2841278a77e99be"
+  },
+  "constructorArgs": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "5n",
+    "1111111111111111111111111111111111111111111111111111111111111111"
+  ],
+  "spends": [
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "6n",
+        "0xce0e2fe11db4681b4e87109fe19898cd64522bb37dc6549f5b0a137b3bc148af",
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "expect": "accept",
+      "note": "block 5 -> 6, pre-state matches, batch hash binds hash256(pre||new), and the readonly commitment is 32 bytes",
+      "expectedState": {
+        "stateRoot": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "blockNumber": "6n"
+      }
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "5n",
+        "0xce0e2fe11db4681b4e87109fe19898cd64522bb37dc6549f5b0a137b3bc148af",
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "expect": "reject",
+      "note": "block number must STRICTLY increase; 5 -> 5 must fail"
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "6n",
+        "0xce0e2fe11db4681b4e87109fe19898cd64522bb37dc6549f5b0a137b3bc148af",
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered continuation output — the covenant must bind the new state"
+    }
+  ]
+}

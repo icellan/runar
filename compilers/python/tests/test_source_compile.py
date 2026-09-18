@@ -65,8 +65,15 @@ class TestSourceCompile:
         artifact = must_compile_source(_source_path("boolean-logic"))
         for op in ("OP_IF", "OP_ELSE", "OP_ENDIF"):
             assert op in artifact.asm, f"expected {op} — `&&` / `||` must branch"
-        assert "OP_BOOLAND" not in artifact.asm
-        assert "OP_BOOLOR" not in artifact.asm
+        # W3 / BoolBamboozle: the `boolean` parameter's ABI-domain gate
+        # legitimately contains an OP_BOOLOR, and the stack lowerer emits it
+        # ahead of the method body — nothing to do with `&&` / `||`. Strip it
+        # so this assertion keeps discriminating what it was written for.
+        gate = "OP_DUP OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL OP_BOOLOR OP_VERIFY "
+        assert artifact.asm.startswith(gate), artifact.asm
+        body = artifact.asm[len(gate):]
+        assert "OP_BOOLAND" not in body
+        assert "OP_BOOLOR" not in body
 
     def test_source_compile_if_else(self):
         artifact = must_compile_source(_source_path("if-else"))

@@ -1,8 +1,16 @@
 //! Proc-macro crate for Rúnar smart contract attributes.
 //!
-//! - `#[runar::contract]` / `#[runar::stateful_contract]` — strips `#[readonly]`
-//!   field annotations (since Rust doesn't allow attribute macros on fields) and
-//!   passes the struct through.
+//! - `#[runar::contract]` / `#[runar::stateful_contract]` /
+//!   `#[runar::unsafe_contract]` — strip `#[readonly]` field annotations (since
+//!   Rust doesn't allow attribute macros on fields) and pass the struct
+//!   through.
+//!
+//! All three expand identically, and deliberately so (R-150): the macro exists
+//! only to make the struct compile in Rust. Which base class a contract extends
+//! is carried by the attribute NAME and read by the Rúnar `.runar.rs` frontend,
+//! which sets `parentClass` from it. That distinction is not expressible as a
+//! Rust-level transform, so applying the wrong attribute compiles here and is
+//! caught there.
 //!
 //! Methods live in a plain `impl ContractName { ... }` block — no attribute is
 //! required. `pub fn` marks a public spending entry point; bare `fn` is a
@@ -20,6 +28,26 @@ use syn::{parse_macro_input, Fields, Item, ItemStruct};
 /// The Rúnar compiler parses these annotations with its own parser.
 #[proc_macro_attribute]
 pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    expand_contract_like(item, "contract")
+}
+
+/// The shared body of all three contract attributes.
+///
+/// R-150: they expand IDENTICALLY, and that is correct rather than an
+/// oversight — the macro's only job is to make the struct compile in Rust by
+/// stripping `#[readonly]`, which Rust does not allow on fields. The
+/// stateless / stateful / unsafe distinction is carried by the ATTRIBUTE NAME
+/// in the source text and read by the Rúnar `.runar.rs` frontend, which sets
+/// `parentClass` from it; nothing about that distinction is expressible as a
+/// Rust-level transform. Applying the wrong one therefore compiles and passes
+/// `cargo test` — and is caught by the Rúnar frontend, which is the only layer
+/// that knows what the three mean.
+///
+/// `name` exists so the diagnostic names the attribute the author actually
+/// wrote. Before, `#[stateful_contract]` on an enum reported
+/// "#[contract] can only be applied to a struct", because the delegation
+/// carried the callee's name into the message.
+fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
     let parsed = parse_macro_input!(item as Item);
 
     // Only structs are supported — bail out with a compile error otherwise.
@@ -28,31 +56,92 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
         other => {
             let err = syn::Error::new_spanned(
                 &other,
-                "#[contract] can only be applied to a struct",
+                format!("#[{name}] can only be applied to a struct"),
             );
             return err.into_compile_error().into();
         }
     };
 
+    let ident = s.ident.clone();
+    let mut_fields = mutable_named_fields(&s.fields);
     strip_readonly_from_fields(&mut s.fields);
 
-    quote! { #s }.into()
+    let field_args = mut_fields.iter().map(|(n, ty)| quote! { #n: #ty });
+    let field_uses = mut_fields.iter().map(|(n, _)| quote! { let _ = #n; });
+
+    // A second impl block is visible to the contract's own `impl` in the
+    // same module (`#[path]` tests). Extra args match mutable properties
+    // in declaration order — the same positional convention the compiler
+    // uses for `this.addOutput(satoshis, ...)`.
+    quote! {
+        #s
+        impl #ident {
+            #[allow(dead_code)]
+            fn add_output<S>(&mut self, _satoshis: S, #(#field_args),*) {
+                #(#field_uses)*
+            }
+            #[allow(dead_code)]
+            fn add_raw_output<S, B: ::core::convert::AsRef<[u8]>>(
+                &mut self,
+                _satoshis: S,
+                _script: B,
+            ) {
+            }
+            #[allow(dead_code)]
+            fn add_data_output<S, B: ::core::convert::AsRef<[u8]>>(
+                &mut self,
+                _satoshis: S,
+                _data: B,
+            ) {
+            }
+        }
+    }
+    .into()
+}
+
+fn mutable_named_fields(fields: &Fields) -> Vec<(syn::Ident, syn::Type)> {
+    match fields {
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .filter_map(|f| {
+                if f.attrs.iter().any(is_readonly_attr) {
+                    return None;
+                }
+                let ident = f.ident.clone()?;
+                // Compiler-injected sighash preimage is not contract state.
+                // Both Rust parsers omit it; including it here makes
+                // `add_output` require an extra positional argument that
+                // native `this.add_output(sats, ...mutable)` calls do not pass.
+                if ident == "tx_preimage" || ident == "txPreimage" {
+                    return None;
+                }
+                Some((ident, f.ty.clone()))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Marks a struct as a stateful Rúnar smart contract.
 #[proc_macro_attribute]
 pub fn stateful_contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    contract(TokenStream::new(), item)
+    expand_contract_like(item, "stateful_contract")
 }
 
 /// Marks a struct as an `UnsafeSmartContract` — the asm-escape-hatch base
-/// class. Like `#[runar::contract]`, all fields must be readonly; the unsafe
-/// designation only relaxes the type-checked subset for the bytes inside
-/// `asm(...)` calls, not for mutable state. The Rúnar Rust-DSL frontend keys
-/// off the `#[runar::unsafe_contract]` attribute to set `parentClass`.
+/// class. The unsafe designation relaxes the type-checked subset for the bytes
+/// inside `asm(...)` calls, not for mutable state. The Rúnar Rust-DSL frontend
+/// keys off the `#[runar::unsafe_contract]` attribute to set `parentClass`.
+///
+/// R-150: this doc comment used to assert "all fields must be readonly". That
+/// is a rule of the RÚNAR FRONTEND, not of this macro — nothing here enforces
+/// it, and a reader taking the sentence at face value would expect a Rust-level
+/// compile error that has never existed. The claim is stated where it is true
+/// instead of where it is merely believed.
 #[proc_macro_attribute]
 pub fn unsafe_contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    contract(TokenStream::new(), item)
+    expand_contract_like(item, "unsafe_contract")
 }
 
 

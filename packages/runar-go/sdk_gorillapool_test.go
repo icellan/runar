@@ -16,7 +16,10 @@ import (
 // baseURL so all subsequent HTTP calls hit the test handler.
 func newTestGorillaPoolProvider(handler http.HandlerFunc) (*GorillaPoolProvider, *httptest.Server) {
 	server := httptest.NewServer(handler)
-	p := NewGorillaPoolProvider("mainnet")
+	p, err := NewGorillaPoolProvider("mainnet")
+	if err != nil {
+		panic(err)
+	}
 	p.baseURL = server.URL
 	return p, server
 }

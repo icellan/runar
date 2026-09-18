@@ -24,8 +24,25 @@ sourceSets {
         java {
             include("**/*.java")
             include("**/*.runar.java")
+
+            // No exclusions. `byte-builtins` used to be one: `split` was
+            // specified as a pair the language could not name, so the compiler
+            // bound the right half while `runar.lang.Builtins.split` returned a
+            // `ByteString[]`, and javac rejected the assignment. `split` is now
+            // single-valued in both, so every .runar.java example compiles.
+            // `javac-source-set.test.ts` holds this list EMPTY.
         }
     }
+}
+
+// R-210: lock the dependency graph so `osv-scanner` in dependency-audit.yml can
+// see it. Five of the seven Gradle projects in this repo had no lock state, so
+// the audit job scanned two lockfiles and the CI comment described the repo as
+// having exactly those two. With lock state present, Gradle fails any ordinary
+// build if a declared version changes without `gradle dependencies
+// --write-locks`, so the scanned lockfile cannot drift from the real graph.
+dependencyLocking {
+    lockAllConfigurations()
 }
 
 dependencies {

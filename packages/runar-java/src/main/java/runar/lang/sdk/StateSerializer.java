@@ -59,8 +59,34 @@ public final class StateSerializer {
     /**
      * Deserialises state from the raw hex bytes between the OP_RETURN
      * separator and the end of the script.
+     *
+     * <p>FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out
+     * of a locking script any third party can construct, so it is untrusted
+     * input, and the caller then builds and SIGNS a continuation output
+     * committing to the restored state. A state section that does not describe
+     * EXACTLY {@code fields} is rejected:
+     *
+     * <ul>
+     *   <li>truncation — a field running past the end of the blob throws
+     *       {@link IllegalArgumentException}. Every arm used to be a bare
+     *       {@code hex.substring(offset, offset + N)} that threw a raw
+     *       {@link StringIndexOutOfBoundsException} instead: a JDK bounds error
+     *       escaping the SDK on attacker-controlled input, not a refusal.</li>
+     *   <li>overlong tails — bytes left over after the last declared field
+     *       throw instead of being silently dropped.</li>
+     * </ul>
+     *
+     * <p>Restoring wrong-but-plausible state from a corrupted continuation is
+     * worse than not restoring it at all.
+     *
+     * @throws IllegalArgumentException if the blob does not match {@code fields} exactly
      */
     public static Map<String, Object> deserialize(List<StateField> fields, String scriptHex) {
+        if (scriptHex.length() % 2 != 0) {
+            throw new IllegalArgumentException(
+                "deserializeState: state blob is " + scriptHex.length()
+                    + " hex chars — not a whole number of bytes");
+        }
         List<StateField> sorted = new ArrayList<>(fields);
         sorted.sort(Comparator.comparingInt(StateField::index));
         Map<String, Object> out = new LinkedHashMap<>();
@@ -72,13 +98,19 @@ public final class StateSerializer {
                 int total = f.fixedArray().syntheticNames().size();
                 List<Object> flat = new ArrayList<>(total);
                 for (int i = 0; i < total; i++) {
-                    Object v = decodeStateValue(scriptHex, offset, leafType);
-                    flat.add(v);
+                    flat.add(decodeStateValue(scriptHex, offset, leafType, f.name() + "[" + i + "]"));
                 }
                 out.put(f.name(), regroupNestedValue(flat, dims));
             } else {
-                out.put(f.name(), decodeStateValue(scriptHex, offset, f.type()));
+                out.put(f.name(), decodeStateValue(scriptHex, offset, f.type(), f.name()));
             }
+        }
+        if (offset[0] != scriptHex.length()) {
+            throw new IllegalArgumentException(String.format(
+                "deserializeState: %d unexpected trailing byte(s) after the last state field "
+                    + "(consumed %d of %d bytes) — the state section does not match the "
+                    + "artifact's stateFields",
+                (scriptHex.length() - offset[0]) / 2, offset[0] / 2, scriptHex.length() / 2));
         }
         return out;
     }
@@ -99,8 +131,37 @@ public final class StateSerializer {
     static String encodeStateValue(Object value, String fieldType, String label) {
         return switch (fieldType) {
             case "int", "bigint" -> encodeNum2Bin(toBigInteger(value), 8, label);
-            case "bool" -> Boolean.TRUE.equals(value) ? "01" : "00";
-            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point" -> String.valueOf(value);
+            // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
+            // what every compiler writes into stateFields[].type, alongside
+            // encoding "bool1" / byteLength 1 — and `bool` is an accepted alias.
+            // Matching only on "bool" meant a REAL boolean state field fell through
+            // to the push-data default below and was framed as the ASCII text
+            // 02 74727565: 3 bytes longer than the continuation the script's own
+            // reader rebuilds, so hash256(outputs) never matched and the first
+            // spend was impossible.
+            case "bool", "boolean" -> Boolean.TRUE.equals(value) ? "01" : "00";
+            // Fixed-size byte types: raw hex, no framing needed. P256Point (64)
+            // and P384Point (96) belong here because runar-lang's cast
+            // constructors hard-assert those widths and all seven compilers emit
+            // them as fixed raw slices; framing them instead deploys a state
+            // section 1-2 bytes long and the first spend fails.
+            //
+            // A MISSING value is refused rather than formatted.
+            // String.valueOf(null) is "null", which is not hex — and the other
+            // six SDKs each invented a DIFFERENT non-hex placeholder for the
+            // same mistake (Go "<nil>", TS "undefined", Python/Ruby ""), a
+            // silent byte divergence on a path whose bytes are committed on
+            // chain. Refusing is the only answer that is the same in every tier.
+            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point" -> {
+                if (value == null) {
+                    throw new IllegalArgumentException(String.format(
+                        "serializeState: state field \"%s\" (%s) has no value. Writing a "
+                            + "placeholder would deploy a state section the contract's own "
+                            + "on-chain reader cannot parse, leaving the output unspendable",
+                        label, fieldType));
+                }
+                yield String.valueOf(value);
+            }
             default -> {
                 String hex = String.valueOf(value);
                 if (hex.isEmpty()) yield "00";
@@ -163,45 +224,51 @@ public final class StateSerializer {
     // Decoding
     // ------------------------------------------------------------------
 
-    static Object decodeStateValue(String hex, int[] offset, String fieldType) {
+    /**
+     * Fixed on-wire width of a state field type in bytes, or {@code null} if the
+     * type is variable-width. The single table {@code encodeStateValue}'s raw
+     * branch and {@code decodeStateValue}'s bounds check both read, so the
+     * writer and the reader cannot drift.
+     */
+    static Integer stateFieldByteWidth(String fieldType) {
         return switch (fieldType) {
-            case "bool" -> {
-                boolean b = !"00".equals(hex.substring(offset[0], offset[0] + 2));
-                offset[0] += 2;
-                yield b;
-            }
-            case "int", "bigint" -> {
-                int hexWidth = 8 * 2;
-                BigInteger v = decodeNum2Bin(hex.substring(offset[0], offset[0] + hexWidth));
-                offset[0] += hexWidth;
-                yield v;
-            }
-            case "PubKey" -> {
-                String s = hex.substring(offset[0], offset[0] + 66);
-                offset[0] += 66;
-                yield s;
-            }
-            case "Addr", "Ripemd160" -> {
-                String s = hex.substring(offset[0], offset[0] + 40);
-                offset[0] += 40;
-                yield s;
-            }
-            case "Sha256" -> {
-                String s = hex.substring(offset[0], offset[0] + 64);
-                offset[0] += 64;
-                yield s;
-            }
-            case "Point" -> {
-                String s = hex.substring(offset[0], offset[0] + 128);
-                offset[0] += 128;
-                yield s;
-            }
-            default -> {
-                ScriptUtils.DecodedPush dp = ScriptUtils.decodePushDataState(hex, offset[0]);
-                offset[0] += dp.hexCharsConsumed();
-                yield dp.dataHex();
-            }
+            case "bool", "boolean" -> 1;
+            case "int", "bigint" -> 8;
+            case "PubKey" -> 33;
+            case "Addr", "Ripemd160" -> 20;
+            case "Sha256" -> 32;
+            case "Point", "P256Point" -> 64;
+            case "P384Point" -> 96;
+            default -> null;
         };
+    }
+
+    static Object decodeStateValue(String hex, int[] offset, String fieldType, String label) {
+        Integer width = stateFieldByteWidth(fieldType);
+        if (width == null) {
+            // Variable-length / unknown types: push-data decoding.
+            ScriptUtils.DecodedPush dp = ScriptUtils.decodePushDataState(hex, offset[0]);
+            offset[0] += dp.hexCharsConsumed();
+            return dp.dataHex();
+        }
+        int hexWidth = width * 2;
+        if (offset[0] + hexWidth > hex.length()) {
+            throw new IllegalArgumentException(String.format(
+                "deserializeState: truncated state — field \"%s\" (%s) needs %d byte(s) at "
+                    + "offset %d but only %d byte(s) remain",
+                label, fieldType, width, offset[0] / 2,
+                Math.max(0, hex.length() - offset[0]) / 2));
+        }
+        String data = hex.substring(offset[0], offset[0] + hexWidth);
+        offset[0] += hexWidth;
+        // Both spellings, matching encodeStateValue — a reader that knows only
+        // "bool" walks a real boolean field as push data and desynchronises
+        // every field after it.
+        if (fieldType.equals("bool") || fieldType.equals("boolean")) return !"00".equals(data);
+        // 8 raw bytes LE sign-magnitude (NUM2BIN 8).
+        if (fieldType.equals("int") || fieldType.equals("bigint")) return decodeNum2Bin(data);
+        // Raw fixed-size byte types.
+        return data;
     }
 
     static BigInteger decodeNum2Bin(String hex) {
@@ -259,6 +326,103 @@ public final class StateSerializer {
             current = inner.substring(0, splitAt).trim();
         }
         return current;
+    }
+
+    /**
+     * Spreads every grouped FixedArray entry of a state record ({@code table}
+     * holding a possibly-nested list of length N) over the SYNTHETIC scalar
+     * names the leaves are really called ({@code table__0}..{@code table__3},
+     * {@code grid__0__0}..). The grouped entries are kept as well, for callers
+     * that read them afterwards.
+     *
+     * <p>This is the ANF-interpreter boundary. Pass {@code 03b-expand-fixed-arrays}
+     * runs BEFORE ANF lowering, so the ANF program has no property called
+     * {@code table} at all — every {@code load_prop} / {@code update_prop} in
+     * the method body names one of the synthetic leaves. Handing the interpreter
+     * the grouped map left it evaluating {@code this.table[i]++} against an
+     * ABSENT property and falling back to the property's {@code initialValue};
+     * because a runtime-index write lowers to a per-leaf select it rewrites
+     * EVERY leaf, so a call on a contract restored from chain rewound the whole
+     * array to its deploy-time contents.
+     *
+     * <p>Mirrors {@code flattenFixedArrayState} in packages/runar-sdk/src/contract.ts
+     * and packages/runar-go/sdk_contract.go, and
+     * {@code _flatten_fixed_array_state} in packages/runar-py/runar/sdk/contract.py,
+     * including their two rules: a non-list value is NOT spread over N leaves
+     * (nothing sensible to spread), and an explicitly-supplied scalar wins over
+     * the grouped list it is also spelled inside.
+     */
+    public static Map<String, Object> flattenFixedArrayState(
+        List<StateField> fields,
+        Map<String, Object> state
+    ) {
+        Map<String, Object> out = new LinkedHashMap<>(state);
+        if (fields == null) return out;
+        for (StateField f : fields) {
+            if (f.fixedArray() == null) continue;
+            Object value = state.get(f.name());
+            if (!(value instanceof List)) continue;
+            List<Object> flat = flattenNestedValue(value, parseFixedArrayDims(f.type()));
+            List<String> names = f.fixedArray().syntheticNames();
+            for (int i = 0; i < names.size(); i++) {
+                String synth = names.get(i);
+                if (out.containsKey(synth)) continue;
+                if (i < flat.size()) out.put(synth, flat.get(i));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Rebuilds each grouped FixedArray entry of a state record from the
+     * synthetic scalar leaves the ANF interpreter writes, so the user-facing
+     * {@code state()} and the serializer's grouped fallback both see the
+     * post-call value rather than the pre-call one. Synthetic entries are left
+     * in place; non-FixedArray fields pass through untouched.
+     *
+     * <p>A field whose leaves are entirely absent from the map is left alone:
+     * the method did not touch that array, so there is nothing to reconstruct.
+     * A leaf the method did not write falls back to its pre-call value from the
+     * grouped entry, so a partial write keeps the untouched slots instead of
+     * zeroing them.
+     *
+     * <p>Mirrors {@code regroupFixedArrayState} / {@code _regroup_fixed_array_state}
+     * in the TS, Go and Python SDKs.
+     */
+    public static Map<String, Object> regroupFixedArrayState(
+        List<StateField> fields,
+        Map<String, Object> state
+    ) {
+        Map<String, Object> out = new LinkedHashMap<>(state);
+        if (fields == null) return out;
+        for (StateField f : fields) {
+            if (f.fixedArray() == null) continue;
+            List<String> names = f.fixedArray().syntheticNames();
+            List<Object> flat = new ArrayList<>(names.size());
+            boolean[] written = new boolean[names.size()];
+            boolean sawAny = false;
+            for (int i = 0; i < names.size(); i++) {
+                String synth = names.get(i);
+                if (out.containsKey(synth)) {
+                    flat.add(out.get(synth));
+                    written[i] = true;
+                    sawAny = true;
+                } else {
+                    flat.add(null);
+                }
+            }
+            if (!sawAny) continue;
+            List<Integer> dims = parseFixedArrayDims(f.type());
+            Object prior = state.get(f.name());
+            if (prior instanceof List) {
+                List<Object> priorFlat = flattenNestedValue(prior, dims);
+                for (int i = 0; i < flat.size(); i++) {
+                    if (!written[i] && i < priorFlat.size()) flat.set(i, priorFlat.get(i));
+                }
+            }
+            out.put(f.name(), regroupNestedValue(flat, dims));
+        }
+        return out;
     }
 
     @SuppressWarnings("unchecked")

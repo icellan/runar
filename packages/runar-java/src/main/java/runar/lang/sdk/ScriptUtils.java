@@ -60,35 +60,74 @@ public final class ScriptUtils {
      * (0x51..0x60) and {@code OP_1NEGATE} (0x4f) are NOT decoded as
      * single-byte values — accepting them would let the SDK read a state
      * section the contract's own script cannot parse.
+     *
+     * @throws IllegalArgumentException if the framing is truncated, non-hex, or
+     *     not a push at all (C2 — this used to throw a raw
+     *     {@link StringIndexOutOfBoundsException} or silently consume a byte).
      */
     public static DecodedPush decodePushDataState(String hex, int offset) {
-        int opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
+        need(hex, offset, 2, "push opcode");
+        int opcode;
+        try {
+            opcode = Integer.parseInt(hex.substring(offset, offset + 2), 16);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                "deserializeState: non-hex byte at offset " + (offset / 2) + " in the state section");
+        }
         if (opcode <= 75) {
             int dataLen = opcode * 2;
+            need(hex, offset, 2 + dataLen, "push payload");
             return new DecodedPush(hex.substring(offset + 2, offset + 2 + dataLen), 2 + dataLen);
         }
         if (opcode == 0x4c) {
+            need(hex, offset, 4, "OP_PUSHDATA1 length prefix");
             int length = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
             int dataLen = length * 2;
+            need(hex, offset, 4 + dataLen, "OP_PUSHDATA1 payload");
             return new DecodedPush(hex.substring(offset + 4, offset + 4 + dataLen), 4 + dataLen);
         }
         if (opcode == 0x4d) {
+            need(hex, offset, 6, "OP_PUSHDATA2 length prefix");
             int lo = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
             int hi = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
             int length = lo | (hi << 8);
             int dataLen = length * 2;
+            need(hex, offset, 6 + dataLen, "OP_PUSHDATA2 payload");
             return new DecodedPush(hex.substring(offset + 6, offset + 6 + dataLen), 6 + dataLen);
         }
         if (opcode == 0x4e) {
+            need(hex, offset, 10, "OP_PUSHDATA4 length prefix");
             int b0 = Integer.parseInt(hex.substring(offset + 2, offset + 4), 16);
             int b1 = Integer.parseInt(hex.substring(offset + 4, offset + 6), 16);
             int b2 = Integer.parseInt(hex.substring(offset + 6, offset + 8), 16);
             int b3 = Integer.parseInt(hex.substring(offset + 8, offset + 10), 16);
             int length = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
             int dataLen = length * 2;
+            need(hex, offset, 10 + dataLen, "OP_PUSHDATA4 payload");
             return new DecodedPush(hex.substring(offset + 10, offset + 10 + dataLen), 10 + dataLen);
         }
-        return new DecodedPush("", 2);
+        // Not a push opcode at all — encodePushDataState can never emit one, so
+        // the state section is malformed. This used to consume one byte and
+        // return an empty value, desynchronising every subsequent field.
+        throw new IllegalArgumentException(String.format(
+            "deserializeState: byte 0x%02x at offset %d is not a push opcode; "
+                + "the state section is malformed",
+            opcode, offset / 2));
+    }
+
+    /**
+     * Asserts {@code chars} hex chars are available from {@code offset}, else
+     * fails closed (C2). Without this every branch above was a bare
+     * {@code substring} that threw a raw {@link StringIndexOutOfBoundsException}
+     * on a short third-party blob.
+     */
+    private static void need(String hex, int offset, int chars, String what) {
+        if (offset + chars > hex.length()) {
+            throw new IllegalArgumentException(String.format(
+                "deserializeState: truncated state — %s runs past the end of the state section "
+                    + "(needs %d byte(s) at offset %d, only %d remain)",
+                what, chars / 2, offset / 2, Math.max(0, hex.length() - offset) / 2));
+        }
     }
 
     /**

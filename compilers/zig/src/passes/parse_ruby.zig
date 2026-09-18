@@ -25,6 +25,7 @@
 //!   - `Runar.check_sig(sig, pk)` -> `checkSig(sig, pk)` (Runar. prefix builtins)
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -75,14 +76,6 @@ pub fn parseRuby(allocator: Allocator, source: []const u8, file_name: []const u8
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -1015,6 +1008,8 @@ const Parser = struct {
     /// Rúnar type or a (possibly nested) FixedArray shape.
     const RbType = struct {
         info: RunarType,
+        /// The type name as the author spelled it. Diagnostics only — N-109.
+        name: []const u8 = "",
         /// Outer length when `info == .fixed_array`. Zero otherwise.
         length: u32 = 0,
         /// Element type when `info == .fixed_array`. `.unknown` otherwise.
@@ -1052,13 +1047,14 @@ const Parser = struct {
             const element_info = if (inner.info == .fixed_array) RunarType.fixed_array else inner.info;
             return .{
                 .info = .fixed_array,
+                .name = "FixedArray",
                 .length = size,
                 .element = element_info,
                 .nested_length = if (inner.info == .fixed_array) inner.length else 0,
             };
         }
 
-        return .{ .info = info };
+        return .{ .info = info, .name = tok.text };
     }
 
     fn parseProp(self: *Parser, parent_class: ParentClass) ?PropertyNode {
@@ -1071,7 +1067,8 @@ const Parser = struct {
             return null;
         }
 
-        const raw_name = self.bump().text; // symbol value (without colon)
+        const raw_name_tok = self.bump(); // symbol value (without colon)
+        const raw_name = raw_name_tok.text;
         if (self.expect(.comma) == null) return null;
 
         // Parse type (supports FixedArray[T, N] and nested forms).
@@ -1117,6 +1114,10 @@ const Parser = struct {
             .type_info = rb_type.info,
             .readonly = is_readonly,
             .initializer = initializer,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = rb_type.name,
+            .source_loc = self.tokenSourceLoc(raw_name_tok),
             .fixed_array_length = rb_type.length,
             .fixed_array_element = rb_type.element,
             .fixed_array_nested_length = rb_type.nested_length,
@@ -1242,6 +1243,9 @@ const Parser = struct {
     fn methodToConstructor(self: *Parser, m: MethodNode) ConstructorNode {
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
+        // R-040: see parse_ts.methodToConstructor — the full body minus the
+        // `super(...)` call, so nothing is silently discarded.
+        var body: std.ArrayListUnmanaged(Statement) = .empty;
 
         for (m.body) |stmt| {
             switch (stmt) {
@@ -1251,16 +1255,19 @@ const Parser = struct {
                         .call => |call| {
                             if (std.mem.eql(u8, call.callee, "super")) {
                                 for (call.args) |arg| super_args.append(self.allocator, arg) catch {};
+                                continue;
                             }
                         },
                         else => {},
                     }
+                    body.append(self.allocator, stmt) catch {};
                 },
                 .assign => |assign| {
                     // this.x = value
                     assignments.append(self.allocator, .{ .target = assign.target, .value = assign.value }) catch {};
+                    body.append(self.allocator, stmt) catch {};
                 },
-                else => {},
+                else => body.append(self.allocator, stmt) catch {},
             }
         }
 
@@ -1268,6 +1275,7 @@ const Parser = struct {
             .params = m.params,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = body.items,
         };
     }
 
@@ -1509,22 +1517,59 @@ const Parser = struct {
 
         _ = self.expect(.kw_in);
 
-        // Parse start value
-        const start_expr = self.parseExpression() orelse return null;
-
-        // Expect range operator: .. (inclusive) or ... (exclusive)
+        // Three loop headers, all of them real Ruby that iterates exactly these
+        // values:
+        //
+        //   for i in 0...n       -> 0, 1, … n-1  (exclusive, ascending)
+        //   for i in 0..n        -> 0, 1, … n    (inclusive, ascending)
+        //   for i in n.downto(m) -> n, n-1, … m  (inclusive, DESCENDING)
+        //
+        // `downto` is what lets the Ruby surface spell a countdown. Ruby's
+        // range operators only ever ascend — `(5..2)` is empty — so
+        // `step = -1` was unreachable from this surface, and no fixture could
+        // exercise it across all nine. `Integer#downto` is the language's own
+        // countdown verb, it returns an Enumerator, and `for x in enum` is
+        // valid Ruby over one.
+        //
+        // The `downto` receiver has to be recognised from the TOKENS, before
+        // the expression parser runs: this tier's `MethodCall.object` is a
+        // `[]const u8`, so a postfix parse of `5.downto(2)` throws the literal
+        // receiver away ("unknown") and the start would be unrecoverable.
         var is_exclusive = false;
-        if (self.check(.dot_dot_dot)) {
-            is_exclusive = true;
-            _ = self.bump();
-        } else if (self.check(.dot_dot)) {
-            is_exclusive = false;
-            _ = self.bump();
-        } else {
-            self.addError("expected range operator '..' or '...' in for loop");
-        }
+        var descending = false;
+        var start_expr: Expression = undefined;
+        var end_expr: Expression = undefined;
 
-        const end_expr = self.parseExpression() orelse return null;
+        if (self.peekAhead(1).kind == .dot and
+            self.peekAhead(2).kind == .ident and
+            std.mem.eql(u8, self.peekAhead(2).text, "downto") and
+            self.peekAhead(3).kind == .lparen)
+        {
+            start_expr = self.parsePrimary() orelse return null;
+            _ = self.expect(.dot);
+            _ = self.bump(); // 'downto'
+            _ = self.expect(.lparen);
+            end_expr = self.parseExpression() orelse return null;
+            _ = self.expect(.rparen);
+            descending = true;
+            is_exclusive = false; // downto's bound is inclusive
+        } else {
+            // Parse start value
+            start_expr = self.parseExpression() orelse return null;
+
+            // Expect range operator: .. (inclusive) or ... (exclusive)
+            if (self.check(.dot_dot_dot)) {
+                is_exclusive = true;
+                _ = self.bump();
+            } else if (self.check(.dot_dot)) {
+                is_exclusive = false;
+                _ = self.bump();
+            } else {
+                self.addError("expected range operator '..' or '...', or '.downto(n)', in for loop");
+            }
+
+            end_expr = self.parseExpression() orelse return null;
+        }
 
         // Optional 'do' keyword
         _ = self.match(.kw_do);
@@ -1535,15 +1580,22 @@ const Parser = struct {
 
         // Extract integer values for the ForStmt (which uses init_value and bound)
         var init_value: i64 = 0;
-        switch (start_expr) {
-            .literal_int => |v| init_value = v,
-            else => {},
+        // N-137: a start that is not a compile-time literal cannot be unrolled.
+        var init_is_const: bool = true;
+        // N-138: `.literal_int` alone missed a negated literal, so
+        // `for i in -1...5` started at 0.
+        if (loopStartLiteral(start_expr)) |v| init_value = v else {
+            init_is_const = false;
         }
 
         var bound: i64 = 0;
         switch (end_expr) {
             .literal_int => |v| {
-                if (is_exclusive) {
+                if (descending or is_exclusive) {
+                    // `downto`'s bound is inclusive and this tier records that
+                    // as `inclusive`, so the raw value goes through unchanged
+                    // — the +1 below is the ASCENDING inclusive range's
+                    // exclusive-bound conversion and must not be applied here.
                     bound = v;
                 } else {
                     bound = v + 1; // inclusive range: bound becomes exclusive
@@ -1552,7 +1604,16 @@ const Parser = struct {
             else => {},
         }
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{
+            .var_name = var_name,
+            .init_value = init_value,
+            .init_is_const = init_is_const,
+            .bound = bound,
+            .descending = descending,
+            .inclusive = descending,
+            .body = body,
+            .source_loc = loc,
+        } };
     }
 
     fn parseReturnStatement(self: *Parser) ?Statement {
@@ -2216,8 +2277,11 @@ const Parser = struct {
             return Expression{ .literal_int = val };
         } else |_| {
             // Oversize decimal literal — carry as `literal_bigint`.
-            if (isAllAsciiDigits(stripped)) {
-                const decimal = self.allocator.dupe(u8, stripped) catch return Expression{ .literal_int = 0 };
+            // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+            // ordinary way to write secp256k1's group order, and accepted by the
+            // other six tiers -- used to fall into the `invalid integer` arm
+            // below, because this fallback only recognised decimal digits.
+            if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
                 return Expression{ .literal_bigint = decimal };
             }
             self.addErrorFmt("invalid integer: '{s}'", .{text});
@@ -2601,4 +2665,26 @@ test "rb parse property with default" {
     }
     // Constructor params should not include properties with defaults
     try std.testing.expectEqual(@as(usize, 0), c.constructor.params.len);
+}
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// discard path, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
 }

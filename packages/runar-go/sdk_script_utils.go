@@ -2,6 +2,7 @@ package runar
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 )
@@ -77,9 +78,16 @@ func readScriptElement(hexStr string, offset int) (dataHex string, totalHexChars
 }
 
 // decodeScriptNumber decodes a minimally-encoded Bitcoin Script number from hex.
-func decodeScriptNumber(dataHex string) int64 {
+//
+// N-074: a Script number is ARBITRARY PRECISION — Rúnar contracts routinely
+// carry 256-bit EC scalars and 1024-bit+ Rabin moduli as plain `bigint`
+// constructor args. Accumulating into an int64 wrapped SILENTLY at 9 data bytes
+// (|v| >= 2^63), so those values came back wrong and rebuilt a locking script
+// that no longer matched chain. The encode side (encodeBigIntScriptNumber) was
+// already arbitrary-precision; the asymmetry was the bug.
+func decodeScriptNumber(dataHex string) *big.Int {
 	if len(dataHex) == 0 {
-		return 0
+		return new(big.Int)
 	}
 	bytes := make([]byte, len(dataHex)/2)
 	for i := 0; i < len(dataHex); i += 2 {
@@ -89,23 +97,65 @@ func decodeScriptNumber(dataHex string) int64 {
 	negative := (bytes[len(bytes)-1] & 0x80) != 0
 	bytes[len(bytes)-1] &= 0x7f
 
-	var result int64
-	for i := len(bytes) - 1; i >= 0; i-- {
-		result = (result << 8) | int64(bytes[i])
+	// Sign-magnitude, little-endian: reverse into big-endian for SetBytes.
+	be := make([]byte, len(bytes))
+	for i, b := range bytes {
+		be[len(bytes)-1-i] = b
 	}
-	if result == 0 {
-		return 0
+	result := new(big.Int).SetBytes(be)
+	if result.Sign() == 0 {
+		return result
 	}
 	if negative {
-		return -result
+		return result.Neg(result)
 	}
 	return result
 }
 
+// scriptNumberValue narrows a decoded Script number back to int64 whenever it
+// fits, so every existing caller that type-asserts `int64` keeps working; only
+// values that genuinely cannot be represented surface as *big.Int (which
+// encodeArg already handles via encodeBigIntScriptNumber).
+func scriptNumberValue(n *big.Int) interface{} {
+	if n.IsInt64() {
+		return n.Int64()
+	}
+	return n
+}
+
 // interpretScriptElement interprets a script element according to its type.
+// abiValueEncoding classifies an ABI type name by how its constructor-slot
+// value is encoded in the script. TABLE, not a `case` list: the two spellings
+// that were missing from the old switch — the bigint aliases RabinSig /
+// RabinPubKey, and the CANONICAL boolean (only the `bool` alias was handled) —
+// each silently turned a value into a hex string on the way back off chain.
+// Mirrors packages/runar-ir-schema/src/abi-type-encoding.ts, the same table the
+// compiler stamps ConstructorSlot.valueEncoding from.
+var abiValueEncodings = map[string]string{
+	"bigint": "scriptnum",
+	"int":    "scriptnum",
+	// RabinSig / RabinPubKey are bigint aliases; verifyRabinSig lowers to
+	// OP_MOD, which reads its operand as a little-endian sign-magnitude
+	// Script number — exactly what bigint gets.
+	"RabinSig":    "scriptnum",
+	"RabinPubKey": "scriptnum",
+	// boolean is canonical; bool is the alias several frontends spell.
+	"boolean": "bool",
+	"bool":    "bool",
+}
+
+// abiValueEncoding returns "scriptnum", "bool", or "data" (the default for
+// ByteString and every fixed-width byte type).
+func abiValueEncoding(typeName string) string {
+	if enc, ok := abiValueEncodings[typeName]; ok {
+		return enc
+	}
+	return "data"
+}
+
 func interpretScriptElement(opcode int, dataHex string, typeName string) interface{} {
-	switch typeName {
-	case "int", "bigint":
+	switch abiValueEncoding(typeName) {
+	case "scriptnum":
 		if opcode == 0x00 {
 			return int64(0)
 		}
@@ -115,7 +165,7 @@ func interpretScriptElement(opcode int, dataHex string, typeName string) interfa
 		if opcode == 0x4f {
 			return int64(-1)
 		}
-		return decodeScriptNumber(dataHex)
+		return scriptNumberValue(decodeScriptNumber(dataHex))
 	case "bool":
 		if opcode == 0x00 {
 			return false

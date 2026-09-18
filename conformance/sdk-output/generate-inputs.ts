@@ -21,6 +21,18 @@ interface TestSpec {
    */
   source?: string;
   constructorArgs: Array<{ type: string; value: string }>;
+  /**
+   * Optional 1sat-ordinals inscription to attach before rendering the locking
+   * script. The envelope lands INSIDE the code part, so this is the only knob
+   * that exercises the seven SDKs' `withInscription` guards (N-043).
+   */
+  inscription?: { contentType: string; data: string };
+  /**
+   * N-043: mark the (artifact, inscription) pair as one every SDK must REFUSE.
+   * The runner then requires every tier to exit non-zero with a reason matching
+   * `pattern`, and compares no golden — the verdict IS the golden.
+   */
+  expectRefusal?: { pattern: string; reason: string };
 }
 
 /** Resolve a TestSpec's source path. Reads source.json when source is absent. */
@@ -284,6 +296,83 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'bigint', value: '0' },
     ],
   },
+  // R-248: the corpus's only MUTABLE `boolean` state field. The compiler
+  // spells the type `boolean` (never `bool`) and annotates it
+  // `encoding: "bool1", byteLength: 1`; five of the seven SDKs matched only
+  // on the spelling `bool` and mis-encoded the canonical one three different
+  // ways. Both polarities are pinned: two of the five wrote a constant `00`
+  // regardless of the value, and a false-only fixture would have let them
+  // through.
+  {
+    name: 'stateful-boolean-true',
+    source: 'conformance/sdk-output/contracts/StatefulFlag.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '7' },
+      { type: 'boolean', value: 'true' },
+    ],
+  },
+  {
+    name: 'stateful-boolean-false',
+    source: 'conformance/sdk-output/contracts/StatefulFlag.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '7' },
+      { type: 'boolean', value: 'false' },
+    ],
+  },
+  // N-043: the three verdicts every SDK must agree on when a 1sat-ordinals
+  // envelope meets a `SIZE(_codePart)` pin. The envelope is concatenated INTO
+  // the code part, and its length is a deploy-time value the compiler never
+  // sees, so the combination is only decidable here — in the SDK.
+  //
+  // MessageBoard has a ByteString state field, so its pin is an EQUALITY pin
+  // (9c) on the deployed code-part length: 1310 bytes (1304 before W1's
+  // unsigned 32-bit extractor zero-pad grew MessageBoard by 6). Attaching a
+  // 23-byte envelope makes the real code part 1333, every honest spend fails OP_VERIFY,
+  // and the funds are locked. Both escape routes are closed (the truncated code
+  // part dies on clause 8b), so refusal is the only safe verdict.
+  {
+    name: 'inscription-pin-exact-refused',
+    source: 'examples/ts/message-board/MessageBoard.runar.ts',
+    constructorArgs: [
+      { type: 'ByteString', value: HELLO },
+      { type: 'PubKey', value: PK },
+    ],
+    inscription: { contentType: 'text/plain', data: '6869' },
+    expectRefusal: {
+      pattern: 'pins SIZE\\(_codePart\\) == 1310',
+      reason:
+        'MessageBoard pins its deployed code-part length exactly; a 23-byte ' +
+        'ordinals envelope lands inside the code part and breaks the pin, so ' +
+        'every spend would fail OP_VERIFY with the funds already committed.',
+    },
+  },
+  // Control 1: StateCovenant's readonly params are variable-width, so the
+  // compiler degrades the pin to a LOWER bound (a2 = OP_GREATERTHANOREQUAL).
+  // Extra envelope bytes SATISFY a lower bound. Guarding `a2` would turn the
+  // N-043 fix into an outage for every contract of this shape, so this fixture
+  // must stay ACCEPTED by all seven tiers.
+  {
+    name: 'inscription-pin-lower-bound',
+    source: 'examples/ts/state-covenant/StateCovenant.runar.ts',
+    constructorArgs: [
+      { type: 'ByteString', value: HASH32 },
+      { type: 'bigint', value: '0' },
+      { type: 'ByteString', value: HASH32 },
+    ],
+    inscription: { contentType: 'text/plain', data: '6869' },
+  },
+  // Control 2: a fixed-size state layout emits NO code-part length pin at all —
+  // clause 8a pins the remainder instead, and the remainder is unaffected by an
+  // envelope that lands inside the code part. Nothing here is broken, so this
+  // must stay ACCEPTED by all seven tiers.
+  {
+    name: 'inscription-fixed-state',
+    source: 'examples/ts/stateful-counter/Counter.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '0' },
+    ],
+    inscription: { contentType: 'text/plain', data: '6869' },
+  },
   {
     name: 'tic-tac-toe',
     source: 'examples/ts/tic-tac-toe/TicTacToe.runar.ts',
@@ -432,6 +521,19 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'bigint', value: '85070591730234615893513767959916445698' },
     ],
   },
+  {
+    // R-094's FixedArray WRITE fixture, mirrored at the SDK layer. Pass 3b
+    // expands `table: FixedArray<bigint, 4>` into four mutable properties
+    // `table__0..table__3`, so this is the only artifact in the suite whose
+    // state section is a compiler-SYNTHESISED field list — every other
+    // fixture's stateFields are names the developer wrote. A tier whose state
+    // serializer ordered, named or counted the expanded slots differently
+    // would produce a divergent state section and the contract would not be
+    // spendable; nothing covered that, because no sdk-output fixture carried
+    // a `__N` state field at all.
+    name: 'fixed-array-write',
+    constructorArgs: [],
+  },
 ];
 
 const TMP_DIR = join(__dirname, '.tmp');
@@ -458,6 +560,12 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
  */
 const CHECK_ONLY = process.argv.includes('--check');
 const drifted: string[] = [];
+// A fixture that cannot be resolved, cannot be compiled, or produces no
+// artifact is a HARD failure in both modes, never a skip. Previously each of
+// those three paths logged and `continue`d, so `--check` reported
+// "inputs match the current compiler" and exited 0 for a fixture whose
+// contract no longer builds at all — the one case the gate exists to catch.
+const failures: string[] = [];
 
 for (const spec of TEST_SPECS) {
   let sourceRel: string;
@@ -465,6 +573,7 @@ for (const spec of TEST_SPECS) {
     sourceRel = resolveTestSource(spec);
   } catch (err: any) {
     console.error(`  ${err.message}`);
+    failures.push(`${spec.name} (source unresolvable: ${err.message})`);
     continue;
   }
   const sourcePath = join(ROOT, sourceRel);
@@ -484,6 +593,7 @@ for (const spec of TEST_SPECS) {
     );
   } catch (err: any) {
     console.error(`  FAILED to compile ${spec.name}: ${err.stderr?.toString().slice(0, 200)}`);
+    failures.push(`${spec.name} (does not compile)`);
     continue;
   }
 
@@ -491,6 +601,7 @@ for (const spec of TEST_SPECS) {
   const artifactPath = join(TMP_DIR, `${sourceBase}.json`);
   if (!existsSync(artifactPath)) {
     console.error(`  No artifact found for ${spec.name} at ${artifactPath}`);
+    failures.push(`${spec.name} (compiler produced no artifact)`);
     continue;
   }
   const artifact = JSON.parse(readFileSync(artifactPath, 'utf-8'));
@@ -502,7 +613,9 @@ for (const spec of TEST_SPECS) {
   delete artifact.sourceMap;
   delete artifact.buildTimestamp;
 
-  const input = { artifact, constructorArgs: spec.constructorArgs };
+  const input: Record<string, unknown> = { artifact, constructorArgs: spec.constructorArgs };
+  if (spec.inscription) input.inscription = spec.inscription;
+  if (spec.expectRefusal) input.expectRefusal = spec.expectRefusal;
   const testDir = join(TESTS_DIR, spec.name);
   const inputPath = join(testDir, 'input.json');
   const rendered = JSON.stringify(input, null, 2) + '\n';
@@ -532,6 +645,17 @@ for (const spec of TEST_SPECS) {
   if (!existsSync(testDir)) mkdirSync(testDir, { recursive: true });
   writeFileSync(inputPath, rendered);
   console.log(`  Wrote ${spec.name}/input.json`);
+}
+
+if (failures.length > 0) {
+  console.error(
+    `\n\u2717 ${failures.length} sdk-output fixture(s) could not be regenerated at all:\n` +
+      failures.map((f) => `    - ${f}`).join('\n') +
+      `\n\n  These are NOT drift — nothing was compared for them. Whatever input.json is on\n` +
+      `  disk is stale by definition, and the seven-SDK comparison is still running against it.\n` +
+      `  Fix the contract or the spec; do not re-stamp the golden.\n`,
+  );
+  process.exit(1);
 }
 
 if (CHECK_ONLY) {

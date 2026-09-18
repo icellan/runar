@@ -357,14 +357,83 @@ def _ec_emit_reverse32(e: Callable) -> None:
     e(_make_stack_op(op="drop"))
 
 
+def emit_point_len_verify(e: Callable, want: int) -> None:
+    """CL-BUG-095 -- length gate for a ``Point`` argument, ABORTING form.
+
+    A ``Point`` is DEFINED as exactly *want* bytes (x || y, big-endian, no
+    prefix). Nothing checked that: ``Point`` carries no width in the builtin
+    table, and every one of these values arrives as an unlock argument, so the
+    blob is attacker-sized. Surplus bytes were then silently DISCARDED, because
+    ``_ec_decompose_point`` splits at the coordinate width and
+    ``_ec_emit_reverse32`` reverses exactly 32 bytes and drops whatever is left
+    over -- so ``ecOnCurve(G || 0xff)`` returned TRUE and ``ecEncodeCompressed``
+    took its parity bit from the surplus.
+
+    This is NOT a new failure channel. An UNDER-length point already aborted, by
+    accident: ``OP_SPLIT`` runs off the end of the value. The gate makes the same
+    outcome explicit, and extends it to the over-length case that used to pass.
+
+    Aborting is right for every Point consumer that produces a VALUE and has no
+    error channel to report through -- ``ecAdd``, ``ecMul``, ``ecNegate``,
+    ``ecPointX``, ``ecPointY``, ``ecEncodeCompressed``. There is no correct value
+    to return for a blob that is not a point. The PREDICATES (``ecOnCurve`` and
+    friends) use ``emit_point_length_gate`` below instead, because for them "no"
+    is an answer.
+    """
+    e(_make_stack_op(op="opcode", code="OP_SIZE"))
+    e(_make_stack_op(op="push", value=_big_int_push(want)))
+    e(_make_stack_op(op="opcode", code="OP_NUMEQUALVERIFY"))
+
+
+def emit_point_length_gate(t: ECTracker, name: str, want: int, flag_name: str) -> None:
+    """CL-BUG-095 -- length gate for a ``Point`` argument, CLAMPING form.
+
+    Leaves ``[flag, clamped]``, where ``clamped`` is the value forced to exactly
+    *want* bytes (``v || 00*want`` split at *want*, tail dropped) and ``flag`` is
+    ``OP_SIZE(v) == want``.
+
+    Same shape, and the same reasoning, as ``_c_emit_length_gate`` in
+    p256_p384.py: the clamp exists so the gate can stay a FLAG. It is used by the
+    on-curve predicates, whose whole job is to answer "is this an acceptable
+    point?" over untrusted bytes -- and for a wrong-length blob the correct
+    answer is ``false``, not an aborted script. Aborting would break
+    ``if (ecOnCurve(p)) { ... } else { ... }``, which is the exact idiom this
+    module's own comments tell contract authors to write. The caller ANDs *flag*
+    into its boolean result, so whatever the clamped bytes happen to compute can
+    never make a wrong-length point certify as on-curve.
+
+    Branch-free: the emitted op sequence, and the tracker's static stack model,
+    are identical for every input length.
+    """
+    t.to_top(name)
+
+    def _gate(e: Callable) -> None:
+        e(_make_stack_op(op="opcode", code="OP_SIZE"))
+        e(_make_stack_op(op="push", value=_big_int_push(want)))
+        e(_make_stack_op(op="opcode", code="OP_NUMEQUAL"))
+        e(_make_stack_op(op="swap"))
+        e(_make_stack_op(op="push", value=_make_push_value(kind="bytes", bytes_=bytes(want))))
+        e(_make_stack_op(op="opcode", code="OP_CAT"))
+        e(_make_stack_op(op="push", value=_big_int_push(want)))
+        e(_make_stack_op(op="opcode", code="OP_SPLIT"))
+        e(_make_stack_op(op="drop"))
+
+    t.raw_block([name], "", _gate)
+    t.nm.append(flag_name)
+    t.nm.append(name)
+
+
 def _ec_decompose_point(t: ECTracker, point_name: str, x_name: str, y_name: str) -> None:
     """Decompose a 64-byte Point into (x_num, y_num) on stack.
 
     Consumes *point_name*, produces *x_name* and *y_name*.
     """
     t.to_top(point_name)
-    # OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+    # OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) -- but only for
+    # a value that really is 64 bytes. CL-BUG-095: gate the width first, here,
+    # so every consumer that decomposes a Point inherits the check.
     def _split(e: Callable) -> None:
+        emit_point_len_verify(e, 64)
         e(_make_stack_op(op="push", value=_big_int_push(32)))
         e(_make_stack_op(op="opcode", code="OP_SPLIT"))
     t.raw_block([point_name], "", _split)
@@ -431,6 +500,53 @@ def _ec_compose_point(t: ECTracker, x_name: str, y_name: str, result_name: str) 
 # ===========================================================================
 # Affine point addition (for ecAdd)
 # ===========================================================================
+
+def _ec_emit_coord_canon_verify(t: ECTracker, x_name: str, y_name: str) -> None:
+    """R-117: a Point's two coordinates must be FIELD ELEMENTS, aborting form.
+
+    ``_ec_decompose_point`` BIN2NUMs each half of the blob as an unsigned
+    integer, so any value that fits in the coordinate width is accepted --
+    ``x + p`` included, whenever ``x + p < 2**256`` (on secp256k1 that is every
+    ``x < 2**32 + 977``). Downstream field arithmetic reduces mod p, so
+    ``(x+p)||y`` behaves as the point ``(x, y)``; ``_ec_affine_add``'s two case
+    selectors do NOT reduce, and they are bare OP_NUMEQUAL on these raw values::
+
+        cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+        notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+
+    so for P and its alias both read 0, the chord path runs on two equal points,
+    ``den_chord = qx - px == 0 (mod p)``, and ``_ec_field_inv`` is Fermat with
+    inv(0) = 0. Measured before this gate landed, x = 1: ``ecAdd(P, P)`` gave
+    the correct 2P and ``ecAdd(P, P')`` gave x = p-2 -- a script that SUCCEEDED
+    and returned a blob that is not a point. Both the doubling case and the
+    P + (-P) case are driven by these selectors, so both are defeated by the
+    same trick.
+
+    REJECT rather than reduce: ``emit_ec_on_curve`` already answers "no" to a
+    non-canonical encoding, so reducing here would leave the predicate and the
+    value builtins disagreeing about whether the blob is a point at all. This is
+    also the policy CL-BUG-095 set for the WIDTH -- predicates clamp and flag,
+    value producers OP_VERIFY.
+
+    Callers are the user-facing value builtins only; deliberately NOT folded
+    into ``_ec_decompose_point``, which also runs inside ``emit_ec_on_curve``
+    and must stay total.
+
+    ``x`` and ``y`` are unsigned by construction, so "< p" is the whole check.
+    """
+    t.copy_to_top(x_name, "_cc_x")
+    _ec_push_field_p(t, "_cc_px")
+    t.raw_block(["_cc_x", "_cc_px"], "_cc_xok", lambda e: e(_make_stack_op(op="opcode", code="OP_LESSTHAN")))
+    t.copy_to_top(y_name, "_cc_y")
+    _ec_push_field_p(t, "_cc_py")
+    t.raw_block(["_cc_y", "_cc_py"], "_cc_yok", lambda e: e(_make_stack_op(op="opcode", code="OP_LESSTHAN")))
+
+    def _and_verify(e):
+        e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+        e(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+    t.raw_block(["_cc_xok", "_cc_yok"], "", _and_verify)
+
 
 def _ec_affine_add(t: ECTracker) -> None:
     """Perform affine point addition.
@@ -553,25 +669,135 @@ def _ec_affine_add(t: ECTracker) -> None:
     t.copy_to_top("py", "_py2")
     _ec_field_sub(t, "_s_px_rx", "_py2", "ry")
 
-    # Clean up original points
-    t.to_top("px")
-    t.drop()
-    t.to_top("py")
-    t.drop()
-    t.to_top("qx")
-    t.drop()
-    t.to_top("qy")
-    t.drop()
+    # CL-BUG-096: select over the infinity operands and the P == -Q case, and
+    # consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+    # mask that used to live here. See emit_affine_infinity_select.
+    emit_affine_infinity_select(t)
 
-    # P == -Q -> force the all-zero point (see the header comment).
-    t.to_top("rx")
-    t.copy_to_top("_notinf", "_notinf_x")
-    t.raw_block(["rx", "_notinf_x"], "rx",
-                lambda e: e(_make_stack_op(op="opcode", code="OP_MUL")))
-    t.to_top("ry")
+
+def emit_affine_infinity_select(t: ECTracker) -> None:
+    """CL-BUG-096 -- the infinity-operand case of affine addition, shared by
+    secp256k1 and the two NIST curves because it is pure integer masking and
+    touches no field parameter.
+
+    The group law has an identity, and this codegen has a representation for it:
+    the ALL-ZERO blob. It is not a theoretical value -- the codegen MANUFACTURES
+    it, from ``ecMul(P, k)`` whenever k == 0 (mod n), from affine_add's own
+    P + (-P) masking, and from the ``ec-mul-zero`` / ``ec-add-negate-cancel``
+    rewrites in optimizer/ec-rules.json. ``_ec_affine_add`` nonetheless had no
+    case for it: fed (G, O) it took the chord path with s = Gy/Gx and returned
+    an off-curve blob from a script that SUCCEEDED.
+
+    And the always-on EC optimizer already believed the right answer:
+    ``ec-add-identity-right`` / ``-left`` rewrite ``ecAdd($x, INFINITY)`` to
+    ``$x``. So the same source meant "P" with the optimizer on and "garbage"
+    with it off. Fixing the adder rather than deleting the two rules is the only
+    option that works, because the rules cannot see a zero scalar that only
+    exists at runtime -- deleting them would leave the runtime path just as
+    wrong and rewrite nothing.
+
+    Branch-free, in the style the rest of this adder uses. Exactly one of the
+    three masks is 1 and the other two are 0, so the sum selects one term::
+
+        pinf = (px == 0) AND (py == 0)          P is O
+        qinf = (qx == 0) AND (qy == 0)          Q is O
+        usep = qinf AND NOT pinf                -> answer is P
+        useq = pinf                             -> answer is Q  (covers O + O = O)
+        user = notinf AND NOT(pinf OR qinf)     -> answer is the computed sum
+
+    ``user`` folds in the pre-existing ``notinf`` mask (the P == -Q case), so
+    P + (-P) still yields the all-zero blob and nothing about that case changes.
+
+    Requiring BOTH coordinates to be zero is load-bearing, not belt-and-braces.
+    x = 0 has genuine curve points whenever the curve's b is a quadratic residue
+    -- (0, sqrt(b)) -- and testing x alone would map them to O. y = 0 has none
+    on any of these three curves (all have prime order, so no point of order 2),
+    but the conjunction makes that fact not need to be true.
+
+    Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+    [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+
+    Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+    rx, ry in their place.
+    """
+    def _numequal(e: Callable[["StackOp"], None]) -> None:
+        e(_make_stack_op(op="opcode", code="OP_NUMEQUAL"))
+
+    def _booland(e: Callable[["StackOp"], None]) -> None:
+        e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+
+    def _boolor(e: Callable[["StackOp"], None]) -> None:
+        e(_make_stack_op(op="opcode", code="OP_BOOLOR"))
+
+    def _not_booland(e: Callable[["StackOp"], None]) -> None:
+        e(_make_stack_op(op="opcode", code="OP_NOT"))
+        e(_make_stack_op(op="opcode", code="OP_BOOLAND"))
+
+    def _mul(e: Callable[["StackOp"], None]) -> None:
+        e(_make_stack_op(op="opcode", code="OP_MUL"))
+
+    def _add(e: Callable[["StackOp"], None]) -> None:
+        e(_make_stack_op(op="opcode", code="OP_ADD"))
+
+    # pinf = (px == 0) AND (py == 0)
+    t.copy_to_top("px", "_px_z")
+    t.push_int("_zero_px", 0)
+    t.raw_block(["_px_z", "_zero_px"], "_pxz", _numequal)
+    t.copy_to_top("py", "_py_z")
+    t.push_int("_zero_py", 0)
+    t.raw_block(["_py_z", "_zero_py"], "_pyz", _numequal)
+    t.raw_block(["_pxz", "_pyz"], "_pinf", _booland)
+
+    # qinf = (qx == 0) AND (qy == 0)
+    t.copy_to_top("qx", "_qx_z")
+    t.push_int("_zero_qx", 0)
+    t.raw_block(["_qx_z", "_zero_qx"], "_qxz", _numequal)
+    t.copy_to_top("qy", "_qy_z")
+    t.push_int("_zero_qy", 0)
+    t.raw_block(["_qy_z", "_zero_qy"], "_qyz", _numequal)
+    t.raw_block(["_qxz", "_qyz"], "_qinf", _booland)
+
+    # usep = qinf AND NOT pinf
+    t.copy_to_top("_qinf", "_usep_q")
+    t.copy_to_top("_pinf", "_usep_p")
+    t.raw_block(["_usep_q", "_usep_p"], "_usep", _not_booland)
+
+    # useq = pinf
+    t.copy_to_top("_pinf", "_useq")
+
+    # user = notinf AND NOT(pinf OR qinf)
+    t.to_top("_pinf")
+    t.to_top("_qinf")
+    t.raw_block(["_pinf", "_qinf"], "_anyinf", _boolor)
     t.to_top("_notinf")
-    t.raw_block(["ry", "_notinf"], "ry",
-                lambda e: e(_make_stack_op(op="opcode", code="OP_MUL")))
+    t.to_top("_anyinf")
+    t.raw_block(["_notinf", "_anyinf"], "_user", _not_booland)
+
+    # rx = px*usep + qx*useq + rx*user
+    t.to_top("px")
+    t.copy_to_top("_usep", "_usep_x")
+    t.raw_block(["px", "_usep_x"], "_selx_p", _mul)
+    t.to_top("qx")
+    t.copy_to_top("_useq", "_useq_x")
+    t.raw_block(["qx", "_useq_x"], "_selx_q", _mul)
+    t.to_top("rx")
+    t.copy_to_top("_user", "_user_x")
+    t.raw_block(["rx", "_user_x"], "_selx_r", _mul)
+    t.raw_block(["_selx_q", "_selx_r"], "_selx_qr", _add)
+    t.raw_block(["_selx_p", "_selx_qr"], "rx", _add)
+
+    # ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+    t.to_top("py")
+    t.to_top("_usep")
+    t.raw_block(["py", "_usep"], "_sely_p", _mul)
+    t.to_top("qy")
+    t.to_top("_useq")
+    t.raw_block(["qy", "_useq"], "_sely_q", _mul)
+    t.to_top("ry")
+    t.to_top("_user")
+    t.raw_block(["ry", "_user"], "_sely_r", _mul)
+    t.raw_block(["_sely_q", "_sely_r"], "_sely_qr", _add)
+    t.raw_block(["_sely_p", "_sely_qr"], "ry", _add)
 
 
 # ===========================================================================
@@ -889,6 +1115,9 @@ def emit_ec_add(emit: Callable) -> None:
     t = ECTracker(["_pa", "_pb"], emit)
     _ec_decompose_point(t, "_pa", "px", "py")
     _ec_decompose_point(t, "_pb", "qx", "qy")
+    # R-117: _ec_affine_add's selectors compare these four values RAW.
+    _ec_emit_coord_canon_verify(t, "px", "py")
+    _ec_emit_coord_canon_verify(t, "qx", "qy")
     _ec_affine_add(t)
     _ec_compose_point(t, "rx", "ry", "_result")
 
@@ -922,6 +1151,59 @@ def _ec_emit_scalar_reduce(t: ECTracker, k_name: str, result_name: str, curve_n:
     t.raw_block([k_name, "_n_red"], result_name, _body)
 
 
+def _ec_emit_point_gate(emit: Callable, emit_on_curve: Callable, coord_bytes: int) -> None:
+    """R-157 -- gate a Point operand of the scalar ladder: it must be ON the curve, or
+    be the point at infinity. ABORTS otherwise. Raw ops, straight-line, run before
+    the ladder's tracker exists.
+    
+    ecMul(P, k) does not compute k*P. It computes ((k mod n) + 3n)*P: the MSB-first
+    ladder adds 3n so a fixed high bit is always set, and +3n is a no-op ONLY when
+    ord(P) divides n. Cofactor 1 gives ord(P) = n for every point on the curve, so
+    the trick is sound there and nowhere else. An off-curve point lies on some other
+    curve y^2 = x^3 + b' of unrelated order, and the ladder silently answers a
+    different question. Measured on @bsv/sdk's Spend with the off-curve P = (5, 7),
+    which lies on y^2 = x^3 - 76: ecMul(P, 1n) -> c8b039d1...9438f2ff, which is NOT
+    P, and matches (1 + 3n)*P on that other curve exactly. So the primitive violated
+    its own contract for EVERY off-curve input.
+    
+    The degenerate sub-case is worse. For a 2-torsion point of the other curve --
+    any (x, 0) -- every multiple collapses to the all-zero blob, because the
+    ladder's unguarded mixed-add hits H = R = 0 mid-ladder, sets Z3 = 0, and a
+    Jacobian accumulator at infinity never leaves it. Combined with R-053, which
+    correctly taught ecAdd that the all-zero blob is the identity, that turns a
+    Schnorr-shaped s*G == R + e*P check into a free pass.
+    
+    WHY HERE AND NOT IN THE CALLER: the +3n offset is INTERNAL to ecMul. A caller
+    cannot see it, cannot know the obligation exists without reading this codegen,
+    and gains nothing by checking what ecMul can check more cheaply (ecOnCurve is
+    0.2% of ecMul). The obligation WAS written down, in all seven tiers, in the
+    ladder's own docstring -- and nothing enforced it.
+    
+    WHY NOT ecAdd: affineAdd implements the group law with no n-dependent trick, so
+    on an off-curve operand it returns the CORRECT sum on that operand's own curve.
+    It does not lie. And O must keep flowing through ecAdd for R-053 to hold.
+    
+    WHY O IS EXEMPT, and it is load-bearing: ecMul(P, 0n) returns the all-zero blob,
+    ecAdd(P, -P) returns it, and the EC optimizer folds to it, so O is a reachable
+    runtime operand -- while ecOnCurve(O) is false by construction. A bare on-curve
+    gate would reject the identity this codegen manufactures itself.
+    
+    This SUBSUMES R-117's coordinate-canonicity gate on the mul builtins, which is
+    why that call is removed here: a non-canonical coordinate makes ecOnCurve false
+    and cannot equal the all-zero blob, so it still aborts.
+    
+    Stack in/out: [point, scalar] -- unchanged.
+    """
+    emit(_make_stack_op(op="over"))
+    emit(_make_stack_op(op="push", value=_make_push_value(kind="bytes", bytes_=bytes(coord_bytes * 2))))
+    emit(_make_stack_op(op="opcode", code="OP_EQUAL"))
+    emit(_make_stack_op(op="push", value=_big_int_push(2)))
+    emit(_make_stack_op(op="pick", depth=2))
+    emit_on_curve(emit)
+    emit(_make_stack_op(op="opcode", code="OP_BOOLOR"))
+    emit(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+
 def emit_ec_mul(emit: Callable) -> None:
     """Perform scalar multiplication P * k.
 
@@ -930,6 +1212,8 @@ def emit_ec_mul(emit: Callable) -> None:
 
     Uses 256-iteration double-and-add with Jacobian coordinates.
     """
+    # R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    _ec_emit_point_gate(emit, emit_ec_on_curve, 32)
     t = ECTracker(["_pt", "_k"], emit)
     # Decompose to affine base point
     _ec_decompose_point(t, "_pt", "ax", "ay")
@@ -1026,6 +1310,7 @@ def emit_ec_negate(emit: Callable) -> None:
     """
     t = ECTracker(["_pt"], emit)
     _ec_decompose_point(t, "_pt", "_nx", "_ny")
+    _ec_emit_coord_canon_verify(t, "_nx", "_ny")
     _ec_push_field_p(t, "_fp")
     _ec_field_sub(t, "_fp", "_ny", "_neg_y")
     _ec_compose_point(t, "_nx", "_neg_y", "_result")
@@ -1038,6 +1323,15 @@ def emit_ec_on_curve(emit: Callable) -> None:
     Stack out: [boolean]
     """
     t = ECTracker(["_pt"], emit)
+
+    # CL-BUG-095: width. ``ecOnCurve(G || 0xff)`` returned TRUE --
+    # _ec_decompose_point discarded the surplus byte, so 2^8 distinct blobs all
+    # certified as the same point and a point's identity AS BYTES stopped being
+    # unique. Clamp and remember the width, rather than abort, because this is
+    # the predicate contracts are told to gate untrusted points on and it must
+    # stay total; the flag is ANDed into the result at the end.
+    emit_point_length_gate(t, "_pt", 64, "_len_ok")
+
     _ec_decompose_point(t, "_pt", "_x", "_y")
 
     # GAP-301: coordinate canonicity. ``_ec_decompose_point`` BIN2NUMs each
@@ -1072,10 +1366,13 @@ def emit_ec_on_curve(emit: Callable) -> None:
     t.to_top("_rhs")
     t.raw_block(["_y2", "_rhs"], "_curve_eq", lambda e: e(_make_stack_op(op="opcode", code="OP_EQUAL")))
 
-    # on-curve = canonical AND curve-equation
+    # on-curve = right width AND canonical AND curve-equation
     t.to_top("_canon")
     t.to_top("_curve_eq")
-    t.raw_block(["_canon", "_curve_eq"], "_result", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+    t.raw_block(["_canon", "_curve_eq"], "_eq_ok", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
+    t.to_top("_len_ok")
+    t.to_top("_eq_ok")
+    t.raw_block(["_len_ok", "_eq_ok"], "_result", lambda e: e(_make_stack_op(op="opcode", code="OP_BOOLAND")))
 
 
 def emit_ec_mod_reduce(emit: Callable) -> None:
@@ -1100,21 +1397,26 @@ def emit_ec_encode_compressed(emit: Callable) -> None:
     Stack in: [point (64 bytes)]
     Stack out: [compressed (33 bytes)]
     """
+    # CL-BUG-095, and the reason this one is the sharpest edge of it: the parity
+    # byte used to be taken from the blob's LAST byte (OP_SIZE 1 OP_SUB
+    # OP_SPLIT), not from a fixed offset. So appending one byte FLIPPED THE SIGN
+    # of the compressed encoding -- the same 64-byte point compressed to 02||x or
+    # 03||x at the caller's choice, and anything that hashes a compressed pubkey
+    # (a P2PKH address, a commitment) became forgeable between the two
+    # spellings. Two independent fixes, both kept: the width is verified, and
+    # the parity byte is read from offset 31 of y whatever the caller sent.
+    emit_point_len_verify(emit, 64)
     # Split at 32: [x_bytes, y_bytes]
     emit(_make_stack_op(op="push", value=_big_int_push(32)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
-    # Get last byte of y for parity
-    emit(_make_stack_op(op="opcode", code="OP_SIZE"))
-    emit(_make_stack_op(op="push", value=_big_int_push(1)))
-    emit(_make_stack_op(op="opcode", code="OP_SUB"))
+    # Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+    emit(_make_stack_op(op="push", value=_big_int_push(31)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
-    # Stack: [x_bytes, y_prefix, last_byte]
+    emit(_make_stack_op(op="opcode", code="OP_NIP"))  # drop y_head
+    # Stack: [x_bytes, last_byte]
     emit(_make_stack_op(op="opcode", code="OP_BIN2NUM"))
     emit(_make_stack_op(op="push", value=_big_int_push(2)))
     emit(_make_stack_op(op="opcode", code="OP_MOD"))
-    # Stack: [x_bytes, y_prefix, parity]
-    emit(_make_stack_op(op="swap"))
-    emit(_make_stack_op(op="drop"))  # drop y_prefix
     # Stack: [x_bytes, parity]
     emit(_make_stack_op(
         op="if",
@@ -1126,12 +1428,52 @@ def emit_ec_encode_compressed(emit: Callable) -> None:
     emit(_make_stack_op(op="opcode", code="OP_CAT"))
 
 
+def _ec_emit_field_element_verify(emit: Callable) -> None:
+    """R-156 -- verify that the script number on TOS is a FIELD ELEMENT, 0 <= v < p.
+    Leaves the value in place (OP_DUP feeds the check, OP_VERIFY consumes the
+    flag), so the caller's stack shape is unchanged.
+    
+    ecMakePoint converts each coordinate with `push 33, OP_NUM2BIN, push 32,
+    OP_SPLIT, OP_DROP`. NUM2BIN(33) writes a 33-byte little-endian SIGN-MAGNITUDE
+    script number, so byte 32 is exactly where the sign bit lives AND where any
+    bits >= 2^256 land -- and the split drops precisely that byte. The result was
+    an ecMakePoint that is NOT INJECTIVE:
+    
+        ecMakePoint( 1n, y) == ecMakePoint(-1n, y)            sign discarded
+        ecMakePoint( 1n, y) == ecMakePoint(1n + 2^256, y)     magnitude truncated
+        ecMakePoint( x,  y) == ecMakePoint(x, -y)             and on the y half
+    
+    all three measured on @bsv/sdk's Spend. The y-half collision is the sharpest:
+    `ecMakePoint(x, 0n - y)` is how an author spells negation by hand, and it
+    silently produced (x, +y) -- the point being negated -- rather than (x, p-y).
+    
+    R-117's coordinate-canonicity gate does not cover this and cannot: the bytes
+    emitted for -1n are the perfectly canonical encoding of 1, so no downstream
+    consumer can tell. The aliasing happens before any Point exists.
+    
+    REJECT rather than reduce, for the reason R-117 gives: ecOnCurve answers "no"
+    to a coordinate outside [0, p), so reducing here would leave the constructor
+    and the predicate disagreeing about what a point is. Rejecting also restores
+    injectivity, which is the property the defect broke.
+    
+    OP_WITHIN(v, 0, p) is `0 <= v < p` in one opcode -- the same half-open bound
+    the `within` builtin exposes to contract authors.
+    """
+    emit(_make_stack_op(op="dup"))
+    emit(_make_stack_op(op="push", value=_big_int_push(0)))
+    emit(_make_stack_op(op="push", value=_big_int_push(EC_FIELD_P)))
+    emit(_make_stack_op(op="opcode", code="OP_WITHIN"))
+    emit(_make_stack_op(op="opcode", code="OP_VERIFY"))
+
+
 def emit_ec_make_point(emit: Callable) -> None:
     """Convert (x: bigint, y: bigint) to a 64-byte Point.
 
     Stack in: [x_num, y_num] (y on top)
     Stack out: [point_bytes (64 bytes)]
     """
+    # R-156: y must be a field element before its sign byte is dropped.
+    _ec_emit_field_element_verify(emit)
     # Convert y to 32 bytes big-endian
     emit(_make_stack_op(op="push", value=_big_int_push(33)))
     emit(_make_stack_op(op="opcode", code="OP_NUM2BIN"))
@@ -1142,6 +1484,8 @@ def emit_ec_make_point(emit: Callable) -> None:
     # Stack: [x_num, y_be]
     emit(_make_stack_op(op="swap"))
     # Stack: [y_be, x_num]
+    # R-156: and so must x.
+    _ec_emit_field_element_verify(emit)
     emit(_make_stack_op(op="push", value=_big_int_push(33)))
     emit(_make_stack_op(op="opcode", code="OP_NUM2BIN"))
     emit(_make_stack_op(op="push", value=_big_int_push(32)))
@@ -1160,6 +1504,11 @@ def emit_ec_point_x(emit: Callable) -> None:
     Stack in: [point (64 bytes)]
     Stack out: [x as bigint]
     """
+    # CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x --
+    # the split at 32 left an empty tail that ``drop`` happily removed. ecPointY
+    # on the identical input already aborted, which is how the hole survived: a
+    # short point looked "already rejected".
+    emit_point_len_verify(emit, 64)
     emit(_make_stack_op(op="push", value=_big_int_push(32)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
     emit(_make_stack_op(op="drop"))
@@ -1176,6 +1525,7 @@ def emit_ec_point_y(emit: Callable) -> None:
     Stack in: [point (64 bytes)]
     Stack out: [y as bigint]
     """
+    emit_point_len_verify(emit, 64)
     emit(_make_stack_op(op="push", value=_big_int_push(32)))
     emit(_make_stack_op(op="opcode", code="OP_SPLIT"))
     emit(_make_stack_op(op="swap"))

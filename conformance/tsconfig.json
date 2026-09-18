@@ -48,12 +48,26 @@
   // never imported as a module, and "fixing" the syntax would delete the
   // shape being pinned.
   //
+  // `closed-findings/*.runar.ts` and `subtype-parity/*.runar.ts` are the same
+  // category one more time: probe contracts read as TEXT and handed to each
+  // compiler CLI, never imported. Some are deliberately invalid Rúnar (the
+  // wrong-arity call and the bigint-indexed array that every tier must
+  // REJECT); the rest are valid Rúnar whose DOMAIN-TYPE WIDENING (ByteString
+  // -> Sha256, Ripemd160 -> Sha256) is exactly the lattice under test and is
+  // unrepresentable in TypeScript's branded `Sha256` / `Ripemd160` types.
+  // Making tsc happy would mean deleting the shape being pinned.
+  // `go-only-parity/*.runar.ts` and `preimage-binding/*.runar.ts` are NOT
+  // excluded — those probes are ordinary Rúnar that also typechecks, so they
+  // keep the free coverage.
+  //
   // `negatives/rejection-parity.test.ts` is NOT excluded — the harness is real
   // TypeScript and stays typechecked.
   "exclude": [
     "node_modules",
     "fuzz-findings*",
     "fuzz-regressions/entries/*/contract.runar.ts",
-    "negatives/*.runar.ts"
+    "negatives/*.runar.ts",
+    "closed-findings/*.runar.ts",
+    "subtype-parity/*.runar.ts"
   ]
 }

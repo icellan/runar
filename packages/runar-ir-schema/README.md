@@ -24,7 +24,7 @@ The Rúnar AST is produced by Pass 1 (Parse) and consumed by Pass 2 (Validate) a
 ContractNode
   +-- kind: 'contract'
   +-- name: string
-  +-- parentClass: 'SmartContract' | 'StatefulSmartContract'
+  +-- parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract'
   +-- properties: PropertyNode[]
   +-- constructor: MethodNode
   +-- methods: MethodNode[]

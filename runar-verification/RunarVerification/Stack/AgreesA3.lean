@@ -159,7 +159,7 @@ theorem structuralArithValueNarrow_iff_structuralConstValue
       constructor
       · intro h; simp [structuralArithValueNarrow] at h
       · intro h; simp [structuralConstValue] at h
-  | loop _ _ _ =>
+  | loop _ _ _ _ _ =>
       constructor
       · intro h; simp [structuralArithValueNarrow] at h
       · intro h; simp [structuralConstValue] at h
@@ -275,7 +275,7 @@ theorem structuralArithValueNarrowB_iff (v : ANFValue) :
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
   | ifVal _ _ _ _ =>
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
-  | loop _ _ _ =>
+  | loop _ _ _ _ _ =>
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
   | assert _ =>
       simp [structuralArithValueNarrowB, structuralArithValueNarrow]
@@ -13895,7 +13895,7 @@ theorem emittableArithChainReadyBool_iff
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
   | (.mk _ (.ifVal _ _ _ _) _) :: _, _sm, _currentIndex => by
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
-  | (.mk _ (.loop _ _ _) _) :: _, _sm, _currentIndex => by
+  | (.mk _ (.loop _ _ _ _ _) _) :: _, _sm, _currentIndex => by
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
   | (.mk _ (.assert _) _) :: _, _sm, _currentIndex => by
       simp only [emittableArithChainReadyBool, emittableArithChainReady, reduceCtorEq]
@@ -14090,7 +14090,7 @@ theorem emittableArithChainReadyNoDblNegBool_iff
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
   | (.mk _ (.ifVal _ _ _ _) _) :: _, _sm, _currentIndex, _ => by
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
-  | (.mk _ (.loop _ _ _) _) :: _, _sm, _currentIndex, _ => by
+  | (.mk _ (.loop _ _ _ _ _) _) :: _, _sm, _currentIndex, _ => by
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
   | (.mk _ (.assert _) _) :: _, _sm, _currentIndex, _ => by
       simp only [emittableArithChainReadyNoDblNegBool, emittableArithChainReadyNoDblNeg, reduceCtorEq]
@@ -14151,7 +14151,7 @@ theorem emittableArithChainReadyNoDblNeg_imp_ready
       | call _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | methodCall _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | ifVal _ _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
-      | loop _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
+      | loop _ _ _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | assert _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | updateProp _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | getStateScript => simp only [emittableArithChainReadyNoDblNeg] at hRef
@@ -14377,7 +14377,7 @@ theorem loweredEmittableArith_areEmittable
       | call _ _ => simp only [emittableArithChainReady] at hReady
       | methodCall _ _ _ => simp only [emittableArithChainReady] at hReady
       | ifVal _ _ _ _ => simp only [emittableArithChainReady] at hReady
-      | loop _ _ _ => simp only [emittableArithChainReady] at hReady
+      | loop _ _ _ _ _ => simp only [emittableArithChainReady] at hReady
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady
@@ -14535,7 +14535,7 @@ theorem loweredEmittableArith_m3ShapeFacts
       | call _ _ => simp only [emittableArithChainReady] at hReady
       | methodCall _ _ _ => simp only [emittableArithChainReady] at hReady
       | ifVal _ _ _ _ => simp only [emittableArithChainReady] at hReady
-      | loop _ _ _ => simp only [emittableArithChainReady] at hReady
+      | loop _ _ _ _ _ => simp only [emittableArithChainReady] at hReady
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady
@@ -14766,7 +14766,7 @@ private theorem refinedTrue_firstBindingNotNeg
       | call _ _ => rfl
       | methodCall _ _ _ => rfl
       | ifVal _ _ _ _ => rfl
-      | loop _ _ _ => rfl
+      | loop _ _ _ _ _ => rfl
       | assert _ => rfl
       | updateProp _ _ => rfl
       | getStateScript => rfl
@@ -14858,7 +14858,7 @@ theorem loweredEmittableArithNoDblNeg_arithEmitNoFuse
       | call _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | methodCall _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | ifVal _ _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
-      | loop _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
+      | loop _ _ _ _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | assert _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | updateProp _ _ => simp only [emittableArithChainReadyNoDblNeg] at hRef
       | getStateScript => simp only [emittableArithChainReadyNoDblNeg] at hRef
@@ -15197,7 +15197,7 @@ theorem structuralArithConsumeBody_of_entry_agreesTagged
       | call _ _ => simp only [emittableArithChainReady] at hReady
       | methodCall _ _ _ => simp only [emittableArithChainReady] at hReady
       | ifVal _ _ _ _ => simp only [emittableArithChainReady] at hReady
-      | loop _ _ _ => simp only [emittableArithChainReady] at hReady
+      | loop _ _ _ _ _ => simp only [emittableArithChainReady] at hReady
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady
@@ -16790,7 +16790,7 @@ theorem agreesTagged_arith_walk_iff
       | call _ _ => simp only [emittableArithChainReady] at hReady
       | methodCall _ _ _ => simp only [emittableArithChainReady] at hReady
       | ifVal _ _ _ _ => simp only [emittableArithChainReady] at hReady
-      | loop _ _ _ => simp only [emittableArithChainReady] at hReady
+      | loop _ _ _ _ _ => simp only [emittableArithChainReady] at hReady
       | assert _ => simp only [emittableArithChainReady] at hReady
       | updateProp _ _ => simp only [emittableArithChainReady] at hReady
       | getStateScript => simp only [emittableArithChainReady] at hReady

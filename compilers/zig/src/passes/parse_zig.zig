@@ -16,6 +16,7 @@
 //!   - Types: `runar.Bigint`, `runar.PubKey`, `runar.Sig`, `runar.Addr`, `runar.ByteString`, `i64`, `bool`, `void`
 
 const std = @import("std");
+const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const readonly_inference = @import("../frontend/readonly_inference.zig");
 
@@ -66,14 +67,6 @@ pub fn parseZig(allocator: Allocator, source: []const u8, file_name: []const u8)
     return parser.parse();
 }
 
-/// True if every byte in `s` is an ASCII digit (0-9).
-fn isAllAsciiDigits(s: []const u8) bool {
-    if (s.len == 0) return false;
-    for (s) |c| {
-        if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
 
 // ============================================================================
 // Token Types
@@ -521,6 +514,10 @@ const Parser = struct {
             .type_info = typeNodeToRunarType(parsed_type.type_node),
             .readonly = false,
             .initializer = expr_val,
+            // N-109: spelled type name + field-name token, for the validator's
+            // unsupported-type diagnostic. Diagnostics only.
+            .type_name = types.typeNodeName(parsed_type.type_node),
+            .source_loc = .{ .file = self.file_name, .line = name_tok.line, .column = name_tok.col },
             .fixed_array_length = fa_len,
             .fixed_array_element = fa_elem,
             .fixed_array_nested_length = fa_nested_len,
@@ -634,6 +631,13 @@ const Parser = struct {
         if (self.expect(.lbrace) == null) return null;
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
         var found_struct_return = false;
+        // R-040: statements the `init` body carries beyond the `return .{...}`
+        // struct literal — `runar.assert(...)` on a parameter, a local `const`.
+        // These used to be parsed and thrown away (`_ = self.parseStatement()`),
+        // so an argument check written in `init` existed in six tiers' ANF and
+        // in none of Zig's. The field writes are appended after them, since the
+        // struct-return literal is by construction the last statement.
+        var ctor_body: std.ArrayListUnmanaged(Statement) = .empty;
 
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             if (self.current.kind == .kw_return) {
@@ -653,7 +657,9 @@ const Parser = struct {
                 continue;
             }
 
-            _ = self.parseStatement();
+            if (self.parseStatement()) |stmt| {
+                ctor_body.append(self.allocator, stmt) catch {};
+            }
         }
 
         _ = self.expect(.rbrace);
@@ -672,6 +678,14 @@ const Parser = struct {
             }
         }
 
+        for (assignments.items) |assign| {
+            ctor_body.append(self.allocator, .{ .assign = .{
+                .target = assign.target,
+                .value = assign.value,
+                .target_is_property = true,
+            } }) catch {};
+        }
+
         // Auto-generate super() args from constructor params (matching TS/Go/Rust/Python
         // behavior — all format parsers auto-inject super() as the first statement).
         var super_args: std.ArrayListUnmanaged(Expression) = .empty;
@@ -683,6 +697,7 @@ const Parser = struct {
             .params = params.items,
             .super_args = super_args.items,
             .assignments = assignments.items,
+            .body = ctor_body.items,
         };
     }
 
@@ -755,13 +770,21 @@ const Parser = struct {
                     if (last.* == .let_decl) {
                         const ld = last.let_decl;
                         if (std.mem.eql(u8, ld.name, s.for_stmt.var_name)) {
-                            const init_val: i64 = if (ld.value) |v| switch (v) {
-                                .literal_int => |n| n,
-                                else => 0,
-                            } else 0;
+                            // N-138: a negated literal is a literal.
+                            // N-137: a declaration whose value is not a literal
+                            // at all leaves the start unknown, which the
+                            // unrolled loop model cannot represent.
+                            var init_val: i64 = 0;
+                            var init_const = true;
+                            if (ld.value) |v| {
+                                if (loopStartLiteral(v)) |n| init_val = n else {
+                                    init_const = false;
+                                }
+                            }
                             stmts.items.len -= 1; // pop the let_decl
                             var merged = s.for_stmt;
                             merged.init_value = init_val;
+                            merged.init_is_const = init_const;
                             stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
                             continue;
                         }
@@ -824,13 +847,29 @@ const Parser = struct {
         return Statement{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
     }
 
+    /// Heap-copy a for-loop update statement so `ForStmt.update` can point at
+    /// it (N-061). Returns null if the allocation fails — the update is then
+    /// treated as absent, exactly as before this field existed.
+    fn storeUpdateStmt(self: *Parser, stmt: Statement) ?*const Statement {
+        const ptr = self.allocator.create(Statement) catch return null;
+        ptr.* = stmt;
+        return ptr;
+    }
+
+    /// Emitted for `while (i != N)`, which is not a representable loop bound.
+    const loop_neq_condition_diagnostic =
+        "while loop condition must compare the loop variable against a bound " ++
+        "with '<', '<=', '>' or '>=' — '!=' carries no direction and is not a " ++
+        "loop bound the unrolled loop model can represent.";
+
     /// Parse Zig while loop: `while (cond) : (continue_expr) { body }`
     ///
     /// Supports common Runar patterns:
     ///   var i: i64 = 0; while (i < 10) : (i += 1) { ... }   // count up
     ///   var i: i64 = 10; while (i > 0) : (i -= 1) { ... }   // count down
-    ///   while (i != 0) : (i -= 1) { ... }                    // until value
     ///   while (10 > i) : (i += 1) { ... }                    // reversed operands
+    ///
+    /// `while (i != N)` is NOT one of them — see the `.neq` branch below.
     ///
     /// Produces a ForStmt. The init_value defaults to 0 and is patched by
     /// parseBlock when a preceding let_decl matches the loop variable.
@@ -859,20 +898,48 @@ const Parser = struct {
         //   literal >= ident  → var_name=ident, bound=literal (reversed)
         var var_name: []const u8 = "_loop_var";
         var bound: i64 = 0;
+        // R-102: `descending` was never set here, so `while (i > 1) : (i -= 1)`
+        // — the shape the doc comment above has always claimed to support —
+        // lowered as an ASCENDING loop from `start` to `bound`, i.e. a count of
+        // `bound - start`, clamped to 0. The body, and every assertion in it,
+        // was dropped from the locking script with no diagnostic. Every other
+        // tier lowered the same `.runar.zig` source to a real countdown, so
+        // this was a one-tier hex divergence as well as a dropped guard.
+        //
+        // The range-style spellings below keep folding their inclusive
+        // endpoint into `bound` and stay ascending; only the raw comparison
+        // directions set `descending` / `inclusive`, exactly as parse_ts does.
+        var descending = false;
+        var inclusive = false;
+        // W4: whether the condition's left-hand side is the iterator itself.
+        // `var_name` is TAKEN from the condition here, so a computed left-hand
+        // side (`i + 1 < 2`) left it at its `_loop_var` default while `bound`
+        // was still read from the right -- the phantom-lap shape, on the
+        // `.runar.zig` surface. Rejected by passes/validate.zig.
+        var cond_tests_iter: bool = true;
         switch (cond) {
             .binary_op => |bop| {
                 if (bop.op == .lt or bop.op == .lte) {
                     // ident < N or ident <= N
-                    if (bop.left == .identifier) var_name = bop.left.identifier;
+                    if (bop.left == .identifier) {
+                        var_name = bop.left.identifier;
+                    } else {
+                        cond_tests_iter = false;
+                    }
                     if (bop.right == .literal_int) {
                         bound = bop.right.literal_int;
                         if (bop.op == .lte) bound += 1;
                     }
                 } else if (bop.op == .gt or bop.op == .gte) {
+                    if (bop.left != .identifier and bop.right != .identifier) {
+                        cond_tests_iter = false;
+                    }
                     if (bop.left == .identifier and bop.right == .literal_int) {
                         // ident > N or ident >= N (countdown)
                         var_name = bop.left.identifier;
                         bound = bop.right.literal_int;
+                        descending = true;
+                        inclusive = bop.op == .gte;
                     } else if (bop.left == .literal_int and bop.right == .identifier) {
                         // N > ident or N >= ident (reversed operands → ident < N)
                         var_name = bop.right.identifier;
@@ -880,27 +947,60 @@ const Parser = struct {
                         if (bop.op == .gte) bound += 1;
                     }
                 } else if (bop.op == .neq) {
-                    // ident != N (loop until value reached)
-                    if (bop.left == .identifier) var_name = bop.left.identifier;
-                    if (bop.right == .literal_int) bound = bop.right.literal_int;
+                    // `i != N` is NOT a loop bound. `spec/grammar.md`'s RelOp
+                    // production is `< | <= | > | >=`, and all six peer tiers
+                    // refuse the shape from ANF lowering ("For loop counting
+                    // up (i++) must use '<' or '<='"). This tier accepted it
+                    // alone, on the `.runar.zig` surface, which is a frontend
+                    // parity break that no fixture covered — and it accepted
+                    // it WRONGLY, unrolling `bound - start` times (zero for
+                    // any real countdown) because `!=` carries no direction.
+                    //
+                    // Converging onto the spec rather than onto this tier's
+                    // extension: gated by
+                    // conformance/negatives/N39-zig-loop-neq-condition.runar.zig.
+                    self.addError(loop_neq_condition_diagnostic);
                 }
             },
             else => {
-                self.addError("while loop condition must be a comparison (e.g. 'i < N', 'i > 0', 'i != 0')");
+                self.addError("while loop condition must be a comparison (e.g. 'i < N', 'i > 0')");
             },
         }
-
         // Continue expression: : (i += 1)
+        //
+        // N-061: this used to be parsed and discarded — only `var_name` and
+        // `bound` were kept, and the step came from the comparison direction —
+        // so `i += 2` compiled to bytes identical to `i += 1`. Record it as
+        // the equivalent `i = i + 1` assignment (the spelling the other six
+        // tiers' Zig frontends produce) so validate.zig can reject a step the
+        // unrolled loop model cannot represent.
+        var update: ?*const Statement = null;
         if (self.current.kind == .colon) {
             _ = self.bump();
             if (self.current.kind == .lparen) _ = self.bump();
-            // Parse and discard the continue expression (e.g. i += 1)
-            // We only need the var_name and bound which we already extracted
-            _ = self.parseExpression();
+            const lhs = self.parseExpression();
             // Handle compound assignment operator if present
             if (isCompoundAssignOp(self.current.kind)) {
+                const op: ?BinOperator = switch (self.current.kind) {
+                    .plus_eq => .add,
+                    .minus_eq => .sub,
+                    .star_eq => .mul,
+                    .slash_eq => .div,
+                    .percent_eq => .mod,
+                    else => null,
+                };
                 _ = self.bump(); // consume +=, -=, etc.
-                _ = self.parseExpression(); // consume RHS
+                const rhs = self.parseExpression(); // consume RHS
+                if (lhs != null and rhs != null and op != null and lhs.? == .identifier) {
+                    const bin = self.allocator.create(BinaryOp) catch null;
+                    if (bin) |ptr| {
+                        ptr.* = .{ .op = op.?, .left = lhs.?, .right = rhs.? };
+                        update = self.storeUpdateStmt(.{ .assign = .{
+                            .target = lhs.?.identifier,
+                            .value = .{ .binary_op = ptr },
+                        } });
+                    }
+                }
             }
             if (self.current.kind == .rparen) _ = self.bump();
         }
@@ -912,6 +1012,10 @@ const Parser = struct {
             .var_name = var_name,
             .init_value = 0, // will be patched by parseBlock if preceding let_decl matches
             .bound = bound,
+            .descending = descending,
+            .inclusive = inclusive,
+            .cond_tests_iter = cond_tests_iter,
+            .update = update,
             .body = body,
             .source_loc = loc,
         } };
@@ -1132,8 +1236,20 @@ const Parser = struct {
                     }
                 } else {
                     // Property access: obj.prop
+                    //
+                    // The receiver is normalised `self` -> `this`, matching
+                    // the eight peer surface parsers in this tier (see
+                    // `parse_rust.zig`, which spells the same rewrite out).
+                    // The canonical AST names the contract receiver `this`,
+                    // and `expand_fixed_arrays.zig`'s
+                    // `tryResolveLiteralIndexChain` only resolves a chain
+                    // rooted at it. Leaving `self` here meant a nested
+                    // element access `self.grid[0][0]` resolved only its
+                    // innermost level, so reads lowered to
+                    // `__array_access(load_prop grid__0, 0)` and stack
+                    // lowering then refused the contract outright (N-059).
                     const object_name = switch (expr) {
-                        .identifier => |id| id,
+                        .identifier => |id| if (std.mem.eql(u8, id, "self")) "this" else id,
                         .property_access => |pa| pa.property,
                         else => "unknown",
                     };
@@ -1192,8 +1308,11 @@ const Parser = struct {
                     break :blk Expression{ .literal_int = val };
                 } else |_| {
                     // Oversize decimal literal — carry as `literal_bigint`.
-                    if (isAllAsciiDigits(tok.text)) {
-                        const decimal = self.allocator.dupe(u8, tok.text) catch break :blk null;
+                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
+                    // ordinary way to write secp256k1's group order, and accepted by the
+                    // other six tiers -- used to fall into the `invalid integer` arm
+                    // below, because this fallback only recognised decimal digits.
+                    if (int_literal.oversizeToDecimal(self.allocator, tok.text)) |decimal| {
                         break :blk Expression{ .literal_bigint = decimal };
                     }
                     self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
@@ -1762,3 +1881,25 @@ test "basic contract with file name" {
 }
 
 const UnexpectedVariant = error{UnexpectedVariant};
+
+/// N-138: the compile-time integer value of a loop-start expression, or null.
+///
+/// Accepts a literal and a NEGATED literal. The negated form is the gap this
+/// helper exists for: every surface parser in this tier recognised a bare
+/// `.number` (or a folded `.literal_int`) and let `-1` fall through to the
+/// zero default, so a loop written with a negative start unrolled from 0 — a
+/// different program from the one the source describes, and byte-divergent
+/// from the other six tiers with no size difference to notice it by.
+fn loopStartLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
+}

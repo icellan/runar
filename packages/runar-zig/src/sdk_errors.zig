@@ -121,3 +121,125 @@ pub fn raiseWitnessValueMissing(
     last_witness_error = rec;
     return error.WitnessValueMissing;
 }
+
+// ---------------------------------------------------------------------------
+// R-062 / CL-BUG-105 — deploy-time gate on unsound builtins
+// ---------------------------------------------------------------------------
+//
+// The compiler refuses to emit a script reaching `verifySP1FRI` unless the
+// author wrote `@acknowledgeUnsoundSP1FriVerifier` or the invoker passed
+// `--acknowledge-unsound-sp1-fri` (R-012). That acknowledgement stopped at
+// whoever ran the compiler: the artifact handed on afterwards looked like any
+// other, carried no marker of the gap, and every SDK funded it in silence.
+//
+// The compiler now stamps `unsoundPrimitives` into the artifact; this is the
+// SDK half. Deploy only, deliberately — spending an already-deployed contract
+// is how funds are RECOVERED from one.
+
+/// Distinct typed error for an unacknowledged unsound primitive.
+pub const UnsoundPrimitiveError = error{UnsoundPrimitiveNotAcknowledged};
+
+/// Last-recorded unacknowledged primitive, for the same reason as
+/// `last_error` above: Zig errors carry no payload.
+pub var last_unsound: ?LastUnsound = null;
+
+pub const LastUnsound = struct {
+    primitive_buf: [64]u8,
+    primitive_len: usize,
+    context_buf: [256]u8,
+    context_len: usize,
+
+    pub fn primitiveSlice(self: *const LastUnsound) []const u8 {
+        return self.primitive_buf[0..self.primitive_len];
+    }
+    pub fn contextSlice(self: *const LastUnsound) []const u8 {
+        return self.context_buf[0..self.context_len];
+    }
+};
+
+/// Return `error.UnsoundPrimitiveNotAcknowledged` unless every primitive in
+/// `declared` appears in `acknowledged`. Records the FIRST unacknowledged one
+/// plus the call-site context into `last_unsound`.
+pub fn assertUnsoundPrimitivesAcknowledged(
+    declared: []const []const u8,
+    acknowledged: []const []const u8,
+    context: []const u8,
+) UnsoundPrimitiveError!void {
+    const std = @import("std");
+    for (declared) |p| {
+        var found = false;
+        for (acknowledged) |a| {
+            if (std.mem.eql(u8, a, p)) {
+                found = true;
+                break;
+            }
+        }
+        if (found) continue;
+
+        var rec = LastUnsound{
+            .primitive_buf = undefined,
+            .primitive_len = 0,
+            .context_buf = undefined,
+            .context_len = 0,
+        };
+        const plen = @min(p.len, rec.primitive_buf.len);
+        @memcpy(rec.primitive_buf[0..plen], p[0..plen]);
+        rec.primitive_len = plen;
+        const clen = @min(context.len, rec.context_buf.len);
+        @memcpy(rec.context_buf[0..clen], context[0..clen]);
+        rec.context_len = clen;
+        last_unsound = rec;
+        return error.UnsoundPrimitiveNotAcknowledged;
+    }
+}
+
+/// Distinct typed error returned when a 1sat-ordinals inscription envelope
+/// would break the contract's own `SIZE(_codePart)` pin (N-043).
+///
+/// A stateful contract with a variable-length state section carries an equality
+/// pin on the deployed code-part length, and the envelope lands INSIDE the code
+/// part. The compiler bakes that number before any inscription exists, so
+/// attaching one makes the pinned length and the real one differ by the
+/// envelope's size and every honest spend aborts at OP_VERIFY -- with the funds
+/// already committed.
+pub const CodePartPinError = error{CodePartLengthPinViolated};
+
+/// Last-recorded `CodePartLengthPinViolated` diagnostic. Same single-threaded-
+/// SDK rationale as `last_error` above -- Zig errors don't carry payloads, so
+/// the structured reason lives in a side channel for tests / callers that need
+/// to report which pin was violated and by how much.
+pub var last_codepart_pin_error: ?LastCodePartPinError = null;
+
+pub const LastCodePartPinError = struct {
+    /// The value the compiler baked into the equality pin.
+    pinned: usize,
+    /// The byte length of the code part the contract actually produces.
+    actual: usize,
+    contract_name_buf: [128]u8,
+    contract_name_len: usize,
+
+    pub fn contractName(self: *const LastCodePartPinError) []const u8 {
+        return self.contract_name_buf[0..self.contract_name_len];
+    }
+};
+
+/// Record a `CodePartLengthPinViolated` diagnostic into
+/// `last_codepart_pin_error` and return the typed error. No allocation; the
+/// contract name is truncated into a fixed buffer.
+pub fn raiseCodePartLengthPinViolated(
+    pinned: usize,
+    actual: usize,
+    contract_name: []const u8,
+) CodePartPinError {
+    var rec = LastCodePartPinError{
+        .pinned = pinned,
+        .actual = actual,
+        .contract_name_buf = undefined,
+        .contract_name_len = 0,
+    };
+    const c = @min(contract_name.len, rec.contract_name_buf.len);
+    @memcpy(rec.contract_name_buf[0..c], contract_name[0..c]);
+    rec.contract_name_len = c;
+    last_codepart_pin_error = rec;
+    return error.CodePartLengthPinViolated;
+}

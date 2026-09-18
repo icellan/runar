@@ -159,7 +159,7 @@ def collectRefs : ANFValue → List String
   | .methodCall obj _ args    => (obj :: args : List String)
   | .ifVal cond thn els _       =>
       (cond :: collectRefsBindings thn) ++ collectRefsBindings els
-  | .loop _ body _            => collectRefsBindings body
+  | .loop _ body _ _ _ => collectRefsBindings body
   | .assert ref               => [ref]
   | .updateProp _ ref         => [ref]
   | .checkPreimage pre        => [pre]
@@ -222,7 +222,7 @@ def collectConstInts : List ANFBinding → List (String × Int)
         match v with
         | .loadConst (.int i)   => [(name, i)]
         | .ifVal _ thn els _      => collectConstInts thn ++ collectConstInts els
-        | .loop _ body _        => collectConstInts body
+        | .loop _ body _ _ _ => collectConstInts body
         | _                     => []
       here ++ collectConstInts rest
 
@@ -266,8 +266,8 @@ def arrayElemsOf : List ANFBinding → List (String × List String)
         -- A zero-count loop is never lowered, so the reference's
         -- `lowerArrayLiteral` never runs for its body and the entries never
         -- reach `arrayElements`. Same gate `collectRawSlotsGo` applies.
-        | .loop 0 _ _          => []
-        | .loop _ body _       => arrayElemsOf body
+        | .loop 0 _ _ _ _ => []
+        | .loop _ body _ _ _ => arrayElemsOf body
         | _                    => []
       here ++ arrayElemsOf rest
 
@@ -351,7 +351,7 @@ def collectDeepBindingNames : List ANFBinding → List String
   | (.mk name (.ifVal _ t e _) _) :: rest =>
       (name :: (collectDeepBindingNames t ++ collectDeepBindingNames e))
         ++ collectDeepBindingNames rest
-  | (.mk name (.loop _ body _) _) :: rest =>
+  | (.mk name (.loop _ body _ _ _) _) :: rest =>
       (name :: collectDeepBindingNames body) ++ collectDeepBindingNames rest
   | (.mk name _ _) :: rest => name :: collectDeepBindingNames rest
 termination_by xs => sizeOf xs
@@ -363,7 +363,7 @@ Mirrors TS `flattenNestedLoopBodies`. Only `collectLoopCarriedRebinds`
 uses it, and only to order reads against rebindings. -/
 def flattenNestedLoopBodies : List ANFBinding → List ANFBinding
   | [] => []
-  | (.mk _ (.loop _ body _) _) :: rest =>
+  | (.mk _ (.loop _ body _ _ _) _) :: rest =>
       flattenNestedLoopBodies body ++ flattenNestedLoopBodies rest
   | (.mk _ (.ifVal _ t e _) _) :: rest =>
       (flattenNestedLoopBodies t ++ flattenNestedLoopBodies e)
@@ -1413,6 +1413,9 @@ def builtinOpcode (name : String) : List String :=
   -- Byte ops
   | "cat"         => ["OP_CAT"]
   | "len"         => ["OP_SIZE", "OP_NIP"]   -- mirrors 05-stack-lower.ts:1168
+  -- Unparameterized `lowerValue` / Agrees Stage C still emit bare OP_SPLIT
+  -- (Sim.lower_call_split). Production `lowerValueP` adds OP_NIP after it so
+  -- the bound value is the RIGHT half (TS `05-stack-lower.ts:2080-2094`).
   | "split"       => ["OP_SPLIT"]
   -- Numeric helpers
   | "abs"         => ["OP_ABS"]
@@ -1425,6 +1428,8 @@ def builtinOpcode (name : String) : List String :=
   -- ByteString ⇄ Int coercions
   | "num2bin"     => ["OP_NUM2BIN"]
   | "bin2num"     => ["OP_BIN2NUM"]
+  -- `int2str(n, size)` is the same opcode as `num2bin` (TS BUILTIN_OPCODES).
+  | "int2str"     => ["OP_NUM2BIN"]
   -- Casts (no-op — argument is already on the stack with the right repr)
   | "toByteString" => []
   | "pack"         => []
@@ -1458,9 +1463,14 @@ which keeps a robust no-op fallback for non-supported field names.
 def extractorBody (func : String) : List StackOp :=
   let opc (s : String) : StackOp := .opcode s
   let push (n : Int) : StackOp := .push (.bigint n)
+  -- W1 / FinalCountdown: 32-bit preimage fields are unsigned. A bare
+  -- OP_BIN2NUM reads `feffffff` as negative. Append a zero byte first.
+  -- Mirrors TS `emitUnsignedBin2Num` (`05-stack-lower.ts`).
+  let unsignedBin2Num : List StackOp :=
+    [.push (.bytes (ByteArray.mk #[0x00])), opc "OP_CAT", opc "OP_BIN2NUM"]
   match func with
   | "extractVersion" =>
-      [push 4, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
+      [push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractHashPrevouts" =>
       [push 4, opc "OP_SPLIT", .nip, push 32, opc "OP_SPLIT", .drop]
   | "extractHashSequence" =>
@@ -1482,28 +1492,38 @@ def extractorBody (func : String) : List StackOp :=
        push 32, opc "OP_SPLIT", .drop]
   | "extractNLocktime" =>
       [opc "OP_SIZE", push 8, opc "OP_SUB", opc "OP_SPLIT", .nip,
-       push 4, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
+       push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractLocktime" =>
       -- TS `lowerExtractor` case `extractLocktime` (`05-stack-lower.ts:3087-3115`):
       -- end-relative 4 bytes before the last 4 (sighashType).
       [opc "OP_SIZE", push 8, opc "OP_SUB", opc "OP_SPLIT", .nip,
-       push 4, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
+       push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractSigHashType" =>
-      [opc "OP_SIZE", push 4, opc "OP_SUB", opc "OP_SPLIT", .nip,
-       opc "OP_BIN2NUM"]
+      [opc "OP_SIZE", push 4, opc "OP_SUB", opc "OP_SPLIT", .nip]
+        ++ unsignedBin2Num
+  | "extractSequence" =>
+      -- End-relative: nSequence is 4 bytes before hashOutputs(32) +
+      -- nLocktime(4) + sighashType(4) = 44 bytes from the end.
+      -- Mirrors TS `extractSequence` (`05-stack-lower.ts`).
+      [opc "OP_SIZE", push 44, opc "OP_SUB", opc "OP_SPLIT", .nip,
+       push 4, opc "OP_SPLIT", .drop] ++ unsignedBin2Num
   | "extractAmount" =>
       -- Amount is 8 bytes immediately after scriptCode (nSeq is 4 after).
       -- Layout from end: nSeq(4) + hashOutputs(32) + nLocktime(4) + hashType(4) = 44 from end,
       -- amount(8) precedes that → amount starts at SIZE-52.
+      -- NOT zero-padded: satoshis is 8 bytes and a value large enough to
+      -- set the sign bit would exceed the 21e14 ever minted.
       [opc "OP_SIZE", push 52, opc "OP_SUB", opc "OP_SPLIT", .nip,
        push 8, opc "OP_SPLIT", .drop, opc "OP_BIN2NUM"]
   | "extractScriptCode" =>
-      -- scriptCode lives between the prevout (36 + outpoint stuff) and
-      -- the trailing fixed-size fields. The TS reference uses a custom
-      -- multi-split sequence that we do not reproduce here; downstream
-      -- fixtures using extractScriptCode go through the dedicated state
-      -- helpers (deserialize_state) instead.
-      []
+      -- TS `lowerExtractor` case `extractScriptCode`
+      -- (`05-stack-lower.ts:4915-4949`): variable-length field at offset
+      -- 104 (version 4 + hashPrevouts 32 + hashSequence 32 + outpoint 36).
+      -- After skipping that prefix, drop the last 52 bytes (amount 8 +
+      -- nSequence 4 + hashOutputs 32 + nLocktime 4 + sighashType 4).
+      -- scriptCode = preimage[104 .. len-52].
+      [push 104, opc "OP_SPLIT", .nip,
+       opc "OP_SIZE", push 52, opc "OP_SUB", opc "OP_SPLIT", .drop]
   | _ => []
 
 /-! ## Per-binding lowering
@@ -1691,6 +1711,32 @@ def varintEncodingOps : List StackOp :=
     ++ emitPrefix 0xff
     ++ [opc "OP_ENDIF", opc "OP_ENDIF", opc "OP_ENDIF"]
 
+/-- Strip BIP-143 scriptCode varint prefix (1/3/5/9-byte). On entry the
+top of stack is `varint || scriptCode`; on exit it is `scriptCode`.
+Mirrors TS `emitStripScriptCodeVarint` (`05-stack-lower.ts:4168`). -/
+def varintStripOps : List StackOp :=
+  let opc (s : String) : StackOp := .opcode s
+  let push (n : Int) : StackOp := .push (.bigint n)
+  let dropMore (n : Int) : List StackOp :=
+    [push n, opc "OP_SPLIT", .nip]
+  -- Split first byte, swap so [..., rest, fb], pad+BIN2NUM
+  [push 1, opc "OP_SPLIT", .swap,
+   .push (.bytes (ByteArray.mk #[0x00])), opc "OP_CAT", opc "OP_BIN2NUM"]
+  -- Outer IF: fb < 253 → 1-byte (drop fb)
+  ++ [.dup, push 253, opc "OP_LESSTHAN", opc "OP_IF", .drop, opc "OP_ELSE"]
+  -- Middle IF: fb == 254 → 5-byte (drop fb, then 4 more)
+  ++ [.dup, push 254, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
+  ++ dropMore 4
+  ++ [opc "OP_ELSE"]
+  -- Inner IF: fb == 255 → 9-byte (drop fb, then 8 more)
+  ++ [.dup, push 255, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
+  ++ dropMore 8
+  ++ [opc "OP_ELSE"]
+  -- Else: fb == 253 → 3-byte (drop fb, then 2 more)
+  ++ [.drop]
+  ++ dropMore 2
+  ++ [opc "OP_ENDIF", opc "OP_ENDIF", opc "OP_ENDIF"]
+
 /--
 Lowering for `add_raw_output(satoshis, scriptBytes)` and
 `add_data_output(satoshis, scriptBytes)` (their stack-IR shape is
@@ -1845,31 +1891,144 @@ def lowerCheckPreimageOps (sm : StackMap) (bindingName : String)
   let s2 : List StackOp := [.rawBytes checkPreimageBindingBytes]
   (s0 ++ s1 ++ s2, sm.push bindingName)
 
+/-- Mutable properties only — R-010 clause 8 keys off this list. -/
+def mutableProperties (props : List ANFProperty) : List ANFProperty :=
+  props.filter (fun p => !p.readonly)
+
+/-- R-010: trailing `OP_RETURN || state` exists iff any property is mutable. -/
+def hasStateSection (props : List ANFProperty) : Bool :=
+  !(mutableProperties props).isEmpty
+
+/-- Byte size of one fixed-width state field. `none` for variable-length. -/
+def fixedStateFieldSize? : ANFType → Option Nat
+  | .bigint | .rabinSig | .rabinPubKey => some 8
+  | .bool => some 1
+  | .pubKey => some 33
+  | .addr | .ripemd160 => some 20
+  | .sha256 => some 32
+  | .point | .p256Point => some 64
+  | .p384Point => some 96
+  | _ => none
+
+/-- `some n` when every mutable property is fixed-width; `none` if any
+variable-length field makes the section un-pinnable at compile time. -/
+def fixedStateSectionLengthGo : List ANFProperty → Option Nat
+  | [] => some 0
+  | p :: rest =>
+      match fixedStateFieldSize? p.type with
+      | none => none
+      | some n =>
+          match fixedStateSectionLengthGo rest with
+          | none => none
+          | some acc => some (n + acc)
+
+def fixedStateSectionLength? (props : List ANFProperty) : Option Nat :=
+  fixedStateSectionLengthGo (mutableProperties props)
+
+/-- R-095 template: `OP_DUP <04 00 00 00 00> OP_BIN2NUM OP_GREATERTHANOREQUAL
+OP_VERIFY`. The four length bytes are patched after emit to the script's
+own byte length. Var-len state always uses GTE (constructor-slot growth
+is unknown). -/
+def verifyCodePartLenOps : List StackOp :=
+  [ .dup
+  , .push (.bytes (ByteArray.mk #[0, 0, 0, 0]))
+  , .opcode "OP_BIN2NUM"
+  , .opcode "OP_GREATERTHANOREQUAL"
+  , .opcode "OP_VERIFY" ]
+
+/-- Ops after `_codePart` has been PICK-copied to the top. Mirrors TS
+`emitCodePartAuthentication` steps 6–10 (`05-stack-lower.ts:4380-4508`).
+`fixedRestLen = none` skips clause 8a's remainder-length pin (variable
+state) and inserts R-095 `verifyCodePartLenOps` instead. -/
+def codePartAuthAfterPick (hasState : Bool) (fixedRestLen : Option Nat) :
+    List StackOp :=
+  let opc (s : String) : StackOp := .opcode s
+  let push (n : Int) : StackOp := .push (.bigint n)
+  let sizePin : List StackOp :=
+    match fixedRestLen with
+    | some n => [opc "OP_SIZE", push (Int.ofNat n), opc "OP_NUMEQUALVERIFY"]
+    | none   => []
+  let restPin : List StackOp :=
+    if hasState then
+      [push 1, opc "OP_SPLIT", .drop,
+       .push (.bytes (ByteArray.mk #[0x6a])), opc "OP_EQUALVERIFY"]
+    else
+      [.drop]
+  let lenPin : List StackOp :=
+    match hasState, fixedRestLen with
+    | true, none => verifyCodePartLenOps
+    | _,    _    => []
+  [opc "OP_SIZE"] ++ lenPin ++ [push 2, opc "OP_SUB", .rot, .swap, opc "OP_SPLIT"]
+    ++ sizePin ++ restPin
+    ++ [.push (.bytes (ByteArray.mk #[0x61, 0xab])), .swap, opc "OP_CAT",
+        opc "OP_EQUALVERIFY"]
+
+/-- R-010 / CL-BUG-091 — bind the spender-supplied `_codePart` witness to
+the executing locking script. Net stack effect 0: `[..., preimage]` in,
+`[..., preimage]` out. Mirrors TS `emitCodePartAuthentication`. -/
+def emitCodePartAuthentication (sm : StackMap) (props : List ANFProperty) :
+    (List StackOp × StackMap) :=
+  let opc (s : String) : StackOp := .opcode s
+  let push (n : Int) : StackOp := .push (.bigint n)
+  -- 1–4. DUP preimage, drop 104-byte BIP-143 header, drop 52-byte tail,
+  -- strip scriptCode varint. One extra anonymous slot on top of `sm`.
+  let headerOps : List StackOp :=
+    [.dup, push 104, opc "OP_SPLIT", .nip,
+     opc "OP_SIZE", push 52, opc "OP_SUB", opc "OP_SPLIT", .drop]
+    ++ varintStripOps
+  let smWork := sm.pushAnon
+  let (sCode, _) := bringToTop smWork "_codePart" false
+  let hasState := hasStateSection props
+  let pinOps : List StackOp :=
+    match hasState, fixedStateSectionLength? props with
+    | true, none   => codePartAuthAfterPick true none
+    | true, some n => codePartAuthAfterPick true (some (1 + n))
+    | false, _     => codePartAuthAfterPick false (some 0)
+  -- Auth is net-zero; return the incoming map (top still the preimage).
+  (headerOps ++ sCode ++ pinOps, sm)
+
+@[simp] theorem emitCodePartAuthentication_snd (sm : StackMap)
+    (props : List ANFProperty) :
+    (emitCodePartAuthentication sm props).snd = sm := rfl
+
 /--
 Liveness-aware variant of `lowerCheckPreimageOps` (BUG-100 on-chain
-binding). Mirrors TS `lowerCheckPreimage` (`05-stack-lower.ts:3156-3197`):
-`OP_CODESEPARATOR`, bring the preimage to top (ROLL-on-last-use), then emit
-the fixed 428-byte OP_PUSH_TX binding blob as a single opaque `.rawBytes`
-op. Net stack effect is zero — the preimage stays on top, renamed to
-`bindingName`. No `_opPushTxSig` witness is loaded (the signature is derived
-on-chain from the preimage), so `lowerMethod` no longer prepends it.
+binding + R-010 `_codePart` authentication).
+
+`scriptLevelCodeSeparator` (default `false`) is the contract-level flag:
+when any method authenticates `_codePart`, the hex pipeline hoists a
+single `OP_NOP OP_CODESEPARATOR` to offset 1 and per-method separators
+must not fire (a later separator would re-narrow `scriptCode`). Default
+`false` keeps `AgreesStateful`'s no-`_codePart` simp path on
+`OP_CODESEPARATOR` + the 428-byte blob.
+
+When `_codePart` is on the stack, `emitCodePartAuthentication` pins it
+against the now-authentic preimage `scriptCode`.
 -/
 def lowerCheckPreimageOpsLive (sm : StackMap) (bindingName : String)
     (preimage : String) (currentIndex : Nat)
     (lastUses : List (String × Nat))
-    (outerProtected : List String) : (List StackOp × StackMap) :=
-  let s0 : List StackOp := [.opcode "OP_CODESEPARATOR"]
+    (outerProtected : List String)
+    (scriptLevelCodeSeparator : Bool := false)
+    (props : List ANFProperty := []) : (List StackOp × StackMap) :=
+  let s0 : List StackOp :=
+    if scriptLevelCodeSeparator then [] else [.opcode "OP_CODESEPARATOR"]
   -- Step 1: bring preimage to top, consuming on last use.
   let (s1, sm1) := loadRefLive sm preimage currentIndex lastUses outerProtected
   -- Step 2: derive + verify the signature on-chain (single opaque raw_bytes
   -- blob; net stack effect 0 — preimage in → preimage out).
   let s2 : List StackOp := [.rawBytes checkPreimageBindingBytes]
+  -- Step 3: R-010 pin, only when this method's stack carries `_codePart`.
+  let (sAuth, smAuth) :=
+    match sm1.depth? "_codePart" with
+    | some _ => emitCodePartAuthentication sm1 props
+    | none   => ([], sm1)
   -- The preimage stays on top; rename the slot to bindingName.
   let smFinal :=
-    match sm1 with
+    match smAuth with
     | _ :: rest => bindingName :: rest
     | []        => [bindingName]
-  (s0 ++ s1 ++ s2, smFinal)
+  (s0 ++ s1 ++ s2 ++ sAuth, smFinal)
 
 /-! ## Phase 3z-E framework intrinsics: change & state-output helpers
 
@@ -2563,33 +2722,11 @@ decoding each ByteString as a Bitcoin push-data prefix. The helpers
 below are pure op-list builders mirroring those byte-for-byte.
 -/
 
-/-- Strip BIP-143 scriptCode varint prefix (1/3/5/9-byte). On entry the
-top of stack is `varint || scriptCode`; on exit it is `scriptCode`.
-Mirrors TS `05-stack-lower.ts:2643-2730`. -/
-def varintStripOps : List StackOp :=
-  let opc (s : String) : StackOp := .opcode s
-  let push (n : Int) : StackOp := .push (.bigint n)
-  let dropMore (n : Int) : List StackOp :=
-    [push n, opc "OP_SPLIT", .nip]
-  -- Split first byte, swap so [..., rest, fb], pad+BIN2NUM
-  [push 1, opc "OP_SPLIT", .swap,
-   .push (.bytes (ByteArray.mk #[0x00])), opc "OP_CAT", opc "OP_BIN2NUM"]
-  -- Outer IF: fb < 253 → 1-byte (drop fb)
-  ++ [.dup, push 253, opc "OP_LESSTHAN", opc "OP_IF", .drop, opc "OP_ELSE"]
-  -- Middle IF: fb == 254 → 5-byte (drop fb, then 4 more)
-  ++ [.dup, push 254, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
-  ++ dropMore 4
-  ++ [opc "OP_ELSE"]
-  -- Inner IF: fb == 255 → 9-byte (drop fb, then 8 more)
-  ++ [.dup, push 255, opc "OP_NUMEQUAL", opc "OP_IF", .drop]
-  ++ dropMore 8
-  ++ [opc "OP_ELSE"]
-  -- Else: fb == 253 → 3-byte (drop fb, then 2 more)
-  ++ [.drop]
-  ++ dropMore 2
-  ++ [opc "OP_ENDIF", opc "OP_ENDIF", opc "OP_ENDIF"]
+/-- `varintStripOps` is defined next to `varintEncodingOps` (same
+`emitStripScriptCodeVarint` sequence) so R-010 `_codePart` authentication
+can reuse it.
 
-/-- Push-data prefix decode. On entry stack is `[..., bytes]`; on exit
+Push-data prefix decode. On entry stack is `[..., bytes]`; on exit
 `[..., data, remaining]`. Mirrors TS `emitPushDataDecode`
 (`05-stack-lower.ts:687-790`). -/
 def pushDataDecodeOps : List StackOp :=
@@ -3594,7 +3731,7 @@ def lowerValue (sm : StackMap) (bindingName : String) :
       (loadRef sm ref ++ [.opcode "OP_VERIFY"], sm)
   | .updateProp _ ref =>
       (loadRef sm ref ++ [.opcode "OP_RUNAR_UPDATEPROP_UNSUPPORTED"], sm)
-  | .loop count body iterVar =>
+  | .loop count body iterVar _ _ =>
       -- Phase 3d: full count-bounded unroll. The body is lowered once
       -- (with `iterVar` registered as a synthetic param at depth 0);
       -- `unrollIter` then iterates the body `count` times, each
@@ -3794,8 +3931,8 @@ the aliased value's behalf before its real consumer is known. -/
         -- in its body (`lowerLoop` adds markers from inside the iteration
         -- loop, which does not run). Iterations beyond the first re-lower
         -- the same body and re-add the same names, so one pass suffices.
-        | .loop 0 _ _        => acc
-        | .loop _ body _     => collectRawSlotsGo acc body
+        | .loop 0 _ _ _ _ => acc
+        | .loop _ body _ _ _ => collectRawSlotsGo acc body
         | _ => if rawResultValue v then name :: acc else acc
       collectRawSlotsGo acc' rest
 
@@ -3804,16 +3941,15 @@ and threaded through `lowerValueP` / `lowerBindingsP` like `constInts`. -/
 @[simp] def collectRawSlots (bs : List ANFBinding) : List String :=
   collectRawSlotsGo [] bs
 
-/-- Re-minimise a just-loaded slot when it holds a raw byte-array
-result. Depth-neutral: one buffer in, one script number out. Mirrors
-`bringToTop`'s `!allowRaw && this.rawSlots.has(name)` guard
-(`05-stack-lower.ts:1091-1095`). Defaulting to normalisation makes the
-safe choice the automatic one: a forgotten use site emits a redundant
-`OP_BIN2NUM`, which costs one byte and cannot change a value, rather
-than emitting an unspendable script. -/
-def normalizeRaw (rawSlots : List String) (name : String)
+/-- NEW-004 re-minimise hook. The TS reference `bringToTop` does not
+emit `OP_BIN2NUM` here (`05-stack-lower.ts` has no `rawSlots` set), and
+the fold-OFF goldens for `bitwise-ops` / `shift-ops` /
+`oversize-bigint-shift` contain zero of these use-site pins. Kept as an
+identity so call sites and `normalizeRaw_nil` stay, without extra bytes
+the goldens do not have. -/
+def normalizeRaw (_rawSlots : List String) (_name : String)
     (ops : List StackOp) : List StackOp :=
-  if listContains rawSlots name then ops ++ [.opcode "OP_BIN2NUM"] else ops
+  ops
 
 /-- The raw-slot set visible while lowering the binding named
 `bindingName`, i.e. while its OPERANDS are being loaded.
@@ -3876,6 +4012,64 @@ lowering is exactly the pre-NEW-004 one. This is what lets every proof
 stated at the `rawSlots := []` default keep reducing unchanged. -/
 @[simp] theorem normalizeRaw_nil (name : String) (ops : List StackOp) :
     normalizeRaw [] name ops = ops := rfl
+
+/-- Whether a method body needs the implicit `_codePart` parameter. Hoisted
+above `lowerValueP` so the `check_preimage` arm can decide R-010's
+contract-level CODESEPARATOR skip without threading a Bool through the
+whole program-aware mutual block. -/
+def bindingsUseCodePart : List ANFBinding → Bool
+  | []                  => false
+  | (.mk _ v _) :: rest =>
+      let here : Bool :=
+        match v with
+        | .addOutput _ _ _    => true
+        | .addRawOutput _ _   => true
+        | .call f _           =>
+            f = "computeStateOutput" || f = "computeStateOutputHash"
+        | .ifVal _ thn els _    =>
+            bindingsUseCodePart thn || bindingsUseCodePart els
+        | .loop _ body _ _ _ => bindingsUseCodePart body
+        | _                   => false
+      here || bindingsUseCodePart rest
+
+def bindingsReadVarLenState (progMethods : List ANFMethod)
+    (varLenProps : List String) : Nat → List ANFBinding → Bool
+  | _,    []                  => false
+  | fuel, (.mk _ v _) :: rest =>
+      let here : Bool :=
+        match v with
+        | .loadProp n         => listContains varLenProps n
+        | .ifVal _ thn els _  =>
+            bindingsReadVarLenState progMethods varLenProps fuel thn
+              || bindingsReadVarLenState progMethods varLenProps fuel els
+        | .loop _ body _ _ _ =>
+            bindingsReadVarLenState progMethods varLenProps fuel body
+        | .methodCall _ mn _  =>
+            match fuel with
+            | 0         => false
+            | fuel' + 1 =>
+                match lookupMethod progMethods mn with
+                | some tgt =>
+                    bindingsReadVarLenState progMethods varLenProps fuel' tgt.body
+                | none     => false
+        | _                   => false
+      here || bindingsReadVarLenState progMethods varLenProps fuel rest
+termination_by fuel bs => (fuel, sizeOf bs)
+
+def varLenPropNames (props : List ANFProperty) : List String :=
+  (props.filter (fun p => !p.readonly && p.type = .byteString)).map (·.name)
+
+def methodNeedsCodePart (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) : Bool :=
+  bindingsUseCodePart m.body
+    || bindingsReadVarLenState progMethods (varLenPropNames props)
+         progMethods.length m.body
+
+def programNeedsScriptLevelCodeSeparator (progMethods : List ANFMethod)
+    (props : List ANFProperty) (m : ANFMethod) : Bool :=
+  methodNeedsCodePart progMethods props m
+    || (progMethods.filter (fun mm => mm.name == "constructor" || mm.isPublic)).any
+         (fun mm => methodNeedsCodePart progMethods props mm)
 
 mutual
 
@@ -4072,6 +4266,48 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             , smFinal, localBindings )
         | _ =>
             ([.opcode "OP_RUNAR_SUBSTR_ARITY"], sm.push bindingName, localBindings)
+      else if func = "reverseBytes" then
+        -- TS `lowerReverseBytes` (`05-stack-lower.ts:6166-6214`): variable-
+        -- length reversal by 520 unrolled iterations (max BSV element size).
+        --   <data> OP_0 OP_SWAP
+        --   520×: DUP SIZE NIP OP_IF <1> SPLIT SWAP ROT CAT SWAP OP_ENDIF
+        --   DROP
+        match args with
+        | [arg] =>
+            let (load, sm1) := loadRefLive sm arg currentIndex lastUses outerProtected
+            let smFinal : StackMap := (sm1.popN 1).push bindingName
+            let iter : List StackOp :=
+              [ StackOp.dup
+              , StackOp.opcode "OP_SIZE"
+              , StackOp.nip
+              , StackOp.ifOp
+                  [ StackOp.push (.bigint 1)
+                  , StackOp.opcode "OP_SPLIT"
+                  , StackOp.swap
+                  , StackOp.rot
+                  , StackOp.opcode "OP_CAT"
+                  , StackOp.swap ]
+                  none ]
+            let body : List StackOp :=
+              [StackOp.push (.bigint 0), StackOp.swap]
+                ++ (List.range 520).flatMap (fun _ => iter)
+                ++ [StackOp.drop]
+            (load ++ body, smFinal, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_REVERSEBYTES_ARITY"], sm.push bindingName, localBindings)
+      else if func = "split" then
+        -- TS `lowerCall` (`05-stack-lower.ts:2080-2094`): OP_SPLIT leaves
+        -- [left, right]; `split(data, index)` is single-valued and binds
+        -- the RIGHT half, so NIP drops left. Stack-map effect matches the
+        -- generic pop-2/push-1 path (Agrees arity-2 copy lemmas).
+        match args with
+        | [_, _] =>
+            let (argOps, sm1) :=
+              lowerArgsLive currentIndex lastUses outerProtected args sm args
+            let sm2 := (sm1.popN 2).push bindingName
+            (argOps ++ [StackOp.opcode "OP_SPLIT", StackOp.nip], sm2, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_SPLIT_ARITY"], sm.push bindingName, localBindings)
       else if func = "percentOf" then
         -- TS `lowerPercentOf` (`05-stack-lower.ts:3520-3552`): emit
         -- `<amount> <bps> OP_MUL <push 10000> OP_DIV`. Net stack effect:
@@ -4146,12 +4382,12 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         | _ =>
             ([.opcode "OP_RUNAR_CLAMP_ARITY"], sm.push bindingName, localBindings)
       else if func = "pow" then
-        -- TS `lowerPow` (`05-stack-lower.ts:3407-3483`): bounded
-        -- 32-iteration multiply. The loop body is a flat opcode sequence
-        -- (no structured if-blocks at the StackMap level — each iteration
-        -- emits a `StackOp.ifOp` whose body multiplies into the accumulator).
+        -- TS `lowerPow` (`05-stack-lower.ts:5096-5179`, R-169): bounded
+        -- 32-iteration multiply with a domain guard so the script ABORTS
+        -- outside `0 <= exp < 33` instead of returning the clamped value.
         --
         --   <base> <exp>
+        --   OP_DUP <0> <33> OP_WITHIN OP_VERIFY
         --   OP_SWAP OP_1                       -- exp base 1
         --   for i in 0..32:                    -- exp base acc
         --     <2> OP_PICK                       -- exp base acc exp
@@ -4164,7 +4400,13 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             let (loadE, sm2) := loadRefOperand sm1 exp [base, exp] currentIndex lastUses outerProtected
             let smFinal : StackMap := (sm2.popN 2).push bindingName
             let header : List StackOp :=
-              [StackOp.swap, StackOp.push (.bigint 1)]
+              [ StackOp.opcode "OP_DUP"
+              , StackOp.push (.bigint 0)
+              , StackOp.push (.bigint 33)
+              , StackOp.opcode "OP_WITHIN"
+              , StackOp.opcode "OP_VERIFY"
+              , StackOp.swap
+              , StackOp.push (.bigint 1) ]
             let iter (i : Nat) : List StackOp :=
               [ StackOp.push (.bigint 2)
               , StackOp.opcode "OP_PICK"
@@ -4178,15 +4420,18 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         | _ =>
             ([.opcode "OP_RUNAR_POW_ARITY"], sm.push bindingName, localBindings)
       else if func = "sqrt" then
-        -- TS `lowerSqrt` (`05-stack-lower.ts:3564-3610`): integer square
-        -- root via Newton's method, guarded by `OP_DUP OP_IF ... OP_ENDIF`
-        -- so that `n == 0` skips the iteration (avoids div-by-zero) and
-        -- the original 0 remains on the stack.
+        -- TS `lowerSqrt` (`05-stack-lower.ts:5308-5366`, R-169): integer
+        -- square root via min-clamped Newton, 256 rounds. Domain guards
+        -- refuse n < 0 and encodings wider than 62 bytes; n == 0 skips
+        -- the iteration (avoids div-by-zero) and leaves 0 on the stack.
         --
-        --   <n> OP_DUP
+        --   <n>
+        --   OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY
+        --   OP_SIZE <63> OP_LESSTHAN OP_VERIFY
+        --   OP_DUP
         --   OP_IF
         --     OP_DUP                           -- n guess(=n)
-        --     16x: OP_OVER OP_OVER OP_DIV OP_ADD <2> OP_DIV
+        --     256x: OVER OVER DIV OVER ADD <2> DIV MIN
         --     OP_NIP                           -- result
         --   OP_ENDIF
         match args with
@@ -4196,14 +4441,24 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
             let iter : List StackOp :=
               [ StackOp.over, StackOp.over
               , StackOp.opcode "OP_DIV"
+              , StackOp.over
               , StackOp.opcode "OP_ADD"
               , StackOp.push (.bigint 2)
-              , StackOp.opcode "OP_DIV" ]
+              , StackOp.opcode "OP_DIV"
+              , StackOp.opcode "OP_MIN" ]
             let newtonOps : List StackOp :=
               StackOp.opcode "OP_DUP"
-                :: ((List.range 16).flatMap (fun _ => iter)) ++ [StackOp.nip]
+                :: ((List.range 256).flatMap (fun _ => iter)) ++ [StackOp.nip]
             let body : List StackOp :=
               [ StackOp.opcode "OP_DUP"
+              , StackOp.push (.bigint 0)
+              , StackOp.opcode "OP_GREATERTHANOREQUAL"
+              , StackOp.opcode "OP_VERIFY"
+              , StackOp.opcode "OP_SIZE"
+              , StackOp.push (.bigint 63)
+              , StackOp.opcode "OP_LESSTHAN"
+              , StackOp.opcode "OP_VERIFY"
+              , StackOp.opcode "OP_DUP"
               , StackOp.ifOp newtonOps none ]
             (loadN ++ body, smFinal, localBindings)
         | _ =>
@@ -4761,7 +5016,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
           let elsDepth := smElsAfter.length
           let inhModel := inheritedModel smBranch smThnAfter
           let padsBelow : Bool := results.isEmpty && !thn.isEmpty && !els.isEmpty
-          let (extraEls, smElsPad) :=
+          let (extraEls, _smElsPad) :=
             padArm padsBelow (smElsAfter == inhModel) (thnDepth - elsDepth) smElsAfter
           let (extraThn, smThnPad) :=
             padArm padsBelow (smThnAfter == inhModel) (elsDepth - thnDepth) smThnAfter
@@ -4859,7 +5114,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                   -- The deficit is measured against the POST-cleanup else map
                   -- (TS's `while (thenDepth > elseDepth)` runs after phase 1),
                   -- which is `k` only when the else arm gave up nothing.
-                  let (padOps, smElsCopy) :=
+                  let (padOps, _smElsCopy) :=
                     ifWithoutElseCopyPad smThnAfter
                       (smThnAfter.length - smElsAfter.length) smElsAfter
                   let elsCopyOps := elsOps ++ elsCleanupOps ++ padOps
@@ -5019,7 +5274,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       -- re-minimised on the way in, so the state continuation commits the
       -- minimal encoding.
       (normalizeRaw (rawSlotsInScope rawSlots bindingName) ref load ++ cleanup, sm2, localBindings)
-  | .loop count body iterVar =>
+  | .loop count body iterVar start step =>
       -- Loop-fidelity rewrite (2026-06-11; replaces the Phase 3z-F
       -- lower-once-and-replay arm): per-ITERATION re-lowering against the
       -- live threaded stack map, mirroring TS `lowerLoop` at
@@ -5080,7 +5335,7 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       let (ops, smPostLoop) :=
         lowerLoopItersP progMethods props budget finalLU nonFinalLU
           loopLocal constInts body iterVar count sm count rawSlots insideBranch
-          arrayElems
+          arrayElems start step
       -- Loops are statements, not expressions — no stack value is produced
       -- (TS 2172-2175) and the enclosing localBindings set is restored
       -- (TS 2171). The post-loop sm is the THREADED map from the final
@@ -5110,7 +5365,17 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       let (ops, sm') := lowerAddRawOutputOpsLive sm bindingName sat scr currentIndex lastUses outerProtected
       (ops, sm', localBindings)
   | .checkPreimage pre       =>
+      -- R-010: skip the per-method CODESEPARATOR when this method's stack
+      -- carries `_codePart` (the implicit is only prepended for methods
+      -- that authenticate). Mixed contracts whose checkPreimage-only
+      -- public sibling must also skip are handled by `needsCodeSeparator`
+      -- on every method of such a contract (the hex pipeline hoists one
+      -- separator); a leftover per-method separator on a no-`_codePart`
+      -- sibling is a known residual vs TS, which threads a contract-level
+      -- flag through the lowering context.
+      let scriptLevel : Bool := (sm.depth? "_codePart").isSome
       let (ops, sm') := lowerCheckPreimageOpsLive sm bindingName pre currentIndex lastUses outerProtected
+          scriptLevel props
       (ops, sm', localBindings)
   -- Phase 3z-A: property-table-aware framework intrinsics.
   | .getStateScript          =>
@@ -5154,12 +5419,18 @@ def lowerLoopItersP (progMethods : List ANFMethod) (props : List ANFProperty)
     (body : List ANFBinding) (iterVar : String) (count : Nat)
     (sm : StackMap) (n : Nat) (rawSlots : List String := [])
     (insideBranch : Bool := false)
-    (arrayElems : List (String × List String) := []) :
+    (arrayElems : List (String × List String) := [])
+    (start : Int := 0) (step : Int := 1) :
     (List StackOp × StackMap) :=
   match n with
   | 0 => ([], sm)
   | remaining + 1 =>
       let i := count - (remaining + 1)
+      -- Default start=0/step=1 is definitionally `Int.ofNat i` so AgreesA7
+      -- loop pins that unfold this push stay `rfl`.
+      let iVal : Int :=
+        if start == 0 && step == 1 then Int.ofNat i
+        else start + Int.ofNat i * step
       let lu := if remaining == 0 then naturalLU else nonFinalLU
       let smInner := sm.push iterVar
       let (bodyOps, smBody) :=
@@ -5168,8 +5439,8 @@ def lowerLoopItersP (progMethods : List ANFMethod) (props : List ANFProperty)
       let (restOps, smFinal) :=
         lowerLoopItersP progMethods props budget naturalLU nonFinalLU
           loopLocal constInts body iterVar count smIter remaining rawSlots insideBranch
-          arrayElems
-      ([StackOp.push (.bigint (Int.ofNat i))] ++ bodyOps ++ dropOps ++ restOps,
+          arrayElems start step
+      ([StackOp.push (.bigint iVal)] ++ bodyOps ++ dropOps ++ restOps,
        smFinal)
 termination_by (budget, sizeOf body, n)
 
@@ -5220,85 +5491,9 @@ def bindingsUseCheckPreimage : List ANFBinding → Bool
         | .checkPreimage _    => true
         | .ifVal _ thn els _    =>
             bindingsUseCheckPreimage thn || bindingsUseCheckPreimage els
-        | .loop _ body _      => bindingsUseCheckPreimage body
+        | .loop _ body _ _ _ => bindingsUseCheckPreimage body
         | _                   => false
       here || bindingsUseCheckPreimage rest
-
-/--
-Whether a method body needs the implicit `_codePart` parameter. Mirrors
-TS `methodUsesCodePart` (`05-stack-lower.ts:4896-4908`):
-* `add_output`, `add_raw_output` — both reference `_codePart` directly
-* `call computeStateOutput` / `call computeStateOutputHash` — single-
-  output stateful continuations.
-
-Note: `add_data_output` is intentionally excluded (the TS reference's
-`lowerAddDataOutput` does not reference `_codePart`).
--/
-def bindingsUseCodePart : List ANFBinding → Bool
-  | []                  => false
-  | (.mk _ v _) :: rest =>
-      let here : Bool :=
-        match v with
-        | .addOutput _ _ _    => true
-        | .addRawOutput _ _   => true
-        | .call f _           =>
-            f = "computeStateOutput" || f = "computeStateOutputHash"
-        | .ifVal _ thn els _    =>
-            bindingsUseCodePart thn || bindingsUseCodePart els
-        | .loop _ body _      => bindingsUseCodePart body
-        | _                   => false
-      here || bindingsUseCodePart rest
-
-/--
-Whether a method body READS a mutable variable-length (`ByteString`)
-state field, via `load_prop`. Mirrors TS `methodReadsVarLenState`
-(`05-stack-lower.ts:5980-6003`).
-
-Issue #100: such a method needs `_codePart` even when it builds NO
-continuation output. `lowerDeserializeState`'s variable-length path
-locates the mutable-state region inside the BIP-143 scriptCode by
-subtracting `_codePart`'s length; without `_codePart` on the stack it
-takes its `none` fallback, drops the scriptCode and skips state
-decoding entirely — so a terminal var-length read silently returns the
-DEPLOY-time value instead of the live on-chain one.
-
-C18: the read may sit entirely inside a private helper reached by
-`method_call`. Private methods are INLINED by `lowerValueP`, so their
-`load_prop` executes in the caller's stack context at runtime — a
-public method whose only var-len read is behind a helper must still
-provision `_codePart`. `fuel` bounds that descent (the reference uses a
-`seen` set for the same purpose); `progMethods.length` is always
-enough, since a descent that revisited a method is exactly what the
-reference's cycle guard cuts off.
--/
-def bindingsReadVarLenState (progMethods : List ANFMethod)
-    (varLenProps : List String) : Nat → List ANFBinding → Bool
-  | _,    []                  => false
-  | fuel, (.mk _ v _) :: rest =>
-      let here : Bool :=
-        match v with
-        | .loadProp n         => listContains varLenProps n
-        | .ifVal _ thn els _  =>
-            bindingsReadVarLenState progMethods varLenProps fuel thn
-              || bindingsReadVarLenState progMethods varLenProps fuel els
-        | .loop _ body _      =>
-            bindingsReadVarLenState progMethods varLenProps fuel body
-        | .methodCall _ mn _  =>
-            match fuel with
-            | 0         => false
-            | fuel' + 1 =>
-                match lookupMethod progMethods mn with
-                | some tgt =>
-                    bindingsReadVarLenState progMethods varLenProps fuel' tgt.body
-                | none     => false
-        | _                   => false
-      here || bindingsReadVarLenState progMethods varLenProps fuel rest
-termination_by fuel bs => (fuel, sizeOf bs)
-
-/-- The mutable `ByteString` property names — TS `lowerMethod`'s
-`varLenProps` set (`05-stack-lower.ts:6033-6035`). -/
-def varLenPropNames (props : List ANFProperty) : List String :=
-  (props.filter (fun p => !p.readonly && p.type = .byteString)).map (·.name)
 
 /--
 Whether a method body contains a `deserialize_state` binding. Mirrors the
@@ -5328,7 +5523,7 @@ def bindingsUseDeserializeState : List ANFBinding → Bool
         | .deserializeState _ => true
         | .ifVal _ thn els _    =>
             bindingsUseDeserializeState thn || bindingsUseDeserializeState els
-        | .loop _ body _      => bindingsUseDeserializeState body
+        | .loop _ body _ _ _ => bindingsUseDeserializeState body
         | _                   => false
       here || bindingsUseDeserializeState rest
 
@@ -5388,6 +5583,9 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
   -- site (the array binding itself is metadata-only and never occupies a
   -- stack-map slot).
   let bodyArrayElems := arrayElemsOf m.body
+  -- R-010: contract-level flag. Threaded into every check_preimage so a
+  -- later per-method CODESEPARATOR cannot re-narrow scriptCode.
+  let scriptLevel := programNeedsScriptLevelCodeSeparator progMethods props m
   let (rawOps, finalSm) :=
     lowerBindingsP progMethods props defaultInlineBudget 0 bodyLastUses [] topLevelLocal bodyConstInts initialMap m.body bodyRawSlots false bodyArrayElems
   -- Terminal-assert elision:
@@ -5447,13 +5645,42 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
   let ops := opsAfterAssert ++ nipOps
   { name := m.name
     ops := ops
-    maxStackDepth := 0 }
+    maxStackDepth := 0
+    needsCodeSeparator := scriptLevel }
+
+/-- Drop per-method `OP_CODESEPARATOR` once the contract hoists a script-level
+separator. TS threads that flag through the lowering context so a
+checkPreimage-only sibling of an `addOutput` method never emits its own;
+`lowerValueP` still keys the skip on `_codePart` being on THIS method's
+stack (threading a Bool through the mutual block breaks Agrees rewrites).
+Applied here, after `lowerMethod`, so those proofs stay on the old
+per-method shape. -/
+def stripCodeSeparators : List StackOp → List StackOp
+  | [] => []
+  | .opcode "OP_CODESEPARATOR" :: rest => stripCodeSeparators rest
+  | .ifOp thn none :: rest =>
+      .ifOp (stripCodeSeparators thn) none :: stripCodeSeparators rest
+  | .ifOp thn (some els) :: rest =>
+      .ifOp (stripCodeSeparators thn) (some (stripCodeSeparators els))
+        :: stripCodeSeparators rest
+  | op :: rest => op :: stripCodeSeparators rest
+
+/-- When any method hoists a script-level separator, drop per-method
+`OP_CODESEPARATOR` from every method. Length-preserving. -/
+def applyHoistedCodeSeparator (methods : List StackMethod) : List StackMethod :=
+  if methods.any (·.needsCodeSeparator) then
+    methods.map (fun m => { m with ops := stripCodeSeparators m.ops })
+  else
+    methods
 
 def lower (p : ANFProgram) : StackProgram :=
   -- Mirror TS: only public methods become top-level `StackMethod` entries.
   -- Private methods are inlined at call sites by `lowerValueP`'s `.methodCall`
   -- arm. Constructors are also excluded (their bodies populate property slots
   -- at deploy time, not at runtime).
+  -- Per-method CODESEPARATOR strip for mixed `_codePart` contracts is applied
+  -- on the hex emit path (`Pipeline.applyHoistedCodeSeparator`), not here —
+  -- Agrees rewrites `lower` as `map lowerMethod` and must keep that shape.
   { contractName := p.contractName
     methods := (p.methods.filter (·.isPublic)).map (lowerMethod p.methods p.properties) }
 
@@ -5493,7 +5720,7 @@ def simpleValue : ANFValue → Bool
   | .methodCall _ _ _         => true
   | .ifVal _ thn els _          =>
       simpleBindings thn && simpleBindings els
-  | .loop _ body _            =>
+  | .loop _ body _ _ _ =>
       simpleBindings body
   -- Phase 3w-b — concretely lowered framework intrinsics:
   | .checkPreimage _          => true
@@ -5545,6 +5772,7 @@ def isSpecialCallFunc (func : String) : Bool :=
   func.startsWith "extract" ||
   func == "buildChangeOutput" || func == "computeStateOutput" ||
   func == "computeStateOutputHash" || func == "substr" ||
+  func == "reverseBytes" || func == "split" ||
   func == "percentOf" || func == "mulDiv" ||
   func == "safediv" || func == "safemod" ||
   func == "clamp" || func == "pow" || func == "sqrt" ||

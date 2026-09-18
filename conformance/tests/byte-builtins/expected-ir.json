@@ -1,0 +1,424 @@
+{
+  "contractName": "ByteBuiltins",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedDigest"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRipemd"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedDigest"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "update_prop",
+            "name": "expectedDigest",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRipemd"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "expectedRipemd",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "expectedDigest",
+          "type": "Sha256"
+        },
+        {
+          "name": "expectedRipemd",
+          "type": "Ripemd160"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "data"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "idx"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "split",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "tail",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedTail"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "tail",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkSplit",
+      "params": [
+        {
+          "name": "data",
+          "type": "ByteString"
+        },
+        {
+          "name": "idx",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedTail",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "value"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "width"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "int2str",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "s",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "s",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkInt2Str",
+      "params": [
+        {
+          "name": "value",
+          "type": "bigint"
+        },
+        {
+          "name": "width",
+          "type": "bigint"
+        },
+        {
+          "name": "expected",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "data"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "reverseBytes",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "r",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "r",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkReverse",
+      "params": [
+        {
+          "name": "data",
+          "type": "ByteString"
+        },
+        {
+          "name": "expected",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "preimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "sha256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "h",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedDigest"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "h",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkSha256",
+      "params": [
+        {
+          "name": "preimage",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "preimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ripemd160",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "h",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRipemd"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "h",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkRipemd",
+      "params": [
+        {
+          "name": "preimage",
+          "type": "ByteString"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "expectedDigest",
+      "readonly": true,
+      "type": "Sha256"
+    },
+    {
+      "name": "expectedRipemd",
+      "readonly": true,
+      "type": "Ripemd160"
+    }
+  ]
+}

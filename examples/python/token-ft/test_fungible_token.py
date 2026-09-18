@@ -30,32 +30,31 @@ def test_send():
 
 def test_merge():
     c = FungibleToken(owner=ALICE.pub_key, balance=50, merge_balance=0, token_id=b'\xab' * 16)
-    # allPrevouts = 72 zero bytes (two 36-byte zero outpoints),
-    # consistent with mock extract_hash_prevouts and extract_outpoint.
     all_prevouts = b'\x00' * 72
-    c.merge(ALICE.test_sig, 150, all_prevouts, 546)
-    assert len(c._outputs) == 1
+    parent = b'\x00' * 64
+    with pytest.raises(AssertionError):
+        c.merge(ALICE.test_sig, 150, all_prevouts, parent, 546)
 
 
 def test_merge_negative_other_balance_fails():
     c = FungibleToken(owner=ALICE.pub_key, balance=100, merge_balance=0, token_id=b'\xab' * 16)
     all_prevouts = b'\x00' * 72
     with pytest.raises(AssertionError):
-        c.merge(ALICE.test_sig, -1, all_prevouts, 546)
+        c.merge(ALICE.test_sig, -1, all_prevouts, b'\x00' * 64, 546)
 
 
 def test_merge_tampered_prevouts_fails():
     c = FungibleToken(owner=ALICE.pub_key, balance=30, merge_balance=0, token_id=b'\xab' * 16)
     tampered_prevouts = b'\xff' * 72
     with pytest.raises(AssertionError):
-        c.merge(ALICE.test_sig, 70, tampered_prevouts, 546)
+        c.merge(ALICE.test_sig, 70, tampered_prevouts, b'\x00' * 64, 546)
 
 
 def test_merge_with_pre_existing_merge_balance():
     c = FungibleToken(owner=ALICE.pub_key, balance=20, merge_balance=10, token_id=b'\xab' * 16)
     all_prevouts = b'\x00' * 72
-    c.merge(ALICE.test_sig, 50, all_prevouts, 546)
-    assert len(c._outputs) == 1
+    with pytest.raises(AssertionError):
+        c.merge(ALICE.test_sig, 50, all_prevouts, b'\x00' * 64, 546)
 
 
 def test_transfer_exact_balance():

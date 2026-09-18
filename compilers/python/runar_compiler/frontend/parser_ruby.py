@@ -19,15 +19,13 @@ Ruby syntax conventions used in Runar contracts:
 
 from __future__ import annotations
 
-import re
-
 from runar_compiler.frontend.ast_nodes import (
     ArrayLiteralExpr,
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
     BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
     PropertyAccessExpr, MemberExpr, BinaryExpr, UnaryExpr, CallExpr,
-    TernaryExpr, IndexAccessExpr, IncrementExpr,
+    TernaryExpr, IndexAccessExpr, IncrementExpr, DecrementExpr,
     VariableDeclStmt, AssignmentStmt, ExpressionStmt, IfStmt, ForStmt,
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
@@ -231,20 +229,49 @@ _PASSTHROUGH_NAMES: frozenset[str] = frozenset({
 })
 
 
+def _match_downto_call(expr: Expression) -> tuple[Expression, Expression] | None:
+    """Destructure ``<receiver>.downto(<bound>)`` -- the Ruby countdown header.
+
+    Returns None for every other expression, including ``downto`` with the
+    wrong arity, so a malformed header falls through to the range-operator
+    branch and gets that branch's diagnostic rather than silently becoming a
+    loop.
+    """
+    if not isinstance(expr, CallExpr):
+        return None
+    if not isinstance(expr.callee, MemberExpr):
+        return None
+    if expr.callee.property != "downto":
+        return None
+    if len(expr.args) != 1:
+        return None
+    return expr.callee.object, expr.args[0]
+
+
 def _snake_to_camel(name: str) -> str:
     """Convert a snake_case identifier to camelCase.
 
-    Only capitalizes lowercase letters and digits after underscores, matching
-    the TS reference: ``name.replace(/_([a-z0-9])/g, ...)``.  This means
-    ``EC_P`` passes through unchanged (uppercase P is not matched).
+    Split on ``_`` and capitalize the first character of every following part,
+    skipping empty parts. This is the shared R-113 rule — the same algorithm as
+    ``snakeToCamelCore`` (TS), ``rbConvertName`` (Go), ``snake_to_camel``
+    (Rust) and ``snakeToCamel`` (Zig).
+
+    It used to be ``re.sub(r"_([a-z0-9])", ...)``, which uppercases only a
+    lower-case letter or digit after the underscore and leaves ``_`` before a
+    CAPITAL in place: a property ``total_A`` reached the artifact as
+    ``total_A`` here and as ``totalA`` in ts/go/rust/zig. The script hex is
+    identical either way, so hex parity never saw it — but ``serializeState``
+    looks state up by ``field.name``, so the two spellings do not interoperate.
 
     Leading underscores are stripped so that ``_require_owner`` becomes
-    ``requireOwner`` (not ``RequireOwner``).
+    ``requireOwner`` (not ``RequireOwner``). An all-underscore name has nothing
+    left to convert and is returned unchanged, as in the Go tier.
     """
-    leading = len(name) - len(name.lstrip("_"))
-    if leading > 0:
-        return re.sub(r"_([a-z0-9])", lambda m: m.group(1).upper(), name[leading:])
-    return re.sub(r"_([a-z0-9])", lambda m: m.group(1).upper(), name)
+    stripped = name.lstrip("_")
+    if not stripped:
+        return name
+    head, *rest = stripped.split("_")
+    return head + "".join(part[0].upper() + part[1:] for part in rest if part)
 
 
 def _map_builtin_name(name: str) -> str:
@@ -1241,21 +1268,45 @@ class _RbParser:
 
         start_expr = self._parse_expression()
 
-        # Expect range operator ``..`` (inclusive) or ``...`` (exclusive)
+        # Three loop headers, all of them real Ruby that iterates exactly these
+        # values:
+        #
+        #   for i in 0...n       -> 0, 1, ... n-1  (exclusive, ascending)
+        #   for i in 0..n        -> 0, 1, ... n    (inclusive, ascending)
+        #   for i in n.downto(m) -> n, n-1, ... m  (inclusive, DESCENDING)
+        #
+        # ``downto`` is what lets the Ruby surface spell a countdown. Ruby's
+        # range operators only ever ascend -- ``(5..2)`` is empty -- so
+        # ``step = -1`` was unreachable from this surface, and no fixture could
+        # exercise it across all nine. ``Integer#downto`` is the language's own
+        # countdown verb, it returns an Enumerator, and ``for x in enum`` is
+        # valid Ruby over one.
+        #
+        # ``5.downto(2)`` is a postfix method call, so the start-expression
+        # parser has already consumed the whole header by the time we get here.
+        # Match on the shape it produced rather than on the tokens.
         is_exclusive = False
-        if self._peek().kind == TOK_DOTDOTDOT:
-            is_exclusive = True
-            self._advance()
-        elif self._peek().kind == TOK_DOTDOT:
-            is_exclusive = False
-            self._advance()
+        descending = False
+        downto = _match_downto_call(start_expr)
+        if downto is not None:
+            start_expr, end_expr = downto
+            descending = True
+            is_exclusive = False  # downto's bound is inclusive
         else:
-            self._errors.append(
-                f"{self._file}:{self._peek().line}: "
-                "expected range operator '..' or '...' in for loop"
-            )
+            # Expect range operator ``..`` (inclusive) or ``...`` (exclusive)
+            if self._peek().kind == TOK_DOTDOTDOT:
+                is_exclusive = True
+                self._advance()
+            elif self._peek().kind == TOK_DOTDOT:
+                is_exclusive = False
+                self._advance()
+            else:
+                self._errors.append(
+                    f"{self._file}:{self._peek().line}: "
+                    "expected range operator '..' or '...', or '.downto(n)', in for loop"
+                )
 
-        end_expr = self._parse_expression()
+            end_expr = self._parse_expression()
 
         # Optional ``do`` keyword
         self._match(TOK_DO)
@@ -1274,19 +1325,25 @@ class _RbParser:
             source_location=loop_var_loc,
         )
 
+        if descending:
+            cmp_op = ">="
+        elif is_exclusive:
+            cmp_op = "<"
+        else:
+            cmp_op = "<="
+
         condition: Expression = BinaryExpr(
-            op="<" if is_exclusive else "<=",
+            op=cmp_op,
             left=Identifier(name=var_name),
             right=end_expr,
         )
 
-        update = ExpressionStmt(
-            expr=IncrementExpr(
-                operand=Identifier(name=var_name),
-                prefix=False,
-            ),
-            source_location=loc,
-        )
+        update_expr: Expression
+        if descending:
+            update_expr = DecrementExpr(operand=Identifier(name=var_name), prefix=False)
+        else:
+            update_expr = IncrementExpr(operand=Identifier(name=var_name), prefix=False)
+        update = ExpressionStmt(expr=update_expr, source_location=loc)
 
         return ForStmt(
             init=init,

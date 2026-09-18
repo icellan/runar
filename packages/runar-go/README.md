@@ -139,7 +139,7 @@ A few Go-specific notes that matter for the rest of this README:
 
 ## 4. Writing a contract
 
-A Rúnar contract is a Go struct that embeds either `runar.SmartContract` (stateless) or `runar.StatefulSmartContract` (stateful) and exposes one or more public methods (capitalized Go method names). Public methods are spending entry points; private methods are inlined helpers. The Go compiler (in `compilers/go`) parses the `.runar.go` source, validates the Rúnar subset, type-checks, lowers to ANF and Stack IR, and emits a `RunarArtifact`. Each compiler in the project (TypeScript, Go, Rust, Python, Zig, Ruby, Java) accepts every `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` extension at the parser layer — enforced in CI by the conformance runner's `--parser-only` mode (every tier's `--parse-only` entry runs against every fixture × every declared format, ignoring the `compilers` allowlist which scopes Stack-IR / hex parity ONLY). For fixtures without an opt-out, the compilers also produce byte-identical Stack IR + Bitcoin Script hex; a small set of fixtures carry an explicit `compilers` allowlist in `conformance/tests/<name>/source.json` (Go-only crypto codegen — BabyBear / KoalaBear / Poseidon2 / BN254 / Merkle / FRI / SP1 FRI verifier — and a few Java-deferred Stack-IR cases) plus a `compilersJustification` string explaining the scope.
+A Rúnar contract is a Go struct that embeds either `runar.SmartContract` (stateless) or `runar.StatefulSmartContract` (stateful) and exposes one or more public methods (capitalized Go method names). Public methods are spending entry points; private methods are inlined helpers. The Go compiler (in `compilers/go`) parses the `.runar.go` source, validates the Rúnar subset, type-checks, lowers to ANF and Stack IR, and emits a `RunarArtifact`. Each compiler in the project (TypeScript, Go, Rust, Python, Zig, Ruby, Java) accepts every `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` extension at the parser layer — enforced in CI by the conformance runner's `--parser-only` mode (every tier's `--parse-only` entry runs against every fixture × every declared format, ignoring the `compilers` allowlist which scopes ANF-IR / hex parity ONLY). For fixtures without an opt-out, the compilers also produce byte-identical canonical ANF IR + Bitcoin Script hex (Stack IR is not compared — R-096); a small set of fixtures carry an explicit `compilers` allowlist in `conformance/tests/<name>/source.json` (Go-only crypto codegen — BabyBear / KoalaBear / Poseidon2 / BN254 / Merkle / FRI / SP1 FRI verifier — and a few Java-deferred Stack-IR cases) plus a `compilersJustification` string explaining the scope.
 
 The full Quick Start contract is just 12 effective lines:
 
@@ -163,7 +163,7 @@ func (c *Counter) Decrement() {
 }
 ```
 
-`runar.Assert(cond)` is the primary control mechanism — Bitcoin Script `OP_VERIFY` semantics. The compiler auto-injects `checkPreimage` at each public method entry on stateful contracts, and a state-continuation output at exit, so the contract author never writes either by hand. The full language specification is in [`spec/`](../../spec/) and the playground at <https://runar.build> compiles snippets to Bitcoin Script in the browser.
+`runar.Assert(cond)` is the primary control mechanism — Bitcoin Script `OP_VERIFY` semantics. The compiler auto-injects `checkPreimage` at each public method entry on stateful contracts, and a state-continuation output at exit, so the contract author never writes either by hand. The full language specification is in [`spec/`](../../spec/) and the playground at <https://runar.build> — a hosted site, not in this git tree — compiles snippets to Bitcoin Script in the browser.
 
 ---
 
@@ -582,7 +582,7 @@ The reference end-to-end test for `Counter` is [`integration/go/counter_test.go`
 
 The integration suite uses `RPCProvider` (or `NewRegtestRPCProvider` for auto-mining) and the helpers in [`integration/go/helpers/`](../../integration/go/helpers) to fund wallets and sign with the test SDK. The same harness ships in [`integration/`](../../integration) for all seven SDKs.
 
-The cross-SDK conformance suite at [`conformance/sdk-output/`](../../conformance/sdk-output) verifies that all 7 SDKs produce **byte-identical deployed locking scripts** for the same artifact + constructor args. The `stateful-counter` test case is one of 27 fixtures.
+The cross-SDK conformance suite at [`conformance/sdk-output/`](../../conformance/sdk-output) verifies that all 7 SDKs produce **byte-identical deployed locking scripts** for the same artifact + constructor args. The `stateful-counter` test case is one of 70 fixtures.
 
 ---
 
@@ -623,16 +623,20 @@ The RPC provider implements all `Provider` methods over `getrawtransaction`, `se
 ### `WhatsOnChainProvider`
 
 ```go
-provider := runar.NewWhatsOnChainProvider("mainnet") // or "testnet"
+provider, err := runar.NewWhatsOnChainProvider("mainnet") // or "testnet"
 ```
+
+The network must be exactly `"mainnet"` or `"testnet"`. Any other value — including the empty string — returns an error rather than defaulting, so a typo can never silently point the SDK at live mainnet.
 
 Wraps the public WhatsOnChain API at `https://api.whatsonchain.com/v1/bsv/{main,test}`. Note that WoC does not return locking scripts in its UTXO list response, so `GetUtxos(...).Script` will be empty — fetch the parent transaction with `GetTransaction` if you need the script.
 
 ### `GorillaPoolProvider`
 
 ```go
-provider := runar.NewGorillaPoolProvider("mainnet") // or "testnet"
+provider, err := runar.NewGorillaPoolProvider("mainnet") // or "testnet"
 ```
+
+The network must be exactly `"mainnet"` or `"testnet"`; any other value returns an error rather than defaulting.
 
 Wraps the GorillaPool 1sat Ordinals API. In addition to the `Provider` interface this provider exposes ordinal-specific methods: `GetInscriptionsByAddress`, `GetInscription`, `GetBSV20Balance`, `GetBSV20Utxos`, `GetBSV21Balance`, `GetBSV21Utxos`.
 
@@ -703,7 +707,7 @@ Build BSV-21 (v2, ID-based) ordinals inscriptions. [sdk_ordinals.go](sdk_ordinal
 type Bigint = int64
 ```
 
-The Rúnar runtime integer type. Backed by `int64` because Go has no operator overloading; the compiler pipeline carries integer values as `*big.Int` internally so any literal of any size compiles correctly. For values >= 2^63 in Go-mock tests, use [`BigintBig`](#bigintbig). [runar.go](runar.go).
+The Rúnar runtime integer type. Backed by `int64` because Go has no operator overloading: a `*big.Int` alias would take `+` and `<` away from contract source, and would silently turn `==` into pointer identity. Rúnar's `bigint` itself is arbitrary precision, as is the emitted Script — so for values that can exceed 2^63, in contract source as well as in Go-mock tests, use [`BigintBig`](#bigintbig) and the [operator helpers](#bigintbigadd--sub--mul--mod--div--less--lesseq--greater--greatereq--equal--notequal). Both type names lower to the same `bigint` primitive and emit the same Script. Nothing in this package narrows into `Bigint` silently: `Pow`, `MulDiv`, `PercentOf`, `Sqrt`, `Bin2Num`, `Num2Bin` and `Bn254FieldNegP` panic rather than truncate. [runar.go](runar.go).
 
 #### `BigintBig`
 
@@ -711,7 +715,7 @@ The Rúnar runtime integer type. Backed by `int64` because Go has no operator ov
 type BigintBig = *big.Int
 ```
 
-Arbitrary-precision integer for Go-mock tests that consume gnark-generated fixtures. Pair with the `*Big`-suffixed BN254 helpers. [runar.go](runar.go).
+Arbitrary-precision integer. Use it for any value that can exceed `int64` — 256-bit secp256k1 coordinates (`EcPointX`, `EcPointY`, `EcMakePoint`), NIST P-256/P-384 scalars, BN254 field elements, gnark-generated Groth16 fixtures. It is a contract-source type, not only a test type: the `.runar.go` parsers map `runar.BigintBig` to the same `bigint` primitive as `runar.Bigint`, so the emitted Script is unchanged. Pair with the operator helpers below and with the `*Big`-suffixed BN254 helpers. [runar.go](runar.go).
 
 #### `BigintBigAdd` / `Sub` / `Mul` / `Mod` / `Div` / `Less` / `LessEq` / `Greater` / `GreaterEq` / `Equal` / `NotEqual`
 
@@ -729,7 +733,7 @@ func Bin2Num(data ByteString) int64
 func Bin2NumBig(data ByteString) *big.Int
 ```
 
-Decode a Bitcoin Script little-endian sign-magnitude byte string into an integer. Inverse of `Num2Bin`. The non-`Big` variant truncates out-of-range values to the low 64 bits. [runar.go](runar.go).
+Decode a Bitcoin Script little-endian sign-magnitude byte string into an integer. Inverse of `Num2Bin`. The non-`Big` variant **panics** on a value outside `int64` rather than returning its low 64 bits; the boundary is the decoded VALUE, not the push width, so a 16-byte push of `1000` decodes fine. [runar.go](runar.go).
 
 #### `Blake3Compress` / `Blake3Hash`
 
@@ -949,10 +953,10 @@ Returns data outputs recorded by `AddDataOutput` during the last test invocation
 #### `DecodePushData`
 
 ```go
-func DecodePushData(hex string, offset int) (string, int)
+func DecodePushData(hex string, offset int) (string, int, error)
 ```
 
-Decode the push-data element at the given hex offset. Returns the pushed bytes (hex) and the total hex chars consumed. [sdk_state.go](sdk_state.go).
+Decode the push-data element at the given hex offset. Returns the pushed bytes (hex) and the total hex chars consumed. Fails closed (C2): a truncated payload, a truncated `OP_PUSHDATA{1,2,4}` length prefix, or a byte that is not a push opcode returns an error rather than a short/empty value. [sdk_state.go](sdk_state.go).
 
 #### `DecodeScriptInt`
 
@@ -976,7 +980,7 @@ type DeployOptions struct {
 #### `DeployWithWalletOptions` / `DeployWithWalletResult`
 
 ```go
-type DeployWithWalletOptions struct { Satoshis int64; Description, Basket string; Tags []string }
+type DeployWithWalletOptions struct { Satoshis int64; Description, Basket string; Tags []string; AcknowledgeUnsound []string }
 type DeployWithWalletResult struct { Txid, RawTx string }
 ```
 
@@ -985,10 +989,10 @@ type DeployWithWalletResult struct { Txid, RawTx string }
 #### `DeserializeState`
 
 ```go
-func DeserializeState(fields []StateField, scriptHex string) map[string]interface{}
+func DeserializeState(fields []StateField, scriptHex string) (map[string]interface{}, error)
 ```
 
-Decode state values from a hex-encoded data section (the bytes after `OP_RETURN`). [sdk_state.go](sdk_state.go).
+Decode state values from a hex-encoded data section (the bytes after `OP_RETURN`). Fails closed (C2): the blob must describe EXACTLY the artifact's `StateFields` — a field running past the end, or any byte left over after the last field, is an error, never a default value. [sdk_state.go](sdk_state.go).
 
 #### `Divmod` / `Gcd` / `GcdBig` / `Log2` / `Log2Big`
 
@@ -1065,7 +1069,7 @@ Walk an on-chain locking script using `artifact.ConstructorSlots` and decode eac
 #### `ExtractStateFromScript`
 
 ```go
-func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) map[string]interface{}
+func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) (map[string]interface{}, error)
 ```
 
 Read state from a full locking script hex. Returns `nil` if the artifact has no state fields or no recognizable state section. [sdk_state.go](sdk_state.go).
@@ -1096,6 +1100,8 @@ Reconnect to an existing deployed contract by fetching its deployment transactio
 func FromUtxo(artifact *RunarArtifact, utxo UTXO) *RunarContract
 ```
 
+Returns `nil` when the artifact declares state fields and the UTXO script's state section does not decode exactly as those fields describe (C2) — check for it.
+
 Synchronous equivalent of `FromTxId` when the UTXO data is already in hand (e.g. from an overlay service). Does not call the provider. [sdk_contract.go](sdk_contract.go).
 
 #### `GenerateGo`
@@ -1110,7 +1116,7 @@ Produce a typed Go wrapper source file for the given artifact. See [Section 10](
 
 ```go
 type GorillaPoolProvider struct { Network string; /* unexported */ }
-func NewGorillaPoolProvider(network string) *GorillaPoolProvider
+func NewGorillaPoolProvider(network string) (*GorillaPoolProvider, error)
 
 func (p *GorillaPoolProvider) GetInscriptionsByAddress(address string) ([]InscriptionInfo, error)
 func (p *GorillaPoolProvider) GetInscription(inscriptionId string) (*InscriptionDetail, error)
@@ -1234,6 +1240,8 @@ Determine whether an on-chain script was produced from the given artifact (regar
 #### `MerkleRootHash256` / `MerkleRootSha256` / `MerkleRootPoseidon2KB` / `MerkleRootPoseidon2KBv`
 
 Merkle-root computation helpers — the SHA-256 forms accept a leaf, proof, index, and depth; the Poseidon2 KB forms work over 8-element field state. [runar.go](runar.go).
+
+`MerkleRootPoseidon2KBv` returns `*big.Int` (`runar.BigintBig`), not `runar.Bigint`. The `merkleRootPoseidon2KB` builtin leaves the base-2^32 packing of all eight KoalaBear root limbs on the stack (up to 256 bits), which `int64` cannot hold. Contracts in the `.runar.go` DSL must therefore type the field they compare against as `runar.BigintBig` and compare with `runar.BigintBigEqual` — this maps to the same `===` and emits identical Script. See `integration/go/contracts/BasefoldVerifier.runar.go`.
 
 #### `Min` / `Max` / `Within` / `Abs` / `AbsBig` / `Sign`
 
@@ -1432,7 +1440,7 @@ type RunarContract struct {
 func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *RunarContract
 
 func (c *RunarContract) Connect(provider Provider, signer Signer)
-func (c *RunarContract) WithInscription(inscription *Inscription) *RunarContract
+func (c *RunarContract) WithInscription(inscription *Inscription) (*RunarContract, error)
 func (c *RunarContract) GetInscription() *Inscription
 
 func (c *RunarContract) Deploy(provider Provider, signer Signer, options DeployOptions) (string, *TransactionData, error)
@@ -1656,7 +1664,7 @@ func NewWalletSigner(opts WalletSignerOptions) *WalletSigner
 
 ```go
 type WhatsOnChainProvider struct { Network string; /* unexported */ }
-func NewWhatsOnChainProvider(network string) *WhatsOnChainProvider
+func NewWhatsOnChainProvider(network string) (*WhatsOnChainProvider, error)
 ```
 
 Plus the standard `Provider` interface methods. [sdk_woc_provider.go](sdk_woc_provider.go).
@@ -1763,13 +1771,21 @@ The `MockSignerImpl` name (rather than `MockSigner` as in the other SDKs) is pre
 ## 17. Links
 
 - Project root: <https://github.com/icellan/runar>
-- Rúnar language playground: <https://runar.build>
+- Rúnar language playground: <https://runar.build> (hosted; not in this git tree)
 - Language specification: [`spec/`](../../spec)
 - Go compiler source: [`compilers/go/`](../../compilers/go)
 - Go example contracts: [`examples/go/`](../../examples/go)
 - Go integration tests (regtest): [`integration/go/`](../../integration/go)
 - Cross-SDK output conformance suite: [`conformance/sdk-output/`](../../conformance/sdk-output)
 - Sister SDKs: [`packages/runar-sdk/`](../runar-sdk) (TypeScript), [`packages/runar-rs/`](../runar-rs) (Rust), [`packages/runar-py/`](../runar-py) (Python), [`packages/runar-zig/`](../runar-zig) (Zig), [`packages/runar-rb/`](../runar-rb) (Ruby), [`packages/runar-java/`](../runar-java) (Java).
+
+> **Hosted, not in this repository.** `runar.build` and `runar.run` are sites
+> operated outside this git tree — no source for either is checked in, so their
+> behaviour cannot be verified against this repository and does not move with it.
+> The webapp under `examples/end2end-example/webapp/` is a DIFFERENT thing: a
+> PriceBet demo whose playground pane compiles a pasted snippet to script hex and
+> ASM. It has no gallery, no share links, no source-map view and no debugger.
+> (R-228)
 
 ---
 
@@ -1827,3 +1843,38 @@ to `76a914 <20 zero bytes> 88ac` — a hash nobody holds. The SDK signed with th
 real key, so `OP_EQUALVERIFY` on `hash160(pubkey)` failed: those deploys and
 calls were **unspendable**, and the always-ack provider reported success. They
 now use `BuildP2PKHScript(addr)` and pass under full script validation.
+
+## Wire-protocol primitives
+
+Two things in this SDK are not ergonomics: their **bytes cross a tier boundary**,
+so all seven SDKs must produce the same ones. A signature produced here is
+verified by a process running another tier's SDK, and a one-byte difference makes
+every such signature fail — at runtime, in someone else's process.
+
+**Canonical JSON** is an RFC 8785 (JCS) serializer. Payloads are hashed through
+it before signing. Reaching for the language's own JSON encoder instead is the
+mistake this section exists to prevent: object key order, number formatting and
+string escaping all differ between stdlib encoders, and any of them changes the
+hash.
+
+**The signed envelope** is the wire shape used by overlay apps (the
+`runar-overlay-express` server, the `runar-react` hooks, and any non-TS overlay
+backend). Every SDK must accept the same envelope, produce signatures every other
+tier verifies, and return the SAME rejection reason for the same bad envelope —
+the reason code is part of the protocol, not a local diagnostic.
+
+Cross-tier interop is pinned by `conformance/sdk-envelope/`: one TS-signed
+envelope replayed against every tier's verifier, plus a known-bad envelope per
+rejection reason. Any change to envelope code has to round-trip through it.
+
+This tier's API (`sdk_envelope.go`):
+
+| primitive | symbol |
+| --- | --- |
+| canonical JSON | `CanonicalJSON(value any) (string, error)` |
+| envelope shape | `type SignedEnvelope struct` |
+| sign | `SignEnvelope(opts SignEnvelopeOpts) (SignedEnvelope, error)` |
+| verify | `VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult` |
+
+`encoding/json` is NOT interchangeable with `CanonicalJSON` here: Go's marshaller
+sorts map keys but not struct fields, and escapes differently.

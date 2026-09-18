@@ -1,0 +1,47 @@
+name: Required checks
+
+# R-104: the repository cannot see its own branch protection, so every gate in
+# ci.yml is advisory from inside the checkout. This workflow asks the API what
+# the protected branch ACTUALLY requires and compares it with the claim in
+# .github/required-checks.json.
+#
+# With only the default GITHUB_TOKEN the protection endpoint is not readable
+# (it needs `administration: read`), and the checker says so out loud — a
+# ::warning:: and a job-summary line stating that enforcement is UNVERIFIED —
+# rather than passing quietly. Set the BRANCH_PROTECTION_TOKEN secret to a
+# fine-grained token with `administration: read` to turn that into a verdict,
+# and REQUIRED_CHECKS_STRICT=1 to make an unverifiable run fail.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/required-checks.json'
+      - '.github/scripts/check-required-checks.mjs'
+      - '.github/workflows/required-checks.yml'
+      - '.github/workflows/ci.yml'
+  schedule:
+    # Branch protection can be changed at any time, by anyone with admin. A
+    # weekly run notices a gate that was quietly dropped between merges.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-branch-protection:
+    name: Verify branch protection matches the manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compare .github/required-checks.json with the branch's required status checks
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_PROTECTION_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
+        run: node .github/scripts/check-required-checks.mjs

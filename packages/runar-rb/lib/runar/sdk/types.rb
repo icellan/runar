@@ -93,7 +93,7 @@ module Runar
                   :script, :asm, :state_fields, :constructor_slots,
                   :code_sep_index_slots,
                   :build_timestamp, :code_separator_index, :code_separator_indices,
-                  :anf
+                  :anf, :unsound_primitives
 
       def initialize(
         version: '',
@@ -113,7 +113,10 @@ module Runar
         build_timestamp: '',
         code_separator_index: nil,
         code_separator_indices: nil,
-        anf: nil
+        anf: nil,
+        # Builtins this script reaches that the compiler does not claim are
+        # sound (R-062). Empty for every ordinary contract.
+        unsound_primitives: []
       )
         @version                = version
         @compiler_version       = compiler_version
@@ -129,6 +132,7 @@ module Runar
         @code_separator_index   = code_separator_index
         @code_separator_indices = code_separator_indices
         @anf                    = anf
+        @unsound_primitives     = Array(unsound_primitives)
       end
 
       # Parse a camelCase FixedArray metadata hash into SDK-native shape.
@@ -208,7 +212,8 @@ module Runar
           build_timestamp:        hash.fetch('buildTimestamp', ''),
           code_separator_index:   hash['codeSeparatorIndex'],
           code_separator_indices: hash['codeSeparatorIndices'],
-          anf:                    hash['anf']
+          anf:                    hash['anf'],
+          unsound_primitives:     Array(hash['unsoundPrimitives'])
         )
       end
 
@@ -220,8 +225,10 @@ module Runar
     end
 
     # Options for deploying a contract.
-    DeployOptions = Struct.new(:satoshis, :change_address, :funding_signer, keyword_init: true) do
-      def initialize(satoshis: 10_000, change_address: '', funding_signer: nil)
+    DeployOptions = Struct.new(:satoshis, :change_address, :funding_signer, :acknowledge_unsound,
+                               keyword_init: true) do
+      def initialize(satoshis: 10_000, change_address: '', funding_signer: nil,
+                     acknowledge_unsound: [])
         # funding_signer (#134): signs the P2PKH funding inputs when the deploy
         # funding UTXOs are owned by a different key than the connected deploy
         # signer. nil → the connected signer (zero behaviour change).

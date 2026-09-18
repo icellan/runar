@@ -443,7 +443,7 @@ prepared.tx_hex          # built transaction with placeholder sigs
 prepared.sig_indices     # arg indices that need external signatures
 ```
 
-The external signer signs `prepared.sighash` (or computes its own preimage from the tx) and produces a DER signature with the sighash flag byte appended.
+`prepared.sighash` is `hash256(preimage)` — `sha256(sha256(preimage))`, the BIP-143 digest `OP_CHECKSIG` verifies against. The external signer ECDSA-signs it **directly**, with no further hashing (`WalletSigner#sign_hash` forwards it to the wallet as `hash_to_sign:`), and produces a DER signature with the sighash flag byte appended. A signer that hashes it once more signs the wrong message and the node rejects the spend; hand it `prepared.preimage` instead if it wants to recompute the digest itself.
 
 `finalize_call(prepared, signatures, provider)` injects the signatures, computes the OP_PUSH_TX prefix if needed, broadcasts the transaction, and updates the tracked UTXO:
 
@@ -1297,7 +1297,7 @@ Runtime contract wrapper. `attr_reader :artifact, :inscription`.
 - `with_inscription(inscription) -> self` — attach a 1Sat ordinals envelope.
 - `connect(provider, signer)` — store provider + signer for later calls.
 - `deploy(provider = nil, signer = nil, options = nil) -> [String, TransactionData]`
-- `deploy_with_wallet(satoshis: 1, description: nil) -> { txid:, output_index: }` — wallet-funded deploy via a connected `WalletProvider`.
+- `deploy_with_wallet(satoshis: 1, description: nil, acknowledge_unsound: []) -> { txid:, output_index: }` — wallet-funded deploy via a connected `WalletProvider`. R-062: `acknowledge_unsound` must name every primitive the artifact's `unsound_primitives` declares, or the deploy is refused before the wallet is asked for coins — the same gate, and the same error, as `deploy`.
 - `call(method_name, args = [], provider = nil, signer = nil, options = nil) -> [String, TransactionData]`
 - `prepare_call(method_name, args = [], provider = nil, signer = nil, options = nil) -> PreparedCall`
 - `finalize_call(prepared, signatures, provider = nil) -> [String, TransactionData]`
@@ -1653,3 +1653,37 @@ deterministic txid, raw storage, copy-safety) plus an explicit rejection test
 for the non-transaction case. `spec/sdk/terminal_call_spec.rb` injected the
 contract UTXO straight into the contract and never told the provider, so the
 gate had nothing to check; it now registers the outpoint.
+
+## Wire-protocol primitives
+
+Two things in this SDK are not ergonomics: their **bytes cross a tier boundary**,
+so all seven SDKs must produce the same ones. A signature produced here is
+verified by a process running another tier's SDK, and a one-byte difference makes
+every such signature fail — at runtime, in someone else's process.
+
+**Canonical JSON** is an RFC 8785 (JCS) serializer. Payloads are hashed through
+it before signing. Reaching for the language's own JSON encoder instead is the
+mistake this section exists to prevent: object key order, number formatting and
+string escaping all differ between stdlib encoders, and any of them changes the
+hash.
+
+**The signed envelope** is the wire shape used by overlay apps (the
+`runar-overlay-express` server, the `runar-react` hooks, and any non-TS overlay
+backend). Every SDK must accept the same envelope, produce signatures every other
+tier verifies, and return the SAME rejection reason for the same bad envelope —
+the reason code is part of the protocol, not a local diagnostic.
+
+Cross-tier interop is pinned by `conformance/sdk-envelope/`: one TS-signed
+envelope replayed against every tier's verifier, plus a known-bad envelope per
+rejection reason. Any change to envelope code has to round-trip through it.
+
+This tier's API (`lib/runar/sdk/envelope.rb`):
+
+| primitive | symbol |
+| --- | --- |
+| canonical JSON | `Runar::SDK::Envelope.canonical_json(value)` |
+| envelope shape | `SignedEnvelope` (a `Struct`) |
+| sign | `sign_envelope(data:, signer:, pubkey:, ttl_ms:)` |
+| verify | `verify_envelope(envelope:, expected_keys:, clock_skew_ms:)` |
+
+`JSON.generate` is NOT interchangeable with `canonical_json`.

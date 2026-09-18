@@ -108,11 +108,18 @@ function serialise(value: unknown, seen: Set<object>, depth: number): string {
 
   // Objects and arrays (typeof === 'object' at this point)
   // Depth guard before descending into the container.
-  if (depth >= InputLimits.MAX_NESTING) {
+  //
+  // R-260/R-261: the bound is MAX_WIRE_NESTING (100), not MAX_NESTING (512).
+  // canonicalJson's output crosses a tier boundary and its bound has to be the
+  // same number verifyEnvelope will PARSE on the far side — if emit allowed
+  // more than parse, a tier could produce a legal, correctly-signed envelope
+  // another tier is physically unable to read. 512 stays the `--ir` loader's
+  // bound, where the input is a trusted local file.
+  if (depth >= InputLimits.MAX_WIRE_NESTING) {
     throw new CanonicalJsonError(
       'depth',
-      `canonical JSON nesting exceeds ${InputLimits.MAX_NESTING}`,
-      { limit: InputLimits.MAX_NESTING, actual: depth + 1 },
+      `canonical JSON nesting exceeds ${InputLimits.MAX_WIRE_NESTING}`,
+      { limit: InputLimits.MAX_WIRE_NESTING, actual: depth + 1 },
     );
   }
 

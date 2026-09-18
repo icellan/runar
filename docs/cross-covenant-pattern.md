@@ -82,8 +82,11 @@ const stateRoot = substr(referencedOutput, stateRootOffset, 32n);
   referenced output script. This is determined by the source covenant's
   script structure.
 
-- This verifies a *specific output script hash*, not a *specific UTXO*.
-  Multiple UTXOs with the same script would all pass verification.
+- This verifies a *specific output script hash*, not a *specific UTXO*, and not
+  even that any UTXO with that script is being spent by this transaction. All it
+  proves is that the spender could produce bytes with that hash — and locking
+  scripts are public, so that is free. Multiple UTXOs with the same script would
+  all pass verification, and so would a transaction spending none of them.
 
 ## Example
 
@@ -120,12 +123,33 @@ above. They emit the same Stack-IR shape (`hash256` + `equalverify` +
 re-push) but free the contract author from the bookkeeping and centralise
 the unsafe-stub vs safe-binding distinction in the compiler.
 
-### `runar.ExtractPrevOutputScript(inputIndex: int, expectedScriptHash: ByteString) -> ByteString`
+### `runar.ExtractPrevOutputScript(witnessSlot: int, expectedScriptHash: ByteString) -> ByteString`
 
-Reads the previous-output locking script of input `inputIndex` via the
-witness-bridge pattern, asserts its `hash256` matches
-`expectedScriptHash`, and returns the script bytes on the stack for
-caller substring extraction.
+Asserts that a caller-supplied byte string hashes to `expectedScriptHash` and
+returns it on the stack for substring extraction. It is the hand-rolled
+witness-bridge pattern above, packaged.
+
+> **It does NOT read an input of the spending transaction (W6 / GhostInput).**
+> The first argument is a compile-time LABEL used to name the hidden witness
+> parameter `_prevOutScript_<witnessSlot>`, nothing more. The emitted script is
+> `OP_HASH256 OP_EQUALVERIFY` over that witness: no vin lookup, no parent
+> transaction, no outpoint comparison, no input-count check. A transaction with
+> a SINGLE input satisfies a covenant calling `ExtractPrevOutputScript(1, ...)`,
+> because nothing ever looks for a second input. And because locking scripts are
+> public, "the spender knows these bytes" costs an attacker nothing. Use it for
+> intent-TEMPLATE matching; never as evidence that a companion covenant is being
+> spent alongside you. For that, see
+> the "Verified Companion Inputs" pointer above — `examples/ts/companion-verifier/` — which
+> binds a specific UTXO by parsing the companion input's parent transaction.
+>
+> **v1 decision.** The primitive keeps its behaviour and its name; what changed
+> is every sentence that oversold it. Making it actually bind `vin[i]` means
+> parsing the authenticated current transaction, selecting the input, fetching
+> and hashing its parent tx, matching the outpoint txid, bounds-checking vout
+> and extracting that output's script — a v2-sized change, and one this repo
+> already ships as a hand-written, tested pattern in `companion-verifier`.
+> Renaming the symbol at v1 would break every downstream caller and every
+> surface parser without changing the emitted script by one byte.
 
 ```go
 intentScript := runar.ExtractPrevOutputScript(1, c.IntentCovenantScriptHash)
@@ -134,18 +158,19 @@ bClaimed := runar.Bin2Num(runar.ReverseBytes(runar.Substr(intentScript, 65, 4)))
 
 Compiler-enforced constraints:
 
-- `inputIndex` MUST be a compile-time integer literal. Variable indices
-  are rejected at typecheck. Each distinct literal index used in one
+- `witnessSlot` MUST be a compile-time integer literal. Variable indices
+  are rejected at typecheck. Each distinct literal used in one
   method auto-injects one hidden witness parameter
-  `_prevOutScript_<inputIndex>` of type `ByteString` — the unlocker
-  supplies the script bytes; the compiler emits the hash assertion.
+  `_prevOutScript_<witnessSlot>` of type `ByteString` — the unlocker
+  supplies the bytes; the compiler emits the hash assertion.
 - `expectedScriptHash` may be any `ByteString` expression, typically a
   `readonly` contract field pinned at construction time.
 
-Equivalent hand-rolled form (what the compiler emits in spirit):
+Equivalent hand-rolled form (what the compiler emits, in full — there is
+nothing else):
 
 ```go
-public func CoSpendPrivileged(
+public func WitnessMatchingHash(
     stateCovScript runar.ByteString,  // ← compiler auto-injects this
     ... // user params
 ) {
@@ -174,13 +199,24 @@ Compiler-enforced constraints:
 
 - `outputIndex` MUST be a compile-time integer literal. Variable indices
   are rejected at typecheck.
-- v1 assumes every output in the tx's serialised output set is exactly
-  34 bytes (8-byte LE amount ‖ 0x19 length ‖ 25-byte P2PKH script). The
-  byte offset of output `i` is `i * 34`. Methods that also call
-  `c.AddDataOutput(...)` (OP_RETURN) in the same body are rejected at
-  typecheck — the variable-length OP_RETURN breaks the fixed-offset
-  assumption. If BSVM needs mixed output sets later, a v2 will accept a
-  literal `precedingOutputSizes [...]int64` argument.
+- **`outputIndex` MUST be `0` in v1.** The byte offset of output `i` is
+  `i * 34`, which is that output's START only if every earlier output is
+  exactly 34 bytes — and a transaction guarantees no such thing. An
+  output is `value[8] ‖ CompactSize(len) ‖ script[len]`, and the spender
+  picks output 0's length: for `i = 1` an attacker builds output 0 as a
+  78-byte OP_RETURN carrying the promised 34 P2PKH bytes at global offset
+  34, and points the transaction's real output 1 at themselves. The
+  witness still hashes to `hashOutputs` — it IS the real output set — so
+  the assertion passes and the payment is not made (W2). Offset 0 is a
+  genuine boundary, so index 0 is sound. Asserting a later output needs a
+  CompactSize walk from byte 0, which the v1 codegen does not emit.
+- The same 34-byte assumption is why methods that also call
+  `c.AddDataOutput(...)` (OP_RETURN), `c.AddOutput(...)` or
+  `c.AddRawOutput(...)` in the same body are rejected at typecheck
+  (R-300). That is a ban on the CONTRACT's own outputs and was never a
+  constraint on the transaction an attacker builds, which is what the
+  index rule above adds. If BSVM needs mixed output sets later, a v2 will
+  parse the CompactSize chain on chain.
 - The serialised-outputs witness is auto-injected as a hidden method
   parameter `_serialisedOutputs` of type `ByteString` — supplied by the
   unlocker once per method, regardless of how many `RequireOutputP2PKH`
@@ -188,14 +224,23 @@ Compiler-enforced constraints:
 
 ### `runar.CurrentBlockHeight() -> Bigint`
 
-Returns the spending tx's `nLockTime` interpreted as a BSV block height.
-Pure source-level sugar for `runar.ExtractLocktime(this.TxPreimage)`;
-emits identical Stack-IR. Only callable inside stateful contracts
-(needs the auto-injected `txPreimage`).
+Returns the spending tx's `nLockTime`. Pure source-level sugar for
+`runar.ExtractLocktime(this.TxPreimage)`; emits identical Stack-IR. Only
+callable inside stateful contracts (needs the auto-injected `txPreimage`).
+
+**The name is misleading and kept only for source compatibility: this is not
+the chain height.** `nLockTime` is written by the spender and enforced by
+consensus as a NOT-BEFORE, and only on a non-final transaction. So the
+comparison below is sound — the spend cannot confirm before `TOpen +
+windowSecs` — provided the covenant also asserts
+`runar.ExtractSequence(c.TxPreimage) != 4294967295`, without which consensus
+ignores `nLockTime` altogether. The reverse comparison (`<`, "still inside the
+window") proves nothing at all: a spender past the window writes a stale
+locktime and the node mines it.
 
 ```go
 if runar.CurrentBlockHeight() > c.TOpen + windowSecs {
-    // expired branch
+    // expired branch — sound only alongside the ExtractSequence finality guard
 }
 ```
 

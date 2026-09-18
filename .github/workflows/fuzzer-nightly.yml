@@ -70,6 +70,15 @@ env:
   # below read (also turbo 2.x's default).
   TURBO_CACHE_DIR: .turbo/cache
 
+permissions:
+  # R-217: least privilege. These jobs check out, build, test and upload
+  # artifacts — `actions/upload-artifact` uses the artifact service, not the
+  # contents scope — so read is all they need. Without this block the workflow
+  # inherits the repository default, which on many repositories is read-write
+  # across contents, issues and packages: a compromised step in any job would
+  # then reach the whole repository rather than the job.
+  contents: read
+
 jobs:
   fuzz:
     name: ANF differential (7 tiers x N random programs)
@@ -265,17 +274,28 @@ jobs:
       # ----- exact shapes behind the 2026-08 fund-safety miscompile) and, since
       # ----- 2026-08-06, the `this.addOutput(...)` multi-output intrinsic.
       # -----
-      # ----- ZIG IS EXCLUDED, and only here. The Zig tier's `.runar.zig`
-      # ----- frontend never detects `self.x = ...` as a mutation, so readonly
-      # ----- INFERENCE marks every un-initialised stateful property readonly:
-      # ----- it emits "StatefulSmartContract has no mutable properties" and a
-      # ----- script with no state continuation, while the same file compiled by
-      # ----- any other tier is correct. Every checked-in `.runar.zig` stateful
-      # ----- example happens to give its mutable properties an INITIALISER
-      # ----- (`count: i64 = 0`), which takes a different branch of the readonly
-      # ----- rule, so no fixture had ever exercised the inference path. Zig is
-      # ----- still gated on the stateless corpus by the step above; restore it
-      # ----- here once the frontend is fixed.
+      # ----- ZIG WAS EXCLUDED HERE until R-111. Two separate things were going
+      # ----- on, and only one of them was a compiler defect:
+      # -----
+      # ----- 1. The defect this comment used to describe — the `.runar.zig`
+      # -----    frontend not seeing `self.x = ...` as a mutation — is fixed
+      # -----    (`readonly_inference.zig`). Measured: an un-initialised stateful
+      # -----    property written with `+=` or with a plain `=` compiles
+      # -----    byte-identically in all seven tiers.
+      # ----- 2. What still failed was a FUZZER artifact. `readonly` was drawn by
+      # -----    coin flip independently of which properties the generated
+      # -----    methods went on to write, so the generator could emit a property
+      # -----    that is mutable BY DECLARATION and written by nothing. The
+      # -----    `.runar.ts` surface expresses that; the `.runar.zig` surface
+      # -----    INFERS readonly from use and cannot, so the same logical
+      # -----    contract rendered to fewer Zig state slots and `addOutput` then
+      # -----    failed Zig's arity check. Fixed in the generator
+      # -----    (`ensureEveryMutablePropertyIsWritten`), not by weakening a
+      # -----    check: a mutable property now always has a write.
+      # -----
+      # ----- `tests/fuzz-gate-tiers.test.ts` pins all seven tiers in this list
+      # ----- and in `fuzz:ir:gate:stateful`, so dropping one again is a visible
+      # ----- edit rather than a quiet argument change.
       # ----- Cost: one more run of the same size as the step above — 12.4s idle
       # ----- / ~35s under load ~30, on the same interleaved measurement.
       - name: Fuzz (PR gate — stateful contract-level IR -> hex, fixed seed)
@@ -289,7 +309,7 @@ jobs:
             --stateful \
             --seed 424242 \
             --num 40 \
-            --compilers ts,go,rust,python,ruby,java \
+            --compilers ts,go,rust,python,zig,ruby,java \
             --render native \
             --output /tmp/ir-fuzz-pr-stateful.json
 
@@ -435,7 +455,7 @@ jobs:
             --stateful \
             --num 200 \
             --seed "$SEED" \
-            --compilers ts,go,rust,python,ruby,java \
+            --compilers ts,go,rust,python,zig,ruby,java \
             --render native \
             --output /tmp/ir-fuzz-nightly-stateful.json
 
@@ -813,6 +833,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: cd conformance && npm ci
+
+      # The fuzz harnesses' own unit guards. They were executed by NOTHING:
+      # `conformance` is not a pnpm workspace member so `turbo run test` never
+      # reaches it, its own `npm test` runs the conformance runner rather than
+      # vitest, and every `npx vitest run` in ci.yml is path-scoped to a
+      # directory that is not this one. Eighty-one assertions about what the
+      # gates mean — the construct-ledger coverage pin, the tier-requirement
+      # rules, the vacuity guards — passed only on developers' machines. Same
+      # defect R-110 found in the repo-root `tests/` directory.
+      #
+      # Run the DIRECTORY, not a file list, for the reason R-110 gives: naming
+      # files is what lets the unnamed ones rot.
+      - name: Fuzz harness unit guards (conformance/fuzzer/__tests__)
+        run: npx vitest run conformance/fuzzer/__tests__/
+        env:
+          # The canonical-shim crash tests drive python3 and ruby. Both are on
+          # the runner image; this makes a missing one FAIL rather than skip.
+          RUNAR_REQUIRE_TOOLCHAINS: '1'
 
       # PR merge gate: every argv value is a literal constant — no untrusted PR
       # input reaches the shell.

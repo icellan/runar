@@ -11,6 +11,7 @@ const parse_ruby = @import("passes/parse_ruby.zig");
 const parse_java = @import("passes/parse_java.zig");
 const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
+const expand_fixed_arrays = @import("passes/expand_fixed_arrays.zig");
 const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
@@ -18,6 +19,7 @@ const stack_lower = @import("passes/stack_lower.zig");
 const peephole = @import("passes/peephole.zig");
 const emit = @import("codegen/emit.zig");
 const input_limits = @import("frontend/input_limits.zig");
+const embed_always_warn = @import("passes/embed_always_warn.zig");
 
 pub const SourceSizeExceededError = input_limits.SourceSizeError;
 pub const MAX_SOURCE_BYTES = input_limits.MAX_SOURCE_BYTES;
@@ -64,7 +66,30 @@ fn detectFormat(path: []const u8) FileFormat {
     return .unknown;
 }
 
-fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
+/// Validate `contract` with the validator its surface calls for: the `.runar.zig`
+/// surface relaxes the `super()` constructor requirement, every other surface
+/// does not. Extracted from `runPipeline` in R-093 so the SDK's frontend check
+/// selects the validator the same way the CLI does instead of hard-wiring one.
+pub fn validateForFile(
+    work: std.mem.Allocator,
+    contract: types.ContractNode,
+    file_name: []const u8,
+) !validate_pass.ValidationResult {
+    return if (detectFormat(file_name) == .runar_zig)
+        validate_pass.validateZig(work, contract)
+    else
+        validate_pass.validate(work, contract);
+}
+
+/// Parse `source` by the format its `file_name` extension names, behind the
+/// two guards that apply to EVERY frontend entry: the caller's size check (see
+/// `runPipeline`'s pass 0) and the fail-closed directive guard below.
+///
+/// `pub` since R-093: the Zig SDK's `compileCheckSource` called `parseZig`
+/// directly and so ran neither guard, which made the SDK's "is this valid
+/// Runar?" answer disagree with the compiler's on the same input. There is one
+/// guarded parse entry now, and both callers use it.
+pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
     const format = detectFormat(file_name);
 
     // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) comment
@@ -126,6 +151,211 @@ fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u
     };
 }
 
+/// Where `runPipeline` stops.
+///
+/// The CLI needs the two early stops: `--parse-only` halts after validate and
+/// `--emit-ir` after the ANF optimizers. Stopping early is not just a speed
+/// question — running stack lowering under `--emit-ir` would let a
+/// stack-lowering refusal fail a command that only asked for the IR.
+pub const StopAfter = enum { validate, anf, full };
+
+pub const PipelineOptions = struct {
+    disable_constant_folding: bool = false,
+    stop_after: StopAfter = .full,
+};
+
+/// Per-pass diagnostics, collected rather than printed.
+///
+/// `runPipeline` appends fully-formatted lines — pass prefix included — so the
+/// CLI and the library report identical text and neither has to know which
+/// pass produced what. Lines are allocated from the caller's work allocator
+/// (the compile arena), so they live exactly as long as the compile does.
+pub const Diagnostics = struct {
+    errors: std.ArrayListUnmanaged([]const u8) = .empty,
+    warnings: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    /// Best-effort: a diagnostic that cannot be recorded is dropped rather than
+    /// masking the compile error it was describing.
+    fn add(
+        list: *std.ArrayListUnmanaged([]const u8),
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+        message: []const u8,
+    ) void {
+        const line = std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, message }) catch return;
+        list.append(allocator, line) catch {};
+    }
+
+    fn addError(self: *Diagnostics, allocator: std.mem.Allocator, prefix: []const u8, message: []const u8) void {
+        add(&self.errors, allocator, prefix, message);
+    }
+
+    fn addWarning(self: *Diagnostics, allocator: std.mem.Allocator, message: []const u8) void {
+        add(&self.warnings, allocator, "  warning: ", message);
+    }
+
+    /// Like `addError`, but renders a `file:line:col: ` prefix when the
+    /// diagnostic carries a location — the shape the Go / Python / Ruby tiers
+    /// print (N-109). Column is converted 1-based -> 0-based here, the same
+    /// conversion `codegen/emit.zig` performs for source maps, so the printed
+    /// coordinates match those tiers byte for byte.
+    ///
+    /// Additive: a diagnostic with no location prints exactly as before, which
+    /// is every validation diagnostic that predates N-109.
+    fn addLocatedError(
+        self: *Diagnostics,
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+        d: types.CompilerDiagnostic,
+    ) void {
+        const loc = d.location orelse {
+            add(&self.errors, allocator, prefix, d.message);
+            return;
+        };
+        const col = if (loc.column > 0) loc.column - 1 else 0;
+        const located = std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}:{d}: {s}",
+            .{ loc.file, loc.line, col, d.message },
+        ) catch return add(&self.errors, allocator, prefix, d.message);
+        add(&self.errors, allocator, prefix, located);
+    }
+};
+
+/// Everything a caller can want out of a compile. Fields past the requested
+/// `stop_after` are null.
+pub const Pipeline = struct {
+    /// Post-expansion contract (pre-expansion when `stop_after == .validate`).
+    contract: types.ContractNode,
+    program: ?types.ANFProgram = null,
+    stack_program: ?types.StackProgram = null,
+};
+
+/// THE compile pipeline. Both entry points — `compileSourceWithOptions` and
+/// the CLI's `compileFromSource` — run this and nothing else, so there is one
+/// pass sequence rather than two kept in step by hand.
+///
+/// They were previously two hand-maintained copies, and they had drifted: the
+/// library ran no `expand_fixed_arrays` pass at all, so a `FixedArray<T, N>`
+/// property reached stack lowering unexpanded (R-027). Because the library is
+/// what the Zig tier's unit tests call, those tests were validating a pipeline
+/// that was not the one shipped in the binary.
+///
+/// `work` must be the caller's compile arena: every value in the returned
+/// `Pipeline`, and every line in `diag`, is allocated from it.
+pub fn runPipeline(
+    work: std.mem.Allocator,
+    source: []const u8,
+    file_name: []const u8,
+    opts: PipelineOptions,
+    diag: *Diagnostics,
+) CompileError!Pipeline {
+    // Pass 0: DoS-bound size guard. Reject oversized source BEFORE any
+    // tokenizer / arena allocator touches the input. BUG-008 follow-up.
+    input_limits.assertSourceBytesUnderLimit(source) catch return error.SourceSizeExceeded;
+
+    // Pass 1: Parse (auto-detect format from file extension). `parseSource`
+    // also carries the fail-closed `@sighash` / `@embedAlways` directive guard.
+    const parse_result = parseSource(work, source, file_name);
+    for (parse_result.errors) |message| diag.addError(work, "  parse error: ", message);
+    if (parse_result.errors.len > 0) return error.ParseFailed;
+    const contract = parse_result.contract orelse return error.ParseFailed;
+
+    // Pass 2: Validate (Zig mode for .runar.zig — relaxes super() constructor requirement)
+    const val_result = validateForFile(work, contract, file_name) catch return error.ValidationFailed;
+    for (val_result.errors) |d| diag.addLocatedError(work, "  validation error: ", d);
+    if (val_result.errors.len > 0) return error.ValidationFailed;
+    for (val_result.warnings) |d| diag.addWarning(work, d.message);
+
+    if (opts.stop_after == .validate) return .{ .contract = contract };
+
+    // Pass 3: Typecheck
+    const tc_result = typecheck_pass.typeCheck(work, contract) catch return error.TypeCheckFailed;
+    for (tc_result.errors) |message| diag.addError(work, "  type error: ", message);
+    if (tc_result.errors.len > 0) return error.TypeCheckFailed;
+
+    // Pass 3b: Expand FixedArray properties into scalar siblings + dispatch
+    // chains. No-op when the contract has no FixedArray properties.
+    const expanded = expand_fixed_arrays.expand(work, contract) catch return error.OutOfMemory;
+    for (expanded.errors) |d| diag.addError(work, "  fixed-array error: ", d.message);
+    if (expanded.errors.len > 0) return error.ValidationFailed;
+    const expanded_contract = expanded.contract;
+
+    // Pass 4: ANF Lower
+    var lower_diag: anf_lower.LowerDiagnostic = .{};
+    var program = anf_lower.lowerToANFWithDiagnostic(work, expanded_contract, &lower_diag) catch |err| {
+        if (lower_diag.message) |message| diag.addError(work, "  anf lowering error: ", message);
+        return err;
+    };
+
+    // Pass 4.25: Constant Fold
+    if (!opts.disable_constant_folding) {
+        program = constant_fold.foldConstants(work, program) catch |err| {
+            diag.addError(work, "  constant folding error: ", @errorName(err));
+            return error.ANFLowerFailed;
+        };
+    }
+
+    // Pass 4.5: EC Optimize (always-on, matches TS compiler behavior)
+    // Note: The EC optimizer has its own internal dead binding elimination
+    // that runs only when EC optimizations produce dead code. A standalone
+    // DCE pass must NOT run here because it incorrectly removes bindings
+    // from private method bodies (whose last binding is the return value,
+    // only referenced at inlining call sites in other methods).
+    program = ec_optimizer.optimize(work, program) catch |err| {
+        diag.addError(work, "  ec optimizer error: ", @errorName(err));
+        return error.ANFLowerFailed;
+    };
+
+    // Issue #109: warn when DCE strips an un-annotated readonly field. Computed
+    // from the post-optimizer ANF (the surviving load_prop set), mirroring the
+    // TS reference's collectReferencedProps(optimizedAnf) placement.
+    {
+        const dce_warnings = embed_always_warn.collectDceWarnings(work, expanded_contract, &program) catch return error.OutOfMemory;
+        for (dce_warnings) |d| diag.addWarning(work, d.message);
+    }
+
+    if (opts.stop_after == .anf) {
+        return .{ .contract = expanded_contract, .program = program };
+    }
+
+    // Pass 5: Stack Lower + Peephole
+    // The mapped error set is deliberately coarse, so the underlying refusal
+    // (`InvalidBuiltin`, `UnsupportedOperation`, …) is recorded as a diagnostic
+    // rather than dropped — collapsing it to `StackLowerFailed` alone would
+    // leave the caller with an unactionable message.
+    const stack_program = stack_lower.lower(work, program) catch |err| {
+        diag.addError(work, "  stack lowering error: ", @errorName(err));
+        return error.StackLowerFailed;
+    };
+    const optimized_methods = peephole.optimize(work, stack_program.methods) catch |err| {
+        diag.addError(work, "  peephole error: ", @errorName(err));
+        return error.StackLowerFailed;
+    };
+
+    return .{
+        .contract = expanded_contract,
+        .program = program,
+        .stack_program = .{
+            .methods = optimized_methods,
+            .contract_name = stack_program.contract_name,
+            .properties = stack_program.properties,
+            .constructor_params = stack_program.constructor_params,
+        },
+    };
+}
+
+/// Slice the `"script":"…"` value out of an emitted artifact JSON. The CLI's
+/// `--hex` performs the same extraction, so the library and the binary hand
+/// back the same bytes. The returned slice borrows from `artifact`.
+pub fn extractArtifactScript(artifact: []const u8) error{MissingHex}![]const u8 {
+    const marker = "\"script\":\"";
+    const idx = std.mem.indexOf(u8, artifact, marker) orelse return error.MissingHex;
+    const after = idx + marker.len;
+    const end = std.mem.indexOfPos(u8, artifact, after, "\"") orelse return error.MissingHex;
+    return artifact[after..end];
+}
+
 // Compile a source string through the full pipeline,
 // returning both the hex script and the JSON artifact.
 // Automatically detects the input format from the file_name extension.
@@ -150,75 +380,32 @@ pub fn compileSourceWithOptions(
     file_name: []const u8,
     disable_constant_folding: bool,
 ) CompileError!CompileResult {
-    // Pass 0: DoS-bound size guard. Reject oversized source BEFORE any
-    // tokenizer / arena allocator touches the input. BUG-008 follow-up.
-    input_limits.assertSourceBytesUnderLimit(source) catch return error.SourceSizeExceeded;
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const work = arena.allocator();
 
-    // Pass 1: Parse (auto-detect format from file extension)
-    const parse_result = parseSource(work, source, file_name);
-    if (parse_result.errors.len > 0) return error.ParseFailed;
-    const contract = parse_result.contract orelse return error.ParseFailed;
-
-    // Pass 2: Validate (Zig mode for .runar.zig — relaxes super() constructor requirement)
-    const format = detectFormat(file_name);
-    const val_result = if (format == .runar_zig)
-        validate_pass.validateZig(work, contract) catch return error.ValidationFailed
-    else
-        validate_pass.validate(work, contract) catch return error.ValidationFailed;
-    if (val_result.errors.len > 0) return error.ValidationFailed;
-
-    // Pass 3: Typecheck
-    const tc_result = typecheck_pass.typeCheck(work, contract) catch return error.TypeCheckFailed;
-    if (tc_result.errors.len > 0) return error.TypeCheckFailed;
-
-    // Pass 4: ANF Lower. The refusal detail is logged here rather than handed
-    // back, because `work` is the arena this frame tears down on return.
-    var lower_diag: anf_lower.LowerDiagnostic = .{};
-    var program = anf_lower.lowerToANFWithDiagnostic(work, contract, &lower_diag) catch |err| {
-        if (lower_diag.message) |message| {
-            std.log.warn("anf lowering: {s}", .{message});
-        }
+    var diag: Diagnostics = .{};
+    // The refusal detail is logged here rather than handed back, because
+    // `work` is the arena this frame tears down on return.
+    const pipeline = runPipeline(work, source, file_name, .{
+        .disable_constant_folding = disable_constant_folding,
+    }, &diag) catch |err| {
+        for (diag.errors.items) |line| std.log.warn("{s}", .{line});
         return err;
     };
 
-    // Pass 4.25: Constant Fold
-    if (!disable_constant_folding) {
-        program = constant_fold.foldConstants(work, program) catch return error.ANFLowerFailed;
-    }
+    // Pass 6: Emit full artifact JSON
+    const artifact_json_work = emit.emitArtifact(work, pipeline.stack_program.?, pipeline.program.?) catch return error.EmitFailed;
 
-    // Pass 4.5: EC Optimize (includes internal DCE when EC rewrites produce dead code)
-    program = ec_optimizer.optimize(work, program) catch return error.ANFLowerFailed;
-
-    // Pass 5: Stack Lower + Peephole
-    const stack_program = stack_lower.lower(work, program) catch return error.StackLowerFailed;
-    const optimized_methods = peephole.optimize(work, stack_program.methods) catch return error.StackLowerFailed;
-    const optimized_stack_program = types.StackProgram{
-        .methods = optimized_methods,
-        .contract_name = stack_program.contract_name,
-        .properties = stack_program.properties,
-        .constructor_params = stack_program.constructor_params,
-    };
-
-    // Pass 6: Emit hex script (concatenate all methods)
-    var hex_parts: std.ArrayListUnmanaged(u8) = .empty;
-    defer hex_parts.deinit(work);
-    for (optimized_stack_program.methods, 0..) |method, i| {
-        const hex = emit.emitMethodScript(work, method.instructions) catch return error.EmitFailed;
-        hex_parts.appendSlice(work, hex) catch return error.OutOfMemory;
-        if (i < optimized_stack_program.methods.len - 1) {
-            hex_parts.append(work, '\n') catch return error.OutOfMemory;
-        }
-    }
-
-    // Emit full artifact JSON
-    const artifact_json_work = emit.emitArtifact(work, optimized_stack_program, program) catch return error.EmitFailed;
+    // `script_hex` is the artifact's `script` field — the full dispatch-table
+    // locking script, i.e. exactly what the CLI's `--hex` prints. It used to be
+    // a newline-joined concatenation of per-method fragments, which is not a
+    // valid locking script for a multi-method contract; `main.zig`'s
+    // `compileFromIR` already carries that note, and the library never got it.
+    const script_hex_work = extractArtifactScript(artifact_json_work) catch return error.EmitFailed;
 
     // Copy results to caller's allocator
-    const script_hex = allocator.dupe(u8, hex_parts.items) catch return error.OutOfMemory;
+    const script_hex = allocator.dupe(u8, script_hex_work) catch return error.OutOfMemory;
     errdefer allocator.free(script_hex);
     const artifact_json = allocator.dupe(u8, artifact_json_work) catch return error.OutOfMemory;
 

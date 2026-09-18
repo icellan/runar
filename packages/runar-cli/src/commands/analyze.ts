@@ -8,6 +8,8 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
+import { InputLimits } from 'runar-ir-schema';
+import { readBoundedFile } from '../input-bounds.js';
 import { extname } from 'node:path';
 import { analyzeScript } from 'runar-testing';
 import type { AnalysisResult, FindingSeverity, RawScriptSpan } from 'runar-testing';
@@ -40,7 +42,7 @@ function resolveInput(input: string): ResolvedInput {
 
     if (ext === '.json') {
       // Read artifact JSON and extract the "script" field
-      const content = readFileSync(input, 'utf-8');
+      const content = readBoundedFile(input, InputLimits.MAX_IR_BYTES);
       const artifact = JSON.parse(content);
       if (typeof artifact.script !== 'string') {
         throw new Error(`Artifact JSON at ${input} does not contain a "script" field`);
@@ -52,7 +54,9 @@ function resolveInput(input: string): ResolvedInput {
     }
 
     // .hex file or any other file — read as raw hex
-    return { hex: readFileSync(input, 'utf-8').trim() };
+    // A hex FILE holds two characters per script byte, so the bound is the
+    // script limit doubled, not the script limit.
+    return { hex: readBoundedFile(input, InputLimits.MAX_SCRIPT_BYTES * 2).trim() };
   }
 
   // Assume it's a hex string

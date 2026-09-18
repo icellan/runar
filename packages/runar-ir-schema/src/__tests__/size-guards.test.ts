@@ -7,20 +7,20 @@ import { InputLimits, CanonicalJsonError } from '../input-limits.js';
 // ---------------------------------------------------------------------------
 
 describe('canonicalJsonStringify depth guard', () => {
-  it('accepts nesting at the MAX_NESTING limit', () => {
+  it('accepts nesting at the MAX_WIRE_NESTING limit', () => {
     // Build object of depth exactly equal to MAX_NESTING (= containers
     // nested inside one another, each at depth d). Depth here means
-    // structural-nesting count, so 1 outer object + (MAX_NESTING-1) extra
+    // structural-nesting count, so 1 outer object + (MAX_WIRE_NESTING-1) extra
     // is the boundary case. We pick a depth a few below the limit to stay
     // well clear of any off-by-one and exercise the happy path.
-    const safeDepth = InputLimits.MAX_NESTING - 2;
+    const safeDepth = InputLimits.MAX_WIRE_NESTING - 2;
     let value: unknown = 1;
     for (let i = 0; i < safeDepth; i++) value = { n: value };
     expect(() => canonicalJsonStringify(value)).not.toThrow();
   });
 
   it('rejects a 600-level-deep object with CanonicalJsonError(depth)', () => {
-    // 600 > InputLimits.MAX_NESTING (512). Build deeply nested object.
+    // 600 > InputLimits.MAX_WIRE_NESTING (512). Build deeply nested object.
     let value: unknown = 1;
     for (let i = 0; i < 600; i++) value = { n: value };
     try {
@@ -30,8 +30,8 @@ describe('canonicalJsonStringify depth guard', () => {
       expect(err).toBeInstanceOf(CanonicalJsonError);
       const cje = err as CanonicalJsonError;
       expect(cje.code).toBe('depth');
-      expect(cje.limit).toBe(InputLimits.MAX_NESTING);
-      expect(cje.actual).toBeGreaterThan(InputLimits.MAX_NESTING);
+      expect(cje.limit).toBe(InputLimits.MAX_WIRE_NESTING);
+      expect(cje.actual).toBeGreaterThan(InputLimits.MAX_WIRE_NESTING);
     }
   });
 

@@ -15,6 +15,20 @@ import java.util.List;
  */
 public record Loop(int count, List<AnfBinding> body, String iterVar, BigInteger start, int step)
     implements AnfValue {
+
+    /**
+     * Maximum number of iterations a single loop binding may unroll to.
+     *
+     * <p>The bound already existed on the {@code --ir} input path in the Go,
+     * Python and Ruby tiers but nothing applied it to a loop written in source,
+     * in any tier. A source contract could therefore ask for an unroll count no
+     * machine can honour, and each tier failed differently — a silently dropped
+     * loop body in Go and Rust, a hang in TypeScript, Python and Ruby, a panic
+     * in Zig, and here an {@code ArithmeticException} whose message named
+     * neither the loop nor the limit. CL-BUG-088.
+     */
+    public static final int MAX_LOOP_COUNT = 10_000;
+
     @Override
     public String kind() {
         return "loop";

@@ -575,7 +575,14 @@ def extract_version(preimage: bytes) -> int:
     return 1
 
 def extract_sequence(preimage: bytes) -> int:
-    return 0xFFFFFFFF
+    """Returns 0xfffffffe in test mode. That is
+    the SDK's own non-final default (``resolveInputSequence``), the value the
+    TypeScript TestContract interpreter returns, and the value all the SDK ANF
+    interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+    one value that makes a #131 finality guard fail off-chain and makes
+    nLockTime a consensus no-op on-chain (W7).
+    """
+    return 0xFFFFFFFE
 
 def extract_hash_prevouts(preimage: bytes) -> bytes:
     """Returns hash256(72 zero bytes) in test mode.
@@ -587,6 +594,10 @@ def extract_hash_prevouts(preimage: bytes) -> bytes:
 
 def extract_outpoint(preimage: bytes) -> bytes:
     return b'\x00' * 36
+
+def extract_script_code(preimage: bytes) -> bytes:
+    """Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks."""
+    return b''
 
 
 # -- Intent sub-covenant intrinsics (BSVM Phase 13) --------------------------

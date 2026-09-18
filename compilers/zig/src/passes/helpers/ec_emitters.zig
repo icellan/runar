@@ -7,6 +7,14 @@ pub const PushValue = union(enum) {
     bytes: []const u8,
     integer: i64,
     boolean: bool,
+    /// Decimal-string-encoded big integer, for constants that overflow `i64`
+    /// and must stay foldable. A `bytes` push encodes the same script number
+    /// but lowers to `push_data`, which the peephole treats as a HARD barrier
+    /// (`tryWindow4` bails on raw bytes) — so a chain such as the BN254
+    /// ladder's `+r +r +r` could never reassociate into `+3r` the way every
+    /// other tier's does. The payload is canonical decimal text and must
+    /// outlive the emitted op (a static constant, in practice).
+    big_int_decimal: []const u8,
 };
 
 pub const StackIf = struct {
@@ -360,6 +368,11 @@ fn emitBoolAndOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_BOOLAND");
 }
 
+fn emitBoolAndVerifySequence(t: *ECTracker) !void {
+    try t.emitOpcode("OP_BOOLAND");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 fn emitSubNotSequence(t: *ECTracker) !void {
     try t.emitOpcode("OP_SUB");
     try t.emitOpcode("OP_NOT");
@@ -548,9 +561,75 @@ fn fieldInv(t: *ECTracker, a_name: []const u8, result_name: []const u8) !void {
     t.renameTop(result_name);
 }
 
+/// CL-BUG-095 — length gate for a `Point` argument, ABORTING form.
+///
+/// A `Point` is DEFINED as exactly `want` bytes (x ‖ y, big-endian, no prefix).
+/// Nothing checked that: `Point` carries no width in the builtin table, and
+/// every one of these values arrives as an unlock argument, so the blob is
+/// attacker-sized. Surplus bytes were then silently DISCARDED, because
+/// `decomposePoint` splits at the coordinate width and `emitReverse32Raw`
+/// reverses exactly 32 bytes and drops whatever is left over — so
+/// `ecOnCurve(G ‖ 0xff)` returned TRUE and `ecEncodeCompressed` took its parity
+/// bit from the surplus.
+///
+/// This is NOT a new failure channel. An UNDER-length point already aborted, by
+/// accident: `OP_SPLIT` runs off the end of the value. The gate makes the same
+/// outcome explicit, and extends it to the over-length case that used to pass.
+///
+/// Aborting is right for every Point consumer that produces a VALUE and has no
+/// error channel to report through — `ecAdd`, `ecMul`, `ecNegate`, `ecPointX`,
+/// `ecPointY`, `ecEncodeCompressed`. There is no correct value to return for a
+/// blob that is not a point. The PREDICATES (`ecOnCurve` and friends) use
+/// `emitPointLengthGate` below instead, because for them "no" is an answer.
+fn emitPointLenVerify(t: *ECTracker, want: usize) !void {
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushIntRaw(@intCast(want));
+    try t.emitOpcode("OP_NUMEQUALVERIFY");
+}
+
+/// CL-BUG-095 — length gate for a `Point` argument, CLAMPING form: leaves
+/// `[flag, clamped]`, where `clamped` is the value forced to exactly `want`
+/// bytes (`v ‖ 00*want` split at `want`, tail dropped) and `flag` is
+/// `OP_SIZE(v) == want`.
+///
+/// Same shape, and the same reasoning, as `emitLengthGate` in
+/// nist_ec_emitters.zig: the clamp exists so the gate can stay a FLAG. It is
+/// used by the on-curve predicates, whose whole job is to answer "is this an
+/// acceptable point?" over untrusted bytes — and for a wrong-length blob the
+/// correct answer is `false`, not an aborted script. Aborting would break
+/// `if (ecOnCurve(p)) { … } else { … }`, which is the exact idiom this module's
+/// own comments tell contract authors to write. The caller ANDs `flag` into its
+/// boolean result, so whatever the clamped bytes happen to compute can never
+/// make a wrong-length point certify as on-curve.
+///
+/// Branch-free: the emitted op sequence, and the tracker's static stack model,
+/// are identical for every input length.
+fn emitPointLengthGate(t: *ECTracker, name: []const u8, want: usize, flag_name: []const u8) !void {
+    try t.toTop(name);
+    t.popNames(1);
+    try t.emitOpcode("OP_SIZE");
+    try t.emitPushIntRaw(@intCast(want));
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.emitRaw(.{ .swap = {} });
+    const pad = try t.allocator.alloc(u8, want);
+    @memset(pad, 0);
+    try t.owned_bytes.append(t.allocator, pad);
+    try t.emitPushBytesRaw(pad);
+    try t.emitOpcode("OP_CAT");
+    try t.emitPushIntRaw(@intCast(want));
+    try t.emitOpcode("OP_SPLIT");
+    try t.emitRaw(.{ .drop = {} });
+    try t.names.append(t.allocator, flag_name);
+    try t.names.append(t.allocator, name);
+}
+
 fn decomposePoint(t: *ECTracker, point_name: []const u8, x_name: []const u8, y_name: []const u8) !void {
     try t.toTop(point_name);
     t.popNames(1);
+    // CL-BUG-095: gate the width here, so every consumer that decomposes a
+    // Point inherits the check. The split at 32 below is only meaningful for a
+    // value that really is 64 bytes.
+    try emitPointLenVerify(t, 64);
     try emitSplit32Sequence(t);
     try t.names.append(t.allocator, "_dp_xb");
     try t.names.append(t.allocator, "_dp_yb");
@@ -675,22 +754,171 @@ fn affineAdd(t: *ECTracker) !void {
     try t.copyToTop("py", "_py2");
     try fieldSub(t, "_s_px_rx", "_py2", "ry");
 
-    try t.toTop("px");
-    try t.drop();
-    try t.toTop("py");
-    try t.drop();
-    try t.toTop("qx");
-    try t.drop();
-    try t.toTop("qy");
-    try t.drop();
+    // CL-BUG-096: select over the infinity operands and the P == -Q case, and
+    // consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+    // mask that used to live here. See emitAffineInfinitySelect.
+    try emitAffineInfinitySelect(t);
+}
 
-    // P == -Q -> force the all-zero point (see the header comment).
-    try t.toTop("rx");
-    try t.copyToTop("_notinf", "_notinf_x");
-    try t.rawBlock(2, "rx", emitMulOpcode);
-    try t.toTop("ry");
+/// CL-BUG-096 — the infinity-operand case of affine addition, shared by
+/// secp256k1 and the two NIST curves because it is pure integer masking and
+/// touches no field parameter. Generic over the tracker type for exactly that
+/// reason: `ECTracker` and `nist_ec_emitters.NistTracker` are separate structs
+/// in this tier, and the alternative to `anytype` is writing the same 48 ops
+/// out twice and hoping the two copies never drift.
+///
+/// The group law has an identity, and this codegen has a representation for it:
+/// the ALL-ZERO blob. It is not a theoretical value — the codegen MANUFACTURES
+/// it, from `ecMul(P, k)` whenever k = 0 (mod n), from affineAdd's own P + (-P)
+/// masking, and from the `ec-mul-zero` / `ec-add-negate-cancel` rewrites in the
+/// EC optimizer. `affineAdd` nonetheless had no case for it: fed (G, O) it took
+/// the chord path with s = Gy/Gx and returned an off-curve blob from a script
+/// that SUCCEEDED.
+///
+/// And the always-on EC optimizer already believed the right answer:
+/// `ec-add-identity-right` / `-left` rewrite `ecAdd($x, INFINITY)` to `$x`. So
+/// the same source meant "P" with the optimizer on and "garbage" with it off.
+/// Fixing the adder rather than deleting the two rules is the only option that
+/// works, because the rules cannot see a zero scalar that only exists at
+/// runtime — deleting them would leave the runtime path just as wrong and
+/// rewrite nothing.
+///
+/// Branch-free, in the style the rest of this adder uses. Exactly one of the
+/// three masks is 1 and the other two are 0, so the sum selects one term:
+///
+///   pinf = (px == 0) AND (py == 0)          P is O
+///   qinf = (qx == 0) AND (qy == 0)          Q is O
+///   usep = qinf AND NOT pinf                -> answer is P
+///   useq = pinf                             -> answer is Q  (covers O + O = O)
+///   user = notinf AND NOT(pinf OR qinf)     -> answer is the computed sum
+///
+/// `user` folds in the pre-existing `notinf` mask (the P == -Q case), so
+/// P + (-P) still yields the all-zero blob and nothing about that case changes.
+///
+/// Requiring BOTH coordinates to be zero is load-bearing, not belt-and-braces.
+/// x = 0 has genuine curve points whenever the curve's b is a quadratic residue
+/// — (0, sqrt(b)) — and testing x alone would map them to O. y = 0 has none on
+/// any of these three curves (all have prime order, so no point of order 2), but
+/// the conjunction makes that fact not need to be true.
+///
+/// Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+/// [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+///
+/// Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+/// rx, ry in their place.
+pub fn emitAffineInfinitySelect(t: anytype) !void {
+    // pinf = (px == 0) AND (py == 0)
+    try t.copyToTop("px", "_px_z");
+    try t.pushInt("_zero_px", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_pxz");
+
+    try t.copyToTop("py", "_py_z");
+    try t.pushInt("_zero_py", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_pyz");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_pinf");
+
+    // qinf = (qx == 0) AND (qy == 0)
+    try t.copyToTop("qx", "_qx_z");
+    try t.pushInt("_zero_qx", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_qxz");
+
+    try t.copyToTop("qy", "_qy_z");
+    try t.pushInt("_zero_qy", 0);
+    t.popNames(2);
+    try t.emitOpcode("OP_NUMEQUAL");
+    try t.names.append(t.allocator, "_qyz");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_qinf");
+
+    // usep = qinf AND NOT pinf
+    try t.copyToTop("_qinf", "_usep_q");
+    try t.copyToTop("_pinf", "_usep_p");
+    t.popNames(2);
+    try t.emitOpcode("OP_NOT");
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_usep");
+
+    // useq = pinf
+    try t.copyToTop("_pinf", "_useq");
+
+    // user = notinf AND NOT(pinf OR qinf)
+    try t.toTop("_pinf");
+    try t.toTop("_qinf");
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLOR");
+    try t.names.append(t.allocator, "_anyinf");
+
     try t.toTop("_notinf");
-    try t.rawBlock(2, "ry", emitMulOpcode);
+    try t.toTop("_anyinf");
+    t.popNames(2);
+    try t.emitOpcode("OP_NOT");
+    try t.emitOpcode("OP_BOOLAND");
+    try t.names.append(t.allocator, "_user");
+
+    // rx = px*usep + qx*useq + rx*user
+    try t.toTop("px");
+    try t.copyToTop("_usep", "_usep_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_selx_p");
+
+    try t.toTop("qx");
+    try t.copyToTop("_useq", "_useq_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_selx_q");
+
+    try t.toTop("rx");
+    try t.copyToTop("_user", "_user_x");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_selx_r");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "_selx_qr");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "rx");
+
+    // ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+    try t.toTop("py");
+    try t.toTop("_usep");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_sely_p");
+
+    try t.toTop("qy");
+    try t.toTop("_useq");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_sely_q");
+
+    try t.toTop("ry");
+    try t.toTop("_user");
+    t.popNames(2);
+    try t.emitOpcode("OP_MUL");
+    try t.names.append(t.allocator, "_sely_r");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "_sely_qr");
+
+    t.popNames(2);
+    try t.emitOpcode("OP_ADD");
+    try t.names.append(t.allocator, "ry");
 }
 
 fn jacobianDouble(t: *ECTracker) !void {
@@ -947,9 +1175,50 @@ fn buildJacobianAddOrDoubleInline(allocator: Allocator, base_names: []const ?[]c
     return inner.takeBundle();
 }
 
+/// R-117 — a Point's two coordinates must be FIELD ELEMENTS, aborting form.
+///
+/// decomposePoint BIN2NUMs each half of the blob as an unsigned integer, so any
+/// value that fits in the coordinate width is accepted — x + p included,
+/// whenever x + p < 2^256 (on secp256k1 that is every x < 2^32 + 977).
+/// Downstream field arithmetic reduces mod p, so (x+p)‖y behaves as the point
+/// (x, y); affineAdd's two case selectors do NOT reduce, and they are bare
+/// OP_NUMEQUAL on exactly these raw values:
+///
+///     cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+///     notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+///
+/// so for P and its alias both read 0, the chord path runs on two equal points,
+/// den_chord = qx - px ≡ 0 (mod p), and fieldInv is Fermat with inv(0) = 0.
+/// Measured before this gate landed, x = 1: ecAdd(P, P) gave the correct 2P and
+/// ecAdd(P, P') gave x = p-2 — a script that SUCCEEDED and returned a blob that
+/// is not a point. Both the doubling case and the P + (-P) case are driven by
+/// these selectors, so both are defeated by the same trick.
+///
+/// REJECT rather than reduce: emitEcOnCurve already answers "no" to a
+/// non-canonical encoding, so reducing here would leave the predicate and the
+/// value builtins disagreeing about whether the blob is a point at all. This is
+/// also the policy CL-BUG-095 set for the WIDTH — predicates clamp and flag,
+/// value producers OP_VERIFY.
+///
+/// Callers are the user-facing value builtins only; deliberately NOT folded
+/// into decomposePoint, which also runs inside emitEcOnCurve and must stay
+/// total.
+fn emitCoordCanonVerify(t: *ECTracker, x_name: []const u8, y_name: []const u8) !void {
+    try t.copyToTop(x_name, "_cc_x");
+    try pushFieldPNum(t, "_cc_px");
+    try t.rawBlock(2, "_cc_xok", emitLessThanOpcode);
+    try t.copyToTop(y_name, "_cc_y");
+    try pushFieldPNum(t, "_cc_py");
+    try t.rawBlock(2, "_cc_yok", emitLessThanOpcode);
+    try t.rawBlock(2, null, emitBoolAndVerifySequence);
+}
+
 fn emitEcAdd(t: *ECTracker) !void {
     try decomposePoint(t, "_pa", "px", "py");
     try decomposePoint(t, "_pb", "qx", "qy");
+    // R-117: affineAdd's selectors compare these four values RAW.
+    try emitCoordCanonVerify(t, "px", "py");
+    try emitCoordCanonVerify(t, "qx", "qy");
     try affineAdd(t);
     try composePoint(t, "rx", "ry", "_result");
 }
@@ -972,7 +1241,66 @@ fn emitScalarReduce(t: *ECTracker, k_name: []const u8, result_name: []const u8) 
     try t.rawBlock(2, result_name, emitFieldModSequence);
 }
 
+/// R-157 -- gate a Point operand of the scalar ladder: it must be ON the curve, or
+/// be the point at infinity. ABORTS otherwise.
+///
+/// ecMul(P, k) does not compute k*P. It computes ((k mod n) + 3n)*P: the MSB-first
+/// ladder adds 3n so a fixed high bit is always set, and +3n is a no-op ONLY when
+/// ord(P) divides n. Cofactor 1 gives ord(P) = n for every point on the curve, so
+/// the trick is sound there and nowhere else. An off-curve point lies on some other
+/// curve y^2 = x^3 + b' of unrelated order, and the ladder silently answers a
+/// different question. Measured on @bsv/sdk's Spend with the off-curve P = (5, 7),
+/// which lies on y^2 = x^3 - 76: ecMul(P, 1n) -> c8b039d1...9438f2ff, which is NOT
+/// P, and matches (1 + 3n)*P on that other curve exactly. So the primitive violated
+/// its own contract for EVERY off-curve input.
+///
+/// The degenerate sub-case is worse. For a 2-torsion point of the other curve --
+/// any (x, 0) -- every multiple collapses to the all-zero blob, because the
+/// ladder's unguarded mixed-add hits H = R = 0 mid-ladder, sets Z3 = 0, and a
+/// Jacobian accumulator at infinity never leaves it. Combined with R-053, which
+/// correctly taught ecAdd that the all-zero blob is the identity, that turns a
+/// Schnorr-shaped s*G == R + e*P check into a free pass.
+///
+/// WHY HERE AND NOT IN THE CALLER: the +3n offset is INTERNAL to ecMul. A caller
+/// cannot see it, cannot know the obligation exists without reading this codegen,
+/// and gains nothing by checking what ecMul can check more cheaply (ecOnCurve is
+/// 0.2% of ecMul). The obligation WAS written down, in all seven tiers, in the
+/// ladder's own docstring -- and nothing enforced it.
+///
+/// WHY NOT ecAdd: affineAdd implements the group law with no n-dependent trick, so
+/// on an off-curve operand it returns the CORRECT sum on that operand's own curve.
+/// It does not lie. And O must keep flowing through ecAdd for R-053 to hold.
+///
+/// WHY O IS EXEMPT, and it is load-bearing: ecMul(P, 0n) returns the all-zero blob,
+/// ecAdd(P, -P) returns it, and the EC optimizer folds to it, so O is a reachable
+/// runtime operand -- while ecOnCurve(O) is false by construction. A bare on-curve
+/// gate would reject the identity this codegen manufactures itself.
+///
+/// This SUBSUMES R-117's coordinate-canonicity gate on the mul builtins, which is
+/// why that call is removed here.
+///
+/// The on-curve body runs over a COPY of the point that sits above the real one.
+/// findDepth searches from the top, so naming the copy "_pt" resolves to the copy
+/// for the whole of emitEcOnCurve, and the original is reachable again the moment
+/// the copy's name is popped.
+fn emitPointGate(t: *ECTracker, point_name: []const u8, coord_bytes: usize) !void {
+    try t.copyToTop(point_name, "_pg_pt");
+    const zeros = try t.allocator.alloc(u8, coord_bytes * 2);
+    @memset(zeros, 0);
+    try t.pushOwnedBytes("_pg_zero", zeros);
+    t.popNames(2);
+    try t.emitOpcode("OP_EQUAL");
+    try t.names.append(t.allocator, "_pg_is_inf");
+    try t.copyToTop(point_name, "_pt");
+    try emitEcOnCurve(t);
+    t.popNames(2);
+    try t.emitOpcode("OP_BOOLOR");
+    try t.emitOpcode("OP_VERIFY");
+}
+
 fn emitEcMul(t: *ECTracker, point_name: []const u8, scalar_name: []const u8) !void {
+    // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+    try emitPointGate(t, point_name, 32);
     try decomposePoint(t, point_name, "ax", "ay");
 
     // "k in [1, n-1]" is a PRECONDITION the caller cannot enforce — the scalar is
@@ -1045,12 +1373,21 @@ fn emitEcMulGen(t: *ECTracker) !void {
 
 fn emitEcNegate(t: *ECTracker) !void {
     try decomposePoint(t, "_pt", "_nx", "_ny");
+    try emitCoordCanonVerify(t, "_nx", "_ny");
     try pushFieldPNum(t, "_fp");
     try fieldSub(t, "_fp", "_ny", "_neg_y");
     try composePoint(t, "_nx", "_neg_y", "_result");
 }
 
 fn emitEcOnCurve(t: *ECTracker) !void {
+    // CL-BUG-095: width. `ecOnCurve(G ‖ 0xff)` returned TRUE — decomposePoint
+    // discarded the surplus byte, so 2^8 distinct blobs all certified as the
+    // same point and a point's identity AS BYTES stopped being unique. Clamp and
+    // remember the width, rather than abort, because this is the predicate
+    // contracts are told to gate untrusted points on and it must stay total; the
+    // flag is ANDed into the result at the end.
+    try emitPointLengthGate(t, "_pt", 64, "_len_ok");
+
     try decomposePoint(t, "_pt", "_x", "_y");
 
     // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
@@ -1081,8 +1418,12 @@ fn emitEcOnCurve(t: *ECTracker) !void {
     try t.toTop("_rhs");
     try t.rawBlock(2, "_curve_eq", emitEqualOpcode);
 
+    // on-curve = right width AND canonical AND curve-equation
     try t.toTop("_canon");
     try t.toTop("_curve_eq");
+    try t.rawBlock(2, "_eq_ok", emitBoolAndOpcode);
+    try t.toTop("_len_ok");
+    try t.toTop("_eq_ok");
     try t.rawBlock(2, "_result", emitBoolAndOpcode);
 }
 
@@ -1174,12 +1515,22 @@ test "ec helper op-count goldens" {
     // they emit a deep pick/roll as two ops (push depth, then OP_PICK/OP_ROLL)
     // where this tracker models it as one `.pick` / `.roll` StackOp, and 5 of
     // the 16 movements here are deep. Same bytes, different counting point.
+    //
+    // ecAdd 8199 -> 8239 (+34): CL-BUG-096, emitAffineInfinitySelect. The adder
+    // had no case for the point at infinity — the all-zero blob this codegen
+    // MANUFACTURES from ecMul(P, 0n) — so ecAdd(G, O) took the chord path and
+    // returned an off-curve blob from a script that SUCCEEDED, while the
+    // always-on optimizer rewrote the same source to G. The select subsumes the
+    // notinf mask it replaces, so P + (-P) is unchanged. The peers book this as
+    // +50 OPS under the deep-pick/roll convention above: measured here, the
+    // weighted count goes 8229 -> 8279, exactly +50. Nothing else moves —
+    // ecMul / ecMulGen / ecNegate / ecOnCurve are untouched.
     const cases = .{
-        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8199) },
-        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 119671) },
-        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 119673) },
-        .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 945) },
-        .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 530) },
+        .{ registry.CryptoBuiltin.ec_add, "ecAdd", @as(usize, 8255) },
+        .{ registry.CryptoBuiltin.ec_mul, "ecMul", @as(usize, 120225) },
+        .{ registry.CryptoBuiltin.ec_mul_gen, "ecMulGen", @as(usize, 120227) },
+        .{ registry.CryptoBuiltin.ec_negate, "ecNegate", @as(usize, 956) },
+        .{ registry.CryptoBuiltin.ec_on_curve, "ecOnCurve", @as(usize, 545) },
     };
     inline for (cases) |c| {
         var bundle = try buildBuiltinOps(std.testing.allocator, c[0]);

@@ -188,7 +188,16 @@ end
 for i in a...b do      # 'do' keyword is optional
   ...
 end
+
+for i in 5.downto(2)   # i = 5, 4, 3, 2  (counting DOWN, inclusive bound)
+  ...
+end
 ```
+
+Ruby's range operators only ever ascend — `(5..2)` is empty — so a countdown is
+spelled with `Integer#downto`, the language's own countdown verb. It returns an
+Enumerator and `for x in enum` is valid Ruby over one, so the header iterates
+the same values here that it does in Ruby.
 
 ---
 

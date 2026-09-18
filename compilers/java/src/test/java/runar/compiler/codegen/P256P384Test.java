@@ -40,53 +40,58 @@ class P256P384Test {
      * {@code cond}, OP_SUB/OP_NOT for {@code notinf}, two OP_MULs masking rx/ry,
      * plus the picks/rolls feeding them. Every one of those is a 1-byte op, so the
      * op count and the byte count move by the same amount.
+     *
+     * <p>CL-BUG-096 adds a further +50 / +50 on top, shared by all three curves:
+     * {@link Ec#emitAffineInfinitySelect} replaces the four toTop/drop cleanups
+     * and the two {@code notinf} OP_MULs with the pinf/qinf/usep/useq/user
+     * select. All 1-byte ops again.
      */
     @Test
     void p256AddParity() {
         assertParity("p256Add",
             P256P384::emitP256Add,
-            6663, 19906,
-            "589550be7906bc2326968d6d2efc48dad59702510b0fd881ea9ee81e5f2fc41e");
+            6737, 20114,
+            "3c210d17ca365ce2b1b504f2210a8cc2452bf0513d1cb1620923539ea0a8b0bf");
     }
 
     @Test
     void p256MulParity() {
         assertParity("p256Mul",
             P256P384::emitP256Mul,
-            140036, 459746,
-            "3f491aae5052651c50af692d7a2c16984e329bf5c790d18249af27171c442e17");
+            140620, 460761,
+            "379117887c1c1b93443daef49320e692a0fa0276d566760b6c5bee650acf1214");
     }
 
     @Test
     void p256MulGenParity() {
         assertParity("p256MulGen",
             P256P384::emitP256MulGen,
-            140038, 459812,
-            "4e6e4fc58b14b14e9ab6c42a6adf8882d562d73b3754d6c28178a80b9b43a54a");
+            140622, 460827,
+            "2b5a4c818295beae10632169f1a4b6de23cfce43197ec744445e87d07d985efa");
     }
 
     @Test
     void p256NegateParity() {
         assertParity("p256Negate",
             P256P384::emitP256Negate,
-            945, 1018,
-            "92527f4c693de2e9ad7207842fc80cae1735abcef68bf26ce32b14a70dec6c2f");
+            956, 1096,
+            "835560d4837be0c382d789e70fc289dbc432c55d40224d2da5d6083d382744cd");
     }
 
     @Test
     void p256OnCurveParity() {
         assertParity("p256OnCurve",
             P256P384::emitP256OnCurve,
-            559, 858,
-            "3ae633ac4a1039e19b9c79e993e6f3567199a6d138d9e71f62edb58e8f124219");
+            574, 940,
+            "218e2c15582b847eb8479d7d5c9787a60b9fa97f6ab50bdc277be6201a50e8e8");
     }
 
     @Test
     void p256EncodeCompressedParity() {
         assertParity("p256EncodeCompressed",
             P256P384::emitP256EncodeCompressed,
-            16, 19,
-            "a4481881396c90da361f987c4adc581125b09103bfb6bd11f3d5acc5be1635d1");
+            16, 21,
+            "6fabc7557f72bcbe35f7fa63715afa3d5f30d54924e8ef48ef879caa1c011ab0");
     }
 
     /**
@@ -142,8 +147,8 @@ class P256P384Test {
     void verifyEcdsaP256Parity() {
         assertParity("verifyECDSA_P256",
             P256P384::emitVerifyECDSA_P256,
-            297331, 974024,
-            "1b8077057d1f724348e603a79b7ebab7ef6b0c36cdf669323e2d4483ab9c4f77");
+            297393, 974090,
+            "c94bb4a39d339b75b7cfd5403d443c0f2154b380a49a1c3c33b47fefab06b1e9");
     }
 
     // --------------------------------------------------------------
@@ -155,48 +160,48 @@ class P256P384Test {
     void p384AddParity() {
         assertParity("p384Add",
             P256P384::emitP384Add,
-            11469, 46710,
-            "744c9376b1c89f0152ff83c0a0ad8940b1b963e489f4e95ecbf3582057c4266c");
+            11543, 46982,
+            "477c845892660ecd52d7892894130db422f6a1eae60c37c298cbfa2c65cee443");
     }
 
     @Test
     void p384MulParity() {
         assertParity("p384Mul",
             P256P384::emitP384Mul,
-            211178, 927350,
-            "ca64d51df61e1ba9f5fd26113cbff649036ee96c00d2d1d27442486e93520fb4");
+            211986, 928800,
+            "4186ccf99c21e16d8109c807beb06525dcea879aca58b44365acdaeab96d3056");
     }
 
     @Test
     void p384MulGenParity() {
         assertParity("p384MulGen",
             P256P384::emitP384MulGen,
-            211180, 927449,
-            "5a5149b884fac627c5b46488bfcb55c7bf5f275b255ed83026c193e8cb42250a");
+            211988, 928899,
+            "ad633f2904febc5346c463527d00c074157b68d4011316f27cfda09ac5ade6bb");
     }
 
     @Test
     void p384NegateParity() {
         assertParity("p384Negate",
             P256P384::emitP384Negate,
-            1393, 1498,
-            "147e2c655c23973481673628c1d0151034a5945462fb26828a6c8c1748b15cdc");
+            1404, 1608,
+            "cae64040e199c863851f06675c2e1b1f04fe2da0a6b6daf60a52e82f1101bbb8");
     }
 
     @Test
     void p384OnCurveParity() {
         assertParity("p384OnCurve",
             P256P384::emitP384OnCurve,
-            783, 1227,
-            "2d8d5ea7a9f059dc3087b62564feed5fac7c24c795e2142c2252e499b18bffe7");
+            798, 1342,
+            "94a8fdd5522fc28ec1e497bc94cb734d98bf778cd82d362a5977aebf28708a07");
     }
 
     @Test
     void p384EncodeCompressedParity() {
         assertParity("p384EncodeCompressed",
             P256P384::emitP384EncodeCompressed,
-            16, 19,
-            "e32d98f40a17d26f70ce433663a01e3c476073419ab6109964d00cfbb57d6eae");
+            16, 21,
+            "0445ab05c849a3528caa951da2d8202ebba4c29a11237b8695b73773cb01c508");
     }
 
     /**
@@ -218,8 +223,8 @@ class P256P384Test {
     void verifyEcdsaP384Parity() {
         assertParity("verifyECDSA_P384",
             P256P384::emitVerifyECDSA_P384,
-            453307, 1987394,
-            "665371eff2690394d04ecbc2195d556d79103849c40b2bafe75ef2fdb5d3d1f9");
+            453369, 1987460,
+            "08dfb06168c1ed75f18e4943a6151d5d65bac852c4ec42d631738fe7a27c5a20");
     }
 
     // --------------------------------------------------------------

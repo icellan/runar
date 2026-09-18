@@ -6,7 +6,7 @@ import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import { InputLimits } from 'runar-ir-schema';
 import { assertScriptHexUnderLimit, WitnessValueMissingError } from './errors.js';
 import type { Provider } from './providers/provider.js';
-import { txToTransactionData } from './providers/provider.js';
+import { txToTransactionData, warnNonFatal } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
 import type { Inscription } from './ordinals/types.js';
@@ -21,6 +21,7 @@ import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/e
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript, Spend } from '@bsv/sdk';
 import { WalletProvider } from './providers/wallet-provider.js';
 import { detachUnlockingScript } from './spend-safety.js';
+import { assertUnsoundPrimitivesAcknowledged } from './unsound-primitives.js';
 
 /**
  * Deep-review finding C8: opt-out for `finalizeCall`'s pre-broadcast local
@@ -175,6 +176,36 @@ function invalidateTxCache(tx: BsvTransaction): void {
  * this name is a cross-tier calling convention, not a per-tier ergonomic.
  */
 const AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts';
+
+/**
+ * Decode the value of every EQUALITY `verify_code_part_len` pin in a compiled
+ * script.
+ *
+ * The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
+ *
+ *     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
+ *     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+ *
+ * `9c` is OP_NUMEQUAL — an exact pin, the only variant a longer code part can
+ * violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
+ * satisfy, so it is deliberately not returned here.
+ *
+ * Read from the emitted TEMPLATE rather than from a built code script: the
+ * template holds OP_0 placeholders where constructor args go, so no
+ * caller-supplied byte string can be mistaken for a pin.
+ */
+function decodeExactCodePartLenPins(scriptHex: string): number[] {
+  const values: number[] = [];
+  for (let i = 0; i + 18 <= scriptHex.length; i += 2) {
+    const seq = scriptHex.slice(i, i + 18);
+    if (!seq.startsWith('7604')) continue;
+    if (seq.slice(12, 14) !== '81') continue;
+    if (seq.slice(14, 16) !== '9c') continue;
+    if (seq.slice(16, 18) !== '69') continue;
+    values.push(parseInt(seq.slice(4, 12).match(/../g)!.reverse().join(''), 16));
+  }
+  return values;
+}
 
 /**
  * Deep-review finding C8: offline dry-run of ONE input of a fully-assembled
@@ -446,10 +477,55 @@ export class RunarContract {
    * ```ts
    * contract.withInscription({ contentType: 'image/png', data: pngHex });
    * ```
+   *
+   * N-043 — THROWS when the envelope would break the contract's own
+   * `SIZE(_codePart)` pin. A stateful contract with a variable-length state
+   * section carries an equality pin on the deployed code-part length, and the
+   * envelope lands INSIDE the code part (see `getCodePartHex`). The compiler
+   * bakes that number before any inscription exists, so the pinned length and
+   * the real one differ by the envelope's size and every honest spend aborts
+   * at OP_VERIFY — with the funds already committed. Refusing here turns a
+   * permanent, silent lock into a loud error before a single satoshi moves.
    */
   withInscription(inscription: Inscription): this {
+    const previous = this._inscription;
     this._inscription = inscription;
+    try {
+      this.assertCodePartLengthPinHonoured();
+    } catch (err) {
+      this._inscription = previous;
+      throw err;
+    }
     return this;
+  }
+
+  /**
+   * Verify that every equality `verify_code_part_len` pin the compiler baked
+   * into this artifact still describes the code part this contract produces.
+   *
+   * The check is the invariant itself, not a restatement of the compiler's
+   * derivation: it decodes the pinned number straight out of the emitted
+   * template and compares it to `getCodePartHex()`. So it permits every
+   * combination that actually works — a stateless contract or a fixed-size
+   * state layout carries no pin at all, and a lower-bound pin is satisfied by
+   * a longer code part — and rejects only the shape that would lock funds.
+   */
+  private assertCodePartLengthPinHonoured(): void {
+    const pinned = decodeExactCodePartLenPins(this.artifact.script);
+    if (pinned.length === 0) return;
+    const actual = this.getCodePartHex().length / 2;
+    for (const value of pinned) {
+      if (value === actual) continue;
+      throw new Error(
+        `RunarContract.withInscription: ${this.artifact.contractName} pins ` +
+          `SIZE(_codePart) == ${value}, but with this inscription attached the ` +
+          `code part is ${actual} bytes. Deploying it would make every spend ` +
+          `fail OP_VERIFY and lock the contract's funds permanently. An ` +
+          `inscription cannot be attached to a stateful contract with a ` +
+          `variable-length state section: the envelope is part of the code ` +
+          `part, and its length is not known when the pin is compiled.`,
+      );
+    }
   }
 
   /** Returns the current inscription, if any. */
@@ -531,6 +607,16 @@ export class RunarContract {
       `${this.artifact.contractName}.deploy`,
     );
 
+    // R-062: and refuse to fund a script reaching a builtin the compiler does
+    // not claim is sound unless the caller says so here, in the same breath as
+    // the money. Same position as the guard above — before any signing or
+    // broadcast.
+    assertUnsoundPrimitivesAcknowledged(
+      this.artifact,
+      options.acknowledgeUnsound,
+      `${this.artifact.contractName}.deploy`,
+    );
+
     // Fetch fee rate and funding UTXOs
     const feeRate = await provider.getFeeRate();
     const allUtxos = await provider.getUtxos(address);
@@ -600,6 +686,13 @@ export class RunarContract {
   async deployWithWallet(options: {
     satoshis?: number;
     description?: string;
+    /**
+     * R-062: builtins the caller accepts despite the compiler not claiming
+     * they are sound. Required — naming each one — when the artifact declares
+     * `unsoundPrimitives`; ignored otherwise. Same mechanism and same error as
+     * `DeployOptions.acknowledgeUnsound` on the ordinary `deploy()` path.
+     */
+    acknowledgeUnsound?: readonly string[];
   } = {}): Promise<{ txid: string; outputIndex: number }> {
     if (!(this._provider instanceof WalletProvider)) {
       throw new Error(
@@ -617,6 +710,16 @@ export class RunarContract {
     assertScriptHexUnderLimit(
       lockingScript,
       InputLimits.MAX_SCRIPT_BYTES,
+      `${this.artifact.contractName}.deployWithWallet`,
+    );
+
+    // R-062: the wallet is a SECOND funding path, and it must make the same
+    // decision `deploy()` makes — refuse to fund a script reaching a builtin
+    // the compiler does not claim is sound unless the caller says so here.
+    // Before `createAction`, so no wallet is ever asked for the coins.
+    assertUnsoundPrimitivesAcknowledged(
+      this.artifact,
+      options.acknowledgeUnsound,
       `${this.artifact.contractName}.deployWithWallet`,
     );
 
@@ -650,8 +753,12 @@ export class RunarContract {
           walletProvider.cacheTx(txid, tx.toHex());
         }
         // Broadcast to ARC (may already be known — non-fatal)
-        await walletProvider.broadcast(tx).catch(() => {});
-      } catch { /* BEEF parse failure is non-fatal */ }
+        await walletProvider.broadcast(tx).catch((e) =>
+          warnNonFatal('deploy-tx broadcast', e),
+        );
+      } catch (e) {
+        warnNonFatal('deploy-tx BEEF parse', e);
+      }
     }
 
     const txid = result.txid || '';

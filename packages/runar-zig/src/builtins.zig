@@ -261,6 +261,9 @@ pub const MockPreimageError = error{
 /// method signatures compile to Bitcoin Script and have no error channel).
 pub fn mockPreimageChecked(allocator: std.mem.Allocator, parts: MockPreimageParts) MockPreimageError!base.SigHashPreimage {
     var encoded = allocator.alloc(u8, 4 + 32 + 32 + 36 + 1 + 8 + 4 + 32 + 4 + 4) catch return MockPreimageError.OutOfMemory;
+    // The locktime cast below can still refuse after this buffer exists; a
+    // refusal must not keep it.
+    errdefer allocator.free(encoded);
     std.mem.writeInt(i32, encoded[0..4], 2, .little);
     copyFixed(encoded[4..36], parts.hashPrevouts);
     @memset(encoded[36..68], 0);
@@ -294,6 +297,12 @@ pub fn extractOutpoint(preimage: base.SigHashPreimage) base.ByteString {
     return dupeBytes(&extracted);
 }
 
+/// Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks.
+pub fn extractScriptCode(preimage: base.SigHashPreimage) base.ByteString {
+    _ = preimage;
+    return "";
+}
+
 pub fn extractOutputHash(preimage: base.SigHashPreimage) base.Sha256 {
     const extracted = bsvz.transaction.extractOutputHash(preimage) catch return default_zero_32[0..];
     return dupeBytes(&extracted.bytes);
@@ -302,6 +311,17 @@ pub fn extractOutputHash(preimage: base.SigHashPreimage) base.Sha256 {
 pub fn extractLocktime(preimage: base.SigHashPreimage) base.Bigint {
     const extracted = bsvz.transaction.extractLocktime(preimage) catch return 0;
     return extracted;
+}
+
+/// Returns 0xfffffffe in test mode. That is
+/// the SDK's own non-final default (`resolveInputSequence`), the value the
+/// TypeScript TestContract interpreter returns, and the value all the SDK ANF
+/// interpreters return. It used to be 0xffffffff, the FINALITY SENTINEL — the
+/// one value that makes a #131 finality guard fail off-chain and makes
+/// nLockTime a consensus no-op on-chain (W7).
+pub fn extractSequence(preimage: base.SigHashPreimage) base.Bigint {
+    _ = preimage;
+    return 0xfffffffe;
 }
 
 // ============================================================================
@@ -381,6 +401,10 @@ pub fn buildChangeOutput(pkh: base.ByteString, amount: base.Bigint) base.ByteStr
     };
 }
 
+pub fn byteStringLen(data: base.ByteString) i64 {
+    return @intCast(data.len);
+}
+
 pub fn cat(left: base.ByteString, right: base.ByteString) base.ByteString {
     // CONTRACT-ABORT: in-contract builtin; page_allocator failure is treated
     // as script-abort. Size is bounded by Bitcoin Script max element size.
@@ -420,12 +444,14 @@ pub fn num2bin(value: anytype, size: base.Bigint) base.ByteString {
     };
 }
 
-pub fn bin2num(bytes: base.ByteString) SignedBigint {
-    // CONTRACT-ABORT: in-contract builtin; malformed encoding = script-abort
-    // matching Bitcoin Script OP_BIN2NUM semantics.
+pub fn bin2num(bytes: base.ByteString) i64 {
+    // Native Zig contracts use `base.Bigint = i64` (see SchnorrZKP_test.zig
+    // BUG-001). Returning i64 lets `bin2num(...) == 0` type-check in
+    // example bodies; values that do not fit panic like other i64 builtins.
+    // CONTRACT-ABORT: malformed encoding = script-abort matching OP_BIN2NUM.
     var script_num = bsvz.script.ScriptNum.bin2num(std.heap.page_allocator, bytes) catch @panic("bin2num: invalid encoding");
     defer script_num.deinit();
-    return signedBigintFromScriptNum(&script_num);
+    return signedBigintFromScriptNum(&script_num).toI64Exact() catch @panic("bin2num: value exceeds i64");
 }
 
 /// Bitcoin Script's OP_WITHIN semantics: `lo <= value < hi` (half-open).
@@ -2125,10 +2151,10 @@ test "num2bin and bin2num follow signed magnitude semantics" {
         const encoded = num2bin(case.value, case.size);
         defer freeIfOwned(encoded);
         try std.testing.expectEqualSlices(u8, case.expected, encoded);
-        try expectBigintEqI64(case.value, bin2num(encoded));
+        try std.testing.expectEqual(case.value, bin2num(encoded));
     }
 
-    try expectBigintEqI64(0, bin2num(&[_]u8{0x80}));
+    try std.testing.expectEqual(@as(i64, 0), bin2num(&[_]u8{0x80}));
 }
 
 test "wide signed-magnitude values flow through bin2num and secp256k1 scalar multiplication" {
@@ -2139,7 +2165,7 @@ test "wide signed-magnitude values flow through bin2num and secp256k1 scalar mul
         0x98, 0x61, 0x44, 0x20, 0x17, 0xb2, 0x6c, 0x7f,
     };
 
-    const scalar = bin2num(&wide);
+    const scalar = SignedBigint.fromLeSignedMagnitude(&wide);
     const encoded = num2bin(scalar, 32);
     defer freeIfOwned(encoded);
     try std.testing.expectEqualSlices(u8, &wide, encoded);

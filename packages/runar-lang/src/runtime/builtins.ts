@@ -155,9 +155,14 @@ export function right(data: ByteString, length: bigint): ByteString {
   return data.slice(data.length - Number(length) * 2) as ByteString;
 }
 
-export function split(data: ByteString, index: bigint): [ByteString, ByteString] {
-  const i = Number(index) * 2;
-  return [data.slice(0, i) as ByteString, data.slice(i) as ByteString];
+/**
+ * The bytes from `index` onwards — the RIGHT half of the cut, which is what the
+ * Rúnar builtin binds (`OP_SPLIT OP_NIP`). `left(data, index)` is the other
+ * side. This used to return the `[left, right]` pair; nothing could name the
+ * pair from contract source, and the signature disagreed with the frontend.
+ */
+export function split(data: ByteString, index: bigint): ByteString {
+  return data.slice(Number(index) * 2) as ByteString;
 }
 
 export function reverseBytes(data: ByteString): ByteString {

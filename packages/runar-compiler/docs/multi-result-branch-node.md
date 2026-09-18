@@ -419,18 +419,30 @@ chain — so it still moves slots by design. An arms-vs-arms variant narrows the
 fixture corpus to three contracts, but one of them is TicTacToe, which is proven
 spendable on a regtest node, so that form is over-strict too.
 
-**The shape §9 called "P1-1" is real, and it is OPEN.** Reduced to
-`if (c1) { if (c2) { a = 5n } else { a = 6n } } ` with a live sibling local: the
-inner `if` declares its one result and its adopt loop physically ROLL+DROPs the
-stale slot out of the region the arm INHERITED from the enclosing arm. The
-enclosing `lowerIf` reconciles by name set and by depth, and neither sees a
-middle slot removed and a same-named slot appearing on top. The two arms of the
-OUTER `if` then leave the same DEPTH with different LAYOUTS, and the else-path
-compiles to an unspendable script. Confirmed pre-existing at `4b0f688f`
-(identical failure with the fix reverted), and confirmed unchanged by this
-remediation. Fixing it means teaching `lowerIf`'s reconcile about an arm that
-rearranged inherited slots — a change that moves bytes in all seven tiers, and
-which is deliberately NOT bundled here.
+**The shape §9 called "P1-1" was real, and it is now CLOSED (R-133).** This
+paragraph used to open "is real, and it is OPEN", and it stayed that way for
+three weeks after the fix landed — long enough for an independent review to
+raise a CRITICAL finding off it that then had to be withdrawn. A stale "OPEN"
+misdirects remediation exactly as badly as a stale "RESOLVED" hides a defect,
+so the retraction is recorded here rather than by deleting the paragraph.
+
+The shape: reduced to `if (c1) { if (c2) { a = 5n } else { a = 6n } }` with a
+live sibling local, the inner `if` declares its one result and its adopt loop
+physically ROLL+DROPs the stale slot out of the region the arm INHERITED from
+the enclosing arm. The enclosing `lowerIf` reconciles by name set and by depth,
+and neither sees a middle slot removed and a same-named slot appearing on top.
+The two arms of the OUTER `if` then left the same DEPTH with different LAYOUTS,
+and the else-path compiled to an unspendable script. Confirmed pre-existing at
+`4b0f688f` (identical failure with the fix reverted).
+
+**The fix is `9cfd953f`** — "fix(stack-lower): restore inherited slot order
+after adopting declared results", `05-stack-lower.ts:2543-2568`, which turned
+the twelve pinned failures green. The reduction is checked in and LIVE at
+`packages/runar-testing/src/__tests__/nested-declared-results-arm-layout-vm.test.ts`
+(6 cases, no skips; its post-state values are derived from the source by hand
+rather than read back from compiler output, so a regression goes red there
+immediately). `r133-p11-doc-not-stale.test.ts` pins this paragraph and that
+suite to each other so they cannot drift apart again.
 
 **Two containment gaps closed, both byte-neutral.** The ANF wire format has no
 version field, so a pre-`4b0f688f` ANF (a legitimate `--ir` / `--ir-parity`

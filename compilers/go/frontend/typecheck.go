@@ -167,7 +167,14 @@ var builtinFunctions = map[string]funcSig{
 	"groth16PublicInput": {params: []string{"bigint"}, returnType: "bigint"},
 	"merkleRootSha256":      {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
 	"merkleRootHash256":     {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
-	"merkleRootPoseidon2KB": {params: nil, returnType: "bigint"}, // variable arity: 8 leaf + depth*8 proof + index + depth; validated in checkCallArgs
+	// Variable arity: 8 leaf + depth*8 proof + index + depth; validated in
+	// checkCallArgs. The Poseidon2 root is EIGHT KoalaBear elements; the single
+	// declared `bigint` is the base-2^32 packing of all eight (root_7 most
+	// significant), emitted by codegen EmitPoseidon2RootPack. The packing is
+	// injective (each limb < p < 2^32), so comparing the result against an
+	// expected value authenticates the WHOLE root. It used to be root_7 alone
+	// — a ~31-bit check (CL-BUG-099).
+	"merkleRootPoseidon2KB": {params: nil, returnType: "bigint"},
 	"abs":               {params: []string{"bigint"}, returnType: "bigint"},
 	"min":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
 	"max":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
@@ -205,6 +212,11 @@ var builtinFunctions = map[string]funcSig{
 	"extractOutputs":       {params: []string{"SigHashPreimage"}, returnType: "Sha256"},
 	"extractLocktime":      {params: []string{"SigHashPreimage"}, returnType: "bigint"},
 	"extractSigHashType":   {params: []string{"SigHashPreimage"}, returnType: "bigint"},
+	// P2PKH change-output serializer. The stateful continuation epilogue emits
+	// this call itself (frontend/anf_lower.go), and codegen/stack.go has always
+	// lowered it — this row is what makes it callable BY NAME, which the ts /
+	// python / zig / ruby / java tiers have always allowed (N-055).
+	"buildChangeOutput":    {params: []string{"ByteString", "bigint"}, returnType: "ByteString"},
 	// Intent sub-covenant intrinsics (BSVM Phase 13). Witness-bridge wrappers
 	// that compile down to standard primitives + auto-injected method params.
 	// See docs/cross-covenant-pattern.md.
@@ -219,6 +231,20 @@ var builtinFunctions = map[string]funcSig{
 // ---------------------------------------------------------------------------
 // Subtyping
 // ---------------------------------------------------------------------------
+
+// knownGlobals are names that resolve to neither a local, a builtin function
+// nor a contract property, and are still legal: the `SigHash` namespace object
+// and the three secp256k1 constants from runar-lang. They reach the typechecker
+// as bare identifiers from every frontend. Before GK-BUG-009 the Identifier arm
+// fell through to "<unknown>" for anything it did not recognise, so these were
+// carried for free by the fall-through; once the fall-through raises an error
+// they have to be listed, exactly as the TS reference tier lists them.
+var knownGlobals = map[string]string{
+	"SigHash": "<namespace>",
+	"EC_P":    "bigint",
+	"EC_N":    "bigint",
+	"EC_G":    "Point",
+}
 
 var byteStringSubtypes = map[string]bool{
 	"ByteString":     true,
@@ -239,6 +265,25 @@ var bigintSubtypes = map[string]bool{
 	"RabinPubKey": true,
 }
 
+// isSubtype reports whether a value of type `actual` may be used where
+// `expected` is required. It is the port of `isSubtype` in
+// packages/runar-compiler/src/passes/03-typecheck.ts and must stay
+// clause-for-clause identical to it.
+//
+// N-104: this tier used to carry only the `subtype -> base` direction of each
+// family, so assignment inside a family worked one way and not the other:
+// `const b: ByteString = pkh` compiled and `const h: Sha256 = pkh` did not,
+// while the reference tier accepted both. Measured as a full bidirectional
+// matrix over every ordered pair of family members in all seven tiers, 85 of
+// 196 cells disagreed. The asymmetry was already known to be wrong at the
+// callsites that tripped over it — this file used to carry a private
+// `outputStateValueMatches` that re-added the missing clauses just for
+// addOutput's state values — and four tiers had independently grown the same
+// patch. The general predicate now carries them, and the patches are gone.
+//
+// Cross-family moves (a ByteString into a bigint slot or the reverse) are
+// still refused here, in every tier; that is what conformance/negatives
+// N02/N16/N17/N19/N21 pin.
 func isSubtype(actual, expected string) bool {
 	if actual == expected {
 		return true
@@ -250,16 +295,70 @@ func isSubtype(actual, expected string) bool {
 	if expected == "<inferred>" || expected == "<unknown>" {
 		return true
 	}
+	// ByteString subtypes. BIDIRECTIONAL, and both-in-family — an Addr value
+	// satisfies a Ripemd160 slot and vice versa. Mirrors isSubtype in
+	// packages/runar-compiler/src/passes/03-typecheck.ts.
 	if expected == "ByteString" && byteStringSubtypes[actual] {
 		return true
 	}
+	if actual == "ByteString" && byteStringSubtypes[expected] {
+		return true
+	}
+	if byteStringSubtypes[actual] && byteStringSubtypes[expected] {
+		return true
+	}
+	// bigint subtypes — same shape.
 	if expected == "bigint" && bigintSubtypes[actual] {
+		return true
+	}
+	if actual == "bigint" && bigintSubtypes[expected] {
+		return true
+	}
+	if bigintSubtypes[actual] && bigintSubtypes[expected] {
 		return true
 	}
 	if strings.HasSuffix(expected, "[]") && strings.HasSuffix(actual, "[]") {
 		return isSubtype(actual[:len(actual)-2], expected[:len(expected)-2])
 	}
 	return false
+}
+
+// stateSlot is one emitted state value: what the continuation actually carries.
+type stateSlot struct {
+	Name string
+	Type TypeNode
+}
+
+// expandedStateSlots returns the mutable state as addOutput sees it — one entry
+// per value the state continuation carries.
+//
+// N-107: ExpandFixedArrays (pass 3b) runs after the typechecker and splits a
+// FixedArray property into one scalar sibling per element, so the DECLARED
+// property list is not the emitted state. The flattening mirrors
+// ExpandFixedArrays' own naming (`<root>__<i>`, recursing through nested
+// arrays) so a diagnostic names the synthetic property the next pass creates.
+//
+// A non-positive length is already a parse/validate error; the property is kept
+// whole in that case so this rule never fires on a contract that is going to be
+// rejected for a better reason.
+func expandedStateSlots(properties []PropertyNode) []stateSlot {
+	var slots []stateSlot
+	var push func(name string, t TypeNode)
+	push = func(name string, t TypeNode) {
+		if arr, ok := t.(FixedArrayType); ok && arr.Length > 0 {
+			for i := 0; i < arr.Length; i++ {
+				push(fmt.Sprintf("%s__%d", name, i), arr.Element)
+			}
+			return
+		}
+		slots = append(slots, stateSlot{Name: name, Type: t})
+	}
+	for _, p := range properties {
+		if !p.Readonly {
+			push(p.Name, p.Type)
+		}
+	}
+	return slots
 }
 
 func isBigintFamily(t string) bool {
@@ -450,8 +549,16 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 	// 0 to also be a 34-byte P2PKH is impossible (codePart >= 253 bytes forces a
 	// 3-byte CompactSize length prefix, never the P2PKH template's 0x19), so the
 	// contract is PERMANENTLY unspendable. The terminal case (no state mutation
-	// -> no continuation) stays valid, and addOutput/addRawOutput layouts are
-	// left to the developer. Mirrors the TS reference guard in 03-typecheck.ts.
+	// -> no continuation) stays valid.
+	//
+	// R-300: "addOutput/addRawOutput layouts are left to the developer" used to
+	// finish that sentence, and it was wrong — no layout the developer can pick
+	// makes the offsets work. this.addOutput(...) writes the continuation
+	// (codePart plus serialised state, hundreds of bytes) at output 0, so
+	// outputIndex*34 lands INSIDE that script for every index. addRawOutput's
+	// length is a runtime value, so the stride cannot be proven there either.
+	// See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
+	// Mirrors the TS reference guard in 03-typecheck.ts.
 	if tc.contract != nil && tc.contract.ParentClass == "StatefulSmartContract" {
 		mutableProps := make(map[string]bool)
 		for _, p := range tc.contract.Properties {
@@ -460,6 +567,16 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 			}
 		}
 		sig := analyzeMethodOutputSignals(method.Body, mutableProps)
+		if hasRequireP2PKH && sig.hasStateOutput {
+			tc.addError(fmt.Sprintf(
+				"method '%s' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — "+
+					"the intrinsic reads output i at byte offset i*34, which is only correct when "+
+					"every earlier output is exactly 34 bytes, and a state-continuation output never "+
+					"is (codePart plus serialised state). The assertion would read bytes from the "+
+					"middle of the contract's own locking script, so the contract would be "+
+					"permanently unspendable. Assert the payment from a separate method that emits "+
+					"no output of its own", method.Name))
+		}
 		if sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput {
 			tc.addError(fmt.Sprintf(
 				"method '%s' calls requireOutputP2PKH(0, ...) but also mutates state "+
@@ -828,6 +945,13 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		if condType != "boolean" {
 			tc.addError(fmt.Sprintf("for loop condition must be boolean, got '%s'", condType))
 		}
+		// R-065: the update clause used to be skipped entirely, so
+		// `for (let i = 0n; i < 3n; undefinedFn())` compiled clean -- a hole in
+		// the rule that only Rúnar builtins and contract methods are callable
+		// (CLAUDE.md names `console.log` explicitly). validator.go separately
+		// restricts the clause to a unit-step advance; this is the type-level
+		// half of the same guard.
+		tc.checkStatement(s.Update, env)
 		tc.checkStatements(s.Body, env)
 		env.popScope()
 
@@ -895,12 +1019,54 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		if e.Name == "super" {
 			return "<super>"
 		}
+		if e.Name == "true" || e.Name == "false" {
+			return "boolean"
+		}
+		// The blank identifier. `_ = x` is the Go / Rust / Zig discard idiom and
+		// the Go DSL frontend emits it as an assignment TARGET, so it reaches the
+		// identifier arm as a name to be typed. It is a discard, not a reference:
+		// nothing is being looked up, so `undefined` is the wrong word for it.
+		// Measured at the parent commit, go/rust/python/zig/ruby/java all compiled
+		// `_ = doubled` to the same 7652957c009c77 while TS alone refused it with
+		// "Undefined variable '_'" — invariant 1 (all seven parse all nine
+		// surfaces) already broken for this shape. Listing it here rather than
+		// letting the new fall-through reject it keeps the six tiers' bytes and
+		// brings the seventh into line.
+		if e.Name == "_" {
+			return "<unknown>"
+		}
 		if t, ok := env.lookup(e.Name); ok {
 			return t
 		}
 		if _, ok := builtinFunctions[e.Name]; ok {
 			return "<builtin>"
 		}
+		// A contract property named without a receiver. Java lets a method say
+		// `strikePrice` for `this.strikePrice`, and the Solidity frontend emits
+		// the same shape; the TS reference tier has resolved it here since that
+		// frontend landed. Without this the identifier types as `<unknown>` and
+		// any operator that demands a type rejects valid source — a frontend
+		// parity break the `--parse-only` matrix cannot see, because the
+		// identifier PARSES fine and only fails to RESOLVE.
+		if t, ok := tc.propTypes[e.Name]; ok {
+			return t
+		}
+		if t, ok := knownGlobals[e.Name]; ok {
+			return t
+		}
+		// GK-BUG-009 — a name that resolves to nothing is an error HERE, at the
+		// only pass that can see the binding environment. It used to return
+		// "<unknown>" silently, and "<unknown>" is compatible with everything
+		// under isSubtype by design (R-092), so `notAThing === 1n` raised
+		// nothing. `notAThing > 1n` did raise — the bigint-family check does not
+		// admit "<unknown>" — which is why R-085's `>` pin read as closed while
+		// the `===` path was wide open. Where the reference is reachable from
+		// codegen, stack lowering later refuses to emit an OP_0 placeholder and
+		// the compile still fails, but for the wrong reason and with a message
+		// that calls the name a "method parameter"; where it is NOT reachable
+		// (an uncalled private helper, a zero-iteration loop) nothing fired at
+		// all and the contract compiled to a locking script.
+		tc.addError(fmt.Sprintf("Undefined variable '%s'", e.Name))
 		return "<unknown>"
 
 	case PropertyAccessExpr:
@@ -951,6 +1117,25 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 			if isSubtype(consType, altType) {
 				return altType
 			}
+			// N-099: arms related in NEITHER direction used to fall through to
+			// `return consType`, silently retyping the alternate. A ByteString
+			// and a bigint do not share a stack representation — one is a byte
+			// string, the other a script number — so the retyped arm leaves the
+			// wrong kind of value on the stack and everything downstream reads a
+			// type the author never wrote. `ts`, `rust` and `java` already
+			// refused this; `go`, `python`, `zig` and `ruby` accepted it.
+			//
+			// Ported from the TypeScript reference (Rust carries it verbatim),
+			// wording included — hence the capital T, which differs from the
+			// lowercase house style of the condition message above. That casing
+			// divergence is pre-existing and left alone; the new message matches
+			// TS so the seven tiers agree on it.
+			//
+			// `<unknown>` never reaches here: isSubtype treats it as top of the
+			// lattice, so a private helper's return type is related to
+			// everything, exactly as in TS.
+			tc.addError(fmt.Sprintf(
+				"Ternary branches have incompatible types: '%s' and '%s'", consType, altType))
 		}
 		return consType
 
@@ -1021,10 +1206,13 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 		return "boolean"
 
 	case "===", "!==":
-		// Allow comparison between compatible types (both ByteString family or both bigint family)
-		compatible := isSubtype(leftType, rightType) || isSubtype(rightType, leftType) ||
-			(byteStringSubtypes[leftType] && byteStringSubtypes[rightType]) ||
-			(bigintSubtypes[leftType] && bigintSubtypes[rightType])
+		// Allow comparison between compatible types. Exactly the reference
+		// tier's rule: each side is tried as a subtype of the other, and
+		// nothing else. The both-in-family clauses that used to sit here were
+		// this tier's local patch for an isSubtype that lacked them (N-104);
+		// isSubtype carries them now, so repeating them here would be a second
+		// copy of the lattice to drift out of sync.
+		compatible := isSubtype(leftType, rightType) || isSubtype(rightType, leftType)
 		if !compatible {
 			if leftType != "<unknown>" && rightType != "<unknown>" {
 				tc.addError(fmt.Sprintf("cannot compare '%s' and '%s' with '%s'", leftType, rightType, e.Op))
@@ -1095,6 +1283,134 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 	return "<unknown>"
 }
 
+// checkOutputIntrinsicArgs type-checks the arguments of the three output
+// intrinsics — this.addOutput / this.addRawOutput / this.addDataOutput — and
+// returns their result type.
+//
+// N-098: the first argument is the output's SATOSHI AMOUNT, and this tier used
+// to accept any type there. That is not a missing lint. lowerAddOutput prepends
+// the operand as `OP_8 OP_NUM2BIN`, so a ByteString in that slot is reinterpreted
+// as a script number with no conversion and becomes the amount the covenant
+// commits to: `blob: ByteString` and `blob: bigint` compiled to the SAME script,
+// byte for byte. On the real @bsv/sdk Spend engine with `blob = 0x2a` only a
+// 42-satoshi continuation validates, and blobs wider than 8 bytes abort at
+// OP_NUM2BIN, making the UTXO unspendable.
+//
+// N-105: the SECOND argument of addRawOutput / addDataOutput is the created
+// output's LOCKING SCRIPT, and this tier used to accept any type there too.
+// lowerAddRawOutput takes OP_SIZE of the operand, varint-prefixes it and
+// concatenates it after the amount — no conversion — so `n: bigint` and
+// `n: ByteString` compiled to the SAME script, byte for byte. A script number
+// on the stack is its minimal little-endian encoding, so the covenant commits
+// to an output whose locking script IS those bytes. Executed on the real
+// @bsv/sdk Spend engine against the exact opcode window this tier emits:
+// n=0 gives an EMPTY locking script, n=81 gives OP_1 and n=118 gives OP_DUP —
+// all three anyone-can-spend — while n=1000 gives 0xe8 0x03, an invalid
+// opcode, and the output is unspendable.
+//
+// N-105 (2/2): the remaining three checks TS performs and this tier did not —
+// the StatefulSmartContract gate, the arity of all three intrinsics, and the
+// types of addOutput's state values. Each had an executed consequence:
+// `addOutput(1000n)` dropped the state value from the continuation entirely
+// (1352 hexchars where the correct call emits 1362), a surplus value was
+// appended to a state serialization the next spend deserializes by fixed
+// offsets, a ByteString state value was serialized where an 8-byte LE number
+// belongs, and addRawOutput in a stateless SmartContract emitted a
+// "continuation" for a contract with no state.
+//
+// Ported from the TypeScript reference (checkCallExpr's addOutput /
+// addRawOutput / addDataOutput arms in
+// packages/runar-compiler/src/passes/03-typecheck.ts), wording included.
+//
+// `<unknown>` is escaped exactly as TS escapes it — a private helper's declared
+// return type is discarded at parse time in every tier, so `this.sats()` infers
+// as `<unknown>` and must keep compiling.
+func (tc *typeChecker) checkOutputIntrinsicArgs(name string, args []Expression, env *typeEnv) string {
+	// N-105: all three intrinsics build an OUTPUT, and an output only exists
+	// in a stateful contract. TS refuses the call outright and checks nothing
+	// else, so the early return is part of the ported behaviour.
+	if tc.contract == nil || tc.contract.ParentClass != "StatefulSmartContract" {
+		tc.addError(fmt.Sprintf("%s() is only available in StatefulSmartContract", name))
+		return "void"
+	}
+
+	if name == "addOutput" {
+		// The surface form `this.addOutput(satoshis, .{ v1, v2, ... })` that Zig
+		// and Move tuple syntax produce carries the state values in a trailing
+		// array literal. anf_lower.go unwraps it with this same helper, so the
+		// arity the check counts is the arity codegen will see.
+		normalized := flattenAddOutputArgs(args)
+
+		// N-107: count the state slots the continuation will actually carry,
+		// not the DECLARED mutable properties. ExpandFixedArrays runs right
+		// after this pass and splits `board: FixedArray<bigint, 3>` into
+		// `board__0 .. board__2`, so a contract declaring `board` and `n`
+		// emits FOUR state values. addOutput is positional against the emitted
+		// values, which is why the declared count is the wrong question.
+		//
+		// This used to be `shapeCheckable := !hasFixedArrayState`: the rule was
+		// scoped OUT of every contract with FixedArray state, because porting
+		// it verbatim would have rejected Boardy (in
+		// compilers/python/tests/test_r025_expand_fixed_arrays_field_preservation.py)
+		// the way the reference tier did. The cost of that opt-out was silent:
+		// a wrong-arity addOutput on a FixedArray contract was ACCEPTED here
+		// and emitted a state continuation one slot short of the contract's own
+		// state. Gate: conformance/negatives/N26-addoutput-arity-fixedarray.
+		mutableProps := expandedStateSlots(tc.contract.Properties)
+		expected := 1 + len(mutableProps)
+		if len(normalized) != expected {
+			tc.addError(fmt.Sprintf(
+				"addOutput() expects %d argument(s): satoshis + %d state value(s), got %d",
+				expected, len(mutableProps), len(normalized)))
+		}
+		if len(normalized) >= 1 {
+			satType := tc.inferExprType(normalized[0], env)
+			if !isBigintFamily(satType) && satType != "<unknown>" {
+				tc.addError(fmt.Sprintf(
+					"addOutput() first argument (satoshis) must be bigint, got '%s'", satType))
+			}
+		}
+		for i := 0; i < len(mutableProps) && i+1 < len(normalized); i++ {
+			argType := tc.inferExprType(normalized[i+1], env)
+			propType := typeNodeToString(mutableProps[i].Type)
+			if !isSubtype(argType, propType) && argType != "<unknown>" {
+				tc.addError(fmt.Sprintf(
+					"addOutput() argument %d (%s) must be '%s', got '%s'",
+					i+2, mutableProps[i].Name, propType, argType))
+			}
+		}
+		// Surplus arguments are still inferred, so a type error inside one
+		// is not swallowed by the arity diagnostic. Mirrors TS.
+		for i := expected; i < len(normalized); i++ {
+			tc.inferExprType(normalized[i], env)
+		}
+		return "void"
+	}
+
+	// addRawOutput / addDataOutput — (satoshis, scriptBytes).
+	if len(args) != 2 {
+		tc.addError(fmt.Sprintf(
+			"%s() expects 2 arguments (satoshis, scriptBytes), got %d", name, len(args)))
+	}
+	if len(args) >= 1 {
+		satType := tc.inferExprType(args[0], env)
+		if !isBigintFamily(satType) && satType != "<unknown>" {
+			tc.addError(fmt.Sprintf(
+				"%s() first argument (satoshis) must be bigint, got '%s'", name, satType))
+		}
+	}
+	if len(args) >= 2 {
+		// TS uses isSubtype against ByteString, not equality, so every
+		// ByteString subtype (PubKey, Ripemd160, Sig, ...) stays accepted.
+		scriptType := tc.inferExprType(args[1], env)
+		if !isSubtype(scriptType, "ByteString") && scriptType != "<unknown>" {
+			tc.addError(fmt.Sprintf(
+				"%s() second argument (scriptBytes) must be ByteString, got '%s'", name, scriptType))
+		}
+	}
+	return "void"
+}
+
 func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 	// super() call
 	if id, ok := e.Callee.(Identifier); ok && id.Name == "super" {
@@ -1158,13 +1474,19 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 	// this.method() via PropertyAccessExpr
 	if pa, ok := e.Callee.(PropertyAccessExpr); ok {
 		if pa.Property == "getStateScript" {
+		// R-173: the builtin takes none — it returns the contract's own state
+		// script, which is a property of the contract, not of anything a caller
+		// could pass. Five tiers used to accept arguments and DISCARD them: the
+		// emitted hex was byte-identical to the zero-argument spelling, so an
+		// author who believed the arguments meant something got a script that
+		// ignored them, with no diagnostic. Message is the reference tier's.
+			if len(e.Args) != 0 {
+				tc.addError("getStateScript() takes no arguments")
+			}
 			return "ByteString"
 		}
 		if pa.Property == "addOutput" || pa.Property == "addRawOutput" || pa.Property == "addDataOutput" {
-			for _, arg := range e.Args {
-				tc.inferExprType(arg, env)
-			}
-			return "void"
+			return tc.checkOutputIntrinsicArgs(pa.Property, e.Args, env)
 		}
 		if sig, ok := tc.methodSigs[pa.Property]; ok {
 			return tc.checkCallArgs(pa.Property, sig, e.Args, env)
@@ -1185,13 +1507,14 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			return ok && id.Name == "this"
 		})() {
 			if me.Property == "getStateScript" {
+				// R-173: see the property_access branch above.
+				if len(e.Args) != 0 {
+					tc.addError("getStateScript() takes no arguments")
+				}
 				return "ByteString"
 			}
 			if me.Property == "addOutput" || me.Property == "addRawOutput" || me.Property == "addDataOutput" {
-				for _, arg := range e.Args {
-					tc.inferExprType(arg, env)
-				}
-				return "void"
+				return tc.checkOutputIntrinsicArgs(me.Property, e.Args, env)
 			}
 			if sig, ok := tc.methodSigs[me.Property]; ok {
 				return tc.checkCallArgs(me.Property, sig, e.Args, env)
@@ -1268,8 +1591,20 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 				if u, isUnary := args[0].(UnaryExpr); isUnary && u.Op == "-" {
 					if inner, innerOk := u.Operand.(BigIntLiteral); innerOk && inner.Value != nil {
 						neg := new(big.Int).Neg(inner.Value)
-						lit = BigIntLiteral{Value: neg}
-						ok = true
+						// N-060: this arm exists ONLY to reach the
+						// "must be >= 0" message below, so it must
+						// surrender anything that is not actually
+						// negative. `-0` negates to 0 and would sail
+						// past that bound check, but ANF lowering
+						// matches on a bare BigIntLiteral: on a
+						// UnaryExpr it falls through to `load_const ""`
+						// and the covenant the intrinsic was supposed
+						// to install is silently absent. Report it as a
+						// non-literal index instead.
+						if neg.Sign() < 0 {
+							lit = BigIntLiteral{Value: neg}
+							ok = true
+						}
 					}
 				}
 			}
@@ -1288,8 +1623,8 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 					if idx < 0 {
 						tc.addError(fmt.Sprintf("%s() argument 1 (index) must be >= 0; got %d", funcName, idx))
 					}
-					if funcName == "requireOutputP2PKH" && idx > 1000 {
-						tc.addError(fmt.Sprintf("requireOutputP2PKH() argument 1 (outputIndex) bound to <= 1000; got %d (the emitted Stack-IR computes byte-offset = idx*34; unrealistic indexes indicate a programming error)", idx))
+					if funcName == "requireOutputP2PKH" && idx > 0 {
+						tc.addError(fmt.Sprintf("requireOutputP2PKH() argument 1 (outputIndex) must be 0 in v1; got %d. The emitted Stack-IR reads output i at byte offset i*34, but Bitcoin outputs are variable length, so for i > 0 that offset is not an output boundary: an attacker sizes output 0 freely and places the expected 34 P2PKH bytes inside its OP_RETURN payload, leaving the transaction's real output i to pay whoever they like. Offset 0 IS a boundary, so index 0 is sound; other indexes need a CompactSize walk the v1 codegen does not emit", idx))
 					}
 				}
 			}

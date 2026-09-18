@@ -85,6 +85,28 @@ class H2LocktimeWarningTest {
     }
 
     @Test
+    void stillWarnsWhenSequenceComparisonIsNegated() throws TsParser.ParseException {
+        String source = """
+            class TimeLock extends StatefulSmartContract {
+              count: bigint;
+              readonly deadline: bigint;
+              constructor(count: bigint, deadline: bigint) {
+                super(count, deadline);
+                this.count = count;
+                this.deadline = deadline;
+              }
+              public unlock() {
+                assert(!(extractSequence(this.txPreimage) !== 0xffffffffn));
+                assert(extractLocktime(this.txPreimage) >= this.deadline);
+                this.count++;
+              }
+            }
+            """;
+        assertTrue(hasLocktimeWarning(validateSource(source)),
+            "negated sequence comparison must not count as a guard");
+    }
+
+    @Test
     void doesNotWarnForMethodThatNeverReadsLocktime() throws TsParser.ParseException {
         String source = """
             class Counter extends StatefulSmartContract {
@@ -147,6 +169,52 @@ class H2LocktimeWarningTest {
             """;
         assertTrue(hasLocktimeWarning(validateSource(source)),
             "expected the locktime-soundness warning; got: "
+                + validateSource(source).warnings());
+    }
+
+    @Test
+    void warnsWhenComparisonIsAssignedNotAsserted() throws TsParser.ParseException {
+        String source = """
+            class TimeLock extends StatefulSmartContract {
+              count: bigint;
+              readonly deadline: bigint;
+              constructor(count: bigint, deadline: bigint) {
+                super(count, deadline);
+                this.count = count;
+                this.deadline = deadline;
+              }
+              public unlock() {
+                const ok: boolean = extractSequence(this.txPreimage) !== 0xffffffffn;
+                assert(extractLocktime(this.txPreimage) >= this.deadline);
+                this.count++;
+              }
+            }
+            """;
+        assertTrue(hasLocktimeWarning(validateSource(source)),
+            "assigned comparison must not silence the warning; got: "
+                + validateSource(source).warnings());
+    }
+
+    @Test
+    void warnsForVacuousStrictBound() throws TsParser.ParseException {
+        String source = """
+            class TimeLock extends StatefulSmartContract {
+              count: bigint;
+              readonly deadline: bigint;
+              constructor(count: bigint, deadline: bigint) {
+                super(count, deadline);
+                this.count = count;
+                this.deadline = deadline;
+              }
+              public unlock() {
+                assert(extractSequence(this.txPreimage) < 0n);
+                assert(extractLocktime(this.txPreimage) >= this.deadline);
+                this.count++;
+              }
+            }
+            """;
+        assertTrue(hasLocktimeWarning(validateSource(source)),
+            "extractSequence < 0n is not a finality guard; got: "
                 + validateSource(source).warnings());
     }
 }

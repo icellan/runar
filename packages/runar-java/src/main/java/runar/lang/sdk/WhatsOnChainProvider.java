@@ -27,7 +27,7 @@ public final class WhatsOnChainProvider implements Provider {
     private final String baseUrl;
     private final HttpTransport transport;
 
-    /** Defaults to mainnet when {@code network} is null/empty. */
+    /** Explicitly selects mainnet. Use {@link #WhatsOnChainProvider(String)} to choose. */
     public WhatsOnChainProvider() {
         this("mainnet", HttpTransport.jdkDefault());
     }
@@ -38,9 +38,17 @@ public final class WhatsOnChainProvider implements Provider {
 
     // Package-private full constructor so tests can inject a fake transport.
     WhatsOnChainProvider(String network, HttpTransport transport) {
-        String n = (network == null || network.isEmpty()) ? "mainnet" : network;
-        this.network = n;
-        this.baseUrl = "testnet".equals(n)
+        // Network must be exactly "mainnet" or "testnet". Any other value —
+        // including null and the empty string — is rejected rather than
+        // defaulted, so a typo or an unvalidated user-supplied value can never
+        // silently point the SDK at live mainnet.
+        if (!"mainnet".equals(network) && !"testnet".equals(network)) {
+            throw new IllegalArgumentException(
+                "invalid network " + (network == null ? "null" : "\"" + network + "\"")
+                    + ": must be \"mainnet\" or \"testnet\"");
+        }
+        this.network = network;
+        this.baseUrl = "testnet".equals(network)
             ? "https://api.whatsonchain.com/v1/bsv/test"
             : "https://api.whatsonchain.com/v1/bsv/main";
         this.transport = transport == null ? HttpTransport.jdkDefault() : transport;

@@ -70,7 +70,10 @@
 // GammaNegG2, DeltaNegG2. α is positive. If you are starting from positive
 // β, γ, δ (e.g. a gnark-built VK), use NewVerifyingKeyFromPositive which
 // applies the negation for you. For SP1 inputs, the vk.json already stores
-// the negated values verbatim and LoadSP1VKFromFile is a pure deserializer.
+// the negated values verbatim, so LoadSP1VKFromFile applies no arithmetic to
+// them — it only deserialises and then runs VerifyingKey.Validate, which
+// rejects keys whose points are non-canonical, at infinity, off their curve,
+// or (on G2) outside the prime-order subgroup.
 //
 // # Iteration alignment
 //

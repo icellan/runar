@@ -1,16 +1,16 @@
 {
-  "generatedAt": "2026-05-12T21:36:45.746Z",
+  "generatedAt": "2026-09-16T05:04:30.494097Z",
   "summary": {
-    "byte-match": 63,
+    "byte-match": 85,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
     "skipped": 0
   },
   "pathBreakdown": {
-    "template": 58,
     "assert-recognizer": 1,
-    "raw_script": 4
+    "raw_script": 4,
+    "template": 80
   },
   "rows": [
     {
@@ -24,7 +24,17 @@
       "recoveryPath": "template"
     },
     {
+      "id": "all-readonly-cleanstack/AllReadonlyCleanstack",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "arithmetic/Arithmetic",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "asm-raw-script/Anyone",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -64,6 +74,16 @@
       "recoveryPath": "template"
     },
     {
+      "id": "branch-merged-locals/BranchMergedLocals",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "branched-readonly-len/BranchedReadonlyLen",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "bsv20-token/BSV20Token",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -74,12 +94,42 @@
       "recoveryPath": "template"
     },
     {
+      "id": "byte-builtins/ByteBuiltins",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "companion-verifier/AttributedToken",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "companion-verifier/CompanionVerifier",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "compiler-directives/Directives",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "cond-write-multi-field/CondWriteMultiField",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "conditional-data-output/ConditionalDataOutput",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
     {
       "id": "convergence-proof/ConvergenceProof",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "countdown-loop/CountdownLoop",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -114,9 +164,44 @@
       "recoveryPath": "template"
     },
     {
+      "id": "fixed-array-index/ArrayIndex",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "fixed-array-nested/Grid2x2.v2",
       "outcome": "byte-match",
       "recoveryPath": "template"
+    },
+    {
+      "id": "fixed-array-write/ArrayWrite",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "fixture/counter",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "fixture/inscribed",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "fixture/p2pkh",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
+    },
+    {
+      "id": "fixture/simple",
+      "outcome": "byte-match",
+      "recoveryPath": "assert-recognizer"
+    },
+    {
+      "id": "fixture/stateful-escrow",
+      "outcome": "byte-match",
+      "recoveryPath": "raw_script"
     },
     {
       "id": "function-patterns/FunctionPatterns",
@@ -140,6 +225,31 @@
     },
     {
       "id": "if-without-else/IfWithoutElse",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "integer-boundary/IntegerBoundary",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "intent-current-block-height/IntentCurrentBlockHeight",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "intent-output-p2pkh/IntentOutputP2PKH",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "intent-prev-output-script/IntentPrevOutputScript",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "loop-shapes/LoopShapes",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -169,12 +279,22 @@
       "recoveryPath": "template"
     },
     {
+      "id": "nested-if-multi-reassign/StackTrackerRepro",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "oracle-price/OraclePriceFeed",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
     {
       "id": "ordinal-nft/OrdinalNFT",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "p256-encode-negate/P256EncodeNegate",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -199,17 +319,17 @@
       "recoveryPath": "template"
     },
     {
+      "id": "p384-encode-negate/P384EncodeNegate",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "p384-primitives/P384Primitives",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
     {
       "id": "p384-wallet/P384Wallet",
-      "outcome": "byte-match",
-      "recoveryPath": "template"
-    },
-    {
-      "id": "post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -244,6 +364,11 @@
       "recoveryPath": "template"
     },
     {
+      "id": "selector/Selector",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "sha256-compress/Sha256CompressTest",
       "outcome": "byte-match",
       "recoveryPath": "template"
@@ -259,7 +384,7 @@
       "recoveryPath": "template"
     },
     {
-      "id": "sphincs-wallet/SPHINCSWallet",
+      "id": "state-covenant-mechanics/StateCovenantMechanics",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -279,7 +404,17 @@
       "recoveryPath": "template"
     },
     {
+      "id": "stateful-wots-gate/StatefulWOTSGate",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
       "id": "stateful/Stateful",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "terminal-varlen-read/TerminalVarlenRead",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },
@@ -302,31 +437,6 @@
       "id": "token-nft/NFTExample",
       "outcome": "byte-match",
       "recoveryPath": "template"
-    },
-    {
-      "id": "fixture/counter",
-      "outcome": "byte-match",
-      "recoveryPath": "raw_script"
-    },
-    {
-      "id": "fixture/inscribed",
-      "outcome": "byte-match",
-      "recoveryPath": "raw_script"
-    },
-    {
-      "id": "fixture/p2pkh",
-      "outcome": "byte-match",
-      "recoveryPath": "raw_script"
-    },
-    {
-      "id": "fixture/simple",
-      "outcome": "byte-match",
-      "recoveryPath": "assert-recognizer"
-    },
-    {
-      "id": "fixture/stateful-escrow",
-      "outcome": "byte-match",
-      "recoveryPath": "raw_script"
     }
   ]
 }

@@ -69,7 +69,8 @@ fn c9_state_bytestring_minimaldata_roundtrip() {
         values.insert("b".to_string(), SdkValue::Bytes(payload.to_string()));
 
         let encoded = serialize_state(&fields, &values);
-        let decoded = deserialize_state(&fields, &encoded);
+        let decoded = deserialize_state(&fields, &encoded)
+            .unwrap_or_else(|e| panic!("deserialize_state refused a well-formed blob {encoded:?}: {e}"));
 
         let got = match decoded.get("b") {
             Some(SdkValue::Bytes(h)) => h.clone(),
@@ -130,6 +131,7 @@ fn ctor_bytestring_artifact() -> RunarArtifact {
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,
+        unsound_primitives: None,
     }
 }
 

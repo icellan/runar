@@ -46,23 +46,84 @@ func TestCryptoEmitOpCountGoldens(t *testing.T) {
 		{"Sha256Finalize", EmitSha256Finalize, 63941},
 		{"Blake3Compress", EmitBlake3Compress, 10373},
 		{"Blake3Hash", EmitBlake3Hash, 10387},
-		{"EcAdd", EmitEcAdd, 8223},
-		{"EcMul", EmitEcMul, 130515},
-		{"EcMulGen", EmitEcMulGen, 130517},
-		{"EcNegate", EmitEcNegate, 945},
-		{"EcOnCurve", EmitEcOnCurve, 533},
-		{"P256Add", EmitP256Add, 6663},
-		{"P256Mul", EmitP256Mul, 140036},
+		// CL-BUG-095 (Point-length validation) deltas below: a Point/pubkey
+		// blob was never checked against its defined width, so surplus bytes
+		// were silently dropped by decomposePoint / cDecomposePoint. ecAdd,
+		// ecMul, ecMulGen, ecNegate, p256Add, p256Mul inherit an abort-form
+		// length check (emitPointLenVerify) via decomposePoint; ecOnCurve /
+		// p256OnCurve gain a clamp-form length gate (emitPointLengthGate)
+		// plus a second BOOLAND; VerifyECDSA_P256 inherits the abort-form
+		// check via cDecomposePoint inside cEmitVerifyECDSA's point additions.
+		// CL-BUG-096 (affine-adder infinity-operand select, R-053): +50 ops for
+		// emitAffineInfinitySelect, which replaces the old cleanup + notinf-only
+		// mask tail of affineAdd / cAffineAdd. Same +50 on P256Add, P384Add, and
+		// VerifyECDSA_P256 below (VerifyECDSA_P384 has no golden entry here).
+		// R-117, the COORDINATE-CANONICITY gate. ecAdd 8279 -> 8297 (+18), ecMul
+		// 130518 -> 131073 (+8), ecMulGen +8, ecNegate 948 -> 956 (+8). emitCoordCanonVerify
+		// is 8 ops per gated point -- copy x (pick), push p, OP_LESSTHAN, copy y (pick),
+		// push p, OP_LESSTHAN, OP_BOOLAND, OP_VERIFY -- and ecAdd gates TWO points, so
+		// +18 there rather than +16. The extra two are pick DEPTH, not extra work: this
+		// tracker emits OP_DUP / OP_OVER for depth 0 / 1 and `push <n>, OP_PICK` for
+		// anything deeper, and in ecAdd's FIRST gate the stack is [px, py, qx, qy], so
+		// both of that gate's picks reach depth 3 and cost two ops each. Its second gate
+		// sees [px, py, qx, qy] with qx / qy at depth 1, so both are a one-op OP_OVER.
+		// 10 + 8 = 18, and ecMul / ecNegate gate a single point off a two-deep stack for
+		// a flat 8. ecOnCurve / ecModReduce /
+		// ecEncodeCompressed / ecMakePoint / ecPointX / ecPointY are all +0 under
+		// R-117. (ecMakePoint DOES move under R-156, which gates its two bigint
+		// ARGUMENTS rather than an existing Point's coordinates; this tier pins no
+		// ecMakePoint op count, so no row here changes for it.) The
+		// predicates must stay TOTAL (they clamp and flag, they do not abort), and the
+		// byte accessors have no selector to fool -- each returns a value derived
+		// injectively from the bytes, so a non-canonical coordinate yields a DIFFERENT
+		// number rather than a colliding one.
+		// R-117, the COORDINATE-CANONICITY gate. pNNNAdd +18, pNNNMul +8, pNNNMulGen +8,
+		// pNNNNegate +8 -- the same shape as secp256k1's, because cEmitCoordCanonVerify
+		// is the same 8 ops (two picks, two pushes of p, two OP_LESSTHANs, OP_BOOLAND,
+		// OP_VERIFY) and the Add gates two points. pNNNOnCurve and
+		// pNNNEncodeCompressed are +0: the predicate must stay TOTAL. verifyECDSA_*
+		// is +0 TOO, and that is the load-bearing part -- cEmitMul takes a
+		// verifyCanonical flag that is FALSE on the ECDSA path, because
+		// decompressPubKey and cEmitSigRangeGate have already decided attacker-chosen
+		// bytes must return false from a total boolean builtin rather than abort.
+		{"EcAdd", EmitEcAdd, 8297},
+		// R-157, the ecMul ON-CURVE-OR-INFINITY gate: ecMul 130526 -> 131073 (+547),
+		// ecMulGen +547. The gate is the whole ecOnCurve body plus a copy/compare against
+		// the all-zero blob and an OP_BOOLOR/OP_VERIFY, run once before the ladder. ecAdd
+		// / ecNegate / ecOnCurve / ecMakePoint / ecPointX / ecPointY are all +0 — this
+		// gate is on the SCALAR LADDER only, because it is the +3n construction inside
+		// ecMul whose soundness needs ord(P) | n. affineAdd has no n-dependent trick and
+		// is correct on whatever curve its operand lies on, so gating it would cost bytes
+		// and break ecAdd(P, O), which R-053 requires.
+		// ecMulGen pays the gate too even though its operand is the compiler-pushed
+		// generator: it is emitted as `push G; swap; ecMul`, and exempting it would mean a
+		// second ecMul spelling whose only difference is a check that can never fail.
+		// R-157, the pNNNMul ON-CURVE-OR-INFINITY gate: p256Mul 140047 -> 140620 (+573),
+		// p256MulGen +573, p384Mul 211189 -> 211986 (+797), p384MulGen +797. Same shape as
+		// secp256k1's, with each curve's own on-curve body; the two curves differ only
+		// because their on-curve bodies do. pNNNAdd / pNNNNegate / pNNNOnCurve /
+		// pNNNEncodeCompressed are +0, and so is verifyECDSA_pNNN — the gate is at the
+		// PUBLIC pNNNMul entry point, NOT inside cEmitMul, because verifyECDSA shares that
+		// ladder and must return false rather than abort on attacker-chosen bytes.
+		{"EcMul", EmitEcMul, 131073},
+		{"EcMulGen", EmitEcMulGen, 131075},
+		{"EcNegate", EmitEcNegate, 956},
+		{"EcOnCurve", EmitEcOnCurve, 548},
+		{"P256Add", EmitP256Add, 6737},
+		{"P256Mul", EmitP256Mul, 140620},
 		// +58 ops: SEC1 §4.1.4 / FIPS 186-5 input-validation gates on the
 		// verifier's untrusted arguments — sig/pubkey length gate
 		// (cEmitLengthGate), signature range gate 1<=r,s<=n-1
 		// (cEmitSigRangeGate), and the pubkey prefix-byte check folded into
 		// cDecompressPubKey's _dk_valid. P-384 carries the identical fix but
 		// has no golden entry in this table.
-		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297331},
-		{"P384Add", EmitP384Add, 11469},
-		{"P384Mul", EmitP384Mul, 211178},
-		{"VerifyWOTS", EmitVerifyWOTS, 15488},
+		// +12 more from CL-BUG-095 (Point-length validation, see above).
+		{"VerifyECDSA_P256", EmitVerifyECDSA_P256, 297393},
+		{"P384Add", EmitP384Add, 11543},
+		{"P384Mul", EmitP384Mul, 211986},
+		// R-135: +3 ops for the exact-signature-length gate
+		// (OP_SIZE, push 2144, OP_EQUALVERIFY). 15488 -> 15491.
+		{"VerifyWOTS", EmitVerifyWOTS, 15491},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -355,4 +355,34 @@ class AnfInterpreterTest {
         }
         throw new IllegalStateException("cannot coerce " + v.getClass() + " to BigInteger: " + v);
     }
+
+    /**
+     * W8 merge: extractScriptCode is empty in the SDK mock, so
+     * {@code substr(sc, 0, len(sc)-49)} has length -49. Java's
+     * {@code String.substring} throws {@code StringIndexOutOfBoundsException}
+     * on a negative end ({@code begin 0, end -98, length 0}); Bitcoin Script
+     * and the TS interpreter's {@code String.slice} yield empty instead.
+     * Pin matching {@code TestAnfEvalCall_SubstrNegativeLength_NoPanic} in Go.
+     */
+    @Test
+    void substrNegativeLengthYieldsEmptyNotBoundsError() {
+        Object got = AnfInterpreter.evalCall(
+            "substr",
+            List.of("", BigInteger.ZERO, BigInteger.valueOf(-49)),
+            null,
+            null
+        );
+        assertEquals("", got);
+    }
+
+    @Test
+    void substrNegativeStartYieldsEmptyNotBoundsError() {
+        Object got = AnfInterpreter.evalCall(
+            "substr",
+            List.of("aabb", BigInteger.valueOf(-1), BigInteger.ONE),
+            null,
+            null
+        );
+        assertEquals("", got);
+    }
 }

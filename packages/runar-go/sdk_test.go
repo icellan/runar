@@ -501,7 +501,7 @@ func TestStateRoundtrip_SingleBigint(t *testing.T) {
 	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
 	values := map[string]interface{}{"count": int64(42)}
 	hex := SerializeState(fields, values)
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["count"] != int64(42) {
 		t.Errorf("expected count=42, got %v", result["count"])
 	}
@@ -511,7 +511,7 @@ func TestStateRoundtrip_ZeroBigint(t *testing.T) {
 	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
 	values := map[string]interface{}{"count": int64(0)}
 	hex := SerializeState(fields, values)
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["count"] != int64(0) {
 		t.Errorf("expected count=0, got %v", result["count"])
 	}
@@ -521,7 +521,7 @@ func TestStateRoundtrip_NegativeBigint(t *testing.T) {
 	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
 	values := map[string]interface{}{"count": int64(-42)}
 	hex := SerializeState(fields, values)
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["count"] != int64(-42) {
 		t.Errorf("expected count=-42, got %v", result["count"])
 	}
@@ -531,7 +531,7 @@ func TestStateRoundtrip_LargeBigint(t *testing.T) {
 	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
 	values := map[string]interface{}{"count": int64(1000000000000)}
 	hex := SerializeState(fields, values)
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["count"] != int64(1000000000000) {
 		t.Errorf("expected count=1000000000000, got %v", result["count"])
 	}
@@ -545,7 +545,7 @@ func TestStateRoundtrip_MultipleFields(t *testing.T) {
 	}
 	values := map[string]interface{}{"a": int64(1), "b": int64(2), "c": int64(3)}
 	hex := SerializeState(fields, values)
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["a"] != int64(1) || result["b"] != int64(2) || result["c"] != int64(3) {
 		t.Errorf("unexpected state: %v", result)
 	}
@@ -555,13 +555,13 @@ func TestStateRoundtrip_Boolean(t *testing.T) {
 	fields := []StateField{{Name: "flag", Type: "bool", Index: 0}}
 
 	hex := SerializeState(fields, map[string]interface{}{"flag": true})
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["flag"] != true {
 		t.Errorf("expected flag=true, got %v", result["flag"])
 	}
 
 	hex = SerializeState(fields, map[string]interface{}{"flag": false})
-	result = DeserializeState(fields, hex)
+	result = mustDeserializeState(t, fields, hex)
 	if result["flag"] != false {
 		t.Errorf("expected flag=false, got %v", result["flag"])
 	}
@@ -571,7 +571,7 @@ func TestStateRoundtrip_ByteString(t *testing.T) {
 	fields := []StateField{{Name: "data", Type: "bytes", Index: 0}}
 	values := map[string]interface{}{"data": "aabbccdd"}
 	hex := SerializeState(fields, values)
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["data"] != "aabbccdd" {
 		t.Errorf("expected data=aabbccdd, got %v", result["data"])
 	}
@@ -584,7 +584,7 @@ func TestStateRoundtrip_MixedTypes(t *testing.T) {
 	}
 	values := map[string]interface{}{"count": int64(100), "active": true}
 	hex := SerializeState(fields, values)
-	result := DeserializeState(fields, hex)
+	result := mustDeserializeState(t, fields, hex)
 	if result["count"] != int64(100) {
 		t.Errorf("expected count=100, got %v", result["count"])
 	}
@@ -689,7 +689,7 @@ func TestExtractState_NoStateFields(t *testing.T) {
 		Methods:     []ABIMethod{{Name: "unlock", Params: nil, IsPublic: true}},
 	})
 
-	result := ExtractStateFromScript(artifact, "76a914"+strings.Repeat("00", 20)+"88ac")
+	result, _ := ExtractStateFromScript(artifact, "76a914"+strings.Repeat("00", 20)+"88ac")
 	if result != nil {
 		t.Errorf("expected nil, got %v", result)
 	}
@@ -703,7 +703,7 @@ func TestExtractState_EmptyStateFields(t *testing.T) {
 		a.StateFields = []StateField{}
 	})
 
-	result := ExtractStateFromScript(artifact, "51")
+	result, _ := ExtractStateFromScript(artifact, "51")
 	if result != nil {
 		t.Errorf("expected nil, got %v", result)
 	}
@@ -718,7 +718,7 @@ func TestExtractState_NoOpReturn(t *testing.T) {
 	})
 
 	// Script with no 0x6a anywhere
-	result := ExtractStateFromScript(artifact, "5193885187")
+	result, _ := ExtractStateFromScript(artifact, "5193885187")
 	if result != nil {
 		t.Errorf("expected nil for script without OP_RETURN, got %v", result)
 	}
@@ -738,7 +738,7 @@ func TestExtractState_FindsLastOpReturn(t *testing.T) {
 	stateHex := SerializeState(fields, map[string]interface{}{"count": int64(42)})
 	fullScript := codeWithEmbedded6a + "6a" + stateHex
 
-	result := ExtractStateFromScript(artifact, fullScript)
+	result, _ := ExtractStateFromScript(artifact, fullScript)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -759,7 +759,7 @@ func TestExtractState_RoundtripBigint(t *testing.T) {
 	stateHex := SerializeState(fields, map[string]interface{}{"count": int64(999)})
 	fullScript := "aabbcc" + "6a" + stateHex
 
-	result := ExtractStateFromScript(artifact, fullScript)
+	result, _ := ExtractStateFromScript(artifact, fullScript)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -784,7 +784,7 @@ func TestExtractState_FieldOrdering(t *testing.T) {
 	stateHex := SerializeState(fields, map[string]interface{}{"a": int64(10), "b": int64(20)})
 	fullScript := "ac" + "6a" + stateHex
 
-	result := ExtractStateFromScript(artifact, fullScript)
+	result, _ := ExtractStateFromScript(artifact, fullScript)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -816,7 +816,7 @@ func TestExtractState_BigintValue106(t *testing.T) {
 	}
 	fullScript := "51ac" + "6a" + stateHex
 
-	result := ExtractStateFromScript(artifact, fullScript)
+	result, _ := ExtractStateFromScript(artifact, fullScript)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -841,7 +841,7 @@ func TestExtractState_PubKeyEndingWith6a(t *testing.T) {
 	stateHex := SerializeState(fields, map[string]interface{}{"count": int64(42), "owner": pubkey})
 	fullScript := "51" + "6a" + stateHex
 
-	result := ExtractStateFromScript(artifact, fullScript)
+	result, _ := ExtractStateFromScript(artifact, fullScript)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -2182,7 +2182,7 @@ func TestBigintEdgeCases(t *testing.T) {
 		t.Run(tc.label, func(t *testing.T) {
 			fields := []StateField{{Name: "v", Type: "bigint", Index: 0}}
 			hex := SerializeState(fields, map[string]interface{}{"v": tc.value})
-			result := DeserializeState(fields, hex)
+			result := mustDeserializeState(t, fields, hex)
 			if result["v"] != tc.value {
 				t.Errorf("roundtrip failed: expected %d, got %v", tc.value, result["v"])
 			}
@@ -2909,7 +2909,7 @@ func TestExtractState_NoStateFieldsDefined(t *testing.T) {
 	// artifact.StateFields is empty/nil
 
 	script := "76a914" + strings.Repeat("00", 20) + "88ac"
-	state := ExtractStateFromScript(artifact, script)
+	state, _ := ExtractStateFromScript(artifact, script)
 	if state != nil {
 		t.Errorf("expected nil state for contract with no stateFields, got: %v", state)
 	}
@@ -2928,7 +2928,10 @@ func TestPushData_SmallData_RoundTrip(t *testing.T) {
 		t.Errorf("expected 4-byte push to start with '04', got: %s", encoded)
 	}
 	// Decode should recover original
-	decoded, _ := DecodePushData(encoded, 0)
+	decoded, _, err := DecodePushData(encoded, 0)
+	if err != nil {
+		t.Fatalf("DecodePushData refused a well-formed push: %v", err)
+	}
 	if decoded != data {
 		t.Errorf("push_data round-trip failed: expected %s, got %s", data, decoded)
 	}

@@ -195,6 +195,9 @@ class _EmitContext:
         self.code_separator_index: int = -1
         self.code_separator_indices: list[int] = []
         self.raw_script_spans: list[RawScriptSpan] = []
+        # R-095 -- verify_code_part_len length fields awaiting back-patch.
+        # Each entry is {"value_byte_offset", "asm_index", "delta"}.
+        self.code_part_len_fixups: list[dict] = []
 
     def set_source_loc(self, loc: Optional[SourceLocation]) -> None:
         self.pending_source_loc = loc
@@ -273,10 +276,99 @@ class _EmitContext:
             out_arity=out_arity,
         ))
 
+    def emit_verify_code_part_len(self, delta: int, exact: bool) -> None:
+        """R-095 -- emit the 9-byte ``SIZE(_codePart)`` pin and register its
+        length field for back-patching.
+
+            OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+
+        ``LL LL LL LL`` is a fixed-width little-endian field, not a minimal
+        Script number push: the value being patched IS the length of the script
+        that contains it, so a width that varied with the value would be
+        self-referential. ``OP_BIN2NUM`` normalises the fixed-width field back
+        to a minimal Script number so the comparison is numeric.
+
+        ``exact`` is known here (the stack lowerer resolved it once every method
+        had been lowered), so only the four length bytes need patching.
+        """
+        self.emit_opcode("OP_DUP")
+        # +1 skips the single-byte push header the 4-byte data push carries.
+        value_byte_offset = self.byte_length + 1
+        asm_index = len(self.asm_parts)
+        self.emit_push(PushValue(kind="bytes", bytes_val=bytes(4)))
+        self.emit_opcode("OP_BIN2NUM")
+        self.emit_opcode("OP_NUMEQUAL" if exact else "OP_GREATERTHANOREQUAL")
+        self.emit_opcode("OP_VERIFY")
+        self.code_part_len_fixups.append({
+            "value_byte_offset": value_byte_offset,
+            "asm_index": asm_index,
+            "delta": delta,
+        })
+
+    def _code_sep_index_growth(self) -> int:
+        """Deploy-time byte growth contributed by the codeSepIndex placeholders.
+
+        Each is a 1-byte OP_0 in the template that the SDK replaces with a push
+        of the adjusted separator index. Post-R-010 that index is always 1 (the
+        separator sits at offset 1 and no constructor slot precedes it), which
+        bakes as the single opcode byte OP_1 -- zero growth. The guard is not
+        decoration: if the separator ever moves, the pin's arithmetic goes
+        silently wrong and every honest spend of a variable-length-state
+        contract becomes unspendable, so fail loudly instead.
+        """
+        for slot in self.code_sep_index_slots:
+            if slot.get("codeSepIndex") != 1:
+                raise ValueError(
+                    f"emit: codeSepIndex placeholder resolves to "
+                    f"{slot.get('codeSepIndex')}, not 1. The verify_code_part_len "
+                    f"pin assumes the post-R-010 layout (a single "
+                    f"OP_CODESEPARATOR at offset 1, so the placeholder bakes as "
+                    f"OP_1 and adds no bytes). Recompute the placeholder growth "
+                    f"before moving the separator."
+                )
+        return 0
+
+    def _apply_code_part_len_fixups(self) -> None:
+        """R-095 -- resolve every ``verify_code_part_len`` length field.
+
+        Runs once the whole script has been emitted, because the value each
+        field carries is the DEPLOYED length of the very script it sits in::
+
+            deployedCodeLen = emitted template length
+                            + growth of the constructor-arg placeholders (delta)
+                            + growth of the codeSepIndex placeholders (0)
+
+        Idempotent: it overwrites a fixed-width field rather than splicing, so
+        the script's length never changes and re-running produces the same
+        bytes.
+        """
+        if not self.code_part_len_fixups:
+            return
+        code_sep_growth = self._code_sep_index_growth()
+        h = "".join(self.hex_parts)
+        for fixup in self.code_part_len_fixups:
+            deployed_len = self.byte_length + fixup["delta"] + code_sep_growth
+            if deployed_len < 0 or deployed_len > 0x7FFFFFFF:
+                raise ValueError(
+                    f"emit: code part length {deployed_len} does not fit the "
+                    f"4-byte pin field"
+                )
+            le = "".join(
+                f"{(deployed_len >> (8 * i)) & 0xFF:02x}" for i in range(4)
+            )
+            start = fixup["value_byte_offset"] * 2
+            h = h[:start] + le + h[start + 8:]
+            asm_index = fixup["asm_index"]
+            if 0 <= asm_index < len(self.asm_parts):
+                self.asm_parts[asm_index] = f"<{le}>"
+        self.hex_parts = [h]
+
     def get_hex(self) -> str:
+        self._apply_code_part_len_fixups()
         return "".join(self.hex_parts)
 
     def get_asm(self) -> str:
+        self._apply_code_part_len_fixups()
         return " ".join(self.asm_parts)
 
 
@@ -435,6 +527,10 @@ def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
         # into the artifact's rawScriptSpans so the analyzer can treat the
         # span as one opaque stack-effect step.
         ctx.emit_raw_bytes(op.raw_bytes or b"", op.in_arity, op.out_arity)
+    elif op.op == "verify_code_part_len":
+        # R-095: pin SIZE(_codePart) against the code part's own deployed byte
+        # length. Fixed-width field, back-patched after the whole script exists.
+        ctx.emit_verify_code_part_len(op.code_part_len_delta, op.code_part_len_exact)
     elif op.op == "push_codesep_index":
         # Emit an OP_0 placeholder that the SDK will replace with the
         # adjusted codeSeparatorIndex at runtime.
@@ -523,6 +619,22 @@ def emit(methods: list[StackMethod]) -> EmitResult:
 
     if not public_methods:
         return EmitResult(script_hex="", script_asm="", source_map=[], constructor_slots=[])
+
+    # R-010 / CL-BUG-091: a contract that authenticates a `_codePart` witness
+    # gets ONE OP_CODESEPARATOR, at offset 1 of the locking script, behind a
+    # single OP_NOP. Contracts with no `_codePart` keep the pre-R-010 per-method
+    # separators (emitted by _lower_check_preimage) instead. Emitting it per method (at the method's entry) hid the dispatch
+    # preamble and every preceding method body from scriptCode — exactly the
+    # bytes the spender-supplied `_codePart` witness claims to reproduce.
+    #
+    # Offset 1, not 0: implementations that store "index of the last executed
+    # OP_CODESEPARATOR" in a zero-initialised field cannot tell "separator at
+    # offset 0" from "no separator seen" and fall back to the whole script (the
+    # BSV go-sdk interpreter does exactly this). Offset 1 keeps every
+    # implementation on the same side of that guard, and costs one byte.
+    if any(m.needs_code_separator for m in public_methods):
+        ctx.emit_opcode("OP_NOP")
+        ctx.emit_opcode("OP_CODESEPARATOR")
 
     if len(public_methods) == 1:
         # Single public method -- no dispatch needed

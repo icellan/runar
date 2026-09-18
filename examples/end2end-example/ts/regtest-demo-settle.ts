@@ -20,8 +20,8 @@
  *
  * Environment variables:
  *   RPC_URL   - JSON-RPC endpoint (default: http://localhost:18332)
- *   RPC_USER  - RPC username (default: rpc)
- *   RPC_PASS  - RPC password (default: rpc)
+ *   RPC_USER  - RPC username (default: bitcoin)
+ *   RPC_PASS  - RPC password (default: bitcoin)
  */
 
 import { readFileSync } from 'node:fs';

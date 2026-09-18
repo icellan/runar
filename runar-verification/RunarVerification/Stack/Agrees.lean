@@ -3146,7 +3146,7 @@ theorem simpleStepRel_preserves :
   | .methodCall _ _ _ => rw [hVal] at hStep; exact hStep.elim
   | .ifVal _ _ _ _ => rw [hVal] at hStep; exact hStep.elim
   | .updateProp _ _ => rw [hVal] at hStep; exact hStep.elim
-  | .loop _ _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .loop _ _ _ _ _ => rw [hVal] at hStep; exact hStep.elim
   | .arrayLiteral _ => rw [hVal] at hStep; exact hStep.elim
   | .addOutput _ _ _ => rw [hVal] at hStep; exact hStep.elim
   | .addRawOutput _ _ => rw [hVal] at hStep; exact hStep.elim
@@ -12374,7 +12374,7 @@ theorem lowerValueP_eq_lowerValue_structuralConst
   | call _ _ => simp [structuralConstValue] at h
   | methodCall _ _ _ => simp [structuralConstValue] at h
   | ifVal _ _ _ _ => simp [structuralConstValue] at h
-  | loop _ _ _ => simp [structuralConstValue] at h
+  | loop _ _ _ _ _ => simp [structuralConstValue] at h
   | assert _ => simp [structuralConstValue] at h
   | updateProp _ _ => simp [structuralConstValue] at h
   | getStateScript => simp [structuralConstValue] at h
@@ -12488,7 +12488,7 @@ theorem evalValue_structuralConstValue_ok
   | call _ _ => simp [structuralConstValue] at h
   | methodCall _ _ _ => simp [structuralConstValue] at h
   | ifVal _ _ _ _ => simp [structuralConstValue] at h
-  | loop _ _ _ => simp [structuralConstValue] at h
+  | loop _ _ _ _ _ => simp [structuralConstValue] at h
   | assert _ => simp [structuralConstValue] at h
   | updateProp _ _ => simp [structuralConstValue] at h
   | getStateScript => simp [structuralConstValue] at h
@@ -12549,7 +12549,7 @@ theorem runOps_lowerValue_structuralConstValue_ok
   | call _ _ => simp [structuralConstValue] at h
   | methodCall _ _ _ => simp [structuralConstValue] at h
   | ifVal _ _ _ _ => simp [structuralConstValue] at h
-  | loop _ _ _ => simp [structuralConstValue] at h
+  | loop _ _ _ _ _ => simp [structuralConstValue] at h
   | assert _ => simp [structuralConstValue] at h
   | updateProp _ _ => simp [structuralConstValue] at h
   | getStateScript => simp [structuralConstValue] at h
@@ -12759,7 +12759,7 @@ theorem lowerValueP_eq_lowerValue_structuralCopy
   | call _ _ => simp [structuralCopyValue] at h
   | methodCall _ _ _ => simp [structuralCopyValue] at h
   | ifVal _ _ _ _ => simp [structuralCopyValue] at h
-  | loop _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ _ _ => simp [structuralCopyValue] at h
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
@@ -14488,7 +14488,7 @@ theorem evalValue_structuralCopyValue_ok
   | call _ _ => simp [structuralCopyValue] at h
   | methodCall _ _ _ => simp [structuralCopyValue] at h
   | ifVal _ _ _ _ => simp [structuralCopyValue] at h
-  | loop _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ _ _ => simp [structuralCopyValue] at h
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
@@ -14700,7 +14700,7 @@ private theorem lowerValue_snd_structuralCopy_early
   | call _ _ => simp [structuralCopyValue] at h
   | methodCall _ _ _ => simp [structuralCopyValue] at h
   | ifVal _ _ _ _ => simp [structuralCopyValue] at h
-  | loop _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ _ _ => simp [structuralCopyValue] at h
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
@@ -15488,7 +15488,7 @@ theorem runOps_lowerValue_structuralCopyValue_ok
   | call _ _ => simp [structuralCopyValue] at h
   | methodCall _ _ _ => simp [structuralCopyValue] at h
   | ifVal _ _ _ _ => simp [structuralCopyValue] at h
-  | loop _ _ _ => simp [structuralCopyValue] at h
+  | loop _ _ _ _ _ => simp [structuralCopyValue] at h
   | assert _ => simp [structuralCopyValue] at h
   | updateProp _ _ => simp [structuralCopyValue] at h
   | getStateScript => simp [structuralCopyValue] at h
@@ -15790,7 +15790,7 @@ theorem structuralCopyValueBool_iff
   | call _ _ => simp [structuralCopyValueBool, structuralCopyValue]
   | methodCall _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
   | ifVal _ _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
-  | loop _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
+  | loop _ _ _ _ _ => simp [structuralCopyValueBool, structuralCopyValue]
   | assert _ => simp [structuralCopyValueBool, structuralCopyValue]
   | updateProp _ _ => simp [structuralCopyValueBool, structuralCopyValue]
   | getStateScript => simp [structuralCopyValueBool, structuralCopyValue]
@@ -16041,7 +16041,7 @@ theorem lowerValueP_insideBranch_irrelevant
   | call _ _ => simp [insideBranchFreeValueB] at h
   | methodCall _ _ _ => simp [insideBranchFreeValueB] at h
   | ifVal _ _ _ _ => simp [insideBranchFreeValueB] at h
-  | loop _ _ _ => simp [insideBranchFreeValueB] at h
+  | loop _ _ _ _ _ => simp [insideBranchFreeValueB] at h
   | assert _ => simp [insideBranchFreeValueB] at h
   | updateProp _ _ => simp [insideBranchFreeValueB] at h
   | getStateScript => simp [insideBranchFreeValueB] at h
@@ -16210,7 +16210,7 @@ private theorem lowerValueP_snd_snd_eq_localBindings
       simp [structuralCopyValue, structuralConsumeValue] at hRef
   | ifVal _ _ _ _ =>
       simp [structuralCopyValue, structuralConsumeValue] at hRef
-  | loop _ _ _ =>
+  | loop _ _ _ _ _ =>
       simp [structuralCopyValue, structuralConsumeValue] at hRef
   | assert _ =>
       simp [structuralCopyValue, structuralConsumeValue] at hRef
@@ -16278,7 +16278,7 @@ theorem evalValue_structuralConsumeValue_ok
   | call _ _ => simp [structuralConsumeValue] at h
   | methodCall _ _ _ => simp [structuralConsumeValue] at h
   | ifVal _ _ _ _ => simp [structuralConsumeValue] at h
-  | loop _ _ _ => simp [structuralConsumeValue] at h
+  | loop _ _ _ _ _ => simp [structuralConsumeValue] at h
   | assert _ => simp [structuralConsumeValue] at h
   | updateProp _ _ => simp [structuralConsumeValue] at h
   | getStateScript => simp [structuralConsumeValue] at h
@@ -16708,7 +16708,7 @@ theorem runOps_lowerValueP_structuralConsumeValue_ok
   | call _ _ => simp [structuralConsumeValue] at h
   | methodCall _ _ _ => simp [structuralConsumeValue] at h
   | ifVal _ _ _ _ => simp [structuralConsumeValue] at h
-  | loop _ _ _ => simp [structuralConsumeValue] at h
+  | loop _ _ _ _ _ => simp [structuralConsumeValue] at h
   | assert _ => simp [structuralConsumeValue] at h
   | updateProp _ _ => simp [structuralConsumeValue] at h
   | getStateScript => simp [structuralConsumeValue] at h
@@ -17255,7 +17255,7 @@ theorem runOps_lowerBindingsP_structuralConsumeBody_preserves_metadata
         | call _ _ => simp [structuralConsumeValue] at hHead
         | methodCall _ _ _ => simp [structuralConsumeValue] at hHead
         | ifVal _ _ _ _ => simp [structuralConsumeValue] at hHead
-        | loop _ _ _ => simp [structuralConsumeValue] at hHead
+        | loop _ _ _ _ _ => simp [structuralConsumeValue] at hHead
         | assert _ => simp [structuralConsumeValue] at hHead
         | updateProp _ _ => simp [structuralConsumeValue] at hHead
         | getStateScript => simp [structuralConsumeValue] at hHead
@@ -18132,7 +18132,7 @@ theorem structuralConsumeValueBool_iff
   | call _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | methodCall _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | ifVal _ _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
-  | loop _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
+  | loop _ _ _ _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | assert _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | updateProp _ _ => simp [structuralConsumeValueBool, structuralConsumeValue]
   | getStateScript => simp [structuralConsumeValueBool, structuralConsumeValue]
@@ -19705,7 +19705,7 @@ theorem structuralArithValueBool_iff
   | ifVal _ _ _ _ =>
       simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
             structuralCopyValue, structuralConsumeValue]
-  | loop _ _ _ =>
+  | loop _ _ _ _ _ =>
       simp [structuralArithValueBool, structuralArithValue, structuralRefValue,
             structuralCopyValue, structuralConsumeValue]
   | updateProp _ _ =>
@@ -21173,7 +21173,7 @@ theorem structuralCallValueBool_iff
   | ifVal _ _ _ _ =>
       simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
             structuralRefValue, structuralCopyValue, structuralConsumeValue]
-  | loop _ _ _ =>
+  | loop _ _ _ _ _ =>
       simp [structuralCallValueBool, structuralCallValue, structuralArithValue,
             structuralRefValue, structuralCopyValue, structuralConsumeValue]
   | updateProp _ _ =>
@@ -21633,8 +21633,8 @@ def structuralLoopValue
     (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
     (sm : StackMap) (currentIndex : Nat) (v : ANFValue) : Prop :=
   structuralIfValValue lastUses outerProtected localBindings sm currentIndex v ∨
-  ∃ count body iterVar,
-    v = .loop count body iterVar
+  ∃ count body iterVar start step,
+    v = .loop count body iterVar start step
 
 /-- Body-level `loop` predicate. -/
 def structuralLoopBody
@@ -21656,7 +21656,7 @@ def structuralLoopBody
 def structuralLoopValueBool
     (lastUses : List (String × Nat)) (outerProtected localBindings : List String)
     (sm : StackMap) (currentIndex : Nat) : ANFValue → Bool
-  | .loop _count _body _iterVar => true
+  | .loop _count _body _iterVar _ _ => true
   | v =>
       structuralIfValValueBool lastUses outerProtected localBindings sm currentIndex v
 
@@ -21667,10 +21667,10 @@ theorem structuralLoopValueBool_iff
     structuralLoopValueBool lastUses outerProtected localBindings sm currentIndex v = true ↔
     structuralLoopValue lastUses outerProtected localBindings sm currentIndex v := by
   cases v with
-  | loop count body iterVar =>
+  | loop count body iterVar start step =>
       simp only [structuralLoopValueBool, structuralLoopValue]
       constructor
-      · intro _h; exact Or.inr ⟨count, body, iterVar, rfl⟩
+      · intro _h; exact Or.inr ⟨count, body, iterVar, start, step, rfl⟩
       · intro _h; trivial
   | _ =>
       simp only [structuralLoopValueBool, structuralLoopValue]
@@ -21679,7 +21679,7 @@ theorem structuralLoopValueBool_iff
         exact Or.inl
           ((structuralIfValValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mp h)
       · intro h
-        rcases h with hPrev | ⟨_, _, _, hveq⟩
+        rcases h with hPrev | ⟨_, _, _, _, _, hveq⟩
         · exact (structuralIfValValueBool_iff lastUses outerProtected localBindings sm currentIndex _).mpr hPrev
         · simp at hveq
 
@@ -22737,7 +22737,7 @@ def supportedIfValShape : ANFValue → Bool
 `ifVal`, the body's recursive support is recorded by the inductive
 constructor. -/
 def supportedLoopShape : ANFValue → Bool
-  | .loop _ _ _ => true
+  | .loop _ _ _ _ _ => true
   | _           => false
 
 /-- MethodCall-shape: any `methodCall obj method args` head. -/
@@ -22792,8 +22792,9 @@ inductive SupportedANFBody : List ANFBinding → Prop where
       (iterVar : String) (src : Option SourceLoc)
       (rest : List ANFBinding)
       (hBody : SupportedANFBody loopBody)
-      (hRest : SupportedANFBody rest) :
-      SupportedANFBody (.mk name (.loop count loopBody iterVar) src :: rest)
+      (hRest : SupportedANFBody rest)
+      (start : Int := 0) (step : Int := 1) :
+      SupportedANFBody (.mk name (.loop count loopBody iterVar start step) src :: rest)
   | methodCallValue (name : String) (v : ANFValue) (src : Option SourceLoc)
       (rest : List ANFBinding)
       (hShape : supportedMethodCallShape v = true)
@@ -22839,7 +22840,7 @@ def supportedANFBodyB : List ANFBinding → Bool
   | [] => true
   | (.mk _ (.ifVal _ thn els _) _) :: rest =>
       supportedANFBodyB thn && supportedANFBodyB els && supportedANFBodyB rest
-  | (.mk _ (.loop _ loopBody _) _) :: rest =>
+  | (.mk _ (.loop _ loopBody _ _ _) _) :: rest =>
       supportedANFBodyB loopBody && supportedANFBodyB rest
   | (.mk _ v _) :: rest =>
       supportedANFHead v && supportedANFBodyB rest
@@ -22865,9 +22866,9 @@ private theorem SupportedANFBody_ifVal_inv
 /-- Helper: inversion when the head is `.loop count body iterVar`. -/
 private theorem SupportedANFBody_loop_inv
     (name : String) (count : Nat) (loopBody : List ANFBinding)
-    (iterVar : String) (src : Option SourceLoc)
+    (iterVar : String) (start : Int) (step : Int) (src : Option SourceLoc)
     (rest : List ANFBinding)
-    (h : SupportedANFBody (.mk name (.loop count loopBody iterVar) src :: rest)) :
+    (h : SupportedANFBody (.mk name (.loop count loopBody iterVar start step) src :: rest)) :
     SupportedANFBody loopBody ∧ SupportedANFBody rest := by
   cases h with
   | refValue _ _ _ _ hShape _ => simp [supportedRefShape] at hShape
@@ -22875,7 +22876,7 @@ private theorem SupportedANFBody_loop_inv
   | arithValue _ _ _ _ hShape _ => simp [supportedArithShape] at hShape
   | callValue _ _ _ _ hShape _ => simp [supportedCallShape] at hShape
   | updatePropValue _ _ _ _ hShape _ => simp [supportedUpdatePropShape] at hShape
-  | loopValue _ _ _ _ _ _ hBody hRest => exact ⟨hBody, hRest⟩
+  | loopValue _ _ _ _ _ _ hBody hRest _ _ => exact ⟨hBody, hRest⟩
   | methodCallValue _ _ _ _ hShape _ => simp [supportedMethodCallShape] at hShape
 
 /-- Helper: inversion when the head is non-recursive (anything but `ifVal`
@@ -22886,7 +22887,7 @@ private theorem SupportedANFBody_nonrec_inv
     (rest : List ANFBinding)
     (h : SupportedANFBody (.mk name v src :: rest))
     (hNotIfVal : ∀ cond thn els results, v ≠ .ifVal cond thn els results)
-    (hNotLoop : ∀ count body iterVar, v ≠ .loop count body iterVar) :
+    (hNotLoop : ∀ count body iterVar start step, v ≠ .loop count body iterVar start step) :
     supportedANFHead v = true ∧ SupportedANFBody rest := by
   cases h with
   | refValue _ _ _ _ hShape hRest =>
@@ -22901,8 +22902,8 @@ private theorem SupportedANFBody_nonrec_inv
       refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
   | ifValValue _ cond thn els results _ _ _ _ _ =>
       exact absurd rfl (hNotIfVal cond thn els results)
-  | loopValue _ count loopBody iterVar _ _ _ _ =>
-      exact absurd rfl (hNotLoop count loopBody iterVar)
+  | loopValue _ count loopBody iterVar _ _ _ _ start step =>
+      exact absurd rfl (hNotLoop count loopBody iterVar start step)
   | methodCallValue _ _ _ _ hShape hRest =>
       refine ⟨?_, hRest⟩; simp [supportedANFHead, hShape]
 
@@ -22937,7 +22938,7 @@ theorem supportedANFBodyB_iff :
             exact ⟨⟨(supportedANFBodyB_iff _).mpr hThn,
                     (supportedANFBodyB_iff _).mpr hEls⟩,
                    (supportedANFBodyB_iff _).mpr hRest⟩
-      | loop count loopBody iterVar =>
+      | loop count loopBody iterVar start step =>
           simp only [supportedANFBodyB, Bool.and_eq_true]
           constructor
           · rintro ⟨hBody, hRest⟩
@@ -22945,11 +22946,12 @@ theorem supportedANFBodyB_iff :
                     rest
                     ((supportedANFBodyB_iff loopBody).mp hBody)
                     ((supportedANFBodyB_iff rest).mp hRest)
+                    start step
           · intro h
             obtain ⟨hBody, hRest⟩ :=
-              SupportedANFBody_loop_inv name count loopBody iterVar src rest h
+              SupportedANFBody_loop_inv name count loopBody iterVar start step src rest h
             exact ⟨(supportedANFBodyB_iff _).mpr hBody,
-                   (supportedANFBodyB_iff _).mpr hRest⟩
+                   (supportedANFBodyB_iff rest).mpr hRest⟩
       | loadParam n =>
           simp only [supportedANFBodyB, Bool.and_eq_true]
           refine ⟨fun ⟨hH, hR⟩ => ?_, fun h => ?_⟩
@@ -23422,7 +23424,7 @@ theorem SupportedANFBody_of_structuralConstBody :
         | call _ _ => simp [structuralConstValue] at hHead
         | methodCall _ _ _ => simp [structuralConstValue] at hHead
         | ifVal _ _ _ _ => simp [structuralConstValue] at hHead
-        | loop _ _ _ => simp [structuralConstValue] at hHead
+        | loop _ _ _ _ _ => simp [structuralConstValue] at hHead
         | assert _ => simp [structuralConstValue] at hHead
         | updateProp _ _ => simp [structuralConstValue] at hHead
         | getStateScript => simp [structuralConstValue] at hHead
@@ -23500,7 +23502,7 @@ theorem SupportedANFBody_of_structuralRefBody
       | ifVal _ _ _ _ =>
           exact absurd hHead (by
             simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
-      | loop _ _ _ =>
+      | loop _ _ _ _ _ =>
           exact absurd hHead (by
             simp [structuralRefValue, structuralCopyValue, structuralConsumeValue])
       | assert _ =>
@@ -23601,7 +23603,7 @@ theorem SupportedANFBody_of_structuralArithBody
           exact absurd hHead (by
             simp [structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
-      | loop _ _ _ =>
+      | loop _ _ _ _ _ =>
           exact absurd hHead (by
             simp [structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
@@ -23705,7 +23707,7 @@ theorem SupportedANFBody_of_structuralCallBody
           exact absurd hHead (by
             simp [structuralCallValue, structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
-      | loop _ _ _ =>
+      | loop _ _ _ _ _ =>
           exact absurd hHead (by
             simp [structuralCallValue, structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
@@ -23812,7 +23814,7 @@ theorem SupportedANFBody_of_structuralUpdatePropBody
           exact absurd hHead (by
             simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
                   structuralRefValue, structuralCopyValue, structuralConsumeValue])
-      | loop _ _ _ =>
+      | loop _ _ _ _ _ =>
           exact absurd hHead (by
             simp [structuralUpdatePropValue, structuralCallValue, structuralArithValue,
                   structuralRefValue, structuralCopyValue, structuralConsumeValue])
@@ -23930,7 +23932,7 @@ theorem SupportedANFBody_of_structuralIfValBody
             simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
                   structuralArithValue, structuralRefValue,
                   structuralCopyValue, structuralConsumeValue])
-      | loop _ _ _ =>
+      | loop _ _ _ _ _ =>
           exact absurd hHead (by
             simp [structuralIfValValue, structuralUpdatePropValue, structuralCallValue,
                   structuralArithValue, structuralRefValue,
@@ -23992,8 +23994,8 @@ theorem SupportedANFBody_of_structuralLoopBody
           ANFBinding.mk name (.ifVal cond thn els results) src ∈ body →
             SupportedANFBody thn ∧ SupportedANFBody els)
       (_hSubLoop :
-        ∀ name count loopBody iterVar src,
-          ANFBinding.mk name (.loop count loopBody iterVar) src ∈ body →
+        ∀ name count loopBody iterVar start step src,
+          ANFBinding.mk name (.loop count loopBody iterVar start step) src ∈ body →
             SupportedANFBody loopBody),
       structuralLoopBody progMethods props budget lastUses outerProtected
           localBindings constInts body sm currentIndex →
@@ -24008,10 +24010,10 @@ theorem SupportedANFBody_of_structuralLoopBody
         intro n c t e r s hMem
         exact hIf n c t e r s (List.mem_cons_of_mem _ hMem)
       have hLoopRest :
-          ∀ n cnt lb iv s, ANFBinding.mk n (.loop cnt lb iv) s ∈ rest →
+          ∀ n cnt lb iv st sp s, ANFBinding.mk n (.loop cnt lb iv st sp) s ∈ rest →
             SupportedANFBody lb := by
-        intro n cnt lb iv s hMem
-        exact hLoop n cnt lb iv s (List.mem_cons_of_mem _ hMem)
+        intro n cnt lb iv st sp s hMem
+        exact hLoop n cnt lb iv st sp s (List.mem_cons_of_mem _ hMem)
       have hRestS : SupportedANFBody rest :=
         SupportedANFBody_of_structuralLoopBody progMethods props budget lastUses
           outerProtected localBindings constInts rest _ (currentIndex + 1)
@@ -24060,11 +24062,11 @@ theorem SupportedANFBody_of_structuralLoopBody
             hIf name cond thn els results src List.mem_cons_self
           exact SupportedANFBody.ifValValue name cond thn els results src rest
                   hHere.1 hHere.2 hRestS
-      | loop count loopBody iterVar =>
+      | loop count loopBody iterVar start step =>
           have hHere : SupportedANFBody loopBody :=
-            hLoop name count loopBody iterVar src List.mem_cons_self
+            hLoop name count loopBody iterVar start step src List.mem_cons_self
           exact SupportedANFBody.loopValue name count loopBody iterVar src rest
-                  hHere hRestS
+                  hHere hRestS start step
       | methodCall _ _ _ =>
           exact absurd hHead (by
             simp [structuralLoopValue, structuralIfValValue, structuralUpdatePropValue,
@@ -24126,8 +24128,8 @@ theorem SupportedANFBody_of_structuralMethodCallBody
           ANFBinding.mk name (.ifVal cond thn els results) src ∈ body →
             SupportedANFBody thn ∧ SupportedANFBody els)
       (_hSubLoop :
-        ∀ name count loopBody iterVar src,
-          ANFBinding.mk name (.loop count loopBody iterVar) src ∈ body →
+        ∀ name count loopBody iterVar start step src,
+          ANFBinding.mk name (.loop count loopBody iterVar start step) src ∈ body →
             SupportedANFBody loopBody),
       structuralMethodCallBody progMethods props budget lastUses outerProtected
           localBindings constInts body sm currentIndex →
@@ -24142,10 +24144,10 @@ theorem SupportedANFBody_of_structuralMethodCallBody
         intro n c t e r s hMem
         exact hIf n c t e r s (List.mem_cons_of_mem _ hMem)
       have hLoopRest :
-          ∀ n cnt lb iv s, ANFBinding.mk n (.loop cnt lb iv) s ∈ rest →
+          ∀ n cnt lb iv st sp s, ANFBinding.mk n (.loop cnt lb iv st sp) s ∈ rest →
             SupportedANFBody lb := by
-        intro n cnt lb iv s hMem
-        exact hLoop n cnt lb iv s (List.mem_cons_of_mem _ hMem)
+        intro n cnt lb iv st sp s hMem
+        exact hLoop n cnt lb iv st sp s (List.mem_cons_of_mem _ hMem)
       have hRestS : SupportedANFBody rest :=
         SupportedANFBody_of_structuralMethodCallBody progMethods props budget lastUses
           outerProtected localBindings constInts rest _ (currentIndex + 1)
@@ -24194,11 +24196,11 @@ theorem SupportedANFBody_of_structuralMethodCallBody
             hIf name cond thn els results src List.mem_cons_self
           exact SupportedANFBody.ifValValue name cond thn els results src rest
                   hHere.1 hHere.2 hRestS
-      | loop count loopBody iterVar =>
+      | loop count loopBody iterVar start step =>
           have hHere : SupportedANFBody loopBody :=
-            hLoop name count loopBody iterVar src List.mem_cons_self
+            hLoop name count loopBody iterVar start step src List.mem_cons_self
           exact SupportedANFBody.loopValue name count loopBody iterVar src rest
-                  hHere hRestS
+                  hHere hRestS start step
       | methodCall _ _ _ =>
           exact SupportedANFBody.methodCallValue name _ src rest
                   (by simp [supportedMethodCallShape]) hRestS

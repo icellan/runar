@@ -139,6 +139,11 @@ structure StackMethod where
   name : String
   ops : List StackOp
   maxStackDepth : Nat := 0
+  /-- R-010: any public method of a contract that authenticates `_codePart`
+  is marked so the hex pipeline can hoist a single `OP_NOP OP_CODESEPARATOR`
+  to offset 1 of the locking script (`06-emit.ts`). Default `false` keeps
+  every existing structure literal on the pre-R-010 layout. -/
+  needsCodeSeparator : Bool := false
   deriving Inhabited
 
 structure StackProgram where

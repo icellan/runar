@@ -1,0 +1,68 @@
+{
+  "fixture": "byte-builtins",
+  "_note": "Provenance for the goldens that MOVED when `split` stopped orphaning its left half. `split(data, index)` is single-valued and binds the RIGHT half, but the lowering emitted a bare OP_SPLIT and recorded the unnameable left half as an anonymous stack-map slot nothing ever consumed; every read after a split then resolved to the wrong slot. The lowering now emits OP_SPLIT OP_NIP in all seven tiers, which moved this fixture's `checkSplit` arm from `OP_SPLIT OP_ROT OP_EQUAL … OP_NIP` (the method epilogue cleaning up afterwards) to `OP_SPLIT OP_NIP OP_SWAP OP_EQUAL`. Same length, different bytes. The `expected-ir.json` hash below is UNCHANGED from before that fix and is pinned here so it self-invalidates if pass 4 ever moves too. This file is the independent execution oracle for the new bytes: `witnesses/differential.test.ts` compiles fresh from source (fold-ON) and runs each spend through BOTH the ANF interpreter and the @bsv/sdk script engine, so a compiler agreeing with itself does not settle it. The ledger entry that used to exempt this fixture claimed a differential witness was infeasible here; it is not — the rows below run. The go-sdk consensus spends in conformance/byte_builtins_execution_test.go and conformance/split_residue_execution_test.go are unchanged and still cover int2str, reverseBytes and the two hash spellings at their boundaries.",
+  "goldenHashes": {
+    "expected-script.hex": "81cc3736b8838173e9fe04e0cabdf5610be5dfcb549403c96339c871c886ca60",
+    "expected-ir.json": "3c5d499c2fbfb2874c7c496ab55dd9851335592a5836f37cf1006b0288368146"
+  },
+  "constructorArgs": {
+    "expectedDigest": "0xbfffaee98575b1524bc13b6f5be8e7757842d5ecac69fa8d63fcb5423a5bafd1",
+    "expectedRipemd": "0xd68d1b2237e5731e4a028580c4b1e26b57efa3a6"
+  },
+  "spends": [
+    {
+      "method": "checkSplit",
+      "args": ["0xaabbccdd", "2n", "0xccdd"],
+      "expect": "accept",
+      "note": "The interior cut. Binds the RIGHT half — a lowering that bound the left would produce aabb here and this row is what says which."
+    },
+    {
+      "method": "checkSplit",
+      "args": ["0xaabbccdd", "2n", "0xaabb"],
+      "expect": "reject",
+      "note": "The LEFT half at the same index. `left(data, 2)` returns exactly this, so a regression that swapped OP_NIP for OP_DROP would accept it. Paired with the row above, the two pin the direction of the cut rather than just its position."
+    },
+    {
+      "method": "checkSplit",
+      "args": ["0xaabbccdd", "0n", "0xaabbccdd"],
+      "expect": "accept",
+      "note": "index 0 — the whole string. One end of the legal range; an off-by-one in the split lowering shows up at the ends, never in the middle."
+    },
+    {
+      "method": "checkSplit",
+      "args": ["0xaabbccdd", "4n", "0x"],
+      "expect": "accept",
+      "note": "index == len — the empty string. The other end of the legal range."
+    },
+    {
+      "method": "checkSplit",
+      "args": ["0xaabbccdd", "2n", "0xccde"],
+      "expect": "reject",
+      "note": "One byte wrong in the tail, so the accepting rows cannot be passing on a script that compares nothing."
+    },
+    {
+      "method": "checkSha256",
+      "args": ["0x72756e617220627974652d6275696c74696e732066697874757265"],
+      "expect": "accept",
+      "note": "The preimage of the digest baked into the locking script, so the constructor args above are load-bearing rather than decoration."
+    },
+    {
+      "method": "checkSha256",
+      "args": ["0xbfffaee98575b1524bc13b6f5be8e7757842d5ecac69fa8d63fcb5423a5bafd1"],
+      "expect": "reject",
+      "note": "The DIGEST itself. A build that dropped OP_SHA256 and left an identity binding would accept this, and the baked digest is public — anyone reading the chain could spend it."
+    },
+    {
+      "method": "checkRipemd",
+      "args": ["0x72756e617220627974652d6275696c74696e732066697874757265"],
+      "expect": "accept",
+      "note": "Same preimage against the RIPEMD-160 digest. The Go surface's `runar.Ripemd160` spelling is both a type name and a builtin name, and two tiers once resolved it as a cast — see conformance/go_surface_hash_spelling_execution_test.go."
+    },
+    {
+      "method": "checkRipemd",
+      "args": ["0xd68d1b2237e5731e4a028580c4b1e26b57efa3a6"],
+      "expect": "reject",
+      "note": "The RIPEMD-160 digest itself — the identity-cast miscompile's spending key."
+    }
+  ]
+}

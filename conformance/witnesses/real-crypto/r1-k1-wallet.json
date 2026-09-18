@@ -4,21 +4,41 @@
   "note": "Executes the exact R1-K1 fixture bytes through @bsv/sdk Spend. The recovery branch uses a real secp256k1 BIP-143 signature; the dedicated example suite separately exercises the P-256 branch with a real prime256v1 signature and its salted public-key commitment.",
   "constructorArgs": {
     "r1SaltedPubKeyHash": "1111111111111111111111111111111111111111",
-    "k1PubKeyHash": { "$pkh": "alice" }
+    "k1PubKeyHash": {
+      "$pkh": "alice"
+    }
   },
   "spends": [
     {
       "method": "recoverK1",
-      "args": [{ "$sig": "alice" }, { "$pubkey": "alice" }],
+      "args": [
+        {
+          "$sig": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        }
+      ],
       "expect": "accept",
       "note": "recovery key matches the constructor commitment and signs the real BIP-143 digest"
     },
     {
       "method": "recoverK1",
-      "args": [{ "$sig": "bob" }, { "$pubkey": "bob" }],
+      "args": [
+        {
+          "$sig": "bob"
+        },
+        {
+          "$pubkey": "bob"
+        }
+      ],
       "expect": "reject",
       "cryptoNearMiss": true,
       "note": "a valid signature from the wrong recovery key reaches the Spend engine but fails the committed HASH160 guard"
     }
-  ]
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "df2821084a477b800cc4c56740ec859a716c09f701e33405c5fc59d4ff370243"
+  },
+  "goldenHashesNote": "R-052 / CL-BUG-095 (no length validation on any Point argument in any tier) and R-053 / CL-BUG-096 (ecAdd(P, O) returned an off-curve blob while the always-on EC optimizer rewrote the same expression as the identity) both moved this golden. The pin is deliberately self-invalidating: any later change to expected-script.hex must come back through this witness, whose spends re-EXECUTE the fixture's actual compiled locking script on the real @bsv/sdk Spend engine with real secp256k1 — which is why this fixture takes provenance path (A) rather than an allowlist hash. Both defects were reproduced by EXECUTION before the fix, not inferred: ecOnCurve(G||0xff) returned TRUE, ecPointX on a 32-byte blob succeeded, ecEncodeCompressed(G||0x01) flipped the compressed sign from 02 to 03, and ecAdd(G, allZero64) returned cf88213f...169139c6 with ecOnCurve(result) false. All seven independently written compilers regenerate these exact bytes; before each regeneration the conformance run reported 0 mismatches BETWEEN compilers against 70 unanimous golden mismatches, which is the signature of a correct port meeting a stale reference rather than a port bug. expected-ir.json is provably unmoved in both commits, so the ANF is untouched and only stack lowering changed."
 }

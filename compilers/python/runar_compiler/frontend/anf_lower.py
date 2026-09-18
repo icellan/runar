@@ -43,6 +43,7 @@ from runar_compiler.frontend.ast_nodes import (
     UnaryExpr,
     VariableDeclStmt,
 )
+from runar_compiler.frontend.validator import is_to_byte_string_literal
 from runar_compiler.ir.types import (
     ANFBinding,
     ANFMethod,
@@ -60,6 +61,8 @@ from runar_compiler.frontend.side_effect_summary import (
     continuation_shape_for,
 )
 from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
+from runar_compiler.ir.loader import MAX_LOOP_COUNT
+from runar_compiler.frontend.typecheck import _BYTESTRING_SUBTYPES
 
 
 # ---------------------------------------------------------------------------
@@ -94,19 +97,49 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
 # Byte-typed expression detection
 # ---------------------------------------------------------------------------
 
-_BYTE_TYPES: frozenset[str] = frozenset({
-    "ByteString",
-    "PubKey",
-    "Sig",
-    "Sha256",
-    "Ripemd160",
-    "Addr",
-    "SigHashPreimage",
-    "RabinSig",
-    "RabinPubKey",
-    "Point",
-    "P256Point",
-    "P384Point",
+# N-076: there is deliberately no list here. typecheck._BYTESTRING_SUBTYPES is
+# the authority on whether a value of a given type sits on the stack as a BYTE
+# STRING rather than as a script NUMBER, and this module consults it.
+#
+# The second, hand-maintained copy this replaces carried "RabinSig" and
+# "RabinPubKey", which typecheck files under _BIGINT_SUBTYPES -- so `===` on a
+# Rabin value emitted OP_EQUAL and, far worse, `+` on one emitted OP_CAT where
+# the source said addition.
+#
+# Anything NOT in this family is numeric: compared with OP_NUMEQUAL, added with
+# OP_ADD.
+_BYTE_TYPES = _BYTESTRING_SUBTYPES
+
+# Preimage field extractors that return BYTES (ByteString / Sha256).
+#
+# N-054: this list is a transcription of the return_type the type checker
+# already records for these builtins in typecheck.py, and the stack lowerer
+# agrees with it byte for byte: _lower_extractor ends the split sequence with
+# OP_BIN2NUM for exactly the SIX extractors that are NOT listed here, and for
+# none of the ones that are.
+#
+# So an extractor listed here leaves a byte string on the stack and must be
+# compared with OP_EQUAL and concatenated with OP_CAT; every other extractor
+# leaves a minimally-encoded script NUMBER and must be compared with
+# OP_NUMEQUAL and added with OP_ADD.
+#
+# Getting it backwards is a correctness defect in both directions. OP_EQUAL on
+# a number is over-strict -- it rejects a witness that encodes the same value
+# with different bytes (0400 for 4), i.e. it refuses a valid spend. OP_NUMEQUAL
+# on a hash or a scriptCode is under-strict -- trailing high-order zero bytes
+# and negative zero compare equal to values they are not byte-equal to, i.e. a
+# covenant bypass.
+#
+# This replaces a name[:7] == "extract" prefix test that swept the six numeric
+# extractors in with the byte ones.
+_BYTE_RETURNING_EXTRACTORS: frozenset[str] = frozenset({
+    "extractHashPrevouts",
+    "extractHashSequence",
+    "extractOutpoint",
+    "extractScriptCode",
+    "extractOutputHash",
+    "extractOutputs",
+    "extractPrevOutputScript",
 })
 
 _BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
@@ -185,7 +218,7 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
                 return expr.asm_return_type == "ByteString"
             if expr.callee.name in _BYTE_RETURNING_FUNCTIONS:
                 return True
-            if len(expr.callee.name) >= 7 and expr.callee.name[:7] == "extract":
+            if expr.callee.name in _BYTE_RETURNING_EXTRACTORS:
                 return True
         return False
 
@@ -259,7 +292,7 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
         )
         if prop.initializer is not None and prop.name not in ctor_assigned:
             anf_prop.initial_value = _extract_literal_value(prop.initializer)
-            _check_state_bigint_magnitude(anf_prop)
+            _check_state_bigint_magnitude(anf_prop, prop.source_location)
         # Propagate synthetic FixedArray chain (set by expand_fixed_arrays)
         # so the artifact assembler can iteratively re-group synthetic runs.
         chain = getattr(prop, "synthetic_array_chain", None)
@@ -278,7 +311,7 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
 _STATE_BIGINT_MAGNITUDE_LIMIT = 1 << 63
 
 
-def _check_state_bigint_magnitude(prop: ANFProperty) -> None:
+def _check_state_bigint_magnitude(prop: ANFProperty, loc: object = None) -> None:
     """Reject a MUTABLE bigint property initialised beyond the 8-byte state word.
 
     The state section writes every bigint field with OP_NUM2BIN 8, which cannot
@@ -305,6 +338,7 @@ def _check_state_bigint_magnitude(prop: ANFProperty) -> None:
     if -_STATE_BIGINT_MAGNITUDE_LIMIT < value < _STATE_BIGINT_MAGNITUDE_LIMIT:
         return
     raise ValueError(
+        f"{_at(loc)}"
         f"Cannot compile state property '{prop.name}' initialised to {value}: it "
         "does not fit the fixed 8-byte sign-magnitude state word (magnitude must "
         "be < 2^63). Reduce the value, or make the property readonly if it is a "
@@ -334,6 +368,14 @@ def _extract_literal_value(expr: Expression) -> str | int | bool | None:
     if isinstance(expr, UnaryExpr) and expr.op == "-":
         if isinstance(expr.operand, BigIntLiteral):
             return -expr.operand.value
+    # `toByteString('<hex>')` IS the ByteStringLiteral production (see
+    # spec/grammar.md section 11 and the peer check in validator.py). UNWRAP it
+    # so `initial_value` holds the bare value, byte-identical to what the bare
+    # `'<hex>'` spelling produces. Without this the validator would accept the
+    # property and this function would return None for it -- silently DROPPING
+    # the default rather than storing a call node. Literal argument only.
+    if is_to_byte_string_literal(expr):
+        return expr.args[0].value
     return None
 
 
@@ -618,23 +660,25 @@ def _lower_params(params: list) -> list[ANFParam]:
 
 
 def _emit_embed_always_preservation(ctx: "_LowerCtx", fields: list) -> None:
-    """Issue #109: emit the DCE-surviving preservation pair for each
+    """Issue #109: emit the DCE-surviving preservation ``load_prop`` for each
     ``@embedAlways`` readonly field, into the given (public) method context.
 
-    Reproduces exactly what a hand-written ``const _bind = this.field;`` lowers
-    to: a ``load_prop`` followed by a ``load_const("@ref:<t>")`` alias. The alias
-    marks the ``load_prop`` as referenced (see ``collect_refs`` in the DCE pass),
-    so dead-binding DCE keeps it; stack lowering then emits the field's
-    constructor-slot placeholder and NIPs the unused value off the stack at
-    method end. The field's bytes therefore remain in the deployed locking
-    script for downstream recovery.
+    The injected ``load_prop`` carries ``preserve=True``, so ``has_side_effect``
+    in the DCE pass keeps it even though nothing references it; stack lowering
+    then emits the field's constructor-slot placeholder and NIPs the unused
+    value off the stack at method end. The field's bytes therefore remain in the
+    deployed locking script for downstream recovery.
+
+    This used to emit an alias pair instead -- the ``load_prop`` plus a
+    ``load_const("@ref:<t>")`` whose only job was to make the ``load_prop`` look
+    referenced. That survives ONE DCE sweep but not the fixed-point loop in
+    ``frontend/dce.py``: sweep 1 drops the now-unreferenced alias, sweep 2 then
+    drops the ``load_prop`` it was protecting, and both halves vanish. Marking
+    the node itself does not depend on a referencing binding surviving. Mirrors
+    the Zig reference (``compilers/zig/src/passes/anf_lower.zig``).
     """
     for field in fields:
-        load_ref = ctx.emit(ANFValue(kind="load_prop", name=field.name))
-        ctx.emit_named(
-            f"__embedAlways_{field.name}",
-            _make_load_const_string(f"@ref:{load_ref}"),
-        )
+        ctx.emit(ANFValue(kind="load_prop", name=field.name, preserve=True))
 
 
 # ---------------------------------------------------------------------------
@@ -656,9 +700,6 @@ class _MethodScope:
         self.auto_injected_params: list[ANFParam] = []
         # Set of names already recorded (dedup).
         self.auto_injected_set: set[str] = set()
-        # requireOutputP2PKH emits its hashOutputs(preimage) check at
-        # most ONCE per method body.
-        self.did_emit_hash_outputs_check: bool = False
 
     def record_auto_injected_param(self, name: str, typ: str) -> None:
         """Idempotent: second call with the same name is a no-op."""
@@ -725,6 +766,16 @@ class _LowerCtx:
         # Always non-None so sub-contexts inherit the same scope and
         # auto-injection registers regardless of nesting depth.
         self.method_scope: _MethodScope = method_scope if method_scope is not None else _MethodScope()
+        # requireOutputP2PKH emits its hashOutputs(preimage) commitment at most
+        # once per CONTROL-FLOW PATH -- deliberately NOT on ``method_scope``.
+        # A sub-context inherits the flag from its parent (the commitment on a
+        # dominating path really has been established), but its writes stay
+        # local, so an ``if``'s two arms cannot latch it for each other. Only
+        # one arm runs on chain, and the arm-local per-output assertion
+        # compares a substring of the attacker-supplied ``_serialisedOutputs``
+        # witness: without its own commitment that arm constrains nothing about
+        # the transaction's real outputs.
+        self.did_emit_hash_outputs_check: bool = False
 
     def push_param_alias(self, name: str, alias_ref: str) -> None:
         self._param_alias_stack.setdefault(name, []).append(alias_ref)
@@ -772,6 +823,38 @@ class _LowerCtx:
             if m.name == name and m.visibility != "public":
                 return m
         return None
+
+    def check_private_call_arity(self, name: str, arg_refs: list[str]) -> None:
+        """Refuse a private-method call whose arg count != the method's params.
+
+        R-189: typecheck resolves a BARE-IDENTIFIER call against the builtin
+        table first, while ANF lowering resolves it against the contract's
+        private methods first. A private method that shadows a builtin name
+        with a different arity -- `private min(a, b, c)` called as
+        `min(x, y)` -- therefore passes the arity check for `min` the BUILTIN
+        and then lowers as `min` the METHOD. Nothing forbids the shadowing.
+
+        Downstream, params and args were zipped pairwise up to the shorter of
+        the two, so the surplus was dropped on the floor: the extra argument
+        was evaluated and discarded, or the unbound parameter compiled to a
+        dangling reference. When the unbound parameter happened to be UNUSED
+        the contract compiled clean -- an arity mismatch silently accepted.
+        When it was used, it surfaced two passes later as "method parameter
+        'c' is not on the stack", naming a pass the author never wrote in.
+
+        Refused here, where both counts are known, on every call form
+        (`m(x)`, `this.m(x)`, member `this.m(x)`) and for both the inlined and
+        the method_call lowering path.
+        """
+        method = self.get_private_method(name)
+        if method is None:
+            return
+        if len(method.params) == len(arg_refs):
+            return
+        raise ValueError(
+            f"private method '{name}' expects {len(method.params)} "
+            f"argument(s), got {len(arg_refs)}."
+        )
 
     def fresh_temp(self) -> str:
         name = f"t{self._counter}"
@@ -869,11 +952,27 @@ class _LowerCtx:
         # Issue #123: a manual checkPreimage() inside a nested block must bind
         # under the same declared @sighash mode as the enclosing method.
         sub.sighash_flag = self.sighash_flag
+        # Inherit (copy, not share) the output-hash commitment state: a
+        # commitment already emitted on the dominating path covers this block
+        # too, but a commitment emitted INSIDE this block must not be visible
+        # to the parent or to a sibling arm.
+        sub.did_emit_hash_outputs_check = self.did_emit_hash_outputs_check
         # Share the method-scoped param-type table by reference so if/else
         # sub-contexts resolve parameter types against the same method.
         sub._param_types = self._param_types
         sub._local_aliases = dict(self._local_aliases)
         sub._local_byte_vars = set(self._local_byte_vars)
+        # Deep-copy the inlined-param alias stack. ``_inline_private_method_call``
+        # pushes the caller's argument refs onto the CURRENT context before
+        # lowering the private body; without this, an if arm / loop body /
+        # ternary arm inside that body lowers with no aliases and falls through
+        # to ``load_param`` naming the PRIVATE's own parameter -- which resolves
+        # to the CALLER's same-named parameter instead of the argument that was
+        # passed in. ``spec/semantics.md`` 6.3 makes inlining substitution, so
+        # the helper form and the hand-inlined form must compile to the same
+        # script. Copied (not shared) because push/pop inside the nested block
+        # are balanced there and must not disturb the parent's frames.
+        sub._param_alias_stack = {k: list(v) for k, v in self._param_alias_stack.items()}
         # ``_lift_branch_update_props`` walks ``method.body`` and does NOT
         # recurse, so an ``if`` its recogniser accepts is only actually
         # REWRITTEN at method top level. ``lower_if_statement`` needs the same
@@ -1039,6 +1138,7 @@ class _LowerCtx:
             )
             if reason is not None:
                 raise ValueError(
+                    f"{_at(stmt.source_location)}"
                     "Cannot compile conditional that both declares outputs and "
                     f"{reason}. Move the addOutput/addRawOutput/addDataOutput "
                     "call after the if-statement."
@@ -1064,6 +1164,7 @@ class _LowerCtx:
         for _name in merged_locals:
             if _name in arm_props:
                 raise ValueError(
+                    f"{_at(stmt.source_location)}"
                     f"Local variable '{_name}' shadows contract property "
                     f"'this.{_name}', and the conditional assigns both. The "
                     f"branch's result slots are identified by name, so the two "
@@ -1418,6 +1519,28 @@ class _LowerCtx:
     def _lower_call_expr(self, e: CallExpr) -> str:
         callee = e.callee
 
+        # `toByteString('<hex>')` IS the ByteStringLiteral production — see
+        # spec/grammar.md section 11:
+        #
+        #     ByteStringLiteral = 'toByteString' '(' StringLiteral ')' ;
+        #
+        # so it must reach the IR as a literal, indistinguishable from the bare
+        # `'<hex>'` spelling the other surfaces use. Lowering it to a
+        # `toByteString` call node instead made the `.runar.rs` surface — where a
+        # bare literal is not valid Rust and this wrapper is the ONLY spelling
+        # that is both valid Rust and valid Rúnar — unable to match the one
+        # `expected-ir.json` every format is compared against.
+        #
+        # Literal argument only. `toByteString(x)` for a non-literal `x` is not
+        # this production; it stays an identity-cast call node (the typechecker
+        # types it ByteString -> ByteString and stack lowering already treats it
+        # as a no-op), so its behaviour is unchanged.
+        if (
+            isinstance(callee, Identifier) and callee.name == "toByteString"
+            and len(e.args) == 1 and isinstance(e.args[0], ByteStringLiteral)
+        ):
+            return self.lower_expr_to_ref(e.args[0])
+
         # super(...) call — accepts both Identifier("super") and MemberExpr(super, "")
         is_super = (isinstance(callee, Identifier) and callee.name == "super") or (
             isinstance(callee, MemberExpr) and isinstance(callee.object, Identifier)
@@ -1504,9 +1627,11 @@ class _LowerCtx:
         # paying `amount` satoshis to `pubkeyHash`. Auto-injects
         # `_serialisedOutputs` (once per method) and emits
         # hash256(serialisedOutputs) == extractOutputHash(txPreimage) the
-        # first time the intrinsic is called in a method body. Subsequent
-        # calls in the same method skip the hashOutputs check (already
-        # established) and emit only the per-output substring assertion.
+        # first time the intrinsic is called on a given CONTROL-FLOW PATH.
+        # A later call on that same path skips the hashOutputs check (already
+        # established) and emits only the per-output substring assertion; a
+        # call in a sibling ``if`` arm re-emits it, because that arm does not
+        # execute the other arm's commitment.
         #
         # v1 assumes all outputs in the serialised set are exactly 34 bytes
         # (8-byte LE amount || 0x19 length || 25-byte P2PKH script). Byte
@@ -1518,14 +1643,23 @@ class _LowerCtx:
             if not isinstance(idx_lit, BigIntLiteral):
                 return self.emit(_make_load_const_string(""))
             idx = idx_lit.value
+            # W2 backstop. The user-facing refusal lives in the typechecker, where a
+            # diagnostic carries a source location -- but ANF lowering is reachable from
+            # callers that run no typechecker, and R-012 is this repo's standing lesson about
+            # a security check that lives in exactly one pass. Unreachable in the normal
+            # pipeline: typecheck answers first.
+            if idx != 0:
+                raise ValueError(
+                    f"requireOutputP2PKH: outputIndex must be 0; got {idx}. The emitted assertion reads output i at byte offset i*34, which is an output boundary only if every earlier output is exactly 34 bytes -- an attacker sizes output 0 freely and can put the expected P2PKH bytes inside its OP_RETURN payload at that offset."
+                )
 
             self.method_scope.record_auto_injected_param("_serialisedOutputs", "ByteString")
             self.add_param("_serialisedOutputs")
             self.register_param_type("_serialisedOutputs", "ByteString")
 
-            # Emit the hashOutputs(preimage) check exactly once per method.
-            if not self.method_scope.did_emit_hash_outputs_check:
-                self.method_scope.did_emit_hash_outputs_check = True
+            # Emit the hashOutputs(preimage) check exactly once per path.
+            if not self.did_emit_hash_outputs_check:
+                self.did_emit_hash_outputs_check = True
                 serialised_ref = self.emit(ANFValue(kind="load_param", name="_serialisedOutputs"))
                 actual_out_hash_ref = self.emit(_make_call("hash256", [serialised_ref]))
                 preimage_ref = self.emit(ANFValue(kind="load_param", name="txPreimage"))
@@ -1667,6 +1801,7 @@ class _LowerCtx:
         # effects).
         if isinstance(callee, PropertyAccessExpr):
             arg_refs = self._lower_args(e.args)
+            self.check_private_call_arity(callee.property, arg_refs)
             if self.should_inline_private(callee.property):
                 return self._inline_private_method_call(callee.property, arg_refs)
             this_ref = self.emit(_make_load_const_string("@this"))
@@ -1679,6 +1814,7 @@ class _LowerCtx:
         if isinstance(callee, MemberExpr):
             if isinstance(callee.object, Identifier) and callee.object.name == "this":
                 arg_refs = self._lower_args(e.args)
+                self.check_private_call_arity(callee.property, arg_refs)
                 if self.should_inline_private(callee.property):
                     return self._inline_private_method_call(callee.property, arg_refs)
                 this_ref = self.emit(_make_load_const_string("@this"))
@@ -1720,6 +1856,7 @@ class _LowerCtx:
             # lowering can inline the body. Keeps .runar.move in sync with
             # .runar.ts across all formats.
             if self._is_private_method(callee.name):
+                self.check_private_call_arity(callee.name, arg_refs)
                 if self.should_inline_private(callee.name):
                     return self._inline_private_method_call(callee.name, arg_refs)
                 this_ref = self.emit(_make_load_const_string("@this"))
@@ -1781,7 +1918,29 @@ class _LowerCtx:
 
         if end_index > start_index:
             return self.bindings[end_index - 1].name
-        return self.emit(_make_load_const_string("@void"))
+
+        # R-290: the body emitted nothing, so there is no value for the caller
+        # to reference.
+        #
+        # Refuse it. The alternative is what was here before: a `load_const "@void"`
+        # sentinel that no tier's stack lowering recognises (unlike `@this`, which IS
+        # special-cased). It survived pass 4 and died in pass 6's hex decoder —
+        # "invalid byte: U+0040 '@'" in Go, "invalid hex string length: 5" in Rust —
+        # messages that name neither the method nor the problem, and that only fire
+        # because the string happens to be odd-length and non-hex. An even-length
+        # sentinel would decode to zeros in the Rust decoder's
+        # `from_str_radix(..).unwrap_or(0)` and reach the script.
+        #
+        # Reachable from source that parses, validates and type-checks: declare a public
+        # method BEFORE two same-named privates. The side-effect summary resolves the
+        # name through a last-wins map and caches the OUTPUT-EMITTING one, so
+        # `shouldInlinePrivate` says yes; `getPrivateMethod` returns the FIRST match,
+        # whose body is empty. Measured pre-fix: `--emit-ir` exit 0 with `@void` in the
+        # IR, `--hex` exit 1 with the hex-decoder message.
+        raise ValueError(
+            f"private method '{method_name}' was inlined but produced no "
+            f"bindings, so the call site has no value to reference."
+        )
 
     def _lower_ternary_arm(self, e: Expression) -> None:
         """Lower one arm of a ternary so the arm ENDS with its result binding.
@@ -1872,7 +2031,7 @@ def _make_load_const_int(val: int) -> ANFValue:
     # AND so consuming IR decoders can distinguish a decimal-encoded big
     # integer from a hex-encoded ByteString literal. ``bigint_json_value``
     # owns the boundary (Number.MAX_SAFE_INTEGER, not int64).
-    raw = json.dumps(bigint_json_value(val))
+    raw = bigint_json_value(val)
     return ANFValue(
         kind="load_const",
         raw_value=raw,
@@ -1881,8 +2040,24 @@ def _make_load_const_int(val: int) -> ANFValue:
     )
 
 
+def _at(loc: object) -> str:
+    """``file:line:column: `` prefix for an ANF-stage rejection.
+
+    R-180: the rejections raised during ANF lowering are ordinary input
+    rejections — the user wrote something the language does not accept — but
+    they arrived with no location, while every validation-stage rejection
+    carries one. Same spelling as ``Diagnostic.format_message`` so the two
+    stages read identically.
+    """
+    if loc is None or not getattr(loc, "file", ""):
+        return ""
+    if getattr(loc, "column", 0) > 0:
+        return f"{loc.file}:{loc.line}:{loc.column}: "
+    return f"{loc.file}:{loc.line}: "
+
+
 def _make_load_const_bool(val: bool) -> ANFValue:
-    raw = json.dumps(val)
+    raw = val
     return ANFValue(
         kind="load_const",
         raw_value=raw,
@@ -1891,7 +2066,7 @@ def _make_load_const_bool(val: bool) -> ANFValue:
 
 
 def _make_load_const_string(val: str) -> ANFValue:
-    raw = json.dumps(val)
+    raw = val
     return ANFValue(
         kind="load_const",
         raw_value=raw,
@@ -2134,7 +2309,7 @@ def _collect_updated_props(bindings: list[ANFBinding], out: list[str]) -> None:
 
 
 def _make_assert(value_ref: str) -> ANFValue:
-    raw = json.dumps(value_ref)
+    raw = value_ref
     return ANFValue(
         kind="assert",
         raw_value=raw,
@@ -2151,7 +2326,7 @@ def _make_auto_injected_state_check_assert(value_ref: str) -> ANFValue:
     code with identical IR shape (covenant rules, e.g.
     ``examples/rust/covenant-vault``).
     """
-    raw = json.dumps(value_ref)
+    raw = value_ref
     return ANFValue(
         kind="assert",
         raw_value=raw,
@@ -2161,7 +2336,7 @@ def _make_auto_injected_state_check_assert(value_ref: str) -> ANFValue:
 
 
 def _make_update_prop(name: str, value_ref: str) -> ANFValue:
-    raw = json.dumps(value_ref)
+    raw = value_ref
     return ANFValue(
         kind="update_prop",
         name=name,
@@ -2333,19 +2508,39 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
     start = _extract_bigint_value(stmt.init.init if stmt.init else None)
     if start is None:
         raise ValueError(
+            f"{_at(stmt.source_location)}"
             "Cannot determine loop start at compile time. For-loop iterators "
             "must start at an integer literal."
         )
 
     if not isinstance(stmt.condition, BinaryExpr):
         raise ValueError(
+            f"{_at(stmt.source_location)}"
             "Cannot determine loop bound at compile time. For-loop bounds must "
             "be integer literals."
         )
+    # W4 backstop. The user-facing refusal lives in the validator, which is
+    # where a located diagnostic belongs -- but ANF lowering is reachable
+    # without it, and then the count comes from ``bound - start`` while the
+    # condition tests something else entirely: ``i + 1n < 2n`` runs once in the
+    # source language and twice here.
+    _iter_name = stmt.init.name if stmt.init is not None else ""
+    if not (
+        isinstance(stmt.condition.left, Identifier)
+        and stmt.condition.left.name == _iter_name
+    ):
+        raise ValueError(
+            f"{_at(stmt.source_location)}"
+            f"For loop condition must compare the loop variable '{_iter_name}' to a "
+            "compile-time constant; the left-hand side is not the iterator, so the "
+            "unrolled trip count would not be the one the source asks for."
+        )
+
     op = stmt.condition.op
     bound = _extract_bigint_value(stmt.condition.right)
     if bound is None:
         raise ValueError(
+            f"{_at(stmt.source_location)}"
             "Cannot determine loop bound at compile time. For-loop bounds must "
             "be integer literals."
         )
@@ -2360,6 +2555,7 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
             count = bound - start + 1
         else:
             raise ValueError(
+                f"{_at(stmt.source_location)}"
                 f"For loop counting up (i++) must use '<' or '<=' (got '{op}')."
             )
     else:
@@ -2369,8 +2565,22 @@ def _extract_loop_shape(stmt: ForStmt) -> tuple[int, int, int]:
             count = start - bound + 1
         else:
             raise ValueError(
+                f"{_at(stmt.source_location)}"
                 f"For loop counting down (i--) must use '>' or '>=' (got '{op}')."
             )
+
+    # Bound the arbitrary-precision count BEFORE handing it to the unroller.
+    # Python integers do not truncate, so `max(0, count)` faithfully preserves a
+    # bound of 10**20 and the unroller then tries to honour it — a hang, not a
+    # diagnostic. MAX_LOOP_COUNT already bounded loop counts arriving on the
+    # `--ir` path; a loop written in source deserves the same ceiling.
+    # CL-BUG-088.
+    if count > MAX_LOOP_COUNT:
+        raise ValueError(
+            f"{_at(stmt.source_location)}"
+            f"For loop unrolls to {count} iterations, exceeding the maximum "
+            f"loop count of {MAX_LOOP_COUNT}."
+        )
 
     return start, step, max(0, count)
 
@@ -2679,11 +2889,11 @@ def _remap_value_refs(value: ANFValue, name_map: dict[str, str]) -> ANFValue:
             if mapped is not None:
                 new_ref = "@ref:" + mapped
                 new_v.const_string = new_ref
-                new_v.raw_value = json.dumps(new_ref)
+                new_v.raw_value = new_ref
 
     # Refresh raw_value for kinds that store the value reference there
     if value.kind in ("assert", "update_prop") and new_v.value_ref is not None:
-        new_v.raw_value = json.dumps(new_v.value_ref)
+        new_v.raw_value = new_v.value_ref
 
     return new_v
 
@@ -2861,8 +3071,32 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     value=_remap_value_refs(vb.value, branch_map),
                 ))
 
-            # The branch's value_ref also needs remapping (it points into value_bindings)
+            # An arm's VALUE is its LAST binding. value_bindings is everything
+            # before the original update_prop, which ends on the assigned value
+            # only when that value was computed INSIDE the arm. When the arm
+            # assigns something bound outside it — a local, or anything hoisted
+            # before the chain — value_bindings does not contain it and is
+            # usually empty, so the arm was emitted EMPTY and stack lowering
+            # padded it with a zero push: `if (p == 0n) { this.c0 = someLocal }`
+            # compiled to `this.c0 = 0`, silently corrupting state on the
+            # MATCHED branch. (TicTacToe's `this.cN = this.turn` escapes only
+            # because its load_prop lands inside the arm.)
+            #
+            # Materialise the value explicitly whenever the arm does not
+            # already end on it. When it does — every shape that compiled
+            # correctly before — this is a no-op and no bytes move.
             mapped_value_ref = branch_map.get(branch.value_ref, branch.value_ref)
+            if not then_bindings or then_bindings[-1].name != mapped_value_ref:
+                value_name = fresh()
+                value_ref_str = "@ref:" + mapped_value_ref
+                then_bindings.append(ANFBinding(
+                    name=value_name,
+                    value=ANFValue(
+                        kind="load_const",
+                        raw_value=value_ref_str,
+                        const_string=value_ref_str,
+                    ),
+                ))
 
             # Else branch: keep old property value
             keep_name = fresh()
@@ -2872,18 +3106,13 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                     name=keep_name,
                     value=ANFValue(
                         kind="load_const",
-                        raw_value=json.dumps(ref_str),
+                        raw_value=ref_str,
                         const_string=ref_str,
                     ),
                 ),
             ]
 
             # Emit conditional if-expression
-            # Note: mapped_value_ref is computed above for symmetry with TS/Go,
-            # but the standard ANF invariant is that the last binding in
-            # value_bindings produces the value the original update_prop
-            # referenced, so it is already the last binding in then_bindings.
-            _ = mapped_value_ref  # reserved for invariant checks in tests
             cond_if_ref = fresh()
             result.append(ANFBinding(
                 name=cond_if_ref,
@@ -2902,7 +3131,7 @@ def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
                 value=ANFValue(
                     kind="update_prop",
                     name=branch.prop_name,
-                    raw_value=json.dumps(cond_if_ref),
+                    raw_value=cond_if_ref,
                     value_ref=cond_if_ref,
                 ),
             ))

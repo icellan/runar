@@ -56,6 +56,7 @@ import runar.compiler.ir.stack.RotOp;
 import runar.compiler.ir.stack.StackMethod;
 import runar.compiler.ir.stack.StackOp;
 import runar.compiler.ir.stack.StackProgram;
+import runar.compiler.ir.stack.VerifyCodePartLenOp;
 import runar.compiler.ir.stack.SwapOp;
 
 /**
@@ -76,6 +77,17 @@ public final class StackLower {
     private StackLower() {}
 
     private static final int MAX_STACK_DEPTH = 800;
+
+    /**
+     * The largest exponent {@code pow(base, exp)} computes, and therefore the
+     * largest one the emitted script ACCEPTS — {@code lowerPow} unrolls exactly
+     * this many conditional multiplies and refuses anything outside
+     * {@code 0 <= exp <= POW_EXPONENT_LIMIT}. The same number lives in
+     * {@code ConstantFold} (which must decline to fold outside it); they have to
+     * move together or {@code pow} means different things folded and executed
+     * (R-169).
+     */
+    static final int POW_EXPONENT_LIMIT = 32;
 
 
     private static int trailingMergedLocalResults(List<AnfBinding> bindings) {
@@ -151,20 +163,45 @@ public final class StackLower {
     // State-field type classification (mirrors stack.py)
     // ------------------------------------------------------------------
 
-    private static final Set<String> NUMERIC_STATE_TYPES = Set.of(
-        "bigint", "boolean", "RabinSig", "RabinPubKey"
+    /**
+     * Fixed byte width each numeric state type occupies in the state section.
+     *
+     * <p>Single source of truth for BOTH sides of the section: the READER
+     * ({@link #isNumericStateType}) and the two state SERIALIZERS in
+     * {@code lowerGetStateScript} / {@code lowerAddOutput}. Those serializers
+     * used to carry their own literal {@code "bigint".equals(prop.type())} test
+     * and drifted from this table when the reader alone was widened for
+     * {@code RabinSig} / {@code RabinPubKey} — a writer that emits a value's
+     * minimal script-number encoding into a section the reader splits at a
+     * fixed width builds a continuation its own script cannot re-read.
+     * {@code RabinSig} / {@code RabinPubKey} are bigint aliases.
+     */
+    private static final Map<String, Integer> NUMERIC_STATE_TYPE_WIDTHS = Map.of(
+        "bigint", 8, "RabinSig", 8, "RabinPubKey", 8, "boolean", 1
     );
     private static final Set<String> VARIABLE_LENGTH_STATE_TYPES = Set.of(
         "ByteString", "Sig", "SigHashPreimage"
     );
 
+    /** Fixed byte width of a numeric state type, or 0 if it is not numeric state. */
+    private static int numericStateTypeWidth(String t) {
+        return NUMERIC_STATE_TYPE_WIDTHS.getOrDefault(t, 0);
+    }
+
     private static boolean isNumericStateType(String t) {
-        return NUMERIC_STATE_TYPES.contains(t);
+        return NUMERIC_STATE_TYPE_WIDTHS.containsKey(t);
     }
 
     private static boolean isVariableLengthStateType(String t) {
         return VARIABLE_LENGTH_STATE_TYPES.contains(t);
     }
+
+    /**
+     * Unrolled-loop bound for {@code reverseBytes}: 520 is the maximum BSV
+     * stack-element size, so the loop always drains the input. The count is
+     * part of the emitted bytes, so it must match every peer tier exactly.
+     */
+    private static final int REVERSE_BYTES_MAX_ITERATIONS = 520;
 
     // ------------------------------------------------------------------
     // Opcode maps
@@ -626,26 +663,244 @@ public final class StackLower {
     // ------------------------------------------------------------------
 
     public static StackProgram run(AnfProgram program) {
-        Map<String, AnfMethod> privateMethods = new HashMap<>();
+        Map<String, AnfMethod> privateMethods = privateMethodMap(program);
+
+        // R-010: the single script-level OP_CODESEPARATOR is a CONTRACT-level
+        // decision, keyed on `_codePart` — not on "this method verifies a
+        // preimage". It has to be known before any method is lowered, because
+        // it decides whether that method emits a separator of its own. See
+        // {@link #lowerCheckPreimage} and {@code Emit#runResultFull}.
+        boolean scriptLevelCodeSeparator = false;
         for (AnfMethod m : program.methods()) {
-            if (!m.isPublic() && !"constructor".equals(m.name())) {
-                privateMethods.put(m.name(), m);
+            if ("constructor".equals(m.name()) || !m.isPublic()) continue;
+            if (methodRequiresCodePart(m, program.properties(), privateMethods)) {
+                scriptLevelCodeSeparator = true;
+                break;
             }
         }
 
         List<StackMethod> out = new ArrayList<>();
         for (AnfMethod m : program.methods()) {
             if ("constructor".equals(m.name()) || !m.isPublic()) continue;
-            out.add(lowerMethod(m, program.properties(), privateMethods));
+            out.add(lowerMethod(m, program.properties(), privateMethods, scriptLevelCodeSeparator));
         }
 
+        pinCodePartLength(out, program.properties());
+
         return new StackProgram(program.contractName(), out);
+    }
+
+    /**
+     * Baked value width, in bytes, of every fixed-size constructor-arg type.
+     * Mirrors the {@code raw}-encoded entries of the shared
+     * {@code STATE_FIELD_WIDTHS} table.
+     */
+    private static Integer constructorSlotValueBytes(String type) {
+        return switch (type) {
+            case "PubKey" -> 33;
+            case "Sha256" -> 32;
+            case "Addr", "Ripemd160" -> 20;
+            case "Point", "P256Point" -> 64;
+            case "P384Point" -> 96;
+            default -> null;
+        };
+    }
+
+    /**
+     * Byte length of the push header {@code encodePushData} puts in front of an
+     * N-byte payload: the length byte itself up to 75, then
+     * OP_PUSHDATA1 / 2 / 4.
+     */
+    private static int pushHeaderLen(int valueBytes) {
+        if (valueBytes <= 75) return 1;
+        if (valueBytes <= 0xff) return 2;
+        if (valueBytes <= 0xffff) return 3;
+        return 5;
+    }
+
+    /**
+     * R-095 — deploy-time byte GROWTH of the single OP_0 placeholder a
+     * constructor slot of this type occupies in the template, or {@code null}
+     * when the type has no compile-time width.
+     *
+     * <p>Mirrors the SDK's {@code encodeArg}: a fixed-size data type bakes as
+     * {@code <push header><N value bytes>} over a 1-byte placeholder, so it
+     * grows the script by {@code pushHeaderLen(N) + N - 1}.
+     *
+     * <p>The header is NOT always one byte, and this method used to assume it
+     * was. {@code P384Point} is 96 bytes — past the 75-byte direct-push
+     * ceiling — so the SDK bakes it through OP_PUSHDATA1 as
+     * {@code 4c 60 || <96>} and it grows the script by 97, not 96.
+     * Under-counting by one emits an {@code exact} pin one byte short, and
+     * every honest spend of such a contract fails OP_VERIFY with the funds
+     * already locked. Deriving the header from the width keeps the next type
+     * above 75 bytes from repeating that silently.
+     *
+     * <p>A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
+     * placeholder, so it grows the script by nothing. {@code bigint}
+     * (minimally-encoded Script number) and {@code ByteString}
+     * (arbitrary-length data push) depend on the VALUE, which the compiler
+     * never sees — those return {@code null} and demote the pin to a lower
+     * bound.
+     */
+    private static Integer constructorSlotGrowth(String type) {
+        if (type == null) return null;
+        if (type.equals("boolean")) return 0;
+        Integer valueBytes = constructorSlotValueBytes(type);
+        if (valueBytes == null) return null;
+        return pushHeaderLen(valueBytes) + valueBytes - 1;
+    }
+
+    /**
+     * R-095 — resolve {@code delta} / {@code exact} on every
+     * {@link VerifyCodePartLenOp}.
+     *
+     * <p>A constructor slot exists only where a property is actually LOADED,
+     * and a method is lowered before the methods after it, so no single method
+     * knows the contract's full placeholder set. This runs once the whole
+     * program is lowered and counts the placeholders that were really emitted,
+     * so an unused readonly property contributes nothing — over-counting would
+     * inflate the pin and make every honest spend unspendable.
+     *
+     * <p>Methods {@code Emit} never writes (the constructor) are skipped: their
+     * placeholders never become deploy-time slots. {@link #run(AnfProgram)}
+     * already filters the constructor out of {@code methods}; the guard here
+     * mirrors the TS / Go references so a caller that hands in a wider list
+     * still gets the same answer.
+     */
+    static void pinCodePartLength(List<StackMethod> methods, List<AnfProperty> properties) {
+        List<VerifyCodePartLenOp> pins = new ArrayList<>();
+        List<Integer> placeholders = new ArrayList<>();
+
+        for (StackMethod m : methods) {
+            if ("constructor".equals(m.name())) continue;
+            collectCodePartPins(m.ops(), pins, placeholders);
+        }
+        if (pins.isEmpty()) return;
+
+        // Matches the paramIndex space lowerLoadProp assigns.
+        List<AnfProperty> ctorProps = new ArrayList<>();
+        for (AnfProperty p : properties) {
+            if (p.initialValue() == null) ctorProps.add(p);
+        }
+
+        int delta = 0;
+        boolean exact = true;
+        for (int paramIndex : placeholders) {
+            String type = (paramIndex >= 0 && paramIndex < ctorProps.size())
+                ? ctorProps.get(paramIndex).type()
+                : null;
+            Integer growth = constructorSlotGrowth(type);
+            if (growth == null) {
+                // No compile-time width. Growth is never negative, so the
+                // running sum stays a sound lower bound — just not an exact one.
+                exact = false;
+            } else {
+                delta += growth;
+            }
+        }
+
+        for (VerifyCodePartLenOp pin : pins) {
+            pin.resolve(delta, exact);
+        }
+    }
+
+    private static void collectCodePartPins(
+        List<StackOp> ops,
+        List<VerifyCodePartLenOp> pins,
+        List<Integer> placeholders
+    ) {
+        for (StackOp op : ops) {
+            if (op instanceof IfOp ifo) {
+                collectCodePartPins(ifo.thenBranch(), pins, placeholders);
+                if (ifo.elseBranch() != null) collectCodePartPins(ifo.elseBranch(), pins, placeholders);
+            } else if (op instanceof PlaceholderOp ph) {
+                placeholders.add(ph.paramIndex().intValueExact());
+            } else if (op instanceof VerifyCodePartLenOp v) {
+                pins.add(v);
+            }
+        }
+    }
+
+    /**
+     * Whether this method's unlocking script is prefixed with the implicit
+     * {@code _codePart} parameter: true for continuation builders
+     * (add_output / add_raw_output / computeStateOutput) AND for methods that
+     * read a mutable variable-length (ByteString) state field, whose
+     * deserialization needs the preimage-relative offset (issue #100). Always
+     * false for methods that don't use checkPreimage at all.
+     *
+     * <p>R-007: exposed so the artifact assembler can publish it as
+     * {@code abi.methods[].usesCodePart}, which is what the SDK reads to decide
+     * whether to push {@code _codePart} — matching
+     * {@code compilers/go/codegen/stack.go}'s {@code UsesCodePart}. Extracted
+     * verbatim from {@link #lowerMethod}, which is still its only in-pass
+     * caller, so the two can never disagree.
+     */
+    public static boolean methodRequiresCodePart(
+        AnfMethod method,
+        List<AnfProperty> properties,
+        Map<String, AnfMethod> privateMethods
+    ) {
+        if (!methodUsesCheckPreimage(method.body(), privateMethods, new java.util.HashSet<>())) {
+            return false;
+        }
+        // This predicate MUST agree with the branch lowerDeserializeState
+        // actually takes, and that branch keys off a CONTRACT-level fact:
+        // hasVariableLength — does ANY mutable property carry a push-data length
+        // prefix. When one does, the state section can only be located via the
+        // _codePart-relative offset, so the WHOLE deserialization is gated on
+        // _codePart; without it the pass hits its "no _codePart" shortcut,
+        // pushes NO mutable property, and every load_prop falls through to the
+        // DEPLOY-TIME constructor placeholder instead of the live on-chain value.
+        //
+        // Two narrower versions of this question have already been wrong here:
+        //   R-015 (CL-BUG-138) asked the wrong TYPE question — "is it literally
+        //   ByteString" rather than what isVariableLengthStateType says.
+        //   R-074 asked the wrong SCOPE question — "does this method read a
+        //   var-length property", when reading the fixed-size SIBLING of one is
+        //   just as gated. A terminal read of a bigint next to a ByteString
+        //   authorised against the deploy-time value forever.
+        // So ask the deserializer's own question: if the contract has
+        // var-length state, EVERY mutable-property read needs _codePart.
+        boolean hasVarLen = false;
+        for (AnfProperty p : properties) {
+            if (!p.readonly() && isVariableLengthStateType(p.type())) {
+                hasVarLen = true;
+                break;
+            }
+        }
+        java.util.Set<String> readsNeedCodePart = new java.util.HashSet<>();
+        if (hasVarLen) {
+            for (AnfProperty p : properties) {
+                if (!p.readonly()) readsNeedCodePart.add(p.name());
+            }
+        }
+        return methodUsesCodePart(method.body())
+            || methodReadsVarLenState(method.body(), readsNeedCodePart, privateMethods, new java.util.HashSet<>());
+    }
+
+    /**
+     * Private methods reachable from inlining, keyed by name. Mirrors the map
+     * {@link #run(AnfProgram)} builds; exposed so callers outside the pass
+     * (the R-007 artifact assembler) can evaluate
+     * {@link #methodRequiresCodePart} with the same inputs the pass used.
+     */
+    public static Map<String, AnfMethod> privateMethodMap(AnfProgram program) {
+        Map<String, AnfMethod> privateMethods = new HashMap<>();
+        for (AnfMethod m : program.methods()) {
+            if (!m.isPublic() && !"constructor".equals(m.name())) {
+                privateMethods.put(m.name(), m);
+            }
+        }
+        return privateMethods;
     }
 
     private static StackMethod lowerMethod(
         AnfMethod method,
         List<AnfProperty> properties,
-        Map<String, AnfMethod> privateMethods
+        Map<String, AnfMethod> privateMethods,
+        boolean scriptLevelCodeSeparator
     ) {
         List<String> paramNames = new ArrayList<>();
         for (AnfParam p : method.params()) paramNames.add(p.name());
@@ -664,17 +919,26 @@ public final class StackLower {
             // reads a mutable variable-length (ByteString) state field — the
             // var-length deserialization needs it for the preimage-relative
             // offset (issue #100).
-            java.util.Set<String> varLenProps = new java.util.HashSet<>();
-            for (AnfProperty p : properties) {
-                if (!p.readonly() && "ByteString".equals(p.type())) varLenProps.add(p.name());
-            }
-            if (methodUsesCodePart(method.body())
-                || methodReadsVarLenState(method.body(), varLenProps, privateMethods, new java.util.HashSet<>())) {
+            if (methodRequiresCodePart(method, properties, privateMethods)) {
                 paramNames.add(0, "_codePart");
             }
         }
 
         LoweringContext ctx = new LoweringContext(paramNames, properties, privateMethods);
+        ctx.scriptLevelCodeSeparator = scriptLevelCodeSeparator;
+
+        // W3 / BoolBamboozle: a public method's `boolean` parameters arrive from
+        // the unlocking script as arbitrary bytes. Pin each of them to the ABI
+        // domain {empty, 0x01} before a single body opcode runs — see
+        // emitBooleanParamGate. Constructor args are baked into the locking
+        // script by the assembler, never pushed by a spender, so only public
+        // methods need the gate.
+        if (method.isPublic()) {
+            for (AnfParam p : method.params()) {
+                if ("boolean".equals(p.type())) ctx.emitBooleanParamGate(p.name());
+            }
+        }
+
         ctx.lowerBindings(method.body(), method.isPublic());
 
         // Strip excess stack items below the top-of-stack boolean (CLEANSTACK).
@@ -696,7 +960,7 @@ public final class StackLower {
                 + " (actual: " + ctx.maxDepth + ")");
         }
 
-        return new StackMethod(method.name(), ctx.ops, ctx.maxDepth);
+        return new StackMethod(method.name(), ctx.ops, ctx.maxDepth, scriptLevelCodeSeparator);
     }
 
     /**
@@ -802,6 +1066,13 @@ public final class StackLower {
         Map<String, Boolean> localBindings = new HashMap<>();
         Set<String> outerProtectedRefs;
         boolean insideBranch;
+        /**
+         * R-010, contract-level: true when ANY public method of this contract
+         * authenticates a {@code _codePart} witness, in which case the emitter
+         * puts a single OP_CODESEPARATOR at offset 1 of the locking script and
+         * {@link #lowerCheckPreimage} emits none of its own.
+         */
+        boolean scriptLevelCodeSeparator;
         /**
          * Method params whose names collide with a MUTABLE property. Maps the
          * param name to the reserved stack-slot name its witness value lives
@@ -932,6 +1203,13 @@ public final class StackLower {
                 if (p.sourceLoc() != null) return p;
                 return new runar.compiler.ir.stack.PushCodeSepIndexOp(sl);
             }
+            if (op instanceof VerifyCodePartLenOp v) {
+                // Mutable op: stamp in place (as the TS tier does) so
+                // pinCodePartLength's later in-place resolve reaches the very
+                // instance the method's op list holds.
+                if (v.sourceLoc() == null) v.setSourceLoc(sl);
+                return v;
+            }
             // RawBytesOp has no sourceLoc field — skip.
             return op;
         }
@@ -944,6 +1222,12 @@ public final class StackLower {
             // body must resolve to the same reserved renamed slot the parent set
             // up (the parent copied its renamed slot names into c.sm above).
             c.renamedParams = this.renamedParams;
+            // R-010: branch arms lower in a FRESH context, so the contract-level
+            // OP_CODESEPARATOR decision has to be carried in explicitly. Without
+            // this a checkPreimage inside an if-branch emits a stray per-method
+            // separator, which executes AFTER the script-level one and
+            // re-narrows scriptCode.
+            c.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
             // GAP-002: nested branches keep the outer statement's loc by
             // default; the inner binding loop will override on each step.
             c.currentSourceLoc = this.currentSourceLoc;
@@ -951,6 +1235,73 @@ public final class StackLower {
         }
 
         // ---------------- bring_to_top ----------------
+
+        /**
+         * W3 / BoolBamboozle — enforce the {@code boolean} ABI domain on-chain.
+         *
+         * <p>The source type {@code boolean} denotes {true, false}, but a
+         * witness item is arbitrary bytes. Nothing used to check the domain,
+         * and comparisons lower to OP_NUMEQUAL, so a raw spender pushing OP_2
+         * matched neither {@code === true} nor {@code === false}: an
+         * exhaustive-looking two-arm split took NEITHER arm and every guard
+         * inside both arms was skipped.
+         *
+         * <p>Emitted once per {@code boolean} parameter of a PUBLIC method, at
+         * the unlocking boundary, before any of the method body runs. Private
+         * helpers inherit the guarantee because their arguments come from an
+         * already-gated caller.
+         *
+         * <pre>
+         * &lt;copy of param&gt;  OP_DUP OP_0 OP_EQUAL OP_SWAP OP_1 OP_EQUAL
+         *                  OP_BOOLOR OP_VERIFY
+         * </pre>
+         *
+         * <p>OP_EQUAL (bytewise), not OP_NUMEQUAL: the ABI encoding is exactly
+         * the empty item or {0x01}, so non-minimal spellings of 0/1 are
+         * rejected too, and an over-long witness item fails cleanly instead of
+         * overflowing the script-number decoder.
+         *
+         * <p>Deliberately NOT OP_0NOTEQUAL: canonicalising to truthiness would
+         * map 2 onto true and silently run an arm the author never authorised.
+         *
+         * <p>Net stack effect is zero.
+         */
+        void emitBooleanParamGate(String name) {
+            String slot = renamedParams.getOrDefault(name, name);
+
+            // Copy of the witness value on top; the original stays in its slot.
+            bringToTop(slot, false);
+
+            emitOp(new DupOp());
+            sm.dup();
+
+            emitOp(new PushOp(PushValue.of(0)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_EQUAL"));
+            sm.pop();
+            sm.pop();
+            sm.push(""); // isFalse
+
+            emitOp(new SwapOp());
+            sm.swap();
+
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_EQUAL"));
+            sm.pop();
+            sm.pop();
+            sm.push(""); // isTrue
+
+            emitOp(new OpcodeOp("OP_BOOLOR"));
+            sm.pop();
+            sm.pop();
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_VERIFY"));
+            sm.pop();
+
+            trackDepth();
+        }
 
         void bringToTop(String name, boolean consume) {
             int depth = sm.findDepth(name);
@@ -1156,6 +1507,10 @@ public final class StackLower {
         // ---------------- lower_binding dispatch ----------------
 
         void lowerBinding(AnfBinding b, int idx, Map<String, Integer> lastUses) {
+            // R-144: the binding carries its own position — round-tripped
+            // through the --ir JSON, so it is there even when this pass never
+            // saw a source file. Published for the error path only.
+            PassLocation.set(b.sourceLoc());
             String name = b.name();
             AnfValue v = b.value();
 
@@ -1519,6 +1874,14 @@ public final class StackLower {
                 lowerSubstr(bindingName, args, idx, lastUses);
                 return;
             }
+            if ("right".equals(funcName)) {
+                lowerRight(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("reverseBytes".equals(funcName)) {
+                lowerReverseBytes(bindingName, args, idx, lastUses);
+                return;
+            }
             if ("safediv".equals(funcName) || "safemod".equals(funcName)) {
                 lowerSafeDivMod(bindingName, funcName, args, idx, lastUses);
                 return;
@@ -1582,8 +1945,19 @@ public final class StackLower {
 
             for (String c : opcodes) emitOp(new OpcodeOp(c));
 
+            // Some builtins leave more on the runtime stack than the binding names.
             if ("split".equals(funcName)) {
-                sm.push("");
+                // OP_SPLIT leaves [left, right]. `split(data, index)` is single-valued -- it
+                // binds the RIGHT half (spec/grammar.md, spec/type-system.md, and all seven
+                // typecheckers) -- so the left half is dropped here, exactly as `substr`,
+                // `right` and `__array_access` already drop the halves they do not bind.
+                //
+                // It used to be recorded as an anonymous slot instead. Nothing ever consumed
+                // that slot -- it is unnameable, because no surface parser accepts array
+                // destructuring -- so every later bringToTop had to step over it and any read
+                // after a split resolved to the wrong slot.
+                // conformance/split_residue_execution_test.go spends the result.
+                emitOp(new OpcodeOp("OP_NIP"));
                 sm.push(bindingName);
             } else if ("len".equals(funcName)) {
                 emitOp(new OpcodeOp("OP_NIP"));
@@ -1763,6 +2137,27 @@ public final class StackLower {
                     "checkMultiSig: array_literal metadata missing (sigs=" + sigsRef + ", pks=" + pksRef + ")");
             }
 
+            // Degenerate thresholds are rejected here, not defended against with
+            // extra opcodes — emitting a runtime guard would move bytes for every
+            // existing valid contract. Checking in the lowerer (rather than the
+            // typechecker) also covers the --ir input path, which never runs a
+            // typecheck.
+            if (sigElems.isEmpty()) {
+                throw new RuntimeException(
+                    "checkMultiSig requires at least one signature: the signature array is "
+                    + "empty, which lowers to a 0-of-N check that OP_CHECKMULTISIG accepts "
+                    + "unconditionally (anyone-can-spend)");
+            }
+            if (pkElems.isEmpty()) {
+                throw new RuntimeException(
+                    "checkMultiSig requires at least one public key: the public key array is empty");
+            }
+            if (sigElems.size() > pkElems.size()) {
+                throw new RuntimeException(
+                    "checkMultiSig signature count (" + sigElems.size() + ") cannot exceed public "
+                    + "key count (" + pkElems.size() + "): the resulting script is unspendable");
+            }
+
             // Dummy OP_0 (historical CHECKMULTISIG off-by-one).
             emitOp(new PushOp(PushValue.of(0)));
             sm.push("");
@@ -1809,6 +2204,87 @@ public final class StackLower {
         // Emitted opcodes (after stack is set up):
         //   OP_SPLIT OP_NIP OP_SPLIT OP_DROP
         // ------------------------------------------------------------------
+        /**
+         * right(data, n): the LAST n bytes of data.
+         * OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP — byte-identical to
+         * 05-stack-lower.ts#lowerRight and its Go / Rust / Python / Ruby peers.
+         */
+        void lowerRight(String bindingName, List<String> args, int idx,
+                        Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException("right requires 2 arguments");
+            }
+            String data = args.get(0);
+            String length = args.get(1);
+
+            bringToTop(data, operandConsume(data, args, idx, lastUses));
+            bringToTop(length, operandConsume(length, args, idx, lastUses));
+
+            // Stack: <data> <len>
+            sm.pop(); // len
+            sm.pop(); // data
+
+            emitOp(new SwapOp());                    // <len> <data>
+            emitOp(new OpcodeOp("OP_SIZE"));         // <len> <data> <size>
+            emitOp(new RotOp());                     // <data> <size> <len>
+            emitOp(new OpcodeOp("OP_SUB"));          // <data> <size-len>
+            emitOp(new OpcodeOp("OP_SPLIT"));        // <left> <right>
+            emitOp(new NipOp());                     // <right>
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        /**
+         * reverseBytes(data): variable-length byte reversal via a bounded,
+         * unrolled loop. Each iteration splits one byte off the front of the
+         * remaining data and prepends it to an accumulator:
+         *
+         * <pre>
+         *   OP_0 OP_SWAP
+         *   520x [ OP_DUP OP_SIZE OP_NIP
+         *          OP_IF OP_1 OP_SPLIT OP_SWAP OP_ROT OP_CAT OP_SWAP OP_ENDIF ]
+         *   OP_DROP
+         * </pre>
+         *
+         * 520 = the maximum BSV stack-element size, so every legal ByteString
+         * is fully drained. Byte-identical to 05-stack-lower.ts#lowerReverseBytes
+         * and its Go / Rust / Python / Zig peers.
+         */
+        void lowerReverseBytes(String bindingName, List<String> args, int idx,
+                               Map<String, Integer> lastUses) {
+            if (args.isEmpty()) {
+                throw new RuntimeException("reverseBytes requires 1 argument");
+            }
+            String arg = args.get(0);
+            bringToTop(arg, isLastUse(arg, idx, lastUses));
+            sm.pop();
+
+            // Push the empty accumulator, then swap the data back on top.
+            emitOp(new PushOp(PushValue.of(0)));
+            emitOp(new SwapOp());
+
+            for (int i = 0; i < REVERSE_BYTES_MAX_ITERATIONS; i++) {
+                // Stack: [result, data] — test whether data still has bytes.
+                emitOp(new DupOp());
+                emitOp(new OpcodeOp("OP_SIZE"));
+                emitOp(new NipOp());
+                emitOp(new IfOp(List.of(
+                    new PushOp(PushValue.of(1)),
+                    new OpcodeOp("OP_SPLIT"),
+                    new SwapOp(),
+                    new RotOp(),
+                    new OpcodeOp("OP_CAT"),
+                    new SwapOp())));
+            }
+
+            // Drop the drained remainder, leaving the reversed accumulator.
+            emitOp(new DropOp());
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
         void lowerSubstr(String bindingName, List<String> args, int idx,
                          Map<String, Integer> lastUses) {
             if (args.size() < 3) {
@@ -1971,11 +2447,24 @@ public final class StackLower {
             sm.pop();
             sm.pop();
 
+            // THE DOMAIN IS ENFORCED, NOT DOCUMENTED (R-169, the pow half).
+            // The 32 rounds below compute base^min(exp, 32). Before this guard
+            // an exponent outside 0..32 returned that CLAMPED value with no
+            // error, while ConstantFold computed the true power for exp <= 256
+            // — so for 33 <= exp <= 256 the fold-ON and fold-OFF scripts
+            // accepted mutually exclusive inputs. A negative exponent was a
+            // third disagreement: script returned 1, interpreter threw, folder
+            // declined. Six bytes per callsite refuse the whole outside.
+            emitOp(new OpcodeOp("OP_DUP"));                     // base exp exp
+            emitOp(new PushOp(PushValue.of(0)));                // base exp exp 0
+            emitOp(new PushOp(PushValue.of(POW_EXPONENT_LIMIT + 1))); // ... 33
+            emitOp(new OpcodeOp("OP_WITHIN"));                  // base exp (0<=exp<33)
+            emitOp(new OpcodeOp("OP_VERIFY"));                  // base exp
+
             emitOp(new SwapOp());                          // exp base
             emitOp(new PushOp(PushValue.of(1)));           // exp base 1(acc)
 
-            final int maxPowIterations = 32;
-            for (int i = 0; i < maxPowIterations; i++) {
+            for (int i = 0; i < POW_EXPONENT_LIMIT; i++) {
                 emitOp(new PushOp(PushValue.of(2)));
                 emitOp(new OpcodeOp("OP_PICK"));            // exp base acc exp
                 emitOp(new PushOp(PushValue.of(i)));
@@ -2022,9 +2511,48 @@ public final class StackLower {
         }
 
         // ------------------------------------------------------------------
-        // sqrt(n): integer square root via 16-iteration Newton's method.
-        // Mirrors lowerSqrt in Go: guarded for n == 0 (skip Newton, leave 0).
-        // OP_DUP IF { OP_DUP; 16x (over, over, OP_DIV, OP_ADD, push 2, OP_DIV); nip }
+        // sqrt(n): integer square root via 256-round Newton's method.
+        //
+        // Algorithm, identical to the constant folder and the reference
+        // interpreter so that all three agree at every input (R-169):
+        //
+        //     guess = n
+        //     repeat 256 times:
+        //       next  = (guess + n / guess) / 2
+        //       guess = min(guess, next)        // the convergence break
+        //
+        // OP_MIN IS the break. Bitcoin Script has no loops, so the rounds are
+        // unrolled and unconditional; what stops them changing the answer is
+        // that the Newton sequence seeded at guess = n is strictly DECREASING
+        // while guess > isqrt(n) and non-decreasing once guess == isqrt(n).
+        // Clamping each round to the running minimum makes isqrt(n) a fixed
+        // point and every post-convergence round a no-op. Without the clamp the
+        // iteration reaches isqrt(n) and then OSCILLATES between it and
+        // isqrt(n)+1, so a fixed round count returns whichever side the parity
+        // lands on — sqrt(8) = 3, sqrt(63) = 8.
+        //
+        // 256 matches the folder's bound, because seeded at guess = n the
+        // iterate only halves per round until it nears sqrt(n): a correct
+        // answer needs ~log2(n)/2 rounds (20 for 32-bit, 37 for 64-bit, 135 for
+        // 256-bit). The previous 16 was short by an unbounded margin, not a
+        // tuning margin — sqrt(10^12) came out as 15280627.
+        //
+        // DOMAIN: exact for every 0 <= n < 2^497, and both ends are ENFORCED,
+        // because outside them the iteration returns a wrong number rather than
+        // failing:
+        //
+        //     OP_DUP <0> OP_GREATERTHANOREQUAL OP_VERIFY    ; n >= 0
+        //     OP_SIZE <63> OP_LESSTHAN OP_VERIFY            ; n fits in 62 bytes
+        //
+        // A minimally-encoded script number of at most 62 bytes is at most
+        // 2^495 - 1, so the enforced domain is 0 <= n < 2^495. The upper guard
+        // is not theoretical: a 500-byte n ran to completion on the real
+        // ScriptVM and returned a wrong root with no error. A negative n is a
+        // fixed point of the min-clamped recurrence and would come back as n
+        // itself, so it is refused too — the folder declines and the
+        // interpreter throws on the same bound, leaving all three in agreement.
+        //
+        // Guarded for n == 0 (skip Newton, leave 0): OP_DUP IF { ... } ENDIF
         // ------------------------------------------------------------------
         void lowerSqrt(String bindingName, List<String> args, int idx,
                        Map<String, Integer> lastUses) {
@@ -2036,18 +2564,30 @@ public final class StackLower {
             bringToTop(n, isLastUse(n, idx, lastUses));
             sm.pop();
 
+            // Domain guards; both leave n on the stack.
+            emitOp(new OpcodeOp("OP_DUP"));                        // n n
+            emitOp(new PushOp(PushValue.of(0)));                   // n n 0
+            emitOp(new OpcodeOp("OP_GREATERTHANOREQUAL"));         // n (n>=0)
+            emitOp(new OpcodeOp("OP_VERIFY"));                     // n
+            emitOp(new OpcodeOp("OP_SIZE"));                       // n size(n)
+            emitOp(new PushOp(PushValue.of(63)));                  // n size(n) 63
+            emitOp(new OpcodeOp("OP_LESSTHAN"));                   // n (size<63)
+            emitOp(new OpcodeOp("OP_VERIFY"));                     // n
+
             emitOp(new OpcodeOp("OP_DUP")); // n n
 
             List<StackOp> newtonOps = new ArrayList<>();
             newtonOps.add(new OpcodeOp("OP_DUP")); // n guess(=n)
-            final int sqrtIterations = 16;
+            final int sqrtIterations = 256;
             for (int i = 0; i < sqrtIterations; i++) {
                 newtonOps.add(new OverOp());                       // n guess n
                 newtonOps.add(new OverOp());                       // n guess n guess
                 newtonOps.add(new OpcodeOp("OP_DIV"));             // n guess (n/guess)
-                newtonOps.add(new OpcodeOp("OP_ADD"));             // n (guess + n/guess)
-                newtonOps.add(new PushOp(PushValue.of(2)));        // n (guess + n/guess) 2
-                newtonOps.add(new OpcodeOp("OP_DIV"));             // n new_guess
+                newtonOps.add(new OverOp());                       // n guess (n/guess) guess
+                newtonOps.add(new OpcodeOp("OP_ADD"));             // n guess (guess + n/guess)
+                newtonOps.add(new PushOp(PushValue.of(2)));        // n guess (...) 2
+                newtonOps.add(new OpcodeOp("OP_DIV"));             // n guess next
+                newtonOps.add(new OpcodeOp("OP_MIN"));             // n min(guess, next)
             }
             newtonOps.add(new NipOp()); // result (drop n)
 
@@ -2222,6 +2762,40 @@ public final class StackLower {
         void inlineMethodCall(String bindingName, AnfMethod m, List<String> args,
                               int idx, Map<String, Integer> lastUses) {
             List<Map<String, String>> shadowed = new ArrayList<>();
+
+            // N-111: arity is checked HERE, for the same reason lowerCheckMultiSig
+            // checks its own -- checking in the lowerer rather than the typechecker also
+            // covers the `--ir` input path, which never runs a typecheck.
+            //
+            // The binding loop below skips every argument past the last parameter. Skipped
+            // is not the same as ignored: a surplus argument never reaches
+            // operandConsume/bringToTop, so a ref that would otherwise have been CONSUMED
+            // at this call site stays live on the stack and every later depth shifts under
+            // it. The emitted script changes, with no diagnostic.
+            //
+            // Measured on the checked-in `multi-method` golden, whose `computeThreshold`
+            // takes two parameters:
+            //
+            //   args ["t0","t1"]        76009c637552958b5aa06900ac67519d00ac68
+            //   args ["t0","t1","t0"]   76009c637552787c958b5aa0697c00ac7767519d00ac68
+            //
+            // All seven tiers agreed on BOTH, which is why no parity gate saw it -- the
+            // tiers were identical and identically wrong. A surplus ref naming a binding
+            // that does not exist at all (`tZZZ`) was likewise accepted silently.
+            //
+            // Only the surplus side is checked. Too FEW arguments already fails, naming
+            // the unbound parameter ("method parameter 'b' is not on the stack at a
+            // post-consumption reference"); that path works and is pinned by existing
+            // tests.
+            if (args.size() > m.params().size()) {
+                throw new RuntimeException(
+                    "method_call to '" + m.name() + "' passes " + args.size()
+                    + " arguments but '" + m.name() + "' declares " + m.params().size()
+                    + " parameter" + (m.params().size() == 1 ? "" : "s")
+                    + ": surplus arguments are not bound to any parameter, and leaving"
+                    + " them unconsumed on the stack silently changes the emitted script");
+            }
+
             for (int i = 0; i < args.size() && i < m.params().size(); i++) {
                 String paramName = m.params().get(i).name();
                 String arg = args.get(i);
@@ -2990,9 +3564,32 @@ public final class StackLower {
                 for (int j = 0; j < body.size(); j++) {
                     lowerBinding(body.get(j), j, lastUses);
                 }
+                // Clean up the iteration variable if it was not consumed by the body.
+                //
+                // R-186 / R-292: it is not always on TOP when that happens. A body
+                // whose last binding LEAVES a value — the accumulator
+                // `sum = sum + x`, which rebinds `sum` in place and ends holding it
+                // — buries the iteration variable one slot down. Dropping only at
+                // depth 0 left one slot behind per iteration, until the leak alone
+                // crossed MAX_STACK_DEPTH and the compiler refused a contract with
+                // a working set of three. Removing it wherever it sits is the same
+                // operation drainBranchPrivateResidue performs, spelled the same
+                // way.
                 if (sm.has(iterVar)) {
                     int d = sm.findDepth(iterVar);
                     if (d == 0) {
+                        emitOp(new DropOp());
+                        sm.pop();
+                    } else if (d == 1) {
+                        emitOp(new NipOp());
+                        sm.removeAtDepth(1);
+                    } else {
+                        emitOp(new PushOp(PushValue.of(d)));
+                        sm.push("");
+                        emitOp(new RollOp(d));
+                        sm.pop();
+                        String rolled = sm.removeAtDepth(d);
+                        sm.push(rolled);
                         emitOp(new DropOp());
                         sm.pop();
                     }
@@ -3068,17 +3665,21 @@ public final class StackLower {
                     sm.push("");
                 }
 
-                if ("bigint".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(8)));
+                // The width MUST come from numericStateTypeWidth — the same
+                // table the reader splits on — or this continuation cannot be
+                // re-read.
+                int numericWidth = numericStateTypeWidth(prop.type());
+                if (numericWidth > 0) {
+                    emitOp(new PushOp(PushValue.of(numericWidth)));
                     sm.push("");
                     emitOp(new OpcodeOp("OP_NUM2BIN"));
                     sm.pop();
-                } else if ("boolean".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(1)));
-                    sm.push("");
-                    emitOp(new OpcodeOp("OP_NUM2BIN"));
-                    sm.pop();
-                } else if ("ByteString".equals(prop.type())) {
+                } else if (isVariableLengthStateType(prop.type())) {
+                    // Prepend the push-data length prefix (matching the SDK
+                    // format). MUST classify exactly what the deserializer
+                    // decodes, or the continuation this method builds cannot be
+                    // read by the next spend: the reader would take the value's
+                    // own first byte (a DER 0x30, say) as a push length.
                     emitPushDataEncode();
                 }
 
@@ -3097,6 +3698,321 @@ public final class StackLower {
 
         // ---------------- check_preimage (OP_PUSH_TX) ----------------
 
+        /**
+         * Strip the BIP-143 scriptCode varint length prefix.
+         *
+         * <p>{@code [..., varint || scriptCode]} -&gt; {@code [..., scriptCode]}
+         *
+         * <p>All four varint shapes must be handled; stripping only the 1- and
+         * 3-byte forms corrupts extraction for scripts whose scriptCode exceeds
+         * 65,535 bytes (e.g. embedded BN254 verifiers) and surfaces as
+         * {@code Invalid OP_SPLIT range} on regtest.
+         */
+        void emitStripScriptCodeVarint() {
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); // firstByte
+            sm.push(""); // rest
+            emitOp(new SwapOp());
+            sm.swap();
+            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't
+            // interpreted as negative script numbers.
+            emitOp(new PushOp(PushValue.ofHex("00")));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            // Stack: [..., rest, fb_num]
+
+            // IF fb_num < 253: 1-byte varint, drop fb_num.
+            emitOp(new DupOp());
+            sm.dup();
+            emitOp(new PushOp(PushValue.of(253)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_LESSTHAN"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAt1ByteIf = sm.clone0();
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAt1ByteIf.slots);
+            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+            emitOp(new DupOp());
+            sm.dup();
+            emitOp(new PushOp(PushValue.of(254)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUAL"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAtFEIf = sm.clone0();
+            // THEN: 5-byte varint (0xfe + 4 bytes LE).
+            emitOp(new DropOp());
+            sm.pop();
+            emitDropMoreVarintBytes(4);
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAtFEIf.slots);
+            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+            // NOTE: 0xff is physically unreachable on BSV (it signifies a
+            // scriptCode > 4 GiB, which no transaction policy permits). We
+            // handle it explicitly here anyway so that any future change to
+            // max-script-size doesn't turn this code path into silent
+            // corruption.
+            emitOp(new DupOp());
+            sm.dup();
+            emitOp(new PushOp(PushValue.of(255)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUAL"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAtFFIf = sm.clone0();
+            // THEN: 9-byte varint (0xff + 8 bytes LE).
+            emitOp(new DropOp());
+            sm.pop();
+            emitDropMoreVarintBytes(8);
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAtFFIf.slots);
+            // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+            emitOp(new DropOp());
+            sm.pop();
+            emitDropMoreVarintBytes(2);
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            emitOp(new OpcodeOp("OP_ENDIF"));
+        }
+
+        /**
+         * Whether the deployed locking script carries a trailing
+         * {@code OP_RETURN || state} section at all (R-010).
+         *
+         * <p>NOT the same question as "is the state section empty". A
+         * StatefulSmartContract with zero mutable properties compiles to an
+         * artifact with no state fields, and the SDK's {@code getLockingScript}
+         * appends neither the separator nor any payload — the deployed script
+         * IS the code part. {@link #fixedStateSectionLength} answers 0 for that
+         * shape, which reads as "a fixed section of length zero" and made
+         * clause 8a pin {@code SIZE(rest) == 1} for a remainder that is always
+         * empty, locking the contract's funds.
+         */
+        boolean hasStateSection() {
+            for (AnfProperty prop : properties) {
+                if (!prop.readonly()) return true;
+            }
+            return false;
+        }
+
+        /**
+         * Byte length of the serialized state section (excluding the OP_RETURN
+         * separator) when every mutable property is fixed-size, and {@code -1}
+         * otherwise. Mirrors the size table in {@link #lowerDeserializeState};
+         * a ByteString property makes the section variable-length and its exact
+         * length un-pinnable at compile time.
+         *
+         * <p>Only meaningful when {@link #hasStateSection()} is true: with no
+         * mutable properties the sum is vacuously 0, which means "no section",
+         * not "an empty section".
+         */
+        int fixedStateSectionLength() {
+            int total = 0;
+            for (AnfProperty prop : properties) {
+                if (prop.readonly()) continue;
+                switch (prop.type()) {
+                    case "bigint", "RabinSig", "RabinPubKey" -> total += 8;
+                    case "boolean" -> total += 1;
+                    case "PubKey" -> total += 33;
+                    case "Addr", "Ripemd160" -> total += 20;
+                    case "Sha256" -> total += 32;
+                    case "Point", "P256Point" -> total += 64;
+                    case "P384Point" -> total += 96;
+                    default -> {
+                        return -1;
+                    }
+                }
+            }
+            return total;
+        }
+
+        /**
+         * Bind the spender-supplied {@code _codePart} witness to the script that
+         * is actually executing (R-010 / CL-BUG-091).
+         *
+         * <p>{@code _codePart} is the locking script minus the trailing
+         * {@code OP_RETURN || state} section. It is pushed by the spender and
+         * OP_CAT'd verbatim as the script prefix of every reconstructed
+         * state-continuation output, so an unauthenticated {@code _codePart} is
+         * a complete break: the spender picks the script the contract's own
+         * funds move to.
+         *
+         * <p>With the OP_CODESEPARATOR hoisted to offset 1 of the locking
+         * script, the BIP-143 scriptCode carried in the (already tx-bound)
+         * preimage is
+         *
+         * <pre>scriptCode = lockingScript[2:] = codePart[2:] || 0x6a || state</pre>
+         *
+         * so the whole of {@code _codePart} is recoverable from it:
+         *
+         * <pre>codePart == 0x61ab || scriptCode[0 : SIZE(codePart) - 2]</pre>
+         *
+         * plus a pin on the split point, without which a spender could claim a
+         * SHORTER code part whose bytes are a genuine prefix — in the degenerate
+         * case just the two prologue bytes, which turns the continuation output
+         * into a bare OP_RETURN that anyone can spend.
+         *
+         * <p>Consumes nothing: {@code [..., preimage]} in,
+         * {@code [..., preimage]} out, aborting the script via OP_EQUALVERIFY
+         * when the witness does not match.
+         */
+        void emitCodePartAuthentication() {
+            // 1. Work on a copy — the caller still needs the preimage.
+            emitOp(new DupOp());
+            sm.dup();
+
+            // 2. Drop the fixed 104-byte BIP-143 header.
+            emitOp(new PushOp(PushValue.of(104)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new NipOp());
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            // 3. Drop the fixed 52-byte tail (amount 8 + nSequence 4 +
+            //    hashOutputs 32 + nLocktime 4 + sighashType 4).
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(52)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SUB"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+
+            // 4. Strip the length varint. Stack: [..., preimage, scriptCode]
+            emitStripScriptCodeVarint();
+
+            // 5. Copy the witness code part up.
+            bringToTop("_codePart", false);
+            sm.renameAtDepth(0, "");
+
+            // 6. n = SIZE(codePart) - 2 (the two prologue bytes scriptCode
+            //    excludes).
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push("");
+
+            // 6a. R-095 — pin SIZE(codePart) itself on the VARIABLE-length-state
+            //     path.
+            //
+            //     Clause 8a below pins the split point through the REMAINDER's
+            //     length, which only works while the state section is a
+            //     compile-time constant. With a ByteString state field it is
+            //     not, 8a is skipped, and the only surviving constraint on where
+            //     the code part ENDS is 8b's `rest[0] == 0x6a` — which a genuine
+            //     PREFIX of the executing script satisfies at any offset whose
+            //     byte happens to be 0x6a.
+            //
+            //     The state's length is unknown at compile time; the CODE's is
+            //     not. The emitted template's byte length is fixed once emit
+            //     finishes, and the only thing deployment adds is the growth of
+            //     the OP_0 placeholders. So the emitter back-patches
+            //     `emittedLength + delta` and pins SIZE(codePart) against it
+            //     directly, which no truncation can satisfy.
+            //
+            //     Stack effect is NET ZERO — the stack map is untouched.
+            if (hasStateSection() && fixedStateSectionLength() < 0) {
+                // delta / exact are refined by pinCodePartLength once every
+                // method has been lowered; the defaults are the SOUND ones (a
+                // lower bound of emittedLength + 0 holds for any deployment).
+                emitOp(new VerifyCodePartLenOp(0, false));
+            }
+
+            emitOp(new PushOp(PushValue.of(2)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SUB"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            // 7. Reorder to [..., codePart, scriptCode, n].
+            emitOp(new RotOp());
+            String rotated = sm.removeAtDepth(2);
+            sm.push(rotated);
+            emitOp(new SwapOp());
+            sm.swap();
+
+            // 8. Split scriptCode at n into the claimed code tail and the
+            //    remainder.
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+
+            // 8a. Pin the split point. R-010: with no mutable properties there
+            //     is no state section and no separator — the deployed script is
+            //     exactly the code part, so the remainder must be EMPTY.
+            boolean hasState = hasStateSection();
+            int fixedStateLen = hasState ? fixedStateSectionLength() : 0;
+            if (fixedStateLen >= 0) {
+                int restLen = hasState ? 1 + fixedStateLen : 0;
+                emitOp(new OpcodeOp("OP_SIZE"));
+                sm.push("");
+                emitOp(new PushOp(PushValue.of(restLen)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_NUMEQUALVERIFY"));
+                sm.pop(); sm.pop();
+            }
+            // 8b. When a state section exists, the byte immediately after the
+            //     code part must be the OP_RETURN separator. With no state
+            //     section clause 8a has already pinned the remainder to zero
+            //     bytes, which is strictly stronger than any byte test.
+            if (hasState) {
+                emitOp(new PushOp(PushValue.of(1)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_SPLIT"));
+                sm.pop(); sm.pop();
+                sm.push(""); sm.push("");
+                emitOp(new DropOp());
+                sm.pop();
+                emitOp(new PushOp(PushValue.ofHex("6a")));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_EQUALVERIFY"));
+                sm.pop(); sm.pop();
+            } else {
+                // Clause 8a consumed the remainder's SIZE but not the
+                // remainder; with 8b skipped it is dead and must still be
+                // dropped so the stack shape matches the state-bearing path.
+                emitOp(new DropOp());
+                sm.pop();
+            }
+
+            // 9. Prepend the two prologue bytes (OP_NOP, OP_CODESEPARATOR).
+            emitOp(new PushOp(PushValue.ofHex("61ab")));
+            sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            // 10. Byte-for-byte or the script dies here.
+            emitOp(new OpcodeOp("OP_EQUALVERIFY"));
+            sm.pop(); sm.pop();
+        }
+
         void lowerCheckPreimage(String bindingName, String preimage, Integer sighashFlag,
                                 int idx, Map<String, Integer> lastUses) {
             // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to
@@ -3108,10 +4024,26 @@ public final class StackLower {
             // pushes ONLY <preimage> (no witness signature). See
             // emitCheckPreimageBinding for the construction.
 
-            // Emit OP_CODESEPARATOR so the scriptCode in the BIP-143 preimage is
-            // only the code after this point (smaller preimage; required for
-            // large scripts).
-            emitOp(new OpcodeOp("OP_CODESEPARATOR"));
+            if (!scriptLevelCodeSeparator) {
+                // No `_codePart` anywhere in this contract, so nothing needs
+                // authenticating: keep the pre-R-010 layout — a separator right
+                // here, at the method's entry, which keeps scriptCode (and the
+                // preimage) small.
+                //
+                // This is not just an optimisation. Widening scriptCode to the
+                // whole script would move the separator IN FRONT of any user
+                // `checkSig` in the method, and `packages/runar-sdk` signs a
+                // stateless contract's user signature over the FULL locking
+                // script — the node would then verify it against `script[2:]`
+                // and the spend would fail (`examples/ts/covenant-vault`).
+                emitOp(new OpcodeOp("OP_CODESEPARATOR"));
+            }
+            // Otherwise NO OP_CODESEPARATOR is emitted here. R-010 /
+            // CL-BUG-091: a per-method separator left the dispatch preamble and
+            // every preceding method body invisible to the running script, and
+            // those are exactly the bytes the spender-supplied `_codePart`
+            // claims to reproduce. The separator is emitted once instead, at
+            // offset 1 of the locking script (see Emit#runResultFull).
 
             // Bring the preimage to the top (kept for field extractors below).
             bringToTop(preimage, isLastUse(preimage, idx, lastUses));
@@ -3122,6 +4054,14 @@ public final class StackLower {
             // method declare a different mode, which only changes the appended
             // sighash flag byte. Net stack effect is zero.
             emitCheckPreimageBinding(sighashFlag);
+
+            // R-010: the preimage is now proven to be THIS transaction's
+            // preimage, so its scriptCode field is authentic. Pin the
+            // spender-supplied `_codePart` to it before any continuation output
+            // is built from it.
+            if (sm.has("_codePart")) {
+                emitCodePartAuthentication();
+            }
 
             // Preimage remains on top. Rename for field extractors.
             sm.pop();
@@ -3253,83 +4193,7 @@ public final class StackLower {
                 // scriptCode exceeds 65,535 bytes (e.g. embedded BN254
                 // verifiers) and surfaces as `Invalid OP_SPLIT range` on
                 // regtest.
-                emitOp(new PushOp(PushValue.of(1)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_SPLIT"));
-                sm.pop(); sm.pop();
-                sm.push(""); // firstByte
-                sm.push(""); // rest
-                emitOp(new SwapOp());
-                sm.swap();
-                // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't
-                // interpreted as negative script numbers.
-                emitOp(new PushOp(PushValue.ofHex("00")));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_CAT"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_BIN2NUM"));
-                // Stack: [..., rest, fb_num]
-
-                // IF fb_num < 253: 1-byte varint, drop fb_num.
-                emitOp(new DupOp());
-                sm.dup();
-                emitOp(new PushOp(PushValue.of(253)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_LESSTHAN"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_IF"));
-                sm.pop();
-                StackMap smAt1ByteIf = sm.clone0();
-                emitOp(new DropOp());
-                sm.pop();
-                emitOp(new OpcodeOp("OP_ELSE"));
-                sm.slots.clear();
-                sm.slots.addAll(smAt1ByteIf.slots);
-                // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
-                emitOp(new DupOp());
-                sm.dup();
-                emitOp(new PushOp(PushValue.of(254)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_NUMEQUAL"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_IF"));
-                sm.pop();
-                StackMap smAtFEIf = sm.clone0();
-                // THEN: 5-byte varint (0xfe + 4 bytes LE).
-                emitOp(new DropOp());
-                sm.pop();
-                emitDropMoreVarintBytes(4);
-                emitOp(new OpcodeOp("OP_ELSE"));
-                sm.slots.clear();
-                sm.slots.addAll(smAtFEIf.slots);
-                // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
-                emitOp(new DupOp());
-                sm.dup();
-                emitOp(new PushOp(PushValue.of(255)));
-                sm.push("");
-                emitOp(new OpcodeOp("OP_NUMEQUAL"));
-                sm.pop(); sm.pop();
-                sm.push("");
-                emitOp(new OpcodeOp("OP_IF"));
-                sm.pop();
-                StackMap smAtFFIf = sm.clone0();
-                // THEN: 9-byte varint (0xff + 8 bytes LE).
-                emitOp(new DropOp());
-                sm.pop();
-                emitDropMoreVarintBytes(8);
-                emitOp(new OpcodeOp("OP_ELSE"));
-                sm.slots.clear();
-                sm.slots.addAll(smAtFFIf.slots);
-                // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
-                emitOp(new DropOp());
-                sm.pop();
-                emitDropMoreVarintBytes(2);
-                emitOp(new OpcodeOp("OP_ENDIF"));
-                emitOp(new OpcodeOp("OP_ENDIF"));
-                emitOp(new OpcodeOp("OP_ENDIF"));
+                emitStripScriptCodeVarint();
                 // --- Stack: [..., scriptCode] ---
 
                 // Compute skip = SIZE(_codePart) - codeSepIdx.
@@ -3581,12 +4445,18 @@ public final class StackLower {
             // Step 1: Bring _codePart to top (PICK)
             bringToTop("_codePart", false);
 
-            // Step 2: Append OP_RETURN byte
-            emitOp(new PushOp(PushValue.ofHex("6a")));
-            sm.push("");
-            emitOp(new OpcodeOp("OP_CAT"));
-            sm.pop(); sm.pop();
-            sm.push("");
+            // Step 2: Append OP_RETURN byte — but ONLY when there is a state
+            // section for it to separate. R-010: with zero mutable properties
+            // the SDK's getLockingScript emits the bare code and stops, so a
+            // separator here would make the continuation output one byte longer
+            // than the script the SDK deploys.
+            if (!stateProps.isEmpty()) {
+                emitOp(new PushOp(PushValue.ofHex("6a")));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_CAT"));
+                sm.pop(); sm.pop();
+                sm.push("");
+            }
 
             // Step 3: Serialise each state value
             int cnt = Math.min(stateValues.size(), stateProps.size());
@@ -3594,17 +4464,16 @@ public final class StackLower {
                 String valueRef = stateValues.get(i);
                 AnfProperty prop = stateProps.get(i);
                 bringToTop(valueRef, operandConsume(valueRef, outputOperands, idx, lastUses));
-                if ("bigint".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(8)));
+                // Same table as the reader — see numericStateTypeWidth.
+                int numericWidth = numericStateTypeWidth(prop.type());
+                if (numericWidth > 0) {
+                    emitOp(new PushOp(PushValue.of(numericWidth)));
                     sm.push("");
                     emitOp(new OpcodeOp("OP_NUM2BIN"));
                     sm.pop();
-                } else if ("boolean".equals(prop.type())) {
-                    emitOp(new PushOp(PushValue.of(1)));
-                    sm.push("");
-                    emitOp(new OpcodeOp("OP_NUM2BIN"));
-                    sm.pop();
-                } else if ("ByteString".equals(prop.type())) {
+                } else if (isVariableLengthStateType(prop.type())) {
+                    // Push-data length prefix — MUST match what the
+                    // deserializer decodes.
                     emitPushDataEncode();
                 }
                 sm.pop(); sm.pop();
@@ -3895,6 +4764,14 @@ public final class StackLower {
             sm.pop();
 
             switch (funcName) {
+                case "extractVersion":
+                    // nVersion is the LEADING 4 bytes, so there is nothing to
+                    // skip: push 4, OP_SPLIT, OP_DROP the tail, OP_BIN2NUM.
+                    // emitAbsoluteSplit(0, 4, ...) would emit an extra
+                    // OP_0 OP_SPLIT OP_NIP prologue and diverge from the peers.
+                    emitLeadingExtract(4, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
+                    break;
                 case "extractHashPrevouts":
                     emitAbsoluteSplit(4, 32, false);
                     break;
@@ -3905,10 +4782,12 @@ public final class StackLower {
                     emitAbsoluteSplit(68, 36, false);
                     break;
                 case "extractSigHashType":
-                    emitTrailingExtract(4, 0, true);
+                    emitTrailingExtract(4, 0, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
                     break;
                 case "extractLocktime":
-                    emitTrailingExtract(8, 4, true);
+                    emitTrailingExtract(8, 4, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
                     break;
                 case "extractOutputHash":
                 case "extractOutputs":
@@ -3918,7 +4797,8 @@ public final class StackLower {
                     emitTrailingExtract(52, 8, true);
                     break;
                 case "extractSequence":
-                    emitTrailingExtract(44, 4, true);
+                    emitTrailingExtract(44, 4, false);
+                    emitUnsignedBin2Num(); // UNSIGNED 32-bit wire field (W1)
                     break;
                 case "extractScriptCode":
                     emitScriptCodeExtract();
@@ -3945,6 +4825,49 @@ public final class StackLower {
          *                    keep the field as raw bytes; trailing extractors
          *                    that want a number should call {@link #emitTrailingExtract}.
          */
+        /**
+         * Convert the 4-byte little-endian field on top of the stack to an
+         * UNSIGNED script number.
+         *
+         * <p>nVersion, nSequence, nLockTime and the trailing sighash type are
+         * unsigned 32-bit wire fields, but a Bitcoin script number is
+         * sign-magnitude: the high bit of the LAST byte is the sign. A bare
+         * OP_BIN2NUM therefore reads {@code feffffff} (0xfffffffe, the SDK's
+         * non-final default) as -2147483646 and {@code ffffffff} (the finality
+         * sentinel) as -2147483647, which makes
+         * {@code extractSequence(p) < 0xffffffff} true for the exact value it
+         * exists to exclude (W1 / FinalCountdown). Appending a zero byte first
+         * makes the value a five-byte non-negative number, so the whole
+         * 0..2^32-1 range reads as itself.
+         */
+        private void emitUnsignedBin2Num() {
+            emitOp(new PushOp(PushValue.ofHex("00")));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+        }
+
+        /**
+         * Slice the LEADING {@code length} bytes off the value on top of the
+         * stack: push length; OP_SPLIT; OP_DROP; optionally OP_BIN2NUM.
+         * The absolute-split helper cannot express this — its leading
+         * "push start; OP_SPLIT; OP_NIP" prologue is not a no-op at start 0.
+         */
+        private void emitLeadingExtract(int length, boolean emitBin2Num) {
+            emitOp(new PushOp(PushValue.of(length)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+            if (emitBin2Num) {
+                emitOp(new OpcodeOp("OP_BIN2NUM"));
+            }
+        }
+
         private void emitAbsoluteSplit(int start, int length, boolean emitBin2Num) {
             emitOp(new PushOp(PushValue.of(start)));
             sm.push("");

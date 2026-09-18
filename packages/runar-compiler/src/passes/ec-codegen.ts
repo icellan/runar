@@ -10,6 +10,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
+import { stackDelta } from './stack-op-effects.js';
 
 // ===========================================================================
 // Constants
@@ -39,6 +40,43 @@ function bigintToBytes32(n: bigint): Uint8Array {
 // ===========================================================================
 // ECTracker — named stack state tracker (mirrors SLHTracker)
 // ===========================================================================
+
+/**
+ * R-285 (CL-GAP-075) — check an `emitIf` branch against what it claims to leave.
+ *
+ * The tracker updates `nm` from the CALLER's `resultName` argument: one name
+ * pushed, or none. Nothing verified that against the opcodes the two arms
+ * actually emit, so a `resultName` that disagreed with the arms — or two arms
+ * that disagreed with each other — desynchronised the model from the real
+ * stack. Every `findDepth` after that point returns a depth that is wrong by
+ * the same amount, and PICK/ROLL silently address the wrong item: a different
+ * locking script, not a compile error. The secp256k1 ladder runs this path 257
+ * times per `ecMul`, and the P-256/P-384 and BN254 codegens reuse it.
+ *
+ * Both arms must leave the same depth, and that depth must be the one
+ * `resultName` promises: +1 for a named result, 0 for none.
+ */
+function assertArmsMatchDeclaredResult(
+  thenOps: StackOp[],
+  elseOps: StackOp[],
+  resultName: string | null,
+): void {
+  const expected = resultName === null ? 0 : 1;
+  const thenDelta = stackDelta(thenOps);
+  const elseDelta = stackDelta(elseOps);
+  if (thenDelta !== elseDelta) {
+    throw new Error(
+      `ECTracker.emitIf: branch arms leave different stack depths ` +
+      `(then ${thenDelta}, else ${elseDelta})`,
+    );
+  }
+  if (thenDelta !== expected) {
+    throw new Error(
+      `ECTracker.emitIf: arms leave ${thenDelta} item(s) but the branch declares ` +
+      `${resultName === null ? 'no result' : `result '${resultName}'`} (${expected})`,
+    );
+  }
+}
 
 export class ECTracker {
   nm: (string | null)[];
@@ -133,6 +171,7 @@ export class ECTracker {
     const elseOps: StackOp[] = [];
     thenFn((op) => thenOps.push(op));
     elseFn((op) => elseOps.push(op));
+    assertArmsMatchDeclaredResult(thenOps, elseOps, resultName);
     this._e({ op: 'if', then: thenOps, else: elseOps });
     if (resultName !== null)
       this.nm.push(resultName);
@@ -293,13 +332,130 @@ function fieldInv(t: ECTracker, aName: string, resultName: string): void {
 // ===========================================================================
 
 /**
+ * CL-BUG-095 — length gate for a `Point` argument, ABORTING form.
+ *
+ * A `Point` is DEFINED as exactly `want` bytes (x ‖ y, big-endian, no prefix).
+ * Nothing checked that: `Point` carries no width in the builtin table, and
+ * every one of these values arrives as an unlock argument, so the blob is
+ * attacker-sized. Surplus bytes were then silently DISCARDED, because
+ * `decomposePoint` splits at the coordinate width and `emitReverse32` reverses
+ * exactly 32 bytes and drops whatever is left over — so `ecOnCurve(G ‖ 0xff)`
+ * returned TRUE and `ecEncodeCompressed` took its parity bit from the surplus.
+ *
+ * This is NOT a new failure channel. An UNDER-length point already aborted, by
+ * accident: `OP_SPLIT` runs off the end of the value. The gate makes the same
+ * outcome explicit, and extends it to the over-length case that used to pass.
+ *
+ * Aborting is right for every Point consumer that produces a VALUE and has no
+ * error channel to report through — `ecAdd`, `ecMul`, `ecNegate`, `ecPointX`,
+ * `ecPointY`, `ecEncodeCompressed`. There is no correct value to return for a
+ * blob that is not a point. The PREDICATES (`ecOnCurve` and friends) use
+ * `emitPointLengthGate` below instead, because for them "no" is an answer.
+ */
+export function emitPointLenVerify(e: (op: StackOp) => void, want: number): void {
+  e({ op: 'opcode', code: 'OP_SIZE' });
+  e({ op: 'push', value: BigInt(want) });
+  e({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' });
+}
+
+/**
+ * CL-BUG-095 — length gate for a `Point` argument, CLAMPING form: leaves
+ * `[flag, clamped]`, where `clamped` is the value forced to exactly `want`
+ * bytes (`v ‖ 00*want` split at `want`, tail dropped) and `flag` is
+ * `OP_SIZE(v) == want`.
+ *
+ * Same shape, and the same reasoning, as `cEmitLengthGate` in
+ * p256-p384-codegen.ts: the clamp exists so the gate can stay a FLAG. It is
+ * used by the on-curve predicates, whose whole job is to answer "is this an
+ * acceptable point?" over untrusted bytes — and for a wrong-length blob the
+ * correct answer is `false`, not an aborted script. Aborting would break
+ * `if (ecOnCurve(p)) { … } else { … }`, which is the exact idiom this module's
+ * own comments tell contract authors to write. The caller ANDs `flag` into its
+ * boolean result, so whatever the clamped bytes happen to compute can never
+ * make a wrong-length point certify as on-curve.
+ *
+ * Branch-free: the emitted op sequence, and the tracker's static stack model,
+ * are identical for every input length.
+ */
+export function emitPointLengthGate(t: ECTracker, name: string, want: number, flagName: string): void {
+  t.toTop(name);
+  t.rawBlock([name], null, (e) => {
+    e({ op: 'opcode', code: 'OP_SIZE' });
+    e({ op: 'push', value: BigInt(want) });
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+    e({ op: 'swap' });
+    e({ op: 'push', value: new Uint8Array(want) });
+    e({ op: 'opcode', code: 'OP_CAT' });
+    e({ op: 'push', value: BigInt(want) });
+    e({ op: 'opcode', code: 'OP_SPLIT' });
+    e({ op: 'drop' });
+  });
+  t.nm.push(flagName);
+  t.nm.push(name);
+}
+
+/**
+ * R-117 — a Point's two coordinates must be FIELD ELEMENTS, aborting form.
+ *
+ * `decomposePoint` BIN2NUMs each half of the blob as an unsigned integer, so
+ * any value that fits in the coordinate width is accepted — `x + p` included,
+ * whenever `x + p < 2^256` (on secp256k1 that is every `x < 2^32 + 977`).
+ * Downstream field arithmetic reduces mod p, so `(x+p) ‖ y` behaves as the
+ * point `(x, y)`; `affineAdd`'s two case selectors do NOT reduce, and they are
+ * bare OP_NUMEQUAL on exactly these raw values:
+ *
+ *     cond   = (px == qx) AND (py == qy)      "same point" -> tangent
+ *     notinf = NOT(px == qx AND NOT cond)     "P and -P"   -> the O mask
+ *
+ * so for P and its alias both read 0, the chord path runs on two equal points,
+ * `den_chord = qx - px ≡ 0 (mod p)`, and `fieldInv` is Fermat with inv(0) = 0.
+ * Measured before this gate landed, x = 1: `ecAdd(P, P)` gave the correct 2P
+ * and `ecAdd(P, P')` gave x = p-2 — a script that SUCCEEDED and returned a
+ * blob that is not a point. Both the doubling case and the P + (-P) case are
+ * driven by these selectors, so both are defeated by the same trick.
+ *
+ * REJECT rather than reduce. `ecOnCurve` already answers "no" to a
+ * non-canonical encoding (GAP-301, and its P-256/P-384 twin), so reducing here
+ * would leave the predicate and the value builtins disagreeing about whether
+ * the blob is a point at all. Rejecting keeps them aligned, and it is the
+ * policy CL-BUG-095 already set for the WIDTH: predicates clamp and flag,
+ * value producers OP_VERIFY.
+ *
+ * Callers are the user-facing value builtins only. It is deliberately NOT
+ * folded into `decomposePoint`: that helper also runs inside `ecOnCurve`,
+ * which must stay total.
+ *
+ * `x` and `y` are unsigned by construction (BIN2NUM of a sign-extended
+ * big-endian blob), so `< p` is the whole check; no lower bound is needed.
+ */
+function emitCoordCanonVerify(t: ECTracker, xName: string, yName: string): void {
+  t.copyToTop(xName, '_cc_x');
+  pushFieldP(t, '_cc_px');
+  t.rawBlock(['_cc_x', '_cc_px'], '_cc_xok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.copyToTop(yName, '_cc_y');
+  pushFieldP(t, '_cc_py');
+  t.rawBlock(['_cc_y', '_cc_py'], '_cc_yok', (e) => {
+    e({ op: 'opcode', code: 'OP_LESSTHAN' });
+  });
+  t.rawBlock(['_cc_xok', '_cc_yok'], null, (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+    e({ op: 'opcode', code: 'OP_VERIFY' });
+  });
+}
+
+/**
  * Decompose 64-byte Point → (x_num, y_num) on stack.
  * Consumes pointName, produces xName and yName.
  */
 function decomposePoint(t: ECTracker, pointName: string, xName: string, yName: string): void {
   t.toTop(pointName);
-  // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+  // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top) — but only for
+  // a value that really is 64 bytes. CL-BUG-095: gate the width first, here,
+  // so every consumer that decomposes a Point inherits the check.
   t.rawBlock([pointName], null, (e) => {
+    emitPointLenVerify(e, 64);
     e({ op: 'push', value: 32n });
     e({ op: 'opcode', code: 'OP_SPLIT' });
   });
@@ -521,22 +677,156 @@ function affineAdd(t: ECTracker): void {
   t.copyToTop('py', '_py2');
   fieldSub(t, '_s_px_rx', '_py2', 'ry');
 
-  // Clean up original points
-  t.toTop('px'); t.drop();
-  t.toTop('py'); t.drop();
-  t.toTop('qx'); t.drop();
-  t.toTop('qy'); t.drop();
+  // CL-BUG-096: select over the infinity operands and the P == -Q case, and
+  // consume px/py/qx/qy in doing so. This subsumes the standalone `notinf`
+  // mask that used to live here. See emitAffineInfinitySelect.
+  emitAffineInfinitySelect(t);
+}
 
-  // P == -Q -> force the all-zero point (see the header comment).
+/**
+ * CL-BUG-096 — the infinity-operand case of affine addition, shared by
+ * secp256k1 and the two NIST curves because it is pure integer masking and
+ * touches no field parameter.
+ *
+ * The group law has an identity, and this codegen has a representation for it:
+ * the ALL-ZERO blob. It is not a theoretical value — the codegen MANUFACTURES
+ * it, from `ecMul(P, k)` whenever k ≡ 0 (mod n), from affineAdd's own P + (−P)
+ * masking, and from the `ec-mul-zero` / `ec-add-negate-cancel` rewrites in
+ * optimizer/ec-rules.json. `affineAdd` nonetheless had no case for it: fed
+ * (G, O) it took the chord path with s = Gy/Gx and returned an off-curve blob
+ * from a script that SUCCEEDED.
+ *
+ * And the always-on EC optimizer already believed the right answer:
+ * `ec-add-identity-right` / `-left` rewrite `ecAdd($x, INFINITY)` to `$x`. So
+ * the same source meant "P" with the optimizer on and "garbage" with it off.
+ * Fixing the adder rather than deleting the two rules is the only option that
+ * works, because the rules cannot see a zero scalar that only exists at
+ * runtime — deleting them would leave the runtime path just as wrong and
+ * rewrite nothing.
+ *
+ * Branch-free, in the style the rest of this adder uses. Exactly one of the
+ * three masks is 1 and the other two are 0, so the sum selects one term:
+ *
+ *   pinf = (px == 0) AND (py == 0)          P is O
+ *   qinf = (qx == 0) AND (qy == 0)          Q is O
+ *   usep = qinf AND NOT pinf                -> answer is P
+ *   useq = pinf                             -> answer is Q  (covers O + O = O)
+ *   user = notinf AND NOT(pinf OR qinf)     -> answer is the computed sum
+ *
+ * `user` folds in the pre-existing `notinf` mask (the P == −Q case), so P + (−P)
+ * still yields the all-zero blob and nothing about that case changes.
+ *
+ * Requiring BOTH coordinates to be zero is load-bearing, not belt-and-braces.
+ * x = 0 has genuine curve points whenever the curve's b is a quadratic residue
+ * — (0, sqrt(b)) — and testing x alone would map them to O. y = 0 has none on
+ * any of these three curves (all have prime order, so no point of order 2), but
+ * the conjunction makes that fact not need to be true.
+ *
+ * Plain OP_MUL / OP_ADD with no field reduction: px, qx, rx are already in
+ * [0, p) and the masks are 0 or 1, so each product and the sum are canonical.
+ *
+ * Consumes px, py, qx, qy and the field-computed rx, ry; leaves the selected
+ * rx, ry in their place.
+ */
+export function emitAffineInfinitySelect(t: ECTracker): void {
+  // pinf = (px == 0) AND (py == 0)
+  t.copyToTop('px', '_px_z');
+  t.pushInt('_zero_px', 0n);
+  t.rawBlock(['_px_z', '_zero_px'], '_pxz', (e) => {
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+  });
+  t.copyToTop('py', '_py_z');
+  t.pushInt('_zero_py', 0n);
+  t.rawBlock(['_py_z', '_zero_py'], '_pyz', (e) => {
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+  });
+  t.rawBlock(['_pxz', '_pyz'], '_pinf', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+
+  // qinf = (qx == 0) AND (qy == 0)
+  t.copyToTop('qx', '_qx_z');
+  t.pushInt('_zero_qx', 0n);
+  t.rawBlock(['_qx_z', '_zero_qx'], '_qxz', (e) => {
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+  });
+  t.copyToTop('qy', '_qy_z');
+  t.pushInt('_zero_qy', 0n);
+  t.rawBlock(['_qy_z', '_zero_qy'], '_qyz', (e) => {
+    e({ op: 'opcode', code: 'OP_NUMEQUAL' });
+  });
+  t.rawBlock(['_qxz', '_qyz'], '_qinf', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+
+  // usep = qinf AND NOT pinf
+  t.copyToTop('_qinf', '_usep_q');
+  t.copyToTop('_pinf', '_usep_p');
+  t.rawBlock(['_usep_q', '_usep_p'], '_usep', (e) => {
+    e({ op: 'opcode', code: 'OP_NOT' });
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+
+  // useq = pinf
+  t.copyToTop('_pinf', '_useq');
+
+  // user = notinf AND NOT(pinf OR qinf)
+  t.toTop('_pinf');
+  t.toTop('_qinf');
+  t.rawBlock(['_pinf', '_qinf'], '_anyinf', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLOR' });
+  });
+  t.toTop('_notinf');
+  t.toTop('_anyinf');
+  t.rawBlock(['_notinf', '_anyinf'], '_user', (e) => {
+    e({ op: 'opcode', code: 'OP_NOT' });
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+
+  // rx = px*usep + qx*useq + rx*user
+  t.toTop('px');
+  t.copyToTop('_usep', '_usep_x');
+  t.rawBlock(['px', '_usep_x'], '_selx_p', (e) => {
+    e({ op: 'opcode', code: 'OP_MUL' });
+  });
+  t.toTop('qx');
+  t.copyToTop('_useq', '_useq_x');
+  t.rawBlock(['qx', '_useq_x'], '_selx_q', (e) => {
+    e({ op: 'opcode', code: 'OP_MUL' });
+  });
   t.toTop('rx');
-  t.copyToTop('_notinf', '_notinf_x');
-  t.rawBlock(['rx', '_notinf_x'], 'rx', (e) => {
+  t.copyToTop('_user', '_user_x');
+  t.rawBlock(['rx', '_user_x'], '_selx_r', (e) => {
+    e({ op: 'opcode', code: 'OP_MUL' });
+  });
+  t.rawBlock(['_selx_q', '_selx_r'], '_selx_qr', (e) => {
+    e({ op: 'opcode', code: 'OP_ADD' });
+  });
+  t.rawBlock(['_selx_p', '_selx_qr'], 'rx', (e) => {
+    e({ op: 'opcode', code: 'OP_ADD' });
+  });
+
+  // ry = py*usep + qy*useq + ry*user  (last use of each mask: consume them)
+  t.toTop('py');
+  t.toTop('_usep');
+  t.rawBlock(['py', '_usep'], '_sely_p', (e) => {
+    e({ op: 'opcode', code: 'OP_MUL' });
+  });
+  t.toTop('qy');
+  t.toTop('_useq');
+  t.rawBlock(['qy', '_useq'], '_sely_q', (e) => {
     e({ op: 'opcode', code: 'OP_MUL' });
   });
   t.toTop('ry');
-  t.toTop('_notinf');
-  t.rawBlock(['ry', '_notinf'], 'ry', (e) => {
+  t.toTop('_user');
+  t.rawBlock(['ry', '_user'], '_sely_r', (e) => {
     e({ op: 'opcode', code: 'OP_MUL' });
+  });
+  t.rawBlock(['_sely_q', '_sely_r'], '_sely_qr', (e) => {
+    e({ op: 'opcode', code: 'OP_ADD' });
+  });
+  t.rawBlock(['_sely_p', '_sely_qr'], 'ry', (e) => {
+    e({ op: 'opcode', code: 'OP_ADD' });
   });
 }
 
@@ -843,6 +1133,9 @@ export function emitEcAdd(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pa', '_pb'], emit);
   decomposePoint(t, '_pa', 'px', 'py');
   decomposePoint(t, '_pb', 'qx', 'qy');
+  // R-117: affineAdd's selectors compare these four values RAW.
+  emitCoordCanonVerify(t, 'px', 'py');
+  emitCoordCanonVerify(t, 'qx', 'qy');
   affineAdd(t);
   composePoint(t, 'rx', 'ry', '_result');
 }
@@ -858,7 +1151,87 @@ export function emitEcAdd(emit: (op: StackOp) => void): void {
  * This avoids the k+n overflow issue where bit 256 was only set for
  * large k, causing incorrect results for ~half of all scalar values.
  */
+/**
+ * R-157 — gate a Point operand of the scalar ladder: it must be ON the curve,
+ * or be the point at infinity. ABORTS otherwise. Raw ops, straight-line, run
+ * before the ladder's tracker exists.
+ *
+ * `ecMul(P, k)` does not compute `k·P`. It computes `((k mod n) + 3n)·P`: the
+ * MSB-first ladder adds `3n` so a fixed high bit is always set, and `+3n` is a
+ * no-op ONLY when ord(P) divides n. Cofactor 1 gives ord(P) = n for every point
+ * on the curve, so the trick is sound there and nowhere else. An off-curve
+ * point lies on some other curve `y² = x³ + b′` of unrelated order, and the
+ * ladder silently answers a different question. Measured on @bsv/sdk's Spend
+ * with the off-curve P = (5, 7), which lies on `y² = x³ − 76`:
+ *
+ *     ecMul(P, 1n) -> c8b039d1…9438f2ff, which is NOT P
+ *
+ * matching `(1 + 3n)·P` on that other curve exactly. So the primitive violated
+ * its own contract for EVERY off-curve input, not merely a contrived one.
+ *
+ * The degenerate sub-case is worse. For a 2-torsion point of the other curve —
+ * any `(x, 0)` — every multiple collapses to the all-zero blob, because the
+ * ladder's unguarded mixed-add hits H = R = 0 mid-ladder, sets Z3 = 0, and a
+ * Jacobian accumulator at infinity never leaves it. Combined with R-053, which
+ * correctly taught `ecAdd` that the all-zero blob is the identity, that turns a
+ * Schnorr-shaped `s·G == R + e·P` check into a free pass: choose an off-curve
+ * `P` of order 2, `e·P` is O, `R + O` is R, and any `s` with `R = s·G` verifies
+ * with no knowledge of any discrete log.
+ *
+ * WHY HERE AND NOT IN THE CALLER. The `+3n` offset is INTERNAL to `ecMul`. A
+ * caller cannot see it, cannot know the obligation exists without reading this
+ * codegen, and gains nothing by checking what `ecMul` can check more cheaply
+ * (`ecOnCurve` is 816 bytes against `ecMul`'s 428 KB — 0.2%). The obligation
+ * WAS written down, in all seven tiers, in `buildJacobianAddOrDoubleInline`'s
+ * own docstring: "callers who accept untrusted points must gate them on
+ * `ecOnCurve` first". Nothing enforced it, and the repository's own
+ * `schnorr-zkp` fixture takes its `pubKey` from a DEPLOYER-supplied constructor
+ * slot, where that idiom is not even reachable.
+ *
+ * WHY NOT `ecAdd`, which is the other half of the boundary: `affineAdd`
+ * implements the group law with no n-dependent trick, so on an off-curve
+ * operand it returns the CORRECT sum on that operand's own curve. It does not
+ * lie. And O — deliberately not on the curve — must keep flowing through
+ * `ecAdd` for R-053 to hold. Gating the adder would break a working primitive
+ * to fix a different one.
+ *
+ * WHY O IS EXEMPT, and it is load-bearing: `ecMul(P, 0n)` returns the all-zero
+ * blob, `ecAdd(P, -P)` returns it, and the EC optimizer folds to it, so O is a
+ * reachable runtime operand — while `ecOnCurve(O)` is false by construction
+ * (0² ≠ 0³ + b). A bare on-curve gate would reject the identity this codegen
+ * manufactures itself.
+ *
+ * This SUBSUMES R-117's coordinate-canonicity gate on the mul builtins, which
+ * is why that call is removed here rather than left as defence in depth: a
+ * non-canonical coordinate makes `ecOnCurve` false and cannot equal the
+ * all-zero blob, so it still aborts, and keeping both would be 74 bytes saying
+ * the same thing twice in two places that must agree.
+ *
+ * Stack in/out: [point, scalar] — unchanged.
+ */
+function emitPointGate(
+  emit: (op: StackOp) => void,
+  emitOnCurve: (e: (op: StackOp) => void) => void,
+  coordBytes: number,
+): void {
+  // [pt, k] -> [pt, k, pt]
+  emit({ op: 'over' });
+  // -> [pt, k, isInf]
+  emit({ op: 'push', value: new Uint8Array(coordBytes * 2) });
+  emit({ op: 'opcode', code: 'OP_EQUAL' });
+  // -> [pt, k, isInf, pt]
+  emit({ op: 'push', value: 2n });
+  emit({ op: 'pick', depth: 2 });
+  // -> [pt, k, isInf, onCurve]
+  emitOnCurve(emit);
+  // -> [pt, k]
+  emit({ op: 'opcode', code: 'OP_BOOLOR' });
+  emit({ op: 'opcode', code: 'OP_VERIFY' });
+}
+
 export function emitEcMul(emit: (op: StackOp) => void): void {
+  // R-157: the ladder's +3n trick is a no-op only for ord(P) | n.
+  emitPointGate(emit, emitEcOnCurve, 32);
   const t = new ECTracker(['_pt', '_k'], emit);
   decomposePoint(t, '_pt', 'ax', 'ay');
 
@@ -960,6 +1333,7 @@ export function emitEcMulGen(emit: (op: StackOp) => void): void {
 export function emitEcNegate(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
   decomposePoint(t, '_pt', '_nx', '_ny');
+  emitCoordCanonVerify(t, '_nx', '_ny');
   pushFieldP(t, '_fp');
   fieldSub(t, '_fp', '_ny', '_neg_y');
   composePoint(t, '_nx', '_neg_y', '_result');
@@ -972,6 +1346,15 @@ export function emitEcNegate(emit: (op: StackOp) => void): void {
  */
 export function emitEcOnCurve(emit: (op: StackOp) => void): void {
   const t = new ECTracker(['_pt'], emit);
+
+  // CL-BUG-095: width. `ecOnCurve(G ‖ 0xff)` returned TRUE — decomposePoint
+  // discarded the surplus byte, so 2^8 distinct blobs all certified as the
+  // same point and a point's identity AS BYTES stopped being unique. Clamp and
+  // remember the width, rather than abort, because this is the predicate
+  // contracts are told to gate untrusted points on and it must stay total; the
+  // flag is ANDed into the result at the end.
+  emitPointLengthGate(t, '_pt', 64, '_len_ok');
+
   decomposePoint(t, '_pt', '_x', '_y');
 
   // GAP-301: coordinate canonicity. `decomposePoint` BIN2NUMs each coordinate
@@ -1013,10 +1396,15 @@ export function emitEcOnCurve(emit: (op: StackOp) => void): void {
     e({ op: 'opcode', code: 'OP_EQUAL' });
   });
 
-  // on-curve = canonical AND curve-equation
+  // on-curve = right width AND canonical AND curve-equation
   t.toTop('_canon');
   t.toTop('_curve_eq');
-  t.rawBlock(['_canon', '_curve_eq'], '_result', (e) => {
+  t.rawBlock(['_canon', '_curve_eq'], '_eq_ok', (e) => {
+    e({ op: 'opcode', code: 'OP_BOOLAND' });
+  });
+  t.toTop('_len_ok');
+  t.toTop('_eq_ok');
+  t.rawBlock(['_len_ok', '_eq_ok'], '_result', (e) => {
     e({ op: 'opcode', code: 'OP_BOOLAND' });
   });
 }
@@ -1043,21 +1431,26 @@ export function emitEcModReduce(emit: (op: StackOp) => void): void {
  * Stack out: [compressed (33 bytes)]
  */
 export function emitEcEncodeCompressed(emit: (op: StackOp) => void): void {
+  // CL-BUG-095, and the reason this one is the sharpest edge of it: the parity
+  // byte used to be taken from the blob's LAST byte (OP_SIZE 1 OP_SUB
+  // OP_SPLIT), not from a fixed offset. So appending one byte FLIPPED THE SIGN
+  // of the compressed encoding — the same 64-byte point compressed to 02‖x or
+  // 03‖x at the caller's choice, and anything that hashes a compressed pubkey
+  // (a P2PKH address, a commitment) became forgeable between the two
+  // spellings. Two independent fixes, both kept: the width is verified, and
+  // the parity byte is read from offset 31 of y whatever the caller sent.
+  emitPointLenVerify(emit, 64);
   // Split at 32: [x_bytes, y_bytes]
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Get last byte of y for parity
-  emit({ op: 'opcode', code: 'OP_SIZE' });
-  emit({ op: 'push', value: 1n });
-  emit({ op: 'opcode', code: 'OP_SUB' });
+  // Take y[31] at a FIXED offset: [x_bytes, y_head, y_last]
+  emit({ op: 'push', value: 31n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
-  // Stack: [x_bytes, y_prefix, last_byte]
+  emit({ op: 'opcode', code: 'OP_NIP' }); // drop y_head
+  // Stack: [x_bytes, last_byte]
   emit({ op: 'opcode', code: 'OP_BIN2NUM' });
   emit({ op: 'push', value: 2n });
   emit({ op: 'opcode', code: 'OP_MOD' });
-  // Stack: [x_bytes, y_prefix, parity]
-  emit({ op: 'swap' });
-  emit({ op: 'drop' }); // drop y_prefix
   // Stack: [x_bytes, parity]
   emit({ op: 'if',
     then: [{ op: 'push', value: new Uint8Array([0x03]) }],
@@ -1069,11 +1462,52 @@ export function emitEcEncodeCompressed(emit: (op: StackOp) => void): void {
 }
 
 /**
+ * R-156 — verify that the script number on TOS is a FIELD ELEMENT, 0 <= v < p.
+ * Leaves the value in place (OP_DUP feeds the check, OP_VERIFY consumes the
+ * flag), so the caller's stack shape is unchanged.
+ *
+ * `ecMakePoint` converts each coordinate with `push 33, OP_NUM2BIN, push 32,
+ * OP_SPLIT, OP_DROP`. NUM2BIN(33) writes a 33-byte little-endian SIGN-MAGNITUDE
+ * script number, so byte 32 is exactly where the sign bit lives AND where any
+ * bits >= 2^256 land — and the split drops precisely that byte. The result was
+ * an ecMakePoint that is NOT INJECTIVE:
+ *
+ *     ecMakePoint( 1n, y) == ecMakePoint(-1n, y)            sign discarded
+ *     ecMakePoint( 1n, y) == ecMakePoint(1n + 2^256, y)     magnitude truncated
+ *     ecMakePoint( x,  y) == ecMakePoint(x, -y)             and on the y half
+ *
+ * all three measured on @bsv/sdk's Spend. The y-half collision is the sharpest:
+ * `ecMakePoint(x, 0n - y)` is how an author spells negation by hand, and it
+ * silently produced (x, +y) — the point being negated — rather than (x, p-y).
+ *
+ * R-117's coordinate-canonicity gate does not cover this and cannot: the bytes
+ * emitted for `-1n` are the perfectly canonical encoding of 1, so no downstream
+ * consumer can tell. The aliasing happens before any Point exists.
+ *
+ * REJECT rather than reduce, for the reason R-117 gives: `ecOnCurve` answers
+ * "no" to a coordinate outside [0, p), so reducing here would leave the
+ * constructor and the predicate disagreeing about what a point is. Rejecting
+ * also restores injectivity, which is the property the defect broke.
+ *
+ * OP_WITHIN(v, 0, p) is `0 <= v < p` in one opcode — the same half-open bound
+ * the `within` builtin exposes to contract authors.
+ */
+function emitFieldElementVerify(emit: (op: StackOp) => void): void {
+  emit({ op: 'dup' });
+  emit({ op: 'push', value: 0n });
+  emit({ op: 'push', value: FIELD_P });
+  emit({ op: 'opcode', code: 'OP_WITHIN' });
+  emit({ op: 'opcode', code: 'OP_VERIFY' });
+}
+
+/**
  * ecMakePoint: (x: bigint, y: bigint) → Point.
  * Stack in: [x_num, y_num] (y on top)
  * Stack out: [point_bytes (64 bytes)]
  */
 export function emitEcMakePoint(emit: (op: StackOp) => void): void {
+  // R-156: y must be a field element before its sign byte is dropped.
+  emitFieldElementVerify(emit);
   // Convert y to 32 bytes big-endian (NUM2BIN(33) to handle sign byte, then take first 32)
   emit({ op: 'push', value: 33n });
   emit({ op: 'opcode', code: 'OP_NUM2BIN' });
@@ -1084,6 +1518,8 @@ export function emitEcMakePoint(emit: (op: StackOp) => void): void {
   // Stack: [x_num, y_be]
   emit({ op: 'swap' });
   // Stack: [y_be, x_num]
+  // R-156: and so must x.
+  emitFieldElementVerify(emit);
   emit({ op: 'push', value: 33n });
   emit({ op: 'opcode', code: 'OP_NUM2BIN' });
   emit({ op: 'push', value: 32n });
@@ -1102,6 +1538,11 @@ export function emitEcMakePoint(emit: (op: StackOp) => void): void {
  * Stack out: [x as bigint]
  */
 export function emitEcPointX(emit: (op: StackOp) => void): void {
+  // CL-BUG-095: a 32-byte blob used to SUCCEED here and return itself as x —
+  // the split at 32 left an empty tail that `drop` happily removed. ecPointY
+  // on the identical input already aborted, which is how the hole survived: a
+  // short point looked "already rejected".
+  emitPointLenVerify(emit, 64);
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
   emit({ op: 'drop' });
@@ -1118,6 +1559,7 @@ export function emitEcPointX(emit: (op: StackOp) => void): void {
  * Stack out: [y as bigint]
  */
 export function emitEcPointY(emit: (op: StackOp) => void): void {
+  emitPointLenVerify(emit, 64);
   emit({ op: 'push', value: 32n });
   emit({ op: 'opcode', code: 'OP_SPLIT' });
   emit({ op: 'swap' });

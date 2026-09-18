@@ -99,7 +99,7 @@ type SourceMap struct {
 
 // IRDebug holds optional IR snapshots for debugging / conformance checking.
 type IRDebug struct {
-	ANF   *ir.ANFProgram       `json:"anf,omitempty"`
+	ANF   *ir.ANFProgram        `json:"anf,omitempty"`
 	Stack []codegen.StackMethod `json:"stack,omitempty"`
 }
 
@@ -118,31 +118,55 @@ type Groth16WAMeta struct {
 	// byte-identical VK files. It is NOT a cryptographic commitment to
 	// the VK semantics and should not be used for anything load-bearing.
 	VKDigest string `json:"vkDigest"`
+
+	// PublicInputs are the public-input scalars pinned into the locking
+	// script at compile time, as decimal strings. The emitted verifier
+	// asserts the spender's witness-supplied scalars equal these, and
+	// recomputes prepared_inputs from them on-chain. They are what makes
+	// the artifact a verifier for a SPECIFIC statement rather than for
+	// "some statement the spender chose".
+	PublicInputs []string `json:"publicInputs,omitempty"`
 }
 
 // Artifact is the final compiled output of a Rúnar compiler.
 type Artifact struct {
-	Version                string            `json:"version"`
-	CompilerVersion        string            `json:"compilerVersion"`
-	ContractName           string            `json:"contractName"`
-	ParentClass            string            `json:"parentClass,omitempty"`
-	ABI                    ABI               `json:"abi"`
-	Script                 string            `json:"script"`
-	ASM                    string            `json:"asm"`
-	StateFields            []StateField      `json:"stateFields,omitempty"`
-	ConstructorSlots       []ConstructorSlot  `json:"constructorSlots,omitempty"`
-	CodeSepIndexSlots      []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
-	CodeSeparatorIndex     *int               `json:"codeSeparatorIndex,omitempty"`
-	CodeSeparatorIndices   []int             `json:"codeSeparatorIndices,omitempty"`
-	BuildTimestamp         string            `json:"buildTimestamp"`
-	ANF                    *ir.ANFProgram    `json:"anf,omitempty"`
-	SourceMapData          *SourceMap        `json:"sourceMap,omitempty"`
-	IR                     *IRDebug          `json:"ir,omitempty"`
+	Version              string             `json:"version"`
+	CompilerVersion      string             `json:"compilerVersion"`
+	ContractName         string             `json:"contractName"`
+	ParentClass          string             `json:"parentClass,omitempty"`
+	ABI                  ABI                `json:"abi"`
+	Script               string             `json:"script"`
+	ASM                  string             `json:"asm"`
+	StateFields          []StateField       `json:"stateFields,omitempty"`
+	ConstructorSlots     []ConstructorSlot  `json:"constructorSlots,omitempty"`
+	CodeSepIndexSlots    []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
+	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
+	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
+	BuildTimestamp       string             `json:"buildTimestamp"`
+	ANF                  *ir.ANFProgram     `json:"anf,omitempty"`
+	SourceMapData        *SourceMap         `json:"sourceMap,omitempty"`
+	IR                   *IRDebug           `json:"ir,omitempty"`
 
 	// Groth16WA is populated only for artifacts produced by the
 	// `runarc groth16-wa` backend. Nil for normal Rúnar contract
 	// compilations. See Groth16WAMeta for field semantics.
 	Groth16WA *Groth16WAMeta `json:"groth16WA,omitempty"`
+
+	// UnsoundPrimitives names every builtin in this script that the project
+	// itself does not claim is sound (R-062 / CL-BUG-105). Today that is
+	// exactly `verifySP1FRI`, whose codegen is a documented PoC with stubbed
+	// protocol algebra.
+	//
+	// R-012 made the compiler REFUSE such a program unless the author or the
+	// invoker acknowledged the gap — but that acknowledgement stopped at the
+	// person running the compiler. Whoever is handed the artifact afterwards
+	// (a deployer, a reviewer, another tier's SDK) saw an ordinary contract.
+	// The fact travels with the artifact now, and every SDK's deploy path
+	// refuses to fund it unless the caller acknowledges the same list.
+	//
+	// `omitempty`: an artifact that reaches no unsound primitive is unchanged,
+	// byte for byte, from before this field existed.
+	UnsoundPrimitives []string `json:"unsoundPrimitives,omitempty"`
 }
 
 const (
@@ -191,9 +215,47 @@ func disableFoldForIRInput(opts []CompileOptions) []CompileOptions {
 	return []CompileOptions{o}
 }
 
+// buildLowerOptions turns CompileOptions into the codegen options pass 5 needs.
+//
+// R-162: there were three copies of this wiring and they had drifted. The two
+// *WithResult copies set SP1FriParams only, so CompileOptions.Groth16WAVKey was
+// silently dropped and the contract was refused with "no Groth16WAConfig was
+// supplied" — naming the option the caller had supplied. One function now, so
+// every entry point lowers with the same options.
+//
+// Mode 3: when Groth16WAVKey is set, load the SP1 vk.json and build the
+// codegen.Groth16Config that the stack-lowering preamble emitter consumes. The
+// compiler package can import bn254witness (which already imports codegen for
+// the NAF table); the codegen package cannot, so the loading happens here.
+//
+// SP1FriParams nil falls back to codegen.DefaultSP1FriParams() (the validated
+// PoC tuple). Use `compiler.SP1FriPreset(name)` for the canonical presets.
+func buildLowerOptions(o CompileOptions) (codegen.LowerToStackOptions, error) {
+	var lowerOpts codegen.LowerToStackOptions
+	if o.Groth16WAVKey != "" {
+		cfg, err := loadGroth16WAConfig(o.Groth16WAVKey)
+		if err != nil {
+			return lowerOpts, fmt.Errorf("loading Groth16WAVKey %q: %w", o.Groth16WAVKey, err)
+		}
+		lowerOpts.Groth16WAConfig = &cfg
+	}
+	if o.SP1FriParams != nil {
+		lowerOpts.SP1FriParams = o.SP1FriParams
+	}
+	return lowerOpts, nil
+}
+
 // CompileFromProgram compiles a parsed ANF program to a Rúnar artifact.
 func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifact, error) {
 	o := mergeOptions(opts)
+
+	// R-012: the IR entry points never run frontend.Validate, so the
+	// verifySP1FRI soundness refusal has to be re-asserted here against the
+	// ANF observable. No-op when the frontend already adjudicated it (source
+	// path) or the invoker acknowledged it. See sp1_fri_ir_guard.go.
+	if err := guardUnsoundSP1FriIR(program, o); err != nil {
+		return nil, err
+	}
 
 	// Bake constructor args into ANF properties.
 	if errs := applyConstructorArgs(program, o.ConstructorArgs); len(errs) > 0 {
@@ -208,26 +270,13 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 	// EC optimization — algebraic simplification of EC calls.
 	// Delegates internally to frontend/dce.go for dead-binding cleanup
 	// after any EC rewrite (see eliminateDeadBindings in anf_optimize.go).
-	program = frontend.OptimizeEC(program)
-
-	// Mode 3: when CompileOptions.Groth16WAVKey is set, load the SP1
-	// vk.json and build the codegen.Groth16Config that the stack-lowering
-	// preamble emitter will consume. The compiler package can import
-	// bn254witness (which already imports codegen for the NAF table); the
-	// codegen package cannot, so the loading happens here.
-	var lowerOpts codegen.LowerToStackOptions
-	if o.Groth16WAVKey != "" {
-		cfg, err := loadGroth16WAConfig(o.Groth16WAVKey)
-		if err != nil {
-			return nil, fmt.Errorf("loading Groth16WAVKey %q: %w", o.Groth16WAVKey, err)
-		}
-		lowerOpts.Groth16WAConfig = &cfg
+	if !o.DisableEcOptimizer {
+		program = frontend.OptimizeEC(program)
 	}
-	// SP1 FRI verifier param tuple override. nil falls back to
-	// codegen.DefaultSP1FriParams() (the validated PoC tuple). Use
-	// `compiler.SP1FriPreset(name)` for the canonical presets.
-	if o.SP1FriParams != nil {
-		lowerOpts.SP1FriParams = o.SP1FriParams
+
+	lowerOpts, err := buildLowerOptions(o)
+	if err != nil {
+		return nil, err
 	}
 
 	// Pass 5: Stack lowering
@@ -237,8 +286,10 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 	}
 
 	// Peephole optimization — runs on Stack IR before emission.
-	for i := range stackMethods {
-		stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+	if !o.DisablePeephole {
+		for i := range stackMethods {
+			stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+		}
 	}
 
 	// Pass 6: Emit
@@ -247,12 +298,15 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	artifact := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+	if err != nil {
+		return nil, err
+	}
 	return artifact, nil
 }
 
 // assembleArtifact builds the final output artifact from the compilation products.
-func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) *Artifact {
+func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
 	// ---------------------------------------------------------------------
 	// Build ABI
 	// ---------------------------------------------------------------------
@@ -273,7 +327,10 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 			index: i,
 		})
 	}
-	regroupedCtor := regroupSyntheticRuns(ctorEntries)
+	regroupedCtor, err := regroupSyntheticRuns(ctorEntries)
+	if err != nil {
+		return nil, err
+	}
 	var constructorParams []ABIParam
 	for _, e := range regroupedCtor {
 		p := ABIParam{Name: e.name, Type: e.typ}
@@ -298,7 +355,10 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 			index:        i,
 		})
 	}
-	regroupedState := regroupSyntheticRuns(stateEntries)
+	regroupedState, err := regroupSyntheticRuns(stateEntries)
+	if err != nil {
+		return nil, err
+	}
 	var stateFields []StateField
 	for _, e := range regroupedState {
 		sf := StateField{
@@ -390,10 +450,18 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		ASM:                  scriptAsm,
 		StateFields:          stateFields,
 		ConstructorSlots:     constructorSlots,
-		CodeSepIndexSlots:   codeSepIndexSlots,
+		CodeSepIndexSlots:    codeSepIndexSlots,
 		CodeSeparatorIndex:   csIndex,
 		CodeSeparatorIndices: csIndices,
 		BuildTimestamp:       buildTimestamp(),
+	}
+
+	// R-062: record the unsound primitives this script reaches. Same observable
+	// the --ir soundness guard keys on (a `call` binding naming the builtin, at
+	// any nesting depth), so the marker and the refusal can never disagree
+	// about whether a program reaches the verifier.
+	if programCallsSP1FriVerifier(program) {
+		artifact.UnsoundPrimitives = []string{"verifySP1FRI"}
 	}
 
 	// Always include ANF IR for stateful contracts — the SDK uses it
@@ -415,35 +483,53 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		}
 	}
 
-	return artifact
+	return artifact, nil
 }
 
 // CompileFromSource compiles a .runar.ts source file through all passes to a Rúnar artifact.
+//
+// Warning-severity validator diagnostics are dropped on the floor: this
+// signature has nowhere to put them. A caller that wants to surface them —
+// the CLI does — must call CompileFromSourceCollectingWarnings instead.
 func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, error) {
+	artifact, _, err := CompileFromSourceCollectingWarnings(sourcePath, opts...)
+	return artifact, err
+}
+
+// CompileFromSourceCollectingWarnings is CompileFromSource, plus the
+// warning-severity validator diagnostics CompileFromSource has to discard.
+//
+// CL-BUG-104: `main.go` called CompileFromSource, so every warning the
+// validator produced died inside the compile call and the contract author got
+// silence. Error handling here is unchanged — same messages, same
+// stop-at-first-failure semantics — the only addition is the second return
+// value.
+func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptions) (*Artifact, []frontend.Diagnostic, error) {
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading source file: %w", err)
+		return nil, nil, fmt.Errorf("reading source file: %w", err)
 	}
 
 	// Pass 1: Parse
 	parseResult := frontend.ParseSource(source, sourcePath)
 	if len(parseResult.Errors) > 0 {
-		return nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  "))
 	}
 	if parseResult.Contract == nil {
-		return nil, fmt.Errorf("no contract found in %s", sourcePath)
+		return nil, nil, fmt.Errorf("no contract found in %s", sourcePath)
 	}
 
 	// Pass 2: Validate
 	validResult := frontend.Validate(parseResult.Contract)
 	if len(validResult.Errors) > 0 {
-		return nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  "))
 	}
+	warnings := validResult.Warnings
 
 	// Pass 3: Type check
 	tcResult := frontend.TypeCheck(parseResult.Contract)
 	if len(tcResult.Errors) > 0 {
-		return nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
+		return nil, nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
 	// Pass 3b: Expand FixedArray properties into scalar siblings.
@@ -453,18 +539,36 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 	// ANF, stack, or emit.
 	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
 	if len(expandResult.Errors) > 0 {
-		return nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
+		return nil, nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
 	}
 	expandedContract := expandResult.Contract
 
 	// Pass 4: ANF lowering (recover from panics)
 	program, err := lowerToANFRecovering(expandedContract)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Feed into existing compilation pipeline (passes 4.25+)
-	return CompileFromProgram(program, opts...)
+	// Feed into existing compilation pipeline (passes 4.25+).
+	//
+	// frontend.Validate accepted this contract above, so the verifySP1FRI
+	// soundness refusal (and its @acknowledgeUnsoundSP1FriVerifier directive)
+	// has already been adjudicated against the real source. Mark the options so
+	// the IR-path guard in CompileFromProgram stands down instead of refusing
+	// what Validate just allowed. See sp1_fri_ir_guard.go (R-012).
+	o := mergeOptions(opts)
+	o.sp1FriAdjudicatedByFrontend = true
+
+	// R-162 divergence (3), in the other direction: the issue-#109 embedAlways
+	// DCE notice ran ONLY in the *WithResult paths, so the API whose entire
+	// purpose is collecting warnings emitted none of these.
+	warnings = append(warnings, frontend.CollectEmbedAlwaysDCEWarnings(expandedContract, program)...)
+
+	artifact, err := CompileFromProgram(program, o)
+	if err != nil {
+		return nil, nil, err
+	}
+	return artifact, warnings, nil
 }
 
 // ParseAndValidateOnlyResult is the result of `ParseAndValidateOnly`. `Err`
@@ -472,6 +576,11 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 // diagnostics.
 type ParseAndValidateOnlyResult struct {
 	Err error
+
+	// Warnings holds the warning-severity validator diagnostics. CL-BUG-104:
+	// the CLI had no way to reach them, so `--parse-only` ran the validator
+	// and then threw away everything it had to say.
+	Warnings []frontend.Diagnostic
 }
 
 // ParseAndValidateOnly runs Pass 1 (parse, dispatched by file extension) and
@@ -496,7 +605,7 @@ func ParseAndValidateOnly(source []byte, sourcePath string) ParseAndValidateOnly
 			Err: fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  ")),
 		}
 	}
-	return ParseAndValidateOnlyResult{Err: nil}
+	return ParseAndValidateOnlyResult{Err: nil, Warnings: validResult.Warnings}
 }
 
 // diagStrings renders a diagnostic slice as a list of error messages for
@@ -551,7 +660,9 @@ func CompileSourceToIR(sourcePath string, opts ...CompileOptions) (*ir.ANFProgra
 		program = frontend.FoldConstants(program)
 	}
 
-	program = frontend.OptimizeEC(program)
+	if !o.DisableEcOptimizer {
+		program = frontend.OptimizeEC(program)
+	}
 	return program, nil
 }
 
@@ -619,177 +730,20 @@ func hasErrors(diagnostics []frontend.Diagnostic) bool {
 // collecting ALL diagnostics from ALL passes and returning partial results.
 // Unlike CompileFromSource, this function never returns an error — all errors
 // are captured in the returned CompileResult.Diagnostics slice.
+//
+// R-162: this used to be 165 lines duplicated from CompileFromSourceStrWithResult,
+// differing only in where the bytes came from — and the two copies had drifted.
+// It now reads the file and delegates, so there is one body to keep correct.
 func CompileFromSourceWithResult(sourcePath string, opts ...CompileOptions) *CompileResult {
-	result := &CompileResult{}
-	o := mergeOptions(opts)
-
-	// Read source file
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
-		result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
+		return &CompileResult{Diagnostics: []frontend.Diagnostic{frontend.MakeDiagnostic(
 			fmt.Sprintf("reading source file: %s", err),
 			frontend.SeverityError,
 			nil,
-		))
-		return result
+		)}}
 	}
-
-	// Pass 1: Parse
-	parseResult := frontend.ParseSource(source, sourcePath)
-	result.Diagnostics = append(result.Diagnostics, parseResult.Errors...)
-	result.Contract = parseResult.Contract
-
-	if hasErrors(result.Diagnostics) || result.Contract == nil {
-		if result.Contract == nil && !hasErrors(result.Diagnostics) {
-			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
-				fmt.Sprintf("no contract found in %s", sourcePath),
-				frontend.SeverityError,
-				nil,
-			))
-		}
-		return result
-	}
-
-	if o.ParseOnly {
-		result.Success = !hasErrors(result.Diagnostics)
-		return result
-	}
-
-	// Pass 2: Validate
-	validResult := frontend.Validate(result.Contract)
-	result.Diagnostics = append(result.Diagnostics, validResult.Errors...)
-	result.Diagnostics = append(result.Diagnostics, validResult.Warnings...)
-
-	if hasErrors(result.Diagnostics) {
-		return result
-	}
-
-	if o.ValidateOnly {
-		result.Success = !hasErrors(result.Diagnostics)
-		return result
-	}
-
-	// Pass 3: Type check
-	tcResult := frontend.TypeCheck(result.Contract)
-	result.Diagnostics = append(result.Diagnostics, tcResult.Errors...)
-
-	if hasErrors(result.Diagnostics) {
-		return result
-	}
-
-	if o.TypecheckOnly {
-		result.Success = !hasErrors(result.Diagnostics)
-		return result
-	}
-
-	// Pass 3b: Expand FixedArray properties.
-	expandResult := frontend.ExpandFixedArrays(result.Contract)
-	result.Diagnostics = append(result.Diagnostics, expandResult.Errors...)
-	if hasErrors(result.Diagnostics) {
-		return result
-	}
-	result.Contract = expandResult.Contract
-
-	// Pass 4: ANF lowering (recover from panics)
-	anfProgram, anfErr := lowerToANFRecovering(result.Contract)
-	if anfErr != nil {
-		result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
-			anfErr.Error(),
-			frontend.SeverityError,
-			nil,
-		))
-		return result
-	}
-	result.ANF = anfProgram
-
-	// Bake constructor args into ANF properties.
-	if errs := applyConstructorArgs(result.ANF, o.ConstructorArgs); len(errs) > 0 {
-		for _, msg := range errs {
-			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
-				msg, frontend.SeverityError, nil))
-		}
-		return result
-	}
-
-	// Pass 4.25: Constant folding (on by default)
-	if !o.DisableConstantFolding {
-		result.ANF = frontend.FoldConstants(result.ANF)
-	}
-
-	// Pass 4.5: EC optimization
-	result.ANF = frontend.OptimizeEC(result.ANF)
-
-	// Issue #109: warn when DCE strips an un-annotated readonly field. Computed
-	// from the post-lowering ANF (the surviving load_prop set), mirroring the TS
-	// reference's collectReferencedProps(optimizedAnf) placement.
-	result.Diagnostics = append(result.Diagnostics,
-		frontend.CollectEmbedAlwaysDCEWarnings(result.Contract, result.ANF)...)
-
-	// Pass 5: Stack lowering (recover from panics)
-	var stackMethods []codegen.StackMethod
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
-					fmt.Sprintf("stack lowering panic: %v", r),
-					frontend.SeverityError,
-					nil,
-				))
-			}
-		}()
-		var stackErr error
-		var lowerOpts codegen.LowerToStackOptions
-		if o.SP1FriParams != nil {
-			lowerOpts.SP1FriParams = o.SP1FriParams
-		}
-		stackMethods, stackErr = codegen.LowerToStack(result.ANF, lowerOpts)
-		if stackErr != nil {
-			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
-				fmt.Sprintf("stack lowering: %s", stackErr),
-				frontend.SeverityError,
-				nil,
-			))
-		}
-	}()
-
-	if hasErrors(result.Diagnostics) {
-		return result
-	}
-
-	// Peephole optimization
-	for i := range stackMethods {
-		stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
-	}
-
-	// Pass 6: Emit (recover from panics)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
-					fmt.Sprintf("emit panic: %v", r),
-					frontend.SeverityError,
-					nil,
-				))
-			}
-		}()
-		emitResult, emitErr := codegen.Emit(stackMethods)
-		if emitErr != nil {
-			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
-				fmt.Sprintf("emit: %s", emitErr),
-				frontend.SeverityError,
-				nil,
-			))
-			return
-		}
-
-		artifact := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
-		result.Artifact = artifact
-		result.ScriptHex = emitResult.ScriptHex
-		result.ScriptAsm = emitResult.ScriptAsm
-	}()
-
-	result.Success = !hasErrors(result.Diagnostics)
-	return result
+	return CompileFromSourceStrWithResult(string(source), sourcePath, opts...)
 }
 
 // CompileFromSourceStrWithResult compiles a source string through all passes,
@@ -881,7 +835,9 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 	}
 
 	// Pass 4.5: EC optimization
-	result.ANF = frontend.OptimizeEC(result.ANF)
+	if !o.DisableEcOptimizer {
+		result.ANF = frontend.OptimizeEC(result.ANF)
+	}
 
 	// Issue #109: warn when DCE strips an un-annotated readonly field. Computed
 	// from the post-lowering ANF (the surviving load_prop set), mirroring the TS
@@ -902,9 +858,15 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 			}
 		}()
 		var stackErr error
-		var lowerOpts codegen.LowerToStackOptions
-		if o.SP1FriParams != nil {
-			lowerOpts.SP1FriParams = o.SP1FriParams
+		// R-162: build the SAME lowering options CompileFromProgram builds.
+		// This used to set SP1FriParams only, so a caller who supplied
+		// CompileOptions.Groth16WAVKey was told to supply the option they had
+		// just supplied.
+		lowerOpts, optErr := buildLowerOptions(o)
+		if optErr != nil {
+			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
+				optErr.Error(), frontend.SeverityError, nil))
+			return
 		}
 		stackMethods, stackErr = codegen.LowerToStack(result.ANF, lowerOpts)
 		if stackErr != nil {
@@ -921,8 +883,10 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 	}
 
 	// Peephole optimization
-	for i := range stackMethods {
-		stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+	if !o.DisablePeephole {
+		for i := range stackMethods {
+			stackMethods[i].Ops = codegen.OptimizeStackOps(stackMethods[i].Ops)
+		}
 	}
 
 	// Pass 6: Emit (recover from panics)
@@ -946,7 +910,15 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 			return
 		}
 
-		artifact := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+		if aerr != nil {
+			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
+				aerr.Error(),
+				frontend.SeverityError,
+				nil,
+			))
+			return
+		}
 		result.Artifact = artifact
 		result.ScriptHex = emitResult.ScriptHex
 		result.ScriptAsm = emitResult.ScriptAsm

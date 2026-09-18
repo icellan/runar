@@ -287,7 +287,11 @@ public final class Builtins {
         if (!SimulatorContext.isActive()) throw notInSimulator("right");
         return MockCrypto.right(bs, len);
     }
-    public static ByteString[] split(ByteString bs, BigInteger idx) {
+    /**
+     * The bytes of {@code bs} from {@code idx} onwards -- the RIGHT half.
+     * Single-valued; see {@link MockCrypto#split(ByteString, BigInteger)}.
+     */
+    public static ByteString split(ByteString bs, BigInteger idx) {
         if (!SimulatorContext.isActive()) throw notInSimulator("split");
         return MockCrypto.split(bs, idx);
     }
@@ -470,8 +474,14 @@ public final class Builtins {
     public static ByteString extractOutpoint(SigHashPreimage p) { return Preimage.extractOutpoint(resolvePreimage(p)); }
     public static ByteString extractOutpoint(Preimage p) { return Preimage.extractOutpoint(p); }
 
+    public static ByteString extractScriptCode(SigHashPreimage p) { return Preimage.extractScriptCode(resolvePreimage(p)); }
+    public static ByteString extractScriptCode(Preimage p) { return Preimage.extractScriptCode(p); }
+
     public static BigInteger extractLocktime(SigHashPreimage p) { return Preimage.extractLocktime(resolvePreimage(p)); }
     public static BigInteger extractLocktime(Preimage p) { return Preimage.extractLocktime(p); }
+
+    public static BigInteger extractSequence(SigHashPreimage p) { return Preimage.extractSequence(resolvePreimage(p)); }
+    public static BigInteger extractSequence(Preimage p) { return Preimage.extractSequence(p); }
 
     public static ByteString extractOutputHash(SigHashPreimage p) {
         // Mirror packages/runar-lang/src/runtime/preimage.ts: when the

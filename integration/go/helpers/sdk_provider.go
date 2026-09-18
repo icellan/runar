@@ -13,6 +13,16 @@ import (
 // RPCProvider implements runar.Provider using JSON-RPC calls to a Bitcoin node.
 type RPCProvider struct {
 	network string
+
+	// BroadcastAttempts counts the times the SDK actually handed a transaction
+	// to the node. Negative tests and on-chain regression guards assert on it
+	// as a DELTA around the call under test (see CheckNodeRejected): without
+	// it, "the call returned an error" does not distinguish a consensus
+	// rejection from the SDK refusing to assemble the transaction in the first
+	// place, and a guard can stay green forever while the attack it describes
+	// was never broadcast. It is cumulative and never reset, so an absolute
+	// `>= 1` check proves nothing — the deploy already satisfies it.
+	BroadcastAttempts int
 }
 
 // NewRPCProvider creates a provider that talks to the regtest node via JSON-RPC.
@@ -54,6 +64,9 @@ func (p *RPCProvider) GetTransaction(txid string) (*runar.TransactionData, error
 
 func (p *RPCProvider) Broadcast(tx *transaction.Transaction) (string, error) {
 	rawTx := tx.Hex()
+	// Count the ATTEMPT, before the node can reject it — that is exactly what
+	// separates a consensus rejection from an SDK-side assembly failure.
+	p.BroadcastAttempts++
 	txid, err := SendRawTransaction(rawTx)
 	if err != nil {
 		return "", err
@@ -76,6 +89,7 @@ func NewBatchRPCProvider() *BatchRPCProvider {
 
 func (p *BatchRPCProvider) Broadcast(tx *transaction.Transaction) (string, error) {
 	rawTx := tx.Hex()
+	p.BroadcastAttempts++
 	txid, err := SendRawTransaction(rawTx)
 	if err != nil {
 		return "", err

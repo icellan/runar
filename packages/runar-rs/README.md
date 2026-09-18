@@ -255,7 +255,7 @@ impl P2PKH {
 }
 ```
 
-The `prelude` exports every type alias (`Bigint`, `Sig`, `PubKey`, `Addr`,
+The `prelude` exports every type alias (`Bigint`, `BigintBig`, `Sig`, `PubKey`, `Addr`,
 `Ripemd160`, `Sha256`, `Sha256Digest`, `Point`, `ByteString`,
 `SigHashPreimage`, `RabinSig`, `RabinPubKey`), every real-crypto verification
 helper (`check_sig`, `check_multi_sig`, `check_preimage`, `verify_rabin_sig`,
@@ -1173,7 +1173,7 @@ mod counter_integration_example {
 [`conformance/sdk-output/`](../../conformance/sdk-output/) cross-validates
 that this SDK emits **byte-identical deployed locking scripts** as every
 other Rúnar SDK (TS, Go, Python, Zig, Ruby, Java) for the same artifact +
-constructor args. The Counter contract is one of the 27 fixtures.
+constructor args. The Counter contract is one of the 70 fixtures.
 
 ---
 
@@ -1243,7 +1243,7 @@ Source: [`src/lib.rs`](src/lib.rs).
 ### `runar::prelude` — contract-author surface
 
 Re-exports the proc macros (`contract`, `methods`, `public`,
-`stateful_contract`), every type alias (`Int`, `Bigint`, `PubKey`, `Sig`,
+`stateful_contract`), every type alias (`Int`, `Bigint`, `BigintBig`, `PubKey`, `Sig`,
 `Addr`, `ByteString`, `Sha256`, `Sha256Digest`, `Ripemd160`,
 `SigHashPreimage`, `RabinSig`, `RabinPubKey`, `Point`), every real-crypto
 helper (`check_sig`, `check_multi_sig`, `check_preimage`,
@@ -1316,8 +1316,11 @@ fn build_call_transaction(
 Extended `build_call_transaction` with multi-output, additional contract
 inputs, and explicit data outputs. See [`src/sdk/calling.rs`](src/sdk/calling.rs).
 
-#### `pub fn build_deploy_transaction(...) -> (String, usize)`
-Build an unsigned deploy transaction. Returns `(tx_hex, input_count)`.
+#### `pub fn build_deploy_transaction(...) -> Result<(String, usize), String>`
+Build an unsigned deploy transaction. Returns `Ok((tx_hex, input_count))`, or
+`Err("buildDeployTransaction: insufficient funds. Need N sats, have M")` when
+the supplied UTXOs cannot cover `satoshis + fee` (same message as the Go
+tier's `BuildDeployTransaction`).
 
 ```rust
 fn build_deploy_transaction(
@@ -1327,7 +1330,7 @@ fn build_deploy_transaction(
     change_address: &str,
     change_script: &str,
     fee_rate: Option<i64>,
-) -> (String, usize) { panic!("doc example only") }
+) -> Result<(String, usize), String> { panic!("doc example only") }
 ```
 
 #### `pub fn build_inscription_envelope(content_type: &str, data: &str) -> String`
@@ -1380,17 +1383,25 @@ Hex-encoded script + satoshis, used as the value type in
 Internal contract output specification (script + satoshis), used by
 `CallTxOptions`.
 
-#### `pub fn deploy_with_wallet<W: WalletClient>(wallet, basket, locking_script, contract_name, options) -> Result<(String, usize), String>`
+#### `pub fn deploy_with_wallet<W: WalletClient>(wallet, basket, locking_script, artifact, options) -> Result<(String, usize), String>`
 One-shot deploy via a BRC-100 wallet — bypasses `RunarContract::deploy` and
 uses `WalletClient::create_action` directly. Returns `(txid, output_index)`.
+Takes the `&RunarArtifact` rather than a bare contract name (R-062): this is a
+funding path, so it has to read `unsound_primitives` and enforce
+`MAX_SCRIPT_BYTES` before asking a wallet for coins. `locking_script` stays a
+separate argument — it is the built script with constructor args spliced in,
+which is not `artifact.script`.
 
 #### `pub struct DeployOptions`
 Fields: `satoshis: i64`, `change_address: Option<String>`.
 
 #### `pub struct DeployWithWalletOptions`
 Optional knobs for `deploy_with_wallet`. Fields: `satoshis: Option<i64>`,
-`description: Option<String>`. Implements `Default` (1 sat, generic
-description).
+`description: Option<String>`, `acknowledge_unsound: Vec<String>`. Implements
+`Default` (1 sat, generic description, nothing acknowledged). R-062:
+`acknowledge_unsound` must name every primitive the artifact's
+`unsound_primitives` declares, or the deploy is refused — the same gate, and
+the same error, as `RunarContract::deploy`.
 
 #### `pub fn deserialize_state(fields: &[StateField], script_hex: &str) -> HashMap<String, SdkValue>`
 Parse a state byte section back into a `HashMap`. Inverse of
@@ -1637,7 +1648,7 @@ impl RunarContract {
     pub fn get_utxo(&self) -> Option<&Utxo> { None }
 
     // Inscription
-    pub fn with_inscription(&mut self, _i: Inscription) -> &mut Self { self }
+    pub fn with_inscription(&mut self, _i: Inscription) -> Result<&mut Self, String> { Ok(self) }
     pub fn inscription(&self) -> Option<&Inscription> { None }
 
     // Script construction
@@ -1930,6 +1941,7 @@ A handful of conditions panic instead of returning an error — they signal
 - `build_p2pkh_script` panics on a malformed Base58 address.
 - `build_deploy_transaction` panics if no UTXOs are passed (the caller
   controls UTXO selection — passing zero is a bug, not a runtime condition).
+  Insufficient funds is the opposite case and returns `Err`, not a panic.
 - `pow`, `mul_div`, `percent_of`, `sqrt`, `gcd` in the prelude panic on
   i64 overflow (Bitcoin Script supports arbitrary precision; Rust tests use
   i64 for ergonomics).
@@ -2111,3 +2123,37 @@ Every Rust fund-path test funded its transactions from a P2PKH coin locked to
 `76a914 <20 zero bytes> 88ac` — a hash nobody holds — so the funding input was
 unspendable and the always-ack provider reported success anyway. They now use
 `build_p2pkh_script(&address)` and pass under real script validation.
+
+## Wire-protocol primitives
+
+Two things in this SDK are not ergonomics: their **bytes cross a tier boundary**,
+so all seven SDKs must produce the same ones. A signature produced here is
+verified by a process running another tier's SDK, and a one-byte difference makes
+every such signature fail — at runtime, in someone else's process.
+
+**Canonical JSON** is an RFC 8785 (JCS) serializer. Payloads are hashed through
+it before signing. Reaching for the language's own JSON encoder instead is the
+mistake this section exists to prevent: object key order, number formatting and
+string escaping all differ between stdlib encoders, and any of them changes the
+hash.
+
+**The signed envelope** is the wire shape used by overlay apps (the
+`runar-overlay-express` server, the `runar-react` hooks, and any non-TS overlay
+backend). Every SDK must accept the same envelope, produce signatures every other
+tier verifies, and return the SAME rejection reason for the same bad envelope —
+the reason code is part of the protocol, not a local diagnostic.
+
+Cross-tier interop is pinned by `conformance/sdk-envelope/`: one TS-signed
+envelope replayed against every tier's verifier, plus a known-bad envelope per
+rejection reason. Any change to envelope code has to round-trip through it.
+
+This tier's API (`src/sdk/envelope.rs`):
+
+| primitive | symbol |
+| --- | --- |
+| canonical JSON | `canonical_json(value: &Value) -> Result<String, String>` |
+| envelope shape | `pub struct SignedEnvelope` |
+| sign | `sign_envelope(opts: SignEnvelopeOpts) -> Result<SignedEnvelope, String>` |
+| verify | `verify_envelope(opts: VerifyEnvelopeOpts) -> VerifyEnvelopeResult` |
+
+`serde_json::to_string` is NOT interchangeable with `canonical_json`.

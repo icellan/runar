@@ -65,21 +65,25 @@ public final class CompileCheck {
             );
         }
 
+        // N-106: Typecheck BEFORE the expansion, matching Cli.compileSource and
+        // the other six tiers. CompileCheck is the frontend the Java contract
+        // tests run, so an order that differs from the compiler's would let a
+        // contract pass its own test suite and then fail to compile.
         try {
-            contract = ExpandFixedArrays.run(contract);
-        } catch (ExpandFixedArrays.ExpandException e) {
+            Typecheck.run(contract);
+        } catch (Typecheck.TypeCheckException e) {
             throw new CompileException(
-                "expand-fixed-arrays errors in " + fileName,
+                "type-check errors in " + fileName,
                 e.errors(),
                 e
             );
         }
 
         try {
-            Typecheck.run(contract);
-        } catch (Typecheck.TypeCheckException e) {
+            contract = ExpandFixedArrays.run(contract);
+        } catch (ExpandFixedArrays.ExpandException e) {
             throw new CompileException(
-                "type-check errors in " + fileName,
+                "expand-fixed-arrays errors in " + fileName,
                 e.errors(),
                 e
             );

@@ -16,11 +16,33 @@ export interface ANFProgram {
   methods: ANFMethod[];
 }
 
+/**
+ * One FixedArray nesting level on a synthetic scalar leaf. Outermost level
+ * first. `base` is the property name one level up (`grid`, then `grid__0`),
+ * `index` this leaf's position at that level, `length` that level's arity.
+ */
+export interface ANFSyntheticArrayLevel {
+  base: string;
+  index: number;
+  length: number;
+}
+
 export interface ANFProperty {
   name: string;
   type: string;
   readonly: boolean;
   initialValue?: string | bigint | boolean;
+  /**
+   * N-095: present only on a scalar leaf minted by the expand-fixed-arrays
+   * pass. The artifact assembler consumes one level per pass to regroup the
+   * synthetic siblings back into a single FixedArray state/ABI entry, so this
+   * is load-bearing wire data: an ANF that drops it still compiles to the same
+   * script bytes but degrades the SDK's `state.grid` accessor into N raw
+   * scalars. The TS frontend reads the chain off the AST
+   * (`PropertyNode.__syntheticArrayChain`) instead and has no ANF-input mode,
+   * so it is the one tier that need not emit it.
+   */
+  syntheticArrayChain?: ANFSyntheticArrayLevel[];
 }
 
 export interface ANFMethod {
@@ -60,9 +82,28 @@ export interface LoadParam {
   name: string;
 }
 
+/**
+ * Issue #109 (`@embedAlways`): marks a `load_prop` that dead-binding DCE must
+ * NOT remove even though nothing references it. Set only on the `load_prop`
+ * that ANF lowering injects for an `@embedAlways` readonly field
+ * (`emitEmbedAlwaysPreservation` in `passes/04-anf-lower.ts`); ordinary
+ * `load_prop`s leave it unset and stay freely eliminable.
+ *
+ * Keyed by a symbol rather than a string because the flag is compiler-internal
+ * and must never reach the wire: `JSON.stringify` skips symbol-keyed
+ * properties, so the emitted ANF IR JSON stays byte-identical to the six other
+ * tiers, each of which suppresses the field with its own serializer's opt-out
+ * (Rust `#[serde(skip)]`, Go `json:"-"`, Python `_IR_EXCLUDED_FIELDS`, Java
+ * `@JsonSkip`, Zig's hand-written writer). Object spread and `Object.assign`
+ * both copy enumerable symbol keys, so the flag survives the optimizer passes
+ * that rebuild bindings.
+ */
+export const PRESERVE = Symbol('runar.anf.preserve');
+
 export interface LoadProp {
   kind: 'load_prop';
   name: string;
+  [PRESERVE]?: boolean;
 }
 
 export interface LoadConst {
@@ -286,3 +327,15 @@ export type ANFValue =
  * recognise the same block.
  */
 export const MERGED_LOCAL_TEMP_PREFIX = '__merge$';
+
+/**
+ * Maximum number of iterations a single loop binding may unroll to.
+ *
+ * The bound already existed on the `--ir` input path (Go's `ir.MaxLoopCount`,
+ * Python's `MAX_LOOP_COUNT`, Ruby's `IR::MAX_LOOP_COUNT`) but nothing applied
+ * it to a loop written in source, in any tier. A source contract could
+ * therefore ask for an unroll count no machine can honour, and each tier failed
+ * differently — precision loss here, a silently dropped loop body in Go and
+ * Rust, a panic in Zig. CL-BUG-088.
+ */
+export const MAX_LOOP_COUNT = 10000;

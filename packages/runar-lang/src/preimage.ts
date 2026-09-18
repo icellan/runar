@@ -55,6 +55,10 @@ export function checkPreimage(_txPreimage: SigHashPreimage): boolean {
 /**
  * Extract the 4-byte transaction version (nVersion) from the preimage.
  * Preimage bytes [0..4).
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295). The
+ * compiled script zero-pads before `OP_BIN2NUM`, so a value with the high bit
+ * of the last byte set is not read as a negative script number.
  */
 export function extractVersion(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractVersion');
@@ -113,6 +117,12 @@ export function extractAmount(_txPreimage: SigHashPreimage): bigint {
 /**
  * Extract the 4-byte nSequence of the current input.
  * Located immediately after the amount field.
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295) — so
+ * `0xfffffffe` is 4294967294 and the finality sentinel `0xffffffff` is
+ * 4294967295, not the negative script numbers a bare `OP_BIN2NUM` would give.
+ * To make a locktime gate consensus-enforced, assert
+ * `extractSequence(p) !== 0xffffffffn`; `<= 0xffffffffn` is a tautology.
  */
 export function extractSequence(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractSequence');
@@ -140,6 +150,25 @@ export function extractOutputs(_txPreimage: SigHashPreimage): Sha256 {
 /**
  * Extract the 4-byte nLocktime from the preimage.
  * Located after hashOutputs.
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295), so
+ * Unix-time locktimes at or beyond 2^31 (after 2038) compare correctly.
+ *
+ * POLARITY — this is a NOT-BEFORE, and it is chosen by the SPENDER.
+ * Consensus asserts only that the chain has already reached `nLockTime`
+ * (and only when the transaction is non-final — see {@link extractSequence}).
+ * Nothing bounds it from above. So:
+ *
+ * - `extractLocktime(p) >= T` is sound: the spend cannot confirm before T.
+ *   Pair it with `extractSequence(p) !== 0xffffffffn` or consensus ignores
+ *   nLockTime altogether and the gate is script-only theatre.
+ * - `extractLocktime(p) < T` proves NOTHING about the current height. A
+ *   spender at height T+1000 simply stamps a stale `nLockTime` of T-1 and
+ *   the node mines it. Do not use this field to close a window.
+ *
+ * A contract that genuinely needs "before T" needs a time source it can read
+ * as state — an oracle or a tick — not the spending transaction's own
+ * locktime. See `examples/ts/auction/Auction.runar.ts`.
  */
 export function extractLocktime(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractLocktime');
@@ -147,6 +176,8 @@ export function extractLocktime(_txPreimage: SigHashPreimage): bigint {
 
 /**
  * Extract the 4-byte sighash type from the end of the preimage.
+ *
+ * Returns the UNSIGNED 32-bit little-endian field (0 .. 4294967295).
  */
 export function extractSigHashType(_txPreimage: SigHashPreimage): bigint {
   return compilerStub('extractSigHashType');
@@ -162,15 +193,37 @@ export function extractSigHashType(_txPreimage: SigHashPreimage): bigint {
 // docs/cross-covenant-pattern.md for the on-chain semantics.
 
 /**
- * Extract the previous-output locking script for an arbitrary input of the
- * spending transaction. `inputIndex` MUST be a compile-time integer
- * literal. The compiler auto-injects a hidden method parameter
- * `_prevOutScript_<inputIndex>` (the unlocking script supplies the witness
- * bytes) and emits a hash assertion.
+ * Prove the spender knows a byte string whose hash matches `expectedScriptHash`,
+ * and return those bytes for further inspection.
+ *
+ * **This does NOT verify an input of the spending transaction, and it is not a
+ * co-spend (W6 / GhostInput).** `inputIndex` is a compile-time LABEL: the
+ * compiler uses it to name a hidden witness parameter
+ * `_prevOutScript_<inputIndex>`, which the unlocking script fills in, and then
+ * emits `hash256(witness) === expectedScriptHash`. There is no vin lookup, no
+ * parent transaction, no outpoint comparison and no input-count check anywhere
+ * in the emitted script. A transaction with a SINGLE input satisfies a contract
+ * that calls `extractPrevOutputScript(1n, ...)`, because nothing ever looks for
+ * a second input.
+ *
+ * Locking scripts are public, so "knows the bytes" is free for anyone who can
+ * read the chain. Use this only where a hash preimage is genuinely what you
+ * want — matching an intent TEMPLATE, say — never as evidence that some other
+ * covenant is being spent alongside you.
+ *
+ * For the strong construction — binding a SPECIFIC companion input of the
+ * current transaction by parsing its parent tx, hash-bound to the spending tx
+ * through the BIP-143 preimage — see the worked example pair in
+ * `examples/ts/companion-verifier/` (`AttributedToken.runar.ts` +
+ * `CompanionVerifier.runar.ts`). That pattern binds a UTXO; this intrinsic
+ * binds a string.
+ *
+ * `inputIndex` MUST be a compile-time integer literal, because the parameter
+ * name is built from it at compile time.
  *
  * Two forms:
  * - 2-arg: emits `hash256(witness) === expectedScriptHash`, pinning the
- *   full prev-output script byte-for-byte.
+ *   witness byte-for-byte.
  * - 3-arg: emits `hash256(substr(witness, 0, prefixLen)) === expectedScriptPrefixHash`,
  *   pinning only the policy prefix and leaving the pushdata tail free
  *   to vary. `prefixLen` MUST also be a compile-time integer literal.
@@ -195,6 +248,22 @@ export function extractPrevOutputScript(
  * emits a one-shot `hash256(_serialisedOutputs) === extractOutputHash(txPreimage)`
  * check, and per call asserts the 34-byte substring at offset
  * `outputIndex * 34` equals the expected P2PKH bytes.
+ *
+ * **v1 accepts `outputIndex` 0 and nothing else** (W2 / OutputInception).
+ * `outputIndex * 34` is the START of output `outputIndex` only if every
+ * earlier output is exactly 34 bytes, and a transaction guarantees no such
+ * thing: an output is `value[8] ‖ CompactSize(len) ‖ script[len]`, and the
+ * spender picks output 0's length. For `outputIndex = 1` an attacker builds
+ * output 0 as a 78-byte OP_RETURN whose payload carries the promised 34-byte
+ * P2PKH serialisation starting at global offset 34, and points the real output
+ * 1 at themselves. The witness still hashes to `hashOutputs` — it IS the real
+ * output set — so the script is satisfied and the payment is not made.
+ *
+ * Offset 0 has no such gap: it is a genuine output boundary, so matching 34
+ * bytes there forces output 0 to BE the expected P2PKH. Asserting an output
+ * beyond the first needs a CompactSize walk from byte 0, which the v1 codegen
+ * does not emit; the compiler refuses the call rather than emitting a check
+ * that can be satisfied without the payment.
  */
 export function requireOutputP2PKH(
   _outputIndex: bigint,
@@ -208,6 +277,14 @@ export function requireOutputP2PKH(
  * Shorthand for `extractLocktime(this.txPreimage)`. Only valid in
  * StatefulSmartContract methods. Pure source-level desugar — no new ANF
  * kind or stack codegen.
+ *
+ * THE NAME IS MISLEADING and is kept only for source compatibility. This does
+ * NOT read the chain height. It reads the spending transaction's own
+ * `nLockTime` — a number the spender writes — so every caveat in
+ * {@link extractLocktime} applies verbatim: it is a NOT-BEFORE, it is only
+ * consensus-enforced on a non-final transaction, and comparing it UPWARDS
+ * (`currentBlockHeight() < T`) proves nothing at all. Read it as
+ * `txLocktime()`. Prefer spelling {@link extractLocktime} directly.
  */
 export function currentBlockHeight(): bigint {
   return compilerStub('currentBlockHeight');

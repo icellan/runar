@@ -577,3 +577,99 @@ class TestValidateIR_Gaps:
         assert any("empty" in e.lower() or "name" in e.lower() for e in errors), (
             f"expected error mentioning empty name, got: {errors}"
         )
+
+
+# ---------------------------------------------------------------------------
+# N-113 — the two shapes the Go tier rejected alone (R-079 / R-081)
+#
+# Both are `--ir`-only: the source path refuses each shape in
+# frontend/validator.py, and validate_ir is reachable only from the IR loader.
+# Go grew these guards first (compilers/go/ir/loader.go) and was deliberately,
+# transiently stricter than its six peers until N-113;
+# conformance/negatives/ir-rejection-parity.test.ts is the gate that now
+# compares the six.
+# ---------------------------------------------------------------------------
+
+
+def _ir_json(is_public: bool = True, raw_bytes: str = "51") -> str:
+    """A one-method contract parameterised on the two fields under test, so
+    every case below differs from the VALID control in exactly one way."""
+    return json.dumps(
+        {
+            "contractName": "Anyone",
+            "properties": [],
+            "methods": [
+                {
+                    "name": "unlock",
+                    "params": [],
+                    "isPublic": is_public,
+                    "body": [
+                        {
+                            "name": "t0",
+                            "value": {
+                                "kind": "raw_script",
+                                "bytes": raw_bytes,
+                                "in_arity": 0,
+                                "out_arity": 1,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def test_control_valid_ir_is_accepted() -> None:
+    # The control every case below is derived from. A probe whose control also
+    # fails proves nothing.
+    program = load_ir(_ir_json())
+    assert program.contract_name == "Anyone"
+
+
+def test_rejects_empty_raw_script_body() -> None:
+    # R-079: lowering pops in_arity and pushes out_arity on the stack model
+    # while emission writes nothing for a zero-length span. The span degrades
+    # to the identity function and a DIFFERENT WITNESS spends the output.
+    # Measured on @bsv/sdk's Spend: `8f01859c` accepts x=5 and rejects x=-5;
+    # with the body erased, `01859c` does the opposite.
+    with pytest.raises(ValueError) as exc:
+        load_ir(_ir_json(raw_bytes=""))
+    assert "empty bytes body" in str(exc.value), str(exc.value)
+
+
+def test_rejects_empty_raw_script_body_even_at_zero_arity() -> None:
+    # The degenerate in=0/out=0 case is harmless on its own and is rejected
+    # anyway: mirroring the source validator exactly beats a narrower
+    # arity-conditional rule that would differ from the rule one pass earlier.
+    payload = json.loads(_ir_json(raw_bytes=""))
+    payload["methods"][0]["body"][0]["value"]["out_arity"] = 0
+    with pytest.raises(ValueError):
+        load_ir(json.dumps(payload))
+
+
+def test_rejects_no_public_methods() -> None:
+    # R-081: emission succeeds with an EMPTY locking script, which is
+    # anyone-can-spend. On @bsv/sdk's Spend under full consensus wrappers,
+    # lock="" with unlock=OP_1 (0x51) validates.
+    with pytest.raises(ValueError) as exc:
+        load_ir(_ir_json(is_public=False))
+    assert "no public methods" in str(exc.value), str(exc.value)
+
+
+def test_rejects_empty_method_list() -> None:
+    with pytest.raises(ValueError) as exc:
+        load_ir('{"contractName": "Empty", "properties": [], "methods": []}')
+    assert "no public methods" in str(exc.value), str(exc.value)
+
+
+def test_structural_errors_keep_priority_over_the_entry_point_error() -> None:
+    # Ordering matters and is asserted, not assumed: when a binding is ALSO
+    # malformed, the malformed binding is the more actionable diagnostic. The
+    # loader raises errors[0], so the entry-point error is APPENDED last.
+    # Same ordering as compilers/go/ir/loader.go.
+    payload = json.loads(_ir_json(is_public=False))
+    payload["methods"][0]["body"][0]["value"]["bytes"] = "515"
+    with pytest.raises(ValueError) as exc:
+        load_ir(json.dumps(payload))
+    assert "odd hex length" in str(exc.value), str(exc.value)

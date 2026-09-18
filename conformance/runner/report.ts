@@ -361,5 +361,23 @@ export function printReportToConsole(report: ConformanceReport): void {
     `${skipColor}${report.skipped} skipped${RESET} ` +
     `(${report.totalTests} total)`,
   );
+
+  // R-103: a run that never exercised a tier must not be mistakable for full
+  // coverage. The runner only hard-fails on a missing toolchain in CI (or when
+  // RUNAR_CONFORMANCE_STRICT is set); everywhere else the summary has to say
+  // out loud which tiers contributed nothing.
+  const absent = report.compilers.filter((c) => !c.available).map((c) => c.name);
+  if (absent.length > 0) {
+    console.log('');
+    console.log(
+      `${BOLD}${YELLOW}INCOMPLETE COVERAGE:${RESET} ` +
+      `${absent.length} of ${report.compilers.length} tiers produced no results: ` +
+      `${BOLD}${absent.join(', ')}${RESET}.`,
+    );
+    console.log(
+      `  This PASS covers ${report.compilers.length - absent.length} tiers, not ${report.compilers.length}. ` +
+      `Set RUNAR_CONFORMANCE_STRICT=1 to exit non-zero instead.`,
+    );
+  }
   console.log('');
 }

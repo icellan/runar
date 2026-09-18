@@ -18,6 +18,7 @@
 //! Internal arithmetic uses Jacobian coordinates for scalar multiplication.
 
 use num_bigint::BigInt;
+use super::ec::emit_point_len_verify;
 use super::stack::{PushValue, StackOp};
 
 // ===========================================================================
@@ -69,6 +70,11 @@ fn bn254_p_minus_2_bit(i: usize) -> bool {
     // BE array: byte at index (31 - byte_from_lsb) is the byte containing bit `i`.
     let byte_idx = 31 - byte_from_lsb;
     (BN254_FIELD_P_MINUS_2_BE[byte_idx] >> bit) & 1 == 1
+}
+
+/// BN254 curve order r as a `BigInt`.
+fn bn254_curve_r() -> BigInt {
+    BigInt::from_bytes_le(num_bigint::Sign::Plus, &BN254_CURVE_R_SCRIPT_NUM)
 }
 
 /// Collect ops into a Vec via closure.
@@ -135,8 +141,17 @@ impl<'a> BN254Tracker<'a> {
     }
 
     /// Push the BN254 curve order r as a script number.
+    ///
+    /// Emitted as `PushValue::Int`, NOT `push_bytes`. The two encode to the
+    /// identical 32 script-number bytes, but the Stack-IR tag is what the
+    /// peephole chain-folding rule keys on: `PUSH(a) ADD PUSH(b) ADD ->
+    /// PUSH(a+b) ADD` bails out on a raw-bytes push, so with `push_bytes` the
+    /// ladder's `+r +r +r` stayed three separate adds while Go / TS / Python /
+    /// Ruby (which all push r as an integer) folded it into a single `+3r`.
+    /// That was a 67-byte cross-tier divergence in every `bn254G1ScalarMul`.
     pub(crate) fn push_curve_r(&mut self, n: &str) {
-        self.push_bytes(n, BN254_CURVE_R_SCRIPT_NUM.to_vec());
+        (self.e)(StackOp::Push(PushValue::Int(bn254_curve_r())));
+        self.nm.push(n.to_string());
     }
 
     pub(crate) fn dup(&mut self, n: &str) {
@@ -585,8 +600,14 @@ pub(crate) fn bn254_decompose_point(
     y_name: &str,
 ) {
     t.to_top(point_name);
-    // OP_SPLIT at 32 produces x_bytes (bottom) and y_bytes (top)
+    // R-141: gate the WIDTH here, so every consumer that decomposes a BN254
+    // Point inherits the check -- the same placement CL-BUG-095 chose for
+    // ec_decompose_point. Without it OP_SPLIT at 32 discards whatever follows
+    // byte 64, so `bn254G1OnCurve(G || 0xff)` returned TRUE. ABORTING form:
+    // emit_bn254_g1_on_curve must stay TOTAL, so it clamps and flags the length
+    // BEFORE calling this, exactly as emit_ec_on_curve does.
     t.raw_block(&[point_name], None, |e| {
+        emit_point_len_verify(e, 64);
         e(StackOp::Push(PushValue::Int(BigInt::from(32))));
         e(StackOp::Opcode("OP_SPLIT".into()));
     });
@@ -650,6 +671,81 @@ pub(crate) fn bn254_compose_point(
     t.to_top("_cp_yb");
     t.raw_block(&["_cp_xb", "_cp_yb"], Some(result_name), |e| {
         e(StackOp::Opcode("OP_CAT".into()));
+    });
+}
+
+// ===========================================================================
+// Point at infinity for the bn254G1Add builtin
+// ===========================================================================
+
+/// bn254_g1_infinity_flag: computes `_notinf`, 0 exactly when P == -Q and 1
+/// otherwise, from px/py/qx/qy WITHOUT consuming them. Call it before
+/// bn254_g1_affine_add; apply the result with bn254_g1_mask_infinity after.
+///
+/// P + (-P) is the point at infinity, which affine x||y cannot represent. This
+/// codegen already has an encoding for O -- the ALL-ZERO blob, which is what
+/// bn254G1ScalarMul returns for k = 0 mod r and what secp256k1 (ec_affine_add)
+/// and both NIST curves (c_affine_add) return for their own P + (-P).
+/// bn254G1Add is a general contract-callable builtin, so it owes callers the
+/// same answer rather than the off-curve blob the unified slope produces there
+/// (py + qy == 0 and bn254_field_inv is Fermat, so inv(0) = 0). O is not on
+/// the curve (0^2 != 0^3 + 3), so the documented assert(bn254G1OnCurve(r))
+/// idiom still rejects the result.
+///
+/// THE PREDICATE IS px == qx AND py != qy, NOT a zero denominator. BN254 has
+/// j-invariant 0 with p = 1 mod 3, so F_p holds a primitive cube root of unity
+/// w and Q = (w*px, -py) is an ordinary point that also zeroes py + qy while
+/// P + Q is an ordinary point, not O. Masking on the denominator would answer
+/// "infinity" there: plausible and wrong -- the exact failure mode 03f50d48
+/// introduced on the NIST curves and f16790a9 had to undo. Testing px == qx
+/// ALONE would be wrong in the other direction: it would swallow doubling.
+///
+/// Deliberately NOT inside bn254_g1_affine_add: the Groth16 MSM bind shares
+/// that helper to accumulate vk_x against a witness-supplied point and keeps
+/// its fail-closed behaviour and its bytes unchanged.
+///
+/// Byte-identical to `bn254G1InfinityFlag` in compilers/go/codegen/bn254.go.
+pub(crate) fn bn254_g1_infinity_flag(t: &mut BN254Tracker) {
+    t.copy_to_top("px", "_inf_px");
+    t.copy_to_top("qx", "_inf_qx");
+    t.raw_block(&["_inf_px", "_inf_qx"], Some("_xeq"), |e| {
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+    });
+    t.copy_to_top("py", "_inf_py");
+    t.copy_to_top("qy", "_inf_qy");
+    t.raw_block(&["_inf_py", "_inf_qy"], Some("_yeq"), |e| {
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+    });
+    // cond = xeq AND yeq: 1 when doubling.
+    t.copy_to_top("_xeq", "_xeq_c");
+    t.to_top("_yeq");
+    t.raw_block(&["_xeq_c", "_yeq"], Some("_cond"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    // notinf = NOT(xeq - cond): xeq - cond is 1 exactly when px == qx and the
+    // points are not equal, i.e. exactly the P == -Q case.
+    t.to_top("_xeq");
+    t.to_top("_cond");
+    t.raw_block(&["_xeq", "_cond"], Some("_notinf"), |e| {
+        e(StackOp::Opcode("OP_SUB".into()));
+        e(StackOp::Opcode("OP_NOT".into()));
+    });
+}
+
+/// bn254_g1_mask_infinity: zeroes rx and ry when `_notinf` is 0, consuming it.
+///
+/// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
+/// and notinf is 0 or 1, so the product is canonical either way.
+pub(crate) fn bn254_g1_mask_infinity(t: &mut BN254Tracker) {
+    t.to_top("rx");
+    t.copy_to_top("_notinf", "_notinf_x");
+    t.raw_block(&["rx", "_notinf_x"], Some("rx"), |e| {
+        e(StackOp::Opcode("OP_MUL".into()));
+    });
+    t.to_top("ry");
+    t.to_top("_notinf");
+    t.raw_block(&["ry", "_notinf"], Some("ry"), |e| {
+        e(StackOp::Opcode("OP_MUL".into()));
     });
 }
 
@@ -874,7 +970,11 @@ fn bn254_build_jacobian_add_affine_standard(it: &mut BN254Tracker) {
 ///
 /// Stack layout: [..., ax, ay, _k, jx, jy, jz]
 /// After:        [..., ax, ay, _k, jx', jy', jz']
-fn bn254_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &BN254Tracker) {
+fn bn254_build_jacobian_add_affine_inline(
+    e: &mut dyn FnMut(StackOp),
+    t: &BN254Tracker,
+    strict: bool,
+) {
     // Create inner tracker with cloned stack state
     let cloned_nm: Vec<String> = t.nm.clone();
     let mut it = BN254Tracker::new_from_strings(&cloned_nm, e);
@@ -890,6 +990,10 @@ fn bn254_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &BN254T
     // compare against a fresh copy of jx. Consumes only the copies.
     it.copy_to_top("jz", "_jz_chk_in");
     bn254_field_sqr(&mut it, "_jz_chk_in", "_jz_chk_sq");
+    if strict {
+        // Z1sq is consumed by U2 below; keep a copy for Z1cu.
+        it.copy_to_top("_jz_chk_sq", "_jz_chk_sq_keep");
+    }
     it.copy_to_top("ax", "_ax_chk_copy");
     bn254_field_mul(&mut it, "_ax_chk_copy", "_jz_chk_sq", "_u2_chk");
     it.copy_to_top("jx", "_jx_chk_copy");
@@ -897,8 +1001,31 @@ fn bn254_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &BN254T
         e(StackOp::Opcode("OP_NUMEQUAL".into()));
     });
 
-    // Move _h_is_zero to top so OP_IF can consume it.
-    it.to_top("_h_is_zero");
+    let mut cond_name = "_h_is_zero";
+    if strict {
+        // R = ay*jz^3 - jy == 0 ? Only H == 0 AND R == 0 means the two
+        // operands are the SAME point; H == 0 with R != 0 means they are
+        // negatives, whose sum is O -- and the standard mixed-add already
+        // answers that correctly, with Z3 = jz*H = 0 flowing through the
+        // Fermat inverse to the all-zero point.
+        it.copy_to_top("jz", "_jz_chk_for_cu");
+        bn254_field_mul(&mut it, "_jz_chk_for_cu", "_jz_chk_sq_keep", "_z1cu_chk");
+        it.copy_to_top("ay", "_ay_chk_copy");
+        bn254_field_mul(&mut it, "_ay_chk_copy", "_z1cu_chk", "_s2_chk");
+        it.copy_to_top("jy", "_jy_chk_copy");
+        it.raw_block(&["_s2_chk", "_jy_chk_copy"], Some("_r_is_zero"), |e| {
+            e(StackOp::Opcode("OP_NUMEQUAL".into()));
+        });
+        it.to_top("_h_is_zero");
+        it.to_top("_r_is_zero");
+        it.raw_block(&["_h_is_zero", "_r_is_zero"], Some("_dbl_cond"), |e| {
+            e(StackOp::Opcode("OP_BOOLAND".into()));
+        });
+        cond_name = "_dbl_cond";
+    }
+
+    // Move the condition to top so OP_IF can consume it.
+    it.to_top(cond_name);
     it.nm.pop(); // consumed by IF
 
     // ------------------------------------------------------------------
@@ -949,6 +1076,11 @@ fn bn254_build_jacobian_add_affine_inline(e: &mut dyn FnMut(StackOp), t: &BN254T
 /// bn254_g1_negate: negates a point: (x, p - y).
 pub(crate) fn bn254_g1_negate(t: &mut BN254Tracker, point_name: &str, result_name: &str) {
     bn254_decompose_point(t, point_name, "_nx", "_ny");
+    // R-141: bn254_compose_point below is documented as requiring [0, p-1] and
+    // does not check, so without this the negation of a non-canonical point
+    // re-emitted its x half verbatim -- a value builtin PRODUCING a blob that
+    // is not a point.
+    bn254_emit_coord_canon_verify(t, "_nx", "_ny");
     // Use bn254_field_neg which already handles prime caching
     bn254_field_neg(t, "_ny", "_neg_y");
     bn254_compose_point(t, "_nx", "_neg_y", result_name);
@@ -1008,6 +1140,74 @@ pub fn emit_bn254_field_neg(emit: &mut dyn FnMut(StackOp)) {
     t.pop_prime_cache();
 }
 
+/// bn254_emit_point_length_gate -- R-141, CLAMPING form, the BN254 twin of
+/// `emit_point_length_gate` in ec.rs. Leaves [flag, clamped] on the tracker.
+/// Used by `emit_bn254_g1_on_curve`, whose job is to answer "is this an
+/// acceptable point?" over untrusted bytes: for a wrong-length blob the correct
+/// answer is FALSE, not an aborted script.
+fn bn254_emit_point_length_gate(t: &mut BN254Tracker, name: &str, want: usize, flag_name: &str) {
+    t.to_top(name);
+    t.raw_block(&[name], None, |e| {
+        e(StackOp::Opcode("OP_SIZE".into()));
+        e(StackOp::Push(PushValue::Int(BigInt::from(want))));
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+        e(StackOp::Swap);
+        e(StackOp::Push(PushValue::Bytes(vec![0u8; want])));
+        e(StackOp::Opcode("OP_CAT".into()));
+        e(StackOp::Push(PushValue::Int(BigInt::from(want))));
+        e(StackOp::Opcode("OP_SPLIT".into()));
+        e(StackOp::Drop);
+    });
+    t.nm.push(flag_name.to_string());
+    t.nm.push(name.to_string());
+}
+
+/// bn254_emit_coord_canon_verify -- R-141: a BN254 G1 Point's two coordinates
+/// must be FIELD ELEMENTS, aborting form. The direct analogue of
+/// `emit_coord_canon_verify` (R-117), with the placement decision re-derived
+/// for this curve rather than copied.
+///
+/// `bn254_decompose_point` BIN2NUMs each half as an UNSIGNED integer, so any
+/// value that fits 32 bytes is accepted. On BN254 that is wider than on
+/// secp256k1: p is ~2^253.6, so `x + p < 2^256` for EVERY x < p -- the alias
+/// exists for every point on the curve. Measured on the go-sdk interpreter
+/// before this gate, with G = (1, 2):
+///
+/// ```text
+/// bn254G1OnCurve(G)          -> 1
+/// bn254G1OnCurve((1+p) || 2) -> 1
+/// bn254G1OnCurve(1 || (2+p)) -> 1
+/// bn254G1OnCurve(G || 0xff)  -> 1
+/// ```
+///
+/// WHY THE VALUE BUILTINS ABORT. Unlike secp256k1's affine_add, BN254's adder
+/// is NOT fooled into a wrong answer by the alias -- measured,
+/// `bn254G1Add(G, (1+p)||2)` returns the correct 2G, because
+/// `bn254_g1_infinity_flag` reduces before it compares. The reason is
+/// different: `bn254_compose_point`'s own contract says callers must supply
+/// [0, p-1] and that it does not check, and `bn254_g1_negate` handed it the RAW
+/// decomposed x -- a value builtin PRODUCING something that is not a point.
+///
+/// Deliberately NOT folded into `bn254_decompose_point`, for R-117's reason:
+/// that helper also runs inside `emit_bn254_g1_on_curve`, which must return
+/// FALSE rather than abort, and inside the Groth16 / pairing preambles.
+fn bn254_emit_coord_canon_verify(t: &mut BN254Tracker, x_name: &str, y_name: &str) {
+    t.copy_to_top(x_name, "_cc_x");
+    t.push_field_p("_cc_px");
+    t.raw_block(&["_cc_x", "_cc_px"], Some("_cc_xok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top(y_name, "_cc_y");
+    t.push_field_p("_cc_py");
+    t.raw_block(&["_cc_y", "_cc_py"], Some("_cc_yok"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.raw_block(&["_cc_xok", "_cc_yok"], None, |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
+    });
+}
+
 /// emit_bn254_g1_add: adds two BN254 G1 points.
 /// Stack in: [point_a, point_b] (b on top)
 /// Stack out: [result_point]
@@ -1016,9 +1216,45 @@ pub fn emit_bn254_g1_add(emit: &mut dyn FnMut(StackOp)) {
     t.push_prime_cache();
     bn254_decompose_point(&mut t, "_pa", "px", "py");
     bn254_decompose_point(&mut t, "_pb", "qx", "qy");
+    // R-141: both points must be canonical before anything consumes them.
+    bn254_emit_coord_canon_verify(&mut t, "px", "py");
+    bn254_emit_coord_canon_verify(&mut t, "qx", "qy");
+    // The flag must be computed BEFORE the add: bn254_g1_affine_add consumes
+    // px/py/qx/qy.
+    bn254_g1_infinity_flag(&mut t);
     bn254_g1_affine_add(&mut t);
+    bn254_g1_mask_infinity(&mut t);
     bn254_compose_point(&mut t, "rx", "ry", "_result");
     t.pop_prime_cache();
+}
+
+/// bn254_emit_scalar_reduce reduces a scalar to [0, r-1]: ((k mod r) + r) mod r.
+///
+/// OP_MOD takes the sign of the DIVIDEND, so `k mod r` alone lands in
+/// (-r, r); the `+ r, mod r` normalises the negative half. One push of r
+/// covers both reductions - the same shape as emit_scalar_reduce in ec.rs,
+/// whose numbers do NOT carry here (see emit_bn254_g1_scalar_mul for the
+/// BN254 interval bounds).
+///
+/// Without it the ladder below is correct only while 2^255 <= k + 3r < 2^256.
+/// A scalar >= 2^256 - 3r (about 2.2902*r) sets bit 256, which the loop never
+/// reads, and one <= 2^255 - 3r drops k' under 2^255, invalidating the
+/// accumulator seed; either way the ladder returns a DIFFERENT multiple of P
+/// rather than failing. In Groth16 the scalars are the caller-supplied PUBLIC
+/// INPUTS of vk_x = IC[0] + sum(IC[i] * pub_i), so the domain is
+/// attacker-chosen.
+fn bn254_emit_scalar_reduce(t: &mut BN254Tracker, k_name: &str, result_name: &str) {
+    t.push_curve_r("_r_red");
+    t.raw_block(&[k_name, "_r_red"], Some(result_name), |e| {
+        e(StackOp::Opcode("OP_2DUP".into()));
+        e(StackOp::Opcode("OP_MOD".into()));
+        e(StackOp::Rot);
+        e(StackOp::Drop);
+        e(StackOp::Over);
+        e(StackOp::Opcode("OP_ADD".into()));
+        e(StackOp::Swap);
+        e(StackOp::Opcode("OP_MOD".into()));
+    });
 }
 
 /// emit_bn254_g1_scalar_mul: scalar multiplication P * k on BN254 G1.
@@ -1032,6 +1268,14 @@ pub fn emit_bn254_g1_scalar_mul(emit: &mut dyn FnMut(StackOp)) {
     t.push_prime_cache();
     // Decompose to affine base point
     bn254_decompose_point(&mut t, "_pt", "ax", "ay");
+    // R-141: the ladder's base point must be canonical.
+    bn254_emit_coord_canon_verify(&mut t, "ax", "ay");
+
+    // Reduce first: the +3r trick below is only sound for k in [0, r-1], and
+    // the scalar is caller input.
+    t.to_top("_k");
+    bn254_emit_scalar_reduce(&mut t, "_k", "_kr");
+    t.rename("_k");
 
     // k' = k + 3r: guarantees bit 255 is set.
     t.to_top("_k");
@@ -1084,8 +1328,11 @@ pub fn emit_bn254_g1_scalar_mul(emit: &mut dyn FnMut(StackOp)) {
         // because OP_IF consumes _bit and the add ops run with _bit already gone.
         t.to_top("_bit");
         t.nm.pop(); // _bit consumed by IF
+        // Only the LAST step can be handed accumulator == -base (k = 0 mod r);
+        // see bn254_build_jacobian_add_affine_inline for why the strict
+        // H == 0 AND R == 0 test is paid there and nowhere else.
         let add_ops = collect_ops(|add_emit| {
-            bn254_build_jacobian_add_affine_inline(add_emit, &t);
+            bn254_build_jacobian_add_affine_inline(add_emit, &t, bit == 0);
         });
         (t.e)(StackOp::If {
             then_ops: add_ops,
@@ -1122,7 +1369,35 @@ pub fn emit_bn254_g1_negate(emit: &mut dyn FnMut(StackOp)) {
 pub fn emit_bn254_g1_on_curve(emit: &mut dyn FnMut(StackOp)) {
     let mut t = BN254Tracker::new(&["_pt"], emit);
     t.push_prime_cache();
+
+    // R-141: width. `bn254G1OnCurve(G || 0xff)` returned TRUE -- the OP_SPLIT
+    // at 32 inside the decomposer discarded the surplus byte. Clamp and
+    // remember the width rather than abort, because this predicate must stay
+    // TOTAL; the flag is ANDed into the result at the end.
+    bn254_emit_point_length_gate(&mut t, "_pt", 64, "_len_ok");
+
     bn254_decompose_point(&mut t, "_pt", "_x", "_y");
+
+    // R-141: coordinate canonicity. The decomposer BIN2NUMs each coordinate as
+    // an unsigned value that may be >= p, and the field arithmetic below
+    // silently reduces mod p, so a non-canonical ENCODING of a real point
+    // passed. Reject it -- require x < p AND y < p -- and AND the result in at
+    // the end so the predicate still returns a boolean.
+    t.copy_to_top("_x", "_x_lt");
+    t.push_field_p("_p_for_x");
+    t.raw_block(&["_x_lt", "_p_for_x"], Some("_x_canon"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.copy_to_top("_y", "_y_lt");
+    t.push_field_p("_p_for_y");
+    t.raw_block(&["_y_lt", "_p_for_y"], Some("_y_canon"), |e| {
+        e(StackOp::Opcode("OP_LESSTHAN".into()));
+    });
+    t.to_top("_x_canon");
+    t.to_top("_y_canon");
+    t.raw_block(&["_x_canon", "_y_canon"], Some("_canon"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
 
     // lhs = y^2
     bn254_field_sqr(&mut t, "_y", "_y2");
@@ -1137,8 +1412,148 @@ pub fn emit_bn254_g1_on_curve(emit: &mut dyn FnMut(StackOp)) {
     // Compare
     t.to_top("_y2");
     t.to_top("_rhs");
-    t.raw_block(&["_y2", "_rhs"], Some("_result"), |e| {
+    t.raw_block(&["_y2", "_rhs"], Some("_curve_eq"), |e| {
         e(StackOp::Opcode("OP_EQUAL".into()));
     });
+
+    // on-curve = right width AND canonical AND curve-equation
+    t.to_top("_canon");
+    t.to_top("_curve_eq");
+    t.raw_block(&["_canon", "_curve_eq"], Some("_eq_ok"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
+    t.to_top("_len_ok");
+    t.to_top("_eq_ok");
+    t.raw_block(&["_len_ok", "_eq_ok"], Some("_result"), |e| {
+        e(StackOp::Opcode("OP_BOOLAND".into()));
+    });
     t.pop_prime_cache();
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::emit::emit_method;
+    use crate::codegen::stack::StackMethod;
+    use sha2::{Digest, Sha256};
+
+    /// SHA-256 of the hex string of the raw (pre-peephole) `bn254G1ScalarMul`
+    /// ladder, taken from the Go reference compiler
+    /// (`codegen.EmitBN254G1ScalarMul` -> `codegen.Emit`) and independently
+    /// reproduced by the TypeScript tier. 42 910 ops, 134 245 bytes.
+    ///
+    /// This pin is the whole cross-tier contract for the ladder. It moved when
+    /// the mod-r scalar reduce and the strict last-step `H == 0 AND R == 0`
+    /// test were ported here from Go; before that this tier emitted a ladder
+    /// that silently returned a different multiple of P for any scalar outside
+    /// (2^255 - 3r, 2^256 - 3r).
+    /// R-141 moved it again: `bn254G1ScalarMul` now gates its base point's
+    /// coordinates (`bn254_emit_coord_canon_verify`) and inherits the
+    /// OP_SIZE-64 verify that `bn254_decompose_point` gained, because the
+    /// predicate used to certify `(x+p) || y` and a 65-byte blob as points.
+    /// 42_910 ops / 134_245 bytes -> 42_921 ops / 134_321 bytes; the new digest
+    /// was produced by Go and independently reproduced, byte for byte, by the
+    /// TypeScript, Python and Ruby tiers before it was written down here.
+    const BN254_SCALAR_MUL_SHA256: &str =
+        "a80bb1910366d399b7d6a6a35f7c8b51678d3655bf6008a6744b57aa2bded02c";
+
+    /// r, spelled out here rather than taken from the module so this test
+    /// module compiles unchanged against the pre-fix source when reproducing
+    /// the RED state.
+    fn curve_r() -> num_bigint::BigInt {
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617"
+            .parse()
+            .unwrap()
+    }
+
+    fn ladder_hex() -> String {
+        let ops = collect_ops(|e| emit_bn254_g1_scalar_mul(e));
+        let method = StackMethod {
+            name: "t".to_string(),
+            ops,
+            max_stack_depth: 0,
+            source_locs: Vec::new(),
+            uses_code_part: false,
+            needs_code_separator: false,
+        };
+        emit_method(&method).expect("emit").script_hex
+    }
+
+    #[test]
+    fn scalar_mul_matches_the_cross_tier_pin() {
+        let hex = ladder_hex();
+        let digest = hex::encode(Sha256::digest(hex.as_bytes()));
+        assert_eq!(
+            digest, BN254_SCALAR_MUL_SHA256,
+            "bn254G1ScalarMul diverged from the six-tier reference ladder \
+             ({} bytes emitted)",
+            hex.len() / 2
+        );
+    }
+
+    /// The scalar reduce is `PUSH(r) OP_2DUP OP_MOD OP_ROT OP_DROP OP_OVER
+    /// OP_ADD OP_SWAP OP_MOD`, emitted once, before the `+3r` offset. Pinned
+    /// separately from the digest so a failure says WHICH half broke.
+    #[test]
+    fn scalar_mul_reduces_the_scalar_mod_r_before_the_ladder() {
+        let ops = collect_ops(|e| emit_bn254_g1_scalar_mul(e));
+        let names: Vec<String> = ops
+            .iter()
+            .map(|op| match op {
+                StackOp::Opcode(c) => c.clone(),
+                StackOp::Rot => "OP_ROT".to_string(),
+                StackOp::Drop => "OP_DROP".to_string(),
+                StackOp::Over => "OP_OVER".to_string(),
+                StackOp::Swap => "OP_SWAP".to_string(),
+                StackOp::Push(PushValue::Int(v)) if *v == curve_r() => "PUSH_R".to_string(),
+                _ => "_".to_string(),
+            })
+            .collect();
+        let want = [
+            "PUSH_R", "OP_2DUP", "OP_MOD", "OP_ROT", "OP_DROP", "OP_OVER", "OP_ADD", "OP_SWAP",
+            "OP_MOD",
+        ];
+        let hits = names.windows(want.len()).filter(|w| w == &want).count();
+        assert_eq!(hits, 1, "expected exactly one mod-r scalar reduce");
+    }
+
+    /// `strict` is paid at the LAST ladder step only: the final conditional
+    /// add carries the extra `R == 0` test (two field multiplications plus an
+    /// OP_BOOLAND) that separates accumulator == -base from accumulator ==
+    /// +base. Every earlier step keeps the cheap H == 0 test.
+    #[test]
+    fn only_the_last_ladder_step_is_strict() {
+        let ops = collect_ops(|e| emit_bn254_g1_scalar_mul(e));
+        let branches: Vec<&Vec<StackOp>> = ops
+            .iter()
+            .filter_map(|op| match op {
+                StackOp::If { then_ops, .. } => Some(then_ops),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(branches.len(), 255, "expected 255 conditional additions");
+
+        let boolands = |b: &Vec<StackOp>| -> usize {
+            b.iter()
+                .filter(|op| matches!(op, StackOp::Opcode(c) if c == "OP_BOOLAND"))
+                .count()
+        };
+        // The last branch gains exactly one OP_BOOLAND over its predecessor.
+        assert_eq!(
+            boolands(branches[254]),
+            boolands(branches[253]) + 1,
+            "the final step must combine H == 0 with R == 0"
+        );
+        for (i, b) in branches.iter().enumerate().take(254) {
+            assert_eq!(
+                boolands(b),
+                boolands(branches[0]),
+                "step {i} must not pay the strict test"
+            );
+        }
+    }
 }

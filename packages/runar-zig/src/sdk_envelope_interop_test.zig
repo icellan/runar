@@ -280,8 +280,135 @@ test "interop: canonical_json rejects malformed Unicode (D6)" {
             defer allocator.free(got);
             std.debug.print("vector did NOT reject lone surrogate; got {s}\n", .{got});
             return error.TestExpectedError;
-        } else |_| {
-            // Any error is acceptable — the gate requires rejection.
+        } else |err| {
+            // R-262: assert WHICH error. `else |_| {}` accepted any error at
+            // all — proven vacuous by neutering canonicalJson to return
+            // error.OutOfMemory unconditionally, after which this test stayed
+            // green.
+            try std.testing.expectEqual(envelope.CanonicalError.LoneSurrogate, err);
         }
+
+        // CONTROL: the same object, the same key, the same code path — the
+        // only change is that U+D800 is now the HIGH half of a valid pair
+        // (U+1F600). It must serialise, and byte-identically to every other
+        // tier. Without this the test passes for a guard that rejects
+        // everything.
+        {
+            const good_kvs = try allocator.alloc(envelope.Value.KeyValue, 1);
+            const good_value: envelope.Value = .{ .Object = good_kvs };
+            good_kvs[0] = .{
+                .key = try allocator.dupe(u8, key),
+                .value = .{ .String = try allocator.dupe(u8, "\u{1F600}") },
+            };
+            defer freeValue(allocator, good_value);
+            const good = try envelope.canonicalJson(allocator, good_value);
+            defer allocator.free(good);
+            const want = try std.fmt.allocPrint(allocator, "{{\"{s}\":\"😀\"}}", .{key});
+            defer allocator.free(want);
+            try std.testing.expectEqualStrings(want, good);
+        }
+    }
+}
+
+// R-260. verifyEnvelope must bound payload nesting ITSELF rather than inherit
+// whatever cap std.json happens to impose, because that cap differs per tier
+// (ruby 100, rust 127, ts/go/python/zig none — THIS tier's scanner is
+// iterative and took 100001 without complaint, java a StackOverflowError whose
+// threshold is the JVM's -Xss flag). All seven tiers enforce
+// MAX_ENVELOPE_PAYLOAD_DEPTH on the payload TEXT, so the same bytes get the
+// same VerifyEnvelopeReason everywhere.
+test "interop: shared payload depth bound" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const limit = parsed.value.object.get("payload_depth_limit").?.integer;
+    try std.testing.expectEqual(@as(i64, @intCast(envelope.MAX_ENVELOPE_PAYLOAD_DEPTH)), limit);
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const dvs = parsed.value.object.get("depth_vectors").?.array;
+    try std.testing.expect(dvs.items.len > 0);
+    for (dvs.items) |dv| {
+        const obj = dv.object;
+        const vid = obj.get("_vector_id").?.string;
+        const e = obj.get("envelope").?.object;
+        const env = envelope.SignedEnvelope{
+            .payload = e.get("payload").?.string,
+            .sig = e.get("sig").?.string,
+            .pubkey = e.get("pubkey").?.string,
+            .nonce = e.get("nonce").?.integer,
+            .expiresAt = e.get("expiresAt").?.integer,
+        };
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        if (obj.get("expect_ok").?.bool) {
+            if (!r.ok) {
+                std.debug.print("{s}: expected ok=true, got reason={s}\n", .{ vid, if (r.reason) |x| x.wire() else "-" });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
+    }
+}
+
+// R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six
+// tiers already distinguished the two (this one via a struct default); Go
+// conflated them and silently gave a caller asking for strict expiry a
+// five-second replay window, and both Go and Java did the same with the
+// now-override. A null in the vector means the caller supplies nothing and the
+// tier default applies -- cs2 and cs3 are the controls that redden if a fix
+// made explicit zero strict by dropping the default.
+test "interop: explicit clock skew and now overrides" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const ve = parsed.value.object.get("valid_envelope").?.object;
+    const env = envelope.SignedEnvelope{
+        .payload = ve.get("payload").?.string,
+        .sig = ve.get("sig").?.string,
+        .pubkey = ve.get("pubkey").?.string,
+        .nonce = ve.get("nonce").?.integer,
+        .expiresAt = ve.get("expiresAt").?.integer,
+    };
+
+    const cvs = parsed.value.object.get("clock_skew_vectors").?.array;
+    try std.testing.expect(cvs.items.len > 0);
+    for (cvs.items) |cv| {
+        const obj = cv.object;
+        const vid = obj.get("_vector_id").?.string;
+        var opts = envelope.VerifyEnvelopeOpts{
+            .envelope = &env,
+            .now_ms = obj.get("now_ms").?.integer,
+        };
+        // A JSON null means the caller supplies nothing, so the struct default
+        // (5_000) stands; a number is used as given, zero included.
+        switch (obj.get("clock_skew_ms").?) {
+            .integer => |i| opts.clock_skew_ms = i,
+            else => {},
+        }
+        var r = try envelope.verifyEnvelope(allocator, opts);
+        defer r.deinit();
+        if (obj.get("expect_ok").?.bool) {
+            if (!r.ok) {
+                std.debug.print("{s}: expected ok=true, got reason={s}\n", .{ vid, if (r.reason) |x| x.wire() else "-" });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
     }
 }

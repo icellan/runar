@@ -1,6 +1,7 @@
 //! Rúnar deployment SDK — deploy and interact with compiled contracts on BSV.
 
 pub mod errors;
+pub mod unsound_primitives;
 pub mod types;
 pub mod state;
 pub mod deployment;
@@ -55,5 +56,6 @@ pub use envelope::{
     sign_envelope, verify_envelope,
     SignedEnvelope, SignEnvelopeOpts, SignFn,
     VerifyEnvelopeOpts, VerifyEnvelopeResult, VerifyEnvelopeReason,
-    MAX_ENVELOPE_PAYLOAD_BYTES, MAX_ENVELOPE_FIELD_BYTES,
+    MAX_ENVELOPE_PAYLOAD_BYTES, MAX_ENVELOPE_FIELD_BYTES, MAX_ENVELOPE_PAYLOAD_DEPTH,
+    MAX_WIRE_NESTING,
 };

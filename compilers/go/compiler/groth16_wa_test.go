@@ -2,9 +2,11 @@ package compiler
 
 import (
 	"encoding/json"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -24,6 +26,35 @@ func sp1VKPath(t *testing.T) string {
 	return abs
 }
 
+// sp1PublicInputs reads the SP1 v6.0.0 fixture's public-input scalars. They
+// are the statement the fixture's proof attests to, and CompileGroth16WA
+// pins them into the verifier — a verifier with no pinned public inputs is
+// refused (see groth16_wa_binding_test.go).
+func sp1PublicInputs(t *testing.T) []*big.Int {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("..", "..", "..", "tests", "vectors", "sp1", "v6.0.0", "groth16_public_inputs.txt"))
+	if err != nil {
+		t.Fatalf("resolve SP1 public-inputs path: %v", err)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatalf("read SP1 public inputs at %s: %v", abs, err)
+	}
+	var pubs []*big.Int
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		v, ok := new(big.Int).SetString(line, 10)
+		if !ok {
+			t.Fatalf("SP1 public-input line %q is not a decimal integer", line)
+		}
+		pubs = append(pubs, v)
+	}
+	return pubs
+}
+
 // sharedSP1Artifact compiles the SP1 VK once and caches the result so the
 // three test cases below don't each regenerate the 700 KB script. The 700 KB
 // emit is fast (<1s), but deterministic-derivation tests read the hex anyway,
@@ -37,7 +68,7 @@ var (
 func loadSP1Artifact(t *testing.T) *Artifact {
 	t.Helper()
 	sp1ArtifactOnce.Do(func() {
-		sp1Artifact, sp1ArtifactErr = CompileGroth16WA(sp1VKPath(t), Groth16WAOpts{})
+		sp1Artifact, sp1ArtifactErr = CompileGroth16WA(sp1VKPath(t), Groth16WAOpts{PublicInputs: sp1PublicInputs(t)})
 	})
 	if sp1ArtifactErr != nil {
 		t.Fatalf("CompileGroth16WA (cached): %v", sp1ArtifactErr)
@@ -110,19 +141,23 @@ func TestCompileGroth16WA_SP1VK_ProducesArtifact(t *testing.T) {
 }
 
 // TestCompileGroth16WA_DefaultsToThreshold0 verifies that the default
-// ModuloThreshold (0) produces the ~718 KB "strict mod-reduce" script that
-// Phase 4 measured. If this test fails, either the default changed or the
-// Groth16 codegen was reshuffled — both warrant human review.
+// ModuloThreshold (0) produces the expected "strict mod-reduce" script size.
+// If this test fails, either the default changed or the Groth16 codegen was
+// reshuffled — both warrant human review.
 func TestCompileGroth16WA_DefaultsToThreshold0(t *testing.T) {
 	art := loadSP1Artifact(t)
 	scriptBytes := len(art.Script) / 2
 
-	// Phase 4 measured ~718 KB on go-sdk. Allow +/- 64 KB headroom so
-	// optimizer improvements / regressions don't break the test on
-	// every unrelated change, but a 2x blow-up still fires.
+	// Phase 4 measured ~718 KB for the RAW verifier variant. The backend
+	// now emits the MSM-binding variant (it must, or the artifact would
+	// accept a proof of any statement the spender chose), which adds five
+	// on-chain BN254 G1 scalar multiplications plus the public-input pin
+	// checks and roughly doubles the script to ~1390 KB. Allow +/- 128 KB
+	// headroom so optimizer drift doesn't break the test, while a further
+	// blow-up or a silent fall back to the unbound raw variant still fires.
 	const (
-		minBytes = 600 * 1024
-		maxBytes = 800 * 1024
+		minBytes = 1264 * 1024
+		maxBytes = 1520 * 1024
 	)
 	if scriptBytes < minBytes || scriptBytes > maxBytes {
 		t.Errorf("default-threshold script size %d bytes is outside the expected [%d, %d] window",
@@ -179,7 +214,7 @@ func TestCompileGroth16WA_RoundTripToJSON(t *testing.T) {
 	// Recompile from the same VK and assert byte-identical script hex.
 	// This is the deterministic-build guarantee: two compiles of the
 	// same VK must produce the same bytes.
-	art2, err := CompileGroth16WA(sp1VKPath(t), Groth16WAOpts{})
+	art2, err := CompileGroth16WA(sp1VKPath(t), Groth16WAOpts{PublicInputs: sp1PublicInputs(t)})
 	if err != nil {
 		t.Fatalf("second compile: %v", err)
 	}
@@ -203,7 +238,7 @@ func TestCompileGroth16WA_InvalidVKPath(t *testing.T) {
 // TestCompileGroth16WA_CustomContractName verifies the --name option
 // propagates to the artifact.
 func TestCompileGroth16WA_CustomContractName(t *testing.T) {
-	art, err := CompileGroth16WA(sp1VKPath(t), Groth16WAOpts{ContractName: "MySP1Verifier"})
+	art, err := CompileGroth16WA(sp1VKPath(t), Groth16WAOpts{ContractName: "MySP1Verifier", PublicInputs: sp1PublicInputs(t)})
 	if err != nil {
 		t.Fatalf("CompileGroth16WA: %v", err)
 	}

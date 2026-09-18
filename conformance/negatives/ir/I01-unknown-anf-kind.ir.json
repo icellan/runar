@@ -1,0 +1,35 @@
+{
+  "contractName": "Anyone",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "totally_not_a_kind",
+            "bytes": "51"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "unlock",
+      "params": []
+    }
+  ],
+  "properties": []
+}

@@ -555,7 +555,8 @@ func moveMapBuiltin(name string) string {
 // moveMapType maps Move-style type names to Rúnar types.
 func moveMapType(name string) TypeNode {
 	switch name {
-	case "u64", "u128", "u256", "Int":
+	// R-183: `Bigint` is accepted here for parity with the other six tiers.
+	case "u64", "u128", "u256", "Int", "Bigint":
 		return PrimitiveType{Name: "bigint"}
 	case "bool", "Bool":
 		return PrimitiveType{Name: "boolean"}
@@ -906,6 +907,10 @@ func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
 	}
 
 	body := p.parseMoveBlock()
+	// Every nested block folded itself on the way up, so a stub that survives
+	// to here — at ANY depth — is a `while` the bounded-loop model cannot
+	// represent. Refuse it rather than lower a dummy iterator.
+	p.reportUnfoldedMoveWhiles(body)
 
 	// Move allows an implicit return of the final expression when the function
 	// declares a return type. Convert the trailing expression statement into
@@ -1017,14 +1022,40 @@ func (p *moveParser) parseMoveBlock() []Statement {
 	return foldMoveWhileAsFor(stmts)
 }
 
-// foldMoveWhileAsFor folds the canonical Move bounded-loop pattern
+// moveWhileStubIter is the iterator name parseMoveWhile gives the synthetic
+// ForStmt it emits for a `while` that has not yet been folded into a counting
+// loop. It is a placeholder, never a real induction variable —
+// reportUnfoldedMoveWhiles refuses any that survives the fold.
+const moveWhileStubIter = "_w"
+
+// moveWhileShapeDiagnostic is emitted for a `while` that is not a
+// representable bounded counting loop.
+const moveWhileShapeDiagnostic = "Move `while` must be a bounded counting loop: " +
+	"`let i = K; while (i < N) { ...; i = i + 1; }`, or the counting-down form " +
+	"`let i = K; while (i > N) { ...; i = i - 1; }`. The iterator declaration, " +
+	"the comparison direction and a unit step must all agree."
+
+// foldMoveWhileAsFor folds the canonical Move bounded-loop patterns
 //
-//	let i: Int = K;
-//	while (i < N) { ...; i = i + S; }
+//	let i: Int = K;          let i: Int = K;
+//	while (i < N) {          while (i > N) {
+//	  ...                      ...
+//	  i = i + 1;               i = i - 1;
+//	}                        }
 //
 // into a single ForStmt whose init/condition/update match what TypeScript's
 // native for-loop would produce, so downstream ANF lowering emits identical
 // bounded-loop IR across all formats.
+//
+// The COUNTING-DOWN column used to be missing: the fold matched `i = i + …`
+// only, so `i = i - 1` fell through to the unfolded stub — a ForStmt over the
+// dummy iterator `_w = 0` — and ANF lowering read start 0 off the dummy,
+// inferred step -1 from the `>`, and computed a trip count of 0. The loop
+// body, and every assertion in it, was dropped with no diagnostic.
+//
+// The step must be a literal 1 whose SIGN agrees with the comparison
+// direction. `i = i + 2` used to fold to `i++` and silently run the wrong
+// iterator values; `i = i - 1` under `i < N` never terminates.
 func foldMoveWhileAsFor(stmts []Statement) []Statement {
 	if len(stmts) == 0 {
 		return stmts
@@ -1034,45 +1065,11 @@ func foldMoveWhileAsFor(stmts []Statement) []Statement {
 		s := stmts[i]
 		if i+1 < len(stmts) {
 			if decl, ok := s.(VariableDeclStmt); ok {
-				if forStmt, ok2 := stmts[i+1].(ForStmt); ok2 {
-					if initDecl, ok3 := interface{}(forStmt.Init).(VariableDeclStmt); ok3 && initDecl.Name == "_w" {
-						iterName := decl.Name
-						cond, condOk := forStmt.Condition.(BinaryExpr)
-						if condOk {
-							if leftId, lok := cond.Left.(Identifier); lok && leftId.Name == iterName {
-								if len(forStmt.Body) > 0 {
-									last := forStmt.Body[len(forStmt.Body)-1]
-									if assign, aok := last.(AssignmentStmt); aok {
-										if tgtId, tok := assign.Target.(Identifier); tok && tgtId.Name == iterName {
-											if rhs, rok := assign.Value.(BinaryExpr); rok && rhs.Op == "+" {
-												if lId, lidOk := rhs.Left.(Identifier); lidOk && lId.Name == iterName {
-													trimmed := forStmt.Body[:len(forStmt.Body)-1]
-													newFor := ForStmt{
-														Init: VariableDeclStmt{
-															Name:           iterName,
-															Type:           decl.Type,
-															Mutable:        true,
-															Init:           decl.Init,
-															SourceLocation: decl.SourceLocation,
-														},
-														Condition: cond,
-														Update: ExpressionStmt{
-															Expr:           IncrementExpr{Operand: Identifier{Name: iterName}, Prefix: false},
-															SourceLocation: forStmt.SourceLocation,
-														},
-														Body:           trimmed,
-														SourceLocation: forStmt.SourceLocation,
-													}
-													out = append(out, newFor)
-													i++ // skip consumed while
-													continue
-												}
-											}
-										}
-									}
-								}
-							}
-						}
+				if stub, ok2 := stmts[i+1].(ForStmt); ok2 && isMoveWhileStub(stub) {
+					if folded, ok3 := foldMoveCountingWhile(decl, stub); ok3 {
+						out = append(out, folded)
+						i++ // skip consumed while
+						continue
 					}
 				}
 			}
@@ -1080,6 +1077,119 @@ func foldMoveWhileAsFor(stmts []Statement) []Statement {
 		out = append(out, s)
 	}
 	return out
+}
+
+// isMoveWhileStub reports whether stmt is the synthetic shape parseMoveWhile
+// emits for an unfolded `while`.
+func isMoveWhileStub(stmt ForStmt) bool {
+	return stmt.Init.Name == moveWhileStubIter
+}
+
+// foldMoveCountingWhile folds decl + a `while` stub into a real counting
+// ForStmt, reporting false when the pair is not a representable counting loop.
+func foldMoveCountingWhile(decl VariableDeclStmt, stub ForStmt) (Statement, bool) {
+	iterName := decl.Name
+	cond, ok := stub.Condition.(BinaryExpr)
+	if !ok {
+		return nil, false
+	}
+	if leftID, lok := cond.Left.(Identifier); !lok || leftID.Name != iterName {
+		return nil, false
+	}
+
+	// `<`/`<=` counts up, `>`/`>=` counts down. Any other comparison is not a
+	// loop bound the unrolled model can represent.
+	var ascending bool
+	switch cond.Op {
+	case "<", "<=":
+		ascending = true
+	case ">", ">=":
+		ascending = false
+	default:
+		return nil, false
+	}
+
+	// The step is the last statement of the while body.
+	if len(stub.Body) == 0 {
+		return nil, false
+	}
+	last := stub.Body[len(stub.Body)-1]
+	assign, ok := last.(AssignmentStmt)
+	if !ok {
+		return nil, false
+	}
+	if tgtID, tok := assign.Target.(Identifier); !tok || tgtID.Name != iterName {
+		return nil, false
+	}
+	rhs, ok := assign.Value.(BinaryExpr)
+	if !ok || (rhs.Op != "+" && rhs.Op != "-") {
+		return nil, false
+	}
+
+	isIter := func(e Expression) bool {
+		id, iok := e.(Identifier)
+		return iok && id.Name == iterName
+	}
+	isOne := func(e Expression) bool {
+		lit, lok := e.(BigIntLiteral)
+		return lok && lit.Value != nil && lit.Value.Cmp(big.NewInt(1)) == 0
+	}
+	// Accept `i + 1`, `1 + i` (addition only) and `i - 1`.
+	var unitStep bool
+	if rhs.Op == "+" {
+		unitStep = (isIter(rhs.Left) && isOne(rhs.Right)) || (isOne(rhs.Left) && isIter(rhs.Right))
+	} else {
+		unitStep = isIter(rhs.Left) && isOne(rhs.Right)
+	}
+	if !unitStep {
+		return nil, false
+	}
+	// The step's sign must agree with the comparison direction.
+	if ascending != (rhs.Op == "+") {
+		return nil, false
+	}
+
+	var update Expression
+	if ascending {
+		update = IncrementExpr{Operand: Identifier{Name: iterName}, Prefix: false}
+	} else {
+		update = DecrementExpr{Operand: Identifier{Name: iterName}, Prefix: false}
+	}
+
+	return ForStmt{
+		Init: VariableDeclStmt{
+			Name:           iterName,
+			Type:           decl.Type,
+			Mutable:        true,
+			Init:           decl.Init,
+			SourceLocation: decl.SourceLocation,
+		},
+		Condition:      cond,
+		Update:         ExpressionStmt{Expr: update, SourceLocation: stub.SourceLocation},
+		Body:           stub.Body[:len(stub.Body)-1],
+		SourceLocation: stub.SourceLocation,
+	}, true
+}
+
+// reportUnfoldedMoveWhiles reports every `while` stub that survived the fold,
+// at any nesting depth.
+//
+// A surviving stub is not a loop — it is a ForStmt over a dummy iterator, and
+// every downstream pass reads a trip count off it as if it were real.
+// Refusing is the only honest outcome.
+func (p *moveParser) reportUnfoldedMoveWhiles(stmts []Statement) {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case ForStmt:
+			if isMoveWhileStub(s) {
+				p.addError(moveWhileShapeDiagnostic)
+			}
+			p.reportUnfoldedMoveWhiles(s.Body)
+		case IfStmt:
+			p.reportUnfoldedMoveWhiles(s.Then)
+			p.reportUnfoldedMoveWhiles(s.Else)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,7 +1351,7 @@ func (p *moveParser) parseMoveWhile(loc SourceLocation) Statement {
 	// Convert while loop to a for loop with no init/update for AST compatibility
 	return ForStmt{
 		Init: VariableDeclStmt{
-			Name: "_w", Mutable: true, Init: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc,
+			Name: moveWhileStubIter, Mutable: true, Init: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc,
 		},
 		Condition:      condition,
 		Update:         ExpressionStmt{Expr: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc},

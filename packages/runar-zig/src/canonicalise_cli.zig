@@ -12,6 +12,18 @@
 //       Build {key: <string from UTF-16 units>} where each unit is emitted as
 //       its 3-byte WTF-8 form so canonicalJson's byte loop sees a lone
 //       surrogate verbatim (mirrors the D6 rejection test).
+//   {"mode":"deep","depth":<int>,"shape":"array"|"object"}
+//       Build `depth` nested containers around the integer leaf 1, NATIVELY.
+//   {"mode":"bigstring","bytes":<int>,"where":"value"|"key"}
+//       Build a one-entry object whose value (or key) is `bytes` ASCII 'a',
+//       NATIVELY, and respond with the SHA-256 of the canonical bytes.
+//
+//   Why `deep` / `bigstring` describe the value instead of carrying it: a deep
+//   or huge value sent as JSON would have to survive THIS shim's std.json parse
+//   before reaching canonicalJson, so the transport would be imposing a limit
+//   on the thing under test. Building natively keeps the request ~50 bytes.
+//   Hashing the bigstring response keeps a ~4 MiB canonical output off the pipe
+//   while still detecting a single divergent byte.
 //
 //   On a typed rejection the shim prints "RUNAR_CANON_ERR:<error>" to stdout
 //   and exits 3; any other failure exits 1.
@@ -66,6 +78,14 @@ pub fn main(init: std.process.Init) !void {
             .value = .{ .String = try allocator.dupe(u8, bad.items) },
         };
         input_value = .{ .Object = kvs };
+    } else if (std.mem.eql(u8, mode, "deep")) {
+        const depth: usize = @intCast((req.get("depth") orelse std.json.Value{ .integer = 0 }).integer);
+        const shape = (req.get("shape") orelse std.json.Value{ .string = "array" }).string;
+        input_value = try buildDeep(allocator, depth, shape);
+    } else if (std.mem.eql(u8, mode, "bigstring")) {
+        const nbytes: usize = @intCast((req.get("bytes") orelse std.json.Value{ .integer = 0 }).integer);
+        const where = (req.get("where") orelse std.json.Value{ .string = "value" }).string;
+        input_value = try buildBigString(allocator, nbytes, where);
     } else {
         try writeStderr(io, "unknown mode\n");
         std.process.exit(1);
@@ -73,13 +93,52 @@ pub fn main(init: std.process.Init) !void {
 
     if (envelope.canonicalJson(allocator, input_value)) |out| {
         defer allocator.free(out);
-        try writeStdout(io, out);
+        if (std.mem.eql(u8, mode, "bigstring")) {
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(out, &digest, .{});
+            var buf: [96]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "RUNAR_CANON_SHA256:{x}", .{&digest});
+            try writeStdout(io, msg);
+        } else {
+            try writeStdout(io, out);
+        }
     } else |err| {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "RUNAR_CANON_ERR:{s}", .{@errorName(err)}) catch "RUNAR_CANON_ERR:unknown";
         try writeStdout(io, msg);
         std.process.exit(3);
     }
+}
+
+/// Nest `depth` containers around the integer leaf 1, iteratively. Arena-backed.
+fn buildDeep(allocator: std.mem.Allocator, depth: usize, shape: []const u8) !envelope.Value {
+    var v: envelope.Value = .{ .Int = 1 };
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        if (std.mem.eql(u8, shape, "array")) {
+            const items = try allocator.alloc(envelope.Value, 1);
+            items[0] = v;
+            v = .{ .Array = items };
+        } else {
+            const kvs = try allocator.alloc(envelope.Value.KeyValue, 1);
+            kvs[0] = .{ .key = "k", .value = v };
+            v = .{ .Object = kvs };
+        }
+    }
+    return v;
+}
+
+/// One-entry object whose value (or key) is `nbytes` ASCII 'a'. Arena-backed.
+fn buildBigString(allocator: std.mem.Allocator, nbytes: usize, where: []const u8) !envelope.Value {
+    const s = try allocator.alloc(u8, nbytes);
+    @memset(s, 'a');
+    const kvs = try allocator.alloc(envelope.Value.KeyValue, 1);
+    if (std.mem.eql(u8, where, "value")) {
+        kvs[0] = .{ .key = "s", .value = .{ .String = s } };
+    } else {
+        kvs[0] = .{ .key = s, .value = .{ .Int = 1 } };
+    }
+    return .{ .Object = kvs };
 }
 
 /// Convert a std.json.Value into an envelope.Value tree. The arena is owned by

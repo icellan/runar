@@ -103,6 +103,11 @@ class LoopCarriedRebind extends SmartContract {
 // Control: the same loop with a single self-accumulating carrier — no read
 // after the rebinding. Its bytes must NOT move, or the carried-rebind fix has
 // been written too wide and every shipped BoundedLoop-shaped contract pays.
+// R-186 / R-292 re-stamped this pin on 2026-09-14: the accumulator body leaves
+// the carried local on top, so the iteration variable sat one slot down and
+// `lowerLoop`'s `depth == 0` cleanup never fired. The control still says what it
+// was written to say about the carried-rebind fix; it no longer pins the bytes
+// that predate it.
 const plainAccumulatorSource = `import { SmartContract, assert } from 'runar-lang';
 
 class LoopPlainAccumulator extends SmartContract {
@@ -157,6 +162,8 @@ class LoopNestedCarriedRebind extends SmartContract {
 // step fires here (the body does contain a nested loop) but the predicate still
 // says "not carried", so the bytes must NOT move — that is what keeps nesting
 // itself from costing anything.
+// R-186 / R-292 re-stamped this pin on 2026-09-14 as well. Nesting still costs
+// nothing — the single-level accumulator moved by exactly the same change.
 const nestedPlainAccumulatorSource = `import { SmartContract, assert } from 'runar-lang';
 
 class LoopNestedPlainAccumulator extends SmartContract {
@@ -180,10 +187,10 @@ class LoopNestedPlainAccumulator extends SmartContract {
 `
 
 // Byte-identical across all seven compiler tiers (fold-OFF).
-const carriedRebindHex = "000000537953797c937b789351557a53797c937b7c93009c77777777"
-const plainAccumulatorHex = "000052797b7c9351537a7b7c93009c7777"
-const nestedCarriedRebindHex = "00000000547954797c93537a789351567953797c937b78935100597954797c93537a7893515b7a53797c937b7c93009c77777777777777777777"
-const nestedPlainAccumulatorHex = "0000005379537a7c935154797b7c9351005679537a7c9351577a7b7c93009c777777777777"
+const carriedRebindHex = "000000537953797c937b78937b7551547a53797c937b7c9377009c7777"
+const plainAccumulatorHex = "000052797b7c9377517b7b7c9377009c"
+const nestedCarriedRebindHex = "00000000547954797c93537a78937b7551557953797c937b78937b75537a755100567954797c93537a78937b7551577a53797c937b7c93777b75009c77777777"
+const nestedPlainAccumulatorHex = "0000005379537a7c93775153797b7c93777751005379537a7c937751537a7b7c937777009c"
 
 func TestLoopCarriedRebind_SurvivesTheIteration(t *testing.T) {
 	result := CompileFromSourceStrWithResult(carriedRebindSource, "LoopCarriedRebind.runar.ts",

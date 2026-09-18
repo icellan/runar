@@ -68,7 +68,31 @@ func SerializeState(fields []StateField, values map[string]interface{}) string {
 // Fields with a `FixedArray` annotation are returned as a nested Go
 // slice (`[]interface{}`) on the grouped name, not as N individual
 // scalar fields.
-func DeserializeState(fields []StateField, scriptHex string) map[string]interface{} {
+//
+// FAILS CLOSED (C2, porting TypeScript's C28). The blob is read back out of a
+// locking script that any third party can construct, so it is untrusted input,
+// and the caller then builds and SIGNS a continuation output committing to the
+// restored state. A state section that does not describe EXACTLY the
+// artifact's StateFields is rejected:
+//
+//   - truncation — a field running past the end of the blob returns an error
+//     instead of a plausible-but-wrong value. bool and bigint used to return
+//     a DEFAULT (false / 0) and advance the nominal width anyway, which
+//     desynchronised every later field; PubKey / Addr / Ripemd160 / Sha256 /
+//     Point / P256Point / P384Point, and the push-payload branch of
+//     DecodePushData, sliced completely unchecked and PANICKED.
+//   - overlong tails — bytes left over after the last declared field are an
+//     error instead of being silently dropped.
+//
+// Restoring wrong-but-plausible state from a corrupted continuation is worse
+// than not restoring it at all.
+func DeserializeState(fields []StateField, scriptHex string) (map[string]interface{}, error) {
+	if len(scriptHex)%2 != 0 {
+		return nil, fmt.Errorf(
+			"DeserializeState: state blob is %d hex chars — not a whole number of bytes",
+			len(scriptHex))
+	}
+
 	sorted := make([]StateField, len(fields))
 	copy(sorted, fields)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -85,19 +109,33 @@ func DeserializeState(fields []StateField, scriptHex string) map[string]interfac
 			total := len(field.FixedArray.SyntheticNames)
 			flat := make([]interface{}, total)
 			for i := 0; i < total; i++ {
-				value, bytesRead := decodeStateValue(scriptHex, offset, leafType)
+				label := fmt.Sprintf("%s[%d]", field.Name, i)
+				value, bytesRead, err := decodeStateValue(scriptHex, offset, leafType, label)
+				if err != nil {
+					return nil, err
+				}
 				flat[i] = value
 				offset += bytesRead
 			}
 			result[field.Name] = regroupNestedValue(flat, dims)
 		} else {
-			value, bytesRead := decodeStateValue(scriptHex, offset, field.Type)
+			value, bytesRead, err := decodeStateValue(scriptHex, offset, field.Type, field.Name)
+			if err != nil {
+				return nil, err
+			}
 			result[field.Name] = value
 			offset += bytesRead
 		}
 	}
 
-	return result
+	if offset != len(scriptHex) {
+		return nil, fmt.Errorf(
+			"DeserializeState: %d unexpected trailing byte(s) after the last state field "+
+				"(consumed %d of %d bytes) — the state section does not match the artifact's StateFields",
+			(len(scriptHex)-offset)/2, offset/2, len(scriptHex)/2)
+	}
+
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -282,14 +320,14 @@ func asInterfaceSlice(value interface{}) []interface{} {
 // ExtractStateFromScript extracts state values from a full locking script
 // hex, given the artifact. Returns nil if the artifact has no state fields
 // or the script doesn't contain a recognizable state section.
-func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) map[string]interface{} {
-	if artifact.StateFields == nil || len(artifact.StateFields) == 0 {
-		return nil
+func ExtractStateFromScript(artifact *RunarArtifact, scriptHex string) (map[string]interface{}, error) {
+	if len(artifact.StateFields) == 0 {
+		return nil, nil
 	}
 
 	opReturnPos := FindLastOpReturn(scriptHex)
 	if opReturnPos == -1 {
-		return nil
+		return nil, nil
 	}
 
 	// State data starts after the OP_RETURN byte (2 hex chars)
@@ -372,14 +410,39 @@ func encodeStateValue(value interface{}, fieldType string, label string) string 
 	case "int", "bigint":
 		n := stateFieldInt64(value, label, 8)
 		return encodeNum2Bin(n, 8)
-	case "bool":
+	// 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
+	// what every compiler writes into `stateFields[].type`, alongside
+	// `encoding: "bool1", byteLength: 1` — and `bool` is an accepted alias.
+	// Matching only on "bool" meant a REAL boolean state field fell through to
+	// the push-data `default` below and was framed as the ASCII text
+	// `02 74727565`: 3 bytes longer than the continuation the script's own
+	// reader rebuilds, so hash256(outputs) never matched and the first spend
+	// was impossible.
+	case "bool", "boolean":
 		b, _ := value.(bool)
 		if b {
 			return "01"
 		}
 		return "00"
-	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point":
+	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point":
 		// Fixed-size byte types: raw hex, no framing needed.
+		// P256Point (64) and P384Point (96) belong here because runar-lang's
+		// cast constructors hard-assert those widths and all seven compilers
+		// emit them as fixed raw slices; framing them instead deploys a state
+		// section 1-2 bytes long and the first spend fails.
+		//
+		// A MISSING value is refused rather than formatted. fmt.Sprintf("%v",
+		// nil) is "<nil>", which is not hex — and the other six SDKs each
+		// invented a DIFFERENT non-hex placeholder for the same mistake (Java
+		// "null", TS "undefined", Python/Ruby ""), a silent four-way byte
+		// divergence on a path whose bytes are committed on chain. Refusing is
+		// the only answer that is the same in every tier.
+		if value == nil {
+			panic(fmt.Sprintf(
+				"runar: SerializeState: state field %q (%s) has no value. Writing a placeholder "+
+					"would deploy a state section the contract's own on-chain reader cannot parse, "+
+					"leaving the output unspendable", label, fieldType))
+		}
 		return fmt.Sprintf("%v", value)
 	default:
 		// Variable-length types (bytes, ByteString, etc.): use push-data
@@ -540,35 +603,64 @@ func EncodePushData(dataHex string) string {
 // Decoding helpers
 // ---------------------------------------------------------------------------
 
-func decodeStateValue(hex string, offset int, fieldType string) (interface{}, int) {
+// stateFieldByteWidth reports the fixed on-wire width of a state field type,
+// and whether the type is fixed-width at all. It is the single table
+// encodeStateValue's raw branch and decodeStateValue's bounds check both read,
+// so the writer and the reader cannot drift.
+func stateFieldByteWidth(fieldType string) (int, bool) {
 	switch fieldType {
-	case "bool":
-		// 1 raw byte: 0x00 = false, 0x01 = true
-		if offset+2 > len(hex) {
-			return false, 2
-		}
-		return hex[offset:offset+2] != "00", 2
+	case "bool", "boolean":
+		return 1, true
 	case "int", "bigint":
-		// 8 raw bytes LE sign-magnitude (NUM2BIN 8)
-		byteWidth := 8
-		hexWidth := byteWidth * 2
-		if offset+hexWidth > len(hex) {
-			return int64(0), hexWidth
-		}
-		return decodeNum2Bin(hex[offset : offset+hexWidth]), hexWidth
+		return 8, true
 	case "PubKey":
-		return hex[offset : offset+66], 66 // 33 bytes
+		return 33, true
 	case "Addr", "Ripemd160":
-		return hex[offset : offset+40], 40 // 20 bytes
+		return 20, true
 	case "Sha256":
-		return hex[offset : offset+64], 64 // 32 bytes
-	case "Point":
-		return hex[offset : offset+128], 128 // 64 bytes
-	default:
-		// For unknown types, fall back to push-data decoding
-		data, bytesRead := DecodePushData(hex, offset)
-		return data, bytesRead
+		return 32, true
+	case "Point", "P256Point":
+		return 64, true
+	case "P384Point":
+		return 96, true
 	}
+	return 0, false
+}
+
+// decodeStateValue reads one state field. Fixed-width types consume exactly
+// their declared width and REFUSE a blob that cannot supply it; everything
+// else falls through to the strict <len><data> push-data reader.
+func decodeStateValue(hex string, offset int, fieldType string, label string) (interface{}, int, error) {
+	if width, ok := stateFieldByteWidth(fieldType); ok {
+		hexWidth := width * 2
+		if offset+hexWidth > len(hex) {
+			return nil, 0, fmt.Errorf(
+				"DeserializeState: truncated state — field %q (%s) needs %d byte(s) at offset %d "+
+					"but only %d byte(s) remain",
+				label, fieldType, width, offset/2, (len(hex)-offset)/2)
+		}
+		data := hex[offset : offset+hexWidth]
+		switch fieldType {
+		case "bool", "boolean":
+			// 1 raw byte: 0x00 = false, 0x01 = true. Both spellings, matching
+			// encodeStateValue — a reader that knows only "bool" walks a real
+			// boolean field as push data and desynchronises every field after it.
+			return data != "00", hexWidth, nil
+		case "int", "bigint":
+			// 8 raw bytes LE sign-magnitude (NUM2BIN 8)
+			return decodeNum2Bin(data), hexWidth, nil
+		default:
+			// Raw fixed-size byte types.
+			return data, hexWidth, nil
+		}
+	}
+
+	// Variable-length / unknown types: push-data decoding.
+	data, bytesRead, err := DecodePushData(hex, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("DeserializeState: field %q — %w", label, err)
+	}
+	return data, bytesRead, nil
 }
 
 // decodeNum2Bin decodes a fixed-width LE sign-magnitude number.
@@ -600,41 +692,79 @@ func decodeNum2Bin(hex string) int64 {
 // single-byte values — accepting them would let the SDK read a state section
 // the contract's own script cannot parse. OP_0 (0x00) falls through to the
 // opcode<=75 branch below and correctly decodes as the empty byte array.
-func DecodePushData(hex string, offset int) (string, int) {
-	if offset >= len(hex) {
-		return "", 0
+func DecodePushData(hex string, offset int) (string, int, error) {
+	// need asserts `chars` hex chars are available from offset, else fails closed.
+	need := func(chars int, what string) error {
+		if offset+chars > len(hex) {
+			return fmt.Errorf(
+				"truncated state — %s runs past the end of the state section "+
+					"(needs %d byte(s) at offset %d, only %d remain)",
+				what, chars/2, offset/2, (len(hex)-offset)/2)
+		}
+		return nil
 	}
 
-	opcode, _ := strconv.ParseUint(hex[offset:offset+2], 16, 8)
+	if err := need(2, "push opcode"); err != nil {
+		return "", 0, err
+	}
+	opcode, err := strconv.ParseUint(hex[offset:offset+2], 16, 8)
+	if err != nil {
+		return "", 0, fmt.Errorf("non-hex byte at offset %d in the state section", offset/2)
+	}
 
 	if opcode <= 75 {
 		dataLen := int(opcode) * 2
-		return hex[offset+2 : offset+2+dataLen], 2 + dataLen
+		if err := need(2+dataLen, "push payload"); err != nil {
+			return "", 0, err
+		}
+		return hex[offset+2 : offset+2+dataLen], 2 + dataLen, nil
 	} else if opcode == 0x4c {
 		// OP_PUSHDATA1
+		if err := need(4, "OP_PUSHDATA1 length prefix"); err != nil {
+			return "", 0, err
+		}
 		length, _ := strconv.ParseUint(hex[offset+2:offset+4], 16, 8)
 		dataLen := int(length) * 2
-		return hex[offset+4 : offset+4+dataLen], 4 + dataLen
+		if err := need(4+dataLen, "OP_PUSHDATA1 payload"); err != nil {
+			return "", 0, err
+		}
+		return hex[offset+4 : offset+4+dataLen], 4 + dataLen, nil
 	} else if opcode == 0x4d {
 		// OP_PUSHDATA2
+		if err := need(6, "OP_PUSHDATA2 length prefix"); err != nil {
+			return "", 0, err
+		}
 		lo, _ := strconv.ParseUint(hex[offset+2:offset+4], 16, 8)
 		hi, _ := strconv.ParseUint(hex[offset+4:offset+6], 16, 8)
 		length := int(lo) | (int(hi) << 8)
 		dataLen := length * 2
-		return hex[offset+6 : offset+6+dataLen], 6 + dataLen
+		if err := need(6+dataLen, "OP_PUSHDATA2 payload"); err != nil {
+			return "", 0, err
+		}
+		return hex[offset+6 : offset+6+dataLen], 6 + dataLen, nil
 	} else if opcode == 0x4e {
 		// OP_PUSHDATA4
+		if err := need(10, "OP_PUSHDATA4 length prefix"); err != nil {
+			return "", 0, err
+		}
 		b0, _ := strconv.ParseUint(hex[offset+2:offset+4], 16, 8)
 		b1, _ := strconv.ParseUint(hex[offset+4:offset+6], 16, 8)
 		b2, _ := strconv.ParseUint(hex[offset+6:offset+8], 16, 8)
 		b3, _ := strconv.ParseUint(hex[offset+8:offset+10], 16, 8)
 		length := int(b0) | (int(b1) << 8) | (int(b2) << 16) | (int(b3) << 24)
 		dataLen := length * 2
-		return hex[offset+10 : offset+10+dataLen], 10 + dataLen
+		if err := need(10+dataLen, "OP_PUSHDATA4 payload"); err != nil {
+			return "", 0, err
+		}
+		return hex[offset+10 : offset+10+dataLen], 10 + dataLen, nil
 	}
 
-	// Unknown opcode — treat as zero-length
-	return "", 2
+	// Not a push opcode at all — encodePushDataState can never emit one, so the
+	// state section is malformed. This used to consume one byte and return an
+	// empty value, desynchronising every subsequent field.
+	return "", 0, fmt.Errorf(
+		"byte 0x%02x at offset %d is not a push opcode; the state section is malformed",
+		opcode, offset/2)
 }
 
 // DecodeScriptInt decodes a minimally-encoded Bitcoin Script integer from hex.

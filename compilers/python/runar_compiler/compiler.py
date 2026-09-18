@@ -111,6 +111,27 @@ class Artifact:
     raw_script_spans: list | None = None
 
 
+
+def _build_timestamp() -> str:
+    """The artifact build time, as an ISO-8601 second-resolution UTC string.
+
+    Honours SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/):
+    when it holds a Unix seconds value that instant is stamped instead of the
+    clock, so two builds of the same source produce byte-identical artifacts.
+    Without it, the wall clock, exactly as before.
+
+    R-212: the Go tier honoured this and the other six did not, so six of seven
+    artifacts could not be reproduced — and reproducing the artifact is how
+    someone other than the author checks that a published locking script is what
+    the published source compiles to. A malformed value is ignored rather than
+    failing the build: the variable is an environment convention, not input.
+    """
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if raw.isdigit():
+        return datetime.fromtimestamp(int(raw), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 SCHEMA_VERSION = "runar-v1.0.0-rc.1"
 COMPILER_VERSION = "1.0.0-rc.1-python"
 
@@ -119,44 +140,24 @@ COMPILER_VERSION = "1.0.0-rc.1-python"
 # Frontend stub imports (filled in as parsers are ported)
 # ---------------------------------------------------------------------------
 
-def _parse_source(source: bytes, file_name: str) -> Any:
-    """Dispatch to the correct parser based on file extension.
+def _parse_source(source: str, file_name: str) -> Any:
+    """Parse a source file, dispatching on its extension.
 
-    Returns a ParseResult-like object (from the frontend package).
+    Thin delegation to ``parser_dispatch.parse_source`` — the SINGLE
+    extension-dispatch chain. This used to be a second, hand-maintained
+    nine-way copy of that chain, and the copy carried neither the 4 MiB
+    ``MAX_SOURCE_BYTES`` DoS bound nor the fail-closed ``@sighash`` /
+    ``@embedAlways`` guard for the non-TS surfaces. Since every production
+    entry point (``compile_from_source``, ``compile_source_to_ir``, the
+    ``*_with_result`` variants, and every ``__main__`` CLI flag) reaches the
+    parser through here, both guards were unreachable in shipped code while
+    the test suite exercised only the guarded copy. Do NOT reintroduce a
+    per-format dispatch here — add formats to ``parser_dispatch`` instead.
+
+    Returns a :class:`ParseResult` from the frontend package.
     """
-    lower = file_name.lower()
-    if lower.endswith(".runar.py"):
-        from runar_compiler.frontend.parser_python import parse_python
-        return parse_python(source, file_name)
-    elif lower.endswith(".runar.ts"):
-        from runar_compiler.frontend.parser_ts import parse_ts
-        return parse_ts(source, file_name)
-    elif lower.endswith(".runar.sol"):
-        from runar_compiler.frontend.parser_sol import parse_sol
-        return parse_sol(source, file_name)
-    elif lower.endswith(".runar.move"):
-        from runar_compiler.frontend.parser_move import parse_move
-        return parse_move(source, file_name)
-    elif lower.endswith(".runar.go"):
-        from runar_compiler.frontend.parser_go import parse_go
-        return parse_go(source, file_name)
-    elif lower.endswith(".runar.rs"):
-        from runar_compiler.frontend.parser_rust import parse_rust
-        return parse_rust(source, file_name)
-    elif lower.endswith(".runar.rb"):
-        from runar_compiler.frontend.parser_ruby import parse_ruby
-        return parse_ruby(source, file_name)
-    elif lower.endswith(".runar.zig"):
-        from runar_compiler.frontend.parser_zig import parse_zig
-        return parse_zig(source, file_name)
-    elif lower.endswith(".runar.java"):
-        from runar_compiler.frontend.parser_java import parse_java
-        return parse_java(source, file_name)
-    else:
-        raise ValueError(
-            f"Unsupported source format: {file_name}. "
-            f"Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java"
-        )
+    from runar_compiler.frontend.parser_dispatch import parse_source
+    return parse_source(source, file_name)
 
 
 def _validate(contract: Any) -> Any:
@@ -210,15 +211,27 @@ def _optimize_ec(program: ANFProgram) -> ANFProgram:
     return optimize_ec(program)
 
 
-def _eliminate_dead_code(program: ANFProgram) -> ANFProgram:
-    """Dead Code Elimination (Pass 4.75) -- discrete named pass.
-
-    See frontend/dce.py. Idempotent w.r.t. the EC optimizer's internal DCE;
-    runs as a safety net for any post-EC residual dead bindings and to
-    mirror the standalone DCE pass shape used by the Zig reference compiler.
-    """
-    from runar_compiler.frontend.dce import eliminate_dead_code
-    return eliminate_dead_code(program)
+# R-240: a `_eliminate_dead_code` wrapper used to sit here, documented as
+# "Dead Code Elimination (Pass 4.75) -- discrete named pass" that "runs as a
+# safety net for any post-EC residual dead bindings". It was called by none of
+# the three pipeline entry points, so it ran never and guarded nothing.
+#
+# Where dead-binding elimination actually happens: frontend/anf_optimize.py's
+# optimize_ec imports `eliminate_dead_bindings` from frontend/dce.py and runs it
+# only when the program contains EC calls — see the `if not any_changed: return
+# program` gate. A program with no EC calls is not DCE'd at all.
+#
+# That gate is load-bearing, measured rather than assumed: moving the sweep ahead
+# of it so DCE runs on every program makes this tier FAIL TO COMPILE 11 of the 78
+# conformance fixtures — all-readonly-cleanstack, bounded-loop,
+# branch-merged-locals, function-patterns, if-else, if-without-else,
+# loop-if-merged-locals, loop-shapes, merge-locals-prop-updates,
+# merge-locals-shapes, multi-method. Exactly the same 11 the TS tier fails under
+# the same probe (R-194), so this is the shared DCE design removing bindings
+# stack lowering still needs — filed as N-140 — and not a Python bug.
+#
+# `eliminate_dead_code` (the whole-program entry) is still used, on a deep-copied
+# probe, by _collect_referenced_props below, for the @embedAlways warning.
 
 
 def _lower_to_stack(program: ANFProgram) -> list[Any]:
@@ -481,6 +494,30 @@ def compile_from_source(
 
     Supports .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs,
     and .runar.py extensions (dispatched by file extension).
+
+    Warning-severity validator diagnostics are discarded. A caller that wants
+    to surface them -- the CLI does -- must use
+    ``compile_from_source_collecting_warnings`` instead.
+    """
+    artifact, _warnings = compile_from_source_collecting_warnings(
+        source_path,
+        disable_constant_folding=disable_constant_folding,
+        constructor_args=constructor_args,
+    )
+    return artifact
+
+
+def compile_from_source_collecting_warnings(
+    source_path: str,
+    disable_constant_folding: bool = False,
+    constructor_args: dict[str, object] | None = None,
+) -> tuple[Artifact, list[str]]:
+    """``compile_from_source`` plus the validator warnings it would discard.
+
+    CL-BUG-104: ``__main__`` called ``compile_from_source``, whose single
+    return value has no room for advisory diagnostics, so every validator
+    warning died inside the compile call. Error handling is unchanged -- same
+    ``CompilationError`` messages, same stop-at-first-failure ordering.
     """
     source = _read_file(source_path)
 
@@ -495,6 +532,7 @@ def compile_from_source(
     valid_result = _validate(parse_result.contract)
     if valid_result.errors:
         raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
+    warnings = valid_result.warning_strings()
 
     # Pass 3: Type check
     tc_result = _type_check(parse_result.contract)
@@ -514,7 +552,42 @@ def compile_from_source(
     _apply_constructor_args(program, constructor_args)
 
     # Feed into existing compilation pipeline (passes 4.25-6)
-    return compile_from_program(program, disable_constant_folding=disable_constant_folding)
+    artifact = compile_from_program(program, disable_constant_folding=disable_constant_folding)
+
+    # R-237: the issue-#109 notice for a readonly field DCE drops. This tier
+    # HAS the check — `_warn_dropped_readonly_fields`, called from
+    # `_compile_from_source_str_with_result` — but this entry point returned
+    # only the VALIDATOR's warnings, so the CLI (which calls this one) never
+    # showed it. Exactly the shape R-162 fixed in the Go tier, where
+    # CollectEmbedAlwaysDCEWarnings ran only in the *WithResult path.
+    warnings = list(warnings) + _dropped_readonly_field_warnings(expanded_contract, program)
+
+    return artifact, warnings
+
+
+def _dropped_readonly_field_warnings(contract: Any, program: ANFProgram) -> list[str]:
+    """Warning strings for readonly fields DCE eliminated (R-237).
+
+    Shares its reference set with `_collect_referenced_props`, which runs
+    dead-binding elimination on a deep-copied probe and skips the constructor —
+    so a field read only into a never-used local does not count as referenced.
+    """
+    if contract is None or program is None:
+        return []
+
+    referenced = _collect_referenced_props(program)
+    return [
+        (
+            f"readonly field '{prop.name}' is not referenced in any method body "
+            f"and was eliminated by DCE; annotate it /** @embedAlways */ to "
+            f"preserve it in the on-chain script"
+        )
+        for prop in contract.properties
+        if prop.readonly
+        and not getattr(prop, "embed_always", False)
+        and prop.initializer is None
+        and prop.name not in referenced
+    ]
 
 
 def compile_source_to_ir(
@@ -596,9 +669,17 @@ def _regroup_one_pass(entries: list[dict]) -> tuple[list[dict], bool]:
             continue
         marker = chain[-1]
         if marker["index"] != 0:
-            out.append(entry)
-            i += 1
-            continue
+            # R-289: a sibling reaching the head of the loop has no run head
+            # before it -- the head consumes its whole run and advances past
+            # it, so index != 0 here means the chain was not written by pass
+            # 3b. Emitting it as a scalar publishes an ABI the SDK reads as N
+            # independent fields instead of one array, with no diagnostic.
+            raise ValueError(
+                f"malformed synthetic-array chain on {entry['name']!r}: element "
+                f"{marker['index']} of {marker['base']!r} appears without the element 0 "
+                "that starts its run. Synthetic-array chains are written by the "
+                "expand-fixed-arrays pass; this IR did not come from it"
+            )
 
         # Greedy extend: collect run of sequential siblings.
         run_entries = [entry]
@@ -623,9 +704,18 @@ def _regroup_one_pass(entries: list[dict]) -> tuple[list[dict], bool]:
             j += 1
 
         if len(run_entries) != marker_len:
-            out.append(entry)
-            i += 1
-            continue
+            # R-289: a well-formed expansion always emits all N siblings
+            # contiguously, so a short run means the chain was not written by
+            # pass 3b. Leaving them ungrouped published an ABI the SDK reads as
+            # N independent fields instead of one array -- a wrong state layout
+            # from an artifact the compiler called valid.
+            raise ValueError(
+                f"malformed synthetic-array chain on {entry['name']!r}: "
+                f"{marker_base!r} declares {marker_len} elements but the "
+                f"contiguous run has {len(run_entries)}. "
+                "Synthetic-array chains are written by the expand-fixed-arrays "
+                "pass; this IR did not come from it"
+            )
 
         inner_type = entry["type"]
         grouped_type = f"FixedArray<{inner_type}, {marker_len}>"
@@ -804,7 +894,7 @@ def _assemble_artifact(
         code_sep_index_slots=code_sep_index_slots or [],
         code_separator_index=cs_index,
         code_separator_indices=cs_indices,
-        build_timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        build_timestamp=_build_timestamp(),
         raw_script_spans=raw_script_spans if raw_script_spans else None,
     )
 
@@ -940,8 +1030,12 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
         if v.name is not None:
             d["name"] = v.name
         if v.raw_value is not None:
-            # raw_value is already JSON-ready (string, number, bool)
-            d["value"] = json.loads(v.raw_value) if isinstance(v.raw_value, str) else v.raw_value
+            # `raw_value` is the DECODED JSON value on both build paths — the
+            # source frontend and `ir/types.py`'s loader agree since the fix
+            # for the `--ir --output` crash. Re-parsing it here was what broke:
+            # `json.loads("@ref:t0")` raised, and `json.loads("3030")` would
+            # have silently turned a hex ByteString into a number.
+            d["value"] = v.raw_value
         if v.op is not None:
             d["op"] = v.op
         if v.left is not None:

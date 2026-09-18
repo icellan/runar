@@ -6448,14 +6448,29 @@ Both sides leave `.vBool (decide (i = 0))` on top. -/
 
 def applyZeroNumEqual : List StackOp → List StackOp
   | [] => []
-  | .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest => .opcode "OP_NOT" :: applyZeroNumEqual rest
+  -- Leave `[push 0, OP_NUMEQUAL, OP_VERIFY]` for `applyNumEqualVerifyFuse`
+  -- (TS one-pass: SWAP SWAP elim and NUMEQUAL+VERIFY fuse in the same
+  -- left-to-right scan, so PUSH 0 never sits next to a bare NUMEQUAL).
+  | .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: .opcode "OP_VERIFY" :: rest =>
+      .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: .opcode "OP_VERIFY" ::
+        applyZeroNumEqual rest
+  | .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest =>
+      .opcode "OP_NOT" :: applyZeroNumEqual rest
   | op :: rest => op :: applyZeroNumEqual rest
 
 theorem applyZeroNumEqual_empty : applyZeroNumEqual [] = [] := rfl
 
-theorem applyZeroNumEqual_match (rest : List StackOp) :
+theorem applyZeroNumEqual_match_verify (rest : List StackOp) :
+    applyZeroNumEqual
+      (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: .opcode "OP_VERIFY" :: rest)
+    = .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: .opcode "OP_VERIFY" ::
+        applyZeroNumEqual rest := rfl
+
+theorem applyZeroNumEqual_match (rest : List StackOp)
+    (h : ∀ t, rest = .opcode "OP_VERIFY" :: t → False) :
     applyZeroNumEqual (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest)
-    = .opcode "OP_NOT" :: applyZeroNumEqual rest := rfl
+    = .opcode "OP_NOT" :: applyZeroNumEqual rest :=
+  applyZeroNumEqual.eq_3 rest h
 
 /-- `[push 0, OP_NUMEQUAL]` extends to `[OP_NOT]` under `.vBigint i :: rest_top` precondition. -/
 theorem zeroNumEqual_extends (s : StackState) (i : Int) (rest_top : List ANF.Eval.Value)
@@ -6496,7 +6511,8 @@ private theorem applyZeroNumEqual_cons_no_match
     (op : StackOp) (rest : List StackOp)
     (h : ∀ rt, op = .push (.bigint 0) → rest = .opcode "OP_NUMEQUAL" :: rt → False) :
     applyZeroNumEqual (op :: rest) = op :: applyZeroNumEqual rest :=
-  applyZeroNumEqual.eq_3 op rest h
+  applyZeroNumEqual.eq_4 op rest
+    (fun rt hOp hRest => h (.opcode "OP_VERIFY" :: rt) hOp hRest) h
 
 theorem zeroNumEqual_pass_sound :
     ∀ (ops : List StackOp), noIfOp ops →
@@ -6508,9 +6524,26 @@ theorem zeroNumEqual_pass_sound :
   | case2 rest' ih =>
     intro hNoIf s hWT
     have hRestNoIf : noIfOp rest' := by
+      change noIfOp (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" ::
+        .opcode "OP_VERIFY" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨_, hCont0⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    exact runOps_cons_push_cong_typed (.bigint 0) _ _ s fun s1 hStep1 => by
+      have hWT1 := hCont0 s1 hStep1
+      have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWT1
+      exact runOps_cons_opcode_cong_typed "OP_NUMEQUAL" _ _ s1 fun s2 hStep2 => by
+        have hWT2 := hCont1 s2 hStep2
+        have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWT2
+        exact runOps_cons_opcode_cong_typed "OP_VERIFY" _ _ s2 fun s3 hStep3 =>
+          ih hRestNoIf s3 (hCont2 s3 hStep3)
+  | case3 rest' hNotVerify ih =>
+    intro hNoIf s hWT
+    have hRestNoIf : noIfOp rest' := by
       change noIfOp (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest') at hNoIf
       change noIfOp rest'
       exact hNoIf
+    rw [applyZeroNumEqual_match rest' hNotVerify]
     have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
     have hStepPush : stepNonIf (.push (.bigint 0)) s = .ok (s.push (.vBigint 0)) :=
       stepNonIf_push_bigint s 0
@@ -6529,14 +6562,9 @@ theorem zeroNumEqual_pass_sound :
       exact h.symm
     have hSStack : s.stack = .vBigint a :: rest_stack :=
       List.tail_eq_of_cons_eq hStackEq
-    show runOps (.opcode "OP_NOT" :: applyZeroNumEqual rest') s
-         = runOps (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest') s
     rw [zeroNumEqual_extends s a rest_stack rest' hSStack]
     apply runOps_cons_opcode_cong_typed
     intro s' hStepNOT
-    -- We need wellTypedRun rest' s' from the OP_NUMEQUAL chain.
-    -- After NUMEQUAL on (s.push (.vBigint 0)) with stack [.vBigint 0, .vBigint a, ...],
-    -- post-stack is .vBool (decide (a = 0)) :: rest_stack.
     have hStackFor : (s.push (.vBigint 0)).stack = .vBigint 0 :: .vBigint a :: rest_stack := by
       rw [hPushStack, hSStack]
     have hStepNumEq : stepNonIf (.opcode "OP_NUMEQUAL") (s.push (.vBigint 0))
@@ -6548,8 +6576,6 @@ theorem zeroNumEqual_pass_sound :
     have hWellRest1 : wellTypedRun rest'
                         (({ s with stack := rest_stack } : StackState).push
                               (.vBool (decide (a = 0)))) := hContNumEq _ hStepNumEq
-    -- And from hStepNOT we know stepNonIf OP_NOT s = .ok s'.
-    -- Reduce stepNonIf OP_NOT s using hSStack.
     have hStepNOTDef : stepNonIf (.opcode "OP_NOT") s
                      = .ok ((({ s with stack := rest_stack } : StackState).push
                               (.vBool (!decide (a ≠ 0))))) := by
@@ -6561,14 +6587,13 @@ theorem zeroNumEqual_pass_sound :
                        (.vBool (!decide (a ≠ 0)))) := by
       rw [hStepNOTDef] at hStepNOT
       exact ((Except.ok.injEq _ _).mp hStepNOT).symm
-    -- The .vBool values are equal: decide (a = 0) = !decide (a ≠ 0).
     have hBoolEq : decide (a = 0) = !decide (a ≠ 0) := by
       by_cases h : a = 0
       · simp [h]
       · simp [h]
     rw [hSEq, ← hBoolEq]
     exact ih hRestNoIf _ hWellRest1
-  | case3 op rest' h_no_match ih =>
+  | case4 op rest' h_weak h_strong ih =>
     intro hNoIf s hWT
     have hRestNoIf : noIfOp rest' := by
       cases op with
@@ -6582,8 +6607,7 @@ theorem zeroNumEqual_pass_sound :
     match op with
     | .ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
     | .push v   =>
-        rw [applyZeroNumEqual_cons_no_match (.push v) rest'
-              (fun rt hOp hRest => h_no_match rt hOp hRest)]
+        rw [applyZeroNumEqual_cons_no_match (.push v) rest' h_strong]
         exact runOps_cons_push_cong_typed v _ _ s ihTyped
     | .dup      =>
         show runOps (.dup :: applyZeroNumEqual rest') s = runOps (.dup :: rest') s
@@ -7773,13 +7797,22 @@ theorem applyZeroNumEqual_preserves_noIfOp :
   | case2 rest' ih =>
     intro h
     have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" ::
+        .opcode "OP_VERIFY" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyZeroNumEqual rest') := ih hRest'
+    simpa [noIfOp] using ihRes
+  | case3 rest' hNotVerify ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
       change noIfOp (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest') at h
       change noIfOp rest'
       exact h
     have ihRes : noIfOp (applyZeroNumEqual rest') := ih hRest'
-    show noIfOp (.opcode "OP_NOT" :: applyZeroNumEqual rest')
+    rw [applyZeroNumEqual_match rest' hNotVerify]
     simpa [noIfOp] using ihRes
-  | case3 op rest' h_no_match ih =>
+  | case4 op rest' h_weak h_strong ih =>
     intro h
     have hRest' : noIfOp rest' := by
       cases op with
@@ -7789,7 +7822,7 @@ theorem applyZeroNumEqual_preserves_noIfOp :
     have hRewrite :
         applyZeroNumEqual (op :: rest')
         = op :: applyZeroNumEqual rest' :=
-      applyZeroNumEqual.eq_3 op rest' h_no_match
+      applyZeroNumEqual.eq_4 op rest' h_weak h_strong
     rw [hRewrite]
     cases op with
     | ifOp _ _ => exact absurd h (by simp [noIfOp])
@@ -8357,6 +8390,9 @@ attribute [implemented_by applyDoubleDrop.tr] applyDoubleDrop
 
 private def applyZeroNumEqual.tr.go : List StackOp → List StackOp → List StackOp
   | [], acc => acc.reverse
+  | .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyZeroNumEqual.tr.go rest
+        (.opcode "OP_VERIFY" :: .opcode "OP_NUMEQUAL" :: .push (.bigint 0) :: acc)
   | .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest, acc =>
       applyZeroNumEqual.tr.go rest (.opcode "OP_NOT" :: acc)
   | op :: rest, acc => applyZeroNumEqual.tr.go rest (op :: acc)
@@ -9745,7 +9781,9 @@ caller to supply the post-rule WT predicate as an external hypothesis,
 mirroring the Phase 3t pragmatic fallback for `equalVerifyFuse`.
 
 Specifically:
-* `applyZeroNumEqual` rewrites `[push 0, OP_NUMEQUAL]` to `[OP_NOT]`. The
+* `applyZeroNumEqual` rewrites `[push 0, OP_NUMEQUAL]` to `[OP_NOT]`,
+  except `[push 0, OP_NUMEQUAL, OP_VERIFY]` which is left for
+  `applyNumEqualVerifyFuse` (TS same-pass SWAP-elim + VERIFY fuse). The
   output's `precondMet .bool` is strictly stronger than the input's
   `precondMet .twoInts ∘ post-push 0` (since `precondMet .bool` rejects
   `.vBigint` even though `asBool?` accepts it).

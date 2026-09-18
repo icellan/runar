@@ -7,11 +7,45 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFValue};
+use num_bigint::BigInt;
+use num_traits::Num;
+
+use crate::ir::{parse_const_value, ANFBinding, ANFMethod, ANFProgram, ANFValue, ConstValue};
 
 // ---------------------------------------------------------------------------
 // EC constants
 // ---------------------------------------------------------------------------
+
+/// secp256k1 group order. Every scalar a fusing rule folds is reduced modulo
+/// `n` into `[0, n)`, matching `CURVE_N` in the TS optimizer, `curveN` in the
+/// Go rules engine, and the same constant in the Python / Ruby / Java tiers.
+fn curve_n() -> &'static BigInt {
+    use std::sync::OnceLock;
+    static N: OnceLock<BigInt> = OnceLock::new();
+    N.get_or_init(|| {
+        BigInt::from_str_radix(
+            "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+            16,
+        )
+        .expect("secp256k1 order is a valid hex literal")
+    })
+}
+
+/// Reduce a folded scalar into `[0, n)`.
+///
+/// `num_bigint`'s `%` is a remainder (it keeps the dividend's sign), so the
+/// extra `+ n` step is what matches the other tiers: TS spells it
+/// `((x % N) + N) % N`, Go/Python/Ruby/Java get it for free from `big.Int.Mod`
+/// / Python `%` / `Integer#%` / `BigInteger.mod`.
+fn reduce_mod_n(v: BigInt) -> BigInt {
+    let n = curve_n();
+    let r = v % n;
+    if r.sign() == num_bigint::Sign::Minus {
+        r + n
+    } else {
+        r
+    }
+}
 
 /// Point at infinity: 64 zero bytes as hex.
 const INFINITY_HEX: &str = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
@@ -33,38 +67,35 @@ fn is_call_to<'a>(value: &'a ANFValue, func_name: &str) -> Option<&'a Vec<String
 }
 
 fn is_const_int(value: &ANFValue, n: i128) -> bool {
-    match value {
-        ANFValue::LoadConst { value: v } => {
-            if let Some(i) = v.as_i64() {
-                return i as i128 == n;
-            }
-            if let Some(f) = v.as_f64() {
-                return f as i128 == n;
-            }
-            false
-        }
-        _ => false,
-    }
+    get_const_int(value).is_some_and(|v| v == BigInt::from(n))
 }
 
-fn get_const_int(value: &ANFValue) -> Option<i128> {
+/// Decode a `load_const` scalar to an arbitrary-precision integer.
+///
+/// Routed through `ir::parse_const_value` — the single definition of the
+/// cross-tier `load_const` wire format — rather than `serde_json`'s
+/// `as_i64` / `as_f64`. Those two see only JSON *numbers*, but any bigint
+/// whose magnitude exceeds `Number.MAX_SAFE_INTEGER` is carried as a
+/// JS-style decimal string (`"115792089...n"`), which is exactly the shape a
+/// real secp256k1 scalar takes. Reading it as a number made every
+/// scalar-fusing EC rule decline on precisely the inputs that matter, in
+/// Rust alone (issue R-033 / CL-BUG-022).
+fn get_const_int(value: &ANFValue) -> Option<BigInt> {
     match value {
-        ANFValue::LoadConst { value: v } => {
-            if let Some(i) = v.as_i64() {
-                return Some(i as i128);
-            }
-            if let Some(f) = v.as_f64() {
-                let i = f as i128;
-                if (i as f64) == f {
-                    return Some(i);
-                }
-            }
-            None
-        }
+        ANFValue::LoadConst { value: v } => match parse_const_value(v) {
+            Some(ConstValue::Int(i)) => Some(i),
+            _ => None,
+        },
         _ => None,
     }
 }
 
+/// Exact-string match against a hex point constant.
+///
+/// Safe to leave as a raw string comparison: `parse_const_value` only treats
+/// a JSON string as a decimal BigInt when it carries the trailing `n`
+/// discriminator, and neither `INFINITY_HEX` (128 zeros) nor `G_HEX` does —
+/// so a decimal-BigInt payload can never be mistaken for either point.
 fn is_const_hex(value: &ANFValue, hex: &str) -> bool {
     match value {
         ANFValue::LoadConst { value: v } => v.as_str() == Some(hex),
@@ -134,9 +165,13 @@ fn make_load_const_hex(hex: &str) -> ANFValue {
     }
 }
 
-fn make_load_const_int(n: i128) -> ANFValue {
+/// Re-encode a folded scalar in the shared `load_const` wire format: a bare
+/// JSON number while it stays JS-safe, a `"...n"` decimal string once it does
+/// not. `n as i64` used to be the encoder, which silently wrapped any product
+/// past `i64::MAX`.
+fn make_load_const_int(n: &BigInt) -> ANFValue {
     ANFValue::LoadConst {
-        value: serde_json::json!(n as i64),
+        value: super::anf_lower::bigint_to_json(n),
     }
 }
 
@@ -220,19 +255,17 @@ fn try_rewrite(
                             let k1 = get_const_int(inner_scalar_val);
                             let k2 = get_const_int(scalar_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                // Only fold if product doesn't overflow i128
-                                if let Some(product) = k1.checked_mul(k2) {
-                                    let new_scalar_name = format!("{}_k", binding.name);
-                                    extra_bindings.push(ANFBinding {
-                                        name: new_scalar_name.clone(),
-                                        value: make_load_const_int(product),
-                                        source_loc: None,
-                                    });
-                                    return Some(ANFValue::Call {
-                                        func: "ecMul".to_string(),
-                                        args: vec![inner_point, new_scalar_name],
-                                    });
-                                }
+                                let product = reduce_mod_n(k1 * k2);
+                                let new_scalar_name = format!("{}_k", binding.name);
+                                extra_bindings.push(ANFBinding {
+                                    name: new_scalar_name.clone(),
+                                    value: make_load_const_int(&product),
+                                    source_loc: None,
+                                });
+                                return Some(ANFValue::Call {
+                                    func: "ecMul".to_string(),
+                                    args: vec![inner_point, new_scalar_name],
+                                });
                             }
                         }
                     }
@@ -268,6 +301,25 @@ fn try_rewrite(
                 }
             }
 
+            // Rule 8r (`ec-add-negate-cancel-reversed`): ecAdd(ecNegate(x), x) -> INFINITY
+            //
+            // The mirror of Rule 8. It has always been in optimizer/ec-rules.json
+            // and the Go tier — whose rule engine executes that file directly —
+            // performed it; the six hand-ported tiers implemented only the
+            // forward direction, so the same ANF compiled to a 1808-byte script
+            // in Go and a 26140-byte one everywhere else (R-034 / CL-BUG-028).
+            //
+            // Placed after Rule 8 and before Rules 10/11 to match the JSON's
+            // rule order, which is the order the Go engine tries them in.
+            // Name equality, not value equality, exactly as Rule 8 above.
+            if let Some(left_val) = value_map.get(left_arg.as_str()) {
+                if let Some(negate_args) = is_call_to(left_val, "ecNegate") {
+                    if negate_args.len() == 1 && negate_args[0] == *right_arg {
+                        return Some(make_load_const_hex(INFINITY_HEX));
+                    }
+                }
+            }
+
             // Rules 10 & 11 require looking up both sides
             let left_val = value_map.get(left_arg.as_str()).cloned();
             let right_val = value_map.get(right_arg.as_str()).cloned();
@@ -287,18 +339,17 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                if let Some(sum) = k1.checked_add(k2) {
-                                    let new_scalar_name = format!("{}_k", binding.name);
-                                    extra_bindings.push(ANFBinding {
-                                        name: new_scalar_name.clone(),
-                                        value: make_load_const_int(sum),
-                                        source_loc: None,
-                                    });
-                                    return Some(ANFValue::Call {
-                                        func: "ecMulGen".to_string(),
-                                        args: vec![new_scalar_name],
-                                    });
-                                }
+                                let sum = reduce_mod_n(k1 + k2);
+                                let new_scalar_name = format!("{}_k", binding.name);
+                                extra_bindings.push(ANFBinding {
+                                    name: new_scalar_name.clone(),
+                                    value: make_load_const_int(&sum),
+                                    source_loc: None,
+                                });
+                                return Some(ANFValue::Call {
+                                    func: "ecMulGen".to_string(),
+                                    args: vec![new_scalar_name],
+                                });
                             }
                         }
                     }
@@ -322,18 +373,17 @@ fn try_rewrite(
                             let k1 = get_const_int(k1_val);
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
-                                if let Some(sum) = k1.checked_add(k2) {
-                                    let new_scalar_name = format!("{}_k", binding.name);
-                                    extra_bindings.push(ANFBinding {
-                                        name: new_scalar_name.clone(),
-                                        value: make_load_const_int(sum),
-                                        source_loc: None,
-                                    });
-                                    return Some(ANFValue::Call {
-                                        func: "ecMul".to_string(),
-                                        args: vec![point_name, new_scalar_name],
-                                    });
-                                }
+                                let sum = reduce_mod_n(k1 + k2);
+                                let new_scalar_name = format!("{}_k", binding.name);
+                                extra_bindings.push(ANFBinding {
+                                    name: new_scalar_name.clone(),
+                                    value: make_load_const_int(&sum),
+                                    source_loc: None,
+                                });
+                                return Some(ANFValue::Call {
+                                    func: "ecMul".to_string(),
+                                    args: vec![point_name, new_scalar_name],
+                                });
                             }
                         }
                     }
@@ -376,12 +426,64 @@ use super::dce::eliminate_dead_bindings_method;
 // Method optimizer
 // ---------------------------------------------------------------------------
 
+/// R-221: rewrite to a FIXPOINT, not once.
+///
+/// The peers loop — Go's `OptimizeEC` runs `for changed { ... }`, Python's
+/// `_optimize_method` runs `while changed:`, and Ruby, Zig and Java do the same
+/// — because one rule's output routinely enables another's. This tier applied
+/// the rules in a single pass, so it stopped one rewrite short of the peers
+/// whenever that happened.
+///
+/// Measured on `ecAdd(ecMulGen(N-7), ecMulGen(7n))`, fold-ON, the shipped
+/// default. Rule 10 reduces the two scalars to `(N-7) + 7 mod N` = 0, and Rule 5
+/// then reduces `ecMulGen(0)` to the infinity-point constant. Five tiers emitted
+/// that constant; this one emitted `ecMulGen(0)` — an extra 256-step ladder, and
+/// a script 849002 hex chars (~425 KB) larger than every peer's:
+///
+/// ```text
+/// go python ruby java zig   1699920 hexchars   sha a609b3e20c
+/// rust                      2548922 hexchars   sha f1ca9484f1
+/// ```
+///
+/// A cross-tier byte divergence in the default mode, which is exactly what the
+/// fold-ON parity gate exists to prevent; no conformance fixture happened to
+/// carry a scalar pair that summed to 0 mod N.
 fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
+    let mut body = method.body.clone();
+    let mut changed = false;
+
+    // Same cap-free shape as the Go tier: every rule strictly reduces the
+    // number of EC calls or replaces a call with a constant, so the loop
+    // terminates.
+    loop {
+        let (next, pass_changed) = optimize_method_ec_once(&body);
+        body = next;
+        if !pass_changed {
+            break;
+        }
+        changed = true;
+    }
+
+    if !changed {
+        return (method.clone(), false);
+    }
+
+    (ANFMethod {
+        name: method.name.clone(),
+        params: method.params.clone(),
+        body,
+        is_public: method.is_public,
+        sighash_type: method.sighash_type,
+    }, true)
+}
+
+/// One rewrite pass over `body`. Returns the new body and whether it changed.
+fn optimize_method_ec_once(body: &[ANFBinding]) -> (Vec<ANFBinding>, bool) {
     let mut value_map: ValueMap = HashMap::new();
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
 
-    for binding in &method.body {
+    for binding in body {
         // Register binding value for lookups
         value_map.insert(binding.name.clone(), binding.value.clone());
 
@@ -407,17 +509,7 @@ fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
         }
     }
 
-    if !changed {
-        return (method.clone(), false);
-    }
-
-    (ANFMethod {
-        name: method.name.clone(),
-        params: method.params.clone(),
-        body: result,
-        is_public: method.is_public,
-        sighash_type: method.sighash_type,
-    }, true)
+    (result, changed)
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +896,60 @@ mod tests {
                 );
             }
             other => panic!("expected LoadConst(INFINITY), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 8r (ec-add-negate-cancel-reversed): ecAdd(ecNegate(x), x) -> INFINITY
+    //
+    // The operand order rule 8 above does NOT cover. optimizer/ec-rules.json
+    // declares both directions with no "supported" tag; only the Go tier
+    // implemented this one (R-034 / CL-BUG-028).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule8r_add_negate_reversed() {
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            call_binding("t1", "ecNegate", vec!["t0"]),
+            call_binding("t2", "ecAdd", vec!["t1", "t0"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(
+                    value.as_str(),
+                    Some(INFINITY_HEX),
+                    "expected INFINITY, got {value}"
+                );
+            }
+            other => panic!("expected LoadConst(INFINITY), got {other:?}"),
+        }
+    }
+
+    /// CONTROL: distinct points must NOT cancel — folding this would be a
+    /// wrong answer, not a faster one.
+    #[test]
+    fn test_rule8r_control_distinct_points_do_not_fold() {
+        let bindings = vec![
+            load_const_hex("p", &some_point()),
+            load_const_hex("q", &g_hex()),
+            call_binding("neg", "ecNegate", vec!["q"]),
+            call_binding("t0", "ecAdd", vec!["neg", "p"]),
+            assert_binding("t1", "t0"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+        let t0 = find_binding(body, "t0").expect("expected binding t0");
+        match &t0.value {
+            ANFValue::Call { func, .. } => assert_eq!(func, "ecAdd"),
+            other => panic!("expected the ecAdd to survive, got {other:?}"),
         }
     }
 

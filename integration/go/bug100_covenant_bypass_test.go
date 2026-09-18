@@ -13,7 +13,7 @@ import (
 
 // deployFreshCounter deploys a new stateful Counter (count=0) with `sats`
 // satoshis and returns the contract + provider + funder signer.
-func deployFreshCounter(t *testing.T, sats int64) (*runar.RunarContract, runar.Provider, runar.Signer) {
+func deployFreshCounter(t *testing.T, sats int64) (*runar.RunarContract, *helpers.RPCProvider, runar.Signer) {
 	t.Helper()
 	artifact := getCounterArtifact(t)
 	contract := runar.NewRunarContract(artifact, []interface{}{int64(0)})
@@ -87,7 +87,7 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 	// which preimage to present: the tx's own (naive) or the state-continuation
 	// one (the attack). Everything else — signature, tx, unlock structure — is
 	// identical between the two.
-	buildDecoupledSpend := func(t *testing.T, useContinuationPreimage bool) (*runar.RunarContract, runar.Provider, *runar.PreparedCall) {
+	buildDecoupledSpend := func(t *testing.T, useContinuationPreimage bool) (*runar.RunarContract, *helpers.RPCProvider, *runar.PreparedCall) {
 		contract, provider, signer := deployFreshCounter(t, 5000)
 		utxo := contract.GetCurrentUtxo()
 
@@ -125,11 +125,12 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 	// must reject it (hash256(continuation) != preimage.hashOutputs).
 	{
 		contract, provider, prepared := buildDecoupledSpend(t, false)
-		if _, _, err := contract.FinalizeCall(prepared, nil, provider); err == nil {
-			t.Fatalf("control-naive: naive theft (matching preimage) was ACCEPTED — the continuation check is absent, not merely unbound")
-		} else {
-			t.Logf("control-naive: naive theft correctly REJECTED: %v", err)
+		before := provider.BroadcastAttempts
+		_, _, err := contract.FinalizeCall(prepared, nil, provider)
+		if bad := helpers.CheckNodeRejected(provider, before, err); bad != nil {
+			t.Fatalf("control-naive: naive theft (matching preimage) was not rejected by the node: %v", bad)
 		}
+		t.Logf("control-naive: naive theft correctly REJECTED by the node: %v", err)
 	}
 
 	// attack: the SAME attacker-paying tx, continuation preimage swapped in.
@@ -139,10 +140,20 @@ func TestBug100_DecoupledPreimage_StatefulCovenantBypass(t *testing.T) {
 	// this is the node-level regression guard for the fix.)
 	{
 		contract, provider, prepared := buildDecoupledSpend(t, true)
+		before := provider.BroadcastAttempts
 		txid, _, err := contract.FinalizeCall(prepared, nil, provider)
 		if err == nil {
 			t.Fatalf("BUG-100 REGRESSION: decoupled-preimage spend was ACCEPTED (txid=%s) — the on-chain preimage binding is not enforced; attacker %s would receive the contract's funds", txid, attacker.Address)
 		}
-		t.Logf("BUG-100 fix verified: decoupled-preimage spend correctly REJECTED: %v", err)
+		// `err != nil` on its own does NOT prove consensus enforced anything.
+		// This leg hand-mutates a PreparedCall (TxHex, OpPushTxSig, a swapped
+		// preimage), and FinalizeCall returns "parsing tx: ..." before it ever
+		// reaches provider.Broadcast — so any future SDK change that makes a
+		// hand-modified PreparedCall fail assembly would turn this repo's only
+		// on-chain guard for a confirmed theft bug permanently green.
+		if bad := helpers.CheckNodeRejected(provider, before, err); bad != nil {
+			t.Fatalf("BUG-100 guard is not measuring consensus: %v", bad)
+		}
+		t.Logf("BUG-100 fix verified: decoupled-preimage spend correctly REJECTED by the node: %v", err)
 	}
 }

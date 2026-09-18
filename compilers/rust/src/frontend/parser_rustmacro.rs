@@ -739,9 +739,67 @@ impl RustDslParser {
                 "i".to_string()
             };
             self.expect(&TokenType::In);
-            let start_expr = self.parse_expression();
+            // Two loop headers, both of them real Rust that iterates exactly
+            // these values:
+            //
+            //   for i in a..b         -> a, a+1, … b-1  (ascending)
+            //   for i in (a..b).rev() -> b-1, b-2, … a  (DESCENDING)
+            //
+            // `.rev()` is what lets the Rust surface spell a countdown. A Rust
+            // range only ever ascends — `(5..2)` is empty — so `step = -1` was
+            // unreachable from this surface and no fixture could exercise it
+            // across all nine. `Iterator::rev` reverses the half-open range:
+            // the descending loop starts at `b - 1` and ends at `a` INCLUSIVE,
+            // which is why the guard below is `>=` against `a`.
+            let has_paren = matches!(self.current().typ, TokenType::LParen);
+            if has_paren {
+                self.advance_clone();
+            }
+            let range_start = self.parse_expression();
             self.expect(&TokenType::DotDot);
-            let end_expr = self.parse_expression();
+            let range_end = self.parse_expression();
+
+            let mut descending = false;
+            if has_paren {
+                self.expect(&TokenType::RParen);
+                self.expect(&TokenType::Dot);
+                let method = match self.current().typ.clone() {
+                    TokenType::Ident(name) => {
+                        self.advance_clone();
+                        name
+                    }
+                    _ => String::new(),
+                };
+                if method != "rev" {
+                    self.errors.push(Diagnostic::error(
+                        format!(
+                            "Unsupported range method '.{}()' in for loop — only '.rev()' is supported",
+                            method
+                        ),
+                        Some(loc.clone()),
+                    ));
+                }
+                self.expect(&TokenType::LParen);
+                self.expect(&TokenType::RParen);
+                descending = true;
+            }
+
+            // `(a..b).rev()` starts at `b - 1`. The unrolled loop model needs
+            // that start as a compile-time literal — it synthesizes iteration
+            // k as `start + k*step` — so fold the subtraction here when `b` is
+            // one, and otherwise hand the un-foldable expression straight
+            // through so ANF lowering raises its own "Cannot determine loop
+            // start" diagnostic rather than this parser inventing a second
+            // wording for the same rule.
+            let (start_expr, end_expr) = if descending {
+                let start = match literal_int_value(&range_end) {
+                    Some(upper) => Expression::BigIntLiteral { value: upper - BigInt::from(1) },
+                    None => range_end,
+                };
+                (start, range_start)
+            } else {
+                (range_start, range_end)
+            };
 
             self.expect(&TokenType::LBrace);
             let mut body = Vec::new();
@@ -758,14 +816,16 @@ impl RustDslParser {
                 source_location: loc.clone(),
             };
             let condition = Expression::BinaryExpr {
-                op: BinaryOp::Lt,
+                op: if descending { BinaryOp::Ge } else { BinaryOp::Lt },
                 left: Box::new(Expression::Identifier { name: var_name.clone() }),
                 right: Box::new(end_expr),
             };
+            let update_operand = Box::new(Expression::Identifier { name: var_name });
             let update = Statement::ExpressionStatement {
-                expression: Expression::IncrementExpr {
-                    operand: Box::new(Expression::Identifier { name: var_name }),
-                    prefix: false,
+                expression: if descending {
+                    Expression::DecrementExpr { operand: update_operand, prefix: false }
+                } else {
+                    Expression::IncrementExpr { operand: update_operand, prefix: false }
                 },
                 source_location: loc.clone(),
             };
@@ -1118,6 +1178,21 @@ impl RustDslParser {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The integer value of a literal expression, or `None` when it is not one.
+///
+/// A negative literal arrives as a unary minus over a positive one, so both
+/// shapes have to be walked — the same walk `extract_big_int_value` does in
+/// ANF lowering, for the same reason (N-138).
+fn literal_int_value(expr: &Expression) -> Option<BigInt> {
+    match expr {
+        Expression::BigIntLiteral { value } => Some(value.clone()),
+        Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => {
+            literal_int_value(operand).map(|v| -v)
+        }
+        _ => None,
+    }
+}
+
 fn snake_to_camel(name: &str) -> String {
     let parts: Vec<&str> = name.split('_').collect();
     if parts.len() <= 1 {
@@ -1136,10 +1211,26 @@ fn snake_to_camel(name: &str) -> String {
     result
 }
 
+/// Map a Rust DSL type name to its Rúnar spelling.
+///
+/// N-108: `Sha256Digest` is runar-lang's cross-language name for `Sha256`
+/// (`packages/runar-lang/src/types.ts`: `export type Sha256Digest = Sha256`)
+/// and the Rust DSL surface uses it. Alias resolution is a per-SURFACE rule,
+/// so `parser.rs`'s `resolve_type_alias` (the `.runar.ts` surface, N-104b) does
+/// not reach this parser. TypeScript, Python, Ruby and Java resolved it here;
+/// Go, Rust and Zig did not, and the name reached the validator as an opaque
+/// custom type. Every other surface parser in this tier already has the arm
+/// (parser_gocontract.rs, parser_java.rs, parser_python.rs, parser_ruby.rs,
+/// parser_zig.rs) -- the Rust DSL was the omission.
 fn map_rust_type(name: &str) -> String {
     match name {
-        "Bigint" | "Int" | "i64" | "u64" | "i128" | "u128" => "bigint".to_string(),
+        // `BigintBig` is packages/runar-rs's num_bigint::BigInt, the wide half
+        // of a pair whose narrow half (`Bigint` = i64) REFUSES what it cannot
+        // represent. A different Rust runtime type, the same Script primitive:
+        // reaching for it must not change one emitted byte. R-RustBigint.
+        "Bigint" | "BigintBig" | "Int" | "i64" | "u64" | "i128" | "u128" => "bigint".to_string(),
         "Bool" | "bool" => "boolean".to_string(),
+        "Sha256Digest" => "Sha256".to_string(),
         _ => name.to_string(),
     }
 }
@@ -1157,6 +1248,13 @@ fn map_rust_builtin(name: &str) -> String {
         "verify_slh_dsa_sha2_256s" => return "verifySLHDSA_SHA2_256s".to_string(),
         "verify_slh_dsa_sha2_256f" => return "verifySLHDSA_SHA2_256f".to_string(),
         "bin_2_num" => return "bin2num".to_string(),
+        // The arbitrary-precision encoder spellings from packages/runar-rs.
+        // Mapped here, BEFORE camelisation, so the answer does not depend on
+        // this tier's snake_to_camel. Without them the typechecker answers
+        // "unknown function" — a TYPECHECK diagnostic, which --parse-only
+        // cannot see. R-RustBigint.
+        "bin2num_big" => return "bin2num".to_string(),
+        "num2bin_big" => return "num2bin".to_string(),
         "int_2_str" => return "int2str".to_string(),
         "to_byte_string" => return "toByteString".to_string(),
         "verify_ecdsa_p256" => return "verifyECDSA_P256".to_string(),

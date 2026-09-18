@@ -70,7 +70,12 @@ func TestAuction_Close(t *testing.T) {
 	auctioneer := helpers.NewWallet()
 	bidder := helpers.NewWallet()
 
-	// deadline=0 allows close at any block time (locktime always satisfied).
+	// deadline=0 keeps extractLocktime trivially satisfied. close() also
+	// asserts extractSequence !== 0xffffffff, and the SDK only defaults
+	// sequence to 0xfffffffe when CallOptions.Locktime is set and non-zero
+	// (issue #131 / resolveInputSequence). A zero/nil locktime leaves the
+	// input final, the script leaves false on the stack, and the node
+	// rejects the spend.
 	contract, _ := deployAuction(t, auctioneer, bidder, 1000, 0)
 
 	// close(sig) via SDK terminal call — method 1. The close method verifies
@@ -82,7 +87,9 @@ func TestAuction_Close(t *testing.T) {
 		t.Fatalf("signer: %v", err)
 	}
 
+	lt := uint32(1)
 	callOpts := &runar.CallOptions{
+		Locktime: &lt,
 		TerminalOutputs: []runar.TerminalOutput{
 			{ScriptHex: auctioneer.P2PKHScript(), Satoshis: 4500},
 		},

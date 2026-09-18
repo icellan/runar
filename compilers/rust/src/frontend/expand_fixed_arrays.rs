@@ -23,6 +23,14 @@
 //!       - Nested literal-index chain (`self.grid[0][1]`) -> resolve to a
 //!         single synthetic leaf.
 //!       - Runtime index on nested FixedArray -> compile error.
+//!   - `self.board[idx]++` / `--` in statement position -> desugared to
+//!     `self.board[idx] = self.board[idx] +/- 1` before the index rewrite,
+//!     so the write goes through the dispatch chain above. Downstream,
+//!     both `anf_lower` and `side_effect_summary` only recognise an
+//!     increment as a state mutation when its operand is a bare property
+//!     access, so without this the mutation is silently discarded AND the
+//!     method is classified terminal (no continuation assertion at all).
+//!     The same shape in expression position is a compile error.
 //!   - Non-pure index/value expressions are hoisted to fresh
 //!     `__idx_K` / `__val_K` bindings.
 
@@ -31,6 +39,7 @@ use std::collections::HashMap;
 
 use super::ast::*;
 use super::diagnostic::Diagnostic;
+use super::typecheck::{is_bigint_subtype, is_bytestring_subtype};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -103,6 +112,39 @@ pub fn expand_fixed_arrays(contract: &ContractNode) -> ExpandResult {
     }
 }
 
+/// Which literal family a FixedArray element type demands, or `None` when the
+/// type is not one this pass can judge (it then declines to complain). N-133.
+///
+/// The two predicates are typecheck.rs's, not copies -- a second list is how
+/// the ByteString family drifted once already (see the N-076 note there).
+fn family_of_element_type(t: &TypeNode) -> Option<&'static str> {
+    let name = match t {
+        TypeNode::Primitive(p) => p.as_str(),
+        _ => return None,
+    };
+    if name == "boolean" {
+        Some("boolean")
+    } else if is_bigint_subtype(name) {
+        Some("bigint")
+    } else if is_bytestring_subtype(name) {
+        Some("ByteString")
+    } else {
+        None
+    }
+}
+
+/// The literal family of an initializer element, or `None` when the expression
+/// is not a literal this pass can judge. N-133.
+fn family_of_literal(expr: &Expression) -> Option<&'static str> {
+    match expr {
+        Expression::BigIntLiteral { .. } => Some("bigint"),
+        Expression::BoolLiteral { .. } => Some("boolean"),
+        Expression::ByteStringLiteral { .. } => Some("ByteString"),
+        _ => None,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 // Metadata
 // ---------------------------------------------------------------------------
@@ -135,6 +177,14 @@ struct ExpandContext<'a> {
     /// synthetic name (e.g. `Grid__0`).
     synthetic_arrays: HashMap<String, ArrayMeta>,
     temp_counter: usize,
+    /// Location of the statement currently being rewritten (R-137).
+    ///
+    /// `rewrite_index_access` and the increment-as-value refusal take no
+    /// `SourceLocation` — they are reached from expression rewriting, which
+    /// carries none — so their diagnostics were built with `None` while every
+    /// sibling check in this file passes `Some(loc)`. The enclosing STATEMENT
+    /// always has one, and `rewrite_statement` sets it here before dispatching.
+    current_stmt_loc: Option<SourceLocation>,
 }
 
 impl<'a> ExpandContext<'a> {
@@ -145,6 +195,7 @@ impl<'a> ExpandContext<'a> {
             array_map: HashMap::new(),
             synthetic_arrays: HashMap::new(),
             temp_counter: 0,
+            current_stmt_loc: None,
         }
     }
 
@@ -356,6 +407,32 @@ impl<'a> ExpandContext<'a> {
                     self.expand_array_meta(&nested_meta, readonly, loc, nested_init, chain_here);
                 out.extend(nested_expanded);
             } else {
+                // N-133: the element-type check. typecheck's array-literal
+                // branch never sees a property initializer -- it is consumed
+                // here -- so before this every tier accepted
+                // `FixedArray<bigint, 2> = [1n, true]` and emitted a DIFFERENT
+                // program (the boolean became the number 1, a hex literal
+                // became a byte string under OP_ADD).
+                if let Some(init) = slot_init.as_ref() {
+                    if let (Some(want), Some(got)) =
+                        (family_of_element_type(&meta.element_type), family_of_literal(init))
+                    {
+                        if want != got {
+                            let declared = match &meta.element_type {
+                                TypeNode::Primitive(p) => p.as_str(),
+                                _ => "FixedArray",
+                            };
+                            self.errors.push(Diagnostic::error(
+                                format!(
+                                    "Property '{}' initializer element {} is a {} literal, but the FixedArray element type is '{}'",
+                                    meta.root_name, i, got, declared
+                                ),
+                                Some(loc.clone()),
+                            ));
+                        }
+                    }
+                }
+
                 out.push(PropertyNode {
                     name: slot.clone(),
                     prop_type: meta.element_type.clone(),
@@ -399,6 +476,11 @@ impl<'a> ExpandContext<'a> {
     }
 
     fn rewrite_statement(&mut self, stmt: &Statement) -> Vec<Statement> {
+        // R-137: remember where we are, so a refusal raised from inside
+        // expression rewriting still reports a file:line:column.
+        if let Some(loc) = statement_location(stmt) {
+            self.current_stmt_loc = Some(loc);
+        }
         match stmt {
             Statement::VariableDecl { .. } => self.rewrite_variable_decl(stmt),
             Statement::Assignment { .. } => self.rewrite_assignment(stmt),
@@ -677,6 +759,48 @@ impl<'a> ExpandContext<'a> {
             _ => unreachable!(),
         };
         let mut prelude: Vec<Statement> = Vec::new();
+
+        // `self.board[idx]++` / `--` in statement position. The generic
+        // expression rewrite below turns `self.board[idx]` into a read
+        // dispatch ternary, and both ANF lowering and the side-effect
+        // summary only recognise an increment as a state mutation when its
+        // operand is a bare `PropertyAccess`. Left alone, the new value is
+        // computed and DISCARDED: no `update_prop`, `mutates_state` stays
+        // false, and `ContinuationShape` calls the method terminal, so NO
+        // continuation assertion is injected for a method that does mutate
+        // state. Desugar to the assignment form, which already routes
+        // through `rewrite_array_write`. Statement position discards the
+        // expression's value, so prefix and postfix are equivalent here.
+        if let Expression::IncrementExpr { operand, .. }
+        | Expression::DecrementExpr { operand, .. } = &expression
+        {
+            if matches!(operand.as_ref(), Expression::IndexAccess { .. }) {
+                let op = if matches!(expression, Expression::IncrementExpr { .. }) {
+                    BinaryOp::Add
+                } else {
+                    BinaryOp::Sub
+                };
+                // Bind every impure index to a `const` first: the desugar
+                // names the element twice (read + write) and each index must
+                // be evaluated exactly once.
+                let target = self.stabilize_index_chain(operand, &mut prelude);
+                let assignment = Statement::Assignment {
+                    target: target.clone(),
+                    value: Expression::BinaryExpr {
+                        op,
+                        left: Box::new(target),
+                        right: Box::new(Expression::BigIntLiteral {
+                            value: BigInt::from(1),
+                        }),
+                    },
+                    source_location: loc,
+                };
+                let mut out = prelude;
+                out.extend(self.rewrite_assignment(&assignment));
+                return out;
+            }
+        }
+
         let new_expr = self.rewrite_expression(&expression, &mut prelude);
         let mut out = prelude;
         out.push(Statement::ExpressionStatement {
@@ -684,6 +808,57 @@ impl<'a> ExpandContext<'a> {
             source_location: loc,
         });
         out
+    }
+
+    /// `self.board[idx]++` used for its VALUE (not in statement position)
+    /// cannot be desugared to an assignment, and the increment lowering has
+    /// no way to write back through a dispatch chain. Silently dropping the
+    /// write is the dangerous outcome — reject it instead.
+    fn reject_array_element_mutation_in_expression(&mut self, operand: &Expression, op: &str) {
+        if !matches!(operand, Expression::IndexAccess { .. }) {
+            return;
+        }
+        let mut base = operand;
+        while let Expression::IndexAccess { object, .. } = base {
+            base = object;
+        }
+        if self.try_resolve_array_base(base).is_some() {
+            self.errors.push(Diagnostic::error(
+                format!(
+                    "`{}` on a FixedArray element is only supported as a statement; \
+                     assign the result explicitly instead",
+                    op
+                ),
+                self.current_stmt_loc.clone(),
+            ));
+        }
+    }
+
+    /// Rewrite every index in an index-access chain so the chain can be
+    /// safely duplicated: impure indices are hoisted to a fresh `__idx_K`
+    /// binding, pure ones are left in place. The base object is returned
+    /// untouched — `rewrite_assignment` resolves it.
+    fn stabilize_index_chain(
+        &mut self,
+        expr: &Expression,
+        prelude: &mut Vec<Statement>,
+    ) -> Expression {
+        match expr {
+            Expression::IndexAccess { object, index } => {
+                let new_object = self.stabilize_index_chain(object, prelude);
+                let new_index = if is_pure_reference(index) {
+                    index.as_ref().clone()
+                } else {
+                    let rewritten = self.rewrite_expression(index, prelude);
+                    self.hoist_if_impure(rewritten, prelude, HoistTag::Idx)
+                };
+                Expression::IndexAccess {
+                    object: Box::new(new_object),
+                    index: Box::new(new_index),
+                }
+            }
+            other => other.clone(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -711,7 +886,11 @@ impl<'a> ExpandContext<'a> {
                     operand: Box::new(o),
                 }
             }
-            Expression::CallExpr { callee, args, .. } => {
+            Expression::CallExpr {
+                callee,
+                args,
+                asm_return_type,
+            } => {
                 let c = self.rewrite_expression(callee, prelude);
                 let new_args: Vec<Expression> = args
                     .iter()
@@ -720,7 +899,12 @@ impl<'a> ExpandContext<'a> {
                 Expression::CallExpr {
                     callee: Box::new(c),
                     args: new_args,
-                    asm_return_type: None,
+                    // R-026: the captured return type of an expression-form
+                    // `asm<T>()` decides whether `+` lowers to OP_CAT or
+                    // OP_ADD. Dropping it here turned a byte concat into a
+                    // numeric add for any contract that also declares a
+                    // FixedArray property.
+                    asm_return_type: asm_return_type.clone(),
                 }
             }
             Expression::MemberExpr { object, property } => {
@@ -745,6 +929,7 @@ impl<'a> ExpandContext<'a> {
                 }
             }
             Expression::IncrementExpr { operand, prefix } => {
+                self.reject_array_element_mutation_in_expression(operand, "++");
                 let o = self.rewrite_expression(operand, prelude);
                 Expression::IncrementExpr {
                     operand: Box::new(o),
@@ -752,6 +937,7 @@ impl<'a> ExpandContext<'a> {
                 }
             }
             Expression::DecrementExpr { operand, prefix } => {
+                self.reject_array_element_mutation_in_expression(operand, "--");
                 let o = self.rewrite_expression(operand, prelude);
                 Expression::DecrementExpr {
                     operand: Box::new(o),
@@ -798,6 +984,30 @@ impl<'a> ExpandContext<'a> {
         if base_name.is_none() {
             let new_obj = self.rewrite_expression(object, prelude);
             let new_idx = self.rewrite_expression(index, prelude);
+
+            // R-167: a runtime index on the SECOND level of a nested array.
+            //
+            // `try_resolve_array_base` only recognises a `PropertyAccess`
+            // object, and for `self.g[0][i]` the object is itself an
+            // `IndexAccess`, so control reached this generic path. The
+            // rewritten form `g__0[i]` then survived into ANF and died in STACK
+            // LOWERING, telling the author that `g__0` — a synthetic this pass
+            // invents, appearing nowhere in their source — has no deploy-time
+            // slot. Two passes downstream of the one that knows what is wrong.
+            //
+            // After the rewrite the object IS a `PropertyAccess` naming that
+            // synthetic, so re-asking the same question catches it. The message
+            // is the one the first-level spelling has always given: they are
+            // the same unsupported feature.
+            if as_literal_index(&new_idx).is_none() && self.try_resolve_array_base(&new_obj).is_some()
+            {
+                self.errors.push(Diagnostic::error(
+                    "Runtime index access on a nested FixedArray is not supported",
+                    self.current_stmt_loc.clone(),
+                ));
+                return Expression::BigIntLiteral { value: BigInt::from(0) };
+            }
+
             return Expression::IndexAccess {
                 object: Box::new(new_obj),
                 index: Box::new(new_idx),
@@ -829,7 +1039,7 @@ impl<'a> ExpandContext<'a> {
                         "Index {} is out of range for FixedArray of length {}",
                         literal, meta.length
                     ),
-                    None,
+                    self.current_stmt_loc.clone(),
                 ));
                 return Expression::BigIntLiteral { value: BigInt::from(0) };
             }
@@ -845,7 +1055,7 @@ impl<'a> ExpandContext<'a> {
         if meta.slot_is_array {
             self.errors.push(Diagnostic::error(
                 "Runtime index access on a nested FixedArray is not supported",
-                None,
+                self.current_stmt_loc.clone(),
             ));
             return Expression::BigIntLiteral { value: BigInt::from(0) };
         }
@@ -1106,7 +1316,7 @@ impl<'a> ExpandContext<'a> {
                         "Index {} is out of range for FixedArray of length {}",
                         idx, meta.length
                     ),
-                    None,
+                    self.current_stmt_loc.clone(),
                 ));
                 return ChainResolve::Error;
             }
@@ -1581,4 +1791,17 @@ class Cube extends StatefulSmartContract {
         assert_eq!(chain[2].index, 1);
         assert_eq!(chain[2].length, 2);
     }
+}
+
+/// The `source_location` every `Statement` variant carries (R-137).
+fn statement_location(stmt: &Statement) -> Option<SourceLocation> {
+    let loc = match stmt {
+        Statement::VariableDecl { source_location, .. }
+        | Statement::Assignment { source_location, .. }
+        | Statement::IfStatement { source_location, .. }
+        | Statement::ForStatement { source_location, .. }
+        | Statement::ReturnStatement { source_location, .. }
+        | Statement::ExpressionStatement { source_location, .. } => source_location,
+    };
+    Some(loc.clone())
 }

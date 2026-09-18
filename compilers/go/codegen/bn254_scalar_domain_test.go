@@ -130,41 +130,77 @@ func TestBN254G1ScalarMul_AllZeroPointIsNotOnCurve(t *testing.T) {
 	}
 }
 
-// TestBN254G1AffineAdd_NegatedOperandStaysOffCurve documents a DELIBERATE
-// divergence from the secp256k1 / P-256 / P-384 convention.
+// TestBN254G1AffineAdd_ZeroDenominatorIsNotMaskedToInfinity guards the
+// PRECISION of the infinity mask added for P + (-P)
+// (TestBN254G1Add_PointAtInfinity): it must key on px == qx AND py != qy, and
+// must NOT key on a zero slope denominator.
 //
-// Those curves answer P + (-P) with the all-zero blob (their O encoding).
-// bn254G1AffineAdd does NOT, and must not: it uses the unified slope
+// bn254G1AffineAdd uses the unified slope
 //
 //	s = (px^2 + px*qx + qx^2) / (py + qy)
 //
 // whose denominator is py + qy, and BN254 has j-invariant 0 with p = 1 mod 3,
-// so F_p contains a primitive cube root of unity w. For any curve point
-// (x, y) the point (w*x, y) is also on the curve, hence Q = (w*x, -y) has
-// py + qy == 0 while Q != -P -- and the true sum P + Q is an ORDINARY point,
-// not O. Masking a zero denominator to the all-zero blob would answer "point
-// at infinity" for those inputs: on-curve, plausible, and wrong, which is the
-// exact failure mode 03f50d48 introduced on the NIST curves and f16790a9 had
-// to undo.
+// so F_p contains a primitive cube root of unity w. For any curve point (x, y)
+// the point (w*x, y) is also on the curve, hence Q = (w*x, -y) has py + qy == 0
+// while Q != -P -- and the true sum P + Q is an ORDINARY point, not O. Masking
+// a zero denominator to the all-zero blob would answer "point at infinity"
+// there: plausible and wrong, the exact failure mode 03f50d48 introduced on the
+// NIST curves and f16790a9 had to undo.
 //
-// So the zero-denominator case keeps its fail-CLOSED behaviour: Fermat gives
-// inv(0) = 0, the result is an off-curve blob, and the documented
-// assert(bn254G1OnCurve(r)) idiom rejects it. Callers must not feed the
-// result back in.
-func TestBN254G1AffineAdd_NegatedOperandStaysOffCurve(t *testing.T) {
+// SEPARATE, PRE-EXISTING DEFECT, deliberately NOT asserted here: this input
+// does not merely fail closed. Both the numerator and the denominator vanish
+// (w^2 + w + 1 == 0 makes px^2 + px*qx + qx^2 == 0), Fermat gives inv(0) = 0,
+// so s = 0 and the result is (-(px + qx), -py) -- which satisfies
+// y^2 = x^3 + 3, because (1 + w)^3 == -1. bn254G1Add answers the zero
+// denominator with a WRONG but ON-CURVE point, so assert(bn254G1OnCurve(r))
+// does not catch it. Fixing that means replacing the unified slope with the
+// chord/tangent selection secp256k1 and the NIST curves use, which also moves
+// the shared Groth16 MSM path; it is out of scope for the P == -Q mask.
+func TestBN254G1AffineAdd_ZeroDenominatorIsNotMaskedToInfinity(t *testing.T) {
 	p := new(big.Int).Set(bn254FieldP)
 	gx := big.NewInt(1)
 	gy := big.NewInt(2)
 	negGy := new(big.Int).Sub(p, gy)
 
+	// w = primitive cube root of unity mod p: b^((p-1)/3) for the first small
+	// b that does not land on 1.
+	exp := new(big.Int).Div(new(big.Int).Sub(p, big.NewInt(1)), big.NewInt(3))
+	var w *big.Int
+	for b := int64(2); b < 100; b++ {
+		cand := new(big.Int).Exp(big.NewInt(b), exp, p)
+		if cand.Cmp(big.NewInt(1)) != 0 {
+			w = cand
+			break
+		}
+	}
+	if w == nil {
+		t.Fatal("no primitive cube root of unity found mod p")
+	}
+	if new(big.Int).Exp(w, big.NewInt(3), p).Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("w is not a cube root of unity: %s", w)
+	}
+
+	// Q = (w*gx, -gy): on the curve, distinct from -G, zero denominator.
+	qx := new(big.Int).Mul(w, gx)
+	qx.Mod(qx, p)
+	if qx.Cmp(gx) == 0 {
+		t.Fatal("w*gx == gx: the endomorphism image is not a distinct point")
+	}
+	if new(big.Int).Mod(new(big.Int).Add(gy, negGy), p).Sign() != 0 {
+		t.Fatal("py + qy is not zero: the input does not exercise the denominator")
+	}
+
+	zx, zy := bn254AllZeroPoint()
+
 	var ops []StackOp
 	ops = append(ops, pushPoint(gx, gy))
-	ops = append(ops, pushPoint(gx, negGy))
+	ops = append(ops, pushPoint(qx, negGy))
 	ops = append(ops, gatherOps(EmitBN254G1Add)...)
-	ops = append(ops, gatherOps(EmitBN254G1OnCurve)...)
+	ops = append(ops, pushPoint(zx, zy))
+	ops = append(ops, opcode("OP_EQUAL"))
 	ops = append(ops, opcode("OP_NOT"))
 
 	if err := buildAndExecute(t, ops); err != nil {
-		t.Fatalf("bn254G1Add(G, -G) should be off-curve (fail-closed): %v", err)
+		t.Fatalf("bn254G1Add(G, (w*gx, -gy)) must NOT be masked to the all-zero point: %v", err)
 	}
 }

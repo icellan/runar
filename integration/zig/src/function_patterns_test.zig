@@ -271,6 +271,7 @@ test "FunctionPatterns_WrongOwnerRejected" {
     var wrong_signer = try wrong_wallet.localSigner();
 
     // deposit(sig=auto, amount=50) with wrong signer -- should be rejected
+    const broadcasts_before = rpc_provider.broadcast_attempts;
     const result = contract.call(
         "deposit",
         &[_]runar.StateValue{
@@ -293,7 +294,7 @@ test "FunctionPatterns_WrongOwnerRejected" {
         // SDK's catch-all — it also covers a UTXO-fetch failure or a build-time
         // refusal — so assert the transaction actually reached the node.
         try std.testing.expectEqual(error.CallFailed, err);
-        try std.testing.expect(rpc_provider.broadcast_attempts >= 1);
+        try std.testing.expect(rpc_provider.broadcast_attempts > broadcasts_before);
         // Expected: call was rejected on-chain due to wrong signer
         std.log.info("FunctionPatterns correctly rejected wrong owner", .{});
     }

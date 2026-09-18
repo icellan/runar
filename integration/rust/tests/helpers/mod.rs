@@ -92,12 +92,19 @@ pub fn read_on_chain_state(
             utxo.txid, utxo.output_index
         )
     });
-    extract_state_from_script(artifact, &output.script).unwrap_or_else(|| {
-        panic!(
-            "read_on_chain_state: tx {} output {} script has no decodable state section",
-            utxo.txid, utxo.output_index
-        )
-    })
+    extract_state_from_script(artifact, &output.script)
+        .unwrap_or_else(|e| {
+            panic!(
+                "read_on_chain_state: tx {} output {} extract failed: {}",
+                utxo.txid, utxo.output_index, e
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "read_on_chain_state: tx {} output {} script has no decodable state section",
+                utxo.txid, utxo.output_index
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------

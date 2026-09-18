@@ -1,0 +1,18 @@
+{
+  // tsc-only. Do not point `cd conformance && tsx` at this file: mapping
+  // runar-compiler to index.d.ts makes the fuzzer load a types-only module
+  // (`does not provide an export named 'compile'`). Runtime uses tsconfig.json.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "runar-lang": ["../packages/runar-lang/dist/index.d.ts"],
+      "runar-lang/*": ["../packages/runar-lang/dist/*"],
+      "runar-compiler": ["../packages/runar-compiler/dist/index.d.ts"],
+      "runar-compiler/*": ["../packages/runar-compiler/dist/*"],
+      "runar-sdk": ["../packages/runar-sdk/dist/index.d.ts"],
+      "runar-sdk/*": ["../packages/runar-sdk/dist/*"],
+      "runar-testing": ["../packages/runar-testing/dist/index.d.ts"],
+      "runar-testing/*": ["../packages/runar-testing/dist/*"]
+    }
+  }
+}

@@ -1,7 +1,27 @@
 # Java as a Native Compiler + SDK Tier — Design Plan
 
-**Status:** Proposal / Phase 1 (skeleton only)
-**Target release:** v0.5+ (aligns with current `0.4.x` cadence)
+**Status:** SHIPPED. Java is the seventh tier, complete and held to the same
+invariants as the other six (R-202).
+
+This document is the original design plan and is kept as the record of how the
+tier was specified. It read "Proposal / Phase 1 (skeleton only)" for several
+releases after the tier shipped, which is the kind of stale status line that
+tells a reader to discount everything under it. What it describes is now built:
+
+- `compilers/java/` compiles all nine `.runar.*` surfaces and runs in every
+  conformance lane — golden, `--multi-format`, `--ir-parity` and the all-tier
+  `--parser-only` matrix — at byte-identical output with the other six.
+- `packages/runar-java/` ships the deployment SDK, including the off-chain
+  `ContractSimulator`.
+- 856 tests in the compiler project alone.
+
+Two gaps remain, both tracked elsewhere rather than here: no `maven-publish`
+configuration, so `scripts/publish-all.sh` reports Java as NOT PUBLISHED
+(R-134), and no `ScriptVM`, which is a deliberate project policy for this tier
+(see CLAUDE.md ⇒ "Off-chain Script VM").
+
+**Original target release:** v0.5+ (aligned with the then-current `0.4.x`
+cadence)
 
 ## Context
 
@@ -154,8 +174,8 @@ Every existing compiler must learn to parse `.runar.java`. Per the CLAUDE.md che
 | Go | `compilers/go/frontend/parser_java.go` | `frontend.ParseSource()` |
 | Rust | `compilers/rust/src/frontend/parser_java.rs` | `parser::parse_source()` |
 | Python | `compilers/python/runar_compiler/frontend/parser_java.py` | `parser_dispatch.py` |
-| Zig | `compilers/zig/src/frontend/parser_java.zig` | `parseSource()` |
-| Ruby | `compilers/ruby/lib/frontend/parser_java.rb` | `parse_source()` |
+| Zig | `compilers/zig/src/passes/parse_java.zig` | `parseSource()` |
+| Ruby | `compilers/ruby/lib/runar_compiler/frontend/parser_java.rb` | `parse_source()` |
 
 These are hand-written recursive-descent parsers in each language (no javac available outside Java). Each only needs to handle the Rúnar subset of Java syntax — class declaration, annotated fields, annotated methods, `super(...)` calls, expressions drawn from the Rúnar surface. Consistent shape with existing `parser_go.py`, `parser_rust.py`, `parser_ruby.py`, etc.
 
@@ -222,7 +242,9 @@ If any verification step fails, the bug is in the Java implementation — **do n
 
 ## Open questions for maintainer
 
-(Unresolved; non-blocking for Phase 1 skeleton.)
+(Was recorded as unresolved and non-blocking for the Phase 1 skeleton. The
+skeleton is long shipped; see the Status note at the top for what is actually
+outstanding.)
 
 1. **Java package root.** `runar.lang` / `runar.compiler` / `runar.sdk`, or `io.runar.*`, or `build.runar.*`? Determines group ID for Maven Central if publishing.
 2. **Publishing target.** Maven Central or GitHub Packages?

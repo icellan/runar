@@ -379,6 +379,46 @@ module RunarCompiler
       # Public emit functions -- entry points called from stack.rb
       # =================================================================
 
+      # R-119 -- a witness-supplied field element must BE a field element,
+      # aborting form.
+      #
+      # Nothing in this module or its KoalaBear twin ever compared anything: the
+      # OP_LESSTHAN / OP_WITHIN / OP_GREATERTHANOREQUAL count in both was zero.
+      # Every operand of the four scalar builtins and the eight ext4 entry
+      # points is an unlock argument and went straight into
+      # OP_ADD / OP_SUB / OP_MUL / OP_MOD.
+      #
+      # The `v` vs `v + p` half of the finding did NOT reproduce -- every
+      # emitter reduces its result mod p, so bbFieldAdd(5+p, 0) and
+      # bbFieldAdd(5, 0) both returned 5. The NEGATIVE half did: field_add and
+      # field_mul reduce with a BARE OP_MOD on the documented assumption that
+      # both operands are already in [0, p-1], and OP_MOD takes the sign of the
+      # dividend. Measured before this gate, bbFieldAdd(-1, 0) returned -1 where
+      # bbFieldAdd(p-1, 0) returned 2013265920 -- two different script numbers
+      # for one residue, out of a builtin whose declared codomain is the field.
+      # Script equality is numeric, so the escaped spelling breaks every
+      # downstream comparison and every serialisation of the element.
+      #
+      # REJECT, not reduce, and gate the INPUT: a reduce would leave `v` and
+      # `v + p` as two accepted spellings of one element, which is the aliasing
+      # this finding is about. Gating the input makes the builtins canonical-in
+      # / canonical-out, so the gate is idempotent under composition. ABORTING
+      # because these are VALUE builtins -- the split R-117 drew for EC and
+      # CL-BUG-095 set for the Point width. Public entry points only; the
+      # internal helpers run hundreds of times on values canonical by
+      # construction.
+      def self.bb_emit_canon_verify(t, *names)
+        names.each do |n|
+          t.copy_to_top(n, "_cv")
+          t.raw_block(["_cv"], nil) do |e|
+            e.call(make_stack_op(op: "push", value: big_int_push(0)))
+            e.call(make_stack_op(op: "push", value: big_int_push(BB_P)))
+            e.call(make_stack_op(op: "opcode", code: "OP_WITHIN"))
+            e.call(make_stack_op(op: "opcode", code: "OP_VERIFY"))
+          end
+        end
+      end
+
       # Baby Bear field addition.
       # Stack in: [..., a, b] (b on top)
       # Stack out: [..., (a + b) mod p]
@@ -386,6 +426,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_field_add(emit)
         t = BBTracker.new(["a", "b"], emit)
+        bb_emit_canon_verify(t, "a", "b")
         bb_field_add(t, "a", "b", "result")
         # Stack should now be: [result]
       end
@@ -397,6 +438,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_field_sub(emit)
         t = BBTracker.new(["a", "b"], emit)
+        bb_emit_canon_verify(t, "a", "b")
         bb_field_sub(t, "a", "b", "result")
       end
 
@@ -407,6 +449,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_field_mul(emit)
         t = BBTracker.new(["a", "b"], emit)
+        bb_emit_canon_verify(t, "a", "b")
         bb_field_mul(t, "a", "b", "result")
       end
 
@@ -417,6 +460,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_field_inv(emit)
         t = BBTracker.new(["a"], emit)
+        bb_emit_canon_verify(t, "a")
         bb_field_inv(t, "a", "result")
       end
 
@@ -438,6 +482,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_mul_0(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3 b0 b1 b2 b3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
         # r0 = a0*b0 + 11*(a1*b3 + a2*b2 + a3*b1)
         t.copy_to_top("a0", "_a0"); t.copy_to_top("b0", "_b0")
@@ -466,6 +511,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_mul_1(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3 b0 b1 b2 b3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
         # r1 = a0*b1 + a1*b0 + 11*(a2*b3 + a3*b2)
         t.copy_to_top("a0", "_a0"); t.copy_to_top("b1", "_b1")
@@ -494,6 +540,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_mul_2(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3 b0 b1 b2 b3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
         # r2 = a0*b2 + a1*b1 + a2*b0 + 11*(a3*b3)
         t.copy_to_top("a0", "_a0"); t.copy_to_top("b2", "_b2")
@@ -522,6 +569,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_mul_3(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3 b0 b1 b2 b3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3", "b0", "b1", "b2", "b3")
 
         # r3 = a0*b3 + a1*b2 + a2*b1 + a3*b0
         t.copy_to_top("a0", "_a0"); t.copy_to_top("b3", "_b3")
@@ -626,6 +674,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_inv_0(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
         bb_ext4_inv_preamble(t)
 
         # r0 = out_even[0] = a0*inv_n0 + W*a2*inv_n1
@@ -652,6 +701,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_inv_1(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
         bb_ext4_inv_preamble(t)
 
         # odd0 = a1*inv_n0 + W*a3*inv_n1
@@ -681,6 +731,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_inv_2(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
         bb_ext4_inv_preamble(t)
 
         # r2 = out_even[1] = a0*inv_n1 + a2*inv_n0
@@ -706,6 +757,7 @@ module RunarCompiler
       # @param emit [Proc] callback receiving a StackOp hash
       def self.emit_bb_ext4_inv_3(emit)
         t = BBTracker.new(%w[a0 a1 a2 a3], emit)
+        bb_emit_canon_verify(t, "a0", "a1", "a2", "a3")
         bb_ext4_inv_preamble(t)
 
         # odd1 = a1*inv_n1 + a3*inv_n0

@@ -77,7 +77,16 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 	scriptCode := subscript
 	if codeSeparatorIndex >= 0 {
 		// Each byte is 2 hex chars. Skip past the separator byte (+1 byte = +2 hex chars).
-		scriptCode = subscript[(codeSeparatorIndex+1)*2:]
+		// R-178: this slice used to panic with "slice bounds out of range" when
+		// the index was past the end — a fund-moving primitive taking down the
+		// caller's process instead of reporting a bad input.
+		trimPos := (codeSeparatorIndex + 1) * 2
+		if trimPos > len(subscript) {
+			return nil, nil, fmt.Errorf(
+				"compute_op_push_tx: codeSeparatorIndex %d is past the end of the subscript (%d bytes)",
+				codeSeparatorIndex, len(subscript)/2)
+		}
+		scriptCode = subscript[trimPos:]
 	}
 
 	lockScript, err := script.NewFromHex(scriptCode)

@@ -88,9 +88,147 @@ remain for proofs). -/
 def compile (p : ANFProgram) : ByteArray :=
   Emit.emitFast (peepholeProgram (Lower.lower p))
 
+/-- R-010: when any public method authenticates `_codePart`, TS `emit`
+prepends `OP_NOP OP_CODESEPARATOR` (bytes `0x61 0xab`) at offsets 0–1 of
+the locking script. Kept off `Emit.emitFast` so the existing
+`unfold emitFast` proof surface stays on the pre-R-010 single-method
+shape; Gate 2 (`compileHex` / `compileHexSafe`) is the path that must
+match `expected-script.hex`. -/
+def r010CodeSeparatorPrologue (stack : StackProgram) : ByteArray :=
+  if stack.methods.any (·.needsCodeSeparator) then
+    ByteArray.mk #[0x61, 0xab]
+  else
+    ByteArray.empty
+
+/-- Push-header length `encodePushData` puts in front of an N-byte
+payload. Mirrors TS `pushHeaderLen` (`05-stack-lower.ts`). -/
+def pushHeaderLen (valueBytes : Nat) : Nat :=
+  if valueBytes ≤ 75 then 1
+  else if valueBytes ≤ 255 then 2
+  else if valueBytes ≤ 65535 then 3
+  else 5
+
+/-- Deploy-time byte growth of one OP_0 constructor slot, or `none` when
+the type has no compile-time width. Mirrors TS `constructorSlotGrowth`. -/
+def constructorSlotGrowth : ANFType → Option Nat
+  | .bool => some 0
+  | .pubKey => some (pushHeaderLen 33 + 33 - 1)
+  | .sha256 => some (pushHeaderLen 32 + 32 - 1)
+  | .addr => some (pushHeaderLen 20 + 20 - 1)
+  | .ripemd160 => some (pushHeaderLen 20 + 20 - 1)
+  | .point => some (pushHeaderLen 64 + 64 - 1)
+  | .p256Point => some (pushHeaderLen 64 + 64 - 1)
+  | .p384Point => some (pushHeaderLen 96 + 96 - 1)
+  | _ => none
+
+def collectPlaceholderIndices : List StackOp → List Nat
+  | [] => []
+  | .placeholder i _ :: rest => i :: collectPlaceholderIndices rest
+  | .ifOp thn none :: rest =>
+      collectPlaceholderIndices thn ++ collectPlaceholderIndices rest
+  | .ifOp thn (some els) :: rest =>
+      collectPlaceholderIndices thn
+        ++ collectPlaceholderIndices els
+        ++ collectPlaceholderIndices rest
+  | _ :: rest => collectPlaceholderIndices rest
+
+/-- R-095 `pinCodePartLength`: `(exact, delta)` from the placeholders
+that public methods actually emit. Unknown-width slots demote `exact`. -/
+def pinCodePartLength (stack : StackProgram) (props : List ANFProperty) :
+    Bool × Nat :=
+  let ctorProps := props.filter (fun p => p.initialValue.isNone)
+  let idxs := stack.methods.foldl (init := ([] : List Nat)) fun acc m =>
+    if m.name == "constructor" then acc
+    else acc ++ collectPlaceholderIndices m.ops
+  idxs.foldl (init := (true, 0)) fun (exact, delta) i =>
+    match ctorProps[i]? with
+    | none => (false, delta)
+    | some prop =>
+        match constructorSlotGrowth prop.type with
+        | none => (false, delta)
+        | some g => (exact, delta + g)
+
+/-- R-095: overwrite the 4-byte zero field in every
+`OP_DUP <04 00 00 00 00> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL)
+OP_VERIFY` pin with `scriptLen + delta`, and rewrite the comparison to
+NUMEQUAL when `exact`. In-place overwrite keeps the length stable. -/
+def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (exact : Bool) :
+    ByteArray :=
+  let len := bs.size + delta
+  let b0 : UInt8 := UInt8.ofNat (len &&& 0xff)
+  let b1 : UInt8 := UInt8.ofNat ((len >>> 8) &&& 0xff)
+  let b2 : UInt8 := UInt8.ofNat ((len >>> 16) &&& 0xff)
+  let b3 : UInt8 := UInt8.ofNat ((len >>> 24) &&& 0xff)
+  let cmp : UInt8 := if exact then 0x9c else 0xa2
+  -- Accumulator form so a 10 KB WOTS script does not blow the 8 MB stack.
+  let rec go (acc : List UInt8) : List UInt8 → List UInt8
+    | 0x76 :: 0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest =>
+        if c == 0x9c || c == 0xa2 then
+          go (0x69 :: cmp :: 0x81 :: b3 :: b2 :: b1 :: b0 :: 0x04 :: 0x76 :: acc) rest
+        else
+          go (0x76 :: acc) (0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest)
+    | x :: rest => go (x :: acc) rest
+    | [] => acc.reverse
+  ByteArray.mk (go [] bs.toList).toArray
+
+/-- Copy-to-top at depth `d`. Mirrors `Tracker.pick` / TS `bringToTop(_, false)`. -/
+def copyAtDepth : Nat → StackOp
+  | 0 => .dup
+  | 1 => .over
+  | n + 2 => .pickStruct (n + 2)
+
+/-- W3 / BoolBamboozle: 9-byte ABI domain pin `{empty, 0x01}` on one
+boolean witness. Net stack 0. Mirrors `emitBooleanParamGate`. -/
+def booleanParamGateOps (depth : Nat) : List StackOp :=
+  copyAtDepth depth ::
+    [ .dup
+    , .push (.bigint 0), .opcode "OP_EQUAL"
+    , .swap
+    , .push (.bigint 1), .opcode "OP_EQUAL"
+    , .opcode "OP_BOOLOR"
+    , .opcode "OP_VERIFY" ]
+
+/-- Gates in declaration order. Depth of param `i` of `n` is `n-1-i`
+(last param is TOS). `_codePart` sits under the user params, so user
+depths are unchanged. -/
+def booleanGatesForMethod (m : ANFMethod) : List StackOp :=
+  if !m.isPublic then []
+  else
+    let n := m.params.length
+    (List.range n).foldl (init := ([] : List StackOp)) fun acc i =>
+      match m.params[i]? with
+      | some p =>
+          if p.type == .bool then
+            acc ++ booleanParamGateOps (n - 1 - i)
+          else acc
+      | none => acc
+
+def applyBooleanParamGates (p : ANFProgram) (stack : StackProgram) :
+    StackProgram :=
+  { stack with methods := stack.methods.map (fun sm =>
+      match p.methods.find? (fun m => m.name == sm.name) with
+      | none => sm
+      | some m => { sm with ops := booleanGatesForMethod m ++ sm.ops }) }
+
+/-- TS threads `scriptLevelCodeSeparator` through every method so a
+checkPreimage-only sibling of an `addOutput` method does not emit its
+own `OP_CODESEPARATOR`. Applied after `lower` (whose Agrees proofs
+keep the per-method shape) and before peephole/emit. W3 boolean ABI
+gates are prepended on the same path. -/
+def hoistStack (p : ANFProgram) : StackProgram :=
+  let lowered := applyBooleanParamGates p (Lower.lower p)
+  peepholeProgram
+    { lowered with methods := Lower.applyHoistedCodeSeparator lowered.methods }
+
+def compileWithR010Prologue (p : ANFProgram) : ByteArray :=
+  let stack := hoistStack p
+  let (exact, delta) := pinCodePartLength stack p.properties
+  let bytes := Emit.appendBA (r010CodeSeparatorPrologue stack) (Emit.emitFast stack)
+  patchCodePartLenPins bytes delta exact
+
 /-- Hex-encoded form, matching the `expected-script.hex` format. -/
 def compileHex (p : ANFProgram) : String :=
-  Emit.bytesToHex (compile p)
+  Emit.bytesToHex (compileWithR010Prologue p)
 
 /-! ## Fail-closed compiler entrypoint -/
 
@@ -187,7 +325,10 @@ def compileSafeWithCodeSepPatches
 
 def compileHexSafe (p : ANFProgram) : Except CompileError String :=
   match compileSafe p with
-  | .ok bytes => .ok (Emit.bytesToHex bytes)
+  | .ok _ =>
+      -- Validate on the unstripped `lower` (Agrees/`compileSafe` shape),
+      -- then emit the R-010-hoisted bytes Gate 2 compares to goldens.
+      .ok (Emit.bytesToHex (compileWithR010Prologue p))
   | .error e => .error e
 
 def compileHexSafeWithCodeSepPatches (p : ANFProgram) :
@@ -2998,7 +3139,7 @@ def valueOperandsNodupB : ANFValue → Bool
   | .addRawOutput a b => a != b
   | .addDataOutput a b => a != b
   | .ifVal _ thn els _ => noAliasedOperandsB thn && noAliasedOperandsB els
-  | .loop _ body _ => noAliasedOperandsB body
+  | .loop _ body _ _ _ => noAliasedOperandsB body
   | _ => true
 
 /-- Every binding in the body reads pairwise-distinct refs per value. -/
@@ -3010,7 +3151,7 @@ end
 mutual
 /-- The value contains a `loop` anywhere (recursing into branch bodies). -/
 def valueUsesLoopB : ANFValue → Bool
-  | .loop _ _ _ => true
+  | .loop _ _ _ _ _ => true
   | .ifVal _ thn els _ => bindingsUseLoopB thn || bindingsUseLoopB els
   | _ => false
 
@@ -3052,7 +3193,7 @@ their branches are loop-free. Designed to be required ALONGSIDE
 def valueLoopMapNeutralB (progMethods : List ANFMethod) (props : List ANFProperty)
     (budget : Nat) (constInts : List (String × Int)) (sm : Lower.StackMap) :
     ANFValue → Bool
-  | .loop _count body iterVar =>
+  | .loop _count body iterVar _ _ =>
       let smInner := sm.push iterVar
       let naturalLU := Lower.computeLastUses body
       let outerRefs := Lower.bodyOuterRefs body iterVar
@@ -3093,7 +3234,7 @@ theorem valueLoopMapNeutralB_of_no_loop
     (v : ANFValue) (h : valueUsesLoopB v = false) :
     valueLoopMapNeutralB progMethods props budget constInts sm v = true := by
   cases v with
-  | loop count body iterVar => simp [valueUsesLoopB] at h
+  | loop count body iterVar _ _ => simp [valueUsesLoopB] at h
   | ifVal cond thn els _ =>
       simp only [valueUsesLoopB] at h
       simp [valueLoopMapNeutralB, h]
@@ -4494,7 +4635,7 @@ theorem arithOnlyBody_of_emittableArithChainReadyNoDblNeg
       | call _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | methodCall _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | ifVal _ _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
-      | loop _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
+      | loop _ _ _ _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | assert _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | updateProp _ _ => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
       | getStateScript => simp only [Agrees.emittableArithChainReadyNoDblNeg] at hChain
@@ -4623,7 +4764,7 @@ theorem noMethodCallBindings_true_of_mathByteNoLen :
       | .unaryOp op o rt => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .methodCall n a r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .ifVal c t e _ => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
-      | .loop a b c => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
+      | .loop a b c _ _ => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .assert r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .updateProp n r => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
       | .getStateScript => cases tsm <;> simp [AgreesA4.mathByteSingleArgShapeNoLenBool] at hShape
@@ -7034,7 +7175,7 @@ theorem compileSafe_observational_correct_stateful_consume
     (pre : String) (ty : ANFType)
     (hParams : anfM.params = [ANFParam.mk pre ty])
     (hBody : anfM.body = StatefulBridge.gatedStatefulPrologueBody pre)
-    (hne1 : pre ≠ "_cp0")
+    (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart")
     (ctx : TxContext) (preimage : ByteArray)
     (rest : List RunarVerification.ANF.Eval.Value)
     (_hValid : ValidTxContext ctx)
@@ -7059,7 +7200,7 @@ theorem compileSafe_observational_correct_stateful_consume
   have hOps : (Lower.lowerMethod p.methods p.properties anfM).ops
       = AgreesStateful.statefulPrologueOps :=
     AgreesStateful.lowerMethod_ops_statefulPrologue p.methods p.properties anfM
-      pre ty hParams hBody hPublic hne1
+      pre ty hParams hBody hPublic hne1 hneCode
   have hPeeped : (peepholedLoweredMethod p anfM).ops
       = AgreesStateful.statefulPrologueOps := by
     show peepholeMethodOps (Lower.lowerMethod p.methods p.properties anfM).ops = _
@@ -7125,7 +7266,7 @@ theorem smoke_stateful_consume_fires :
   exact compileSafe_observational_correct_stateful_consume
     stSmokeProg AgreesStateful.smokeMethod bytes
     (by simp [stSmokeProg]) rfl hSafe stSmokeAnf stSmokeStk rfl (by decide)
-    "pre" .byteString rfl rfl (by decide)
+    "pre" .byteString rfl rfl (by decide) (by decide)
     Stack.TxContext.sampleCtx stSmokePreimage []
     RunarVerification.Stack.ValidTxContext.sampleCtx_valid rfl rfl rfl
 
@@ -7143,6 +7284,32 @@ reconstruct as `.ifOp`s; int pushes above OP_16 come back as byte pushes —
 handled by the consensus CScriptNum coercion `Eval.asNum?` on
 `OP_LESSTHAN`).  No sub-omnibus axiom appears in the discharge. -/
 
+private def rollPickFoldOpNoopB : StackOp → Bool
+  | .roll 0 | .roll 1 | .roll 2 | .pick 0 | .pick 1 => false
+  | _ => true
+
+private theorem rollPickFoldOpNoop_of_b (op : StackOp)
+    (h : rollPickFoldOpNoopB op = true) : Peephole.rollPickFoldOpNoop op := by
+  cases op with
+  | roll n =>
+      cases n with
+      | zero => simp [rollPickFoldOpNoopB] at h
+      | succ n1 =>
+        cases n1 with
+        | zero => simp [rollPickFoldOpNoopB] at h
+        | succ n2 =>
+          cases n2 with
+          | zero => simp [rollPickFoldOpNoopB] at h
+          | succ _ => simp [Peephole.rollPickFoldOpNoop]
+  | pick n =>
+      cases n with
+      | zero => simp [rollPickFoldOpNoopB] at h
+      | succ n1 =>
+        cases n1 with
+        | zero => simp [rollPickFoldOpNoopB] at h
+        | succ _ => simp [Peephole.rollPickFoldOpNoop]
+  | _ => simp [Peephole.rollPickFoldOpNoop]
+
 set_option maxRecDepth 8192 in
 /-- The 4-pass peephole pipeline is the identity on the composed constant
 ops (the flat `OP_IF` chain is named-opcode-only, so `noIfOp` holds and
@@ -7152,8 +7319,7 @@ theorem peepholeMethodOps_statefulFull :
       = AgreesStateful.statefulFullOps := by
   unfold peepholeMethodOps
   have hNoIf : Peephole.noIfOp AgreesStateful.statefulFullOps := by
-    simp [AgreesStateful.statefulFullOps, AgreesStateful.statefulFullEpilogueOps,
-      Lower.varintEncodingOps, Peephole.noIfOp]
+    native_decide
   rw [Peephole.peepholePassAll_eq_flat_of_noIfOp _ hNoIf]
   have hFlat : Peephole.peepholePassAllFlat AgreesStateful.statefulFullOps
       = AgreesStateful.statefulFullOps := by
@@ -7163,13 +7329,15 @@ theorem peepholeMethodOps_statefulFull :
       (Peephole.applyPushOneAdd AgreesStateful.statefulFullOps)
       = AgreesStateful.statefulFullOps := by
     with_unfolding_all rfl
+  have hRollB : AgreesStateful.statefulFullOps.all rollPickFoldOpNoopB = true := by
+    native_decide
+  have hRoll : Peephole.rollPickFoldFlatNoop AgreesStateful.statefulFullOps := by
+    intro op hop
+    exact rollPickFoldOpNoop_of_b op ((List.all_eq_true.mp hRollB) op hop)
   rw [hPost,
     Peephole.peepholeChainFold_eq_self_of_noIfOp_stepId _ hNoIf (by
       with_unfolding_all rfl),
-    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_flatNoop _ hNoIf (by
-      simp +decide [AgreesStateful.statefulFullOps,
-        AgreesStateful.statefulFullEpilogueOps, Lower.varintEncodingOps,
-        Peephole.rollPickFoldFlatNoop, Peephole.rollPickFoldOpNoop])]
+    Peephole.peepholeRollPickFold_eq_self_of_noIfOp_flatNoop _ hNoIf hRoll]
 
 /-- **Widened stateful consume theorem (prologue + state-output epilogue,
 acceptance bit).**
@@ -7215,7 +7383,7 @@ theorem compileSafe_observational_correct_statefulFull_consume
   -- BUG-100: no spender-witness signature and no serialization readiness
   -- hypotheses — the deployed script's acceptance is the preimage verdict via
   -- the opaque `runOps_statefulFullParsedOps_scriptAccepts` shim.
-  obtain ⟨hPE, hPC, _hPv1, _hPso, _hPO, _hPcp,
+  obtain ⟨hPE, hPC, _hPv1, _hPso, _hPO, hPcp,
     hSE, hSC, hS2, _hSso, _hSO, hSCp, hSA,
     hVE, hVC, hV2, _hVso, _hVO, hVCp, hVA,
     hPS, hPV, hSV⟩ := AgreesStateful.statefulFullNamesOk_unpack pre sats stateVal hNames
@@ -7232,7 +7400,7 @@ theorem compileSafe_observational_correct_statefulFull_consume
       = AgreesStateful.statefulFullOps :=
     AgreesStateful.lowerMethod_ops_statefulFull p.methods p.properties anfM
       pre sats stateVal pn tyS tyV tyP hParams hBody hPublic hProps
-      hPE hPS hPV hPC hSE hVE hSV hSC hVC hVCp hSCp hVA hSA
+      hPE hPS hPV hPC hSE hVE hSV hSC hVC hVCp hSCp hPcp hVA hSA
   have hPeeped : (peepholedLoweredMethod p anfM).ops
       = AgreesStateful.statefulFullOps := by
     show peepholeMethodOps (Lower.lowerMethod p.methods p.properties anfM).ops = _
@@ -9548,9 +9716,16 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
           · obtain ⟨pre, ty, ctx, preimage, restV, hStParams, hStBody,
               hStNe1, hStValid, hStPreLink, hStAnfPre, hStStk⟩ :=
               hStatefulFrag hStShape
+            have hneCode : pre ≠ "_codePart" := by
+              intro hEq
+              have hFalse : AgreesStateful.statefulConsumeShapeBool anfM = false := by
+                simp [AgreesStateful.statefulConsumeShapeBool, hStParams, hStBody, hEq,
+                  StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody]
+              rw [hFalse] at hStShape
+              cases hStShape
             exact compileSafe_observational_correct_stateful_consume
               p anfM bytes hMem hPublic hSafe initialAnf initialStack
-              hStSingle hStName pre ty hStParams hStBody hStNe1
+              hStSingle hStName pre ty hStParams hStBody hStNe1 hneCode
               ctx preimage restV hStValid hStPreLink hStAnfPre hStStk
           · have hResidue : cryptoCallResidueB p anfM = true := by
               simp only [cryptoCallResidueB, hPublic, hStateful, Bool.true_and,
@@ -9775,7 +9950,7 @@ theorem compileSafe_observational_correct_modulo_codegen_axioms (p : ANFProgram)
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ (.methodCall _ _ _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
-                | [.mk _ (.loop _ _ _) _] =>
+                | [.mk _ (.loop _ _ _ _ _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])
                 | [.mk _ (.assert _) _] =>
                     intro hc; exact absurd hc (by simp [Agrees.ifValArithBody])

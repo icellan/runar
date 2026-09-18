@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
 use runar_lang::sdk::{
     canonical_json, verify_envelope, SignedEnvelope, VerifyEnvelopeOpts, VerifyEnvelopeReason,
+    MAX_ENVELOPE_PAYLOAD_DEPTH,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -153,6 +154,7 @@ fn canonical_json_rejection_vectors() {
     assert!(!rvs.is_empty(), "canonical_json_rejection_vectors empty");
     for v in rvs {
         let id = v["_vector_id"].as_str().unwrap_or("?");
+        let key = v["input_object_key"].as_str().unwrap();
         let units = v["input_value_utf16_units"].as_array().unwrap();
         // Encode each code unit as its 3-byte UTF-8 form (illegal for
         // surrogates).
@@ -163,15 +165,125 @@ fn canonical_json_rejection_vectors() {
             bytes.push(0x80 | (((cp >> 6) & 0x3f) as u8));
             bytes.push(0x80 | ((cp & 0x3f) as u8));
         }
-        // The gate: Rust's safe string constructors MUST reject this byte
-        // sequence. canonical_json is therefore never reachable with a lone
-        // surrogate in well-formed (non-unsafe) Rust code.
-        let r = std::str::from_utf8(&bytes);
+        // Gate 1 (type level): Rust's safe string constructors MUST reject
+        // this byte sequence, so canonical_json is unreachable with a lone
+        // surrogate in non-unsafe code.
         assert!(
-            r.is_err(),
+            std::str::from_utf8(&bytes).is_err(),
             "vector {id}: str::from_utf8 unexpectedly accepted lone-surrogate bytes; \
              the Rust tier's canonical_json correct-by-construction gate is broken — \
              canonical_json itself must now reject lone surrogates explicitly"
         );
+
+        // R-262: gate 1 alone tests the Rust standard library, not this tier —
+        // the test as written never called canonical_json at all, so it could
+        // not have failed for anything this crate does. The two assertions
+        // below exercise the tier's ACTUAL wire path.
+
+        // Gate 2 (wire path): the way a lone surrogate really arrives is as a
+        // `\ud800` escape inside a JSON document, so assert the parser that
+        // feeds canonical_json refuses it rather than folding it to U+FFFD.
+        let doc = format!(r#"{{"{key}":"\ud800"}}"#);
+        assert!(
+            serde_json::from_str::<Value>(&doc).is_err(),
+            "vector {id}: serde_json accepted a lone-surrogate escape, so one can reach canonical_json"
+        );
+
+        // CONTROL: the same document shape, the same key, the same code path —
+        // the only change is that the surrogate is now PAIRED (U+1F600). It
+        // must parse AND serialise, byte-identically to every other tier.
+        // Without this, gate 2 would pass for a parser that rejects
+        // everything.
+        let good_doc = format!(r#"{{"{key}":"\ud83d\ude00"}}"#);
+        let good: Value = serde_json::from_str(&good_doc)
+            .unwrap_or_else(|e| panic!("vector {id}: paired-surrogate control failed to parse: {e}"));
+        assert_eq!(
+            canonical_json(&good).expect("paired-surrogate control"),
+            format!("{{\"{key}\":\"{}\"}}", '\u{1F600}'),
+            "vector {id}: paired-surrogate control"
+        );
+    }
+}
+
+/// R-260. `verify_envelope` must bound payload nesting ITSELF rather than
+/// inherit whatever cap serde_json happens to impose, because that cap differs
+/// per tier (ruby 100, THIS tier 127, ts/go/python/zig none, java a
+/// `StackOverflowError` whose threshold is the JVM's `-Xss` flag). All seven
+/// tiers enforce `MAX_ENVELOPE_PAYLOAD_DEPTH` on the payload TEXT, so the same
+/// bytes get the same `VerifyEnvelopeReason` everywhere.
+#[test]
+fn payload_depth_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["depth_vectors"]
+        .as_array()
+        .expect("depth_vectors missing");
+    assert!(!vectors.is_empty(), "depth_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let env = envelope_from_value(&v["envelope"]);
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "bad-json" => VerifyEnvelopeReason::BadJson,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
+    }
+}
+
+/// The bound is part of the wire contract, so the fixture pins it and every
+/// tier asserts its own constant against the fixture's number.
+#[test]
+fn payload_depth_limit_matches_fixture() {
+    let fixture = load_fixture();
+    assert_eq!(
+        fixture["payload_depth_limit"].as_u64().unwrap() as usize,
+        MAX_ENVELOPE_PAYLOAD_DEPTH
+    );
+}
+
+/// R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six
+/// tiers already distinguished the two (this one via `Option::unwrap_or`); Go
+/// conflated them and silently gave a caller asking for strict expiry a
+/// five-second replay window, and both Go and Java did the same with the
+/// now-override. A `null` in the vector means the caller supplies no value and
+/// the tier default applies — that is the control: an over-strict fix reddens
+/// on cs2/cs3, not cs1.
+#[test]
+fn clock_skew_vectors() {
+    let fixture = load_fixture();
+    let env = envelope_from_value(&fixture["valid_envelope"]);
+    let vectors = fixture["clock_skew_vectors"]
+        .as_array()
+        .expect("clock_skew_vectors missing");
+    assert!(!vectors.is_empty(), "clock_skew_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: v["clock_skew_ms"].as_i64(),
+            now_ms: Some(v["now_ms"].as_i64().unwrap()),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "expired" => VerifyEnvelopeReason::Expired,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
     }
 }

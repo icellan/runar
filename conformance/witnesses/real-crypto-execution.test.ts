@@ -58,6 +58,10 @@ interface SpendSpec {
   signerKey?: string;
   constructorArgs?: unknown;
   lockTime?: number;
+  /** nSequence for every input of the call tx. Unset = the SDK default
+   *  (0xfffffffe when `lockTime` is non-zero, else 0xffffffff). Set it to model
+   *  an all-final transaction, whose nLockTime consensus ignores entirely. */
+  sequence?: number;
   satoshis?: number;
   tamperOutput?: boolean;
   /** Independent, hand-authored expected continuation state after an accepted
@@ -124,6 +128,20 @@ function scalar(v: unknown): bigint | boolean | string {
     return v; // bare hex string (byte payload) — see DIALECT WARNING above
   }
   throw new Error(`unencodable scalar ${JSON.stringify(v)}`);
+}
+
+/**
+ * Decode an `expectedState` VALUE, which unlike a constructor arg may be an
+ * array: a `FixedArray<T, N>` property is expanded into N scalar slots by pass
+ * 3b and regrouped by the artifact assembler, so the decoded continuation state
+ * hands it back as a real array (R-094).
+ *
+ * Nested arrays decode too — `FixedArray<FixedArray<T, A>, B>` regroups into an
+ * array of arrays — so the recursion is not speculative.
+ */
+function stateValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(stateValue);
+  return scalar(v);
 }
 
 /** Resolve constructor args (record for stateless, array for stateful). */
@@ -230,6 +248,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               constructorArgs: resolveCtorArray(s.constructorArgs ?? spec.constructorArgs),
               signerKey: s.signerKey ?? spec.signerKey ?? 'alice',
               lockTime: s.lockTime,
+              sequence: s.sequence,
               satoshis: s.satoshis,
               tamperOutput: s.tamperOutput,
             });
@@ -246,7 +265,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
                   const p = placeholder(v);
                   if (p?.tag === 'pubkey') want[k] = testKey(p.key).pubKey;
                   else if (p?.tag === 'pkh') want[k] = testKey(p.key).pubKeyHash;
-                  else want[k] = scalar(v);
+                  else want[k] = stateValue(v);
                 }
                 expect(
                   r.continuationState,

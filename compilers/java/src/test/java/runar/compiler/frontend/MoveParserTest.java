@@ -390,4 +390,54 @@ class MoveParserTest {
             () -> MoveParser.parse(src, "Bad.runar.move")
         );
     }
+
+    /**
+     * R-183 (CL-BUG-063): the seven tiers' Move type tables had drifted.
+     *
+     * <p>Measured before the fix, across all seven Move frontends:
+     * {@code Bigint} was accepted by 3 of 7, {@code Bytes} by 2 of 7 and
+     * {@code address} by 4 of 7 — so the same {@code .runar.move} source parsed
+     * in some tiers and silently degraded to a custom type in others. This tier
+     * was missing {@code Bytes} and {@code address}.
+     *
+     * <p>Driven through the real parser rather than the private mapper, so it
+     * also proves the alias survives to the AST.
+     */
+    @Test
+    void r183MoveTypeAliasesAreAcceptedAsPrimitives() throws Exception {
+        String[][] cases = {
+            {"Bigint", "bigint"}, {"Int", "bigint"}, {"u64", "bigint"},
+            {"Bytes", "ByteString"}, {"vector", "ByteString"},
+            {"address", "Addr"},
+        };
+        for (String[] c : cases) {
+            String src = """
+                module Aliases {
+                    use runar::StatefulSmartContract;
+
+                    resource struct Aliases {
+                        tag: %s,
+                        count: &mut bigint = 0,
+                    }
+
+                    public fun bump(n: bigint) {
+                        self.count = self.count + n;
+                    }
+                }
+                """.formatted(c[0]);
+            ContractNode contract = MoveParser.parse(src, "Aliases.runar.move");
+            PropertyNode tag = contract.properties().stream()
+                .filter(p -> p.name().equals("tag"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no 'tag' property for alias " + c[0]));
+            assertTrue(
+                tag.type() instanceof PrimitiveType,
+                c[0] + " did not map to a primitive; it would become a custom type: " + tag.type());
+            assertEquals(
+                c[1],
+                ((PrimitiveType) tag.type()).name().canonical(),
+                c[0] + " mapped to the wrong primitive");
+        }
+    }
+
 }

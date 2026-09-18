@@ -162,13 +162,13 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 
 | Go type | Rúnar type |
 |---------|-----------|
-| `int64` / `runar.BigInt` | `bigint` |
+| `int64` / `runar.Int` / `runar.Bigint` / `runar.BigintBig` | `bigint` |
 | `bool` | `boolean` |
 | `runar.ByteString` | `ByteString` |
 | `runar.PubKey` | `PubKey` |
 | `runar.Sig` | `Sig` |
-| `runar.Sha256` | `Sha256` |
-| `runar.Ripemd160` | `Ripemd160` |
+| `runar.Sha256Digest` | `Sha256` |
+| `runar.Ripemd160Hash` | `Ripemd160` |
 | `runar.Addr` | `Addr` |
 | `runar.SigHashPreimage` | `SigHashPreimage` |
 | `runar.RabinSig` | `RabinSig` |
@@ -176,6 +176,113 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 | `runar.Point` | `Point` |
 
 Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats them as `bigint` values (no `n` suffix needed).
+
+### Integers wider than int64
+
+Rúnar's `bigint` is arbitrary precision and so is the Script it compiles to. The
+`.runar.go` **runtime** type `runar.Bigint` is `int64`, because Go has no
+operator overloading and a `*big.Int` alias would take `+`, `<` and friends away
+from contract source — and would silently redefine `==` as pointer identity,
+which compiles and compares the wrong thing.
+
+Nothing narrows silently as a result. Every helper in `packages/runar-go` whose
+result can exceed `int64` — `Pow`, `MulDiv`, `PercentOf`, `Bin2Num`,
+`Num2Bin`, `Bn254FieldNegP`, `Abs`, `Gcd` — panics rather than returning a
+truncated answer, and names the wide peer to use instead. `Sqrt` is not on
+that list: √int64 always fits int64, and its only panic is `"sqrt: negative
+input"`, which does not name `SqrtBig`.
+
+`Abs` and `Gcd` were absent from that list, and from the behaviour, until the
+sentence was checked against the code. `Abs(math.MinInt64)` returned
+`math.MinInt64` — a negative absolute value — and `Gcd(math.MinInt64, 0)`
+returned `math.MaxInt64` as an "overflow sentinel", which is a wrong answer
+rather than an error. Script numbers are arbitrary-width after Genesis, so the
+emitted `OP_ABS` computes the true `2^63`: a contract guarding
+`runar.Assert(runar.Abs(x) > 0)` was refused by `go test` and **spent on chain**
+for `x = -2^63`.
+
+`TestNarrowHelpersRefuseWhatTheyCannotHold` covers `Abs` and `Gcd`
+specifically. It does **not** enforce the list above — this sentence previously
+claimed it did, which would have made the list appear machine-checked
+when two rows were. The other six are each covered by their own test
+(`TestPow_Overflow`, `TestMulDiv_Overflow`, `TestPercentOf_Overflow`, and the
+`Bin2Num` / `Num2Bin` / `Bn254FieldNegP` width tests), so the behaviour is
+guarded — but adding another helper to this list without a test would be caught
+by nothing. The list is maintained by hand. Treat it that way.
+
+For values past 2^63, type the field or parameter `runar.BigintBig` (`*big.Int`)
+and spell the arithmetic with the helper functions. **Both type names lower to
+the same `bigint` primitive, and the helpers lower to the same operator nodes,
+so the emitted Script is byte-identical either way:**
+
+| Contract source | Rúnar node |
+|---|---|
+| `a + b` / `runar.BigintBigAdd(a, b)` | `+` |
+| `a - b` / `runar.BigintBigSub(a, b)` | `-` |
+| `a * b` / `runar.BigintBigMul(a, b)` | `*` |
+| `a / b` / `runar.BigintBigDiv(a, b)` | `/` |
+| `a % b` / `runar.BigintBigMod(a, b)` | `%` |
+| `a == b` / `runar.BigintBigEqual(a, b)` | `===` |
+| `a != b` / `runar.BigintBigNotEqual(a, b)` | `!==` |
+| `a < b` / `runar.BigintBigLess(a, b)` | `<` |
+| `a <= b` / `runar.BigintBigLessEq(a, b)` | `<=` |
+| `a > b` / `runar.BigintBigGreater(a, b)` | `>` |
+| `a >= b` / `runar.BigintBigGreaterEq(a, b)` | `>=` |
+
+Four `*Big` helpers are not operators but ordinary builtins, and are callable
+from contract source the same way. The `Big` suffix names a different Go
+**runtime** type (`*big.Int`, so the Go-side mock does not narrow), not a
+different Script operation — each lowers to the unsuffixed builtin and emits
+identical bytes:
+
+| Contract source | Rúnar node |
+|---|---|
+| `runar.AbsBig(n)` | `abs(n)` |
+| `runar.GcdBig(a, b)` | `gcd(a, b)` |
+| `runar.Num2BinBig(n, size)` | `num2bin(n, size)` |
+| `runar.Bin2NumBig(data)` | `bin2num(data)` |
+
+`AbsBig` and `GcdBig` are the peers `Abs(math.MinInt64)` and
+`Gcd(math.MinInt64, 0)` name when they panic. Until R-AbsGcd no tier's Go
+builtin table carried them, so a contract author following that advice got
+`unknown function 'absBig'` from all seven and a `runar.BigintBig` value could
+not be passed to abs or gcd at all. The pair is now gated cross-tier by
+`conformance/subtype-parity/GoBigintBigOperators.runar.go` and its `abs`/`gcd`
+reference half, which requires all seven tiers to accept it AND to emit the
+bytes the unsuffixed spelling emits.
+
+The other wide helpers the package header mentions — `PowBig`, `MulDivBig`,
+`PercentOfBig`, `SqrtBig`, `Log2Big` — are Go-callable only. They are not in
+any tier's builtin table and are **not** spellings a `.runar.go` contract can
+use.
+
+`examples/go/ec-primitives` and `examples/go/ec-demo` use this for 256-bit
+secp256k1 coordinates; `examples/go/p256-primitives` and
+`examples/go/p384-primitives` for NIST scalars.
+
+One thing has no Go spelling: a bigint **literal** wider than `int64`. Go
+constants are exact and must fit the type they land in, and no constant
+expression converts to a pointer, so
+`115792089237316195423570985008687907852837564279074904382605163141518161494337`
+cannot appear in a `.runar.go` file at all. A contract needing one is written in
+any of the other eight formats — every compiler accepts all nine and produces
+byte-identical Script. Three of the five ports in `examples/go` that still carry
+`//go:build ignore` (`integer-boundary`, `schnorr-zkp`,
+`go-dsl-bytestring-literal`) are held out by exactly this — they need such a
+literal. The numeric limit is **not** the whole list, and reading it as such is
+how two of the exclusions stayed unexamined: the other two are
+`all-readonly-cleanstack` (Go's unused-local rule vs a deliberately unused
+binding) and `multisig-2of3` (the `[N]T{...}` composite literal three of the
+seven `.runar.go` parsers require does not convert to the slice the mock's
+`CheckMultiSig` takes). Each of the five says which it is at the top of its own
+file, and `examples/go/build-exclusions` is the ratchet that keeps the set
+honest — it asserts the set exactly, so it has to move in the same commit as an
+exclusion does.
+
+`byte-builtins` and `state-ripemd160` were on that list until the RIPEMD-160
+digest type gained its real name: both needed `runar.Ripemd160Hash` in type
+position, which no tier's `.runar.go` type table mapped. Both build and run
+under `go test` now.
 
 ---
 
@@ -253,13 +360,78 @@ Built-in functions are accessed through the `runar` package with PascalCase name
 | `runar.VerifySLHDSA_SHA2_256s(msg, sig, pubkey)` | `verifySLHDSA_SHA2_256s(msg, sig, pubkey)` |
 | `runar.VerifySLHDSA_SHA2_256f(msg, sig, pubkey)` | `verifySLHDSA_SHA2_256f(msg, sig, pubkey)` |
 
-EC constants are available as package-level variables:
+### Names that are both a type and a function
 
-| Go constant | Rúnar constant |
-|------------|---------------|
-| `runar.EC_P` | `EC_P` |
-| `runar.EC_N` | `EC_N` |
-| `runar.EC_G` | `EC_G` |
+`Sha256` and `Ripemd160` are Rúnar **type** names as well as Rúnar **builtin**
+names, and the Go surface spells a type conversion and a call identically —
+`runar.Sha256(x)`. Go cannot bind one identifier to both, so `packages/runar-go`
+binds the **function** in each case and gives the digest types distinct names:
+
+| Purpose | Spelling |
+|---|---|
+| the SHA-256 **hash** | `runar.Sha256(data)` (alias `runar.Sha256Hash`) |
+| the SHA-256 **digest type** | `runar.Sha256Digest` |
+| the RIPEMD-160 **hash** | `runar.Ripemd160(data)` |
+| the RIPEMD-160 **digest type** | `runar.Ripemd160Hash` |
+
+`runar.Sha256Hash` is a real second contract spelling: it is a compatibility
+alias carried in all seven tiers' builtin tables, and contracts use it today
+(`examples/go/r1-k1-wallet`, `examples/go/byte-builtins`). `Ripemd160Func` is
+**not** its counterpart, and this table used to imply it was. It is the Go-side
+original name that `runar.Ripemd160` delegates to in one line — callable from
+Go test code, in no tier's builtin table, and a contract that writes it is
+rejected by all seven with `unknown function 'ripemd160Func'` (measured). Write
+`runar.Ripemd160(data)`; it needs no alias because nothing shadows it in call
+position. `tests/go-md-call-spellings-resolve.test.ts` now holds every
+`(alias ...)` in this file to that standard.
+
+Use the `…Digest` / `…Hash` type names in field and parameter annotations. They
+are what a `.runar.go` file needs to be **both** valid Go and valid Rúnar, which
+is the whole point of this surface: the same file compiles against the mock
+types under `go test` and through the Rúnar frontend. The bare `runar.Sha256` /
+`runar.Ripemd160` spellings in type position are still accepted by the Rúnar
+parser for backwards compatibility, but they do not compile as Go —
+`runar.Ripemd160 (value of type func(...) ...) is not a type` — so a file using
+them gets only half of what the surface is for.
+
+In **call** position the rule is unambiguous: the name is the **function** and
+the table above applies — it hashes. There is deliberately no conversion
+spelling for these two. Both digest types are `ByteString` subtypes, so a
+conversion would have been an identity on the value and emitted no bytes; use
+the value directly, or `runar.ToByteString(...)` if you need an explicit
+widening. Reading `runar.Sha256(preimage)` as a *cast* is not a style
+preference: it drops the hash opcode, and two tiers once shipped that, which
+made the digest baked into the locking script the spending key. See
+`conformance/go_surface_hash_spelling_execution_test.go`, and
+`conformance/subtype-parity/GoDigestTypeSpellings.runar.go` for the type half.
+
+### EC constants are NOT reachable from this surface (measured)
+
+| Go constant | Rúnar constant | Status |
+|------------|---------------|--------|
+| `runar.EC_P` | `EC_P` | **not available** |
+| `runar.EC_N` | `EC_N` | **not available** |
+| `runar.EC_G` | `EC_G` | **not available** |
+
+This table used to say the three were "available as package-level variables".
+They are not, in either half of what a `.runar.go` file has to be:
+
+- **As Go.** `packages/runar-go` does not export `EC_P`, `EC_N` or `EC_G`. The
+  values exist as the unexported `ecP` / `ecN` / `ecGX` in `ec.go`, so
+  `runar.EC_P` does not compile.
+- **As Rúnar.** No tier compiles it, and they fail in two different ways. The
+  go, ts, rust, zig and ruby Go-surface parsers have no entry for the name, so
+  the default leading-character rule turns it into `eC_P` and the type checker
+  answers `Undefined variable 'eC_P'`. The python and java parsers DO map it to
+  `EC_P`, get past the type checker, and then fail in stack lowering with
+  `method parameter 'EC_P' is not on the stack` — a message about a parameter
+  that does not exist.
+
+The constants are real in the TypeScript surface
+(`packages/runar-lang/src/ec.ts` exports all three). Reaching them from
+`.runar.go` needs an SDK export plus a parser entry in all seven tiers, which is
+not done. Until then, write the value as a literal in a format that can hold one
+— see "Integers wider than int64" above for why `.runar.go` cannot.
 
 ---
 

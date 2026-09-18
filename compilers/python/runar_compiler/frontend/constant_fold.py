@@ -22,6 +22,12 @@ from runar_compiler.ir.types import (
 )
 from runar_compiler.ir.unknown_anf_kind_error import UnknownANFKindError
 
+# Upper end of the domain pow is exact on, shared with the emitted script
+# (codegen/stack.py#_lower_pow unrolls exactly this many conditional multiplies
+# and enforces the bound with OP_DUP <0> <33> OP_WITHIN OP_VERIFY) and with the
+# reference interpreter.
+POW_FOLD_EXPONENT_LIMIT = 32
+
 
 # Kinds that fall through ``_fold_value`` unchanged. Listing them explicitly
 # lets us raise UnknownANFKindError on any kind that isn't a known fold case,
@@ -248,7 +254,13 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
         if len(int_args) != 2:
             return None
         base, exp = int_args[0], int_args[1]
-        if exp < 0 or exp > 256:
+        # Decline outside the domain the emitted script GUARANTEES and ENFORCES
+        # (codegen/stack.py#_lower_pow: 0 <= exp <= 32, the number of unrolled
+        # conditional multiplies). The old bound was 256, which folded
+        # exponents the script CLAMPED to 32 — so for 33 <= exp <= 256 the
+        # fold-ON and fold-OFF scripts accepted mutually exclusive inputs
+        # (R-169, the pow half).
+        if exp < 0 or exp > POW_FOLD_EXPONENT_LIMIT:
             return None
         result = 1
         for _ in range(exp):
@@ -278,6 +290,13 @@ def _eval_builtin_call(func_name: str, args: list[ConstValue]) -> ConstValue | N
             return None
         n = int_args[0]
         if n < 0:
+            return None
+        # Decline outside the domain the emitted script GUARANTEES and ENFORCES
+        # (codegen/stack.py _lower_sqrt): n >= 0 and n encodable in <= 62 script
+        # bytes, i.e. n < 2**495. Outside it the compiled script aborts, so
+        # folding to a value here would make sqrt(k) mean one thing folded and
+        # another executed - R-169 at the other end of the domain.
+        if n.bit_length() > 495:
             return None
         if n == 0:
             return ("int", 0)
@@ -371,24 +390,24 @@ def _const_to_anf_value(cv: ConstValue) -> ANFValue:
         # double-backed consumers.
         return ANFValue(
             kind="load_const",
-            raw_value=json.dumps(bigint_json_value(val)),
+            raw_value=bigint_json_value(val),
             const_big_int=val,
             const_int=val,
         )
     if tag == "bool":
         return ANFValue(
             kind="load_const",
-            raw_value=json.dumps(val),
+            raw_value=val,
             const_bool=val,
         )
     if tag == "str":
         return ANFValue(
             kind="load_const",
-            raw_value=json.dumps(val),
+            raw_value=val,
             const_string=val,
         )
     # Fallback (shouldn't happen)
-    return ANFValue(kind="load_const", raw_value=json.dumps(val))
+    return ANFValue(kind="load_const", raw_value=val)
 
 
 # ---------------------------------------------------------------------------
