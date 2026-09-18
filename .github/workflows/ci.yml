@@ -886,6 +886,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The analyzer gate (`conformance/analyzer/run.ts`) builds each SDK's
+      # analyzer from source. Zig's wrapper is `zig build analyzer` in
+      # packages/runar-zig — the downloaded `runar-zig` compiler binary is
+      # not that toolchain, so without this the 8 zig × fixture pairs die
+      # with `zig: command not found`.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       # Read-only restore of the turbo build-output cache written by the
       # ts-compiler job (this job `needs:` it, so the same-commit entry exists).
       # See that job's writer step for the staleness argument. `pnpm run build`
