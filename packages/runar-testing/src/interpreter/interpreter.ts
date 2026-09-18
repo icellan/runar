@@ -1443,7 +1443,7 @@ export class RunarInterpreter {
         return { kind: 'bigint', value: 0n };
 
       case 'extractScriptCode':
-        return { kind: 'bytes', value: new Uint8Array(0) };
+        return { kind: 'bytes', value: this._mockPreimageBytes['scriptCode'] ?? new Uint8Array(0) };
 
       case 'extractSigHashType':
         return { kind: 'bigint', value: 0x41n };

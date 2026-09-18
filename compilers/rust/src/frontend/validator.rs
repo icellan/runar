@@ -1794,6 +1794,20 @@ fn is_sequence_finality_guard(expr: &Expression) -> bool {
     }
 }
 
+/// True when asserting `expr` logically implies a sequence-finality guard.
+/// A matching comparison nested under `!` (or `||`) does not count.
+fn assertion_implies_sequence_guard(expr: &Expression) -> bool {
+    if is_sequence_finality_guard(expr) {
+        return true;
+    }
+    match expr {
+        Expression::BinaryExpr { op: BinaryOp::And, left, right, .. } => {
+            assertion_implies_sequence_guard(left) || assertion_implies_sequence_guard(right)
+        }
+        _ => false,
+    }
+}
+
 /// #131: warn when `method` (transitively, through the private-helper call
 /// graph) reads the tx locktime but never asserts the tx is non-final. A
 /// locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
@@ -1827,11 +1841,9 @@ fn warn_locktime_without_sequence_guard(
             if is_assert_call(expr) {
                 if let Expression::CallExpr { args, .. } = expr {
                     for arg in args {
-                        walk_expression(arg, &mut |inner| {
-                            if is_sequence_finality_guard(inner) {
-                                has_sequence_guard = true;
-                            }
-                        });
+                        if assertion_implies_sequence_guard(arg) {
+                            has_sequence_guard = true;
+                        }
                     }
                 }
             }

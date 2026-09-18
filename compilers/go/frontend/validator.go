@@ -1496,6 +1496,24 @@ func isSequenceFinalityGuard(expr Expression) bool {
 	return false
 }
 
+// assertionImpliesSequenceGuard reports whether asserting expr logically
+// implies a sequence-finality guard. A matching comparison nested under
+// `!` (or `||`) does not count: assert(!(extractSequence !== 0xffffffff))
+// requires a FINAL sequence. `&&` implies each conjunct.
+func assertionImpliesSequenceGuard(expr Expression) bool {
+	if isSequenceFinalityGuard(expr) {
+		return true
+	}
+	bin, ok := expr.(BinaryExpr)
+	if !ok {
+		return false
+	}
+	if bin.Op == "&&" {
+		return assertionImpliesSequenceGuard(bin.Left) || assertionImpliesSequenceGuard(bin.Right)
+	}
+	return false
+}
+
 // warnLocktimeWithoutSequenceGuard warns when method (transitively, through the
 // private-helper call graph) reads the tx locktime but never asserts the tx is
 // non-final. A locktime gate is not consensus-enforced unless
@@ -1524,11 +1542,9 @@ func (ctx *validationContext) warnLocktimeWithoutSequenceGuard(method MethodNode
 			if isAssertCall(expr) {
 				call := expr.(CallExpr)
 				for _, arg := range call.Args {
-					walkExpr(arg, func(inner Expression) {
-						if isSequenceFinalityGuard(inner) {
-							hasSequenceGuard = true
-						}
-					})
+					if assertionImpliesSequenceGuard(arg) {
+						hasSequenceGuard = true
+					}
 				}
 			}
 		})

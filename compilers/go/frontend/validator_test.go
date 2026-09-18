@@ -1786,6 +1786,32 @@ class TimeLock extends StatefulSmartContract {
 	}
 }
 
+func TestValidate_H2_NegatedSequenceComparison_StillWarns(t *testing.T) {
+	source := `
+import { StatefulSmartContract, assert, extractLocktime, extractSequence } from 'runar-lang';
+
+class TimeLock extends StatefulSmartContract {
+  count: bigint;
+  readonly deadline: bigint;
+  constructor(count: bigint, deadline: bigint) {
+    super(count, deadline);
+    this.count = count;
+    this.deadline = deadline;
+  }
+  public unlock(): void {
+    assert(!(extractSequence(this.txPreimage) !== 0xffffffffn));
+    assert(extractLocktime(this.txPreimage) >= this.deadline);
+    this.count++;
+  }
+}
+`
+	contract := mustParseTS(t, source)
+	result := Validate(contract)
+	if !hasLocktimeWarning(result) {
+		t.Fatalf("negated sequence comparison must not count as a guard, got warnings: %v", result.WarningStrings())
+	}
+}
+
 func TestValidate_H2_NoLocktimeRead_NoWarn(t *testing.T) {
 	source := `
 import { StatefulSmartContract } from 'runar-lang';

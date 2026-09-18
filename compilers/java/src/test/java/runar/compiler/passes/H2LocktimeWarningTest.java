@@ -85,6 +85,28 @@ class H2LocktimeWarningTest {
     }
 
     @Test
+    void stillWarnsWhenSequenceComparisonIsNegated() throws TsParser.ParseException {
+        String source = """
+            class TimeLock extends StatefulSmartContract {
+              count: bigint;
+              readonly deadline: bigint;
+              constructor(count: bigint, deadline: bigint) {
+                super(count, deadline);
+                this.count = count;
+                this.deadline = deadline;
+              }
+              public unlock() {
+                assert(!(extractSequence(this.txPreimage) !== 0xffffffffn));
+                assert(extractLocktime(this.txPreimage) >= this.deadline);
+                this.count++;
+              }
+            }
+            """;
+        assertTrue(hasLocktimeWarning(validateSource(source)),
+            "negated sequence comparison must not count as a guard");
+    }
+
+    @Test
     void doesNotWarnForMethodThatNeverReadsLocktime() throws TsParser.ParseException {
         String source = """
             class Counter extends StatefulSmartContract {

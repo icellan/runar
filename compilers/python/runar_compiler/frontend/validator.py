@@ -1373,6 +1373,23 @@ def _is_sequence_finality_guard(expr: Expression) -> bool:
         return _is_call_to_named(expr.right, "extractSequence") and non_strict_bound_ok(expr.left)
     return False
 
+
+def _assertion_implies_sequence_guard(expr: Expression) -> bool:
+    """True when asserting *expr* logically implies a sequence-finality guard.
+
+    A matching comparison nested under ``!`` (or ``||``) does not count:
+    ``assert(not (extract_sequence !== 0xffffffff))`` requires a FINAL sequence.
+    ``&&`` implies each conjunct.
+    """
+    if _is_sequence_finality_guard(expr):
+        return True
+    if isinstance(expr, BinaryExpr) and expr.op == "&&":
+        return _assertion_implies_sequence_guard(expr.left) or _assertion_implies_sequence_guard(
+            expr.right
+        )
+    return False
+
+
 def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagnostic]) -> None:
     """#131: warn when *method* (transitively, through the private-helper call
     graph) reads the tx locktime but never asserts the tx is non-final.
@@ -1388,18 +1405,14 @@ def _warn_locktime_without_sequence_guard(method, contract, warnings: list[Diagn
     reads_locktime = False
     has_sequence_guard = False
 
-    def mark_guard(inner: Expression) -> None:
-        nonlocal has_sequence_guard
-        if _is_sequence_finality_guard(inner):
-            has_sequence_guard = True
-
     def visitor(expr: Expression) -> None:
         nonlocal reads_locktime, has_sequence_guard
         if _is_locktime_read(expr):
             reads_locktime = True
         if _is_assert_call(expr) and isinstance(expr, CallExpr):
             for arg in expr.args:
-                _walk_expr(arg, mark_guard)
+                if _assertion_implies_sequence_guard(arg):
+                    has_sequence_guard = True
 
     visited: set[str] = {method.name}
     queue: list = [method]

@@ -1803,10 +1803,14 @@ fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool
         .call => |c| for (c.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard, count_guard),
         .method_call => |mc| for (mc.args) |arg| scanExprForLocktime(arg, reads_locktime, has_guard, count_guard),
         .binary_op => |b| {
-            scanExprForLocktime(b.left, reads_locktime, has_guard, count_guard);
-            scanExprForLocktime(b.right, reads_locktime, has_guard, count_guard);
+            const next = if (count_guard and b.op == .or_op) false else count_guard;
+            scanExprForLocktime(b.left, reads_locktime, has_guard, next);
+            scanExprForLocktime(b.right, reads_locktime, has_guard, next);
         },
-        .unary_op => |u| scanExprForLocktime(u.operand, reads_locktime, has_guard, count_guard),
+        .unary_op => |u| {
+            const next = if (u.op == .not) false else count_guard;
+            scanExprForLocktime(u.operand, reads_locktime, has_guard, next);
+        },
         .ternary => |t| {
             scanExprForLocktime(t.condition, reads_locktime, has_guard, count_guard);
             scanExprForLocktime(t.then_expr, reads_locktime, has_guard, count_guard);
@@ -3255,6 +3259,50 @@ test "H2: vacuous strict bound still warns" {
     var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
     var body = [_]Statement{
         .{ .assert_stmt = .{ .condition = .{ .binary_op = &seq_cmp } } },
+        .{ .assert_stmt = .{ .condition = .{ .binary_op = &lt_cmp } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{
+        makeProperty("count", .bigint, false),
+        makeProperty("deadline", .bigint, true),
+    };
+    var assignments = [_]types.AssignmentNode{ makeAssignment("count"), makeAssignment("deadline") };
+    var super_args = [_]Expression{ .{ .identifier = "count" }, .{ .identifier = "deadline" } };
+    var params = [_]types.ParamNode{ makeParam("count"), makeParam("deadline") };
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
+}
+
+test "H2: negated sequence comparison still warns" {
+    const allocator = testing.allocator;
+
+    // assert(!(extractSequence(this.txPreimage) !== 0xffffffffn))
+    var seq_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var seq_call = types.CallExpr{ .callee = "extractSequence", .args = &seq_args };
+    var seq_cmp = types.BinaryOp{ .op = .neq, .left = .{ .call = &seq_call }, .right = .{ .literal_int = 0xffffffff } };
+    var not_u = types.UnaryOp{ .op = .not, .operand = .{ .binary_op = &seq_cmp } };
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    var lt_cmp = types.BinaryOp{
+        .op = .gte,
+        .left = .{ .call = &lt_call },
+        .right = .{ .property_access = .{ .object = "this", .property = "deadline" } },
+    };
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .assert_stmt = .{ .condition = .{ .unary_op = &not_u } } },
         .{ .assert_stmt = .{ .condition = .{ .binary_op = &lt_cmp } } },
         .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
     };

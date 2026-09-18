@@ -1410,6 +1410,17 @@ module RunarCompiler
         end
       end
 
+      # True when asserting +expr+ logically implies a sequence-finality
+      # guard. A matching comparison nested under +!+ (or +||+) does not
+      # count: +assert(!(extractSequence !== 0xffffffff))+ requires a FINAL
+      # sequence. +&&+ implies each conjunct.
+      def assertion_implies_sequence_guard?(expr)
+        return true if sequence_finality_guard?(expr)
+        return false unless expr.is_a?(BinaryExpr) && expr.op == '&&'
+
+        assertion_implies_sequence_guard?(expr.left) || assertion_implies_sequence_guard?(expr.right)
+      end
+
       # #131: warn when +method+ (transitively, through the private-helper call
       # graph) reads the tx locktime but never asserts the tx is non-final. A
       # locktime gate is not consensus-enforced unless
@@ -1433,9 +1444,7 @@ module RunarCompiler
             reads_locktime = true if locktime_read?(expr)
             if assert_call?(expr)
               expr.args.each do |arg|
-                walk_expr(arg, proc do |inner|
-                  has_sequence_guard = true if sequence_finality_guard?(inner)
-                end)
+                has_sequence_guard = true if assertion_implies_sequence_guard?(arg)
               end
             end
           end)

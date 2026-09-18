@@ -108,7 +108,15 @@ fn mutable_named_fields(fields: &Fields) -> Vec<(syn::Ident, syn::Type)> {
                 if f.attrs.iter().any(is_readonly_attr) {
                     return None;
                 }
-                Some((f.ident.clone()?, f.ty.clone()))
+                let ident = f.ident.clone()?;
+                // Compiler-injected sighash preimage is not contract state.
+                // Both Rust parsers omit it; including it here makes
+                // `add_output` require an extra positional argument that
+                // native `this.add_output(sats, ...mutable)` calls do not pass.
+                if ident == "tx_preimage" || ident == "txPreimage" {
+                    return None;
+                }
+                Some((ident, f.ty.clone()))
             })
             .collect(),
         _ => Vec::new(),

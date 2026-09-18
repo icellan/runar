@@ -152,12 +152,20 @@ impl FungibleToken {
             assert!(sl < 253);
             off = off + 36 + 1 + sl + 4;
         }
-        let out_count = bin2num(cat(substr(&other_parent_tx, off, 1), pad00.clone()));
+        let out_count_prefix = bin2num(cat(substr(&other_parent_tx, off, 1), pad00.clone()));
+        assert!(out_count_prefix != 254);
+        assert!(out_count_prefix != 255);
+        let mut out_hdr = 1;
+        let mut out_count = out_count_prefix;
+        if out_count_prefix == 253 {
+            out_count = bin2num(cat(substr(&other_parent_tx, off + 1, 2), pad00.clone()));
+            out_hdr = 3;
+        }
         assert!(out_count >= 1);
-        let marker = bin2num(cat(substr(&other_parent_tx, off + 9, 1), pad00.clone()));
+        let marker = bin2num(cat(substr(&other_parent_tx, off + out_hdr + 8, 1), pad00.clone()));
         assert!(marker == 253);
-        let script_len = bin2num(cat(substr(&other_parent_tx, off + 10, 2), pad00.clone()));
-        let script_start = off + 12;
+        let script_len = bin2num(cat(substr(&other_parent_tx, off + out_hdr + 9, 2), pad00.clone()));
+        let script_start = off + out_hdr + 11;
         assert!(len(&other_parent_tx) >= script_start + script_len);
         let companion_script = substr(&other_parent_tx, script_start, script_len);
         assert!(script_len > 49);

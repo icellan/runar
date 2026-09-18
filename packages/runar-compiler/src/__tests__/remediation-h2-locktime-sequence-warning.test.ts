@@ -147,6 +147,19 @@ describe('H2 (#131): extractLocktime without extractSequence guard', () => {
     expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(true);
   });
 
+  it('STILL warns when a real comparison is negated', () => {
+    // `assert(!(extractSequence !== 0xffffffffn))` requires a FINAL sequence.
+    // Walking into the `!` used to count the inner `!==` as a guard.
+    const guard = 'assert(!(extractSequence(this.txPreimage) !== 0xffffffffn));';
+    expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(true);
+  });
+
+  it('does NOT warn when a real guard is AND-combined with another condition', () => {
+    const guard =
+      'assert(extractSequence(this.txPreimage) !== 0xffffffffn && this.count >= 0n);';
+    expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(false);
+  });
+
   it('does NOT warn for a method that never reads extractLocktime', () => {
     const source = `
       class Counter extends StatefulSmartContract {

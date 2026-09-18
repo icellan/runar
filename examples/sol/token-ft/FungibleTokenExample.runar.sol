@@ -117,12 +117,20 @@ contract FungibleToken is StatefulSmartContract {
             require(sl < 253);
             off = off + 36 + 1 + sl + 4;
         }
-        bigint outCount = bin2num(cat(substr(otherParentTx, off, 1), pad00));
+        bigint outCountPrefix = bin2num(cat(substr(otherParentTx, off, 1), pad00));
+        require(outCountPrefix != 254);
+        require(outCountPrefix != 255);
+        bigint outHdr = 1;
+        bigint outCount = outCountPrefix;
+        if (outCountPrefix == 253) {
+            outCount = bin2num(cat(substr(otherParentTx, off + 1, 2), pad00));
+            outHdr = 3;
+        }
         require(outCount >= 1);
-        bigint marker = bin2num(cat(substr(otherParentTx, off + 9, 1), pad00));
+        bigint marker = bin2num(cat(substr(otherParentTx, off + outHdr + 8, 1), pad00));
         require(marker == 253);
-        bigint scriptLen = bin2num(cat(substr(otherParentTx, off + 10, 2), pad00));
-        bigint scriptStart = off + 12;
+        bigint scriptLen = bin2num(cat(substr(otherParentTx, off + outHdr + 9, 2), pad00));
+        bigint scriptStart = off + outHdr + 11;
         require(len(otherParentTx) >= scriptStart + scriptLen);
         ByteString companionScript = substr(otherParentTx, scriptStart, scriptLen);
         require(scriptLen > 49);

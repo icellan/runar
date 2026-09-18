@@ -1721,6 +1721,21 @@ function isSequenceFinalityGuard(expr: Expression): boolean {
 }
 
 /**
+ * True when asserting `expr` logically implies a sequence-finality guard.
+ *
+ * A matching comparison nested under `!` (or `||`) does NOT count: e.g.
+ * `assert(!(extractSequence !== 0xffffffffn))` requires a FINAL sequence.
+ * `&&` does imply each conjunct, so a guard on either side is enough.
+ */
+function assertionImpliesSequenceGuard(expr: Expression): boolean {
+  if (isSequenceFinalityGuard(expr)) return true;
+  if (expr.kind === 'binary_expr' && expr.op === '&&') {
+    return assertionImpliesSequenceGuard(expr.left) || assertionImpliesSequenceGuard(expr.right);
+  }
+  return false;
+}
+
+/**
  * #131: warn when `method` (transitively, through the private-helper call
  * graph) reads the tx locktime but never asserts the tx is non-final. A
  * locktime gate is not consensus-enforced unless `extractSequence !== 0xffffffff`
@@ -1745,9 +1760,7 @@ function warnLocktimeWithoutSequenceGuard(method: MethodNode, ctx: ValidationCon
       if (isLocktimeRead(expr)) readsLocktime = true;
       if (isAssertCall(expr) && expr.kind === 'call_expr') {
         for (const arg of expr.args) {
-          walkExpr(arg, (inner) => {
-            if (isSequenceFinalityGuard(inner)) hasSequenceGuard = true;
-          });
+          if (assertionImpliesSequenceGuard(arg)) hasSequenceGuard = true;
         }
       }
     });

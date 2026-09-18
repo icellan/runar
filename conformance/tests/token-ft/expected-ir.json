@@ -2355,7 +2355,7 @@
           }
         },
         {
-          "name": "outCount",
+          "name": "outCountPrefix",
           "value": {
             "kind": "load_const",
             "value": "@ref:t147"
@@ -2365,15 +2365,15 @@
           "name": "t148",
           "value": {
             "kind": "load_const",
-            "value": 1
+            "value": 254
           }
         },
         {
           "name": "t149",
           "value": {
             "kind": "bin_op",
-            "left": "outCount",
-            "op": ">=",
+            "left": "outCountPrefix",
+            "op": "!==",
             "right": "t148"
           }
         },
@@ -2387,24 +2387,24 @@
         {
           "name": "t151",
           "value": {
-            "kind": "load_param",
-            "name": "otherParentTx"
+            "kind": "load_const",
+            "value": 255
           }
         },
         {
           "name": "t152",
           "value": {
-            "kind": "load_const",
-            "value": 9
+            "kind": "bin_op",
+            "left": "outCountPrefix",
+            "op": "!==",
+            "right": "t151"
           }
         },
         {
           "name": "t153",
           "value": {
-            "kind": "bin_op",
-            "left": "off",
-            "op": "+",
-            "right": "t152"
+            "kind": "assert",
+            "value": "t152"
           }
         },
         {
@@ -2415,22 +2415,269 @@
           }
         },
         {
+          "name": "outHdr",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t154"
+          }
+        },
+        {
+          "name": "outCount",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:outCountPrefix"
+          }
+        },
+        {
           "name": "t155",
           "value": {
+            "kind": "load_const",
+            "value": 253
+          }
+        },
+        {
+          "name": "t156",
+          "value": {
+            "kind": "bin_op",
+            "left": "outCountPrefix",
+            "op": "===",
+            "right": "t155"
+          }
+        },
+        {
+          "name": "t165",
+          "value": {
+            "cond": "t156",
+            "else": [
+              {
+                "name": "__merge$0",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:outCount"
+                }
+              },
+              {
+                "name": "__merge$1",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:outHdr"
+                }
+              },
+              {
+                "name": "outCount",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__merge$0"
+                }
+              },
+              {
+                "name": "outHdr",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__merge$1"
+                }
+              }
+            ],
+            "kind": "if",
+            "results": [
+              "outCount",
+              "outHdr"
+            ],
+            "then": [
+              {
+                "name": "t157",
+                "value": {
+                  "kind": "load_param",
+                  "name": "otherParentTx"
+                }
+              },
+              {
+                "name": "t158",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t159",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "off",
+                  "op": "+",
+                  "right": "t158"
+                }
+              },
+              {
+                "name": "t160",
+                "value": {
+                  "kind": "load_const",
+                  "value": 2
+                }
+              },
+              {
+                "name": "t161",
+                "value": {
+                  "args": [
+                    "t157",
+                    "t159",
+                    "t160"
+                  ],
+                  "func": "substr",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t162",
+                "value": {
+                  "args": [
+                    "t161",
+                    "pad00"
+                  ],
+                  "func": "cat",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t163",
+                "value": {
+                  "args": [
+                    "t162"
+                  ],
+                  "func": "bin2num",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "outCount",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t163"
+                }
+              },
+              {
+                "name": "t164",
+                "value": {
+                  "kind": "load_const",
+                  "value": 3
+                }
+              },
+              {
+                "name": "outHdr",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t164"
+                }
+              },
+              {
+                "name": "__merge$0",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:outCount"
+                }
+              },
+              {
+                "name": "__merge$1",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:outHdr"
+                }
+              },
+              {
+                "name": "outCount",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__merge$0"
+                }
+              },
+              {
+                "name": "outHdr",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:__merge$1"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t166",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t167",
+          "value": {
+            "kind": "bin_op",
+            "left": "outCount",
+            "op": ">=",
+            "right": "t166"
+          }
+        },
+        {
+          "name": "t168",
+          "value": {
+            "kind": "assert",
+            "value": "t167"
+          }
+        },
+        {
+          "name": "t169",
+          "value": {
+            "kind": "load_param",
+            "name": "otherParentTx"
+          }
+        },
+        {
+          "name": "t170",
+          "value": {
+            "kind": "bin_op",
+            "left": "off",
+            "op": "+",
+            "right": "outHdr"
+          }
+        },
+        {
+          "name": "t171",
+          "value": {
+            "kind": "load_const",
+            "value": 8
+          }
+        },
+        {
+          "name": "t172",
+          "value": {
+            "kind": "bin_op",
+            "left": "t170",
+            "op": "+",
+            "right": "t171"
+          }
+        },
+        {
+          "name": "t173",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t174",
+          "value": {
             "args": [
-              "t151",
-              "t153",
-              "t154"
+              "t169",
+              "t172",
+              "t173"
             ],
             "func": "substr",
             "kind": "call"
           }
         },
         {
-          "name": "t156",
+          "name": "t175",
           "value": {
             "args": [
-              "t155",
+              "t174",
               "pad00"
             ],
             "func": "cat",
@@ -2438,10 +2685,10 @@
           }
         },
         {
-          "name": "t157",
+          "name": "t176",
           "value": {
             "args": [
-              "t156"
+              "t175"
             ],
             "func": "bin2num",
             "kind": "call"
@@ -2451,190 +2698,6 @@
           "name": "marker",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t157"
-          }
-        },
-        {
-          "name": "t158",
-          "value": {
-            "kind": "load_const",
-            "value": 253
-          }
-        },
-        {
-          "name": "t159",
-          "value": {
-            "kind": "bin_op",
-            "left": "marker",
-            "op": "===",
-            "right": "t158"
-          }
-        },
-        {
-          "name": "t160",
-          "value": {
-            "kind": "assert",
-            "value": "t159"
-          }
-        },
-        {
-          "name": "t161",
-          "value": {
-            "kind": "load_param",
-            "name": "otherParentTx"
-          }
-        },
-        {
-          "name": "t162",
-          "value": {
-            "kind": "load_const",
-            "value": 10
-          }
-        },
-        {
-          "name": "t163",
-          "value": {
-            "kind": "bin_op",
-            "left": "off",
-            "op": "+",
-            "right": "t162"
-          }
-        },
-        {
-          "name": "t164",
-          "value": {
-            "kind": "load_const",
-            "value": 2
-          }
-        },
-        {
-          "name": "t165",
-          "value": {
-            "args": [
-              "t161",
-              "t163",
-              "t164"
-            ],
-            "func": "substr",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t166",
-          "value": {
-            "args": [
-              "t165",
-              "pad00"
-            ],
-            "func": "cat",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t167",
-          "value": {
-            "args": [
-              "t166"
-            ],
-            "func": "bin2num",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "scriptLen",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t167"
-          }
-        },
-        {
-          "name": "t168",
-          "value": {
-            "kind": "load_const",
-            "value": 12
-          }
-        },
-        {
-          "name": "t169",
-          "value": {
-            "kind": "bin_op",
-            "left": "off",
-            "op": "+",
-            "right": "t168"
-          }
-        },
-        {
-          "name": "scriptStart",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t169"
-          }
-        },
-        {
-          "name": "t170",
-          "value": {
-            "kind": "load_param",
-            "name": "otherParentTx"
-          }
-        },
-        {
-          "name": "t171",
-          "value": {
-            "args": [
-              "t170"
-            ],
-            "func": "len",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t172",
-          "value": {
-            "kind": "bin_op",
-            "left": "scriptStart",
-            "op": "+",
-            "right": "scriptLen"
-          }
-        },
-        {
-          "name": "t173",
-          "value": {
-            "kind": "bin_op",
-            "left": "t171",
-            "op": ">=",
-            "right": "t172"
-          }
-        },
-        {
-          "name": "t174",
-          "value": {
-            "kind": "assert",
-            "value": "t173"
-          }
-        },
-        {
-          "name": "t175",
-          "value": {
-            "kind": "load_param",
-            "name": "otherParentTx"
-          }
-        },
-        {
-          "name": "t176",
-          "value": {
-            "args": [
-              "t175",
-              "scriptStart",
-              "scriptLen"
-            ],
-            "func": "substr",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "companionScript",
-          "value": {
-            "kind": "load_const",
             "value": "@ref:t176"
           }
         },
@@ -2642,15 +2705,15 @@
           "name": "t177",
           "value": {
             "kind": "load_const",
-            "value": 49
+            "value": 253
           }
         },
         {
           "name": "t178",
           "value": {
             "kind": "bin_op",
-            "left": "scriptLen",
-            "op": ">",
+            "left": "marker",
+            "op": "===",
             "right": "t177"
           }
         },
@@ -2665,14 +2728,216 @@
           "name": "t180",
           "value": {
             "kind": "load_param",
-            "name": "txPreimage"
+            "name": "otherParentTx"
           }
         },
         {
           "name": "t181",
           "value": {
+            "kind": "bin_op",
+            "left": "off",
+            "op": "+",
+            "right": "outHdr"
+          }
+        },
+        {
+          "name": "t182",
+          "value": {
+            "kind": "load_const",
+            "value": 9
+          }
+        },
+        {
+          "name": "t183",
+          "value": {
+            "kind": "bin_op",
+            "left": "t181",
+            "op": "+",
+            "right": "t182"
+          }
+        },
+        {
+          "name": "t184",
+          "value": {
+            "kind": "load_const",
+            "value": 2
+          }
+        },
+        {
+          "name": "t185",
+          "value": {
             "args": [
-              "t180"
+              "t180",
+              "t183",
+              "t184"
+            ],
+            "func": "substr",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t186",
+          "value": {
+            "args": [
+              "t185",
+              "pad00"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t187",
+          "value": {
+            "args": [
+              "t186"
+            ],
+            "func": "bin2num",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "scriptLen",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t187"
+          }
+        },
+        {
+          "name": "t188",
+          "value": {
+            "kind": "bin_op",
+            "left": "off",
+            "op": "+",
+            "right": "outHdr"
+          }
+        },
+        {
+          "name": "t189",
+          "value": {
+            "kind": "load_const",
+            "value": 11
+          }
+        },
+        {
+          "name": "t190",
+          "value": {
+            "kind": "bin_op",
+            "left": "t188",
+            "op": "+",
+            "right": "t189"
+          }
+        },
+        {
+          "name": "scriptStart",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t190"
+          }
+        },
+        {
+          "name": "t191",
+          "value": {
+            "kind": "load_param",
+            "name": "otherParentTx"
+          }
+        },
+        {
+          "name": "t192",
+          "value": {
+            "args": [
+              "t191"
+            ],
+            "func": "len",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t193",
+          "value": {
+            "kind": "bin_op",
+            "left": "scriptStart",
+            "op": "+",
+            "right": "scriptLen"
+          }
+        },
+        {
+          "name": "t194",
+          "value": {
+            "kind": "bin_op",
+            "left": "t192",
+            "op": ">=",
+            "right": "t193"
+          }
+        },
+        {
+          "name": "t195",
+          "value": {
+            "kind": "assert",
+            "value": "t194"
+          }
+        },
+        {
+          "name": "t196",
+          "value": {
+            "kind": "load_param",
+            "name": "otherParentTx"
+          }
+        },
+        {
+          "name": "t197",
+          "value": {
+            "args": [
+              "t196",
+              "scriptStart",
+              "scriptLen"
+            ],
+            "func": "substr",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "companionScript",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t197"
+          }
+        },
+        {
+          "name": "t198",
+          "value": {
+            "kind": "load_const",
+            "value": 49
+          }
+        },
+        {
+          "name": "t199",
+          "value": {
+            "kind": "bin_op",
+            "left": "scriptLen",
+            "op": ">",
+            "right": "t198"
+          }
+        },
+        {
+          "name": "t200",
+          "value": {
+            "kind": "assert",
+            "value": "t199"
+          }
+        },
+        {
+          "name": "t201",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t202",
+          "value": {
+            "args": [
+              "t201"
             ],
             "func": "extractScriptCode",
             "kind": "call"
@@ -2682,40 +2947,40 @@
           "name": "sc",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t181"
+            "value": "@ref:t202"
           }
         },
         {
-          "name": "t182",
+          "name": "t203",
           "value": {
             "kind": "load_const",
             "value": 0
           }
         },
         {
-          "name": "t183",
+          "name": "t204",
           "value": {
             "kind": "load_const",
             "value": 1
           }
         },
         {
-          "name": "t184",
+          "name": "t205",
           "value": {
             "args": [
               "sc",
-              "t182",
-              "t183"
+              "t203",
+              "t204"
             ],
             "func": "substr",
             "kind": "call"
           }
         },
         {
-          "name": "t185",
+          "name": "t206",
           "value": {
             "args": [
-              "t184",
+              "t205",
               "pad00"
             ],
             "func": "cat",
@@ -2723,10 +2988,10 @@
           }
         },
         {
-          "name": "t186",
+          "name": "t207",
           "value": {
             "args": [
-              "t185"
+              "t206"
             ],
             "func": "bin2num",
             "kind": "call"
@@ -2736,41 +3001,41 @@
           "name": "scMarker",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t186"
+            "value": "@ref:t207"
           }
         },
         {
-          "name": "t187",
+          "name": "t208",
           "value": {
             "kind": "load_const",
             "value": 253
           }
         },
         {
-          "name": "t188",
+          "name": "t209",
           "value": {
             "kind": "bin_op",
             "left": "scMarker",
             "op": "===",
-            "right": "t187"
+            "right": "t208"
           }
         },
         {
-          "name": "t189",
+          "name": "t210",
           "value": {
             "kind": "assert",
-            "value": "t188"
+            "value": "t209"
           }
         },
         {
-          "name": "t190",
+          "name": "t211",
           "value": {
             "kind": "load_const",
             "value": 3
           }
         },
         {
-          "name": "t191",
+          "name": "t212",
           "value": {
             "args": [
               "sc"
@@ -2780,28 +3045,28 @@
           }
         },
         {
-          "name": "t192",
+          "name": "t213",
           "value": {
             "kind": "load_const",
             "value": 3
           }
         },
         {
-          "name": "t193",
+          "name": "t214",
           "value": {
             "kind": "bin_op",
-            "left": "t191",
+            "left": "t212",
             "op": "-",
-            "right": "t192"
+            "right": "t213"
           }
         },
         {
-          "name": "t194",
+          "name": "t215",
           "value": {
             "args": [
               "sc",
-              "t190",
-              "t193"
+              "t211",
+              "t214"
             ],
             "func": "substr",
             "kind": "call"
@@ -2811,39 +3076,39 @@
           "name": "myBody",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t194"
+            "value": "@ref:t215"
           }
         },
         {
-          "name": "t195",
+          "name": "t216",
           "value": {
             "kind": "load_const",
             "value": 2
           }
         },
         {
-          "name": "t196",
+          "name": "t217",
           "value": {
             "kind": "load_const",
             "value": 2
           }
         },
         {
-          "name": "t197",
+          "name": "t218",
           "value": {
             "kind": "bin_op",
             "left": "scriptLen",
             "op": "-",
-            "right": "t196"
+            "right": "t217"
           }
         },
         {
-          "name": "t198",
+          "name": "t219",
           "value": {
             "args": [
               "companionScript",
-              "t195",
-              "t197"
+              "t216",
+              "t218"
             ],
             "func": "substr",
             "kind": "call"
@@ -2853,11 +3118,11 @@
           "name": "companionBody",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t198"
+            "value": "@ref:t219"
           }
         },
         {
-          "name": "t199",
+          "name": "t220",
           "value": {
             "args": [
               "myBody"
@@ -2867,7 +3132,7 @@
           }
         },
         {
-          "name": "t200",
+          "name": "t221",
           "value": {
             "args": [
               "companionBody"
@@ -2877,23 +3142,23 @@
           }
         },
         {
-          "name": "t201",
+          "name": "t222",
           "value": {
             "kind": "bin_op",
-            "left": "t199",
+            "left": "t220",
             "op": "===",
-            "right": "t200"
+            "right": "t221"
           }
         },
         {
-          "name": "t202",
+          "name": "t223",
           "value": {
             "kind": "assert",
-            "value": "t201"
+            "value": "t222"
           }
         },
         {
-          "name": "t203",
+          "name": "t224",
           "value": {
             "args": [
               "myBody"
@@ -2903,37 +3168,37 @@
           }
         },
         {
-          "name": "t204",
+          "name": "t225",
           "value": {
             "kind": "load_const",
             "value": 49
           }
         },
         {
-          "name": "t205",
+          "name": "t226",
           "value": {
             "kind": "bin_op",
-            "left": "t203",
+            "left": "t224",
             "op": ">",
-            "right": "t204"
+            "right": "t225"
           }
         },
         {
-          "name": "t206",
+          "name": "t227",
           "value": {
             "kind": "assert",
-            "value": "t205"
+            "value": "t226"
           }
         },
         {
-          "name": "t207",
+          "name": "t228",
           "value": {
             "kind": "load_const",
             "value": 0
           }
         },
         {
-          "name": "t208",
+          "name": "t229",
           "value": {
             "args": [
               "myBody"
@@ -2943,42 +3208,42 @@
           }
         },
         {
-          "name": "t209",
+          "name": "t230",
           "value": {
             "kind": "load_const",
             "value": 49
           }
         },
         {
-          "name": "t210",
+          "name": "t231",
           "value": {
             "kind": "bin_op",
-            "left": "t208",
+            "left": "t229",
             "op": "-",
-            "right": "t209"
+            "right": "t230"
           }
         },
         {
-          "name": "t211",
+          "name": "t232",
           "value": {
             "args": [
               "myBody",
-              "t207",
-              "t210"
+              "t228",
+              "t231"
             ],
             "func": "substr",
             "kind": "call"
           }
         },
         {
-          "name": "t212",
+          "name": "t233",
           "value": {
             "kind": "load_const",
             "value": 0
           }
         },
         {
-          "name": "t213",
+          "name": "t234",
           "value": {
             "args": [
               "companionBody"
@@ -2988,90 +3253,90 @@
           }
         },
         {
-          "name": "t214",
+          "name": "t235",
           "value": {
             "kind": "load_const",
             "value": 49
           }
         },
         {
-          "name": "t215",
+          "name": "t236",
           "value": {
             "kind": "bin_op",
-            "left": "t213",
+            "left": "t234",
             "op": "-",
-            "right": "t214"
+            "right": "t235"
           }
         },
         {
-          "name": "t216",
+          "name": "t237",
           "value": {
             "args": [
               "companionBody",
-              "t212",
-              "t215"
+              "t233",
+              "t236"
             ],
             "func": "substr",
             "kind": "call"
           }
         },
         {
-          "name": "t217",
+          "name": "t238",
           "value": {
             "kind": "bin_op",
-            "left": "t211",
+            "left": "t232",
             "op": "===",
             "result_type": "bytes",
-            "right": "t216"
+            "right": "t237"
           }
         },
         {
-          "name": "t218",
+          "name": "t239",
           "value": {
             "kind": "assert",
-            "value": "t217"
+            "value": "t238"
           }
         },
         {
-          "name": "t219",
+          "name": "t240",
           "value": {
             "kind": "load_const",
             "value": 16
           }
         },
         {
-          "name": "t220",
+          "name": "t241",
           "value": {
             "kind": "bin_op",
             "left": "scriptLen",
             "op": "-",
-            "right": "t219"
+            "right": "t240"
           }
         },
         {
-          "name": "t221",
+          "name": "t242",
           "value": {
             "kind": "load_const",
             "value": 8
           }
         },
         {
-          "name": "t222",
+          "name": "t243",
           "value": {
             "args": [
               "companionScript",
-              "t220",
-              "t221"
+              "t241",
+              "t242"
             ],
             "func": "substr",
             "kind": "call"
           }
         },
         {
-          "name": "t223",
+          "name": "t244",
           "value": {
             "args": [
-              "t222",
+              "t243",
               "pad00"
             ],
             "func": "cat",
@@ -3079,10 +3344,10 @@
           }
         },
         {
-          "name": "t224",
+          "name": "t245",
           "value": {
             "args": [
-              "t223"
+              "t244"
             ],
             "func": "bin2num",
             "kind": "call"
@@ -3092,49 +3357,49 @@
           "name": "otherPrimary",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t224"
+            "value": "@ref:t245"
           }
         },
         {
-          "name": "t225",
+          "name": "t246",
           "value": {
             "kind": "load_const",
             "value": 8
           }
         },
         {
-          "name": "t226",
+          "name": "t247",
           "value": {
             "kind": "bin_op",
             "left": "scriptLen",
             "op": "-",
-            "right": "t225"
+            "right": "t246"
           }
         },
         {
-          "name": "t227",
+          "name": "t248",
           "value": {
             "kind": "load_const",
             "value": 8
           }
         },
         {
-          "name": "t228",
+          "name": "t249",
           "value": {
             "args": [
               "companionScript",
-              "t226",
-              "t227"
+              "t247",
+              "t248"
             ],
             "func": "substr",
             "kind": "call"
           }
         },
         {
-          "name": "t229",
+          "name": "t250",
           "value": {
             "args": [
-              "t228",
+              "t249",
               "pad00"
             ],
             "func": "cat",
@@ -3142,10 +3407,10 @@
           }
         },
         {
-          "name": "t230",
+          "name": "t251",
           "value": {
             "args": [
-              "t229"
+              "t250"
             ],
             "func": "bin2num",
             "kind": "call"
@@ -3155,11 +3420,11 @@
           "name": "otherMerge",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t230"
+            "value": "@ref:t251"
           }
         },
         {
-          "name": "t231",
+          "name": "t252",
           "value": {
             "kind": "bin_op",
             "left": "otherPrimary",
@@ -3168,60 +3433,60 @@
           }
         },
         {
-          "name": "t232",
+          "name": "t253",
           "value": {
             "kind": "load_param",
             "name": "otherBalance"
           }
         },
         {
-          "name": "t233",
+          "name": "t254",
           "value": {
             "kind": "bin_op",
-            "left": "t231",
+            "left": "t252",
             "op": "===",
-            "right": "t232"
+            "right": "t253"
           }
         },
         {
-          "name": "t234",
+          "name": "t255",
           "value": {
             "kind": "assert",
-            "value": "t233"
+            "value": "t254"
           }
         },
         {
-          "name": "t235",
+          "name": "t256",
           "value": {
             "kind": "load_prop",
             "name": "balance"
           }
         },
         {
-          "name": "t236",
+          "name": "t257",
           "value": {
             "kind": "load_prop",
             "name": "mergeBalance"
           }
         },
         {
-          "name": "t237",
+          "name": "t258",
           "value": {
             "kind": "bin_op",
-            "left": "t235",
+            "left": "t256",
             "op": "+",
-            "right": "t236"
+            "right": "t257"
           }
         },
         {
           "name": "myBalance",
           "value": {
             "kind": "load_const",
-            "value": "@ref:t237"
+            "value": "@ref:t258"
           }
         },
         {
-          "name": "t238",
+          "name": "t259",
           "value": {
             "kind": "bin_op",
             "left": "myOutpoint",
@@ -3231,40 +3496,40 @@
           }
         },
         {
-          "name": "t247",
+          "name": "t268",
           "value": {
-            "cond": "t238",
+            "cond": "t259",
             "else": [
               {
-                "name": "t243",
+                "name": "t264",
                 "value": {
                   "kind": "load_param",
                   "name": "outputSatoshis"
                 }
               },
               {
-                "name": "t244",
+                "name": "t265",
                 "value": {
                   "kind": "load_prop",
                   "name": "owner"
                 }
               },
               {
-                "name": "t245",
+                "name": "t266",
                 "value": {
                   "kind": "load_param",
                   "name": "otherBalance"
                 }
               },
               {
-                "name": "t246",
+                "name": "t267",
                 "value": {
                   "kind": "add_output",
                   "preimage": "",
-                  "satoshis": "t243",
+                  "satoshis": "t264",
                   "stateValues": [
-                    "t244",
-                    "t245",
+                    "t265",
+                    "t266",
                     "myBalance"
                   ]
                 }
@@ -3273,36 +3538,36 @@
             "kind": "if",
             "then": [
               {
-                "name": "t239",
+                "name": "t260",
                 "value": {
                   "kind": "load_param",
                   "name": "outputSatoshis"
                 }
               },
               {
-                "name": "t240",
+                "name": "t261",
                 "value": {
                   "kind": "load_prop",
                   "name": "owner"
                 }
               },
               {
-                "name": "t241",
+                "name": "t262",
                 "value": {
                   "kind": "load_param",
                   "name": "otherBalance"
                 }
               },
               {
-                "name": "t242",
+                "name": "t263",
                 "value": {
                   "kind": "add_output",
                   "preimage": "",
-                  "satoshis": "t239",
+                  "satoshis": "t260",
                   "stateValues": [
-                    "t240",
+                    "t261",
                     "myBalance",
-                    "t241"
+                    "t262"
                   ]
                 }
               }
@@ -3310,42 +3575,42 @@
           }
         },
         {
-          "name": "t248",
+          "name": "t269",
           "value": {
             "kind": "load_param",
             "name": "_changePKH"
           }
         },
         {
-          "name": "t249",
+          "name": "t270",
           "value": {
             "kind": "load_param",
             "name": "_changeAmount"
           }
         },
         {
-          "name": "t250",
+          "name": "t271",
           "value": {
             "kind": "load_const",
             "value": 0
           }
         },
         {
-          "name": "t251",
+          "name": "t272",
           "value": {
             "kind": "bin_op",
-            "left": "t249",
+            "left": "t270",
             "op": "!==",
-            "right": "t250"
+            "right": "t271"
           }
         },
         {
-          "name": "t254",
+          "name": "t275",
           "value": {
-            "cond": "t251",
+            "cond": "t272",
             "else": [
               {
-                "name": "t253",
+                "name": "t274",
                 "value": {
                   "kind": "load_const",
                   "value": ""
@@ -3355,11 +3620,11 @@
             "kind": "if",
             "then": [
               {
-                "name": "t252",
+                "name": "t273",
                 "value": {
                   "args": [
-                    "t248",
-                    "t249"
+                    "t269",
+                    "t270"
                   ],
                   "func": "buildChangeOutput",
                   "kind": "call"
@@ -3369,59 +3634,59 @@
           }
         },
         {
-          "name": "t255",
+          "name": "t276",
           "value": {
             "args": [
-              "t247",
-              "t254"
+              "t268",
+              "t275"
             ],
             "func": "cat",
             "kind": "call"
           }
         },
         {
-          "name": "t256",
+          "name": "t277",
           "value": {
             "args": [
-              "t255"
+              "t276"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t257",
+          "name": "t278",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t258",
+          "name": "t279",
           "value": {
             "args": [
-              "t257"
+              "t278"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t259",
+          "name": "t280",
           "value": {
             "kind": "bin_op",
-            "left": "t256",
+            "left": "t277",
             "op": "===",
             "result_type": "bytes",
-            "right": "t258"
+            "right": "t279"
           }
         },
         {
-          "name": "t260",
+          "name": "t281",
           "value": {
             "isAutoInjectedStateCheck": true,
             "kind": "assert",
-            "value": "t259"
+            "value": "t280"
           }
         }
       ],

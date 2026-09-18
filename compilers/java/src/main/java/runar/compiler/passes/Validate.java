@@ -1774,6 +1774,20 @@ public final class Validate {
         return false;
     }
 
+    /**
+     * True when asserting {@code expr} logically implies a sequence-finality
+     * guard. A matching comparison nested under {@code !} (or {@code ||})
+     * does not count. {@code &&} implies each conjunct.
+     */
+    private static boolean assertionImpliesSequenceGuard(Expression expr) {
+        if (isSequenceFinalityGuard(expr)) return true;
+        if (expr instanceof BinaryExpr be && be.op() == Expression.BinaryOp.AND) {
+            return assertionImpliesSequenceGuard(be.left())
+                || assertionImpliesSequenceGuard(be.right());
+        }
+        return false;
+    }
+
     private static boolean isFinalSentinel(Expression e) {
         return e instanceof BigIntLiteral lit && lit.value().compareTo(SEQUENCE_FINAL) == 0;
     }
@@ -1817,9 +1831,7 @@ public final class Validate {
                 if (isLocktimeRead(expr)) readsLocktime[0] = true;
                 if (isAssertCall(expr) && expr instanceof CallExpr call) {
                     for (Expression arg : call.args()) {
-                        Ctx.walkExpression(arg, inner -> {
-                            if (isSequenceFinalityGuard(inner)) hasSequenceGuard[0] = true;
-                        });
+                        if (assertionImpliesSequenceGuard(arg)) hasSequenceGuard[0] = true;
                     }
                 }
             });

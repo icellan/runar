@@ -5,7 +5,7 @@
 //! Methods live in a plain `impl` block with no attribute; `pub fn` marks a
 //! public spending entry point.
 
-use runar_lang_macros::contract;
+use runar_lang_macros::{contract, stateful_contract};
 
 #[contract]
 pub struct StripsReadonly {
@@ -81,4 +81,32 @@ fn add_output_intrinsics_exist_on_the_generated_struct() {
     };
     c.bump();
     assert_eq!(c.count, 1);
+}
+
+// The compiler injects `tx_preimage` for checkPreimage. Native Rust still
+// declares it on the struct, but it is not a mutable state slot — parsers
+// omit it, and `add_output` must too, or token-ft's
+// `add_output(sats, owner, balance, merge_balance)` fails to typecheck.
+#[stateful_contract]
+pub struct ImplicitPreimage {
+    pub owner: Vec<u8>,
+    pub balance: i64,
+    pub tx_preimage: Vec<u8>,
+}
+
+impl ImplicitPreimage {
+    pub fn bump(&mut self) {
+        self.add_output(0, self.owner.clone(), self.balance);
+    }
+}
+
+#[test]
+fn add_output_omits_implicit_preimage() {
+    let mut c = ImplicitPreimage {
+        owner: vec![1],
+        balance: 7,
+        tx_preimage: vec![],
+    };
+    c.bump();
+    assert_eq!(c.balance, 7);
 }

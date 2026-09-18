@@ -94,6 +94,33 @@ class TimeLock extends StatefulSmartContract {
 }
 
 #[test]
+fn still_warns_when_sequence_comparison_is_negated() {
+    let source = r#"
+import { StatefulSmartContract } from 'runar-lang';
+
+class TimeLock extends StatefulSmartContract {
+    count: bigint;
+    readonly deadline: bigint;
+    constructor(count: bigint, deadline: bigint) {
+        super(count, deadline);
+        this.count = count;
+        this.deadline = deadline;
+    }
+    public unlock() {
+        assert(!(extractSequence(this.txPreimage) !== 0xffffffffn));
+        assert(extractLocktime(this.txPreimage) >= this.deadline);
+        this.count++;
+    }
+}
+"#;
+    let warnings = warnings_of(source);
+    assert!(
+        has_locktime_warning(&warnings),
+        "negated sequence comparison must not count as a guard; got: {warnings:?}"
+    );
+}
+
+#[test]
 fn no_warn_when_method_never_reads_locktime() {
     let source = r#"
 import { StatefulSmartContract } from 'runar-lang';

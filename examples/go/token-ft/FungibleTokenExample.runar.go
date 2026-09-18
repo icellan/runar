@@ -121,12 +121,20 @@ func (c *FungibleToken) Merge(sig runar.Sig, otherBalance runar.Bigint, allPrevo
 		runar.Assert(sl < 253)
 		off = off + 36 + 1 + sl + 4
 	}
-	outCount := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off, 1), pad00))
+	outCountPrefix := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off, 1), pad00))
+	runar.Assert(outCountPrefix != 254)
+	runar.Assert(outCountPrefix != 255)
+	outHdr := runar.Bigint(1)
+	outCount := outCountPrefix
+	if outCountPrefix == 253 {
+		outCount = runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+1, 2), pad00))
+		outHdr = 3
+	}
 	runar.Assert(outCount >= 1)
-	marker := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+9, 1), pad00))
+	marker := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+outHdr+8, 1), pad00))
 	runar.Assert(marker == 253)
-	scriptLen := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+10, 2), pad00))
-	scriptStart := off + 12
+	scriptLen := runar.Bin2Num(runar.Cat(runar.Substr(otherParentTx, off+outHdr+9, 2), pad00))
+	scriptStart := off + outHdr + 11
 	runar.Assert(runar.Len(otherParentTx) >= scriptStart+scriptLen)
 	companionScript := runar.Substr(otherParentTx, scriptStart, scriptLen)
 	runar.Assert(scriptLen > 49)
