@@ -26,6 +26,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { Transaction, LockingScript, UnlockingScript } from '@bsv/sdk';
 import {
   RunarContract,
@@ -38,6 +39,8 @@ import {
 import type { UTXO } from 'runar-sdk';
 import { compile } from 'runar-compiler';
 import { testKey, validateContractInput } from '../oracle/index.js';
+import { TestContract } from '../test-contract.js';
+import { signTestMessage } from '../crypto/ecdsa.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
 const TOKEN_FT_TS = join(
@@ -442,6 +445,156 @@ const EXTRA_CLAIM_FILES = [
   'integration/rust/tests/fungible_token.rs',
   'docs/formats/solidity.md',
 ];
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+function littleEndian(value: bigint, width: number): Uint8Array {
+  const result = new Uint8Array(width);
+  let remaining = value;
+  for (let i = 0; i < width; i++) {
+    result[i] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  return result;
+}
+
+function compactSize(value: bigint): Uint8Array {
+  if (value < 0xfdn) return littleEndian(value, 1);
+  if (value <= 0xffffn) return concatBytes(new Uint8Array([0xfd]), littleEndian(value, 2));
+  if (value <= 0xffffffffn) return concatBytes(new Uint8Array([0xfe]), littleEndian(value, 4));
+  return concatBytes(new Uint8Array([0xff]), littleEndian(value, 8));
+}
+
+function hash256Bytes(data: Uint8Array): Uint8Array {
+  const first = createHash('sha256').update(data).digest();
+  return new Uint8Array(createHash('sha256').update(first).digest());
+}
+
+function hex(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('hex');
+}
+
+/**
+ * A syntactically sufficient companion parent for the source interpreter.
+ * Only output zero is walked; the caller chooses the exact CompactSize bytes
+ * so canonical and non-canonical encodings can share the rest of the fixture.
+ */
+function companionFixture(outputCount: Uint8Array): {
+  parent: Uint8Array;
+  scriptCode: Uint8Array;
+} {
+  const alice = testKey('alice');
+  const owner = new Uint8Array(Buffer.from(alice.pubKey, 'hex'));
+  // Full locking script is 255 bytes.  The executed OP_CODESEPARATOR removes
+  // the 0x61ab prologue, leaving a 253-byte scriptCode with a 0xfd prefix.
+  const body = concatBytes(
+    new Uint8Array(204).fill(0x51),
+    owner,
+    littleEndian(7n, 8),
+    littleEndian(5n, 8),
+  );
+  const lockingScript = concatBytes(new Uint8Array([0x61, 0xab]), body);
+  // Make the principal 0xfd boundary fixture a genuinely complete 253-output
+  // transaction.  The wider-count cases below intentionally exercise only
+  // offset decoding: materialising 65,536 or 4,294,967,296 outputs would make
+  // a focused parser test impractical.
+  const remainingOutputs = outputCount.length === 3 &&
+    outputCount[0] === 0xfd && outputCount[1] === 0xfd && outputCount[2] === 0
+    ? new Uint8Array(9 * 252)
+    : new Uint8Array(0);
+  const parent = concatBytes(
+    littleEndian(2n, 4),
+    new Uint8Array([1]),
+    new Uint8Array(36),
+    new Uint8Array([0]),
+    new Uint8Array([0xff, 0xff, 0xff, 0xff]),
+    outputCount,
+    littleEndian(1n, 8),
+    compactSize(BigInt(lockingScript.length)),
+    lockingScript,
+    remainingOutputs,
+    littleEndian(0n, 4),
+  );
+  return { parent, scriptCode: concatBytes(compactSize(BigInt(body.length)), body) };
+}
+
+function runCompanionCountCase(sourcePath: string, outputCount: Uint8Array) {
+  const source = readFileSync(join(REPO_ROOT, sourcePath), 'utf8');
+  const alice = testKey('alice');
+  const token = TestContract.fromSource(source, {
+    owner: alice.pubKey,
+    balance: 30n,
+    mergeBalance: 0n,
+    tokenId: '01',
+  }, sourcePath);
+  const { parent, scriptCode } = companionFixture(outputCount);
+  const myOutpoint = new Uint8Array(36).fill(0x11);
+  const companionOutpoint = concatBytes(hash256Bytes(parent), new Uint8Array(4));
+  // Put the companion first and this input second.  This also avoids relying
+  // on the reference interpreter's branch-local reassignment handling for
+  // Python, while exercising the contract's explicit second-input path.
+  const allPrevouts = concatBytes(companionOutpoint, myOutpoint);
+  token.setMockPreimageBytes({
+    hashPrevouts: hash256Bytes(allPrevouts),
+    outpoint: myOutpoint,
+    scriptCode,
+  });
+  return token.call('merge', {
+    ...(sourcePath.endsWith('.runar.zig') ? { ctx: 0n } : {}),
+    sig: signTestMessage(alice.privKey),
+    otherBalance: 12n,
+    allPrevouts: hex(allPrevouts),
+    otherParentTx: hex(parent),
+    outputSatoshis: 1n,
+  });
+}
+
+describe('W8 / SoloMerge: companion output-count CompactSize', () => {
+  // Python branch-local assignments and Zig tuple literals are known limits
+  // of TestContract's AST interpreter.  Their positive cases run in the
+  // native example suites; every surface still gets the negative parse pin.
+  const interpreterPositiveSources = TOKEN_FT_SOURCES.filter(
+    sourcePath => !sourcePath.endsWith('.runar.py') && !sourcePath.endsWith('.runar.zig'),
+  );
+  for (const sourcePath of interpreterPositiveSources) {
+    it(`${sourcePath} accepts the 0xfd boundary and locates output zero`, () => {
+      const result = runCompanionCountCase(sourcePath, compactSize(253n));
+      expect(result.success, result.error).toBe(true);
+    });
+  }
+
+  for (const sourcePath of TOKEN_FT_SOURCES) {
+    it(`${sourcePath} rejects a non-canonical 0xfd output count`, () => {
+      expect(runCompanionCountCase(sourcePath, new Uint8Array([0xfd, 0xfc, 0x00])).success).toBe(false);
+    });
+  }
+
+  it.each([
+    ['one-byte', compactSize(1n)],
+    ['0xfe', compactSize(65_536n)],
+    ['0xff', compactSize(4_294_967_296n)],
+  ])('the TypeScript surface accepts a canonical %s output count', (_label, encoded) => {
+    const result = runCompanionCountCase(TOKEN_FT_SOURCES[0]!, encoded);
+    expect(result.success, result.error).toBe(true);
+  });
+
+  it.each([
+    ['zero', new Uint8Array([0x00])],
+    ['truncated 0xfd', new Uint8Array([0xfd])],
+    ['non-canonical 0xfe', new Uint8Array([0xfe, 0xff, 0xff, 0x00, 0x00])],
+    ['non-canonical 0xff', new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00])],
+  ])('the TypeScript surface rejects %s', (_label, encoded) => {
+    expect(runCompanionCountCase(TOKEN_FT_SOURCES[0]!, encoded).success).toBe(false);
+  });
+});
 
 /**
  * Phrases that assert the merge is safe. Each was present before W8. Matching

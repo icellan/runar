@@ -154,9 +154,28 @@ describe('H2 (#131): extractLocktime without extractSequence guard', () => {
     expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(true);
   });
 
+  it.each([
+    [
+      'a real guard OR an unrelated condition',
+      'assert(extractSequence(this.txPreimage) !== 0xffffffffn || this.count >= 0n);',
+    ],
+    [
+      'a nested comparison explicitly compared with false',
+      'assert((extractSequence(this.txPreimage) !== 0xffffffffn) === false);',
+    ],
+  ])('STILL warns when the assertion does not imply non-finality: %s', (_label, guard) => {
+    expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(true);
+  });
+
   it('does NOT warn when a real guard is AND-combined with another condition', () => {
     const guard =
       'assert(extractSequence(this.txPreimage) !== 0xffffffffn && this.count >= 0n);';
+    expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(false);
+  });
+
+  it('does NOT warn when the guard is the right side of an AND', () => {
+    const guard =
+      'assert(this.count >= 0n && extractSequence(this.txPreimage) !== 0xffffffffn);';
     expect(hasLocktimeWarning(validateSource(timelock(guard)))).toBe(false);
   });
 

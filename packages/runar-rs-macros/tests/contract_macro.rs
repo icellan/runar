@@ -92,11 +92,12 @@ pub struct ImplicitPreimage {
     pub owner: Vec<u8>,
     pub balance: i64,
     pub tx_preimage: Vec<u8>,
+    pub tx_preimage_backup: Vec<u8>,
 }
 
 impl ImplicitPreimage {
     pub fn bump(&mut self) {
-        self.add_output(0, self.owner.clone(), self.balance);
+        self.add_output(0, self.owner.clone(), self.balance, self.tx_preimage_backup.clone());
     }
 }
 
@@ -106,7 +107,9 @@ fn add_output_omits_implicit_preimage() {
         owner: vec![1],
         balance: 7,
         tx_preimage: vec![],
+        tx_preimage_backup: vec![0xbb],
     };
     c.bump();
     assert_eq!(c.balance, 7);
+    assert_eq!(c.tx_preimage_backup, vec![0xbb]);
 }

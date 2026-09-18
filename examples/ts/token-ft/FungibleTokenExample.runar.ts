@@ -156,25 +156,32 @@ class FungibleToken extends StatefulSmartContract {
       assert(sl < 253n);
       off = off + 36n + 1n + sl + 4n;
     }
-    // CompactSize outCount: 1 byte if < 253, else 0xfd + LE16.
-    // A 1-byte read + off+9 script marker lands inside the 8-byte amount
-    // when the companion parent has >= 253 outputs.
-    const outCountPrefix = bin2num(cat(substr(otherParentTx, off, 1n), pad00));
-    assert(outCountPrefix !== 254n);
-    assert(outCountPrefix !== 255n);
-    let outHdr = 1n;
-    let outCount = outCountPrefix;
-    if (outCountPrefix === 253n) {
+    const outCountMarker = bin2num(cat(substr(otherParentTx, off, 1n), pad00));
+    let outCount = outCountMarker;
+    let outCountSize = 1n;
+    if (outCountMarker === 253n) {
       outCount = bin2num(cat(substr(otherParentTx, off + 1n, 2n), pad00));
-      outHdr = 3n;
+      assert(outCount >= 253n);
+      outCountSize = 3n;
+    }
+    if (outCountMarker === 254n) {
+      outCount = bin2num(cat(substr(otherParentTx, off + 1n, 4n), pad00));
+      assert(outCount > 65535n);
+      outCountSize = 5n;
+    }
+    if (outCountMarker === 255n) {
+      outCount = bin2num(cat(substr(otherParentTx, off + 1n, 8n), pad00));
+      assert(outCount > 4294967295n);
+      outCountSize = 9n;
     }
     assert(outCount >= 1n);
+    off = off + outCountSize;
     // Token locking scripts are >252 B, so the varint MUST be 0xfd + LE16
     // (also rejects a P2PKH fee input sitting in the companion slot).
-    const marker = bin2num(cat(substr(otherParentTx, off + outHdr + 8n, 1n), pad00));
+    const marker = bin2num(cat(substr(otherParentTx, off + 8n, 1n), pad00));
     assert(marker === 253n);
-    const scriptLen = bin2num(cat(substr(otherParentTx, off + outHdr + 9n, 2n), pad00));
-    const scriptStart = off + outHdr + 11n;
+    const scriptLen = bin2num(cat(substr(otherParentTx, off + 9n, 2n), pad00));
+    const scriptStart = off + 11n;
     assert(len(otherParentTx) >= scriptStart + scriptLen);
     const companionScript = substr(otherParentTx, scriptStart, scriptLen);
     assert(scriptLen > 49n);

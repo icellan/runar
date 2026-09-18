@@ -145,20 +145,30 @@ class FungibleToken extends StatefulSmartContract {
             assertThat(sl.lt(Bigint.of(253)));
             off = off.plus(Bigint.of(36)).plus(Bigint.ONE).plus(sl).plus(Bigint.of(4));
         }
-        Bigint outCountPrefix = Bigint.of(bin2num(cat(substr(otherParentTx, off.value(), Bigint.ONE.value()), pad00)));
-        assertThat(outCountPrefix.neq(Bigint.of(254)));
-        assertThat(outCountPrefix.neq(Bigint.of(255)));
-        Bigint outHdr = Bigint.ONE;
-        Bigint outCount = outCountPrefix;
-        if (outCountPrefix.eq(Bigint.of(253))) {
+        Bigint outCountMarker = Bigint.of(bin2num(cat(substr(otherParentTx, off.value(), Bigint.ONE.value()), pad00)));
+        Bigint outCount = outCountMarker;
+        Bigint outCountSize = Bigint.ONE;
+        if (outCountMarker.eq(Bigint.of(253))) {
             outCount = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.ONE).value(), Bigint.of(2).value()), pad00)));
-            outHdr = Bigint.of(3);
+            assertThat(outCount.ge(Bigint.of(253)));
+            outCountSize = Bigint.of(3);
+        }
+        if (outCountMarker.eq(Bigint.of(254))) {
+            outCount = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.ONE).value(), Bigint.of(4).value()), pad00)));
+            assertThat(outCount.gt(Bigint.of(65535)));
+            outCountSize = Bigint.of(5);
+        }
+        if (outCountMarker.eq(Bigint.of(255))) {
+            outCount = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.ONE).value(), Bigint.of(8).value()), pad00)));
+            assertThat(outCount.gt(Bigint.of(4294967295L)));
+            outCountSize = Bigint.of(9);
         }
         assertThat(outCount.ge(Bigint.ONE));
-        Bigint marker = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(outHdr).plus(Bigint.of(8)).value(), Bigint.ONE.value()), pad00)));
+        off = off.plus(outCountSize);
+        Bigint marker = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.of(8)).value(), Bigint.ONE.value()), pad00)));
         assertThat(marker.eq(Bigint.of(253)));
-        Bigint scriptLen = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(outHdr).plus(Bigint.of(9)).value(), Bigint.of(2).value()), pad00)));
-        Bigint scriptStart = off.plus(outHdr).plus(Bigint.of(11));
+        Bigint scriptLen = Bigint.of(bin2num(cat(substr(otherParentTx, off.plus(Bigint.of(9)).value(), Bigint.of(2).value()), pad00)));
+        Bigint scriptStart = off.plus(Bigint.of(11));
         assertThat(len(otherParentTx).ge(scriptStart.plus(scriptLen)));
         ByteString companionScript = substr(otherParentTx, scriptStart.value(), scriptLen.value());
         assertThat(scriptLen.gt(Bigint.of(49)));

@@ -137,6 +137,8 @@ pub const assert_failure_message = "runar assertion failed";
 pub const MockPreimageParts = struct {
     hashPrevouts: base.Sha256 = default_zero_32[0..],
     outpoint: base.ByteString = default_zero_36[0..],
+    /// Raw scriptCode bytes; `mockPreimageChecked` adds CompactSize framing.
+    scriptCode: base.ByteString = "",
     outputHash: base.Sha256 = default_zero_32[0..],
     locktime: base.Bigint = 0,
 };
@@ -254,13 +256,41 @@ pub const MockPreimageError = error{
     LocktimeOutOfRange,
 };
 
+fn compactSizeWidth(value: usize) usize {
+    if (value < 0xfd) return 1;
+    if (value <= std.math.maxInt(u16)) return 3;
+    if (value <= std.math.maxInt(u32)) return 5;
+    return 9;
+}
+
+fn writeCompactSize(dest: []u8, value: usize) usize {
+    if (value < 0xfd) {
+        dest[0] = @intCast(value);
+        return 1;
+    }
+    if (value <= std.math.maxInt(u16)) {
+        dest[0] = 0xfd;
+        std.mem.writeInt(u16, dest[1..3], @intCast(value), .little);
+        return 3;
+    }
+    if (value <= std.math.maxInt(u32)) {
+        dest[0] = 0xfe;
+        std.mem.writeInt(u32, dest[1..5], @intCast(value), .little);
+        return 5;
+    }
+    dest[0] = 0xff;
+    std.mem.writeInt(u64, dest[1..9], @intCast(value), .little);
+    return 9;
+}
+
 /// Error-returning variant of `mockPreimage`. Prefer this in SDK / harness
 /// code that can handle allocation failure or invalid caller input. The
 /// non-`Checked` variant remains panic-based because it is called directly
 /// from Rúnar contract bodies (which cannot propagate errors — contract
 /// method signatures compile to Bitcoin Script and have no error channel).
 pub fn mockPreimageChecked(allocator: std.mem.Allocator, parts: MockPreimageParts) MockPreimageError!base.SigHashPreimage {
-    var encoded = allocator.alloc(u8, 4 + 32 + 32 + 36 + 1 + 8 + 4 + 32 + 4 + 4) catch return MockPreimageError.OutOfMemory;
+    const script_prefix_len = compactSizeWidth(parts.scriptCode.len);
+    var encoded = allocator.alloc(u8, 4 + 32 + 32 + 36 + script_prefix_len + parts.scriptCode.len + 8 + 4 + 32 + 4 + 4) catch return MockPreimageError.OutOfMemory;
     // The locktime cast below can still refuse after this buffer exists; a
     // refusal must not keep it.
     errdefer allocator.free(encoded);
@@ -268,13 +298,20 @@ pub fn mockPreimageChecked(allocator: std.mem.Allocator, parts: MockPreimagePart
     copyFixed(encoded[4..36], parts.hashPrevouts);
     @memset(encoded[36..68], 0);
     copyFixed(encoded[68..104], parts.outpoint);
-    encoded[104] = 0x00;
-    @memset(encoded[105..113], 0);
-    std.mem.writeInt(u32, encoded[113..117], 0xffff_ffff, .little);
-    copyFixed(encoded[117..149], parts.outputHash);
+    var off: usize = 104;
+    off += writeCompactSize(encoded[off..], parts.scriptCode.len);
+    @memcpy(encoded[off .. off + parts.scriptCode.len], parts.scriptCode);
+    off += parts.scriptCode.len;
+    @memset(encoded[off .. off + 8], 0);
+    off += 8;
+    std.mem.writeInt(u32, encoded[off..][0..4], 0xffff_ffff, .little);
+    off += 4;
+    copyFixed(encoded[off .. off + 32], parts.outputHash);
+    off += 32;
     const locktime: u32 = std.math.cast(u32, parts.locktime) orelse return MockPreimageError.LocktimeOutOfRange;
-    std.mem.writeInt(u32, encoded[149..153], locktime, .little);
-    std.mem.writeInt(u32, encoded[153..157], 0x41, .little);
+    std.mem.writeInt(u32, encoded[off..][0..4], locktime, .little);
+    off += 4;
+    std.mem.writeInt(u32, encoded[off..][0..4], 0x41, .little);
     return encoded;
 }
 
@@ -297,10 +334,13 @@ pub fn extractOutpoint(preimage: base.SigHashPreimage) base.ByteString {
     return dupeBytes(&extracted);
 }
 
-/// Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks.
 pub fn extractScriptCode(preimage: base.SigHashPreimage) base.ByteString {
-    _ = preimage;
-    return "";
+    // BIP-143 tail after scriptCode is amount(8), sequence(4), hashOutputs(32),
+    // locktime(4), sighash type(4). Return the framed field exactly as the
+    // compiler intrinsic does; callers that need the raw script strip its
+    // CompactSize prefix themselves.
+    if (preimage.len < 104 + 1 + 52) return "";
+    return dupeBytes(preimage[104 .. preimage.len - 52]);
 }
 
 pub fn extractOutputHash(preimage: base.SigHashPreimage) base.Sha256 {

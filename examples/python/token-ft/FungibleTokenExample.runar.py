@@ -133,19 +133,27 @@ class FungibleToken(StatefulSmartContract):
             sl = bin2num(cat(substr(other_parent_tx, off + 36, 1), pad00))
             assert_(sl < 253)
             off = off + 36 + 1 + sl + 4
-        out_count_prefix = bin2num(cat(substr(other_parent_tx, off, 1), pad00))
-        assert_(out_count_prefix != 254)
-        assert_(out_count_prefix != 255)
-        out_hdr = 1
-        out_count = out_count_prefix
-        if out_count_prefix == 253:
+        out_count_marker = bin2num(cat(substr(other_parent_tx, off, 1), pad00))
+        out_count = out_count_marker
+        out_count_size = 1
+        if out_count_marker == 253:
             out_count = bin2num(cat(substr(other_parent_tx, off + 1, 2), pad00))
-            out_hdr = 3
+            assert_(out_count >= 253)
+            out_count_size = 3
+        if out_count_marker == 254:
+            out_count = bin2num(cat(substr(other_parent_tx, off + 1, 4), pad00))
+            assert_(out_count > 65535)
+            out_count_size = 5
+        if out_count_marker == 255:
+            out_count = bin2num(cat(substr(other_parent_tx, off + 1, 8), pad00))
+            assert_(out_count > 4294967295)
+            out_count_size = 9
         assert_(out_count >= 1)
-        marker = bin2num(cat(substr(other_parent_tx, off + out_hdr + 8, 1), pad00))
+        off = off + out_count_size
+        marker = bin2num(cat(substr(other_parent_tx, off + 8, 1), pad00))
         assert_(marker == 253)
-        script_len = bin2num(cat(substr(other_parent_tx, off + out_hdr + 9, 2), pad00))
-        script_start = off + out_hdr + 11
+        script_len = bin2num(cat(substr(other_parent_tx, off + 9, 2), pad00))
+        script_start = off + 11
         assert_(len(other_parent_tx) >= script_start + script_len)
         companion_script = substr(other_parent_tx, script_start, script_len)
         assert_(script_len > 49)
