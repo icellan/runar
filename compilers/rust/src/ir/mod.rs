@@ -259,6 +259,8 @@ pub enum ANFValue {
         /// golden ANF stays unchanged for every existing contract.
         #[serde(rename = "sighashFlag", skip_serializing_if = "Option::is_none", default)]
         sighash_flag: Option<i64>,
+        #[serde(rename = "bindingVariant", skip_serializing_if = "Option::is_none", default)]
+        binding_variant: Option<String>,
     },
 
     #[serde(rename = "deserialize_state")]

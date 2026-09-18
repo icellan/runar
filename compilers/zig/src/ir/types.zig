@@ -230,6 +230,7 @@ pub const MethodNode = struct {
     /// the OP_PUSH_TX binding flag, the ABI sigHashType, and the SDK-side
     /// preimage construction. Honoured only on the `.runar.ts` surface.
     sighash_type: ?i32 = null,
+    binding_variant: ?[]const u8 = null,
 };
 pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "" };
 pub const ANFParam = ParamNode;
@@ -575,6 +576,8 @@ pub const CheckPreimage = struct {
     /// non-default @sighash mode, keeping golden ANF unchanged for every
     /// existing contract.
     sighash_flag: i32 = 0,
+    /// Absent / empty / "lowS" = default low-S blob. "all" = compact non-low-S.
+    binding_variant: []const u8 = "",
 };
 pub const DeserializeState = struct { preimage: []const u8 };
 pub const ANFAddOutput = struct { satoshis: []const u8, state_values: []const []const u8 = &.{}, preimage: []const u8 = "", state_refs: []const []const u8 = &.{} };

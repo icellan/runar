@@ -1413,7 +1413,7 @@ func (ctx *loweringContext) lowerBinding(binding *ir.ANFBinding, bindingIndex in
 	case "get_state_script":
 		ctx.lowerGetStateScript(name)
 	case "check_preimage":
-		ctx.lowerCheckPreimage(name, value.Preimage, value.SighashFlag, bindingIndex, lastUses)
+		ctx.lowerCheckPreimage(name, value.Preimage, value.SighashFlag, value.BindingVariant, bindingIndex, lastUses)
 	case "deserialize_state":
 		ctx.lowerDeserializeState(value.Preimage, bindingIndex, lastUses)
 	case "add_output":
@@ -4296,7 +4296,7 @@ func (ctx *loweringContext) emitCodePartAuthentication() {
 	ctx.sm.pop()
 }
 
-func (ctx *loweringContext) lowerCheckPreimage(bindingName, preimage string, sighashFlag int, bindingIndex int, lastUses map[string]int) {
+func (ctx *loweringContext) lowerCheckPreimage(bindingName, preimage string, sighashFlag int, bindingVariant string, bindingIndex int, lastUses map[string]int) {
 	// OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
 	// current spending transaction. The signature is DERIVED FROM THE PREIMAGE
 	// ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*k⁻¹ mod n, with
@@ -4328,7 +4328,7 @@ func (ctx *loweringContext) lowerCheckPreimage(bindingName, preimage string, sig
 	// to the pinned cross-tier constant; issue #123 lets a method declare a
 	// different mode, which only changes the appended sighash flag byte. Net
 	// stack effect is zero.
-	ctx.emitCheckPreimageBinding(sighashFlag)
+	ctx.emitCheckPreimageBinding(sighashFlag, bindingVariant)
 
 	// R-010: the preimage is now proven to be THIS transaction's preimage, so
 	// its scriptCode field is authentic. Pin the spender-supplied `_codePart`

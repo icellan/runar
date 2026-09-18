@@ -22,6 +22,7 @@ const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const bindingvariant_directive = @import("../frontend/bindingvariant_directive.zig");
 const input_limits = @import("../frontend/input_limits.zig");
 const containsDirectiveToken = input_limits.containsDirectiveToken;
 
@@ -705,6 +706,7 @@ const Parser = struct {
             // method's leading comment trivia. Only public methods are spending
             // entry points, so a directive on a private helper is meaningless.
             m.sighash_type = self.parseSighashDirective(member_trivia, member_name, is_public);
+            m.binding_variant = self.parseBindingVariantDirective(member_trivia, member_name, is_public);
             return .{ .method = m };
         }
 
@@ -910,6 +912,22 @@ const Parser = struct {
         }
 
         const result = sighash_directive.extractDirective(self.allocator, trivia) orelse return null;
+        switch (result) {
+            .value => |v| return v,
+            .err => |msg| {
+                self.addErrorFmt("Method '{s}': {s}", .{ name, msg });
+                return null;
+            },
+        }
+    }
+
+    fn parseBindingVariantDirective(self: *Parser, trivia: []const u8, name: []const u8, is_public: bool) ?[]const u8 {
+        if (!containsDirectiveToken(trivia, "@bindingVariant")) return null;
+        if (!is_public) {
+            self.addErrorFmt("@bindingVariant directive on non-public method '{s}' has no effect — only public methods are spending entry points", .{name});
+            return null;
+        }
+        const result = bindingvariant_directive.extractDirective(self.allocator, trivia) orelse return null;
         switch (result) {
             .value => |v| return v,
             .err => |msg| {

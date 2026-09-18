@@ -389,6 +389,9 @@ public final class AnfLower {
             if (!isDefaultSighash) {
                 ctx.sighashFlag = sighashMode;
             }
+            if (method.bindingVariant() != null && !"lowS".equals(method.bindingVariant())) {
+                ctx.bindingVariant = method.bindingVariant();
+            }
 
             boolean isStatefulPublic = contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT
                 && method.visibility() == Visibility.PUBLIC;
@@ -419,7 +422,7 @@ public final class AnfLower {
                 // binding blob stay byte-identical for every existing contract).
                 String preimageRef = ctx.emit(new LoadParam("txPreimage"));
                 String checkResult = ctx.emit(
-                    new CheckPreimage(preimageRef, isDefaultSighash ? null : sighashMode));
+                    new CheckPreimage(preimageRef, isDefaultSighash ? null : sighashMode, ctx.bindingVariant));
                 ctx.emit(new Assert(checkResult));
 
                 // GAP-302 / #123: pin the sighash type to the declared mode
@@ -636,6 +639,7 @@ public final class AnfLower {
         // being lowered, so a MANUAL checkPreimage(pre) call binds under the
         // same mode as the method's declared sighash. null = default ALL|FORKID.
         Integer sighashFlag = null;
+        String bindingVariant = null;
         /**
          * True in every context produced by {@link #subContext()} — inside an
          * if arm, a loop body, or an inlined helper's block — and false only in
@@ -905,6 +909,7 @@ public final class AnfLower {
             // manual checkPreimage() inside an if/else / ternary / inlined
             // branch binds under the same mode instead of the default.
             sub.sighashFlag = this.sighashFlag;
+            sub.bindingVariant = this.bindingVariant;
             // R-072: inherited by VALUE — a parent commitment dominates this
             // block, but one emitted inside it must not flow back out to a
             // sibling arm.
@@ -1825,7 +1830,7 @@ public final class AnfLower {
                 if (!e.args().isEmpty()) {
                     String preimageRef = lowerExprToRef(e.args().get(0));
                     // Issue #123: honour the method's declared @sighash on manual calls.
-                    return emit(new CheckPreimage(preimageRef, sighashFlag));
+                    return emit(new CheckPreimage(preimageRef, sighashFlag, bindingVariant));
                 }
             }
 
@@ -2904,7 +2909,7 @@ public final class AnfLower {
             return new UpdateProp(up.name(), mapOr(up.value(), nameMap));
         }
         if (value instanceof CheckPreimage cp) {
-            return new CheckPreimage(mapOr(cp.preimage(), nameMap), cp.sighashFlag());
+            return new CheckPreimage(mapOr(cp.preimage(), nameMap), cp.sighashFlag(), cp.bindingVariant());
         }
         if (value instanceof DeserializeState ds) {
             return new DeserializeState(mapOr(ds.preimage(), nameMap));

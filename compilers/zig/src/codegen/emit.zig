@@ -1118,6 +1118,10 @@ fn emitANFValueJson(w: anytype, value: types.ANFValue) error{OutOfMemory}!void {
             if (cp.sighash_flag != 0) {
                 try w.print(",\"sighashFlag\":{d}", .{cp.sighash_flag});
             }
+            if (cp.binding_variant.len > 0 and !std.mem.eql(u8, cp.binding_variant, "lowS")) {
+                try w.writeAll(",\"bindingVariant\":");
+                try writeJsonString(w, cp.binding_variant);
+            }
             try w.writeByte('}');
         },
         .deserialize_state => |ds| {

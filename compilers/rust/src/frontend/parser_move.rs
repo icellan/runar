@@ -926,6 +926,7 @@ impl<'a> MoveParser<'a> {
             visibility,
             source_location: self.loc(),
             sighash_type: None,
+            binding_variant: None,
         }
     }
 
@@ -1835,6 +1836,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
             column: 0,
         },
         sighash_type: None,
+        binding_variant: None,
     }
 }
 

@@ -6,6 +6,8 @@
  * the original type annotations written by the user.
  */
 
+import type { BindingVariant } from './anf-ir.js';
+
 // ---------------------------------------------------------------------------
 // Source locations
 // ---------------------------------------------------------------------------
@@ -128,6 +130,10 @@ export interface MethodNode {
    * on a public method. Absent = default `ALL|FORKID` (0x41).
    */
   sighashType?: number;
+  /**
+   * Any-S OP_PUSH_TX binding construction from `@bindingVariant`. Absent = `lowS`.
+   */
+  bindingVariant?: BindingVariant;
   sourceLocation: SourceLocation;
 }
 

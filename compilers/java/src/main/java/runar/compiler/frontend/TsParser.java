@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 import runar.compiler.passes.SighashDirective;
+import runar.compiler.passes.BindingVariantDirective;
 import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
@@ -81,6 +82,7 @@ public final class TsParser {
     // /@embedAlways\b/ and /@sighash\b/ scans.
     private static final Pattern EMBED_ALWAYS_RE = Pattern.compile("@embedAlways\\b");
     private static final Pattern SIGHASH_TOKEN_RE = Pattern.compile("@sighash\\b");
+    private static final Pattern BINDING_VARIANT_TOKEN_RE = Pattern.compile("@bindingVariant\\b");
 
     /** A source comment captured by the tokenizer, keyed by its start line. */
     private record CommentInfo(int line, String text) {}
@@ -908,7 +910,8 @@ public final class TsParser {
 
             Visibility vis = visibility.equals("public") ? Visibility.PUBLIC : Visibility.PRIVATE;
             Integer sighashType = parseSighashDirective(name, vis, leadingComments);
-            return new MethodNode(name, params, body, vis, location, sighashType);
+            String bindingVariant = parseBindingVariantDirective(name, vis, leadingComments);
+            return new MethodNode(name, params, body, vis, location, sighashType, bindingVariant);
         }
 
         /**
@@ -929,6 +932,28 @@ public final class TsParser {
                 return null;
             }
             SighashDirective.Result result = SighashDirective.extractSighashDirective(leadingComments);
+            if (result == null) {
+                return null;
+            }
+            if (result.isError()) {
+                addError(String.format("Method '%s': %s", name, result.error()));
+                return null;
+            }
+            return result.value();
+        }
+
+        String parseBindingVariantDirective(String name, Visibility vis, String leadingComments) {
+            if (leadingComments == null || !BINDING_VARIANT_TOKEN_RE.matcher(leadingComments).find()) {
+                return null;
+            }
+            if (vis != Visibility.PUBLIC) {
+                addError(String.format(
+                    "@bindingVariant directive on non-public method '%s' has no effect "
+                    + "— only public methods are spending entry points", name));
+                return null;
+            }
+            BindingVariantDirective.Result result =
+                BindingVariantDirective.extractBindingVariantDirective(leadingComments);
             if (result == null) {
                 return null;
             }

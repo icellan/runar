@@ -536,6 +536,11 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
                 method_sighash = st;
             }
         }
+        if (method.binding_variant) |bv| {
+            if (!std.mem.eql(u8, bv, "lowS")) {
+                method_ctx.binding_variant = bv;
+            }
+        }
 
         if (contract.parent_class == .stateful_smart_contract and method.is_public) {
             try lowerStatefulPublicMethod(allocator, &method_ctx, method, contract, &embed_injected);
@@ -734,6 +739,7 @@ fn lowerStatefulPublicMethod(
     const check_result = try ctx.emit(.{ .check_preimage = .{
         .preimage = preimage_ref,
         .sighash_flag = if (is_default_sighash) 0 else sighash_mode,
+        .binding_variant = method.binding_variant orelse "",
     } });
     _ = try ctx.emit(.{ .assert = .{ .value = check_result } });
 
@@ -1004,6 +1010,7 @@ const LowerCtx = struct {
     /// keeping the pinned binding blob unchanged. Propagated into sub-contexts
     /// so a manual call inside an if/for body picks it up.
     sighash_flag: ?i32 = null,
+    binding_variant: ?[]const u8 = null,
     /// True in every context produced by `subContext()` — inside an if arm, a
     /// loop body, or an inlined helper's block — and false only in the context
     /// a method's own body is lowered into. `liftBranchUpdateProps` walks
@@ -1193,6 +1200,7 @@ const LowerCtx = struct {
         sub.counter = self.counter;
         // #123: nested manual checkPreimage inherits the method's mode.
         sub.sighash_flag = self.sighash_flag;
+        sub.binding_variant = self.binding_variant;
         sub.nested = true;
         // A refusal raised inside the branch must reach the same sink.
         sub.diagnostic = self.diagnostic;
@@ -2235,6 +2243,7 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
             return try ctx.emit(.{ .check_preimage = .{
                 .preimage = preimage_ref,
                 .sighash_flag = ctx.sighash_flag orelse 0,
+                .binding_variant = ctx.binding_variant orelse "",
             } });
         }
     }
@@ -3565,6 +3574,7 @@ fn remapValueRefs(
             return .{ .check_preimage = .{
                 .preimage = r(name_map, cp.preimage),
                 .sighash_flag = cp.sighash_flag,
+                .binding_variant = cp.binding_variant,
             } };
         },
         .deserialize_state => |ds| {

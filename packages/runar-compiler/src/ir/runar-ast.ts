@@ -6,6 +6,8 @@
  * compiled yet.
  */
 
+import type { BindingVariant } from './anf-ir.js';
+
 // ---------------------------------------------------------------------------
 // Source locations
 // ---------------------------------------------------------------------------
@@ -131,6 +133,14 @@ export interface MethodNode {
    * the ABI `sigHashType`, and the SDK-side preimage/signature construction.
    */
   sighashType?: number;
+  /**
+   * The Any-S OP_PUSH_TX binding construction declared via a
+   * `/** @bindingVariant <VARIANT> *\/` directive on a public method. Absent =
+   * the default `lowS` (low-S, byte-identical to the historically-pinned blob).
+   * `'all'` selects the compact non-low-S construction, valid only for spends
+   * with nVersion != 0x01000000. Drives the OP_PUSH_TX preimage-binding blob.
+   */
+  bindingVariant?: BindingVariant;
   sourceLocation: SourceLocation;
 }
 

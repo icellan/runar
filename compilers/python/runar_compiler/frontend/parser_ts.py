@@ -21,6 +21,9 @@ from runar_compiler.frontend.ast_nodes import (
 from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.sighash_directive import extract_sighash_directive
+from runar_compiler.frontend.binding_variant_directive import (
+    extract_binding_variant_directive,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +86,7 @@ _EMBED_ALWAYS_RE = re.compile(r"@embedAlways\b")
 # Issue #123: `@sighash` comment directive token (word-boundary anchored),
 # mirroring the TS `/@sighash\b/` scan.
 _SIGHASH_TOKEN_RE = re.compile(r"@sighash\b")
+_BINDING_VARIANT_TOKEN_RE = re.compile(r"@bindingVariant\b")
 
 
 class Token:
@@ -754,6 +758,7 @@ class _TsParser:
         # Issue #123: `/** @sighash <FLAGS> */` (or `// @sighash ...`) directive
         # in the method's leading trivia → per-method BIP-143 sighash type.
         sighash_type = self._parse_sighash_directive(leading, name, visibility)
+        binding_variant = self._parse_binding_variant_directive(leading, name, visibility)
 
         return MethodNode(
             name=name,
@@ -761,8 +766,28 @@ class _TsParser:
             body=body,
             visibility=visibility,
             sighash_type=sighash_type,
+            binding_variant=binding_variant,
             source_location=location,
         )
+
+    def _parse_binding_variant_directive(
+        self, leading: str, name: str, visibility: str,
+    ) -> str | None:
+        if not _BINDING_VARIANT_TOKEN_RE.search(leading):
+            return None
+        if visibility != "public":
+            self.add_error(
+                f"@bindingVariant directive on non-public method '{name}' has no "
+                f"effect — only public methods are spending entry points"
+            )
+            return None
+        result = extract_binding_variant_directive(leading)
+        if result is None:
+            return None
+        if result.error is not None:
+            self.add_error(f"Method '{name}': {result.error}")
+            return None
+        return result.value
 
     def _parse_sighash_directive(
         self, leading: str, name: str, visibility: str,

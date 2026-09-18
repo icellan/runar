@@ -72,7 +72,7 @@ TS_V1 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.runar.ts"
 TS_V2 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.v2.runar.ts"
 PY_DSL = REPO_ROOT / "examples" / "python" / "tic-tac-toe" / "TicTacToe.runar.py"
 
-EXPECTED_BYTES = 7796  # W1: +18 bytes, six 32-bit-extractor zero-pad sites
+EXPECTED_BYTES = 7760  # 7796 minus 6 bytes per six covenant bindings (428→422)
 
 
 def _byte_len(hex_str: str) -> int:

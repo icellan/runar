@@ -35,6 +35,8 @@ import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
+import { BINDING_VARIANT_DEFAULT } from './bindingvariant-directive.js';
+import type { BindingVariant } from '../ir/anf-ir.js';
 import { isByteStringFamilyType } from './03-typecheck.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
@@ -297,6 +299,11 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
     if (method.sighashType !== undefined && method.sighashType !== SIGHASH_DEFAULT) {
       methodCtx.sighashFlag = method.sighashType;
     }
+    // A non-default @bindingVariant selects the compact 'all' binding for any
+    // checkPreimage in this method (auto-injected below, or a manual call).
+    if (method.bindingVariant !== undefined && method.bindingVariant !== BINDING_VARIANT_DEFAULT) {
+      methodCtx.bindingVariant = method.bindingVariant;
+    }
 
     // Register the declared param NAMES so a bare identifier resolves to
     // `load_param` before falling through to `load_prop` (issue #130). Without
@@ -339,14 +346,18 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // the tx sighash under this mode) AND the runtime preimage-type assert.
       const sighashMode = method.sighashType ?? SIGHASH_DEFAULT;
       const isDefaultSighash = sighashMode === SIGHASH_DEFAULT;
+      const bindingVariant = method.bindingVariant ?? BINDING_VARIANT_DEFAULT;
+      const isDefaultBinding = bindingVariant === BINDING_VARIANT_DEFAULT;
 
       // Inject checkPreimage(txPreimage) at the start
       const preimageRef = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
       const checkResult = methodCtx.emit({
         kind: 'check_preimage',
         preimage: preimageRef,
-        // Omit for the default so the ANF (and pinned binding blob) is unchanged.
+        // Omit each field for its default so the ANF (and pinned binding blob)
+        // is unchanged for methods that do not opt in.
         ...(isDefaultSighash ? {} : { sighashFlag: sighashMode }),
+        ...(isDefaultBinding ? {} : { bindingVariant }),
       });
       methodCtx.emit({ kind: 'assert', value: checkResult });
 
@@ -638,6 +649,13 @@ class LoweringContext {
    * ALL|FORKID, keeping the pinned binding blob unchanged.
    */
   sighashFlag: number | undefined;
+  /**
+   * The declared non-default `@bindingVariant` for the method being lowered, so
+   * a MANUAL `checkPreimage(pre)` call binds under the same construction as the
+   * method's declared variant. `undefined` = default `'lowS'`, keeping the
+   * pinned binding blob unchanged.
+   */
+  bindingVariant: BindingVariant | undefined;
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
@@ -957,6 +975,9 @@ class LoweringContext {
     // blob's, OP_CHECKSIGVERIFY aborts, and the branch is unspendable.
     // Go's subContext already carried it; this matches it.
     sub.sighashFlag = this.sighashFlag;
+    // Same inheritance for `@bindingVariant`: a manual checkPreimage inside an
+    // if/loop/ternary arm is still a call in THIS method.
+    sub.bindingVariant = this.bindingVariant;
     // Share the method scope so auto-injection from intrinsics called
     // inside the nested block bubbles up to the parent's ABI list.
     sub.methodScope = this.methodScope;
@@ -2135,6 +2156,8 @@ function lowerCallExpr(
         preimage: preimageRef,
         // Issue #123: honour the method's declared @sighash on manual calls.
         ...(ctx.sighashFlag !== undefined ? { sighashFlag: ctx.sighashFlag } : {}),
+        // Honour the method's declared @bindingVariant on manual calls.
+        ...(ctx.bindingVariant !== undefined ? { bindingVariant: ctx.bindingVariant } : {}),
       });
     }
   }

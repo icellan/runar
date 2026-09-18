@@ -864,6 +864,7 @@ impl<'a> ZigParser<'a> {
                 visibility: Visibility::Public,
                 source_location: self.loc(),
                 sighash_type: None,
+                binding_variant: None,
             });
         }
 
@@ -882,6 +883,7 @@ impl<'a> ZigParser<'a> {
             },
             source_location: self.loc(),
             sighash_type: None,
+            binding_variant: None,
         })
     }
 
@@ -1989,6 +1991,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
             column: 0,
         },
         sighash_type: None,
+        binding_variant: None,
     }
 }
 

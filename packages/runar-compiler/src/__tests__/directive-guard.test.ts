@@ -74,4 +74,41 @@ describe('fail-closed directive guard (issues #123 / #109)', () => {
     const joined = errorMessages(src, 'C.runar.ts');
     expect(joined).not.toContain('not supported');
   });
+
+  it('honours @bindingVariant on the .runar.ts surface', () => {
+    const src = `
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @bindingVariant all */
+        public bump(): void { this.n = this.n + 1n; }
+      }`;
+    const r = parse(src, 'C.runar.ts');
+    expect(r.errors.filter((e) => e.severity === 'error')).toEqual([]);
+    expect(r.contract!.methods.find((m) => m.name === 'bump')!.bindingVariant).toBe('all');
+  });
+
+  it('rejects an unknown @bindingVariant value', () => {
+    const src = `
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @bindingVariant high */
+        public bump(): void { this.n = this.n + 1n; }
+      }`;
+    const joined = errorMessages(src, 'C.runar.ts');
+    expect(joined).toContain('@bindingVariant');
+    expect(joined).toContain('unknown variant');
+  });
+
+  it('rejects @bindingVariant on a non-TS (.runar.sol) surface', () => {
+    const src = `
+      contract Counter {
+        // @bindingVariant all
+        function unlock() public {}
+      }`;
+    const joined = errorMessages(src, 'Counter.runar.sol');
+    expect(joined).toContain('@bindingVariant');
+    expect(joined).toContain('not supported');
+  });
 });

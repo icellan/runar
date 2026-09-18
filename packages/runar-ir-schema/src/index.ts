@@ -44,6 +44,7 @@ export type {
 
 // ANF IR (Pass 4 output — canonical conformance boundary)
 export type {
+  BindingVariant,
   ANFProgram,
   ANFProperty,
   ANFSyntheticArrayLevel,

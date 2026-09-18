@@ -297,6 +297,11 @@
           "minimum": 0,
           "maximum": 255,
           "description": "Issue #123: BIP-143 sighash byte the on-chain OP_PUSH_TX binding appends to the derived signature. Emitted by every tier for a method declaring a non-default `@sighash` mode; ABSENT means the default ALL|FORKID (0x41), which keeps every pre-existing golden byte-identical."
+        },
+        "bindingVariant": {
+          "type": "string",
+          "enum": ["lowS", "all"],
+          "description": "Any-S OP_PUSH_TX binding construction. Absent = default lowS. 'all' is the compact non-low-S blob, valid only for spends with nVersion != 0x01000000."
         }
       }
     },
