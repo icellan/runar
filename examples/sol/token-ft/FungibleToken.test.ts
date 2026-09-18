@@ -81,8 +81,6 @@ describe('FungibleToken (Solidity)', () => {
 
   describe('merge', () => {
     it('rejects the mock-zero prevouts path (W8: that was the solo-merge hole)', () => {
-      // INTERPRETER-ONLY. Honest two-input Spend is pinned by
-      // w8-token-ft-solo-merge-known-broken.test.ts.
       const token = makeToken(ALICE.pubKey, 30n);
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
@@ -116,6 +114,24 @@ describe('FungibleToken (Solidity)', () => {
         sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: tamperedPrevouts,
+        otherParentTx: '00'.repeat(64),
+        outputSatoshis: SATS,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects the mock-zero path with a pre-existing mergeBalance', () => {
+      const token = TestContract.fromSource(source, {
+        owner: ALICE.pubKey,
+        balance: 20n,
+        mergeBalance: 10n,
+        tokenId: TOKEN_ID,
+      }, FILE_NAME);
+      token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
+      const result = token.call('merge', {
+        sig: ALICE_SIG,
+        otherBalance: 50n,
+        allPrevouts: MOCK_PREVOUTS,
         otherParentTx: '00'.repeat(64),
         outputSatoshis: SATS,
       });

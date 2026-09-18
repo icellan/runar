@@ -97,20 +97,30 @@ pub const FungibleToken = struct {
             runar.assert(sl < 253);
             off = off + 36 + 1 + sl + 4;
         }
-        const outCountPrefix = runar.bin2num(runar.cat(runar.substr(otherParentTx, off, 1), pad00));
-        runar.assert(outCountPrefix != 254);
-        runar.assert(outCountPrefix != 255);
-        var outHdr: i64 = 1;
-        var outCount = outCountPrefix;
-        if (outCountPrefix == 253) {
+        const outCountMarker = runar.bin2num(runar.cat(runar.substr(otherParentTx, off, 1), pad00));
+        var outCount = outCountMarker;
+        var outCountSize: i64 = 1;
+        if (outCountMarker == 253) {
             outCount = runar.bin2num(runar.cat(runar.substr(otherParentTx, off + 1, 2), pad00));
-            outHdr = 3;
+            runar.assert(outCount >= 253);
+            outCountSize = 3;
+        }
+        if (outCountMarker == 254) {
+            outCount = runar.bin2num(runar.cat(runar.substr(otherParentTx, off + 1, 4), pad00));
+            runar.assert(outCount > 65535);
+            outCountSize = 5;
+        }
+        if (outCountMarker == 255) {
+            outCount = runar.bin2num(runar.cat(runar.substr(otherParentTx, off + 1, 8), pad00));
+            runar.assert(outCount > 4294967295);
+            outCountSize = 9;
         }
         runar.assert(outCount >= 1);
-        const marker = runar.bin2num(runar.cat(runar.substr(otherParentTx, off + outHdr + 8, 1), pad00));
+        off = off + outCountSize;
+        const marker = runar.bin2num(runar.cat(runar.substr(otherParentTx, off + 8, 1), pad00));
         runar.assert(marker == 253);
-        const scriptLen = runar.bin2num(runar.cat(runar.substr(otherParentTx, off + outHdr + 9, 2), pad00));
-        const scriptStart = off + outHdr + 11;
+        const scriptLen = runar.bin2num(runar.cat(runar.substr(otherParentTx, off + 9, 2), pad00));
+        const scriptStart = off + 11;
         runar.assert(runar.len(otherParentTx) >= scriptStart + scriptLen);
         const companionScript = runar.substr(otherParentTx, scriptStart, scriptLen);
         runar.assert(scriptLen > 49);

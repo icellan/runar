@@ -119,20 +119,30 @@ module FungibleToken {
             assert!(sl < 253, 0);
             off = off + 36 + 1 + sl + 4;
         };
-        let out_count_prefix: bigint = bin2num(cat(substr(other_parent_tx, off, 1), pad00));
-        assert!(out_count_prefix != 254, 0);
-        assert!(out_count_prefix != 255, 0);
-        let mut out_hdr: bigint = 1;
-        let mut out_count: bigint = out_count_prefix;
-        if (out_count_prefix == 253) {
+        let out_count_marker: bigint = bin2num(cat(substr(other_parent_tx, off, 1), pad00));
+        let out_count: bigint = out_count_marker;
+        let out_count_size: bigint = 1;
+        if (out_count_marker == 253) {
             out_count = bin2num(cat(substr(other_parent_tx, off + 1, 2), pad00));
-            out_hdr = 3;
+            assert!(out_count >= 253, 0);
+            out_count_size = 3;
+        };
+        if (out_count_marker == 254) {
+            out_count = bin2num(cat(substr(other_parent_tx, off + 1, 4), pad00));
+            assert!(out_count > 65535, 0);
+            out_count_size = 5;
+        };
+        if (out_count_marker == 255) {
+            out_count = bin2num(cat(substr(other_parent_tx, off + 1, 8), pad00));
+            assert!(out_count > 4294967295, 0);
+            out_count_size = 9;
         };
         assert!(out_count >= 1, 0);
-        let marker: bigint = bin2num(cat(substr(other_parent_tx, off + out_hdr + 8, 1), pad00));
+        off = off + out_count_size;
+        let marker: bigint = bin2num(cat(substr(other_parent_tx, off + 8, 1), pad00));
         assert!(marker == 253, 0);
-        let script_len: bigint = bin2num(cat(substr(other_parent_tx, off + out_hdr + 9, 2), pad00));
-        let script_start: bigint = off + out_hdr + 11;
+        let script_len: bigint = bin2num(cat(substr(other_parent_tx, off + 9, 2), pad00));
+        let script_start: bigint = off + 11;
         assert!(len(other_parent_tx) >= script_start + script_len, 0);
         let companion_script: ByteString = substr(other_parent_tx, script_start, script_len);
         assert!(script_len > 49, 0);

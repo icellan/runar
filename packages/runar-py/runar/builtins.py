@@ -590,13 +590,19 @@ def extract_hash_prevouts(preimage: bytes) -> bytes:
     This is consistent with passing all_prevouts = 72 zero bytes in tests,
     since extract_outpoint also returns 36 zero bytes.
     """
+    if len(preimage) >= 36:
+        return preimage[4:36]
     return hash256(b'\x00' * 72)
 
 def extract_outpoint(preimage: bytes) -> bytes:
+    if len(preimage) >= 104:
+        return preimage[68:104]
     return b'\x00' * 36
 
 def extract_script_code(preimage: bytes) -> bytes:
-    """Empty scriptCode in test mode. Honest merge is pinned by Spend, not native mocks."""
+    """Return the CompactSize-framed BIP-143 scriptCode field."""
+    if len(preimage) >= 157:
+        return preimage[104:-52]
     return b''
 
 

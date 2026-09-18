@@ -117,20 +117,30 @@ contract FungibleToken is StatefulSmartContract {
             require(sl < 253);
             off = off + 36 + 1 + sl + 4;
         }
-        bigint outCountPrefix = bin2num(cat(substr(otherParentTx, off, 1), pad00));
-        require(outCountPrefix != 254);
-        require(outCountPrefix != 255);
-        bigint outHdr = 1;
-        bigint outCount = outCountPrefix;
-        if (outCountPrefix == 253) {
+        bigint outCountMarker = bin2num(cat(substr(otherParentTx, off, 1), pad00));
+        bigint outCount = outCountMarker;
+        bigint outCountSize = 1;
+        if (outCountMarker == 253) {
             outCount = bin2num(cat(substr(otherParentTx, off + 1, 2), pad00));
-            outHdr = 3;
+            require(outCount >= 253);
+            outCountSize = 3;
+        }
+        if (outCountMarker == 254) {
+            outCount = bin2num(cat(substr(otherParentTx, off + 1, 4), pad00));
+            require(outCount > 65535);
+            outCountSize = 5;
+        }
+        if (outCountMarker == 255) {
+            outCount = bin2num(cat(substr(otherParentTx, off + 1, 8), pad00));
+            require(outCount > 4294967295);
+            outCountSize = 9;
         }
         require(outCount >= 1);
-        bigint marker = bin2num(cat(substr(otherParentTx, off + outHdr + 8, 1), pad00));
+        off = off + outCountSize;
+        bigint marker = bin2num(cat(substr(otherParentTx, off + 8, 1), pad00));
         require(marker == 253);
-        bigint scriptLen = bin2num(cat(substr(otherParentTx, off + outHdr + 9, 2), pad00));
-        bigint scriptStart = off + outHdr + 11;
+        bigint scriptLen = bin2num(cat(substr(otherParentTx, off + 9, 2), pad00));
+        bigint scriptStart = off + 11;
         require(len(otherParentTx) >= scriptStart + scriptLen);
         ByteString companionScript = substr(otherParentTx, scriptStart, scriptLen);
         require(scriptLen > 49);
