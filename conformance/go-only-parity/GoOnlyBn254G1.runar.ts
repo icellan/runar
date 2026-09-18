@@ -6,12 +6,12 @@
 // once, and nothing else in this repository compares those six on a G1 POINT
 // builtin — the existing probe only exercises `bn254FieldMul`.
 import { SmartContract, assert, bn254G1OnCurve, bn254G1Negate } from 'runar-lang';
-import type { ByteString } from 'runar-lang';
+import type { ByteString, Point } from 'runar-lang';
 
 export class GoOnlyBn254G1 extends SmartContract {
   readonly expected: ByteString;
   constructor(expected: ByteString) { super(expected); this.expected = expected; }
-  public verify(p: ByteString) {
+  public verify(p: Point) {
     assert(bn254G1OnCurve(p));
     assert(bn254G1Negate(p) === this.expected);
   }

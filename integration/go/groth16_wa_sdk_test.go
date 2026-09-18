@@ -33,9 +33,9 @@ import (
 // — if the artifact's Groth16WA metadata is missing, the SDK wrapper
 // will panic at the NewGroth16WAContract call, catching any regression
 // in the compiler path.
-func buildGroth16WAArtifactFromCompiler(t *testing.T, vkPath string) *runar.RunarArtifact {
+func buildGroth16WAArtifactFromCompiler(t *testing.T, vkPath string, publicInputs []*big.Int) *runar.RunarArtifact {
 	t.Helper()
-	compArt, err := compiler.CompileGroth16WA(vkPath, compiler.Groth16WAOpts{})
+	compArt, err := compiler.CompileGroth16WA(vkPath, compiler.Groth16WAOpts{PublicInputs: publicInputs})
 	if err != nil {
 		t.Fatalf("compiler.CompileGroth16WA: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestGroth16WASDK_DeployAndCall_SP1(t *testing.T) {
 	// exercises compiler.CompileGroth16WA inside the integration test,
 	// which is the entry point bsv-evm will use.
 	vkPath := sp1FixtureDirForIntegration(t) + "/vk.json"
-	artifact := buildGroth16WAArtifactFromCompiler(t, vkPath)
+	artifact := buildGroth16WAArtifactFromCompiler(t, vkPath, fix.publicInputs)
 	if artifact.Groth16WA.NumPubInputs != len(fix.publicInputs) {
 		t.Fatalf("artifact.NumPubInputs=%d, expected %d", artifact.Groth16WA.NumPubInputs, len(fix.publicInputs))
 	}
@@ -180,7 +180,7 @@ func TestGroth16WASDK_RejectsTamperedWitness(t *testing.T) {
 
 	fix := getGroth16WAFixture(t)
 	vkPath := sp1FixtureDirForIntegration(t) + "/vk.json"
-	artifact := buildGroth16WAArtifactFromCompiler(t, vkPath)
+	artifact := buildGroth16WAArtifactFromCompiler(t, vkPath, fix.publicInputs)
 
 	provider := helpers.NewBatchRPCProvider()
 	defer provider.MineAll()

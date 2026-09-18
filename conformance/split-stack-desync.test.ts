@@ -52,8 +52,8 @@ ${body}
   return {
     ok: r.success === true,
     errors: (r.diagnostics ?? [])
-      .filter((d) => d.severity === 'error')
-      .map((d) => d.message),
+      .filter((d: { severity?: string; message: string }) => d.severity === 'error')
+      .map((d: { message: string }) => d.message),
     hex: r.scriptHex,
   };
 }

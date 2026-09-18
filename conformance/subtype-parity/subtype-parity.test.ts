@@ -417,6 +417,7 @@ describe('cross-tier acceptance parity', () => {
             vb.ok,
             vb.ok ? '' : `${tier.id} REJECTED ${pair.b}:\n${(vb.diag ?? '').slice(0, 800)}`,
           ).toBe(true);
+          if (!va.ok || !vb.ok) return;
           expect(va.hex.length, `${tier.id} produced no hex for ${pair.a}`).toBeGreaterThan(0);
           expect(
             va.hex,
