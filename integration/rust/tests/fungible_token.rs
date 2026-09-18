@@ -12,7 +12,9 @@
 //! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
-use runar_lang::sdk::{CallOptions, DeployOptions, OutputSpec, Provider, RunarContract, SdkValue};
+use runar_lang::sdk::{
+    CallOptions, DeployOptions, OutputSpec, Provider, RunarContract, SdkValue,
+};
 use std::collections::HashMap;
 
 fn hex_encode_str(s: &str) -> String {
@@ -47,26 +49,19 @@ fn test_fungible_token_deploy() {
     let token_id_hex = hex_encode_str("TEST-TOKEN-001");
 
     // Constructor: (owner: PubKey, balance: bigint, mergeBalance: bigint, tokenId: ByteString)
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner.pub_key_hex),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner.pub_key_hex),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
 
     let (deploy_txid, _tx) = contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
     assert!(!deploy_txid.is_empty());
     assert_eq!(deploy_txid.len(), 64);
@@ -85,26 +80,19 @@ fn test_fungible_token_deploy_zero_balance() {
 
     let token_id_hex = hex_encode_str("ZERO-BAL-TOKEN");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner.pub_key_hex),
-            SdkValue::Int(0),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner.pub_key_hex),
+        SdkValue::Int(0),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
 
     let (deploy_txid, _tx) = contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
     assert!(!deploy_txid.is_empty());
 }
@@ -122,26 +110,19 @@ fn test_fungible_token_deploy_large_balance() {
 
     let token_id_hex = hex_encode_str("BIG-TOKEN");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner.pub_key_hex),
-            SdkValue::Int(2_100_000_000_000_000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner.pub_key_hex),
+        SdkValue::Int(2_100_000_000_000_000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
 
     let (deploy_txid, _tx) = contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
     assert!(!deploy_txid.is_empty());
 }
@@ -158,36 +139,25 @@ fn test_fungible_token_send() {
 
     let token_id_hex = "deadbeef".to_string();
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
 
     contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     let (call_txid, _tx) = contract
         .call(
             "send",
-            &[
-                SdkValue::Auto,
-                SdkValue::Bytes(recipient.pub_key_hex),
-                SdkValue::Int(5000),
-            ],
+            &[SdkValue::Auto, SdkValue::Bytes(recipient.pub_key_hex), SdkValue::Int(5000)],
             &mut provider,
             &*signer,
             None,
@@ -208,45 +178,31 @@ fn test_fungible_token_wrong_owner_rejected() {
 
     let token_id_hex = hex_encode_str("REJECT-TOKEN");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
 
     contract
-        .deploy(
-            &mut provider,
-            &*signer_a,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer_a, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
     let mut new_state = HashMap::new();
-    new_state.insert(
-        "owner".to_string(),
-        SdkValue::Bytes(recipient.pub_key_hex.clone()),
-    );
+    new_state.insert("owner".to_string(), SdkValue::Bytes(recipient.pub_key_hex.clone()));
     let call_opts = CallOptions {
         new_state: Some(new_state),
         ..Default::default()
     };
     let result = contract.call(
         "send",
-        &[
-            SdkValue::Auto,
-            SdkValue::Bytes(recipient.pub_key_hex),
-            SdkValue::Int(5000),
-        ],
+        &[SdkValue::Auto, SdkValue::Bytes(recipient.pub_key_hex), SdkValue::Int(5000)],
         &mut provider,
         &*signer_b,
         Some(&call_opts),
@@ -269,26 +225,19 @@ fn test_fungible_token_transfer() {
     let recipient = create_wallet();
     let token_id_hex = hex_encode_str("TRANSFER-TOKEN");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
 
     contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     let call_opts = CallOptions {
@@ -338,47 +287,33 @@ fn test_fungible_token_merge() {
     let token_id_hex = hex_encode_str("MERGE-TOKEN");
 
     // Deploy contract 1 (balance=400)
-    let mut contract1 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(400),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract1 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(400),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract1
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract1 failed");
 
     // Deploy contract 2 (balance=600)
-    let mut contract2 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(600),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract2 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(600),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract2
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract2 failed");
 
     let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
@@ -390,29 +325,21 @@ fn test_fungible_token_merge() {
     // allPrevouts is auto-computed by SDK (null placeholder)
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
-        additional_contract_input_args: Some(vec![vec![
-            SdkValue::Auto,
-            SdkValue::Int(400),
-            SdkValue::Auto,
-            SdkValue::Bytes(parent1.clone()),
-            SdkValue::Int(4000),
-        ]]),
-        outputs: Some(vec![OutputSpec {
-            satoshis: 4000,
-            state: ft_state(&owner_wallet.pub_key_hex, 400, 600),
-        }]),
+        additional_contract_input_args: Some(vec![
+            vec![SdkValue::Auto, SdkValue::Int(400), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
+        ]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 4000,
+                state: ft_state(&owner_wallet.pub_key_hex, 400, 600),
+            },
+        ]),
         ..Default::default()
     };
     let (txid, _) = contract1
         .call(
             "merge",
-            &[
-                SdkValue::Auto,
-                SdkValue::Int(600),
-                SdkValue::Auto,
-                SdkValue::Bytes(parent2.clone()),
-                SdkValue::Int(4000),
-            ],
+            &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
             &mut provider,
             &*signer,
             Some(&call_opts),
@@ -436,46 +363,32 @@ fn test_fungible_token_merge_inflated_other_balance() {
     let (signer, owner_wallet) = create_funded_wallet(&mut provider);
     let token_id_hex = hex_encode_str("INFLATE-TOKEN");
 
-    let mut contract1 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(400),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract1 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(400),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract1
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract1 failed");
 
-    let mut contract2 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(600),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract2 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(600),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract2
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract2 failed");
 
     let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
@@ -487,36 +400,25 @@ fn test_fungible_token_merge_inflated_other_balance() {
     // Outputs won't match → hashOutputs mismatch → rejected
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
-        additional_contract_input_args: Some(vec![vec![
-            SdkValue::Auto,
-            SdkValue::Int(1400),
-            SdkValue::Auto,
-            SdkValue::Bytes(parent1.clone()),
-            SdkValue::Int(4000),
-        ]]),
-        outputs: Some(vec![OutputSpec {
-            satoshis: 4000,
-            state: ft_state(&owner_wallet.pub_key_hex, 400, 1600),
-        }]),
+        additional_contract_input_args: Some(vec![
+            vec![SdkValue::Auto, SdkValue::Int(1400), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
+        ]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 4000,
+                state: ft_state(&owner_wallet.pub_key_hex, 400, 1600),
+            },
+        ]),
         ..Default::default()
     };
     let result = contract1.call(
         "merge",
-        &[
-            SdkValue::Auto,
-            SdkValue::Int(1600),
-            SdkValue::Auto,
-            SdkValue::Bytes(parent2.clone()),
-            SdkValue::Int(4000),
-        ],
+        &[SdkValue::Auto, SdkValue::Int(1600), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
         &mut provider,
         &*signer,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "merge with inflated otherBalance should be rejected"
-    );
+    assert!(result.is_err(), "merge with inflated otherBalance should be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -533,46 +435,32 @@ fn test_fungible_token_merge_negative_other_balance() {
     let (signer, owner_wallet) = create_funded_wallet(&mut provider);
     let token_id_hex = hex_encode_str("DEFLATE-TOKEN");
 
-    let mut contract1 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(400),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract1 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(400),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract1
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract1 failed");
 
-    let mut contract2 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(600),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract2 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(600),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract2
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract2 failed");
 
     let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
@@ -582,36 +470,25 @@ fn test_fungible_token_merge_negative_other_balance() {
 
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
-        additional_contract_input_args: Some(vec![vec![
-            SdkValue::Auto,
-            SdkValue::Int(-1),
-            SdkValue::Auto,
-            SdkValue::Bytes(parent1.clone()),
-            SdkValue::Int(4000),
-        ]]),
-        outputs: Some(vec![OutputSpec {
-            satoshis: 4000,
-            state: ft_state(&owner_wallet.pub_key_hex, 100, 400),
-        }]),
+        additional_contract_input_args: Some(vec![
+            vec![SdkValue::Auto, SdkValue::Int(-1), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
+        ]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 4000,
+                state: ft_state(&owner_wallet.pub_key_hex, 100, 400),
+            },
+        ]),
         ..Default::default()
     };
     let result = contract1.call(
         "merge",
-        &[
-            SdkValue::Auto,
-            SdkValue::Int(100),
-            SdkValue::Auto,
-            SdkValue::Bytes(parent2.clone()),
-            SdkValue::Int(4000),
-        ],
+        &[SdkValue::Auto, SdkValue::Int(100), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
         &mut provider,
         &*signer,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "merge with negative otherBalance should be rejected"
-    );
+    assert!(result.is_err(), "merge with negative otherBalance should be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -628,46 +505,32 @@ fn test_fungible_token_merge_zero_balance() {
     let (signer, owner_wallet) = create_funded_wallet(&mut provider);
     let token_id_hex = hex_encode_str("ZERO-MERGE-TK");
 
-    let mut contract1 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(0),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract1 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(0),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract1
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract1 failed");
 
-    let mut contract2 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(500),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract2 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(500),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract2
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract2 failed");
 
     let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
@@ -677,29 +540,21 @@ fn test_fungible_token_merge_zero_balance() {
 
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
-        additional_contract_input_args: Some(vec![vec![
-            SdkValue::Auto,
-            SdkValue::Int(0),
-            SdkValue::Auto,
-            SdkValue::Bytes(parent1.clone()),
-            SdkValue::Int(4000),
-        ]]),
-        outputs: Some(vec![OutputSpec {
-            satoshis: 4000,
-            state: ft_state(&owner_wallet.pub_key_hex, 0, 500),
-        }]),
+        additional_contract_input_args: Some(vec![
+            vec![SdkValue::Auto, SdkValue::Int(0), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
+        ]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 4000,
+                state: ft_state(&owner_wallet.pub_key_hex, 0, 500),
+            },
+        ]),
         ..Default::default()
     };
     let (txid, _) = contract1
         .call(
             "merge",
-            &[
-                SdkValue::Auto,
-                SdkValue::Int(500),
-                SdkValue::Auto,
-                SdkValue::Bytes(parent2.clone()),
-                SdkValue::Int(4000),
-            ],
+            &[SdkValue::Auto, SdkValue::Int(500), SdkValue::Auto, SdkValue::Bytes(parent2.clone()), SdkValue::Int(4000)],
             &mut provider,
             &*signer,
             Some(&call_opts),
@@ -724,46 +579,32 @@ fn test_fungible_token_merge_wrong_signer() {
     let (signer_b, _wallet_b) = create_funded_wallet(&mut provider);
     let token_id_hex = hex_encode_str("MERGESIG-TOKEN");
 
-    let mut contract1 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(400),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract1 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(400),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract1
-        .deploy(
-            &mut provider,
-            &*signer_a,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer_a, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract1 failed");
 
-    let mut contract2 = RunarContract::new(
-        artifact.clone(),
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(600),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex.clone()),
-        ],
-    );
+    let mut contract2 = RunarContract::new(artifact.clone(), vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(600),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex.clone()),
+    ]);
     contract2
-        .deploy(
-            &mut provider,
-            &*signer_a,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer_a, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy contract2 failed");
 
     let utxo1 = contract1.get_utxo().expect("contract1 has no UTXO").clone();
@@ -773,35 +614,25 @@ fn test_fungible_token_merge_wrong_signer() {
 
     let call_opts = CallOptions {
         additional_contract_inputs: Some(vec![utxo2]),
-        additional_contract_input_args: Some(vec![vec![
-            SdkValue::Auto,
-            SdkValue::Int(400),
-            SdkValue::Auto,
-            SdkValue::Bytes(parent1.clone()),
-            SdkValue::Int(4000),
-        ]]),
-        outputs: Some(vec![OutputSpec {
-            satoshis: 4000,
-            state: ft_state(&owner_wallet.pub_key_hex, 400, 600),
-        }]),
+        additional_contract_input_args: Some(vec![
+            vec![SdkValue::Auto, SdkValue::Int(400), SdkValue::Auto, SdkValue::Bytes(parent1.clone()), SdkValue::Int(4000)],
+        ]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 4000,
+                state: ft_state(&owner_wallet.pub_key_hex, 400, 600),
+            },
+        ]),
         ..Default::default()
     };
     let result = contract1.call(
         "merge",
-        &[
-            SdkValue::Auto,
-            SdkValue::Int(600),
-            SdkValue::Auto,
-            SdkValue::Int(4000),
-        ],
+        &[SdkValue::Auto, SdkValue::Int(600), SdkValue::Auto, SdkValue::Int(4000)],
         &mut provider,
         &*signer_b,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "merge with wrong signer should be rejected"
-    );
+    assert!(result.is_err(), "merge with wrong signer should be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -820,25 +651,18 @@ fn test_fungible_token_transfer_wrong_signer() {
     let recipient = create_wallet();
     let token_id_hex = hex_encode_str("XFERSIG-TOKEN");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
     contract
-        .deploy(
-            &mut provider,
-            &*signer_a,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer_a, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     let call_opts = CallOptions {
@@ -866,10 +690,7 @@ fn test_fungible_token_transfer_wrong_signer() {
         &*signer_b,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "transfer with wrong signer should be rejected"
-    );
+    assert!(result.is_err(), "transfer with wrong signer should be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -887,33 +708,28 @@ fn test_fungible_token_transfer_exact_balance() {
     let recipient = create_wallet();
     let token_id_hex = hex_encode_str("XFER-EXACT-TK");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
     contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     // Transfer entire balance — produces only 1 output (no change)
     let call_opts = CallOptions {
-        outputs: Some(vec![OutputSpec {
-            satoshis: 5000,
-            state: ft_state(&recipient.pub_key_hex, 1000, 0),
-        }]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 5000,
+                state: ft_state(&recipient.pub_key_hex, 1000, 0),
+            },
+        ]),
         ..Default::default()
     };
     let (txid, _) = contract
@@ -949,32 +765,27 @@ fn test_fungible_token_transfer_zero_amount_rejected() {
     let recipient = create_wallet();
     let token_id_hex = hex_encode_str("XFER-ZERO-TK");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
     contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     let call_opts = CallOptions {
-        outputs: Some(vec![OutputSpec {
-            satoshis: 5000,
-            state: ft_state(&owner_wallet.pub_key_hex, 1000, 0),
-        }]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 5000,
+                state: ft_state(&owner_wallet.pub_key_hex, 1000, 0),
+            },
+        ]),
         ..Default::default()
     };
     let result = contract.call(
@@ -989,10 +800,7 @@ fn test_fungible_token_transfer_zero_amount_rejected() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "transfer of zero amount should be rejected"
-    );
+    assert!(result.is_err(), "transfer of zero amount should be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,32 +818,27 @@ fn test_fungible_token_transfer_exceeds_balance_rejected() {
     let recipient = create_wallet();
     let token_id_hex = hex_encode_str("XFER-EXCEED-TK");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
     contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     let call_opts = CallOptions {
-        outputs: Some(vec![OutputSpec {
-            satoshis: 5000,
-            state: ft_state(&recipient.pub_key_hex, 1001, 0),
-        }]),
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 5000,
+                state: ft_state(&recipient.pub_key_hex, 1001, 0),
+            },
+        ]),
         ..Default::default()
     };
     let result = contract.call(
@@ -1050,10 +853,7 @@ fn test_fungible_token_transfer_exceeds_balance_rejected() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "transfer exceeding balance should be rejected"
-    );
+    assert!(result.is_err(), "transfer exceeding balance should be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,25 +871,18 @@ fn test_fungible_token_transfer_inflated_balance() {
     let recipient = create_wallet();
     let token_id_hex = hex_encode_str("XFER-INFLATE-TK");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
     contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     // Attacker claims outputs totaling 1300 from a 1000-balance UTXO.
@@ -1120,10 +913,7 @@ fn test_fungible_token_transfer_inflated_balance() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "transfer with inflated output totals should be rejected"
-    );
+    assert!(result.is_err(), "transfer with inflated output totals should be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,25 +931,18 @@ fn test_fungible_token_transfer_deflated_balance() {
     let recipient = create_wallet();
     let token_id_hex = hex_encode_str("XFER-DEFLATE-TK");
 
-    let mut contract = RunarContract::new(
-        artifact,
-        vec![
-            SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
-            SdkValue::Int(1000),
-            SdkValue::Int(0),
-            SdkValue::Bytes(token_id_hex),
-        ],
-    );
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
     contract
-        .deploy(
-            &mut provider,
-            &*signer,
-            &DeployOptions {
-                satoshis: 5000,
-                change_address: None,
-                ..Default::default()
-            },
-        )
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+            ..Default::default()
+        })
         .expect("deploy failed");
 
     // Attacker claims outputs totaling only 500 from a 1000-balance UTXO.
@@ -1190,8 +973,5 @@ fn test_fungible_token_transfer_deflated_balance() {
         &*signer,
         Some(&call_opts),
     );
-    assert!(
-        result.is_err(),
-        "transfer with deflated output totals should be rejected"
-    );
+    assert!(result.is_err(), "transfer with deflated output totals should be rejected");
 }

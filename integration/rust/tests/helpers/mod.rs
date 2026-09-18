@@ -1,15 +1,15 @@
 #[allow(dead_code)]
 pub mod crypto;
 
-use bsv::transaction::Transaction as BsvTransaction;
-use k256::ecdsa::SigningKey;
-use ripemd::Ripemd160;
 use runar_lang::sdk::{
     extract_state_from_script, ExternalSigner, LocalSigner, Provider, RPCProvider, RunarArtifact,
     SdkValue, Signer, TransactionData, Utxo,
 };
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use bsv::transaction::Transaction as BsvTransaction;
+use sha2::{Digest, Sha256};
+use ripemd::Ripemd160;
+use k256::ecdsa::SigningKey;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Wrapper around `RPCProvider` that prints the raw tx size in bytes on
@@ -86,15 +86,12 @@ pub fn read_on_chain_state(
     let tx = provider
         .get_transaction(&utxo.txid)
         .unwrap_or_else(|e| panic!("read_on_chain_state: get_transaction({}): {}", utxo.txid, e));
-    let output = tx
-        .outputs
-        .get(utxo.output_index as usize)
-        .unwrap_or_else(|| {
-            panic!(
-                "read_on_chain_state: tx {} has no output {}",
-                utxo.txid, utxo.output_index
-            )
-        });
+    let output = tx.outputs.get(utxo.output_index as usize).unwrap_or_else(|| {
+        panic!(
+            "read_on_chain_state: tx {} has no output {}",
+            utxo.txid, utxo.output_index
+        )
+    });
     extract_state_from_script(artifact, &output.script)
         .unwrap_or_else(|e| {
             panic!(
@@ -142,12 +139,13 @@ pub fn compile_contract(source_path: &str) -> RunarArtifact {
 /// Compile a contract from source code and a file name.
 /// Returns the SDK-compatible `RunarArtifact`.
 pub fn compile_source(source: &str, file_name: &str) -> RunarArtifact {
-    let compiler_artifact = runar_compiler_rust::compile_from_source_str(source, Some(file_name))
-        .unwrap_or_else(|e| panic!("compile failed for {}: {}", file_name, e));
+    let compiler_artifact =
+        runar_compiler_rust::compile_from_source_str(source, Some(file_name))
+            .unwrap_or_else(|e| panic!("compile failed for {}: {}", file_name, e));
 
     // Bridge: serialize compiler artifact to JSON, deserialize into SDK artifact.
-    let json =
-        serde_json::to_string(&compiler_artifact).expect("failed to serialize compiler artifact");
+    let json = serde_json::to_string(&compiler_artifact)
+        .expect("failed to serialize compiler artifact");
     serde_json::from_str::<RunarArtifact>(&json)
         .expect("failed to deserialize SDK artifact from compiler JSON")
 }
@@ -225,18 +223,14 @@ pub fn rpc_call(method: &str, params: &[serde_json::Value]) -> Result<serde_json
          Connection: close\r\n\
          \r\n\
          {}",
-        path,
-        host_port,
-        auth,
-        body_str.len(),
-        body_str,
+        path, host_port, auth, body_str.len(), body_str,
     );
 
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
-    let mut stream =
-        TcpStream::connect(host_port).map_err(|e| format!("connect to {}: {}", host_port, e))?;
+    let mut stream = TcpStream::connect(host_port)
+        .map_err(|e| format!("connect to {}: {}", host_port, e))?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .map_err(|e| format!("set timeout: {}", e))?;
@@ -261,13 +255,8 @@ pub fn rpc_call(method: &str, params: &[serde_json::Value]) -> Result<serde_json
         json_str.to_string()
     };
 
-    let json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
-        format!(
-            "parse response: {} (body: {})",
-            e,
-            &json_str[..json_str.len().min(200)]
-        )
-    })?;
+    let json: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("parse response: {} (body: {})", e, &json_str[..json_str.len().min(200)]))?;
 
     if let Some(err) = json.get("error") {
         if !err.is_null() {
@@ -284,7 +273,8 @@ pub fn rpc_call(method: &str, params: &[serde_json::Value]) -> Result<serde_json
 
 /// Mine the specified number of blocks on regtest.
 pub fn mine(blocks: usize) {
-    rpc_call("generate", &[serde_json::Value::from(blocks as u64)]).expect("failed to mine blocks");
+    rpc_call("generate", &[serde_json::Value::from(blocks as u64)])
+        .expect("failed to mine blocks");
 }
 
 /// Fund an address with the given BTC amount on regtest.
@@ -342,7 +332,8 @@ pub fn create_wallet() -> TestWallet {
     let idx = next_wallet_index();
     let mut key_bytes = [0u8; 32];
     key_bytes[24..32].copy_from_slice(&idx.to_be_bytes());
-    let signing_key = SigningKey::from_bytes((&key_bytes).into()).expect("valid private key");
+    let signing_key = SigningKey::from_bytes((&key_bytes).into())
+        .expect("valid private key");
     let verifying_key = signing_key.verifying_key();
     let point = verifying_key.to_encoded_point(true);
     let pubkey_bytes = point.as_bytes();
@@ -367,12 +358,14 @@ pub fn create_wallet() -> TestWallet {
 
 /// Create a funded wallet and return (ExternalSigner wrapping LocalSigner, TestWallet).
 /// The ExternalSigner returns the regtest address but delegates signing to LocalSigner.
-pub fn create_funded_wallet(_provider: &mut LoggingRPCProvider) -> (Box<dyn Signer>, TestWallet) {
+pub fn create_funded_wallet(
+    _provider: &mut LoggingRPCProvider,
+) -> (Box<dyn Signer>, TestWallet) {
     let wallet = create_wallet();
     fund_address(&wallet.address, 1.0);
 
-    let local_signer =
-        LocalSigner::new(&wallet.priv_key_hex).expect("failed to create LocalSigner");
+    let local_signer = LocalSigner::new(&wallet.priv_key_hex)
+        .expect("failed to create LocalSigner");
 
     // Capture values for closures
     let pub_key = wallet.pub_key_hex.clone();
@@ -452,22 +445,15 @@ fn base58_encode(data: &[u8]) -> String {
 }
 
 fn base64_encode(input: &str) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = input.as_bytes();
     let mut result = String::new();
     let mut i = 0;
     while i < bytes.len() {
         let b0 = bytes[i] as u32;
-        let b1 = if i + 1 < bytes.len() {
-            bytes[i + 1] as u32
-        } else {
-            0
-        };
-        let b2 = if i + 2 < bytes.len() {
-            bytes[i + 2] as u32
-        } else {
-            0
-        };
+        let b1 = if i + 1 < bytes.len() { bytes[i + 1] as u32 } else { 0 };
+        let b2 = if i + 2 < bytes.len() { bytes[i + 2] as u32 } else { 0 };
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
         result.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
