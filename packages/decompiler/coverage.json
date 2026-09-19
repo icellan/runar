@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-19T00:54:44.462Z",
+  "generatedAt": "2026-09-19T02:18:26.381Z",
   "summary": {
     "byte-match": 87,
     "byte-diff": 0,
@@ -8,10 +8,10 @@
     "skipped": 6
   },
   "pathBreakdown": {
-    "template": 77,
+    "template": 82,
     "assert-recognizer": 1,
-    "symexec": 2,
-    "raw_script": 7
+    "symexec": 0,
+    "raw_script": 4
   },
   "rows": [
     {
@@ -82,7 +82,7 @@
     {
       "id": "branched-readonly-len/BranchedReadonlyLen",
       "outcome": "byte-match",
-      "recoveryPath": "raw_script"
+      "recoveryPath": "template"
     },
     {
       "id": "bsv20-token/BSV20Token",
@@ -242,7 +242,7 @@
     {
       "id": "message-board/MessageBoard",
       "outcome": "byte-match",
-      "recoveryPath": "symexec"
+      "recoveryPath": "template"
     },
     {
       "id": "multi-method/MultiMethod",
@@ -402,12 +402,12 @@
     {
       "id": "state-covenant-mechanics/StateCovenantMechanics",
       "outcome": "byte-match",
-      "recoveryPath": "raw_script"
+      "recoveryPath": "template"
     },
     {
       "id": "state-covenant/StateCovenant",
       "outcome": "byte-match",
-      "recoveryPath": "raw_script"
+      "recoveryPath": "template"
     },
     {
       "id": "state-ripemd160/HashRegistry",
@@ -432,7 +432,7 @@
     {
       "id": "terminal-varlen-read/TerminalVarlenRead",
       "outcome": "byte-match",
-      "recoveryPath": "symexec"
+      "recoveryPath": "template"
     },
     {
       "id": "tic-tac-toe/TicTacToe",
