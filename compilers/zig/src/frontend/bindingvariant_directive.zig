@@ -42,32 +42,65 @@ pub fn parseVariant(allocator: std.mem.Allocator, variant_text: []const u8) Pars
     return .{ .err = std.fmt.allocPrint(allocator, "@bindingVariant: unknown variant '{s}' (valid: lowS, all)", .{raw}) catch "@bindingVariant: unknown variant (valid: lowS, all)" };
 }
 
+fn hasBindingVariantToken(s: []const u8) bool {
+    const marker = "@bindingVariant";
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, s, start, marker)) |i| {
+        const after = i + marker.len;
+        if (after >= s.len or !(std.ascii.isAlphanumeric(s[after]) or s[after] == '_')) return true;
+        start = after;
+    }
+    return false;
+}
+
+const line_start_err = "@bindingVariant must be a JSDoc tag at the start of a comment line (`@bindingVariant all` or `@bindingVariant lowS`)";
+
+fn startsWith(hay: []const u8, needle: []const u8) bool {
+    return hay.len >= needle.len and std.mem.eql(u8, hay[0..needle.len], needle);
+}
+
+fn stripCommentLine(raw: []const u8) []const u8 {
+    var s = raw;
+    while (s.len > 0 and (s[0] == ' ' or s[0] == '\t')) s = s[1..];
+    if (startsWith(s, "//")) {
+        s = s[2..];
+        while (s.len > 0 and (s[0] == ' ' or s[0] == '\t')) s = s[1..];
+    } else if (startsWith(s, "/**")) {
+        s = s[3..];
+        while (s.len > 0 and (s[0] == ' ' or s[0] == '\t')) s = s[1..];
+    } else if (startsWith(s, "/*")) {
+        s = s[2..];
+        while (s.len > 0 and (s[0] == ' ' or s[0] == '\t')) s = s[1..];
+    } else if (s.len > 0 and s[0] == '*') {
+        s = s[1..];
+        while (s.len > 0 and (s[0] == ' ' or s[0] == '\t')) s = s[1..];
+    }
+    while (s.len > 0 and (s[s.len - 1] == ' ' or s[s.len - 1] == '\t' or s[s.len - 1] == '\r')) s = s[0 .. s.len - 1];
+    if (s.len >= 2 and s[s.len - 2] == '*' and s[s.len - 1] == '/') {
+        s = s[0 .. s.len - 2];
+        while (s.len > 0 and (s[s.len - 1] == ' ' or s[s.len - 1] == '\t')) s = s[0 .. s.len - 1];
+    }
+    return s;
+}
+
 /// Extract and parse a `@bindingVariant` directive from a block of comment text.
 /// Returns null when no `@bindingVariant` token is present; otherwise the parse
-/// result (which may itself be an error). Mirrors the TS/Go
-/// `@bindingVariant\s+([A-Za-z0-9_]*?)(?:\*\/|\n|\r|\s|$)`.
+/// result. Only a JSDoc/line-comment tag at the start of a comment line is a
+/// directive; mid-sentence mentions and trailing junk error.
 pub fn extractDirective(allocator: std.mem.Allocator, comment_text: []const u8) ?ParseResult {
-    const marker = "@bindingVariant";
-    const pos = std.mem.indexOf(u8, comment_text, marker) orelse return null;
-    const after = pos + marker.len;
-    // Match the `@bindingVariant\s+`: at least one whitespace must follow the
-    // marker, otherwise `@bindingVariantType`-style identifiers are NOT directives.
-    if (after >= comment_text.len or !(comment_text[after] == ' ' or comment_text[after] == '\t' or comment_text[after] == '\n' or comment_text[after] == '\r')) {
-        return null;
+    if (!hasBindingVariantToken(comment_text)) return null;
+    var it = std.mem.splitScalar(u8, comment_text, '\n');
+    while (it.next()) |raw| {
+        const line = stripCommentLine(raw);
+        if (!startsWith(line, "@bindingVariant")) continue;
+        const rest = line["@bindingVariant".len..];
+        if (rest.len > 0 and (std.ascii.isAlphanumeric(rest[0]) or rest[0] == '_')) continue;
+        if (rest.len > 0 and rest[0] != ' ' and rest[0] != '\t') {
+            return .{ .err = line_start_err };
+        }
+        return parseVariant(allocator, rest);
     }
-    // Collect the variant token up to `*/`, newline, carriage return, EOF, or any
-    // char outside the [A-Za-z0-9_] variant alphabet (so trailing prose/space ends
-    // the capture). Leading/trailing whitespace is trimmed by parseVariant.
-    const rest = comment_text[after..];
-    // Skip leading whitespace so the captured token starts at the variant name.
-    var start: usize = 0;
-    while (start < rest.len and (rest[start] == ' ' or rest[start] == '\t')) : (start += 1) {}
-    var end: usize = start;
-    while (end < rest.len) : (end += 1) {
-        const c = rest[end];
-        if (!(std.ascii.isAlphanumeric(c) or c == '_')) break;
-    }
-    return parseVariant(allocator, rest[start..end]);
+    return .{ .err = line_start_err };
 }
 
 // ============================================================================

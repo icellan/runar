@@ -24,7 +24,8 @@ module RunarCompiler
 
       # Regex extracting the value following an `@bindingVariant` token in a
       # block of comment text. Mirrors the TS BINDING_VARIANT_RE.
-      BINDING_VARIANT_RE = /@bindingVariant\s+([A-Za-z0-9_]*?)(?:\*\/|\n|\r|\s|$)/
+      BINDING_VARIANT_TOKEN_RE = /@bindingVariant\b/
+      LINE_START_ERR = "@bindingVariant must be a JSDoc tag at the start of a comment line (`@bindingVariant all` or `@bindingVariant lowS`)"
 
       # Parse the value text of a `@bindingVariant` directive.
       #
@@ -50,11 +51,30 @@ module RunarCompiler
       # Extract and parse an `@bindingVariant` directive from a block of comment
       # text. Returns nil when no `@bindingVariant` token is present, otherwise
       # the parse result ({value:} or {error:}).
-      def extract_binding_variant_directive(comment_text)
-        m = BINDING_VARIANT_RE.match(comment_text)
-        return nil if m.nil?
+      def strip_comment_line(raw)
+        s = raw.sub(/\A[ \t]+/, "")
+        s = s.sub(%r{\A(?://|/\*\*?|\*)[ \t]*}, "")
+        s = s.sub(/[ \t]*(?:\*\/)?[ \t]*\z/, "")
+        s
+      end
 
-        parse_binding_variant(m[1] || "")
+      def extract_binding_variant_directive(comment_text)
+        return nil unless comment_text.match?(BINDING_VARIANT_TOKEN_RE)
+
+        comment_text.each_line do |raw|
+          line = strip_comment_line(raw.chomp)
+          next unless line.start_with?("@bindingVariant")
+
+          rest = line["@bindingVariant".length..]
+          if rest && !rest.empty? && rest[0].match?(/[A-Za-z0-9_]/)
+            next
+          end
+          if rest && !rest.empty? && rest[0] != " " && rest[0] != "\t"
+            return { error: LINE_START_ERR }
+          end
+          return parse_binding_variant(rest.to_s.strip)
+        end
+        { error: LINE_START_ERR }
       end
     end
   end

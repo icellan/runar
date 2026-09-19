@@ -26,42 +26,61 @@ pub fn parse_binding_variant(variant_text: &str) -> Result<String, String> {
     }
 }
 
-/// Extract and parse an `@bindingVariant` directive from a block of comment
-/// text. Returns `None` when no `@bindingVariant <variant>` token is present,
-/// otherwise the parse result (variant or error). Mirrors the reference regex
-/// `/@bindingVariant\s+([A-Za-z0-9_]*?)(?:\*\/|\n|\r|\s|$)/`.
-pub fn extract_binding_variant_directive(comment_text: &str) -> Option<Result<String, String>> {
-    let idx = comment_text.find("@bindingVariant")?;
-    let after = &comment_text[idx + "@bindingVariant".len()..];
-
-    // The reference regex requires `\s+` immediately after `@bindingVariant`;
-    // without leading whitespace the directive does not match (falls back to the
-    // default lowS).
-    let mut chars = after.char_indices();
-    match chars.next() {
-        Some((_, c)) if c.is_whitespace() => {}
-        _ => return None,
-    }
-
-    // Skip the run of leading whitespace, then capture `[A-Za-z0-9_]*` up to the
-    // first terminator (`*/`, newline, CR, whitespace, or end).
-    let token_start = after
-        .char_indices()
-        .find(|(_, c)| !c.is_whitespace())
-        .map(|(i, _)| i)
-        .unwrap_or(after.len());
-    let rest = &after[token_start..];
-    let mut end = rest.len();
-    for (i, ch) in rest.char_indices() {
-        let is_ident = ch.is_ascii_alphanumeric() || ch == '_';
-        if !is_ident {
-            end = i;
-            break;
+fn has_binding_variant_token(s: &str) -> bool {
+    let marker = "@bindingVariant";
+    s.match_indices(marker).any(|(i, _)| {
+        let after = i + marker.len();
+        match s.as_bytes().get(after) {
+            None => true,
+            Some(c) => !(c.is_ascii_alphanumeric() || *c == b'_'),
         }
-    }
-    let token = &rest[..end];
+    })
+}
 
-    Some(parse_binding_variant(token))
+const LINE_START_ERR: &str =
+    "@bindingVariant must be a JSDoc tag at the start of a comment line (`@bindingVariant all` or `@bindingVariant lowS`)";
+
+fn strip_comment_line(raw: &str) -> String {
+    let mut s = raw.trim_start_matches([' ', '\t']);
+    if let Some(rest) = s.strip_prefix("//") {
+        s = rest.trim_start_matches([' ', '\t']);
+    } else if let Some(rest) = s.strip_prefix("/**") {
+        s = rest.trim_start_matches([' ', '\t']);
+    } else if let Some(rest) = s.strip_prefix("/*") {
+        s = rest.trim_start_matches([' ', '\t']);
+    } else if let Some(rest) = s.strip_prefix('*') {
+        s = rest.trim_start_matches([' ', '\t']);
+    }
+    s = s.trim_end_matches([' ', '\t']);
+    if let Some(rest) = s.strip_suffix("*/") {
+        s = rest.trim_end_matches([' ', '\t']);
+    }
+    s.to_string()
+}
+
+/// Extract and parse an `@bindingVariant` directive from a block of comment
+/// text. Returns `None` when no `@bindingVariant` token is present, otherwise
+/// the parse result (variant or error). Only a JSDoc/line-comment tag at the
+/// start of a comment line is a directive.
+pub fn extract_binding_variant_directive(comment_text: &str) -> Option<Result<String, String>> {
+    if !has_binding_variant_token(comment_text) {
+        return None;
+    }
+    for raw in comment_text.split('\n') {
+        let line = strip_comment_line(raw.trim_end_matches('\r'));
+        if !line.starts_with("@bindingVariant") {
+            continue;
+        }
+        let rest = &line["@bindingVariant".len()..];
+        if rest.bytes().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+            continue;
+        }
+        if !rest.is_empty() && rest.as_bytes()[0] != b' ' && rest.as_bytes()[0] != b'\t' {
+            return Some(Err(LINE_START_ERR.to_string()));
+        }
+        return Some(parse_binding_variant(rest.trim()));
+    }
+    Some(Err(LINE_START_ERR.to_string()))
 }
 
 #[cfg(test)]

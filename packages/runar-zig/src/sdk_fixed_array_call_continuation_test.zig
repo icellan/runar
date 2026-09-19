@@ -28,8 +28,8 @@
 //!
 //! Zig has NO ScriptVM (see CLAUDE.md), so the proof is a byte assertion on the
 //! built continuation output, cross-checked against the TypeScript SDK driven
-//! over the SAME artifact: TS deploys 878 bytes ending `6a` + 32 zero bytes and
-//! calls `bump(0)` to a 878-byte continuation ending `6a 0100000000000000` + 24
+//! over the SAME artifact: TS deploys 881 bytes ending `6a` + 32 zero bytes and
+//! calls `bump(0)` to a 881-byte continuation ending `6a 0100000000000000` + 24
 //! zero bytes.
 //!
 //! The embedded artifact is `examples/ts/fixed-array-write/ArrayWrite.runar.ts`
@@ -156,13 +156,13 @@ test "FixedArray call(): the continuation commits the POST-call state, not the p
     const deploy_txid = try contract.deploy(prov.provider(), deployer.signer(), .{ .satoshis = 1000 });
     defer allocator.free(deploy_txid);
 
-    // Deploy anchor: 878 bytes ending in OP_RETURN + 4 zero words — the value
+    // Deploy anchor: 881 bytes ending in OP_RETURN + 4 zero words — the value
     // the other six tiers agree on for this fixture.
     {
         const txs = prov.getBroadcastedTxs();
         const outs = try parseOutputs(allocator, txs[0]);
         defer allocator.free(outs);
-        try std.testing.expectEqual(@as(usize, 878), outs[0].script.len / 2);
+        try std.testing.expectEqual(@as(usize, 881), outs[0].script.len / 2);
         try std.testing.expectEqualStrings(ZERO_WORD ** 4, stateTail(outs[0].script));
     }
 
@@ -192,7 +192,7 @@ test "FixedArray call(): the continuation commits the POST-call state, not the p
     try std.testing.expect(outs.len >= 1);
 
     const cont = outs[0].script;
-    try std.testing.expectEqual(@as(usize, 878), cont.len / 2);
+    try std.testing.expectEqual(@as(usize, 881), cont.len / 2);
     // TypeScript, driven over this same artifact, ends its continuation
     // `...6a 0100000000000000` + 24 zero bytes.
     try std.testing.expectEqualStrings(ONE_WORD ++ ZERO_WORD ** 3, stateTail(cont));

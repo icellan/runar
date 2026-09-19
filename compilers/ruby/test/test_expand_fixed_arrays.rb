@@ -415,4 +415,34 @@ class TestExpandFixedArrays < Minitest::Test
     assert_equal 0x43, bump_after.sighash_type,
                  "expansion dropped sighash_type -- the method silently reverts to ALL|FORKID"
   end
+
+  def test_preserves_binding_variant_through_expansion
+    source = <<~TS
+      class Boardy extends StatefulSmartContract {
+        board: FixedArray<bigint, 3> = [0n, 0n, 0n];
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @bindingVariant all */
+        public bump(): void {
+          this.addOutput(1000n, this.board[0], this.board[1], this.board[2], this.n);
+        }
+      }
+    TS
+
+    before = parse_contract(source)
+    bump_before = before.methods.find { |m| m.name == "bump" }
+    refute_nil bump_before, "no bump method parsed"
+    assert_equal "all", bump_before.binding_variant,
+                 "the directive did not reach the AST -- this test would be vacuous"
+
+    result = expand(source)
+    assert_empty result.errors.map(&:format_message)
+    assert_operator result.contract.properties.length, :>=, 3,
+                    "expansion did not expand: #{property_names(result.contract).inspect}"
+
+    bump_after = result.contract.methods.find { |m| m.name == "bump" }
+    refute_nil bump_after, "bump vanished during expansion"
+    assert_equal "all", bump_after.binding_variant,
+                 "expansion dropped binding_variant -- the method silently reverts to lowS"
+  end
 end

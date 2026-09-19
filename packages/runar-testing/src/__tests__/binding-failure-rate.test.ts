@@ -160,6 +160,6 @@ describe('Any-S binding failure rates', () => {
       const ctx = { ...v1, lockTime: i * 101 + 1, sourceSatoshis: 100000 + i };
       if (interp('all', ctx).ok) accepted++;
     }
-    expect(accepted, "'all' should be broadly rejected at nVersion=1").toBeLessThan(60);
+    expect(accepted, "'all' is rejected at nVersion=1 (LOW_S + MINIMALDATA)").toBe(0);
   });
 });

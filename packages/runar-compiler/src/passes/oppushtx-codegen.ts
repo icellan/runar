@@ -330,7 +330,11 @@ function anySBindingBytes(sighashFlag: number, variant: BindingVariant = 'lowS')
   for (let i = 0; i < 31; i++) op(OP.OP_SWAP, OP.OP_CAT);
   // s0 = z + 1 (C=1). Both variants share the C=1 key (038ff83d…); they differ in
   // whether the low-S fixup and mod-n normalisation are applied on top.
-  if (variant === 'lowS') {
+  // Fail-closed: only the exact token `all` opts into the compact blob. Peers
+  // encode the same polarity (`if variant == "all"`); the inverse (everything
+  // except `'lowS'` is `all`) would emit an unspendable-at-nVersion=1 script
+  // for empty / unknown / `--from-ir` junk.
+  if (variant !== 'all') {
     // little-endian digest ‖ 0x00 sign byte, then OP_BIN2NUM to MINIMALLY encode
     // it before the arithmetic. The 0x00 is a redundant leading zero whenever the
     // digest's most-significant byte is < 0x80 (~half the time); feeding that
@@ -362,7 +366,7 @@ function anySBindingBytes(sighashFlag: number, variant: BindingVariant = 'lowS')
   // s (minimal LE script number) → big-endian DER magnitude: fan out one byte
   // while the remainder is a nonzero number (empty splits once exhausted). low-S
   // ⇒ s ≤ 32 bytes (31 fan-outs); 'all' may leave a 33-byte s (32 fan-outs).
-  const fan = variant === 'lowS' ? 31 : 32;
+  const fan = variant === 'all' ? 32 : 31;
   for (let i = 0; i < fan; i++) op(OP.OP_DUP, OP.OP_0NOTEQUAL, OP.OP_SPLIT);
   for (let i = 0; i < fan; i++) op(OP.OP_SWAP, OP.OP_CAT);
   // sig = 0x30 ‖ totLen ‖ 0x02 0x20 Gx ‖ 0x02 ‖ len(s) ‖ s ‖ flag

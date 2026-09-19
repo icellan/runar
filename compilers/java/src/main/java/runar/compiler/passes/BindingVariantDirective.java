@@ -1,7 +1,6 @@
 package runar.compiler.passes;
 
 import java.util.Set;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -57,26 +56,47 @@ public final class BindingVariantDirective {
         return Result.ok(raw);
     }
 
-    /**
-     * Extract the value following an {@code @bindingVariant} token in a block of
-     * comment text. Mirrors the TS {@code BINDING_VARIANT_RE}.
-     */
-    private static final Pattern BINDING_VARIANT_RE =
-        Pattern.compile("@bindingVariant\\s+([A-Za-z0-9_]*?)(?:\\*/|\\n|\\r|\\s|$)");
+    private static final Pattern BINDING_VARIANT_TOKEN =
+        Pattern.compile("@bindingVariant\\b");
+    private static final String LINE_START_ERR =
+        "@bindingVariant must be a JSDoc tag at the start of a comment line "
+        + "(`@bindingVariant all` or `@bindingVariant lowS`)";
+
+    private static boolean isIdentChar(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+    }
+
+    private static String stripCommentLine(String raw) {
+        String s = raw.replaceFirst("^[ \\t]+", "");
+        if (s.startsWith("//")) s = s.substring(2).replaceFirst("^[ \\t]+", "");
+        else if (s.startsWith("/**")) s = s.substring(3).replaceFirst("^[ \\t]+", "");
+        else if (s.startsWith("/*")) s = s.substring(2).replaceFirst("^[ \\t]+", "");
+        else if (s.startsWith("*")) s = s.substring(1).replaceFirst("^[ \\t]+", "");
+        s = s.replaceFirst("[ \\t]+$", "");
+        if (s.endsWith("*/")) s = s.substring(0, s.length() - 2).replaceFirst("[ \\t]+$", "");
+        return s;
+    }
 
     /**
      * Extract and parse a {@code @bindingVariant} directive from a block of
      * comment text. Returns {@code null} when no {@code @bindingVariant} token is
-     * present, otherwise the parse result (value or error).
+     * present, otherwise the parse result (value or error). Only a JSDoc/line
+     * tag at the start of a comment line is a directive.
      */
     public static Result extractBindingVariantDirective(String commentText) {
-        if (commentText == null) {
+        if (commentText == null || !BINDING_VARIANT_TOKEN.matcher(commentText).find()) {
             return null;
         }
-        Matcher m = BINDING_VARIANT_RE.matcher(commentText);
-        if (!m.find()) {
-            return null;
+        for (String raw : commentText.split("\\R", -1)) {
+            String line = stripCommentLine(raw);
+            if (!line.startsWith("@bindingVariant")) continue;
+            String rest = line.substring("@bindingVariant".length());
+            if (!rest.isEmpty() && isIdentChar(rest.charAt(0))) continue;
+            if (!rest.isEmpty() && rest.charAt(0) != ' ' && rest.charAt(0) != '\t') {
+                return Result.err(LINE_START_ERR);
+            }
+            return parseBindingVariant(rest.trim());
         }
-        return parseBindingVariant(m.group(1) == null ? "" : m.group(1));
+        return Result.err(LINE_START_ERR);
     }
 }

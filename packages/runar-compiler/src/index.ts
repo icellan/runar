@@ -726,6 +726,7 @@ export function loadANFFromJSON(json: string): ANFProgram {
   }
   coerceNumericBigInts(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
+  assertBindingVariant(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);
   return program as ANFProgram;
 }
@@ -906,6 +907,36 @@ function assertAddOutputArity(program: ANFProgram): void {
     }
   };
 
+  for (const method of program.methods) {
+    walk(method.body ?? [], method.name);
+  }
+}
+
+/**
+ * `--from-ir` trust boundary for `check_preimage.bindingVariant`.
+ * Unknown / empty / misspelled values must not fail-open to the compact `all`
+ * blob (unspendable at nVersion=1). Only `'all'` opts in; anything else that
+ * is present and not `'lowS'` is rejected here rather than at emit.
+ */
+function assertBindingVariant(program: ANFProgram): void {
+  const walk = (bindings: readonly ANFBinding[], methodName: string): void => {
+    for (const binding of bindings) {
+      const value = binding.value as { kind?: string } & Record<string, unknown>;
+      if (value?.kind === 'check_preimage' && value.bindingVariant !== undefined) {
+        const v = value.bindingVariant;
+        if (v !== 'lowS' && v !== 'all') {
+          throw new Error(
+            `loadANFFromJSON: check_preimage in method '${methodName}' has ` +
+              `bindingVariant ${JSON.stringify(v)} (valid: "lowS", "all")`,
+          );
+        }
+      }
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = (value as Record<string, unknown>)[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[], methodName);
+      }
+    }
+  };
   for (const method of program.methods) {
     walk(method.body ?? [], method.name);
   }

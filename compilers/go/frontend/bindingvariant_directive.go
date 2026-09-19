@@ -43,17 +43,54 @@ func parseBindingVariant(variantText string) bindingVariantParseResult {
 	return bindingVariantParseResult{value: raw}
 }
 
-// bindingVariantRE extracts the value following an `@bindingVariant` token in a
-// block of comment text. Mirrors the TS BINDING_VARIANT_RE.
-var bindingVariantRE = regexp.MustCompile(`@bindingVariant\s+([A-Za-z0-9_]*?)(?:\*/|\n|\r|\s|$)`)
+var bindingVariantTokenRE = regexp.MustCompile(`@bindingVariant\b`)
+
+const bindingVariantLineStartErr = "@bindingVariant must be a JSDoc tag at the start of a comment line (`@bindingVariant all` or `@bindingVariant lowS`)"
+
+func isBindingVariantIdentChar(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+func stripBindingVariantCommentLine(raw string) string {
+	s := strings.TrimLeft(raw, " \t")
+	switch {
+	case strings.HasPrefix(s, "//"):
+		s = strings.TrimLeft(s[2:], " \t")
+	case strings.HasPrefix(s, "/**"):
+		s = strings.TrimLeft(s[3:], " \t")
+	case strings.HasPrefix(s, "/*"):
+		s = strings.TrimLeft(s[2:], " \t")
+	case strings.HasPrefix(s, "*"):
+		s = strings.TrimLeft(s[1:], " \t")
+	}
+	s = strings.TrimRight(s, " \t")
+	if strings.HasSuffix(s, "*/") {
+		s = strings.TrimRight(s[:len(s)-2], " \t")
+	}
+	return s
+}
 
 // extractBindingVariantDirective extracts and parses a `@bindingVariant`
 // directive from a block of comment text. Returns (result, true) when the token
-// is present, else (_, false).
+// is present, else (_, false). Only a JSDoc/line-comment tag at the start of a
+// comment line is a directive; mid-sentence mentions and trailing junk error.
 func extractBindingVariantDirective(commentText string) (bindingVariantParseResult, bool) {
-	m := bindingVariantRE.FindStringSubmatch(commentText)
-	if m == nil {
+	if !bindingVariantTokenRE.MatchString(commentText) {
 		return bindingVariantParseResult{}, false
 	}
-	return parseBindingVariant(m[1]), true
+	for _, raw := range strings.Split(commentText, "\n") {
+		line := stripBindingVariantCommentLine(strings.TrimRight(raw, "\r"))
+		if !strings.HasPrefix(line, "@bindingVariant") {
+			continue
+		}
+		rest := line[len("@bindingVariant"):]
+		if rest != "" && isBindingVariantIdentChar(rest[0]) {
+			continue
+		}
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+			return bindingVariantParseResult{err: bindingVariantLineStartErr}, true
+		}
+		return parseBindingVariant(strings.TrimSpace(rest)), true
+	}
+	return bindingVariantParseResult{err: bindingVariantLineStartErr}, true
 }

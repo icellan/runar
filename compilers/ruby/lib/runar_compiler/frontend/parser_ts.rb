@@ -185,7 +185,7 @@ module RunarCompiler
       # issue #123 @sighash). Word-boundary anchored to mirror the TS reference
       # compiler's +/@embedAlways\b/+ / +/@sighash\b/+ scans so an identifier
       # like +sighashType+ inside a comment does not register a directive.
-      DIRECTIVE_RE = /@(?:embedAlways|sighash)\b/
+      DIRECTIVE_RE = /@(?:embedAlways|sighash|bindingVariant)\b/
 
       # Tokenize a source string into an array of Token structs.
       #

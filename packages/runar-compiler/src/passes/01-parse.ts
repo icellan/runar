@@ -517,7 +517,15 @@ function parseBindingVariantOnMethod(
   }
 
   const result = extractBindingVariantDirective(text);
-  if (result === null) return undefined;
+  if (result === null) {
+    errors.push(makeDiagnostic(
+      `Method '${name}': @bindingVariant must be a JSDoc tag at the start of a comment line (` +
+        '`@bindingVariant all` or `@bindingVariant lowS`)',
+      'error',
+      locFromNode(method, file),
+    ));
+    return undefined;
+  }
   if ('error' in result) {
     errors.push(makeDiagnostic(
       `Method '${name}': ${result.error}`,

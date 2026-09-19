@@ -1,6 +1,6 @@
 {
   "version": "runar-v1.0.0-rc.1",
-  "compilerVersion": "1.0.0-rc.1-zig",
+  "compilerVersion": "1.0.0-rc.1",
   "contractName": "SatCounter",
   "parentClass": "StatefulSmartContract",
   "abi": {
@@ -34,14 +34,18 @@
       }
     ]
   },
-  "script": "76ab76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad69768254947f778101419d7601687f7782012c947f758258947f758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777",
-  "asm": "OP_DUP OP_CODESEPARATOR <raw 428 bytes> OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_1ADD OP_NIP <e803> OP_OVER OP_6 OP_PICK <6a> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_CAT OP_HASH256 OP_ROT OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_NIP",
+  "script": "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686855798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777",
+  "asm": "OP_NOP OP_CODESEPARATOR OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_5 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_1ADD OP_NIP <e803> OP_OVER OP_6 OP_PICK <6a> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_CAT OP_HASH256 OP_ROT OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_NIP",
   "constructorSlots": [],
   "stateFields": [
     {
       "name": "count",
       "type": "bigint",
-      "index": 0
+      "index": 0,
+      "encoding": "num2bin-le8",
+      "byteLength": 8,
+      "byteOffset": 0,
+      "tailOffset": -8
     }
   ],
   "codeSeparatorIndex": 1,
@@ -72,6 +76,11 @@
             "value": {
               "kind": "load_prop",
               "name": "count"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
+              "column": 31
             }
           },
           {
@@ -82,6 +91,11 @@
               "args": [
                 "t0"
               ]
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
+              "column": 31
             }
           },
           {
@@ -89,6 +103,11 @@
             "value": {
               "kind": "load_prop",
               "name": "count"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
+              "column": 45
             }
           },
           {
@@ -97,6 +116,11 @@
               "kind": "update_prop",
               "name": "count",
               "value": "t2"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
+              "column": 45
             }
           }
         ],
@@ -161,7 +185,7 @@
             "name": "t5",
             "value": {
               "kind": "load_const",
-              "value": 65
+              "value": "65n"
             }
           },
           {
@@ -199,13 +223,23 @@
             "value": {
               "kind": "load_prop",
               "name": "count"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
+              "column": 4
             }
           },
           {
             "name": "t11",
             "value": {
               "kind": "load_const",
-              "value": 1
+              "value": "1n"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
+              "column": 4
             }
           },
           {
@@ -215,6 +249,11 @@
               "op": "+",
               "left": "t10",
               "right": "t11"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
+              "column": 4
             }
           },
           {
@@ -223,13 +262,23 @@
               "kind": "update_prop",
               "name": "count",
               "value": "t12"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
+              "column": 4
             }
           },
           {
             "name": "t14",
             "value": {
               "kind": "load_const",
-              "value": 1000
+              "value": "1000n"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 8,
+              "column": 4
             }
           },
           {
@@ -237,6 +286,11 @@
             "value": {
               "kind": "load_prop",
               "name": "count"
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 8,
+              "column": 4
             }
           },
           {
@@ -246,7 +300,13 @@
               "satoshis": "t14",
               "stateValues": [
                 "t15"
-              ]
+              ],
+              "preimage": ""
+            },
+            "sourceLoc": {
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 8,
+              "column": 4
             }
           },
           {
@@ -267,7 +327,7 @@
             "name": "t19",
             "value": {
               "kind": "load_const",
-              "value": 0
+              "value": "0n"
             }
           },
           {
@@ -360,12 +420,21 @@
             "name": "t29",
             "value": {
               "kind": "assert",
-              "value": "t28"
+              "value": "t28",
+              "isAutoInjectedStateCheck": true
             }
           }
         ],
         "isPublic": true
       }
     ]
-  }
+  },
+  "rawScriptSpans": [
+    {
+      "offset": 3,
+      "length": 422,
+      "inArity": 1,
+      "outArity": 1
+    }
+  ]
 }

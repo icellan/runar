@@ -32,13 +32,14 @@ const CTX = {
   sourceTXID: '00'.repeat(32),
   sourceOutputIndex: 0,
   sourceSatoshis: 100000,
-  transactionVersion: 2,
+  transactionVersion: 1,
   otherInputs: [] as never[],
   outputs: [] as never[],
   inputIndex: 0,
   inputSequence: 0xffffffff,
   lockTime: 0,
 };
+const CTX_ALL = { ...CTX, transactionVersion: 2 };
 const SCOPE =
   TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID;
 
@@ -62,10 +63,10 @@ function buildConstructionHex(variant: BindingVariant = 'lowS'): string {
   return scriptHex;
 }
 
-function runWith(preimage: Uint8Array, lockingHex: string): { ok: boolean; err?: string } {
+function runWith(preimage: Uint8Array, lockingHex: string, ctx: typeof CTX = CTX): { ok: boolean; err?: string } {
   const lockingScript = LockingScript.fromHex(lockingHex);
   const unlockingScript = UnlockingScript.fromHex(pushDataHex(preimage));
-  const spend = new Spend({ ...CTX, lockingScript, unlockingScript });
+  const spend = new Spend({ ...ctx, lockingScript, unlockingScript });
   try {
     return { ok: spend.validate() };
   } catch (e) {
@@ -83,7 +84,7 @@ describe('BUG-100 fix: on-chain OP_PUSH_TX preimage binding', () => {
   );
 
   it('emits a non-trivial locking script', () => {
-    expect(lockingHex.length).toBeGreaterThan(200);
+    expect(lockingHex.length / 2).toBe(422);
   });
 
   it('the pinned cross-tier constant matches the generator (drift guard)', () => {
@@ -170,18 +171,19 @@ describe("BUG-100 fix: 'all' (non-low-S, nVersion != 1) binding variant", () => 
   });
 
   it('is smaller than the low-S construction', () => {
+    expect(lockingHex.length / 2).toBe(376);
     expect(lockingHex.length).toBeLessThan(CHECK_PREIMAGE_BINDING_HEX.length);
   });
 
   it('ACCEPTS the genuine tx-sighash preimage', () => {
     const pre = Uint8Array.from(
       TransactionSignature.formatBytes({
-        ...CTX,
+        ...CTX_ALL,
         subscript: LockingScript.fromHex(lockingHex),
         scope: SCOPE,
       }) as unknown as number[],
     );
-    const r = runWith(pre, lockingHex);
+    const r = runWith(pre, lockingHex, CTX_ALL);
     expect(r.err, r.err).toBeUndefined();
     expect(r.ok).toBe(true);
   });
@@ -189,14 +191,14 @@ describe("BUG-100 fix: 'all' (non-low-S, nVersion != 1) binding variant", () => 
   it('REJECTS a decoupled preimage (the BUG-100 exploit)', () => {
     const pre = Uint8Array.from(
       TransactionSignature.formatBytes({
-        ...CTX,
+        ...CTX_ALL,
         subscript: LockingScript.fromHex(lockingHex),
         scope: SCOPE,
       }) as unknown as number[],
     );
     const forged = new Uint8Array(pre);
     for (let i = 104; i < 136 && i < forged.length; i++) forged[i] = ((forged[i] ?? 0) ^ 0xff) & 0xff;
-    const r = runWith(forged, lockingHex);
+    const r = runWith(forged, lockingHex, CTX_ALL);
     expect(r.ok).toBe(false);
   });
 
@@ -205,7 +207,7 @@ describe("BUG-100 fix: 'all' (non-low-S, nVersion != 1) binding variant", () => 
   it('ACCEPTS across 60 distinct sighashes (variable-length DER, no low-S)', () => {
     let accepted = 0;
     for (let i = 0; i < 60; i++) {
-      const ctx = { ...CTX, lockTime: i * 7919 + 1, sourceSatoshis: 100000 + i * 131 };
+      const ctx = { ...CTX_ALL, lockTime: i * 7919 + 1, sourceSatoshis: 100000 + i * 131 };
       const sub = LockingScript.fromHex(lockingHex);
       const pre = Uint8Array.from(
         TransactionSignature.formatBytes({ ...ctx, subscript: sub, scope: SCOPE }) as unknown as number[],

@@ -148,6 +148,11 @@
           "minimum": 0,
           "maximum": 255,
           "description": "Issue #123: the non-default BIP-143 sighash byte this public method's covenant commits to, so the SDK builds a matching preimage. ABSENT means the default ALL|FORKID (0x41)."
+        },
+        "bindingVariant": {
+          "type": "string",
+          "enum": ["all"],
+          "description": "@bindingVariant all on this public method. ABSENT means the default lowS construction. The SDK refuses call() when this is present."
         }
       }
     },

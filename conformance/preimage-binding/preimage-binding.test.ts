@@ -28,7 +28,7 @@
  * of the blob is.
  */
 import { describe, it, expect } from 'vitest';
-import { CHECK_PREIMAGE_BINDING_HEX } from '../../packages/runar-compiler/src/index.js';
+import { CHECK_PREIMAGE_BINDING_HEX, CHECK_PREIMAGE_BINDING_ALL_HEX } from '../../packages/runar-compiler/src/index.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -340,4 +340,26 @@ describe('R-105: every tier emits the exact preimage-binding blob that was explo
       expect(count, `${tier.id} emits the binding blob ${count} times`).toBe(1);
     }
   });
+});
+
+const PROBE_ALL = 'StatefulBindingAll.runar.ts';
+
+describe("R-105: every tier emits the compact 'all' blob byte-identically", () => {
+  it('the all blob is 376 bytes', () => {
+    expect(CHECK_PREIMAGE_BINDING_ALL_HEX.length / 2).toBe(376);
+  });
+
+  for (const tier of available) {
+    it(`${tier.id} emits the all blob verbatim`, () => {
+      const v = verdict(tier, join(__dirname, PROBE_ALL));
+      expect(v.ok, v.ok ? '' : `${tier.id} refused the all probe:\n${v.diag.slice(0, 600)}`).toBe(true);
+      const hex = (v as { ok: true; hex: string }).hex;
+      expect(
+        hex.includes(CHECK_PREIMAGE_BINDING_ALL_HEX),
+        `${tier.id} does not contain CHECK_PREIMAGE_BINDING_ALL_HEX ` +
+          `(${CHECK_PREIMAGE_BINDING_ALL_HEX.length / 2} B); script ${hex.length / 2} B`,
+      ).toBe(true);
+      expect(hex.includes(CHECK_PREIMAGE_BINDING_HEX)).toBe(false);
+    });
+  }
 });

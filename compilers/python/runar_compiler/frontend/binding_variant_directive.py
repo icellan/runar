@@ -52,9 +52,27 @@ def parse_binding_variant(variant_text: str) -> BindingVariantParseResult:
     return BindingVariantParseResult(value=raw)
 
 
-# Extract the value following ``@bindingVariant`` in a block of comment text.
-# Mirrors the TS BINDING_VARIANT_RE / the Go bindingVariantRE.
-_BINDING_VARIANT_RE = re.compile(r"@bindingVariant\s+([A-Za-z0-9_]*?)(?:\*/|\n|\r|\s|$)")
+_BINDING_VARIANT_TOKEN_RE = re.compile(r"@bindingVariant\b")
+_LINE_START_ERR = (
+    "@bindingVariant must be a JSDoc tag at the start of a comment line "
+    "(`@bindingVariant all` or `@bindingVariant lowS`)"
+)
+
+
+def _strip_comment_line(raw: str) -> str:
+    s = raw.lstrip(" \t")
+    if s.startswith("//"):
+        s = s[2:].lstrip(" \t")
+    elif s.startswith("/**"):
+        s = s[3:].lstrip(" \t")
+    elif s.startswith("/*"):
+        s = s[2:].lstrip(" \t")
+    elif s.startswith("*"):
+        s = s[1:].lstrip(" \t")
+    s = s.rstrip(" \t")
+    if s.endswith("*/"):
+        s = s[:-2].rstrip(" \t")
+    return s
 
 
 def extract_binding_variant_directive(comment_text: str) -> BindingVariantParseResult | None:
@@ -62,10 +80,19 @@ def extract_binding_variant_directive(comment_text: str) -> BindingVariantParseR
     text.
 
     Returns ``None`` when no ``@bindingVariant`` token is present, otherwise the
-    parse result (value or error). Used by the parser after it has collected a
-    method's JSDoc / leading-comment trivia.
+    parse result (value or error). Only a JSDoc/line-comment tag at the start of
+    a comment line is a directive; mid-sentence mentions and trailing junk error.
     """
-    m = _BINDING_VARIANT_RE.search(comment_text)
-    if m is None:
+    if not _BINDING_VARIANT_TOKEN_RE.search(comment_text):
         return None
-    return parse_binding_variant(m.group(1) or "")
+    for raw in comment_text.splitlines():
+        line = _strip_comment_line(raw)
+        if not line.startswith("@bindingVariant"):
+            continue
+        rest = line[len("@bindingVariant"):]
+        if rest and (rest[0].isalnum() or rest[0] == "_"):
+            continue
+        if rest and rest[0] not in " \t":
+            return BindingVariantParseResult(error=_LINE_START_ERR)
+        return parse_binding_variant(rest.strip())
+    return BindingVariantParseResult(error=_LINE_START_ERR)

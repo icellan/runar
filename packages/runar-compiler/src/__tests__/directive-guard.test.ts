@@ -75,6 +75,18 @@ describe('fail-closed directive guard (issues #123 / #109)', () => {
     expect(joined).not.toContain('not supported');
   });
 
+  it('unknown variant fail-closes at parse (does not emit all)', () => {
+    const src = `
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @bindingVariant high */
+        public bump(): void { this.n = this.n + 1n; }
+      }`;
+    const r = parse(src, 'C.runar.ts');
+    expect(r.contract!.methods.find((m) => m.name === 'bump')!.bindingVariant).toBeUndefined();
+  });
+
   it('honours @bindingVariant on the .runar.ts surface', () => {
     const src = `
       class C extends StatefulSmartContract {
@@ -110,5 +122,39 @@ describe('fail-closed directive guard (issues #123 / #109)', () => {
     const joined = errorMessages(src, 'Counter.runar.sol');
     expect(joined).toContain('@bindingVariant');
     expect(joined).toContain('not supported');
+  });
+
+  it('does not treat warning prose as an opt-in to all', () => {
+    const src = `
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** Do NOT use @bindingVariant all — spends are nVersion=1. */
+        public bump(): void { this.n = this.n + 1n; }
+      }`;
+    const r = parse(src, 'C.runar.ts');
+    const bump = r.contract!.methods.find((m) => m.name === 'bump');
+    expect(bump!.bindingVariant).toBeUndefined();
+    expect(errorMessages(src, 'C.runar.ts')).toContain('@bindingVariant');
+    expect(errorMessages(src, 'C.runar.ts')).toContain('start of a comment line');
+  });
+
+  it('rejects @bindingVariant: all and @bindingVariant all; instead of silently defaulting', () => {
+    const colon = `
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @bindingVariant: all */
+        public bump(): void { this.n = this.n + 1n; }
+      }`;
+    expect(errorMessages(colon, 'C.runar.ts')).toContain('@bindingVariant');
+    const semi = `
+      class C extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @bindingVariant all; */
+        public bump(): void { this.n = this.n + 1n; }
+      }`;
+    expect(errorMessages(semi, 'C.runar.ts')).toContain('@bindingVariant');
   });
 });

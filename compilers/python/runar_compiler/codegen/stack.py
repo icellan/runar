@@ -189,7 +189,9 @@ _CHECK_PREIMAGE_BINDING_HEX = (
 )
 
 # Compact non-low-S ('all') construction: s = z + 1 without mod-n + low-S.
-# Valid only for spends with nVersion != 0x01000000.
+# Valid only for spends with nVersion != 0x01000000. 376 bytes — byte-identical
+# to the TS/Go/Rust/Zig/Ruby pin. An extra 7c7e (OP_SWAP OP_CAT) before DER
+# 827c7e makes CHECKSIG fail on a genuine spend.
 _CHECK_PREIMAGE_BINDING_ALL_HEX = (
     "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
     "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
@@ -198,7 +200,7 @@ _CHECK_PREIMAGE_BINDING_ALL_HEX = (
     "927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f"
     "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e"
     "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac"
     "55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21"
     "038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad"
 )

@@ -60,10 +60,34 @@ export function parseBindingVariant(variantText: string): BindingVariantParseRes
  * Returns `null` when no `@bindingVariant` token is present, otherwise the parse
  * result (variant or error). Used by the parser after it has collected a
  * method's JSDoc / leading-comment trivia.
+ *
+ * Only a JSDoc/line-comment TAG at the start of a comment line is a directive.
+ * Mid-sentence mentions (`Do NOT use @bindingVariant all`) and trailing junk
+ * (`@bindingVariant: all`, `@bindingVariant all;`) are errors, not silent
+ * default-to-lowS and not silent opt-in to `all`.
  */
-const BINDING_VARIANT_RE = /@bindingVariant\s+([A-Za-z0-9_]*?)(?:\*\/|\n|\r|\s|$)/;
+const BINDING_VARIANT_TOKEN_RE = /@bindingVariant\b/;
+
+function stripCommentLinePrefix(raw: string): string {
+  return raw
+    .replace(/^[ \t]+/, '')
+    .replace(/^(?:\/\/|\/\*\*?|\*)[ \t]*/, '')
+    .replace(/[ \t]*(?:\*\/)?[ \t]*$/, '');
+}
+
 export function extractBindingVariantDirective(commentText: string): BindingVariantParseResult | null {
-  const m = BINDING_VARIANT_RE.exec(commentText);
-  if (!m) return null;
-  return parseBindingVariant(m[1] ?? '');
+  if (!BINDING_VARIANT_TOKEN_RE.test(commentText)) return null;
+  for (const raw of commentText.split(/\r?\n/)) {
+    const line = stripCommentLinePrefix(raw);
+    if (!line.startsWith('@bindingVariant')) continue;
+    const rest = line.slice('@bindingVariant'.length);
+    if (rest.length > 0 && /[A-Za-z0-9_]/.test(rest[0]!)) continue;
+    if (rest.length > 0 && rest[0] !== ' ' && rest[0] !== '\t') {
+      return { error: '@bindingVariant must be a JSDoc tag at the start of a comment line (`@bindingVariant all` or `@bindingVariant lowS`)' };
+    }
+    return parseBindingVariant(rest.trim());
+  }
+  return {
+    error: '@bindingVariant must be a JSDoc tag at the start of a comment line (`@bindingVariant all` or `@bindingVariant lowS`)',
+  };
 }
