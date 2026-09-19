@@ -51,7 +51,7 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 439,
+        "byteOffset": 433,
         "name": "recipient",
         "type": "Addr",
         "valueEncoding": "data",
@@ -60,7 +60,7 @@
       },
       {
         "paramIndex": 2,
-        "byteOffset": 445,
+        "byteOffset": 439,
         "name": "minAmount",
         "type": "bigint",
         "valueEncoding": "scriptnum"
@@ -82,7 +82,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 439,
+          "byteOffset": 433,
           "slot": "recipient"
         },
         {
@@ -90,7 +90,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 445,
+          "byteOffset": 439,
           "slot": "minAmount"
         },
         {
@@ -105,7 +105,7 @@
     "rawScriptSpans": [
       {
         "offset": 5,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

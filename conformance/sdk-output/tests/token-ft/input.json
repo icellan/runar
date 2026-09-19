@@ -166,7 +166,7 @@
     "constructorSlots": [
       {
         "paramIndex": 3,
-        "byteOffset": 2125,
+        "byteOffset": 2107,
         "name": "tokenId",
         "type": "ByteString",
         "valueEncoding": "data"
@@ -180,7 +180,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 2125,
+          "byteOffset": 2107,
           "slot": "tokenId"
         },
         {
@@ -195,19 +195,19 @@
     "rawScriptSpans": [
       {
         "offset": 8,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 847,
-        "length": 428,
+        "offset": 841,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 1558,
-        "length": 428,
+        "offset": 1546,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

@@ -94,13 +94,13 @@
     "rawScriptSpans": [
       {
         "offset": 8,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 709,
-        "length": 428,
+        "offset": 703,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

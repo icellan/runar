@@ -79,7 +79,7 @@ func TestTicTacToeV2_ByteIdenticalToV1(t *testing.T) {
 	v1Bytes := len(v1.Script) / 2
 	v2Bytes := len(v2.Script) / 2
 
-	const expectedBytes = 7796 // W1: +18 bytes, six 32-bit-extractor zero-pad sites
+	const expectedBytes = 7760 // C=1: 7796 - 6 B × six covenant bindings
 	if v1Bytes != expectedBytes {
 		t.Errorf("v1 script length = %d bytes, want %d", v1Bytes, expectedBytes)
 	}

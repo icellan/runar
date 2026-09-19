@@ -105,13 +105,13 @@ const BODIES: Record<string, string> = {
  * matched only `stmt` and `dflt`.
  */
 const GO_REFERENCE: Record<string, { bytes: number; sha256: string }> = {
-  stmt: { bytes: 433, sha256: '03d5b2e3f11ece28f0fb26fe450fe8a1e11b3c11da06562ab8b2d9225e107e0f' },
-  then: { bytes: 439, sha256: '3d284720fce66099b1a97333ef221a843c9e98918f531b06bef4ef3405bd66f3' },
-  else: { bytes: 440, sha256: '289fe2ebd819dc99cf4572adfa3df41ad436127088b3346f0f0e77806dbc316c' },
-  nested: { bytes: 448, sha256: 'ed8f510fa694bc20191fed402011029414247b5e75fdcfcbc399d49bdfc03aa1' },
-  loop: { bytes: 435, sha256: 'f4edcd4d7445946ae4a597020a137d818e13a324332346deb7c219468a83cf84' },
+  stmt: { bytes: 427, sha256: '536886b124e54533890929da2a44749a95c3bab0b7439a7920e856c3e684c93e' },
+  then: { bytes: 433, sha256: '1219ca9f72bdf7c538f2372aa15ac26bc9f834a6e2e509a7c1166027ea15ad65' },
+  else: { bytes: 434, sha256: '7cbf4663acc2d0065cfaf2fc43d49ddbb1538042ad2ffb89ecc46767d4768702' },
+  nested: { bytes: 442, sha256: '8e5a9c553cd1a1340b8ed56b04b848ae84a5fd2a7ce0f8a7ef18ee2dbdbe9f93' },
+  loop: { bytes: 429, sha256: '3827e6af85b3de666feb510d353c81139efdbe4270c715e3ab6aa41f56d466ff' },
   // Default mode in a then-arm: the fix must NOT start stamping a flag here.
-  dflt: { bytes: 439, sha256: '10c7149f4b7cebecc9ace19190b34e17acd34072d53f20ebc641610b4721fb7d' },
+  dflt: { bytes: 433, sha256: 'f03dd0af40bb1a8f59b766f72cd53a16313af726439b186a07b02bcbb6019f2a' },
 };
 
 interface Compiled {

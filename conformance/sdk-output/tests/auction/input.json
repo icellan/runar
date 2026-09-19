@@ -102,7 +102,7 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 1184,
+        "byteOffset": 1172,
         "name": "auctioneer",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -111,7 +111,7 @@
       },
       {
         "paramIndex": 3,
-        "byteOffset": 1200,
+        "byteOffset": 1188,
         "name": "deadline",
         "type": "bigint",
         "valueEncoding": "scriptnum"
@@ -125,7 +125,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 1184,
+          "byteOffset": 1172,
           "slot": "auctioneer"
         },
         {
@@ -133,7 +133,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 1200,
+          "byteOffset": 1188,
           "slot": "deadline"
         },
         {
@@ -148,13 +148,13 @@
     "rawScriptSpans": [
       {
         "offset": 8,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 714,
-        "length": 428,
+        "offset": 708,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

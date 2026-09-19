@@ -391,7 +391,7 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 1432,
+        "byteOffset": 1420,
         "name": "playerX",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -400,23 +400,7 @@
       },
       {
         "paramIndex": 0,
-        "byteOffset": 2653,
-        "name": "playerX",
-        "type": "PubKey",
-        "valueEncoding": "data",
-        "fixedValueByteLength": 33,
-        "fixedPushHeaderBytes": 1
-      },
-      {
-        "paramIndex": 1,
-        "byteOffset": 4119,
-        "name": "betAmount",
-        "type": "bigint",
-        "valueEncoding": "scriptnum"
-      },
-      {
-        "paramIndex": 0,
-        "byteOffset": 4787,
+        "byteOffset": 2635,
         "name": "playerX",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -425,14 +409,14 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 6374,
+        "byteOffset": 4101,
         "name": "betAmount",
         "type": "bigint",
         "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 6383,
+        "byteOffset": 4763,
         "name": "playerX",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -441,14 +425,14 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 6391,
+        "byteOffset": 6350,
         "name": "betAmount",
         "type": "bigint",
         "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 7054,
+        "byteOffset": 6359,
         "name": "playerX",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -457,14 +441,14 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 7056,
+        "byteOffset": 6367,
         "name": "betAmount",
         "type": "bigint",
         "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 7065,
+        "byteOffset": 7024,
         "name": "playerX",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -473,14 +457,14 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 7673,
+        "byteOffset": 7026,
         "name": "betAmount",
         "type": "bigint",
         "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 7682,
+        "byteOffset": 7035,
         "name": "playerX",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -489,14 +473,30 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 7689,
+        "byteOffset": 7637,
         "name": "betAmount",
         "type": "bigint",
         "valueEncoding": "scriptnum"
       },
       {
         "paramIndex": 0,
-        "byteOffset": 7772,
+        "byteOffset": 7646,
+        "name": "playerX",
+        "type": "PubKey",
+        "valueEncoding": "data",
+        "fixedValueByteLength": 33,
+        "fixedPushHeaderBytes": 1
+      },
+      {
+        "paramIndex": 1,
+        "byteOffset": 7653,
+        "name": "betAmount",
+        "type": "bigint",
+        "valueEncoding": "scriptnum"
+      },
+      {
+        "paramIndex": 0,
+        "byteOffset": 7736,
         "name": "playerX",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -512,7 +512,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 1432,
+          "byteOffset": 1420,
           "slot": "playerX"
         },
         {
@@ -520,7 +520,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 2653,
+          "byteOffset": 2635,
           "slot": "playerX"
         },
         {
@@ -528,7 +528,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 4119,
+          "byteOffset": 4101,
           "slot": "betAmount"
         },
         {
@@ -536,7 +536,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 4787,
+          "byteOffset": 4763,
           "slot": "playerX"
         },
         {
@@ -544,7 +544,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 6374,
+          "byteOffset": 6350,
           "slot": "betAmount"
         },
         {
@@ -552,7 +552,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 6383,
+          "byteOffset": 6359,
           "slot": "playerX"
         },
         {
@@ -560,7 +560,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 6391,
+          "byteOffset": 6367,
           "slot": "betAmount"
         },
         {
@@ -568,7 +568,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 7054,
+          "byteOffset": 7024,
           "slot": "playerX"
         },
         {
@@ -576,7 +576,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 7056,
+          "byteOffset": 7026,
           "slot": "betAmount"
         },
         {
@@ -584,7 +584,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 7065,
+          "byteOffset": 7035,
           "slot": "playerX"
         },
         {
@@ -592,7 +592,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 7673,
+          "byteOffset": 7637,
           "slot": "betAmount"
         },
         {
@@ -600,7 +600,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 7682,
+          "byteOffset": 7646,
           "slot": "playerX"
         },
         {
@@ -608,7 +608,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 7689,
+          "byteOffset": 7653,
           "slot": "betAmount"
         },
         {
@@ -616,7 +616,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 7772,
+          "byteOffset": 7736,
           "slot": "playerX"
         },
         {
@@ -631,37 +631,37 @@
     "rawScriptSpans": [
       {
         "offset": 8,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 819,
-        "length": 428,
+        "offset": 813,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 2120,
-        "length": 428,
+        "offset": 2108,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 4254,
-        "length": 428,
+        "offset": 4236,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 6531,
-        "length": 428,
+        "offset": 6507,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 7155,
-        "length": 428,
+        "offset": 7125,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

@@ -69,7 +69,7 @@
       },
       {
         "paramIndex": 1,
-        "byteOffset": 959318,
+        "byteOffset": 959312,
         "name": "k1PubKeyHash",
         "type": "Addr",
         "valueEncoding": "data",
@@ -93,7 +93,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 959318,
+          "byteOffset": 959312,
           "slot": "k1PubKeyHash"
         },
         {
@@ -108,7 +108,7 @@
     "rawScriptSpans": [
       {
         "offset": 40,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

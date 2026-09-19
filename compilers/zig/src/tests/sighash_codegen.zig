@@ -104,8 +104,8 @@ test "sighash: ALL|ANYONECANPAY|FORKID swaps binding-blob flag to 0xC1 + ABI mod
     // swap: default `0141` -> ACP `01c1`. (The `extractSigHashType === 0xc1`
     // assert push, by contrast, script-number-encodes 0xc1 as 02c100 with a
     // sign byte, so the full script length changes by one byte — matching TS.)
-    const blob_all = "01417e2102b405d7f032";
-    const blob_acp = "01c17e2102b405d7f032";
+    const blob_all = "01417e21038ff83d8cf1";
+    const blob_acp = "01c17e21038ff83d8cf1";
     try std.testing.expect(std.mem.indexOf(u8, dflt.script_hex, blob_all) != null);
     try std.testing.expect(std.mem.indexOf(u8, dflt.script_hex, blob_acp) == null);
     try std.testing.expect(std.mem.indexOf(u8, acp.script_hex, blob_acp) != null);

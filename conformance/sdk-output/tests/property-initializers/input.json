@@ -82,7 +82,7 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 558,
+        "byteOffset": 552,
         "name": "maxCount",
         "type": "bigint",
         "valueEncoding": "scriptnum"
@@ -96,7 +96,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 558,
+          "byteOffset": 552,
           "slot": "maxCount"
         },
         {
@@ -111,13 +111,13 @@
     "rawScriptSpans": [
       {
         "offset": 8,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 698,
-        "length": 428,
+        "offset": 692,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

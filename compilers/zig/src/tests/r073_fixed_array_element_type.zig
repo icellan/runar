@@ -387,7 +387,7 @@ test "R-073 control: correct element writes and an element read still compile" {
     const hex = try compileHex(a, GOOD_BIGINT_CELLS, "PosIdx.runar.ts");
     defer a.free(hex);
     // Byte-for-byte pin, captured from the pre-fix binary.
-    try std.testing.expectEqual(@as(usize, 2560), hex.len); // W1: +12, four zero-pad sites
+    try std.testing.expectEqual(@as(usize, 2536), hex.len); // C=1: 2560 - 2×6 B blob shrink, hex chars
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab76009c63757676aa517f"));
 }
 
@@ -396,7 +396,7 @@ test "R-073 control: FixedArray<ByteString,2> written with a ByteString still co
     try std.testing.expectEqual(@as(usize, 0), try typecheckErrorCount(a, GOOD_BYTESTRING_WORDS));
     const hex = try compileHex(a, GOOD_BYTESTRING_WORDS, "PosWords.runar.ts");
     defer a.free(hex);
-    try std.testing.expectEqual(@as(usize, 1784), hex.len); // W1: +6, two zero-pad sites
+    try std.testing.expectEqual(@as(usize, 1772), hex.len); // C=1: 1784 - 6 B blob shrink, hex chars
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab7676aa517f517f"));
 }
 

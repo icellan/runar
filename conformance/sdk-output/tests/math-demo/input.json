@@ -439,97 +439,97 @@
     "rawScriptSpans": [
       {
         "offset": 8,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 698,
-        "length": 428,
+        "offset": 692,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 1401,
-        "length": 428,
+        "offset": 1389,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 2094,
-        "length": 428,
+        "offset": 2076,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 2785,
-        "length": 428,
+        "offset": 2761,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 3752,
-        "length": 428,
+        "offset": 3722,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 6242,
-        "length": 428,
+        "offset": 6206,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 8469,
-        "length": 428,
+        "offset": 8427,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 9162,
-        "length": 428,
+        "offset": 9114,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 10490,
-        "length": 428,
+        "offset": 10436,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 11175,
-        "length": 428,
+        "offset": 11115,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 11862,
-        "length": 428,
+        "offset": 11796,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 12549,
-        "length": 428,
+        "offset": 12477,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 13029,
-        "length": 428,
+        "offset": 12951,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 13719,
-        "length": 428,
+        "offset": 13635,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       },
       {
-        "offset": 14408,
-        "length": 428,
+        "offset": 14318,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }

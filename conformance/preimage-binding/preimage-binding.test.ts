@@ -16,7 +16,7 @@
  * argued by resemblance.
  *
  * The link is cheap and total: if every tier's compiled stateful contract
- * contains that exact 428-byte blob, verbatim, then the execution proof
+ * contains that exact 422-byte blob, verbatim, then the execution proof
  * transfers by construction. That is what this file asserts, and it is a
  * stronger statement than "the scripts agree" — it names the security-bearing
  * substring and requires it to be present, so a tier that agreed on a
@@ -306,10 +306,10 @@ describe('R-105: every tier emits the exact preimage-binding blob that was explo
     expect(CHECK_PREIMAGE_BINDING_HEX.length % 2).toBe(0);
     expect(
       CHECK_PREIMAGE_BINDING_HEX.length / 2,
-      'the OP_PUSH_TX binding blob is 428 bytes since the Any-S construction; a ' +
+      'the OP_PUSH_TX binding blob is 422 bytes since the C=1 Any-S construction; a ' +
         'sudden change in size means the thing being transferred is not the thing ' +
         'oppushtx-binding.test.ts exploit-tested',
-    ).toBe(428);
+    ).toBe(422);
     expect(/^[0-9a-f]+$/.test(CHECK_PREIMAGE_BINDING_HEX)).toBe(true);
   });
 

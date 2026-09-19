@@ -35,7 +35,7 @@
     "constructorSlots": [
       {
         "paramIndex": 0,
-        "byteOffset": 443,
+        "byteOffset": 437,
         "name": "owner",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -44,7 +44,7 @@
       },
       {
         "paramIndex": 0,
-        "byteOffset": 445,
+        "byteOffset": 439,
         "name": "owner",
         "type": "PubKey",
         "valueEncoding": "data",
@@ -60,7 +60,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 443,
+          "byteOffset": 437,
           "slot": "owner"
         },
         {
@@ -68,7 +68,7 @@
         },
         {
           "kind": "slot",
-          "byteOffset": 445,
+          "byteOffset": 439,
           "slot": "owner"
         },
         {
@@ -83,7 +83,7 @@
     "rawScriptSpans": [
       {
         "offset": 2,
-        "length": 428,
+        "length": 422,
         "inArity": 1,
         "outArity": 1
       }
