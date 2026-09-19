@@ -231,8 +231,26 @@ describe('artifact schema — real compile output', () => {
     expect(variants).toContain('all');
 
     const artifactResult = validateArtifact(plain);
-    expect(artifactResult.valid, artifactResult.errors?.map((e) => e.message).join('\n')).toBe(true);
-    expect(validateANF(plain.anf).valid).toBe(true);
+    if (!artifactResult.valid) {
+      throw new Error(
+        'validateArtifact rejected a fresh @bindingVariant all artifact:\n' +
+          artifactResult.errors
+            .map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`)
+            .join('\n'),
+      );
+    }
+    expect(artifactResult.valid).toBe(true);
+
+    const anfResult = validateANF(plain.anf);
+    if (!anfResult.valid) {
+      throw new Error(
+        'validateANF rejected the ANF of a fresh @bindingVariant all artifact:\n' +
+          anfResult.errors
+            .map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`)
+            .join('\n'),
+      );
+    }
+    expect(anfResult.valid).toBe(true);
   });
 });
 
