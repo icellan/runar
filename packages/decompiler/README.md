@@ -16,20 +16,17 @@ Where the wins come from, same file's `pathBreakdown`:
 
 | path | wins |
 |---|---|
-| `template` | 82 |
-| `raw_script` | 4 |
+| `template` | 77 |
+| `raw_script` | 7 |
 | `assert-recognizer` | 1 |
-| `symexec` | **0** |
+| `symexec` | 2 |
 
-**The symbolic-execution lifter contributes nothing.** `src/symexec.ts` is the
-largest component here and recovers no entry that the template matcher and the
-assert recogniser do not already recover. That is a statement about the CORPUS,
-not a claim that the code is dead: the corpus is Rúnar-compiled output, which is
-exactly what template matching is best at. It matters because "the decompiler
-handles this" and "the template database happens to contain this" are different
-guarantees, and only the second is currently evidenced. Template-free
-decompilation of arbitrary Rúnar-compiled script remains the open item at the
-bottom of this file.
+The C=1 binding-blob restamp moved five stateful fixtures off the template
+matcher (`branched-readonly-len`, `state-covenant`, `state-covenant-mechanics`
+to `raw_script`; `message-board` and `terminal-varlen-read` to `symexec`).
+`src/symexec.ts` now recovers those two; it still recovers nothing the
+templates already cover. Template-free decompilation of arbitrary
+Rúnar-compiled script remains the open item at the bottom of this file.
 
 R-218: this section used to carry a hand-written pass rate and a note about
 pre-peephole "holdouts". Both were stale — the figures matched neither the
