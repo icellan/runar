@@ -5071,11 +5071,11 @@
       }
     ]
   },
-  "codeSeparatorIndex": 1394,
+  "codeSeparatorIndex": 1382,
   "codeSeparatorIndices": [
     6,
-    764,
-    1394
+    758,
+    1382
   ],
   "rawScriptSpans": [
     {
@@ -5085,13 +5085,13 @@
       "outArity": 1
     },
     {
-      "offset": 765,
+      "offset": 759,
       "length": 422,
       "inArity": 1,
       "outArity": 1
     },
     {
-      "offset": 1395,
+      "offset": 1383,
       "length": 422,
       "inArity": 1,
       "outArity": 1

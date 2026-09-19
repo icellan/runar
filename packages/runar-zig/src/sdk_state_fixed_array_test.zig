@@ -12,7 +12,7 @@
 //! state reader rebuilds 4 x OP_NUM2BIN 8 = 32 bytes for `table`, so a deploy
 //! carrying a 1-byte state section can never satisfy the continuation covenant
 //! and the UTXO is unspendable forever. Measured on
-//! `conformance/sdk-output/tests/fixed-array-write`: six tiers agreed on 884
+//! `conformance/sdk-output/tests/fixed-array-write`: six tiers agreed on 878
 //! bytes, Zig alone emitted 853.
 //!
 //! Contract (matches packages/runar-sdk/src/state.ts `serializeState`):
