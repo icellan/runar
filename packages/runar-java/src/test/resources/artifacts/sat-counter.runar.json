@@ -34,415 +34,8 @@
       }
     ]
   },
-  "script": "76ab76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad69768254947f778101419d7601687f7782012c947f758258947f758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777",
-  "asm": "OP_DUP OP_CODESEPARATOR <raw 428 bytes> OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_1ADD OP_NIP <e803> OP_OVER OP_6 OP_PICK <6a> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_CAT OP_HASH256 OP_ROT OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_NIP",
-  "buildTimestamp": "2026-07-28T07:41:48.084Z",
-  "sourceMap": {
-    "mappings": [
-      {
-        "opcodeIndex": 33,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 6,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 35,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 6,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 36,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 37,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 38,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 39,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 40,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 41,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 42,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 43,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 44,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 45,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 46,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 47,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 48,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 49,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 50,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 51,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 52,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 53,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 54,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 55,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 56,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 57,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 58,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 59,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 60,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 61,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 62,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 63,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 64,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 65,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 66,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 67,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 68,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 69,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 70,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 71,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 72,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 73,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 74,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 75,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 76,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 77,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 78,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 79,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 80,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 81,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 82,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 83,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 84,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 85,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 86,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 87,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 88,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 89,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 90,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 91,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 92,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 93,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 94,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 95,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 96,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 97,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 98,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 99,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      },
-      {
-        "opcodeIndex": 100,
-        "sourceFile": "SatCounter.runar.ts",
-        "line": 7,
-        "column": 4
-      }
-    ]
-  },
+  "script": "61ab7676aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad7601687f77820134947f75517f7c01007e817602fd009f6375677602fe009c6375547f77677602ff009c6375587f776775527f7768686855798252947b7c7f82599d517f75016a880261ab7c7e8869768254947f7701007e8101419d7601687f7782012c947f758258947f758258947f7781768b7702e803785679016a7e7c58807e827602fd009f635280517f756776030000019f635380527f7501fd7c7e67760500000000019f635580547f7501fe7c7e675980587f7501ff7c7e6868687c7e7c58807c7e547a547a00787c9c9163041976a9147b7e0288ac7e7c58807c7e67007b7577687eaa7b820128947f7701207f75877777",
+  "asm": "OP_NOP OP_CODESEPARATOR OP_DUP <raw 422 bytes> OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <34> OP_SUB OP_SPLIT OP_DROP OP_1 OP_SPLIT OP_SWAP <00> OP_CAT OP_BIN2NUM OP_DUP <fd00> OP_LESSTHAN OP_IF OP_DROP OP_ELSE OP_DUP <fe00> OP_NUMEQUAL OP_IF OP_DROP OP_4 OP_SPLIT OP_NIP OP_ELSE OP_DUP <ff00> OP_NUMEQUAL OP_IF OP_DROP OP_8 OP_SPLIT OP_NIP OP_ELSE OP_DROP OP_2 OP_SPLIT OP_NIP OP_ENDIF OP_ENDIF OP_ENDIF OP_5 OP_PICK OP_SIZE OP_2 OP_SUB OP_ROT OP_SWAP OP_SPLIT OP_SIZE OP_9 OP_NUMEQUALVERIFY OP_1 OP_SPLIT OP_DROP <6a> OP_EQUALVERIFY <61ab> OP_SWAP OP_CAT OP_EQUALVERIFY OP_VERIFY OP_DUP OP_SIZE OP_4 OP_SUB OP_SPLIT OP_NIP <00> OP_CAT OP_BIN2NUM <41> OP_NUMEQUALVERIFY OP_DUP <68> OP_SPLIT OP_NIP OP_SIZE <2c> OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_DROP OP_SIZE OP_8 OP_SUB OP_SPLIT OP_NIP OP_BIN2NUM OP_DUP OP_1ADD OP_NIP <e803> OP_OVER OP_6 OP_PICK <6a> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_CAT OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP OP_ELSE OP_DUP <000001> OP_LESSTHAN OP_IF OP_3 OP_NUM2BIN OP_2 OP_SPLIT OP_DROP <fd> OP_SWAP OP_CAT OP_ELSE OP_DUP <0000000001> OP_LESSTHAN OP_IF OP_5 OP_NUM2BIN OP_4 OP_SPLIT OP_DROP <fe> OP_SWAP OP_CAT OP_ELSE OP_9 OP_NUM2BIN OP_8 OP_SPLIT OP_DROP <ff> OP_SWAP OP_CAT OP_ENDIF OP_ENDIF OP_ENDIF OP_SWAP OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_4 OP_ROLL OP_4 OP_ROLL OP_0 OP_OVER OP_SWAP OP_NUMEQUAL OP_NOT OP_IF <1976a914> OP_ROT OP_CAT <88ac> OP_CAT OP_SWAP OP_8 OP_NUM2BIN OP_SWAP OP_CAT OP_ELSE OP_0 OP_ROT OP_DROP OP_NIP OP_ENDIF OP_CAT OP_HASH256 OP_ROT OP_SIZE <28> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_EQUAL OP_NIP OP_NIP",
   "stateFields": [
     {
       "name": "count",
@@ -480,8 +73,8 @@
               "name": "count"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 4,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
               "column": 31
             }
           },
@@ -495,8 +88,8 @@
               ]
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 4,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
               "column": 31
             }
           },
@@ -507,8 +100,8 @@
               "name": "count"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 4,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
               "column": 45
             }
           },
@@ -520,8 +113,8 @@
               "value": "t2"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 4,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 5,
               "column": 45
             }
           }
@@ -587,7 +180,7 @@
             "name": "t5",
             "value": {
               "kind": "load_const",
-              "value": 65
+              "value": "65n"
             }
           },
           {
@@ -627,8 +220,8 @@
               "name": "count"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 6,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
               "column": 4
             }
           },
@@ -636,11 +229,11 @@
             "name": "t11",
             "value": {
               "kind": "load_const",
-              "value": 1
+              "value": "1n"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 6,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
               "column": 4
             }
           },
@@ -653,8 +246,8 @@
               "right": "t11"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 6,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
               "column": 4
             }
           },
@@ -666,8 +259,8 @@
               "value": "t12"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 6,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 7,
               "column": 4
             }
           },
@@ -675,11 +268,11 @@
             "name": "t14",
             "value": {
               "kind": "load_const",
-              "value": 1000
+              "value": "1000n"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 7,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 8,
               "column": 4
             }
           },
@@ -690,8 +283,8 @@
               "name": "count"
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 7,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 8,
               "column": 4
             }
           },
@@ -706,8 +299,8 @@
               "preimage": ""
             },
             "sourceLoc": {
-              "file": "SatCounter.runar.ts",
-              "line": 7,
+              "file": "/tmp/runar-restamp-src/SatCounter.runar.ts",
+              "line": 8,
               "column": 4
             }
           },
@@ -729,7 +322,7 @@
             "name": "t19",
             "value": {
               "kind": "load_const",
-              "value": 0
+              "value": "0n"
             }
           },
           {
@@ -837,8 +430,8 @@
   ],
   "rawScriptSpans": [
     {
-      "offset": 2,
-      "length": 428,
+      "offset": 3,
+      "length": 422,
       "inArity": 1,
       "outArity": 1
     }

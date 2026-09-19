@@ -46,6 +46,12 @@ export interface ABIMethod {
    * existing artifacts are unchanged and older SDKs keep working.
    */
   sigHashType?: number;
+  /**
+   * `@bindingVariant all` on this public method. Absent = default `lowS`.
+   * The SDK refuses `call()` when this is `'all'` (nVersion=1 spends reject
+   * the compact blob); it does not bump tx.version.
+   */
+  bindingVariant?: 'all';
 }
 
 export interface ABI {

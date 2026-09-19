@@ -193,6 +193,11 @@ type ANFValue struct {
 	// deserialization; emission is handled by MarshalJSON.
 	SighashFlag int `json:"sighashFlag,omitempty"`
 
+	// check_preimage — the Any-S binding construction ("" or "lowS" = default
+	// low-S blob; "all" = the compact non-low-S blob). Only set for a method
+	// that declares @bindingVariant all.
+	BindingVariant string `json:"bindingVariant,omitempty"`
+
 	// add_output
 	Satoshis    string   `json:"satoshis,omitempty"`
 	StateValues []string `json:"stateValues,omitempty"`
@@ -338,6 +343,9 @@ func (v ANFValue) MarshalJSON() ([]byte, error) {
 		// byte-identical.
 		if v.Kind == "check_preimage" && v.SighashFlag != 0 {
 			out["sighashFlag"] = v.SighashFlag
+		}
+		if v.Kind == "check_preimage" && v.BindingVariant != "" && v.BindingVariant != "lowS" {
+			out["bindingVariant"] = v.BindingVariant
 		}
 	case "add_output":
 		out["preimage"] = v.Preimage

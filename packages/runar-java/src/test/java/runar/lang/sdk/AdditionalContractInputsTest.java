@@ -1,7 +1,9 @@
 package runar.lang.sdk;
 
 import java.math.BigInteger;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 
@@ -33,6 +35,25 @@ class AdditionalContractInputsTest {
     private static final String FUND_TXID = "ff".repeat(32);
     private static final long FUND_SATS = 5_000_000L;
     private static final String TOKEN_ID = "4d45524745"; // "MERGE"
+    private static final String DUMMY_PARENT = "00".repeat(64);
+
+    /**
+     * Live merge ABI is {@code merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)}.
+     * {@code allPrevouts} auto-resolves from a null; {@code otherParentTx} does not (G6).
+     */
+    private static List<Object> mergeArgs(BigInteger otherBalance, String otherParentTx) {
+        return java.util.Arrays.asList(
+            null, otherBalance, null, otherParentTx, BigInteger.ONE);
+    }
+
+    private static Map<String, Object> mergeState(
+            String ownerHex, BigInteger balance, BigInteger mergeBalance) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("owner", ownerHex);
+        m.put("balance", balance);
+        m.put("mergeBalance", mergeBalance);
+        return m;
+    }
 
     private static RunarArtifact tokenArtifact() throws Exception {
         try (var in = AdditionalContractInputsTest.class.getClassLoader()
@@ -43,7 +64,8 @@ class AdditionalContractInputsTest {
     }
 
     private record Setup(
-        RunarContract first, RunarContract second, MockProvider provider, LocalSigner signer
+        RunarContract first, RunarContract second, MockProvider provider, LocalSigner signer,
+        String ownerHex, String parent1, String parent2
     ) {}
 
     /** Deploy two token contracts under one owner: balances 400 and 600. */
@@ -63,7 +85,8 @@ class AdditionalContractInputsTest {
             ownerHex, BigInteger.valueOf(600), BigInteger.ZERO, TOKEN_ID));
         second.deploy(provider, signer, 1L, signer.address());
 
-        return new Setup(first, second, provider, signer);
+        List<String> txs = provider.getBroadcastedTxs();
+        return new Setup(first, second, provider, signer, ownerHex, txs.get(0), txs.get(1));
     }
 
     @Test
@@ -72,17 +95,19 @@ class AdditionalContractInputsTest {
         UTXO other = s.second().currentUtxo();
         UTXO primary = s.first().currentUtxo();
 
-        CallOptions opts = new CallOptions(null, null, null)
+        CallOptions opts = new CallOptions(
+            mergeState(s.ownerHex(), BigInteger.valueOf(400), BigInteger.valueOf(600)),
+            null, null)
             .withAdditionalContractInputs(List.of(other))
             .withAdditionalContractInputArgs(List.of(
-                // merge(sig, otherBalance, allPrevouts, outputSatoshis) as seen
-                // from the SECOND input: its counterpart holds 400.
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)
+                // merge(sig, otherBalance, allPrevouts, otherParentTx, outputSatoshis)
+                // as seen from the SECOND input: its counterpart holds 400.
+                mergeArgs(BigInteger.valueOf(400), s.parent1())
             ));
 
         s.first().callWithOptions(
             "merge",
-            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            mergeArgs(BigInteger.valueOf(600), s.parent2()),
             opts, s.provider(), s.signer());
 
         List<String> txs = s.provider().getBroadcastedTxs();
@@ -139,7 +164,7 @@ class AdditionalContractInputsTest {
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () ->
             s.first().callWithOptions(
                 "merge",
-                java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+                mergeArgs(BigInteger.valueOf(600), s.parent2()),
                 opts, s.provider(), s.signer()));
         assertTrue(e.getMessage().contains("additionalContractInputs"),
             "the error must name the option that was rejected, got: " + e.getMessage());
@@ -198,14 +223,16 @@ class AdditionalContractInputsTest {
         UTXO other = s.second().currentUtxo();
         String deployTxid1 = s.first().currentUtxo().txid();
 
-        CallOptions opts = new CallOptions(null, null, null)
+        CallOptions opts = new CallOptions(
+            mergeState(s.ownerHex(), BigInteger.valueOf(400), BigInteger.valueOf(600)),
+            null, null)
             .withAdditionalContractInputs(List.of(other))
             .withAdditionalContractInputArgs(List.of(
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)));
+                mergeArgs(BigInteger.valueOf(400), s.parent1())));
 
         s.first().callWithOptions(
             "merge",
-            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            mergeArgs(BigInteger.valueOf(600), s.parent2()),
             opts, s.provider(), s.signer());
 
         List<String> txs = s.provider().getBroadcastedTxs();
@@ -284,13 +311,15 @@ class AdditionalContractInputsTest {
         // outpoint this call spends — injecting it straight into the contract
         // bypasses the provider, which would then have nothing to check.
         provider.addKnownOutpoint(other);
-        CallOptions opts = new CallOptions(null, null, null)
+        CallOptions opts = new CallOptions(
+            mergeState(ownerHex, BigInteger.valueOf(400), BigInteger.valueOf(600)),
+            null, null)
             .withAdditionalContractInputs(List.of(other))
             .withAdditionalContractInputArgs(List.of(
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE)));
+                mergeArgs(BigInteger.valueOf(400), DUMMY_PARENT)));
         first.callWithOptions(
             "merge",
-            java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+            mergeArgs(BigInteger.valueOf(600), DUMMY_PARENT),
             opts, provider, signer);
 
         List<String> txs = provider.getBroadcastedTxs();
@@ -332,15 +361,15 @@ class AdditionalContractInputsTest {
         CallOptions opts = new CallOptions(null, null, null)
             .withAdditionalContractInputs(List.of(s.second().currentUtxo()))
             .withAdditionalContractInputArgs(List.of(
-                java.util.Arrays.asList(null, BigInteger.valueOf(400), null, BigInteger.ONE),
-                java.util.Arrays.asList(null, BigInteger.valueOf(999), null, BigInteger.ONE)));
+                mergeArgs(BigInteger.valueOf(400), s.parent1()),
+                mergeArgs(BigInteger.valueOf(999), s.parent1())));
 
         // Two arg lists for one extra input is a caller mistake that would
         // otherwise silently drop the second: fail loudly instead.
         assertThrows(IllegalArgumentException.class, () ->
             s.first().callWithOptions(
                 "merge",
-                java.util.Arrays.asList(null, BigInteger.valueOf(600), null, BigInteger.ONE),
+                mergeArgs(BigInteger.valueOf(600), s.parent2()),
                 opts, s.provider(), s.signer()));
     }
 }

@@ -177,16 +177,35 @@ _CHECK_PREIMAGE_BINDING_HEX = (
     "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
     "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
     "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-    "7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dc"
+    "7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dc"
     "aebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f"
     "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692"
     "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76"
     "927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
     "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
     "827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    "027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2"
-    "bf66a71ae74a1e83b0ad"
+    "027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432"
+    "dc5a5c1905608b9218ad"
 )
+
+# Compact non-low-S ('all') construction: s = z + 1 without mod-n + low-S.
+# Valid only for spends with nVersion != 0x01000000. 376 bytes — byte-identical
+# to the TS/Go/Rust/Zig/Ruby pin. An extra 7c7e (OP_SWAP OP_CAT) before DER
+# 827c7e makes CHECKSIG fail on a genuine spend.
+_CHECK_PREIMAGE_BINDING_ALL_HEX = (
+    "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
+    "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e01007e8b76927f76927f76927f76927f76927f76927f76927f76"
+    "927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f"
+    "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+    "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac"
+    "55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21"
+    "038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad"
+)
+
+_BINDING_VARIANT_DEFAULT = "lowS"
 
 # SIGHASH_ALL | SIGHASH_FORKID — default appended sighash flag byte in the
 # binding blob above. The append is encoded ``01<flag>7e`` (OP_DATA_1, flag byte,
@@ -195,21 +214,15 @@ _SIGHASH_ALL_FORKID = 0x41
 _DEFAULT_SIGHASH_APPEND = "01417e"
 
 
-def _binding_hex_with_sighash_flag(sighash_flag: int) -> str:
-    """Return the canonical preimage-binding blob with its appended sighash flag
-    byte swapped for ``sighash_flag`` (issue #123).
-
-    The default blob appends ``push(0x41) OP_CAT`` (``01417e``) exactly once. A
-    non-default @sighash mode changes ONLY that byte — byte-exact equivalent to
-    the TS reference regenerating the blob with a different flag.
-    """
+def _binding_hex_with_sighash_flag(sighash_flag: int, variant: str = _BINDING_VARIANT_DEFAULT) -> str:
+    """Return the binding blob for ``variant`` with the appended sighash flag swapped."""
+    base = _CHECK_PREIMAGE_BINDING_ALL_HEX if variant == "all" else _CHECK_PREIMAGE_BINDING_HEX
     replacement = f"01{sighash_flag & 0xFF:02x}7e"
-    if _CHECK_PREIMAGE_BINDING_HEX.count(_DEFAULT_SIGHASH_APPEND) != 1:
-        # Defensive: the anchor must be unique or the substitution is unsafe.
+    if base.count(_DEFAULT_SIGHASH_APPEND) != 1:
         raise AssertionError(
             "check-preimage binding blob no longer has a unique sighash-flag anchor"
         )
-    return _CHECK_PREIMAGE_BINDING_HEX.replace(_DEFAULT_SIGHASH_APPEND, replacement)
+    return base.replace(_DEFAULT_SIGHASH_APPEND, replacement)
 
 
 # ---------------------------------------------------------------------------
@@ -1290,7 +1303,7 @@ class _LoweringContext:
         elif kind == "get_state_script":
             self._lower_get_state_script(name)
         elif kind == "check_preimage":
-            self._lower_check_preimage(name, value.preimage, value.sighash_flag, binding_index, last_uses)
+            self._lower_check_preimage(name, value.preimage, value.sighash_flag, value.binding_variant, binding_index, last_uses)
         elif kind == "deserialize_state":
             self._lower_deserialize_state(value.preimage, binding_index, last_uses)
         elif kind == "add_output":
@@ -3843,6 +3856,7 @@ class _LoweringContext:
 
     def _lower_check_preimage(self, binding_name: str, preimage: str,
                               sighash_flag: int | None,
+                              binding_variant: str | None,
                               binding_index: int, last_uses: dict[str, int]) -> None:
         # OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
         # current spending transaction. The signature is DERIVED FROM THE PREIMAGE
@@ -3876,7 +3890,7 @@ class _LoweringContext:
         # byte-identical to the pinned cross-tier constant; issue #123 lets a
         # method declare a different mode, which only changes the appended
         # sighash flag byte. Net stack effect is zero.
-        self._emit_check_preimage_binding(sighash_flag)
+        self._emit_check_preimage_binding(sighash_flag, binding_variant)
 
         # R-010: the preimage is now proven to be THIS transaction's preimage,
         # so its scriptCode field is authentic. Pin the spender-supplied
@@ -3889,25 +3903,17 @@ class _LoweringContext:
         self.sm.push(binding_name)
         self._track_depth()
 
-    def _emit_check_preimage_binding(self, sighash_flag: int | None = None) -> None:
-        """Emit the on-chain preimage binding as one opaque raw_bytes op.
-
-        Net stack effect is 0 (preimage in -> preimage out), declared as
-        in_arity=1 / out_arity=1 so the static analyzer keeps the depth
-        consistent. The bytes are the canonical BUG-100 construction, identical
-        across all seven tiers and guarded by the cross-tier conformance suite.
-
-        Issue #123: a non-default @sighash mode changes ONLY the single appended
-        sighash flag byte in the derived DER signature (``push(flag) OP_CAT``,
-        encoded ``01<flag>7e`` in the blob). This substitution is byte-exact
-        equivalent to regenerating the blob with a different flag (the TS
-        reference's ``emitCheckPreimageBinding(emit, sighashFlag)`` differs only
-        in that push), so the default (None) blob is unchanged (zero golden
-        churn) and every other mode swaps exactly that one byte.
-        """
-        blob_hex = _CHECK_PREIMAGE_BINDING_HEX
-        if sighash_flag is not None and sighash_flag != _SIGHASH_ALL_FORKID:
-            blob_hex = _binding_hex_with_sighash_flag(sighash_flag)
+    def _emit_check_preimage_binding(self, sighash_flag: int | None = None,
+                                     binding_variant: str | None = None) -> None:
+        """Emit the on-chain preimage binding as one opaque raw_bytes op."""
+        variant = binding_variant if binding_variant else _BINDING_VARIANT_DEFAULT
+        is_default_variant = variant == _BINDING_VARIANT_DEFAULT
+        is_default_sighash = sighash_flag is None or sighash_flag == _SIGHASH_ALL_FORKID
+        if is_default_variant and is_default_sighash:
+            blob_hex = _CHECK_PREIMAGE_BINDING_HEX
+        else:
+            flag = _SIGHASH_ALL_FORKID if sighash_flag is None else sighash_flag
+            blob_hex = _binding_hex_with_sighash_flag(flag, variant)
         self.emit_op(StackOp(
             op="raw_bytes",
             raw_bytes=bytes.fromhex(blob_hex),

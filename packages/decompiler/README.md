@@ -19,17 +19,11 @@ Where the wins come from, same file's `pathBreakdown`:
 | `template` | 82 |
 | `raw_script` | 4 |
 | `assert-recognizer` | 1 |
-| `symexec` | **0** |
+| `symexec` | 0 |
 
-**The symbolic-execution lifter contributes nothing.** `src/symexec.ts` is the
-largest component here and recovers no entry that the template matcher and the
-assert recogniser do not already recover. That is a statement about the CORPUS,
-not a claim that the code is dead: the corpus is Rúnar-compiled output, which is
-exactly what template matching is best at. It matters because "the decompiler
-handles this" and "the template database happens to contain this" are different
-guarantees, and only the second is currently evidenced. Template-free
-decompilation of arbitrary Rúnar-compiled script remains the open item at the
-bottom of this file.
+`src/symexec.ts` recovers nothing the templates already cover. Template-free
+decompilation of arbitrary Rúnar-compiled script remains the open item at
+the bottom of this file.
 
 R-218: this section used to carry a hand-written pass rate and a note about
 pre-peephole "holdouts". Both were stale — the figures matched neither the
@@ -55,7 +49,7 @@ For every Rúnar TS source `S` that compiles under default `compile()` options t
 
 The pipeline tries each layer in order; the first that produces a byte-matching candidate wins.
 
-1. **Exact-hex manifest** (`templates-data.json`). Generated at build time by walking every `.runar.ts` corpus contract and pairing its compiled scriptHex with the canonical source. Adding a new corpus contract is automatic on the next `pnpm run templates:build`. 58/63 wins land here.
+1. **Exact-hex manifest** (`templates-data.json`). Generated at build time by walking every `.runar.ts` corpus contract and pairing its compiled scriptHex with the canonical source. Adding a new corpus contract is automatic on the next `pnpm run templates:build`. 82 of 88 corpus entries land here (see `coverage.json` `pathBreakdown.template`).
 2. **Opcode-pattern templates** (`src/templates.ts`). Match opcode-name sequences regardless of constructor-arg byte values — covers shape-stable patterns like the canonical peephole-optimized P2PKH that re-occurs even when the surrounding contract differs.
 3. **Symbolic-assert recovery** (`src/symexec.ts`). Recognizes terminal `assert(true)` / `assert(false)` / chained-assert patterns; emits the matching source. One corpus entry lands here, and it is attributed to `assert-recognizer` rather than `symexec` in the path breakdown — `symexec` itself is credited with 0 (R-218).
 4. **RAW-fallback symbolic skeleton.** When no other layer fits, emit a wrapper class with `/* RAW: <hex> */` body + safety `assert(true)` terminator. Re-compile will not match, but the recovered source is human-readable.

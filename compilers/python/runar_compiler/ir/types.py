@@ -219,6 +219,7 @@ class ANFValue:
     #    ALL|FORKID (0x41), byte-identical to the pinned cross-tier binding
     #    blob. Only set for a method that declares a non-default @sighash mode.
     sighash_flag: int | None = None
+    binding_variant: str | None = None
 
     # -- add_output --------------------------------------------------------
     satoshis: str | None = None
@@ -424,6 +425,7 @@ def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
         v.step = int(d.get("step"))
     v.preimage = d.get("preimage")
     v.sighash_flag = d.get("sighashFlag")
+    v.binding_variant = d.get("bindingVariant")
     v.satoshis = d.get("satoshis")
     v.state_values = d.get("stateValues")
     v.script_bytes = d.get("scriptBytes")

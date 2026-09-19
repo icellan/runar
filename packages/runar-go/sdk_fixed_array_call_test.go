@@ -162,7 +162,7 @@ func TestFixedArrayCall_Outbound_ContinuationCommitsNewState(t *testing.T) {
 	contract, provider, signer := deployArrayWrite(t)
 
 	deployed := contract.GetCurrentUtxo().Script
-	if got, want := len(deployed)/2, 884; got != want {
+	if got, want := len(deployed)/2, 881; got != want {
 		t.Fatalf("deployed locking script: got %d bytes, want %d", got, want)
 	}
 	if got, want := stateTailHex(t, deployed), leHex(0, 0, 0, 0); got != want {
@@ -174,7 +174,7 @@ func TestFixedArrayCall_Outbound_ContinuationCommitsNewState(t *testing.T) {
 	}
 
 	cont := contract.GetCurrentUtxo().Script
-	if got, want := len(cont)/2, 884; got != want {
+	if got, want := len(cont)/2, 881; got != want {
 		t.Fatalf("continuation locking script: got %d bytes, want %d", got, want)
 	}
 	if got, want := stateTailHex(t, cont), leHex(1, 0, 0, 0); got != want {

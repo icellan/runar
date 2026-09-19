@@ -462,6 +462,7 @@ impl<'a> ExpandContext<'a> {
             // Issue #123: the @sighash directive is attached to the source
             // method; preserve it through fixed-array expansion.
             sighash_type: method.sighash_type,
+            binding_variant: method.binding_variant.clone(),
             source_location: method.source_location.clone(),
         }
     }

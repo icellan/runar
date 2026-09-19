@@ -202,6 +202,56 @@ describe('artifact schema — real compile output', () => {
     }
     expect(anfResult.valid).toBe(true);
   });
+
+  it('validates a stateful artifact compiled under @bindingVariant all', () => {
+    const source = `
+      class AllCounter extends StatefulSmartContract {
+        n: bigint;
+        constructor(n: bigint) { super(n); this.n = n; }
+        /** @bindingVariant all */
+        public bump(): void { this.addOutput(1000n, this.n); }
+      }
+    `;
+    const result = compile(source, { fileName: 'AllCounter.runar.ts' });
+    expect(result.success).toBe(true);
+    const bump = result.artifact!.abi.methods.find((m) => m.name === 'bump');
+    expect(bump!.bindingVariant).toBe('all');
+
+    const plain = toPlainJson(result.artifact) as { anf?: unknown };
+    const variants: unknown[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === 'object') {
+        const rec = node as Record<string, unknown>;
+        if (rec.kind === 'check_preimage') variants.push(rec.bindingVariant);
+        Object.values(rec).forEach(walk);
+      }
+    };
+    walk(plain.anf);
+    expect(variants).toContain('all');
+
+    const artifactResult = validateArtifact(plain);
+    if (!artifactResult.valid) {
+      throw new Error(
+        'validateArtifact rejected a fresh @bindingVariant all artifact:\n' +
+          artifactResult.errors
+            .map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`)
+            .join('\n'),
+      );
+    }
+    expect(artifactResult.valid).toBe(true);
+
+    const anfResult = validateANF(plain.anf);
+    if (!anfResult.valid) {
+      throw new Error(
+        'validateANF rejected the ANF of a fresh @bindingVariant all artifact:\n' +
+          anfResult.errors
+            .map((e) => `  ${e.path}: ${e.message} [${e.keyword}]`)
+            .join('\n'),
+      );
+    }
+    expect(anfResult.valid).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

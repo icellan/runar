@@ -104,6 +104,9 @@ pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []con
         if (input_limits.containsDirectiveToken(source, "@embedAlways")) {
             return .{ .contract = null, .errors = &.{input_limits.EMBED_ALWAYS_DIRECTIVE_ERROR} };
         }
+        if (input_limits.containsDirectiveToken(source, "@bindingVariant")) {
+            return .{ .contract = null, .errors = &.{input_limits.BINDING_VARIANT_DIRECTIVE_ERROR} };
+        }
     }
 
     return switch (format) {

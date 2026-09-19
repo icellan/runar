@@ -27,7 +27,8 @@ pub fn assertSourceBytesUnderLimit(source: []const u8) SourceSizeError!void {
 // Fail-closed guard for author-facing comment directives that the Zig frontend
 // honours ONLY on the `.runar.ts` surface (matching the TS reference compiler,
 // which implements them only there): `@sighash <FLAGS>` (#123, per-method
-// sighash type) and `@embedAlways` (#109, readonly-field DCE opt-out). The
+// sighash type), `@embedAlways` (#109, readonly-field DCE opt-out), and
+// `@bindingVariant <lowS|all>` (per-method Any-S binding construction). The
 // eight non-TS surface parsers ignore comments, so silently dropping a
 // directive would change signing / DCE semantics — those formats reject rather
 // than diverge. The `.runar.ts` parse path is exempt (it implements the
@@ -36,6 +37,7 @@ pub fn assertSourceBytesUnderLimit(source: []const u8) SourceSizeError!void {
 
 pub const SIGHASH_DIRECTIVE_ERROR = "@sighash directive (issue #123) is only honoured on the TypeScript (.runar.ts) surface; write the contract in .runar.ts where @sighash is implemented";
 pub const EMBED_ALWAYS_DIRECTIVE_ERROR = "@embedAlways directive (issue #109) is only honoured on the TypeScript (.runar.ts) surface; write the contract in .runar.ts where @embedAlways is implemented";
+pub const BINDING_VARIANT_DIRECTIVE_ERROR = "@bindingVariant directive is only honoured on the TypeScript (.runar.ts) surface; write the contract in .runar.ts where @bindingVariant is implemented";
 
 fn isWordByte(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
@@ -60,5 +62,6 @@ pub fn containsDirectiveToken(source: []const u8, marker: []const u8) bool {
 pub fn unsupportedDirectiveError(source: []const u8) ?[]const u8 {
     if (containsDirectiveToken(source, "@sighash")) return SIGHASH_DIRECTIVE_ERROR;
     if (containsDirectiveToken(source, "@embedAlways")) return EMBED_ALWAYS_DIRECTIVE_ERROR;
+    if (containsDirectiveToken(source, "@bindingVariant")) return BINDING_VARIANT_DIRECTIVE_ERROR;
     return null;
 }

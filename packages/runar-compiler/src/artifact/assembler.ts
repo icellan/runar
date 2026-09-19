@@ -55,6 +55,12 @@ export interface ABIMethod {
    * for SINGLE|FORKID). Absent = default `ALL|FORKID` (0x41).
    */
   sigHashType?: number;
+  /**
+   * `@bindingVariant all` on this public method. Absent = default `lowS`.
+   * The SDK refuses `call()` when this is `'all'` (nVersion=1 spends reject
+   * the compact blob); it does not bump tx.version.
+   */
+  bindingVariant?: 'all';
 }
 
 export interface ABI {
@@ -605,6 +611,9 @@ function extractABI(contract: ContractNode): ABI {
     // Omitted for the default (0x41) → existing artifacts are byte-identical.
     if (isPublic && method.sighashType !== undefined && method.sighashType !== SIGHASH_DEFAULT) {
       result.sigHashType = method.sighashType;
+    }
+    if (isPublic && method.bindingVariant === 'all') {
+      result.bindingVariant = 'all';
     }
 
     return result;

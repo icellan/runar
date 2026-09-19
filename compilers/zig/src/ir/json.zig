@@ -562,8 +562,11 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
         .get_state_script => .{ .get_state_script = {} },
         .check_preimage => .{ .check_preimage = .{
             .preimage = try allocator.dupe(u8, try getString(obj, "preimage")),
-            // #123: optional non-default sighash flag (default 0 = ALL|FORKID).
             .sighash_flag = getOptionalI32(obj, "sighashFlag"),
+            .binding_variant = if (obj.get("bindingVariant")) |v| switch (v) {
+                .string => |s| try allocator.dupe(u8, s),
+                else => "",
+            } else "",
         } },
         .deserialize_state => .{ .deserialize_state = .{
             .preimage = try allocator.dupe(u8, try getString(obj, "preimage")),
@@ -1577,6 +1580,13 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
                 try writeIndent(writer, depth + 1);
                 try writeJsonString(writer, "sighashFlag");
                 try writer.print(": {d}", .{cp.sighash_flag});
+            }
+            if (cp.binding_variant.len > 0 and !std.mem.eql(u8, cp.binding_variant, "lowS")) {
+                try writer.writeAll(",\n");
+                try writeIndent(writer, depth + 1);
+                try writeJsonString(writer, "bindingVariant");
+                try writer.writeAll(": ");
+                try writeJsonString(writer, cp.binding_variant);
             }
             try writer.writeByte('\n');
             try writeIndent(writer, depth);

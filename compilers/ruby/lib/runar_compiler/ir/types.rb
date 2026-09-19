@@ -178,6 +178,7 @@ module RunarCompiler
         #    (issue #123). nil = default ALL|FORKID (0x41),
         #    byte-identical to the pinned cross-tier binding blob.
         :sighash_flag,
+        :binding_variant,
         # -- add_output ----------------------------------------
         :satoshis,
         :state_values,
@@ -365,6 +366,7 @@ module RunarCompiler
       v.preimage    = d["preimage"]
       # Issue #123: non-default sighash flag for a check_preimage node.
       v.sighash_flag = d["sighashFlag"]
+      v.binding_variant = d["bindingVariant"]
       v.satoshis    = d["satoshis"]
       v.state_values = d["stateValues"]
       v.script_bytes = d["scriptBytes"]

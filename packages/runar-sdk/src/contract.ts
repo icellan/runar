@@ -906,6 +906,13 @@ export class RunarContract {
         `RunarContract.prepareCall: method '${methodName}' not found in ${this.artifact.contractName}`,
       );
     }
+    if (method.bindingVariant === 'all') {
+      throw new Error(
+        `RunarContract.prepareCall: method '${methodName}' uses @bindingVariant all, ` +
+          `which is only valid for nVersion != 1. This SDK builds version-1 transactions ` +
+          `and will not spend that method. Compile without the directive (default lowS).`,
+      );
+    }
 
     const isStateful =
       this.artifact.stateFields !== undefined &&

@@ -25,6 +25,7 @@ public final class ParserDispatch {
     // trip the guard.
     private static final Pattern SIGHASH_DIRECTIVE = Pattern.compile("@sighash\\b");
     private static final Pattern EMBED_ALWAYS_DIRECTIVE = Pattern.compile("@embedAlways\\b");
+    private static final Pattern BINDING_VARIANT_DIRECTIVE = Pattern.compile("@bindingVariant\\b");
 
     /**
      * Parse {@code source} into a {@link ContractNode}, dispatching by the
@@ -58,6 +59,11 @@ public final class ParserDispatch {
                 throw new ParseException(
                     "@embedAlways directive is only supported on the .runar.ts surface "
                     + "(issue #109); write the contract in TypeScript syntax");
+            }
+            if (BINDING_VARIANT_DIRECTIVE.matcher(source).find()) {
+                throw new ParseException(
+                    "@bindingVariant directive is only supported on the .runar.ts surface; "
+                    + "write the contract in TypeScript syntax");
             }
         }
 

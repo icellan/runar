@@ -701,7 +701,8 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     // site gains the `_codePart` authentication sequence that pins the
     // spender-supplied code part to the executing script — 7624 -> 7778.)
     // (W1 took it 7778 -> 7796: six 32-bit-extractor zero-pad sites.)
-    const expected_bytes: usize = 7796;
+    // C=1 binding blob 428 -> 422: six covenant methods × 6 B = 36, 7796 -> 7760.
+    const expected_bytes: usize = 7760;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

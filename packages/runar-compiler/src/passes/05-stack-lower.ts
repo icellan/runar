@@ -28,7 +28,7 @@ import {
   emitEcOnCurve, emitEcModReduce, emitEcEncodeCompressed,
   emitEcMakePoint, emitEcPointX, emitEcPointY,
 } from './ec-codegen.js';
-import { emitCheckPreimageBindingRaw } from './oppushtx-codegen.js';
+import { emitCheckPreimageBindingRaw, type BindingVariant } from './oppushtx-codegen.js';
 import {
   emitBn254FieldAdd, emitBn254FieldSub, emitBn254FieldMul,
   emitBn254FieldInv, emitBn254FieldNeg,
@@ -1441,7 +1441,7 @@ class LoweringContext {
         this.lowerGetStateScript(name);
         break;
       case 'check_preimage':
-        this.lowerCheckPreimage(name, value.preimage, value.sighashFlag, bindingIndex, lastUses);
+        this.lowerCheckPreimage(name, value.preimage, value.sighashFlag, value.bindingVariant, bindingIndex, lastUses);
         break;
       case 'deserialize_state':
         this.lowerDeserializeState(value.preimage, bindingIndex, lastUses);
@@ -4516,6 +4516,7 @@ class LoweringContext {
     bindingName: string,
     preimage: string,
     sighashFlag: number | undefined,
+    bindingVariant: BindingVariant | undefined,
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
@@ -4579,7 +4580,7 @@ class LoweringContext {
     // rather than ignoring it. Net stack
     // effect is zero: the preimage is consumed internally as a copy and left on
     // top; OP_CHECKSIGVERIFY aborts the script unless the binding holds.
-    emitCheckPreimageBindingRaw((op) => this.emitOp(op), sighashFlag);
+    emitCheckPreimageBindingRaw((op) => this.emitOp(op), sighashFlag, bindingVariant ?? 'lowS');
 
     // R-010: the preimage is now proven to be THIS transaction's preimage, so
     // its `scriptCode` field is authentic. Pin the spender-supplied

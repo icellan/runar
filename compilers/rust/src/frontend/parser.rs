@@ -274,6 +274,7 @@ fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) ->
                 body,
                 visibility: Visibility::Public,
                 sighash_type: None,
+                binding_variant: None,
                 source_location: default_loc(file),
             };
         }
@@ -286,6 +287,7 @@ fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) ->
         body: Vec::new(),
         visibility: Visibility::Public,
         sighash_type: None,
+        binding_variant: None,
         source_location: default_loc(file),
     }
 }
@@ -369,6 +371,14 @@ fn parse_methods(
             // Issue #123: `/** @sighash <FLAGS> */` directive → per-method type.
             let sighash_type =
                 parse_sighash_on_method(comments, method.span().lo, &name, &visibility, file, errors);
+            let binding_variant = parse_binding_variant_on_method(
+                comments,
+                method.span().lo,
+                &name,
+                &visibility,
+                file,
+                errors,
+            );
 
             result.push(MethodNode {
                 name,
@@ -376,6 +386,7 @@ fn parse_methods(
                 body,
                 visibility,
                 sighash_type,
+                binding_variant,
                 source_location: default_loc(file),
             });
         }
@@ -444,6 +455,11 @@ fn unsupported_directive_error(source: &str, surface_name: &str) -> Option<Strin
             "@embedAlways directive (issue #109) is not supported by the {surface_name} surface parser; write the contract in TypeScript (.runar.ts) where @embedAlways is honoured"
         ));
     }
+    if directive_present(source, "@bindingVariant") {
+        return Some(format!(
+            "@bindingVariant directive is not supported by the {surface_name} surface parser; write the contract in TypeScript (.runar.ts) where @bindingVariant is honoured"
+        ));
+    }
     None
 }
 
@@ -486,6 +502,41 @@ fn parse_sighash_on_method(
     }
 
     match super::sighash_directive::extract_sighash_directive(&text) {
+        None => None,
+        Some(Ok(value)) => Some(value),
+        Some(Err(msg)) => {
+            errors.push(Diagnostic::error(
+                format!("Method '{}': {}", name, msg),
+                Some(default_loc(file)),
+            ));
+            None
+        }
+    }
+}
+
+fn parse_binding_variant_on_method(
+    comments: &SingleThreadedComments,
+    pos: BytePos,
+    name: &str,
+    visibility: &Visibility,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let text = leading_comment_text(comments, pos)?;
+    if !directive_present(&text, "@bindingVariant") {
+        return None;
+    }
+    if *visibility != Visibility::Public {
+        errors.push(Diagnostic::error(
+            format!(
+                "@bindingVariant directive on non-public method '{}' has no effect — only public methods are spending entry points",
+                name
+            ),
+            Some(default_loc(file)),
+        ));
+        return None;
+    }
+    match super::binding_variant_directive::extract_binding_variant_directive(&text) {
         None => None,
         Some(Ok(value)) => Some(value),
         Some(Err(msg)) => {

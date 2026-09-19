@@ -125,15 +125,27 @@ public final class StackLower {
         "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
         + "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
         + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
-        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dc"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dc"
         + "aebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f"
         + "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7692"
         + "7f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76"
         + "927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
         + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
         + "827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        + "027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2"
-        + "bf66a71ae74a1e83b0ad";
+        + "027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432"
+        + "dc5a5c1905608b9218ad";
+
+    private static final String CHECK_PREIMAGE_BINDING_ALL_HEX =
+        "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f"
+        + "517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e01007e8b76927f76927f76927f76927f76927f76927f76927f76"
+        + "927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f"
+        + "76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e"
+        + "7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac"
+        + "55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21"
+        + "038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
 
     /**
      * Issue #123: the check-preimage binding blob for a declared @sighash mode.
@@ -144,19 +156,20 @@ public final class StackLower {
      * byte byte-identical to the default blob (matching the TypeScript reference
      * {@code checkPreimageBindingBytes(sighashFlag)}).
      */
-    private static String checkPreimageBindingHex(Integer sighashFlag) {
+    private static String checkPreimageBindingHex(Integer sighashFlag, String bindingVariant) {
+        boolean all = "all".equals(bindingVariant);
+        String base = all ? CHECK_PREIMAGE_BINDING_ALL_HEX : CHECK_PREIMAGE_BINDING_HEX;
         if (sighashFlag == null || sighashFlag == SighashDirective.SIGHASH_DEFAULT) {
-            return CHECK_PREIMAGE_BINDING_HEX;
+            return base;
         }
-        int marker = CHECK_PREIMAGE_BINDING_HEX.indexOf("01417e");
+        int marker = base.indexOf("01417e");
         if (marker < 0) {
-            // Defensive: the constant is pinned, so this cannot happen.
             throw new IllegalStateException("check-preimage binding: sighash flag byte not found");
         }
         String flagHex = String.format("%02x", sighashFlag & 0xff);
-        return CHECK_PREIMAGE_BINDING_HEX.substring(0, marker + 2)
+        return base.substring(0, marker + 2)
             + flagHex
-            + CHECK_PREIMAGE_BINDING_HEX.substring(marker + 4);
+            + base.substring(marker + 4);
     }
 
     // ------------------------------------------------------------------
@@ -1540,7 +1553,7 @@ public final class StackLower {
             } else if (v instanceof GetStateScript) {
                 lowerGetStateScript(name);
             } else if (v instanceof CheckPreimage cp) {
-                lowerCheckPreimage(name, cp.preimage(), cp.sighashFlag(), idx, lastUses);
+                lowerCheckPreimage(name, cp.preimage(), cp.sighashFlag(), cp.bindingVariant(), idx, lastUses);
             } else if (v instanceof DeserializeState ds) {
                 lowerDeserializeState(ds.preimage(), idx, lastUses);
             } else if (v instanceof AddOutput ao) {
@@ -4014,7 +4027,7 @@ public final class StackLower {
         }
 
         void lowerCheckPreimage(String bindingName, String preimage, Integer sighashFlag,
-                                int idx, Map<String, Integer> lastUses) {
+                                String bindingVariant, int idx, Map<String, Integer> lastUses) {
             // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to
             // the current spending transaction. The signature is DERIVED FROM THE
             // PREIMAGE ON CHAIN (Optimal OP_PUSH_TX): s = (hash256(preimage) + r)*
@@ -4053,7 +4066,7 @@ public final class StackLower {
             // byte-identical to the pinned cross-tier constant; issue #123 lets a
             // method declare a different mode, which only changes the appended
             // sighash flag byte. Net stack effect is zero.
-            emitCheckPreimageBinding(sighashFlag);
+            emitCheckPreimageBinding(sighashFlag, bindingVariant);
 
             // R-010: the preimage is now proven to be THIS transaction's
             // preimage, so its scriptCode field is authentic. Pin the
@@ -4077,8 +4090,8 @@ public final class StackLower {
          * default ALL|FORKID mode; issue #123 swaps only the appended sighash
          * flag byte for a non-default declared mode.
          */
-        void emitCheckPreimageBinding(Integer sighashFlag) {
-            emitOp(new RawBytesOp(Emit.hexToBytes(checkPreimageBindingHex(sighashFlag)), 1, 1));
+        void emitCheckPreimageBinding(Integer sighashFlag, String bindingVariant) {
+            emitOp(new RawBytesOp(Emit.hexToBytes(checkPreimageBindingHex(sighashFlag, bindingVariant)), 1, 1));
         }
 
         // ---------------- deserialize_state ----------------

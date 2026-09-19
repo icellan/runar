@@ -45,6 +45,12 @@ export interface ABIMethod {
    * for SINGLE|FORKID). Absent = default `ALL|FORKID` (0x41).
    */
   sigHashType?: number;
+  /**
+   * `@bindingVariant all` on this public method. Absent = default `lowS`.
+   * The SDK refuses `call()` when this is `'all'` (nVersion=1 spends reject
+   * the compact blob); it does not bump tx.version.
+   */
+  bindingVariant?: 'all';
 }
 
 export interface ABI {

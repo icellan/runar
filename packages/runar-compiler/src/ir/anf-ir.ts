@@ -7,6 +7,18 @@
  */
 
 // ---------------------------------------------------------------------------
+// Shared codegen selectors
+// ---------------------------------------------------------------------------
+
+/**
+ * Which Any-S OP_PUSH_TX preimage-binding construction a `check_preimage` node
+ * emits. `'lowS'` (default) is the canonical low-S blob; `'all'` is the compact
+ * non-low-S blob, valid only for spends with nVersion != 0x01000000. Declared
+ * per method via the `@bindingVariant` directive.
+ */
+export type BindingVariant = 'lowS' | 'all';
+
+// ---------------------------------------------------------------------------
 // Program structure
 // ---------------------------------------------------------------------------
 
@@ -221,6 +233,13 @@ export interface CheckPreimage {
    * `@sighash` mode, keeping golden ANF unchanged for every existing contract.
    */
   sighashFlag?: number;
+  /**
+   * The Any-S binding construction to emit. Absent = default `'lowS'` (the
+   * low-S blob, byte-identical to the pinned cross-tier binding). Only set for
+   * a method that declares `@bindingVariant all`, keeping golden ANF unchanged
+   * for every existing contract that does not opt in.
+   */
+  bindingVariant?: BindingVariant;
 }
 
 export interface DeserializeState {

@@ -450,7 +450,8 @@ public final class ExpandFixedArrays {
                 // ACCEPTED a non-default @sighash by the time this pass runs,
                 // so dropping it here silently compiles a different
                 // signature-hash commitment than the author declared.
-                method.sighashType()
+                method.sighashType(),
+                method.bindingVariant()
             );
         }
 

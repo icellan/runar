@@ -1203,7 +1203,7 @@ const LowerCtx = struct {
             },
             .assert => |a| try self.lowerAssertOp(binding.name, .{ .condition = a.value }, false),
             .update_prop => |up| try self.lowerPropertyWrite(binding.name, .{ .name = up.name, .value_ref = up.value }),
-            .check_preimage => |cp| try self.lowerCheckPreimage(binding.name, &.{cp.preimage}, cp.sighash_flag),
+            .check_preimage => |cp| try self.lowerCheckPreimage(binding.name, &.{cp.preimage}, cp.sighash_flag, cp.binding_variant),
             .deserialize_state => |ds| try self.lowerDeserializeState(binding.name, &.{ds.preimage}),
             .array_literal => |al| try self.lowerArrayLiteral(binding.name, al.elements),
             .raw_script => |rs| try self.lowerRawScript(binding.name, rs.bytes, rs.in_arity, rs.out_arity),
@@ -2015,7 +2015,7 @@ const LowerCtx = struct {
             // checkPreimage, which anf_lower never emits (it lowers manual
             // checkPreimage() into a dedicated check_preimage node carrying the
             // sighash flag). Default flag (0 = ALL|FORKID) is correct here.
-            .checkPreimage => try self.lowerCheckPreimage(bind_name, args, 0),
+            .checkPreimage => try self.lowerCheckPreimage(bind_name, args, 0, "lowS"),
             .deserializeState => try self.lowerDeserializeState(bind_name, args),
             .exit_builtin => try self.lowerExitBuiltin(bind_name, args),
             .byte_string_cast => try self.lowerByteStringCast(bind_name, args),
@@ -3504,7 +3504,7 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
-    fn lowerCheckPreimage(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, sighash_flag: i32) !void {
+    fn lowerCheckPreimage(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, sighash_flag: i32, binding_variant: []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         // OP_PUSH_TX: verify the pushed BIP-143 sighash preimage is bound to the
         // current spending transaction. The signature is DERIVED FROM THE PREIMAGE
@@ -3540,7 +3540,7 @@ const LowerCtx = struct {
         // byte-identical to the pinned cross-tier constant; issue #123 lets a
         // method declare a different mode, which only changes the appended
         // sighash flag byte. Net stack effect is zero.
-        try self.emitCheckPreimageBinding(sighash_flag);
+        try self.emitCheckPreimageBinding(sighash_flag, binding_variant);
 
         // R-010: the preimage is now proven to be THIS transaction's preimage,
         // so its scriptCode field is authentic. Pin the spender-supplied
@@ -3560,7 +3560,7 @@ const LowerCtx = struct {
     /// peephole optimizer treats it as a hard barrier. The construction is the
     /// canonical output of the TypeScript reference, byte-identical across all
     /// seven tiers (guarded by the cross-tier conformance suite).
-    fn emitCheckPreimageBinding(self: *LowerCtx, sighash_flag: i32) !void {
+    fn emitCheckPreimageBinding(self: *LowerCtx, sighash_flag: i32, binding_variant: []const u8) !void {
         // The frozen binding hex pushes SIGHASH_ALL|FORKID (0x41) as the DER
         // signature's appended sighash byte via the single `0141` push
         // immediately before the fixed G-pubkey tail. Issue #123 lets a method
@@ -3573,12 +3573,16 @@ const LowerCtx = struct {
 
         var owned_hex: ?[]u8 = null;
         defer if (owned_hex) |h| self.allocator.free(h);
-        const hex: []const u8 = if (flag == 0x41) check_preimage_binding_hex else blk: {
+        const base_hex: []const u8 = if (std.mem.eql(u8, binding_variant, "all"))
+            check_preimage_binding_all_hex
+        else
+            check_preimage_binding_hex;
+        const hex: []const u8 = if (flag == 0x41) base_hex else blk: {
             const suffix = "0141" ++ check_preimage_sighash_tail;
-            if (!std.mem.endsWith(u8, check_preimage_binding_hex, suffix)) {
+            if (!std.mem.endsWith(u8, base_hex, suffix)) {
                 return LowerError.UnsupportedOperation;
             }
-            const prefix = check_preimage_binding_hex[0 .. check_preimage_binding_hex.len - suffix.len];
+            const prefix = base_hex[0 .. base_hex.len - suffix.len];
             const new_hex = try std.fmt.allocPrint(self.allocator, "{s}01{x:0>2}{s}", .{
                 prefix,
                 @as(u8, @intCast(flag & 0xff)),
@@ -6143,14 +6147,15 @@ const LowerCtx = struct {
 // (packages/runar-compiler/src/passes/oppushtx-codegen.ts). Emitted as a single
 // opaque raw_bytes op (peephole barrier). The cross-tier conformance suite
 // guards that this constant matches every other tier byte-for-byte.
-const check_preimage_binding_hex = "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8100011f80517e9321414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad";
+const check_preimage_binding_hex = "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e818b21414136d08c5ed2bf3ba048afe6dcaebafeffffffffffffffffffffffffffffff007d97785296789f527952798d9495937776927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
+const check_preimage_binding_all_hex = "76aa517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f517f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e01007e8b76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f76927f7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e7c7e827c7e23022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798027c7e827c7e01307c7e01417e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
 
 // The frozen binding hex above ends with `0141` (OP_DATA_1 SIGHASH_ALL|FORKID)
 // immediately before this fixed G-pubkey tail. Issue #123: a non-default
 // @sighash mode swaps only that single push (`0141` -> `01<flag>`), leaving the
 // tail intact — byte-for-byte matching the TS reference. Mirrors Go's
 // checkPreimageSighashTail (compilers/go/codegen/oppushtx.go).
-const check_preimage_sighash_tail = "7e2102b405d7f0322a89d0f9f3a98e6f938fdc1c969a8d1382a2bf66a71ae74a1e83b0ad";
+const check_preimage_sighash_tail = "7e21038ff83d8cf12121491609c4939dc11c4aa35503508fe432dc5a5c1905608b9218ad";
 
 // ============================================================================
 // Public API

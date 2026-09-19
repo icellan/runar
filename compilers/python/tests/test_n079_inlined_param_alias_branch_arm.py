@@ -231,16 +231,16 @@ PASSTHROUGH = contract("""  private pay(v: bigint): void {
 
 # label -> (script byte length, sha256 of the lowercase script hex)
 SEVEN_TIER = {
-    "if-arm": (708, "d0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470"),
-    "if-arm-manual": (708, "d0499caa79ff3d89a84a9830ab35dec5822ef4f8bdb613f190bad0f9cb9a8470"),
-    "if-arm-200": (709, "76b75efe60492121334561aa1f44639aa538efac39f0c8c078a68b7ecccc935e"),
-    "ternary-arm": (694, "697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde"),
-    "ternary-arm-manual": (694, "697a10519f0ac738ff497312c9b2ca5e601d135a793e5f22b21e4501a1931cde"),
-    "loop-body": (701, "7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a"),
-    "loop-body-manual": (701, "7ca33e902cbc9ccb0431b2c29d66c0db63856619579ae5f2661202f635dc5f6a"),
-    "no-if": (686, "7ac476f9ac2eaac74d9b7d6ec51483a1ef7fe8f267998ff371728b5408511300"),
-    "stmt-level": (704, "c7df31bb403a85a97117ba27f16da98b58068b9ffc5be12dbd3d76d0a5ae0c79"),
-    "passthrough": (706, "8826b46db122ecd01f584ff3148ef7f24d9dd948088bd97cee4c086235efdd56"),
+    "if-arm": (702, "92db59e2c0e61df6dbeef8256d0c37ac1f74880f71d22bdd1e992fab9e257507"),
+    "if-arm-manual": (702, "92db59e2c0e61df6dbeef8256d0c37ac1f74880f71d22bdd1e992fab9e257507"),
+    "if-arm-200": (703, "7584c506d6b04e415c9036f8e345c749dc1661ef6dd13c7a05aa83597ddbd840"),
+    "ternary-arm": (688, "ed951f38c72d41f09b0e20d9aeb1408693cbc7936f3e9ea7b6d34905ed6df613"),
+    "ternary-arm-manual": (688, "ed951f38c72d41f09b0e20d9aeb1408693cbc7936f3e9ea7b6d34905ed6df613"),
+    "loop-body": (695, "af13b9a1c80743a69ed0181c4bf227d99f632b18a2f8d71f51cf694b720e9590"),
+    "loop-body-manual": (695, "af13b9a1c80743a69ed0181c4bf227d99f632b18a2f8d71f51cf694b720e9590"),
+    "no-if": (680, "bfea7ecbf3196c7e4943227546da0918055d0c11548ba41ac4b45676f741f170"),
+    "stmt-level": (698, "0b1e61517510b65cbdb2f18458df8c3d67b0decd116aabf592f3aef5e936a470"),
+    "passthrough": (700, "1e7409174b2026df384f2d22e3baf6b8926ee9bfd4e17772f004bd7711a5f7e5"),
 }
 
 CASES = [

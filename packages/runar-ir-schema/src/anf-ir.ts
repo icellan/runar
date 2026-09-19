@@ -10,6 +10,9 @@
  * variable references, a single primitive operation, or a branch/loop.
  */
 
+/** Which Any-S OP_PUSH_TX preimage-binding construction a check_preimage node emits. */
+export type BindingVariant = 'lowS' | 'all';
+
 // ---------------------------------------------------------------------------
 // Program structure
 // ---------------------------------------------------------------------------
@@ -184,6 +187,8 @@ export interface CheckPreimage {
    * `@sighash` mode, keeping golden ANF unchanged for every existing contract.
    */
   sighashFlag?: number;
+  /** Absent = default `'lowS'`. Only set for `@bindingVariant all`. */
+  bindingVariant?: BindingVariant;
 }
 
 export interface DeserializeState {
