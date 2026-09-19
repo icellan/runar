@@ -2015,7 +2015,7 @@ const LowerCtx = struct {
             // checkPreimage, which anf_lower never emits (it lowers manual
             // checkPreimage() into a dedicated check_preimage node carrying the
             // sighash flag). Default flag (0 = ALL|FORKID) is correct here.
-            .checkPreimage => try self.lowerCheckPreimage(bind_name, args, 0),
+            .checkPreimage => try self.lowerCheckPreimage(bind_name, args, 0, "lowS"),
             .deserializeState => try self.lowerDeserializeState(bind_name, args),
             .exit_builtin => try self.lowerExitBuiltin(bind_name, args),
             .byte_string_cast => try self.lowerByteStringCast(bind_name, args),
