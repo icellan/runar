@@ -139,7 +139,7 @@
     "data": "6869"
   },
   "expectRefusal": {
-    "pattern": "pins SIZE\\(_codePart\\) == 1310",
+    "pattern": "pins SIZE\\(_codePart\\) == 1298",
     "reason": "MessageBoard pins its deployed code-part length exactly; a 23-byte ordinals envelope lands inside the code part and breaks the pin, so every spend would fail OP_VERIFY with the funds already committed."
   }
 }
