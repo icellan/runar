@@ -1,4 +1,4 @@
-> **Status (2026-09-18).** This write-up is the result of #160, measured against a pre-#168 corpus. The optimizer flags (`--ec-constant-pool`, `--ec-reduction-sinking`, `--ec-fixed-base-comb`) are **not** on `main`. #168 rewrote the EC emitters this work patched. Do not rebase #160; port as three new PRs onto current emitters. Byte counts below are historical.
+> **Status (2026-09-18).** This write-up is the result of #160, measured against a pre-#168 corpus. The optimizer flags (`--ec-constant-pool`, `--ec-reduction-sinking`, `--ec-fixed-base-comb`) are **not** on `main`. #168 rewrote the EC emitters this work patched. Do not rebase #160; port as three new PRs onto current emitters. Byte counts below are historical — they describe that branch, not this tree.
 
 # Script-size optimizer — results
 
@@ -6,26 +6,29 @@
 liveness stack scheduler (Phase 2), EC constant pooling, sign-lattice reduction sinking
 (Phases 4–5), and a fixed-base comb (Phase 10). Straus/Shamir (Phase 9) was measured and
 rejected — see §3.10. No witness hints (Phase 7).
-**Companion documents:** [`script-size-optimization-baseline.md`](script-size-optimization-baseline.md),
-[`stack-scheduler-design.md`](stack-scheduler-design.md).
+Companion documents (`script-size-optimization-baseline.md`, `stack-scheduler-design.md`)
+lived on the #160 branch and are not in this tree.
 
-Everything below is measured on the 72 conformance fixtures with
+Everything below was measured on the **72-fixture** #160 / pre-#168 corpus with
 `pnpm --filter runar-conformance run script-metrics -- --compare current,ec-pool,ec-sink,ec-comb
 pnpm --filter runar-conformance run script-metrics -- --compare current,all`.
+This tree's `conformance/script-size-baseline.json` is a different denominator: **82** fixtures,
+`p256-wallet` **958,854**, `p384-wallet` **1,963,362**, corpus **14,504,527**. Do not treat the
+tables below as current compiler output.
 
 ---
 
 ## 1. Headline
 
-**`conformance/tests/p256-wallet`: 958,792 → 147,113 bytes (−84.7 %)** — the fixture the brief
-calls its "959,592 B reference implementation". `p384-wallet`: 1,963,300 → 223,204 (−88.6 %).
+On the #160 tree, pre-#168: **`conformance/tests/p256-wallet`: 958,792 → 147,113 bytes (−84.7 %)** — the fixture the brief
+called its "959,592 B reference implementation". `p384-wallet`: 1,963,300 → 223,204 (−88.6 %).
 
-Across the whole corpus, with every flag on: **13,526,563 → 4,726,567 bytes (−65.1 %)**,
+Across that 72-fixture corpus, with every flag on: **13,526,563 → 4,726,567 bytes (−65.1 %)**,
 43 of 72 fixtures changed, **none grown**.
 
 | stage | p256-wallet | p384-wallet | corpus |
 |---|---:|---:|---:|
-| shipping | 958,792 | 1,963,300 | 13,526,563 |
+| pre-#168 #160 baseline | 958,792 | 1,963,300 | 13,526,563 |
 | + EC constant pool | 304,463 (−68.2 %) | 463,435 (−76.4 %) | 6,285,154 (−53.5 %) |
 | + reduction sinking | 179,890 (−81.2 %) | 272,678 (−86.1 %) | — |
 | + fixed-base comb (NIST) | **147,113 (−84.7 %)** | **223,204 (−88.6 %)** | 4,906,225 (−63.7 %) |
@@ -39,16 +42,17 @@ secp256k1 fixtures (`ec-primitives`, `ec-demo`, `ec-unit`, `schnorr-zkp`,
 deliberately NOT combed: its base arrives at run time, and the comb's interval
 argument does not cover an attacker-chosen point.
 
-**All seven tiers ship all four optimizations, byte-identically.** See §8.
+On that branch the seven tiers emitted all four optimizations byte-identically, behind flags
+that never landed on `main`. See §8 for what that port contained; none of those paths exist
+here.
 
-The liveness scheduler moves 34 fixtures but −0.0 % of corpus bytes; it is reported separately
+The liveness scheduler moved 34 fixtures but −0.0 % of corpus bytes; it is reported separately
 in §2 because its value is qualitative, not numeric.
 
-Default output is unchanged at every stage and in every tier: all 72 fixtures reproduce their
-checked-in `expected-script.hex` byte-for-byte
-(`packages/runar-compiler/src/__tests__/golden-invariance.test.ts`), `script-size-check` is
-72/72 ok, and every tier's own suite — including its crypto op-count goldens — still passes.
-Every optimization is opt-in.
+Default output on that branch was unchanged at every stage and in every tier: all 72 fixtures
+reproduced their checked-in `expected-script.hex` byte-for-byte
+(`golden-invariance.test.ts` on #160), `script-size-check` was 72/72 ok, and every tier's own
+suite — including its crypto op-count goldens — still passed. Every optimization was opt-in.
 
 ## 2. What was built
 
@@ -199,16 +203,19 @@ the patch was discarded. Two variants:
   (6 bytes instead of 10). This is what a correct analysis could actually emit.
 - `all` — short reduction everywhere. Semantically wrong; the absolute floor.
 
-| fixture | shipping | + pool | **+ pool + sinking** | floor (`all`) |
+| fixture | pre-#168 #160 baseline | + pool | **+ pool + sinking** | floor (`all`) |
 |---|---:|---:|---:|---:|
 | `p256-wallet` | 958,792 | 304,463 | **179,796** (−81.2 %) | 164,302 |
 | `p384-wallet` | 1,963,300 | 463,435 | **272,584** (−86.1 %) | 249,410 |
 | `ec-primitives` | 1,332,782 | 433,880 | **258,160** (−80.6 %) | 237,229 |
 | `ec-unit` | 479,716 | 157,129 | **93,585** (−80.5 %) | 86,576 |
 
-**The sound variant captures 89 % of the theoretical floor** (124,667 of a possible 140,161
-bytes on `p256-wallet`), so the analysis does not need to be clever about subtraction — the
+**The sound variant captured 89 % of the theoretical floor** (124,667 of a possible 140,161
+bytes on `p256-wallet`), so the analysis did not need to be clever about subtraction — the
 cheap `+p` form is nearly free.
+
+The **179,796** cell is this throwaway-env snapshot. The end-to-end sink stage used in §1 /
+§3.9 / §8.4 is **179,890** — same flags, full compiler, not the patched `fieldMod` experiment.
 
 Note the pooling and the sinking are complementary, not independent: without pooling, the
 cheap `fieldSub` form pushes the prime *twice* and `p256-wallet` gets **larger** (958,792 →
@@ -250,7 +257,7 @@ oracle assertions and one that is actually correct.
 ### 3.9 Trajectory
 
 ```
-958,792   shipping
+958,792   pre-#168 #160 baseline
 304,463   + EC constant pool                     MEASURED
 179,890   + sign lattice + reduction sinking     MEASURED
 147,113   + fixed-base comb for u1·G             MEASURED
@@ -346,7 +353,7 @@ already a fix-point driver (brief Phase 3 is done; see the baseline document §5
 
 The scheduler's first working version **miscompiled `if-without-else-multi-temp`**: it
 produced a script that ran to completion, left a truthy top-of-stack, and **accepted a witness
-the shipping compiler rejects**. Byte counts, golden comparisons for the other fixtures, and
+the then-shipping compiler rejects**. Byte counts, golden comparisons for the other fixtures, and
 the compiler's own 4,099 unit tests all passed while this was true.
 
 What caught it was `conformance/witnesses/` replayed through `runDifferentialExecution` —
@@ -440,15 +447,15 @@ npx vitest run packages/runar-testing/src/__tests__/ec-reduction-sinking.test.ts
 npx vitest run packages/runar-testing/src/__tests__/ec-comb.test.ts
 npx vitest run packages/runar-compiler/src/__tests__/comb-table.test.ts
 
-# CLI
+# CLI (these flags existed on #160; they are not registered on this tree and fail closed)
 node --import tsx packages/runar-cli/src/bin.ts compile <file> --hex \
   --ec-constant-pool --ec-reduction-sinking --ec-fixed-base-comb --stack-scheduler liveness
 ```
 
-## 8. The seven-tier port
+## 8. The seven-tier port (on the #160 tree)
 
-All four optimizations ship in TypeScript, Go, Rust, Python, Zig, Ruby and Java, behind the same
-three flags in every tier:
+On that branch all four optimizations shipped in TypeScript, Go, Rust, Python, Zig, Ruby and Java,
+behind the same three flags in every tier. None of those flags, tests, or paths exist here.
 
 ```
 --ec-constant-pool  --ec-reduction-sinking  --ec-fixed-base-comb
@@ -563,12 +570,12 @@ Per-tier gates:
 | Java | `codegen/EcFlagParityTest` | 3 tests over 24 × 4 |
 | Zig | `passes/helpers/ec_flag_parity_test.zig` | 7 tests over 19 emitters × 4, byte counts + width selection per curve |
 
-Every tier additionally pins that the flags OFF reproduce the shipping hash for every emitter, so
-the experimental work cannot move default output.
+Every tier additionally pinned that the flags OFF reproduced the then-shipping hash for every
+emitter, so the experimental work could not move default output.
 
-### 8.5 What is still not done
+### 8.5 What was still not done
 
-The ports are complete and gated, but this is still not a merge candidate:
+The ports were complete and gated on that branch, but it was still not a merge candidate:
 
 - The checked-in EC goldens were stamped under flags-off and are unchanged, which is correct — but
   nothing regenerates them for a flags-on world, and `conformance/script-size-baseline.json` would

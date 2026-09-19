@@ -77,13 +77,17 @@ describe('the golden-provenance gate does not depend on the caller cwd', () => {
     // Anti-vacuity. If the gate crashed on startup from both directories it
     // would "agree" perfectly and prove nothing — which is the exact class of
     // guard this branch keeps finding. A real run always prints one of two
-    // headers: the count line when goldens moved, or the nothing-to-justify
-    // line when they did not (docs-only PRs, this one included). A crash or
-    // empty stdout matches neither.
+    // headers, both anchored at `Golden-provenance gate:`:
+    //   - `Golden-provenance gate: N golden/vector file(s) changed.`
+    //   - `Golden-provenance gate: no golden/vector files changed — nothing to justify.`
+    // A crash, empty stdout, or the skip-fail line (`…changed, but the allowlist
+    // itself is invalid`) matches neither.
     expect(
       fromRoot.out,
       'the gate produced no summary line from the repo root, so the agreement ' +
         'asserted above is between two non-runs',
-    ).toMatch(/golden\/vector file(\(s\))?s? changed/);
+    ).toMatch(
+      /Golden-provenance gate: (?:\d+ golden\/vector file\(s\) changed\.|no golden\/vector files changed — nothing to justify\.)/,
+    );
   });
 });
