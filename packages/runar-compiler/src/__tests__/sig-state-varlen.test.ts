@@ -201,30 +201,30 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
   // -------------------------------------------------------------------------
   describe('controls: every other state type is byte-unchanged', () => {
     const TERMINAL_PINS: Record<string, string> = {
-      bigint: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
+      bigint: '785d8f69691b7f96628b34ff5221ba1a8326aeb83229cc1aa8b6ca6b48870a21',
       // W3 / BoolBamboozle re-stamp: `check(expected: boolean)` is a public
       // method with a `boolean` parameter, so its entry now carries the
       // 9-byte ABI-domain gate. The other six rows are unmoved, which is the
       // point of the control — the gate is scoped to boolean PARAMS and does
       // not touch state encoding for any type, boolean included.
-      boolean: '92a509b1441238ebe8903c8c04004c8c4dfd150e02c88f256212266f54ddcece',
-      RabinSig: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
-      RabinPubKey: 'e75f91c8ccad40ff213eb8bc2aa71ec772d5d325b28b5b5a50573bdde7a5b174',
-      PubKey: '584bda4d3de4e73ace367fdfc3d5500a37967a7327af5c7c1421b474702598af',
-      Sha256: '18ba16775519004de420c6d32178843d9ace1242f906c9aef4f4f7d7d75fbe6f',
-      Addr: 'cb372d34a9db0c8a9c56989796bc204f51e171397573c7f87656e86b0faab04c',
+      boolean: '9fec1ff6a7c3f3fcb6b8dd554d1a61008589427be8ffa6849da94dd561620e3a',
+      RabinSig: '785d8f69691b7f96628b34ff5221ba1a8326aeb83229cc1aa8b6ca6b48870a21',
+      RabinPubKey: '785d8f69691b7f96628b34ff5221ba1a8326aeb83229cc1aa8b6ca6b48870a21',
+      PubKey: '006609c7f3c136bea9d4396af412100effebb331049e59c9b3fe0bc2ecbb0e71',
+      Sha256: '8552b481afb50361fbd43f0a58ad187dde568ab29d09066b6ec0842ea4fb9a5b',
+      Addr: 'ae21dcf5b719b3d82ef42d593d8aa802b802e01de900219a9f15523af71ccc90',
     };
 
     const WRITE_PINS: Record<string, string> = {
-      ByteString: '5f873f911dbb2caf364021413581423af0f6aaf8ba882d787c8ee9f72d0c0e5b',
-      PubKey: 'c0ba2f049c2a412f6ee80f36ca97d7c615c938cf75f19c33888aa9a26d8cd572',
-      bigint: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
+      ByteString: '9868c0d2a60553456bfe622a313fc88bc57379a0ab2c96221eda29bb2da3a3ad',
+      PubKey: 'c804a19a59c6632d248ab4db5805ac742541c5b786b889f5cf78c2424e0d8b9c',
+      bigint: 'bd83c832749091ccf375b763df0977d39bcbd62eff0f7d5544d3a19e2de6501f',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
       // parameter and so gains the 9-byte ABI-domain gate. `bigint` and
       // `RabinSig` still agree with each other, which is the equality this
       // table exists to defend.
-      boolean: '9d0412948a994626f8d3f87b74bdf191ef7cad96d668df73bb944b5d0646a918',
-      RabinSig: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
+      boolean: '12f92c710002e4a46d07b4b7436f850cbb82f7400637992795b12bc7e59a86f2',
+      RabinSig: 'bd83c832749091ccf375b763df0977d39bcbd62eff0f7d5544d3a19e2de6501f',
     };
 
     for (const [type, digest] of Object.entries(TERMINAL_PINS)) {
@@ -241,7 +241,7 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
 
     it('the ByteString control read path is byte-unchanged', () => {
       expect(sha256(hexOf(terminalSource('ByteString'), READ_FILE))).toBe(
-        'ecfc6f7aea65c879be7375ffbb232a756cada31e1679b5b71c23f73309659522',
+        '91b84e4bb625d0ac7c83dc095de0f51932e3664c44062a0f7ee1caed747d6a43',
       );
     });
   });
