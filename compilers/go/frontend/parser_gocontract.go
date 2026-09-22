@@ -454,7 +454,22 @@ func (p *goContractParser) convertStatement(stmt ast.Stmt) Statement {
 			if target == nil || value == nil {
 				return nil
 			}
-			return AssignmentStmt{Target: target, Value: value, SourceLocation: loc}
+			if s.Tok == token.ASSIGN {
+				return AssignmentStmt{Target: target, Value: value, SourceLocation: loc}
+			}
+			// Compound assignment: desugar `x op= rhs` to `x = x op rhs`.
+			binOp, ok := goCompoundAssignOps[s.Tok]
+			if !ok {
+				p.addError(fmt.Sprintf(
+					"unsupported compound assignment operator %q at %s:%d:%d",
+					s.Tok.String(), p.fileName, pos.Line, pos.Column))
+				return nil
+			}
+			return AssignmentStmt{
+				Target:         target,
+				Value:          BinaryExpr{Op: binOp, Left: target, Right: value},
+				SourceLocation: loc,
+			}
 		}
 
 	case *ast.DeclStmt:
@@ -735,6 +750,18 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 	}
 
 	return nil
+}
+
+// goCompoundAssignOps maps Go compound-assignment tokens to the Rúnar binary
+// operator they desugar to. Limited to the set the TS reference Go-surface
+// parser accepts (01-parse-go.ts: += -= *= /= %=); every other compound
+// operator (&= |= ^= <<= >>= &^=) is a parse error, for frontend parity.
+var goCompoundAssignOps = map[token.Token]string{
+	token.ADD_ASSIGN: "+",
+	token.SUB_ASSIGN: "-",
+	token.MUL_ASSIGN: "*",
+	token.QUO_ASSIGN: "/",
+	token.REM_ASSIGN: "%",
 }
 
 func mapGoOp(op token.Token) string {

@@ -760,3 +760,117 @@ func TestR254_GoFieldToCamelLowercasesTheFirstLetter(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-003 / CL-BUG-167: compound assignment in the Go DSL.
+//
+// convertStatement special-cased only `:=`; every other AssignStmt token
+// (`=`, `+=`, `*=`, `<<=`, ...) fell through to a plain AssignmentStmt whose
+// value was the bare RHS, so `x *= 2` compiled as `x = 2` with no diagnostic.
+//
+// Proves: exactly the compound operators the TS reference Go-surface parser
+// accepts (`+= -= *= /= %=`, 01-parse-go.ts) lower to `x = x <op> rhs`, plain
+// `=` still lowers to the bare RHS, and every other Go compound operator
+// (`&= |= ^= <<= >>= &^=`, which the reference rejects) is a parse error
+// rather than a silent rewrite or a new frontend-parity divergence.
+// Does not prove: anything about the emitted script (the ANF/stack passes
+// are shared with every other surface and covered elsewhere), nor anything
+// about the Rust tier's `.runar.go` parser (a separate item).
+// ---------------------------------------------------------------------------
+
+func parseGoCompoundAssign(t *testing.T, stmt string) *ParseResult {
+	t.Helper()
+	source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Compound struct {
+	runar.SmartContract
+	Target runar.Bigint ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *Compound) Unlock(a runar.Bigint) {
+	x := a
+	` + stmt + `
+	runar.Assert(x == c.Target)
+}
+`
+	return ParseSource([]byte(source), "Compound.runar.go")
+}
+
+func TestParseGoContract_CompoundAssignmentDesugars(t *testing.T) {
+	cases := []struct{ stmt, op string }{
+		{"x += 3", "+"},
+		{"x -= 3", "-"},
+		{"x *= 3", "*"},
+		{"x /= 3", "/"},
+		{"x %= 3", "%"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.stmt, func(t *testing.T) {
+			result := parseGoCompoundAssign(t, tc.stmt)
+			if len(result.Errors) > 0 {
+				t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+			}
+			if result.Contract == nil || len(result.Contract.Methods) == 0 {
+				t.Fatal("expected a contract with at least one method")
+			}
+			body := result.Contract.Methods[0].Body
+			if len(body) != 3 {
+				t.Fatalf("expected 3 statements, got %d", len(body))
+			}
+			assign, ok := body[1].(AssignmentStmt)
+			if !ok {
+				t.Fatalf("expected AssignmentStmt, got %T", body[1])
+			}
+			if id, ok := assign.Target.(Identifier); !ok || id.Name != "x" {
+				t.Fatalf("expected target x, got %#v", assign.Target)
+			}
+			bin, ok := assign.Value.(BinaryExpr)
+			if !ok {
+				t.Fatalf("%s: value is %#v, want BinaryExpr x %s 3 (operator was discarded)", tc.stmt, assign.Value, tc.op)
+			}
+			if bin.Op != tc.op {
+				t.Errorf("%s: op = %q, want %q", tc.stmt, bin.Op, tc.op)
+			}
+			if id, ok := bin.Left.(Identifier); !ok || id.Name != "x" {
+				t.Errorf("%s: left = %#v, want identifier x", tc.stmt, bin.Left)
+			}
+			if lit, ok := bin.Right.(BigIntLiteral); !ok || lit.Value.Int64() != 3 {
+				t.Errorf("%s: right = %#v, want literal 3", tc.stmt, bin.Right)
+			}
+		})
+	}
+}
+
+func TestParseGoContract_PlainAssignmentUnchanged(t *testing.T) {
+	result := parseGoCompoundAssign(t, "x = 3")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	assign, ok := result.Contract.Methods[0].Body[1].(AssignmentStmt)
+	if !ok {
+		t.Fatalf("expected AssignmentStmt, got %T", result.Contract.Methods[0].Body[1])
+	}
+	if lit, ok := assign.Value.(BigIntLiteral); !ok || lit.Value.Int64() != 3 {
+		t.Errorf("x = 3: value = %#v, want literal 3", assign.Value)
+	}
+}
+
+// The TS reference (01-parse-go.ts) lexes only `+= -= *= /= %=` as compound
+// assignments; accepting any other Go compound operator here would parse
+// programs the reference rejects (frontend-parity divergence).
+func TestParseGoContract_NonReferenceCompoundAssignmentRejected(t *testing.T) {
+	for _, stmt := range []string{"x &= 3", "x |= 3", "x ^= 3", "x <<= 3", "x >>= 3", "x &^= 3"} {
+		t.Run(stmt, func(t *testing.T) {
+			result := parseGoCompoundAssign(t, stmt)
+			if len(result.Errors) == 0 {
+				t.Fatalf("expected a parse error for %q (not accepted by the TS reference), got none", stmt)
+			}
+			if msg := strings.Join(result.ErrorStrings(), "; "); !strings.Contains(msg, "unsupported compound assignment operator") {
+				t.Errorf("%q: error %q does not name the unsupported compound assignment", stmt, msg)
+			}
+		})
+	}
+}
