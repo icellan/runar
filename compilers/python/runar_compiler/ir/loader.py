@@ -154,6 +154,8 @@ def validate_ir(program: ANFProgram) -> list[str]:
     # R-126 / CL-BUG-164: an add_output must name exactly one state value per
     # MUTABLE property. Counted once, up front.
     mutable_count = sum(1 for p in program.properties if not p.readonly)
+    # F-014 / CL-BUG-266: readonly properties, for the update_prop rule below.
+    readonly_props = frozenset(p.name for p in program.properties if p.readonly)
 
     for i, method in enumerate(program.methods):
         if not method.name:
@@ -168,7 +170,9 @@ def validate_ir(program: ANFProgram) -> list[str]:
                     f"method {method.name} param {param.name} has empty type"
                 )
         errors.extend(
-            _validate_bindings(method.body, method.name, mutable_count)
+            _validate_bindings(
+                method.body, method.name, mutable_count, readonly_props
+            )
         )
 
     for i, prop in enumerate(program.properties):
@@ -176,6 +180,27 @@ def validate_ir(program: ANFProgram) -> list[str]:
             errors.append(f"property[{i}] has empty name")
         if not prop.type:
             errors.append(f"property {prop.name} has empty type")
+
+    # F-014 / CL-BUG-266: the source validator requires every public
+    # method to end with assert() (frontend/validator.py
+    # ``_ends_with_assert``; UnsafeSmartContract may instead end with a
+    # terminal asm() of out_arity 1). --ir runs no frontend, so a public
+    # body of just ``load_const true`` compiled to 51 (OP_TRUE) --
+    # anyone-can-spend. Appended after the structural checks so a malformed
+    # binding keeps priority. IR carries no parentClass, so the terminal
+    # raw_script form is accepted without the UnsafeSmartContract gate.
+    for method in program.methods:
+        if (
+            method.is_public
+            and method.name != "constructor"
+            and not _ends_with_assert(method.body)
+        ):
+            errors.append(
+                f"public method '{method.name}' must end with an assert() call "
+                f"(or a terminal raw_script with out_arity 1); without one the "
+                f"method leaves no checked value and the output can be "
+                f"anyone-can-spend"
+            )
 
     # N-113 / R-081: a contract with no public method has no spending entry
     # point and emits an EMPTY locking script -- which is anyone-can-spend, not
@@ -258,8 +283,30 @@ def _allowed_arity(name: str):
     return (len(sig.params),)
 
 
+def _ends_with_assert(bindings: list[ANFBinding]) -> bool:
+    """ANF analogue of the source validator's ``_ends_with_assert`` (plus the
+    UnsafeSmartContract terminal-asm form): the last binding is an ``assert``,
+    a ``raw_script`` with out_arity 1, or an ``if`` whose two arms both end
+    that way."""
+    if not bindings:
+        return False
+    value = bindings[-1].value
+    if value.kind == "assert":
+        return True
+    if value.kind == "raw_script":
+        return value.out_arity == 1
+    if value.kind == "if":
+        return _ends_with_assert(value.then or []) and _ends_with_assert(
+            value.else_ or []
+        )
+    return False
+
+
 def _validate_bindings(
-    bindings: list[ANFBinding], method_name: str, mutable_count: int
+    bindings: list[ANFBinding],
+    method_name: str,
+    mutable_count: int,
+    readonly_props: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Validate a list of ANF bindings, including nested ones."""
     errors: list[str] = []
@@ -355,15 +402,29 @@ def _validate_bindings(
                     f"successor that cannot be spent."
                 )
 
+        # F-014 / CL-BUG-266: readonly properties may only be assigned in the
+        # constructor (frontend/validator.py ``_check_readonly_writes``). --ir
+        # runs no frontend, so an update_prop on one compiled clean.
+        if (
+            kind == "update_prop"
+            and method_name != "constructor"
+            and (binding.value.name or "") in readonly_props
+        ):
+            errors.append(
+                f"cannot assign to readonly property '{binding.value.name}' in "
+                f"method '{method_name}' (binding {binding.name}). readonly "
+                f"properties may only be assigned in the constructor."
+            )
+
         # Validate nested bindings
         if kind == "if":
             if binding.value.then:
                 errors.extend(
-                    _validate_bindings(binding.value.then, method_name, mutable_count)
+                    _validate_bindings(binding.value.then, method_name, mutable_count, readonly_props)
                 )
             if binding.value.else_:
                 errors.extend(
-                    _validate_bindings(binding.value.else_, method_name, mutable_count)
+                    _validate_bindings(binding.value.else_, method_name, mutable_count, readonly_props)
                 )
 
         if kind == "loop":
@@ -380,7 +441,7 @@ def _validate_bindings(
                 )
             if binding.value.body:
                 errors.extend(
-                    _validate_bindings(binding.value.body, method_name, mutable_count)
+                    _validate_bindings(binding.value.body, method_name, mutable_count, readonly_props)
                 )
 
         if kind == "raw_script":

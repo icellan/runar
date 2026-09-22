@@ -91,6 +91,8 @@ class TestLoadIR_DecodesConstants:
                         {"name": "t1", "value": {"kind": "load_const", "value": True}},
                         {"name": "t2", "value": {"kind": "load_const", "value": "deadbeef"}},
                         {"name": "t3", "value": {"kind": "load_param", "name": "x"}},
+                        # F-014: a public method must end with an assert.
+                        {"name": "t4", "value": {"kind": "assert", "value": "t1"}},
                     ],
                     "isPublic": True,
                 },
@@ -473,6 +475,8 @@ class TestLoadIR_RoundTripExtended:
                                 ],
                             },
                         },
+                        # F-014: a public method must end with an assert.
+                        {"name": "done", "value": {"kind": "assert", "value": "cond"}},
                     ],
                     "isPublic": True,
                 },
@@ -484,7 +488,7 @@ class TestLoadIR_RoundTripExtended:
         assert len(loaded.methods) == 1
 
         body = loaded.methods[0].body
-        assert len(body) == 3
+        assert len(body) == 4
 
         # Verify if survived
         if_binding = body[1]
