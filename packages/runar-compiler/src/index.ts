@@ -573,7 +573,14 @@ export function compile(source: string, options?: CompileOptions): CompileResult
 export interface CompileFromANFOptions {
   /** Bake property values into the locking script (replaces placeholders). */
   constructorArgs?: Record<string, bigint | boolean | string>;
-  /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
+  /**
+   * @deprecated Ignored by `compileFromANF`: ANF constant folding is never run
+   * on IR input, whatever this is set to (the Go/Rust/Python/Zig/Ruby/Java
+   * `--ir` entry points do the same). Accepted only so CLI callers can pass
+   * their `--disable-constant-folding` flag through unchanged. Constant
+   * folding on this path happens only in the Stack-IR peephole optimizer,
+   * which `disablePeephole` controls.
+   */
   disableConstantFolding?: boolean;
   /** If true, skip the EC algebraic optimizer. See CompileOptions for context. */
   disableEcOptimizer?: boolean;
@@ -598,7 +605,9 @@ export interface CompileFromANFResult {
  * Compile a parsed/loaded ANF IR program directly to a Bitcoin Script.
  *
  * Skips passes 1–4 (parse/validate/typecheck/anf-lower) and runs only:
- *   constant-fold (optional) → EC optimize → stack-lower → peephole → emit
+ *   EC optimize → stack-lower → peephole → emit
+ * ANF constant folding is NOT run here (see the note in the body);
+ * `disableConstantFolding` is ignored.
  *
  * Mirrors Go's `CompileFromIR`, Rust's `compile_from_ir`, Python's
  * `compile_from_ir_bytes`, and the corresponding entry points on the Zig,
