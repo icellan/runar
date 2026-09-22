@@ -340,16 +340,35 @@ module RunarCompiler
       # The tokenizer processes one line at a time, tracking parenthesis depth
       # to suppress NEWLINE tokens inside multi-line expressions. This matches
       # the behavior of the TypeScript reference implementation.
-      def self.tokenize(source)
+      #
+      # +errors+, when given, receives tokenizer diagnostics (currently only an
+      # unterminated +=begin+ embedded document).
+      def self.tokenize(source, errors = nil)
       tokens = []
       lines = source.split("\n", -1)
       paren_depth = 0
+      # Line number of an open +=begin+ embedded document, or nil.
+      block_comment_start = nil
 
       lines.each_with_index do |raw_line, line_idx|
         line_num = line_idx + 1
 
         # Strip trailing carriage return
         line = raw_line.chomp("\r")
+
+        # F-018: Ruby embedded documents. +=begin+ / +=end+ open and close a
+        # block comment only at column 0 and only as a whole word (followed by
+        # whitespace or end of line) -- exactly Ruby's own rule. Everything
+        # from the +=begin+ line through the +=end+ line is a comment. Before
+        # this, a method "commented out" this way compiled as a live spend path.
+        if block_comment_start
+          block_comment_start = nil if line.match?(/\A=end(?:\s|\z)/)
+          next
+        end
+        if line.match?(/\A=begin(?:\s|\z)/)
+          block_comment_start = line_num
+          next
+        end
 
         # Skip blank lines and comment-only lines
         stripped = line.lstrip
@@ -601,6 +620,10 @@ module RunarCompiler
         if paren_depth == 0
           tokens << Token.new(kind: TOK_NEWLINE, value: "", line: line_num, col: line.length + 1)
         end
+      end
+
+      if block_comment_start && errors
+        errors << "unterminated '=begin' block comment starting at line #{block_comment_start}: missing '=end'"
       end
 
       tokens << Token.new(kind: TOK_EOF, value: "", line: lines.length + 1, col: 1)
@@ -1899,7 +1922,13 @@ module RunarCompiler
     # @param file_name [String] the source file name
     # @return [ParseResult]
     def self.parse_ruby(source, file_name = "contract.runar.rb")
-      tokens = RubyTokens.tokenize(source)
+      lex_errors = []
+      tokens = RubyTokens.tokenize(source, lex_errors)
+      unless lex_errors.empty?
+        return ParseResult.new(errors: lex_errors.map { |e|
+          Diagnostic.new(message: "#{file_name}: #{e}", severity: Severity::ERROR)
+        })
+      end
       parser = RbParser.new(tokens, file_name)
       parser.parse
     end
