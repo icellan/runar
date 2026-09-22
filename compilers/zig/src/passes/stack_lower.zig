@@ -5309,7 +5309,8 @@ const LowerCtx = struct {
         // entire body. `assert((f ? this.a : this.hx(x)) === this.a)` then came
         // out `7c 63 00 77 67 68 00 9c` against the six-tier
         // `7c 63 00 77 68 00 9c`. It is not about calls, though: `p + 0n`
-        // (rule 6) and `p - 0n` (rule 7) erase the same way.
+        // (rule 6) and `p - 0n` (rule 7) used to erase the same way (both
+        // rules were removed by F-001).
         //
         // Optimizing here is byte-neutral for every other program. No peephole
         // rule names `op_if` / `op_else` / `op_endif` in any window position, so

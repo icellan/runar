@@ -406,18 +406,16 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
     // Rule 5: PUSH(1) + OP_SUB -> OP_1SUB
     if (isPushInt(a, 1) and isOp(b, .op_sub)) return .{ Inst{ .op = .op_1sub }, null };
 
-    // Rule 6: PUSH(0) + OP_ADD -> (removed)
-    if (isPushInt(a, 0) and isOp(b, .op_add)) return .{ null, null };
-
-    // Rule 7: PUSH(0) + OP_SUB -> (removed)
-    if (isPushInt(a, 0) and isOp(b, .op_sub)) return .{ null, null };
+    // Rules 6, 7, 9 removed (F-001): PUSH(0) + OP_ADD, PUSH(0) + OP_SUB and
+    // OP_NEGATE + OP_NEGATE are identities over integers, not over stack
+    // elements: the opcode decodes its operand as a CScriptNum (rejecting a
+    // non-minimal encoding under strict rules) and pushes back the minimal
+    // re-encoding. Deleting it changes accept/reject and the value for a
+    // witness-supplied operand.
 
     // Rule 8 moved to tryWindow3: `OP_NOT + OP_NOT -> (removed)` was an
     // UNGUARDED 2-op rule and is unsound (C17). The 3-op form takes the
     // PRODUCER of the negated value into the window.
-
-    // Rule 9: OP_NEGATE + OP_NEGATE -> (removed)
-    if (isOp(a, .op_negate) and isOp(b, .op_negate)) return .{ null, null };
 
     // Rule 10: OP_EQUAL + OP_VERIFY -> OP_EQUALVERIFY
     if (isOp(a, .op_equal) and isOp(b, .op_verify))
@@ -675,22 +673,27 @@ test "rule 5: push 1 + sub -> 1sub" {
     try expectOps(&.{.{ .op = .op_1sub }}, result);
 }
 
-// --- Rule 6: PUSH(0) + OP_ADD -> removed ---
-test "rule 6: push 0 + add eliminated" {
+// --- Rule 6 (removed, F-001): PUSH(0) + OP_ADD is kept ---
+// x + 0 = x over integers, but OP_ADD decodes its operand as a CScriptNum
+// (rejecting a non-minimal encoding under strict rules) and re-encodes it
+// minimally; a witness operand gets no other normalisation, so deleting the
+// pair changes accept/reject and value. Proves the Zig peephole keeps the
+// pair; does not execute a script.
+test "rule 6 (F-001): push 0 + add kept" {
     const alloc = testing.allocator;
     const input = [_]Inst{ .{ .push_int = 0 }, .{ .op = .op_add } };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&input, result);
 }
 
-// --- Rule 7: PUSH(0) + OP_SUB -> removed ---
-test "rule 7: push 0 + sub eliminated" {
+// --- Rule 7 (removed, F-001): PUSH(0) + OP_SUB is kept ---
+test "rule 7 (F-001): push 0 + sub kept" {
     const alloc = testing.allocator;
     const input = [_]Inst{ .{ .push_int = 0 }, .{ .op = .op_sub } };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&input, result);
 }
 
 // --- Rule 8: <canonical-bool producer> + OP_NOT + OP_NOT -> <producer> ---
@@ -781,13 +784,13 @@ test "C17: x !== 0n keeps its OP_NOT pair" {
     }, result);
 }
 
-// --- Rule 9: OP_NEGATE + OP_NEGATE -> removed ---
-test "rule 9: negate + negate eliminated" {
+// --- Rule 9 (removed, F-001): OP_NEGATE + OP_NEGATE is kept ---
+test "rule 9 (F-001): negate + negate kept" {
     const alloc = testing.allocator;
     const input = [_]Inst{ .{ .op = .op_negate }, .{ .op = .op_negate } };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&input, result);
 }
 
 // --- Rule 10: OP_EQUAL + OP_VERIFY -> OP_EQUALVERIFY ---
@@ -986,7 +989,7 @@ test "fixed-point: reassociation then identity" {
     const alloc = testing.allocator;
     // PUSH(5) OP_ADD PUSH(5) OP_SUB
     // Rule 29: diff = 5-5 = 0 -> PUSH(0) OP_ADD
-    // Rule 6: PUSH(0) OP_ADD -> removed
+    // PUSH(0) OP_ADD is then KEPT (F-001: OP_ADD validates/normalises x).
     const input = [_]Inst{
         .{ .push_int = 5 },
         .{ .op = .op_add },
@@ -995,7 +998,7 @@ test "fixed-point: reassociation then identity" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    try expectOps(&.{ .{ .push_int = 0 }, .{ .op = .op_add } }, result);
 }
 
 // --- No-op on already optimal code ---

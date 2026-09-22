@@ -105,22 +105,9 @@ export const PEEPHOLE_RULES: PeepholeRuleSpec[] = [
     stackInputs: 1,
     sweep: { kind: 'stack', inputs: 1, domain: 'num' },
   },
-  // PUSH 0, OP_ADD → [] (x + 0 = x)
-  {
-    name: 'push0-add-elim',
-    pattern: [push(0n), opc('OP_ADD')],
-    replacement: [],
-    stackInputs: 1,
-    sweep: { kind: 'stack', inputs: 1, domain: 'num' },
-  },
-  // PUSH 0, OP_SUB → [] (x - 0 = x)
-  {
-    name: 'push0-sub-elim',
-    pattern: [push(0n), opc('OP_SUB')],
-    replacement: [],
-    stackInputs: 1,
-    sweep: { kind: 'stack', inputs: 1, domain: 'num' },
-  },
+  // No push0-add-elim / push0-sub-elim / negate-negate-elim: deleting the
+  // opcode deletes its ScriptNum validation + normalisation (F-001; see
+  // peephole.ts).
   // <canonical-bool producer>, OP_NOT, OP_NOT → <canonical-bool producer>
   //
   // `OP_NOT OP_NOT` is boolean-idempotence, NOT numeric identity: for a
@@ -139,14 +126,6 @@ export const PEEPHOLE_RULES: PeepholeRuleSpec[] = [
     replacement: [opc('OP_NUMEQUAL')],
     stackInputs: 2,
     sweep: { kind: 'stack', inputs: 2, domain: 'num' },
-  },
-  // OP_NEGATE, OP_NEGATE → []  (numeric identity for all integers)
-  {
-    name: 'negate-negate-elim',
-    pattern: [opc('OP_NEGATE'), opc('OP_NEGATE')],
-    replacement: [],
-    stackInputs: 1,
-    sweep: { kind: 'stack', inputs: 1, domain: 'num' },
   },
   // OP_EQUAL, OP_VERIFY → OP_EQUALVERIFY
   {

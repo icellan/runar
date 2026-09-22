@@ -113,11 +113,14 @@ module RunarCompiler
       if _is_push_bigint(a, 1) && _is_opcode(b, "OP_SUB")
         return [{ op: "opcode", code: "OP_1SUB" }]
       end
-      if _is_push_bigint(a, 0) && _is_opcode(b, "OP_ADD") then return [] end
-      if _is_push_bigint(a, 0) && _is_opcode(b, "OP_SUB") then return [] end
+      # NOTE (F-001): no push(0)+OP_ADD, push(0)+OP_SUB or OP_NEGATE+OP_NEGATE
+      # elimination. x+0, x-0 and -(-x) are identities over integers, not over
+      # stack elements: the opcode decodes its operand as a CScriptNum
+      # (rejecting a non-minimal encoding under strict rules) and pushes back
+      # the minimal re-encoding. Deleting it changes accept/reject and the
+      # value for a witness-supplied operand.
 
       # OP_NOT + OP_NOT is NOT a 2-op rule -- see _match_window3 (C17).
-      if _is_opcode(a, "OP_NEGATE") && _is_opcode(b, "OP_NEGATE") then return [] end
 
       if _is_opcode(a, "OP_EQUAL") && _is_opcode(b, "OP_VERIFY")
         return [{ op: "opcode", code: "OP_EQUALVERIFY" }]

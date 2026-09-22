@@ -362,7 +362,6 @@ Runs on Stack IR between Pass 5 (Stack Lower) and Pass 6 (Emit). Always enabled.
 | `NUMEQUAL + VERIFY` | `OP_NUMEQUALVERIFY` | 1 byte |
 | `CHECKSIG + VERIFY` | `OP_CHECKSIGVERIFY` | 1 byte |
 | `SWAP + DROP` | `NIP` | 1 byte |
-| `PUSH_INT(0) + ADD` | (removed) | 2+ bytes |
 | `NOT + NOT` | (removed) | 2 bytes |
 
 ### ANF EC Optimizer (`anf-ec.ts`)

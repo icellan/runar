@@ -152,30 +152,18 @@ const rules: PeepholeRule[] = [
   },
 
   // -------------------------------------------------------------------------
-  // PUSH 0, OP_ADD → remove both (identity: x + 0 = x)
+  // NO `PUSH 0, OP_ADD → []`, `PUSH 0, OP_SUB → []` or
+  // `OP_NEGATE, OP_NEGATE → []` rule (F-001).
+  //
+  // `x + 0`, `x - 0` and `-(-x)` are identities over integers, not over stack
+  // elements: OP_ADD / OP_SUB / OP_NEGATE decode their operand as a CScriptNum
+  // (rejecting a non-minimal encoding under strict rules) and push back the
+  // minimal re-encoding. A witness-supplied operand reaches the stack with no
+  // other normalisation, so deleting the opcode changes accept/reject and the
+  // value (e.g. into serialised state). Same class of bug as the OP_NOT pair
+  // below; unlike it, no local producer guard buys anything here — a constant
+  // producer is already folded by `const-fold-add` / `const-fold-sub`.
   // -------------------------------------------------------------------------
-  {
-    windowSize: 2,
-    match(ops) {
-      if (isPushZero(ops[0]!) && isOpcode(ops[1]!, 'OP_ADD')) {
-        return [];
-      }
-      return null;
-    },
-  },
-
-  // -------------------------------------------------------------------------
-  // PUSH 0, OP_SUB → remove both (identity: x - 0 = x)
-  // -------------------------------------------------------------------------
-  {
-    windowSize: 2,
-    match(ops) {
-      if (isPushZero(ops[0]!) && isOpcode(ops[1]!, 'OP_SUB')) {
-        return [];
-      }
-      return null;
-    },
-  },
 
   // -------------------------------------------------------------------------
   // <canonical-bool producer>, OP_NOT, OP_NOT → <canonical-bool producer>
@@ -205,19 +193,6 @@ const rules: PeepholeRule[] = [
         isOpcode(ops[2]!, 'OP_NOT')
       ) {
         return [ops[0]!];
-      }
-      return null;
-    },
-  },
-
-  // -------------------------------------------------------------------------
-  // OP_NEGATE, OP_NEGATE → remove both (double negation)
-  // -------------------------------------------------------------------------
-  {
-    windowSize: 2,
-    match(ops) {
-      if (isOpcode(ops[0]!, 'OP_NEGATE') && isOpcode(ops[1]!, 'OP_NEGATE')) {
-        return [];
       }
       return null;
     },

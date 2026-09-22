@@ -337,24 +337,16 @@ fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
         return Some(vec![StackOp::Opcode("OP_1SUB".to_string())]);
     }
 
-    // PUSH 0, OP_ADD -> remove both
-    if is_push_int(a, 0) && is_opcode(b, "OP_ADD") {
-        return Some(vec![]);
-    }
-
-    // PUSH 0, OP_SUB -> remove both
-    if is_push_int(a, 0) && is_opcode(b, "OP_SUB") {
-        return Some(vec![]);
-    }
+    // NOTE (F-001): no `PUSH 0, OP_ADD`, `PUSH 0, OP_SUB` or
+    // `OP_NEGATE, OP_NEGATE -> []` rule. x+0, x-0 and -(-x) are identities over
+    // integers, not over stack elements: the opcode decodes its operand as a
+    // CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    // pushes back the minimal re-encoding. Deleting it changes accept/reject
+    // and the value for a witness-supplied operand.
 
     // NOTE: `OP_NOT, OP_NOT -> []` used to live here as an unguarded 2-op rule.
     // It is unsound (C17) and now lives in `match_window_3`, which takes the
     // PRODUCER of the negated value into the window.
-
-    // OP_NEGATE, OP_NEGATE -> remove both
-    if is_opcode(a, "OP_NEGATE") && is_opcode(b, "OP_NEGATE") {
-        return Some(vec![]);
-    }
 
     // OP_EQUAL, OP_VERIFY -> OP_EQUALVERIFY
     if is_opcode(a, "OP_EQUAL") && is_opcode(b, "OP_VERIFY") {
@@ -603,14 +595,18 @@ mod tests {
         );
     }
 
+    // F-001: -(-x) = x over integers, but OP_NEGATE decodes its operand as a
+    // CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    // re-encodes it minimally; deleting the pair changes accept/reject and
+    // value for a witness operand. Proves the pair survives; does not execute.
     #[test]
-    fn test_negate_negate_removed() {
+    fn test_negate_negate_kept() {
         let ops = vec![
             StackOp::Opcode("OP_NEGATE".to_string()),
             StackOp::Opcode("OP_NEGATE".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "NEGATE NEGATE should be eliminated, got {:?}", result);
+        assert_eq!(format!("{:?}", result), format!("{:?}", ops), "NEGATE NEGATE must survive (F-001)");
     }
 
     #[test]
@@ -668,24 +664,26 @@ mod tests {
         assert!(matches!(&result[0], StackOp::Opcode(c) if c == "OP_1SUB"));
     }
 
+    // F-001: PUSH(0) ADD / PUSH(0) SUB must survive — OP_ADD / OP_SUB
+    // validate and normalise their operand (see test_negate_negate_kept).
     #[test]
-    fn test_push0_add_removed() {
+    fn test_push0_add_kept() {
         let ops = vec![
             StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_ADD".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "PUSH(0) ADD should be eliminated, got {:?}", result);
+        assert_eq!(format!("{:?}", result), format!("{:?}", ops), "PUSH(0) ADD must survive (F-001)");
     }
 
     #[test]
-    fn test_push0_sub_removed() {
+    fn test_push0_sub_kept() {
         let ops = vec![
             StackOp::Push(PushValue::Int(BigInt::from(0))),
             StackOp::Opcode("OP_SUB".to_string()),
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "PUSH(0) SUB should be eliminated, got {:?}", result);
+        assert_eq!(format!("{:?}", result), format!("{:?}", ops), "PUSH(0) SUB must survive (F-001)");
     }
 
     #[test]
@@ -994,15 +992,16 @@ mod tests {
 
     #[test]
     fn test_iterative_optimization() {
-        // After first pass: PUSH(0) ADD is removed, leaving DUP DROP which is
-        // removed on the second pass
+        // After first pass: PUSH(7) DROP is removed, leaving DUP DROP which is
+        // removed on the second pass. (Was PUSH(0) ADD, which F-001 no longer
+        // eliminates.)
         let ops = vec![
             StackOp::Dup,
-            StackOp::Push(PushValue::Int(BigInt::from(0))),
-            StackOp::Opcode("OP_ADD".to_string()),
+            StackOp::Push(PushValue::Int(BigInt::from(7))),
+            StackOp::Drop,
             StackOp::Drop,
         ];
         let result = optimize_stack_ops(&ops);
-        assert!(result.is_empty(), "iterative optimization should remove DUP (PUSH0 ADD -> empty) DROP -> DUP DROP -> empty, got {:?}", result);
+        assert!(result.is_empty(), "iterative optimization should remove DUP (PUSH7 DROP -> empty) DROP -> DUP DROP -> empty, got {:?}", result);
     }
 }

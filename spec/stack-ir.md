@@ -368,10 +368,7 @@ The Stack IR phase applies the following peephole optimizations. Rules are appli
 | `SWAP, SWAP` | (remove both) | 2 bytes |
 | `PUSH 1, OP_ADD` | `OP_1ADD` | 1+ bytes |
 | `PUSH 1, OP_SUB` | `OP_1SUB` | 1+ bytes |
-| `PUSH 0, OP_ADD` | (remove both) | 2+ bytes |
-| `PUSH 0, OP_SUB` | (remove both) | 2+ bytes |
 | `OP_NOT, OP_NOT` | (remove both) | 2 bytes |
-| `OP_NEGATE, OP_NEGATE` | (remove both) | 2 bytes |
 | `OP_EQUAL, OP_VERIFY` | `OP_EQUALVERIFY` | 1 byte |
 | `OP_CHECKSIG, OP_VERIFY` | `OP_CHECKSIGVERIFY` | 1 byte |
 | `OP_NUMEQUAL, OP_VERIFY` | `OP_NUMEQUALVERIFY` | 1 byte |
@@ -379,6 +376,8 @@ The Stack IR phase applies the following peephole optimizations. Rules are appli
 | `OP_DUP, OP_DROP` | (remove both) | 2 bytes |
 | `OVER, OVER` | `OP_2DUP` | 1 byte |
 | `DROP, DROP` | `OP_2DROP` | 1 byte |
+
+`PUSH 0, OP_ADD`, `PUSH 0, OP_SUB` and `OP_NEGATE, OP_NEGATE` are deliberately NOT eliminated: the opcode decodes its operand as a script number (rejecting a non-minimal encoding under strict rules) and pushes back the minimal re-encoding, so removing it is not a no-op on witness-supplied bytes (F-001).
 
 ---
 

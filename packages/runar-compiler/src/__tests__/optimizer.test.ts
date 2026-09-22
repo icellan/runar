@@ -730,14 +730,17 @@ describe('Optimizer: Peephole (Stack IR)', () => {
       expect(result).toEqual([{ op: 'push', value: 1n }]);
     });
 
-    it('removes OP_NEGATE OP_NEGATE', () => {
+    it('keeps OP_NEGATE OP_NEGATE (F-001: OP_NEGATE validates/normalises its operand)', () => {
+      // Sound to drop only over a canonical producer like this constant; the
+      // rule has no producer guard (see peephole.ts), so it never fires — the
+      // ANF constant folder covers the constant case.
       const ops: StackOp[] = [
         { op: 'push', value: 42n },
         { op: 'opcode', code: 'OP_NEGATE' },
         { op: 'opcode', code: 'OP_NEGATE' },
       ];
       const result = optimizeStackIR(ops);
-      expect(result).toEqual([{ op: 'push', value: 42n }]);
+      expect(result).toEqual(ops);
     });
   });
 

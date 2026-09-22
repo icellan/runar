@@ -25,6 +25,7 @@ import type { StackOp } from '../ir/index.js';
 import { emitMethod } from '../passes/06-emit.js';
 import { PEEPHOLE_RULES, type PeepholeRuleSpec } from '../optimizer/peephole-rules.js';
 import { optimizeStackIR } from '../optimizer/peephole.js';
+import { compile } from '../index.js';
 
 // ---------------------------------------------------------------------------
 // Edge domains
@@ -232,5 +233,84 @@ describe('not-not-elim precondition (C17 — the guard that closed TS-GAP-008)',
   it('the optimizer therefore leaves a bare OP_NOT pair in place', () => {
     const ops = [push(5n), opc('OP_NOT'), opc('OP_NOT')];
     expect(runEffect(optimizeStackIR(ops))).toEqual(runEffect(ops));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-001: numeric-identity rules must not delete ScriptNum validation.
+// ---------------------------------------------------------------------------
+
+describe('F-001: PUSH 0;OP_ADD / PUSH 0;OP_SUB / OP_NEGATE;OP_NEGATE keep the opcode', () => {
+  // `x + 0`, `x - 0` and `-(-x)` are numeric identities over INTEGERS, but the
+  // opcode is not a no-op over STACK ELEMENTS: OP_ADD / OP_SUB / OP_NEGATE
+  // decode their operand as a CScriptNum — rejecting a non-minimal encoding —
+  // and push back the minimal re-encoding. A witness-supplied bigint parameter
+  // reaches the stack with no other normalisation, so deleting the opcode lets
+  // a spend succeed (and write raw, non-canonical bytes into state) that the
+  // unoptimised script rejects. The edge sweep above cannot see this: its
+  // domain is canonical script numbers only.
+  //
+  // Proves: for each of the three windows, on non-canonical operand encodings
+  // (negative zero, non-minimal 0 and 1, a redundant sign byte), the optimised
+  // op-sequence has exactly the stack effect of the unoptimised one under the
+  // real @bsv/sdk interpreter — in strict-encoding mode (the unoptimised script
+  // REJECTS) and in relaxed mode (it NORMALISES the value) — and a compiled
+  // contract keeps the opcode in both fold modes.
+  // Does NOT prove: anything about the interpreter's numeric SIZE limit
+  // (@bsv/sdk enforces none), nor about peephole rules other than these three,
+  // nor that other tiers match (their own optimizer tests cover that).
+  const NON_CANONICAL: Uint8Array[] = [
+    Uint8Array.from([0x80]), // negative zero
+    Uint8Array.from([0x00]), // non-minimal 0
+    Uint8Array.from([0x01, 0x00]), // non-minimal 1
+    Uint8Array.from([0x05, 0x00, 0x00, 0x80]), // non-minimal -5
+  ];
+  const WINDOWS: Array<[string, StackOp[]]> = [
+    ['PUSH 0, OP_ADD', [push(0n), opc('OP_ADD')]],
+    ['PUSH 0, OP_SUB', [push(0n), opc('OP_SUB')]],
+    ['OP_NEGATE, OP_NEGATE', [opc('OP_NEGATE'), opc('OP_NEGATE')]],
+  ];
+
+  for (const [label, window] of WINDOWS) {
+    it(`${label}: optimised ≡ unoptimised on non-canonical operands`, () => {
+      for (const bytes of NON_CANONICAL) {
+        const ops: StackOp[] = [SENTINEL, { op: 'push', value: bytes }, ...window];
+        const optimised = optimizeStackIR(ops);
+        const hex = bytesToHex(bytes);
+        for (const strictEncoding of [true, false]) {
+          const run = (o: StackOp[]): Effect => {
+            const r = new ScriptVM({ flags: { strictEncoding } }).executeHex(emitOps(o));
+            return { success: r.success, stack: r.stack.map(bytesToHex) };
+          };
+          const before = run(ops);
+          // The opcode observably acts on this operand — rejected when strict,
+          // re-encoded when relaxed — so deleting it is not an identity.
+          if (strictEncoding) expect(before.success, `${label} on ${hex} (strict)`).toBe(false);
+          else expect(before.stack.at(-1), `${label} on ${hex} (relaxed)`).not.toBe(hex);
+          expect(run(optimised), `${label} on ${hex} (strict=${strictEncoding})`).toEqual(before);
+        }
+      }
+    });
+  }
+
+  it('a compiled contract keeps OP_0 OP_ADD, OP_0 OP_SUB and OP_NEGATE OP_NEGATE', () => {
+    const source = `import { SmartContract, assert } from 'runar-lang';
+export class F001 extends SmartContract {
+  readonly t: bigint;
+  constructor(t: bigint) { super(t); this.t = t; }
+  public unlock(x: bigint, y: bigint, z: bigint) {
+    assert(x + 0n === this.t);
+    assert(y - 0n === this.t);
+    assert(-(-z) === this.t);
+  }
+}`;
+    for (const disableConstantFolding of [true, false]) {
+      const r = compile(source, { fileName: 'F001.runar.ts', disableConstantFolding });
+      expect(r.success).toBe(true);
+      const asm = r.scriptAsm!;
+      expect(asm).toContain('OP_0 OP_ADD');
+      expect(asm).toContain('OP_0 OP_SUB');
+      expect(asm).toContain('OP_NEGATE OP_NEGATE');
+    }
   });
 });

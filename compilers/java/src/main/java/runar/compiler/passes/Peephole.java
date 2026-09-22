@@ -192,14 +192,14 @@ public final class Peephole {
         if (isPushBigInt(a, 1) && isOpcode(b, "OP_ADD")) return List.of(new OpcodeOp("OP_1ADD"));
         // PUSH 1, OP_SUB → OP_1SUB
         if (isPushBigInt(a, 1) && isOpcode(b, "OP_SUB")) return List.of(new OpcodeOp("OP_1SUB"));
-        // PUSH 0, OP_ADD → identity
-        if (isPushBigInt(a, 0) && isOpcode(b, "OP_ADD")) return List.of();
-        // PUSH 0, OP_SUB → identity
-        if (isPushBigInt(a, 0) && isOpcode(b, "OP_SUB")) return List.of();
+        // NOTE (F-001): no PUSH 0 + OP_ADD, PUSH 0 + OP_SUB or
+        // OP_NEGATE + OP_NEGATE elimination. x+0, x-0 and -(-x) are identities
+        // over integers, not over stack elements: the opcode decodes its
+        // operand as a CScriptNum (rejecting a non-minimal encoding under
+        // strict rules) and pushes back the minimal re-encoding. Deleting it
+        // changes accept/reject and the value for a witness-supplied operand.
 
         // OP_NOT, OP_NOT is NOT a 2-op rule — see matchWindow3 (C17).
-        // OP_NEGATE, OP_NEGATE → remove both
-        if (isOpcode(a, "OP_NEGATE") && isOpcode(b, "OP_NEGATE")) return List.of();
 
         // OP_EQUAL + OP_VERIFY → OP_EQUALVERIFY
         if (isOpcode(a, "OP_EQUAL") && isOpcode(b, "OP_VERIFY")) return List.of(new OpcodeOp("OP_EQUALVERIFY"));

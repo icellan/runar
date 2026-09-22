@@ -127,22 +127,17 @@ def _match_window2(a: StackOp, b: StackOp) -> Optional[list[StackOp]]:
     if _is_push_bigint(a, 1) and _is_opcode_op(b, "OP_SUB"):
         return [StackOp(op="opcode", code="OP_1SUB")]
 
-    # PUSH 0, OP_ADD -> remove both (x + 0 = x)
-    if _is_push_bigint(a, 0) and _is_opcode_op(b, "OP_ADD"):
-        return []
-
-    # PUSH 0, OP_SUB -> remove both (x - 0 = x)
-    if _is_push_bigint(a, 0) and _is_opcode_op(b, "OP_SUB"):
-        return []
+    # NOTE (F-001): no ``PUSH 0, OP_ADD``, ``PUSH 0, OP_SUB`` or
+    # ``OP_NEGATE, OP_NEGATE`` elimination.  x+0, x-0 and -(-x) are identities
+    # over integers, not over stack elements: the opcode decodes its operand as
+    # a CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    # pushes back the minimal re-encoding.  Deleting it changes accept/reject
+    # and the value for a witness-supplied operand.
 
     # NOTE: ``OP_NOT, OP_NOT`` is NOT eliminated here -- see the guarded 3-op
     # rule in ``_match_window3`` (C17).  The pair is boolean normalisation, not
     # numeric identity, so it may only be dropped when the producer of the
     # negated value provably leaves a canonical 0/1 behind.
-
-    # OP_NEGATE, OP_NEGATE -> remove both
-    if _is_opcode_op(a, "OP_NEGATE") and _is_opcode_op(b, "OP_NEGATE"):
-        return []
 
     # OP_EQUAL, OP_VERIFY -> OP_EQUALVERIFY
     if _is_opcode_op(a, "OP_EQUAL") and _is_opcode_op(b, "OP_VERIFY"):

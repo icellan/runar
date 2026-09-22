@@ -56,16 +56,21 @@ class PeepholeTest {
         assertTrue(r.get(0) instanceof OpcodeOp o && "OP_1SUB".equals(o.code()));
     }
 
+    // F-001: x + 0 = x over integers, but OP_ADD / OP_SUB decode their operand
+    // as a CScriptNum (rejecting a non-minimal encoding under strict rules) and
+    // re-encode it minimally; a witness operand gets no other normalisation, so
+    // deleting the pair changes accept/reject and value. Proves the Java
+    // peephole keeps the pair; does not execute a script.
     @Test
-    void pushZeroAddIsIdentity() {
-        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_ADD")));
-        assertEquals(0, r.size());
+    void pushZeroAddIsKept() {
+        List<StackOp> in = List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_ADD"));
+        assertEquals(in, Peephole.optimize(in));
     }
 
     @Test
-    void pushZeroSubIsIdentity() {
-        List<StackOp> r = Peephole.optimize(List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_SUB")));
-        assertEquals(0, r.size());
+    void pushZeroSubIsKept() {
+        List<StackOp> in = List.of(new PushOp(PushValue.of(0)), new OpcodeOp("OP_SUB"));
+        assertEquals(in, Peephole.optimize(in));
     }
 
     @Test
@@ -82,10 +87,11 @@ class PeepholeTest {
         assertEquals(2, unknownProducer.size());
     }
 
+    // F-001: OP_NEGATE validates/normalises its operand too — the pair stays.
     @Test
-    void doubleOpNegateCancels() {
-        List<StackOp> r = Peephole.optimize(List.of(new OpcodeOp("OP_NEGATE"), new OpcodeOp("OP_NEGATE")));
-        assertEquals(0, r.size());
+    void doubleOpNegateIsKept() {
+        List<StackOp> in = List.of(new OpcodeOp("OP_NEGATE"), new OpcodeOp("OP_NEGATE"));
+        assertEquals(in, Peephole.optimize(in));
     }
 
     @Test
