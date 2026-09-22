@@ -257,6 +257,13 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		return nil, err
 	}
 
+	// F-004: re-assert the validator rules that decide covenant vs
+	// anyone-can-spend (terminal assert, no readonly writes) on the ANF.
+	// See ir_frontend_rules.go.
+	if err := checkIRFrontendRules(program); err != nil {
+		return nil, err
+	}
+
 	// Bake constructor args into ANF properties.
 	if errs := applyConstructorArgs(program, o.ConstructorArgs); len(errs) > 0 {
 		return nil, fmt.Errorf("applyConstructorArgs: %s", strings.Join(errs, "; "))
