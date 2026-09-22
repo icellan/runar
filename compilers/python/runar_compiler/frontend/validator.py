@@ -721,6 +721,29 @@ class _ValidationContext:
                 )
             self._validate_expression(stmt.init)
         elif isinstance(stmt, AssignmentStmt):
+            # F-013: only a FixedArray property is index-writable. Any other
+            # index target (a ByteString property, a local, a parameter) is
+            # left alone by expand_fixed_arrays and anf_lower lowers it as a
+            # READ, dropping the write -- a deployable script whose state
+            # never changes. Reject it here with a location instead.
+            if isinstance(stmt.target, IndexAccessExpr):
+                root = stmt.target
+                while isinstance(root, IndexAccessExpr):
+                    root = root.object
+                fixed_array_props = {
+                    p.name for p in self.contract.properties
+                    if isinstance(p.type, FixedArrayType)
+                }
+                if not (
+                    isinstance(root, PropertyAccessExpr)
+                    and root.property in fixed_array_props
+                ):
+                    self._add_error(
+                        "index assignment is only supported on FixedArray "
+                        "contract properties; the target here is not a "
+                        "FixedArray property",
+                        loc=stmt.source_location,
+                    )
             self._validate_expression(stmt.target)
             self._validate_expression(stmt.value)
         elif isinstance(stmt, IfStmt):
