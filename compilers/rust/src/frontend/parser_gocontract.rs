@@ -273,6 +273,13 @@ enum TokenType {
     ColonEq,  // :=
     PlusEq,   // +=
     MinusEq,  // -=
+    StarEq,    // *=
+    SlashEq,   // /=
+    PercentEq, // %=
+    // A Go compound assignment the Rúnar Go surface does not accept
+    // (&= |= ^= <<= >>= &^=). Lexed as one token so the parser can refuse it
+    // by name instead of mis-parsing it as `x & (= ...)` and dropping it.
+    UnsupportedCompoundAssign(&'static str),
     PlusPlus, // ++
     MinusMinus, // --
     // Literals
@@ -416,9 +423,18 @@ fn tokenize(source: &str) -> Vec<Token> {
 
         // Three-char operators first
         if pos + 2 < chars.len() {
-            let three = format!("{}{}{}", ch, chars[pos + 1], chars[pos + 2]);
-            // none currently needed, placeholder
-            let _ = three;
+            let tok = match (ch, chars[pos + 1], chars[pos + 2]) {
+                ('<', '<', '=') => Some(TokenType::UnsupportedCompoundAssign("<<=")),
+                ('>', '>', '=') => Some(TokenType::UnsupportedCompoundAssign(">>=")),
+                ('&', '^', '=') => Some(TokenType::UnsupportedCompoundAssign("&^=")),
+                _ => None,
+            };
+            if let Some(t) = tok {
+                tokens.push(Token { typ: t, line: l, col: c });
+                pos += 3;
+                col += 3;
+                continue;
+            }
         }
 
         // Two-char operators
@@ -434,6 +450,12 @@ fn tokenize(source: &str) -> Vec<Token> {
                 ('|', '|') => Some(TokenType::PipePipe),
                 ('+', '=') => Some(TokenType::PlusEq),
                 ('-', '=') => Some(TokenType::MinusEq),
+                ('*', '=') => Some(TokenType::StarEq),
+                ('/', '=') => Some(TokenType::SlashEq),
+                ('%', '=') => Some(TokenType::PercentEq),
+                ('&', '=') => Some(TokenType::UnsupportedCompoundAssign("&=")),
+                ('|', '=') => Some(TokenType::UnsupportedCompoundAssign("|=")),
+                ('^', '=') => Some(TokenType::UnsupportedCompoundAssign("^=")),
                 ('+', '+') => Some(TokenType::PlusPlus),
                 ('-', '-') => Some(TokenType::MinusMinus),
                 ('<', '<') => Some(TokenType::Shl),
@@ -1406,6 +1428,11 @@ impl<'a> GoParser<'a> {
                 Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
             }
 
+            TokenType::StarEq
+            | TokenType::SlashEq
+            | TokenType::PercentEq
+            | TokenType::UnsupportedCompoundAssign(_) => self.parse_compound_assign(lhs, loc),
+
             TokenType::PlusPlus => {
                 // x++ -> ExpressionStatement(IncrementExpr)
                 self.advance();
@@ -1595,8 +1622,55 @@ impl<'a> GoParser<'a> {
                 };
                 Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
             }
+            TokenType::StarEq
+            | TokenType::SlashEq
+            | TokenType::PercentEq
+            | TokenType::UnsupportedCompoundAssign(_) => self.parse_compound_assign(lhs, loc),
+
             _ => Some(Statement::ExpressionStatement { expression: lhs, source_location: loc }),
         }
+    }
+
+    /// `target *= expr` / `/=` / `%=`  ->  `target = target op expr`.
+    ///
+    /// Together with the `+=` / `-=` arms this is exactly the compound set the
+    /// TS reference Go-surface parser (01-parse-go.ts) accepts. Every other Go
+    /// compound operator (&= |= ^= <<= >>= &^=) is a parse error: rewriting it
+    /// here would accept programs the reference refuses, and dropping it (the
+    /// F-019 defect) compiles a script that does not do what the source says.
+    fn parse_compound_assign(&mut self, lhs: Expression, loc: SourceLocation) -> Option<Statement> {
+        let op = match self.current().typ.clone() {
+            TokenType::StarEq => BinaryOp::Mul,
+            TokenType::SlashEq => BinaryOp::Div,
+            TokenType::PercentEq => BinaryOp::Mod,
+            TokenType::UnsupportedCompoundAssign(text) => {
+                self.errors.push(Diagnostic::error(
+                    format!(
+                        "unsupported compound assignment operator '{}' at {}:{}:{}; \
+                         the Go surface accepts only += -= *= /= %=",
+                        text,
+                        self.file,
+                        self.current().line,
+                        self.current().col
+                    ),
+                    Some(loc.clone()),
+                ));
+                // Consume the operator and its operand so parsing resumes at the
+                // next statement; the diagnostic already makes the compile fail.
+                self.advance();
+                let _ = self.parse_expr();
+                return Some(Statement::ExpressionStatement { expression: lhs, source_location: loc });
+            }
+            _ => return None,
+        };
+        self.advance();
+        let rhs = self.parse_expr()?;
+        let new_val = Expression::BinaryExpr {
+            op,
+            left: Box::new(lhs.clone()),
+            right: Box::new(rhs),
+        };
+        Some(Statement::Assignment { target: lhs, value: new_val, source_location: loc })
     }
 
     // ---------------------------------------------------------------------------
