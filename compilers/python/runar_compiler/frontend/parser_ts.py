@@ -393,6 +393,13 @@ def _tokenize(source: str) -> list[Token]:
 # Parser
 # ---------------------------------------------------------------------------
 
+_VALID_BASE_CLASSES = frozenset((
+    "SmartContract",
+    "StatefulSmartContract",
+    "UnsafeSmartContract",
+))
+
+
 class _TsParser:
     def __init__(self, file_name: str):
         self.file_name = file_name
@@ -459,40 +466,66 @@ class _TsParser:
 
     # -- Top-level parsing ---------------------------------------------------
 
-    def parse_contract(self) -> ContractNode:
-        # Skip import statements, export keywords, and other top-level noise
-        # until we find a class declaration
+    def parse_contract(self) -> ContractNode | None:
+        # F-016: mirror the TS reference (01-parse.ts). Scan EVERY top-level
+        # class; only one whose ``extends`` names a valid base is the contract.
+        # Other classes are ignored wherever they sit. Each valid class after
+        # the first is an error, and the LAST valid class is the one parsed.
+        valid: list[int] = []  # token index of each valid ``class`` keyword
         while not self.check(TOK_EOF):
             # Skip import statements
             if self.check_ident("import"):
                 self._skip_import()
                 continue
 
-            # export class ...
+            decl_loc = self.loc()
+            # export class ... / export default class ...
             if self.check_ident("export"):
                 self.advance()
-                if self.check_ident("class"):
-                    return self._parse_class()
-                # export default class, etc.
                 if self.check_ident("default"):
                     self.advance()
-                    if self.check_ident("class"):
-                        return self._parse_class()
-                # Other export statements — skip to next semicolon or brace
-                self._skip_statement()
-                continue
+                if not self.check_ident("class"):
+                    # Other export statements — skip to next semicolon or brace
+                    self._skip_statement()
+                    continue
 
-            # class ...
             if self.check_ident("class"):
-                return self._parse_class()
+                class_pos = self.pos
+                self.advance()
+                self.match(TOK_IDENT)  # class name
+                base = None
+                if self.match_ident("extends") and self.check(TOK_IDENT):
+                    base = self.peek().value
+                # Skip the rest of the header and the balanced class body.
+                self._skip_statement()
+                if base in _VALID_BASE_CLASSES:
+                    # The TS reference locates a declaration at its first
+                    # token (``export`` included).
+                    if valid:
+                        self.errors.append(Diagnostic(
+                            message="Only one SmartContract subclass is allowed per file",
+                            severity=Severity.ERROR,
+                            loc=decl_loc,
+                        ))
+                    valid.append(class_pos)
+                continue
 
             # Skip anything else at top level
             self._skip_statement()
 
-        raise ValueError(
-            "no class extending SmartContract, StatefulSmartContract, "
-            "or UnsafeSmartContract found"
-        )
+        if not valid:
+            self.errors.append(Diagnostic(
+                message=(
+                    "No class extending SmartContract, StatefulSmartContract, "
+                    "or UnsafeSmartContract found"
+                ),
+                severity=Severity.ERROR,
+                loc=SourceLocation(file=self.file_name, line=1, column=0),
+            ))
+            return None
+
+        self.pos = valid[-1]
+        return self._parse_class()
 
     def _skip_import(self) -> None:
         """Skip an import statement."""
