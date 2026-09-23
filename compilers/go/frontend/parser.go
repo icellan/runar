@@ -1008,7 +1008,12 @@ func (p *parseContext) parseAugmentedAssignment(node *sitter.Node, loc SourceLoc
 	case "%=":
 		binOp = "%"
 	default:
-		binOp = "+"
+		// Same set and diagnostic as the TS reference (01-parse.ts
+		// parseExpressionStatement): any other compound operator is refused.
+		opLoc := loc
+		p.errors = append(p.errors, MakeDiagnostic(
+			fmt.Sprintf("Unsupported binary operator: '%s'", opText), SeverityError, &opLoc))
+		return nil
 	}
 
 	target := p.parseExpression(leftNode)
