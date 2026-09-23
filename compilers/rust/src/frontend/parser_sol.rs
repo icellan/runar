@@ -454,10 +454,18 @@ impl<'a> SolParser<'a> {
         self.expect(&Token::Contract);
         let name = self.expect_ident();
 
-        // 'is' BaseClass
+        // 'is' BaseClass. Mirrors the TS reference (01-parse-sol.ts): only the
+        // three real bases are honoured; any other name falls back to
+        // SmartContract, so a mutable property under an unknown base is
+        // refused by the readonly rule instead of compiling with no
+        // checkPreimage / state continuation (F-022).
         let parent_class = if *self.peek() == Token::Is {
             self.advance();
-            self.expect_ident()
+            let parent = self.expect_ident();
+            match parent.as_str() {
+                "StatefulSmartContract" | "UnsafeSmartContract" => parent,
+                _ => "SmartContract".to_string(),
+            }
         } else {
             "SmartContract".to_string()
         };
@@ -2224,5 +2232,73 @@ contract TwoProps is SmartContract {
         );
         assert_eq!(contract.properties[0].name, "addr");
         assert_eq!(contract.properties[1].name, "key");
+    }
+
+    // -----------------------------------------------------------------------
+    // F-022 / CL-BUG-247: unknown base class after `is`
+    //
+    // Proves: the Rust `.runar.sol` frontend treats `is <UnknownName>` exactly
+    // as the TS reference (01-parse-sol.ts) does — it falls back to
+    // SmartContract — so a mutable property under an unknown base is REFUSED
+    // by the SmartContract readonly rule instead of compiling to a script
+    // with an `update_prop` and no checkPreimage / state continuation
+    // (pre-fix: `Bogus is TotallyMadeUp` compiled to `008b`, spendable by
+    // anyone into any output). Also pins that the three real bases are
+    // preserved verbatim.
+    // Does NOT prove: anything about on-chain behaviour of the accepted
+    // programs (that is covered by the stateful/stateless conformance
+    // fixtures), nor parity of the other six tiers — Go/Python/Zig/Ruby/Java
+    // reject an unknown base at parse time instead ("unknown parent class"),
+    // which is a pre-existing cross-tier diagnostic divergence from TS.
+    // -----------------------------------------------------------------------
+
+    const BOGUS_MUTABLE_SOL: &str = r#"
+contract Bogus is TotallyMadeUp {
+    bigint total;
+
+    constructor(bigint _total) {
+        total = _total;
+    }
+
+    function bump() public {
+        this.total = this.total + 1;
+    }
+}
+"#;
+
+    #[test]
+    fn test_unknown_base_class_falls_back_to_smart_contract() {
+        let result = parse_solidity(BOGUS_MUTABLE_SOL, Some("Bogus.runar.sol"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(
+            contract.parent_class, "SmartContract",
+            "an unknown base must fall back to SmartContract (TS reference parity), \
+             never pass through as an unrecognized parent class"
+        );
+    }
+
+    #[test]
+    fn test_known_base_classes_preserved() {
+        for base in ["SmartContract", "StatefulSmartContract", "UnsafeSmartContract"] {
+            let src = BOGUS_MUTABLE_SOL.replace("TotallyMadeUp", base);
+            let result = parse_solidity(&src, Some("Bogus.runar.sol"));
+            assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+            assert_eq!(result.contract.unwrap().parent_class, base);
+        }
+    }
+
+    #[test]
+    fn test_unknown_base_with_mutable_property_is_refused() {
+        let err = crate::compile_from_source_str(BOGUS_MUTABLE_SOL, Some("Bogus.runar.sol"))
+            .expect_err(
+                "a mutable property under an unknown base must not compile \
+                 (pre-fix it compiled with update_prop and no checkPreimage/continuation)",
+            );
+        assert!(
+            err.contains("property 'total' in SmartContract must be readonly"),
+            "expected the SmartContract readonly diagnostic, got: {}",
+            err
+        );
     }
 }
