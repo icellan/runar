@@ -30,7 +30,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { snakeToCamelCore } from './snake-to-camel.js';
+import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
@@ -562,6 +562,17 @@ class RbParser {
   /** Track locally declared variables per method scope to distinguish decl from assignment. */
   private declaredLocals: Set<string> = new Set();
 
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = snakeToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
+
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
@@ -626,6 +637,11 @@ class RbParser {
     const contract = this.parseClass();
     if (!contract) {
       return { contract: null, errors: this.errors };
+    }
+
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
     }
 
     return { contract, errors: this.errors };
@@ -901,7 +917,7 @@ class RbParser {
 
     return {
       kind: 'property',
-      name: snakeToCamel(rawName),
+      name: this.declare(rawName),
       type: typeNode,
       readonly: isReadonly,
       initializer,
@@ -971,7 +987,7 @@ class RbParser {
     }
 
     const isPublic = pendingVisibility === 'public';
-    const methodName = snakeToCamel(rawName);
+    const methodName = this.declare(rawName);
 
     return {
       kind: 'method',
@@ -989,7 +1005,7 @@ class RbParser {
     while (this.peek().type !== ')' && this.peek().type !== 'eof') {
       const nameTok = this.advance();
       const rawName = nameTok.value;
-      const camelName = snakeToCamel(rawName);
+      const camelName = this.declare(rawName);
 
       // Look up the type from the preceding runar_public/params declaration
       let typeNode: TypeNode | undefined;
@@ -1241,7 +1257,7 @@ class RbParser {
     this.advance(); // 'for'
 
     const iterVar = this.advance(); // loop variable
-    const varName = snakeToCamel(iterVar.value);
+    const varName = this.declare(iterVar.value);
 
     this.expect('in');
 
@@ -1437,7 +1453,7 @@ class RbParser {
       this.advance(); // consume ident
       this.advance(); // consume '='
       const value = this.parseExpression();
-      const camelName = snakeToCamel(rawName);
+      const camelName = this.declare(rawName);
 
       if (this.declaredLocals.has(camelName)) {
         // Already declared: this is an assignment

@@ -24,6 +24,7 @@
 const std = @import("std");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const Expression = types.Expression;
@@ -486,8 +487,16 @@ const Parser = struct {
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
     depth: u32,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: identifier_collision.DeclaredIdents = .{},
 
     const max_depth: u32 = 256;
+
+    /// Convert a DECLARED identifier and record it for the F-017 collision
+    /// rule (see identifier_collision.zig).
+    fn declare(self: *Parser, raw: []const u8) []const u8 {
+        return self.idents.declare(self.allocator, raw, snakeToCamel(self.allocator, raw));
+    }
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
@@ -619,7 +628,7 @@ const Parser = struct {
                             _ = self.match(.comma);
 
                             // Skip txPreimage — implicit stateful param
-                            const camel_name = snakeToCamel(self.allocator, field_name_tok.text);
+                            const camel_name = self.declare(field_name_tok.text);
                             if (!std.mem.eql(u8, camel_name, "txPreimage")) {
                                 const type_info = types.typeNodeToRunarType(field_type);
                                 // Capture FixedArray shape so expand_fixed_arrays.zig
@@ -747,6 +756,7 @@ const Parser = struct {
             .assignments = ctor_assignments,
         };
 
+        if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
         return .{
             .contract = ContractNode{
                 .name = contract_name,
@@ -920,7 +930,7 @@ const Parser = struct {
         } else {
             self.addError("expected function name");
         }
-        const name = snakeToCamel(self.allocator, raw_name);
+        const name = self.declare(raw_name);
 
         if (self.expect(.lparen) == null) {
             return .{ .name = name, .is_public = is_public, .params = &.{}, .body = &.{}, .source_loc = method_loc };
@@ -951,7 +961,7 @@ const Parser = struct {
                 const param_type = self.parseRustType();
                 const param_type_info = types.typeNodeToRunarType(param_type);
                 params.append(self.allocator, .{
-                    .name = snakeToCamel(self.allocator, param_name_tok.text),
+                    .name = self.declare(param_name_tok.text),
                     .type_info = param_type_info,
                     .type_name = runarTypeToTypeName(param_type_info),
                 }) catch {};
@@ -1074,7 +1084,7 @@ const Parser = struct {
             return null;
         }
         const name_tok = self.bump();
-        const var_name = snakeToCamel(self.allocator, name_tok.text);
+        const var_name = self.declare(name_tok.text);
 
         // Optional type annotation
         var ti: ?RunarType = null;
@@ -1140,7 +1150,7 @@ const Parser = struct {
 
         var var_name: []const u8 = "_i";
         if (self.current.kind == .ident and !self.checkIdent("in")) {
-            var_name = snakeToCamel(self.allocator, self.bump().text);
+            var_name = self.declare(self.bump().text);
         }
 
         // Consume 'in'

@@ -13,6 +13,7 @@ pub mod dce;
 pub mod ast;
 pub mod diagnostic;
 pub mod expand_fixed_arrays;
+pub mod identifier_collision;
 pub mod input_limits;
 pub mod parser;
 pub mod parser_gocontract;

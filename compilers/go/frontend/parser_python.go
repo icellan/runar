@@ -27,6 +27,7 @@ func ParsePython(source []byte, fileName string) *ParseResult {
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
 	}
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
 	}
@@ -105,6 +106,9 @@ type pyParser struct {
 	tokens   []pyToken
 	pos      int
 	errors   []Diagnostic
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
 }
 
 func (p *pyParser) addError(msg string) {
@@ -1016,7 +1020,7 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 	loc := p.loc()
 
 	nameTok := p.expect(pyTokIdent)
-	propName := pyConvertName(nameTok.value)
+	propName := p.idents.declare(nameTok.value, pyConvertName(nameTok.value))
 
 	p.expect(pyTokColon)
 
@@ -1136,7 +1140,7 @@ func (p *pyParser) parsePyMethod(visibility string) MethodNode {
 	p.expectIdent("def")
 
 	nameTok := p.expect(pyTokIdent)
-	name := pyConvertName(nameTok.value)
+	name := p.idents.declare(nameTok.value, pyConvertName(nameTok.value))
 
 	params := p.parsePyParams()
 
@@ -1184,7 +1188,7 @@ func (p *pyParser) parsePyParams() []ParamNode {
 		}
 
 		params = append(params, ParamNode{
-			Name: pyConvertName(paramName),
+			Name: p.idents.declare(paramName, pyConvertName(paramName)),
 			Type: typ,
 		})
 
@@ -1332,7 +1336,7 @@ func (p *pyParser) parsePyFor(loc SourceLocation) Statement {
 	p.expectIdent("for")
 
 	varTok := p.expect(pyTokIdent)
-	varName := pyConvertName(varTok.value)
+	varName := p.idents.declare(varTok.value, pyConvertName(varTok.value))
 
 	p.expectIdent("in")
 	p.expectIdent("range")
@@ -1441,7 +1445,7 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 		// Could be a property-like declaration or a variable declaration
 		// In a method body, "name: Type = expr" is a typed variable declaration
 		nameTok := p.advance()
-		varName := pyConvertName(nameTok.value)
+		varName := p.idents.declare(nameTok.value, pyConvertName(nameTok.value))
 		p.expect(pyTokColon) // consume ':'
 
 		typNode := p.parsePyTypeAnnotation()
@@ -1462,6 +1466,7 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 		}
 	}
 
+	targetTok := p.peek()
 	expr := p.parsePyExpression()
 	if expr == nil {
 		p.advance()
@@ -1476,6 +1481,9 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 		// If the target is a plain identifier, it's a variable declaration (first assignment)
 		// But we can't always tell — emit assignment for now (the validator/ANF handles it)
 		if ident, ok := expr.(Identifier); ok {
+			if targetTok.kind == pyTokIdent {
+				p.idents.declare(targetTok.value, ident.Name)
+			}
 			// Treat bare "name = expr" as a variable declaration for simple identifiers
 			return VariableDeclStmt{
 				Name:           ident.Name,

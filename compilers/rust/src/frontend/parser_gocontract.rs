@@ -58,6 +58,10 @@ pub fn parse_go_contract(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = GoParser::new(tokens, file, &mut errors);
 
     let contract = parser.parse();
+    let collision = parser.idents.collision_diagnostic();
+    if contract.is_some() {
+        errors.extend(collision);
+    }
 
     ParseResult { contract, errors, source_size_err: None }
 }
@@ -568,6 +572,8 @@ struct GoParser<'a> {
     errors: &'a mut Vec<Diagnostic>,
     /// The current method's receiver name (e.g. "c", "self", "m")
     receiver_name: String,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: super::identifier_collision::DeclaredIdents,
 }
 
 impl<'a> GoParser<'a> {
@@ -578,6 +584,7 @@ impl<'a> GoParser<'a> {
             file: file.to_string(),
             errors,
             receiver_name: "c".to_string(),
+            idents: Default::default(),
         }
     }
 
@@ -940,7 +947,7 @@ impl<'a> GoParser<'a> {
             // Otherwise first_name is a field name, next is the type
             // e.g. `PubKeyHash runar.Addr `runar:"readonly"``
             let prop_type = self.parse_type();
-            let prop_name = go_to_camel(&first_name);
+            let prop_name = self.idents.declare(&first_name, go_to_camel(&first_name));
 
             // Check for struct tag
             let mut readonly = false;
@@ -1058,7 +1065,7 @@ impl<'a> GoParser<'a> {
         self.receiver_name = recv_name;
 
         let method_name_raw = self.expect_ident();
-        let method_name = go_to_camel(&method_name_raw);
+        let method_name = self.idents.declare(&method_name_raw, go_to_camel(&method_name_raw));
 
         // Exported = public, unexported = private
         let visibility = if method_name_raw.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
@@ -1106,7 +1113,7 @@ impl<'a> GoParser<'a> {
         // Exported standalone functions are skipped (only unexported helpers)
         // (But we parse all, callers can filter)
 
-        let func_name = go_to_camel(&func_name_raw);
+        let func_name = self.idents.declare(&func_name_raw, go_to_camel(&func_name_raw));
         // Standalone functions with receiver = "" → private
         let saved_recv = self.receiver_name.clone();
         self.receiver_name = String::new(); // no receiver
@@ -1202,7 +1209,7 @@ impl<'a> GoParser<'a> {
 
             let param_type = self.parse_type();
             for raw in param_names {
-                let name = go_to_camel(&raw);
+                let name = self.idents.declare(&raw, go_to_camel(&raw));
                 params.push(ParamNode {
                     name,
                     param_type: param_type.clone(),
@@ -1310,7 +1317,7 @@ impl<'a> GoParser<'a> {
                 let is_var = matches!(self.current().typ, TokenType::Var);
                 self.advance();
                 let name_raw = self.expect_ident();
-                let name = go_to_camel(&name_raw);
+                let name = self.idents.declare(&name_raw, go_to_camel(&name_raw));
 
                 // Optional type
                 let var_type = if !matches!(self.current().typ, TokenType::Eq | TokenType::Semi | TokenType::Eof) {
@@ -1375,6 +1382,7 @@ impl<'a> GoParser<'a> {
     }
 
     fn parse_ident_statement(&mut self, loc: SourceLocation) -> Option<Statement> {
+        let lhs_tok = self.current().typ.clone();
         // Parse the left-hand side expression
         let lhs = self.parse_expr()?;
 
@@ -1384,6 +1392,9 @@ impl<'a> GoParser<'a> {
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let name = if let Expression::Identifier { name } = &lhs {
+                    if let TokenType::Ident(raw) = &lhs_tok {
+                        self.idents.declare(raw, name.clone());
+                    }
                     name.clone()
                 } else {
                     String::new()
@@ -1568,6 +1579,7 @@ impl<'a> GoParser<'a> {
             self.advance();
             if matches!(self.current().typ, TokenType::ColonEq) {
                 self.advance();
+                let name = self.idents.declare(&name_raw, name);
                 let init = self.parse_expr()?;
                 return Some(Statement::VariableDecl {
                     name,

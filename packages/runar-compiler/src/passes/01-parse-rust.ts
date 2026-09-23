@@ -32,7 +32,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { ParseResult } from './01-parse.js';
-import { snakeToCamelCore } from './snake-to-camel.js';
+import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
@@ -355,6 +355,17 @@ class RustParser extends ParserCore<RustToken> {
   /** Name of the contract struct. */
   private contractName = '';
 
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = snakeToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
+
   parse(): ParseResult {
     // Skip `use runar::prelude::*;` and other use declarations
     this.skipUseDecls();
@@ -492,6 +503,11 @@ class RustParser extends ParserCore<RustToken> {
       sourceFile: this.file,
     };
 
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
+    }
+
     return { contract, errors: this.errors };
   }
 
@@ -570,7 +586,7 @@ class RustParser extends ParserCore<RustToken> {
 
       // Field name
       const fieldNameRaw = this.expect('ident').value;
-      const fieldName = snakeToCamel(fieldNameRaw);
+      const fieldName = this.declare(fieldNameRaw);
 
       // Colon + type
       this.expect(':');
@@ -700,7 +716,7 @@ class RustParser extends ParserCore<RustToken> {
 
     // Method name
     const rawName = this.expect('ident').value;
-    const name = snakeToCamel(rawName);
+    const name = this.declare(rawName);
 
     // Parameters
     this.expect('(');
@@ -739,7 +755,7 @@ class RustParser extends ParserCore<RustToken> {
 
       params.push({
         kind: 'param',
-        name: snakeToCamel(paramNameRaw),
+        name: this.declare(paramNameRaw),
         type: paramType,
       });
 
@@ -824,7 +840,7 @@ class RustParser extends ParserCore<RustToken> {
         this.advance();
         mutable = true;
       }
-      const varName = snakeToCamel(this.expect('ident').value);
+      const varName = this.declare(this.expect('ident').value);
       let varType: TypeNode | undefined;
       if (this.current().type === ':') {
         this.advance();
@@ -988,7 +1004,7 @@ class RustParser extends ParserCore<RustToken> {
     // for i in 0..n { body }
     // Parse loop variable
     const loopVarRaw = this.expect('ident').value;
-    const loopVar = snakeToCamel(loopVarRaw);
+    const loopVar = this.declare(loopVarRaw);
     this.expect('in');
 
     // Two loop headers, both of them real Rust that iterates exactly these

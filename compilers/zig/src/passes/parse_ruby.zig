@@ -27,6 +27,7 @@
 const std = @import("std");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const Expression = types.Expression;
@@ -682,8 +683,16 @@ const Parser = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     depth: u32,
     declared_locals: std.StringHashMapUnmanaged(void),
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: identifier_collision.DeclaredIdents = .{},
 
     const max_depth: u32 = 256;
+
+    /// Convert a DECLARED identifier and record it for the F-017 collision
+    /// rule (see identifier_collision.zig).
+    fn declare(self: *Parser, raw: []const u8) []const u8 {
+        return self.idents.declare(self.allocator, raw, rbConvertName(self.allocator, raw));
+    }
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(allocator, source);
@@ -809,6 +818,9 @@ const Parser = struct {
         }
 
         const contract = self.parseContract();
+        if (contract != null) {
+            if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
+        }
         return .{ .contract = contract, .errors = self.errors.items };
     }
 
@@ -1110,7 +1122,7 @@ const Parser = struct {
         while (!self.check(.newline) and !self.check(.eof)) _ = self.bump();
 
         return PropertyNode{
-            .name = rbConvertName(self.allocator, raw_name),
+            .name = self.declare(raw_name),
             .type_info = rb_type.info,
             .readonly = is_readonly,
             .initializer = initializer,
@@ -1163,7 +1175,7 @@ const Parser = struct {
         }
 
         return .{
-            .name = rbConvertName(self.allocator, raw_name),
+            .name = self.declare(raw_name),
             .is_public = is_public,
             .params = params,
             .body = body,
@@ -1178,7 +1190,7 @@ const Parser = struct {
             if (!self.check(.ident)) break;
             const name_tok = self.bump();
             const raw_name = name_tok.text;
-            const camel_name = rbConvertName(self.allocator, raw_name);
+            const camel_name = self.declare(raw_name);
 
             // Look up the type from the preceding runar_public/params declaration
             var type_info: RunarType = .unknown;
@@ -1513,7 +1525,7 @@ const Parser = struct {
 
         // Loop variable
         const iter_tok = self.bump();
-        const var_name = rbConvertName(self.allocator, iter_tok.text);
+        const var_name = self.declare(iter_tok.text);
 
         _ = self.expect(.kw_in);
 
@@ -1735,7 +1747,7 @@ const Parser = struct {
             _ = self.bump(); // consume ident
             _ = self.bump(); // consume '='
             const value = self.parseExpression() orelse return null;
-            const camel_name = rbConvertName(self.allocator, tok.text);
+            const camel_name = self.declare(tok.text);
 
             if (self.declared_locals.contains(camel_name)) {
                 // Already declared: this is an assignment

@@ -85,6 +85,8 @@ public final class RustParser {
         State state = new State(filename);
         state.tokens = tokenize(source);
         ContractNode contract = parseContract(state);
+        String collision = state.idents.message();
+        if (collision != null) state.errors.add(collision);
         if (!state.errors.isEmpty()) {
             // Report first error to mirror Python behaviour where the caller
             // surfaces diagnostics; for the Java parser surface we promote
@@ -567,6 +569,8 @@ public final class RustParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
         State(String filename) {
             this.filename = filename;
@@ -792,7 +796,7 @@ public final class RustParser {
                             TypeNode fieldType = parseRustType(s);
                             s.matchTok(TOK_COMMA);
 
-                            String camelName = snakeToCamel(fieldName);
+                            String camelName = s.idents.declare(fieldName, snakeToCamel(fieldName));
                             // Skip txPreimage — implicit stateful param
                             if (!camelName.equals("txPreimage")) {
                                 properties.add(new PropertyNode(
@@ -973,7 +977,7 @@ public final class RustParser {
         } else {
             s.advance();
         }
-        String name = snakeToCamel(rawName);
+        String name = s.idents.declare(rawName, snakeToCamel(rawName));
 
         s.expect(TOK_LPAREN);
         List<ParamNode> params = new ArrayList<>();
@@ -1005,7 +1009,7 @@ public final class RustParser {
                     if (s.check(TOK_MUT)) s.advance();
                 }
                 TypeNode paramType = parseRustType(s);
-                params.add(new ParamNode(snakeToCamel(paramName), paramType));
+                params.add(new ParamNode(s.idents.declare(paramName, snakeToCamel(paramName)), paramType));
             } else {
                 s.advance();
             }
@@ -1086,7 +1090,7 @@ public final class RustParser {
 
             String varName = "unknown";
             if (s.peek().kind == TOK_IDENT) {
-                varName = snakeToCamel(s.peek().value);
+                varName = s.idents.declare(s.peek().value, snakeToCamel(s.peek().value));
                 s.advance();
             } else {
                 s.advance();
@@ -1143,7 +1147,7 @@ public final class RustParser {
             s.advance();
             String varName = "i";
             if (s.peek().kind == TOK_IDENT) {
-                varName = snakeToCamel(s.peek().value);
+                varName = s.idents.declare(s.peek().value, snakeToCamel(s.peek().value));
                 s.advance();
             }
 

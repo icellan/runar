@@ -585,6 +585,10 @@ impl Escrow {
 
 Type names and struct names remain PascalCase (unchanged).
 
+### Identifier Collision Rule
+
+The snake_case to camelCase conversion is not injective: two different identifiers may convert to the same Rúnar name (e.g., `n` and `n_` both become `n`). A contract that declares two distinct source spellings that map to one Rúnar name is refused with: `identifier collision: '<a>' and '<b>' both convert to '<name>'; rename one of them`. Single use of one spelling, or one identifier that maps to a different name (`sum_` → `sum`), is fine.
+
 ### Constructor
 
 The constructor is auto-generated from the struct fields. Properties with defaults (set via the `init()` method) are excluded from the constructor parameters. There is no explicit constructor syntax.

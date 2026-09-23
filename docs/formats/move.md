@@ -479,6 +479,10 @@ The parser applies these conversions automatically:
 
 The snake_case to camelCase conversion handles underscores before both letters and digits: `hash_160` becomes `hash160`, `num_2_bin` becomes `num2Bin` (then the builtin map normalizes it to `num2bin`).
 
+### Identifier Collision Rule
+
+The snake_case to camelCase conversion is not injective: two different identifiers may convert to the same Rúnar name (e.g., `tmp` and `tmp_` both become `tmp`). A contract that declares two distinct source spellings that map to one Rúnar name is refused with: `identifier collision: '<a>' and '<b>' both convert to '<name>'; rename one of them`. Single use of one spelling, or one identifier that maps to a different name (`sum_` → `sum`), is fine.
+
 ### `Sha256Digest` is not a type name on this surface
 
 `Sha256Digest` is a TypeScript-ecosystem spelling: `packages/runar-lang/src/types.ts`

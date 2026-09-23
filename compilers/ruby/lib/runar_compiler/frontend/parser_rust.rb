@@ -24,6 +24,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
 
 module RunarCompiler
   module Frontend
@@ -216,7 +217,10 @@ module RunarCompiler
     }.freeze
 
     def self.rust_snake_to_camel(name)
-      parts = name.split("_")
+      # `-1` keeps trailing empty fields: without it `tmp_` split to ["tmp"]
+      # and came back as `tmp_`, where the reference and the other five tiers
+      # say `tmp` (F-017).
+      parts = name.split("_", -1)
       return name if parts.length <= 1
 
       result = parts[0]
@@ -502,6 +506,17 @@ module RunarCompiler
 
       attr_accessor :tokens, :pos, :errors
 
+      # F-017: (source spelling, Rúnar name) of every declared identifier.
+      attr_reader :declared
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.rust_snake_to_camel(raw)
+        (@declared ||= []) << [raw, name]
+        name
+      end
+
       # -- Error helpers ----------------------------------------------------
 
       def add_error(msg)
@@ -739,7 +754,7 @@ module RunarCompiler
 
           # Field name
           field_name_raw = expect(TOK_IDENT).value
-          field_name = Frontend.rust_snake_to_camel(field_name_raw)
+          field_name = declare(field_name_raw)
 
           # Colon + type
           expect(TOK_COLON)
@@ -852,7 +867,7 @@ module RunarCompiler
         expect(TOK_FN)
 
         raw_name = expect(TOK_IDENT).value
-        name = Frontend.rust_snake_to_camel(raw_name)
+        name = declare(raw_name)
 
         expect(TOK_LPAREN)
         params = []
@@ -886,7 +901,7 @@ module RunarCompiler
           param_type = parse_rust_type
 
           params << ParamNode.new(
-            name: Frontend.rust_snake_to_camel(param_name_raw),
+            name: declare(param_name_raw),
             type: param_type
           )
 
@@ -964,7 +979,7 @@ module RunarCompiler
             advance
             is_mutable = true
           end
-          var_name = Frontend.rust_snake_to_camel(expect(TOK_IDENT).value)
+          var_name = declare(expect(TOK_IDENT).value)
           var_type = nil
           if check(TOK_COLON)
             advance
@@ -1126,7 +1141,7 @@ module RunarCompiler
         expect(TOK_FOR)
 
         loop_var_raw = expect(TOK_IDENT).value
-        loop_var = Frontend.rust_snake_to_camel(loop_var_raw)
+        loop_var = declare(loop_var_raw)
 
         expect(TOK_IN)
 
@@ -1614,6 +1629,7 @@ module RunarCompiler
         )
       end
 
+      p.errors.concat(IdentifierCollision.diagnostics(p.declared || []))
       if p.errors.any?
         return ParseResult.new(contract: contract, errors: p.errors)
       end

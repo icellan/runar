@@ -23,6 +23,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
 
 module RunarCompiler
   module Frontend
@@ -181,8 +182,11 @@ module RunarCompiler
         stripped = stripped[1..]
       end
 
-      # General snake_case to camelCase
-      parts = stripped.split("_")
+      # General snake_case to camelCase. `-1` keeps trailing empty fields:
+      # without it `tmp__` (-> `tmp_` after the strip above) split to ["tmp"]
+      # and came back as `tmp_`, where the reference and the other five tiers
+      # say `tmp` (F-017).
+      parts = stripped.split("_", -1)
       return stripped if parts.length <= 1
 
       result = parts[0]
@@ -573,6 +577,17 @@ module RunarCompiler
 
       attr_accessor :tokens, :pos, :errors
 
+      # F-017: (source spelling, Rúnar name) of every declared identifier.
+      attr_reader :declared
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.py_convert_name(raw)
+        (@declared ||= []) << [raw, name]
+        name
+      end
+
       # -- Error helpers ----------------------------------------------------
 
       def add_error(msg)
@@ -806,7 +821,7 @@ module RunarCompiler
         end
 
         PropertyNode.new(
-          name: Frontend.py_convert_name(raw_name),
+          name: declare(raw_name),
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
@@ -876,7 +891,7 @@ module RunarCompiler
         end
 
         is_public = decorators.include?("public")
-        method_name = Frontend.py_convert_name(raw_name)
+        method_name = declare(raw_name)
 
         MethodNode.new(
           name: method_name,
@@ -915,7 +930,7 @@ module RunarCompiler
           end
 
           params << ParamNode.new(
-            name: Frontend.py_convert_name(raw_name),
+            name: declare(raw_name),
             type: type_node || CustomType.new(name: "unknown")
           )
 
@@ -1128,7 +1143,7 @@ module RunarCompiler
         expect_ident("for")
 
         iter_tok = advance
-        var_name = Frontend.py_convert_name(iter_tok.value)
+        var_name = declare(iter_tok.value)
 
         expect_ident("in")
         expect_ident("range")
@@ -1288,7 +1303,7 @@ module RunarCompiler
                    BigIntLiteral.new(value: 0)
                  end
           return VariableDeclStmt.new(
-            name: Frontend.py_convert_name(raw_name),
+            name: declare(raw_name),
             type: type_node,
             mutable: true,
             init: init,
@@ -1302,7 +1317,7 @@ module RunarCompiler
           advance # '='
           value = parse_expression
           return VariableDeclStmt.new(
-            name: Frontend.py_convert_name(raw_name),
+            name: declare(raw_name),
             mutable: true,
             init: value,
             source_location: location
@@ -1729,6 +1744,7 @@ module RunarCompiler
         )
       end
 
+      p.errors.concat(IdentifierCollision.diagnostics(p.declared || []))
       if p.errors.any?
         return ParseResult.new(contract: contract, errors: p.errors)
       end

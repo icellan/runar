@@ -49,6 +49,10 @@ pub fn parse_move(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = MoveParser::new(tokens, file, &mut errors);
 
     let contract = parser.parse_module();
+    let collision = parser.idents.collision_diagnostic();
+    if contract.is_some() {
+        errors.extend(collision);
+    }
 
     ParseResult {
         contract,
@@ -481,6 +485,8 @@ struct MoveParser<'a> {
     file: &'a str,
     errors: &'a mut Vec<Diagnostic>,
     struct_name: String,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: super::identifier_collision::DeclaredIdents,
 }
 
 impl<'a> MoveParser<'a> {
@@ -491,6 +497,7 @@ impl<'a> MoveParser<'a> {
             file,
             errors,
             struct_name: String::new(),
+            idents: Default::default(),
         }
     }
 
@@ -809,7 +816,7 @@ impl<'a> MoveParser<'a> {
         };
 
         PropertyNode {
-            name: map_builtin_name(&field_name),
+            name: self.idents.declare(&field_name, map_builtin_name(&field_name)),
             prop_type: type_node,
             readonly,
             initializer,
@@ -873,7 +880,7 @@ impl<'a> MoveParser<'a> {
     fn parse_fun(&mut self, visibility: Visibility) -> MethodNode {
         self.advance(); // consume 'fun'
         let raw_name = self.expect_ident();
-        let name = map_builtin_name(&raw_name);
+        let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
 
         self.expect(&Token::LParen);
         let params = self.parse_param_list();
@@ -959,6 +966,10 @@ impl<'a> MoveParser<'a> {
         self.expect(&Token::Colon);
         let param_type = self.parse_type();
         let name = map_builtin_name(&raw_name);
+        // The receiver (`self` / `contract`) is not a parameter (F-017).
+        if raw_name != "self" && raw_name != "contract" {
+            self.idents.declare(&raw_name, name.clone());
+        }
         ParamNode { name, param_type }
     }
 
@@ -1167,7 +1178,7 @@ impl<'a> MoveParser<'a> {
         };
 
         let raw_name = self.expect_ident();
-        let name = map_builtin_name(&raw_name);
+        let name = self.idents.declare(&raw_name, map_builtin_name(&raw_name));
 
         // Optional type annotation: ": Type"
         let var_type = if *self.peek() == Token::Colon {

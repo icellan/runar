@@ -18,6 +18,7 @@ from runar_compiler.frontend.ast_nodes import (
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +460,15 @@ class _RustParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _snake_to_camel(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -655,7 +665,7 @@ class _RustParser:
                             self.match_tok(TOK_COMMA)
 
                             # Skip txPreimage — implicit stateful param, not a contract property
-                            camel_name = _snake_to_camel(field_name)
+                            camel_name = self.declare(field_name)
                             if camel_name != "txPreimage":
                                 properties.append(PropertyNode(
                                     name=camel_name,
@@ -810,7 +820,7 @@ class _RustParser:
         else:
             self.advance()
 
-        name = _snake_to_camel(raw_name)
+        name = self.declare(raw_name)
 
         self.expect(TOK_LPAREN)
         params: list[ParamNode] = []
@@ -842,7 +852,7 @@ class _RustParser:
                         self.advance()
                 param_type = self.parse_rust_type()
                 params.append(ParamNode(
-                    name=_snake_to_camel(param_name),
+                    name=self.declare(param_name),
                     type=param_type,
                 ))
             else:
@@ -923,7 +933,7 @@ class _RustParser:
 
             var_name = "unknown"
             if self.peek().kind == TOK_IDENT:
-                var_name = _snake_to_camel(self.peek().value)
+                var_name = self.declare(self.peek().value)
                 self.advance()
             else:
                 self.advance()
@@ -988,7 +998,7 @@ class _RustParser:
             self.advance()
             var_name = "i"
             if self.peek().kind == TOK_IDENT:
-                var_name = _snake_to_camel(self.peek().value)
+                var_name = self.declare(self.peek().value)
                 self.advance()
 
             self.expect(TOK_IN)
@@ -1405,6 +1415,7 @@ def parse_rust(source: str, file_name: str) -> ParseResult:
     except Exception as e:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

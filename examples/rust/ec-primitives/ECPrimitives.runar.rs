@@ -47,9 +47,9 @@ impl ECPrimitives {
     }
 
     pub fn check_make_point(&self, x: BigintBig, y: BigintBig, expected_x: BigintBig, expected_y: BigintBig) {
-        let pt = ec_make_point(x, y);
-        assert!(ec_point_x(&pt) == expected_x);
-        assert!(ec_point_y(&pt) == expected_y);
+        let point = ec_make_point(x, y);
+        assert!(ec_point_x(&point) == expected_x);
+        assert!(ec_point_y(&point) == expected_y);
     }
 
     pub fn check_encode_compressed(&self, expected: ByteString) {

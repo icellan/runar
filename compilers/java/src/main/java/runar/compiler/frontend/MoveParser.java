@@ -59,6 +59,8 @@ public final class MoveParser {
         List<Token> tokens = tokenize(source);
         Parser p = new Parser(tokens, filename);
         ContractNode contract = p.parseModule();
+        String collision = p.idents.message();
+        if (collision != null) p.errors.add(collision);
         if (!p.errors.isEmpty()) {
             throw new ParseException(String.join("; ", p.errors));
         }
@@ -328,7 +330,10 @@ public final class MoveParser {
     // ---------------------------------------------------------------
 
     private static String snakeToCamel(String s) {
-        String[] parts = s.split("_");
+        // `-1` keeps trailing empty fields: without it `tmp_` split to ["tmp"]
+        // and came back as `tmp_`, where the reference and the other five
+        // tiers say `tmp` (F-017).
+        String[] parts = s.split("_", -1);
         if (parts.length <= 1) {
             return s;
         }
@@ -464,6 +469,8 @@ public final class MoveParser {
         final String filename;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
         Parser(List<Token> tokens, String filename) {
             this.tokens = tokens;
@@ -641,7 +648,7 @@ public final class MoveParser {
             List<PropertyNode> props = new ArrayList<>();
             while (!check(Kind.RBRACE) && !check(Kind.EOF)) {
                 Token nameTok = expect(Kind.IDENT);
-                String fieldName = snakeToCamel(nameTok.value());
+                String fieldName = idents.declare(nameTok.value(), snakeToCamel(nameTok.value()));
 
                 expect(Kind.COLON);
 
@@ -828,7 +835,7 @@ public final class MoveParser {
             expectIdent("fun");
 
             Token nameTok = expect(Kind.IDENT);
-            String name = snakeToCamel(nameTok.value());
+            String name = idents.declare(nameTok.value(), snakeToCamel(nameTok.value()));
 
             ParamsResult pr = parseParams();
             List<ParamNode> params = pr.params;
@@ -909,7 +916,7 @@ public final class MoveParser {
                     break;
                 }
 
-                String camelName = snakeToCamel(paramName);
+                String camelName = idents.declare(paramName, snakeToCamel(paramName));
                 params.add(new ParamNode(camelName, mapType(typeName)));
 
                 if (!match(Kind.COMMA)) break;
@@ -954,7 +961,7 @@ public final class MoveParser {
 
             matchIdent("mut");
             Token nameTok = expect(Kind.IDENT);
-            String varName = snakeToCamel(nameTok.value());
+            String varName = idents.declare(nameTok.value(), snakeToCamel(nameTok.value()));
 
             TypeNode typeNode = null;
             if (match(Kind.COLON)) {

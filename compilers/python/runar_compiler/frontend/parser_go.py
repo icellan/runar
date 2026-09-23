@@ -18,6 +18,7 @@ from runar_compiler.frontend.ast_nodes import (
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +550,15 @@ class _GoParser:
         self.pos = 0
         self.errors: list[Diagnostic] = []
         self.receiver_name: str = ""
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _go_field_to_camel(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -845,7 +855,7 @@ class _GoParser:
                         readonly = True
 
                 for fname in field_names:
-                    prop_name = _go_field_to_camel(fname)
+                    prop_name = self.declare(fname)
                     properties.append(PropertyNode(
                         name=prop_name,
                         type=field_type,
@@ -965,7 +975,7 @@ class _GoParser:
             self._skip_func_body()
             return None
 
-        method_name = _go_field_to_camel(func_name)
+        method_name = self.declare(func_name)
 
         # Parse parameters
         params = self._parse_func_params()
@@ -1049,7 +1059,7 @@ class _GoParser:
 
             for pname in param_names:
                 params.append(ParamNode(
-                    name=_go_field_to_camel(pname),
+                    name=self.declare(pname),
                     type=param_type,
                 ))
 
@@ -1302,7 +1312,7 @@ class _GoParser:
     def _parse_var_decl(self, loc: SourceLocation) -> Statement:
         self.expect_ident("var")
         name_tok = self.expect(TOK_IDENT)
-        var_name = _go_field_to_camel(name_tok.value)
+        var_name = self.declare(name_tok.value)
 
         type_node: TypeNode | None = None
         if not self.check(TOK_ASSIGN):
@@ -1327,7 +1337,7 @@ class _GoParser:
     def _parse_const_decl(self, loc: SourceLocation) -> Statement:
         self.expect_ident("const")
         name_tok = self.expect(TOK_IDENT)
-        var_name = _go_field_to_camel(name_tok.value)
+        var_name = self.declare(name_tok.value)
 
         type_node: TypeNode | None = None
         if not self.check(TOK_ASSIGN):
@@ -1349,6 +1359,7 @@ class _GoParser:
         self, loc: SourceLocation, consume_semicolons: bool = True,
     ) -> Statement | None:
         """Parse an expression statement, assignment, short var decl, or inc/dec."""
+        target_tok = self.peek()
         expr = self._parse_expression()
         if expr is None:
             self.advance()
@@ -1362,6 +1373,8 @@ class _GoParser:
             name = ""
             if isinstance(expr, Identifier):
                 name = expr.name
+                if target_tok.kind == TOK_IDENT:
+                    self.declared.append((target_tok.value, name))
             if consume_semicolons:
                 self.skip_semicolons()
             return VariableDeclStmt(
@@ -1829,6 +1842,7 @@ def parse_go(source: str, file_name: str) -> ParseResult:
     if contract is None and not p.errors:
         p.errors.append("no Runar contract struct found in Go source")
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

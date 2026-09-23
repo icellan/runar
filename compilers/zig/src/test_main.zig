@@ -25,6 +25,8 @@ test {
     _ = @import("passes/parse_rust.zig");
     _ = @import("passes/parse_python.zig");
     _ = @import("passes/parse_ruby.zig");
+    _ = @import("passes/identifier_collision.zig");
+    _ = @import("tests/f017_identifier_collision.zig");
     _ = @import("passes/parse_java.zig");
     _ = @import("passes/validate.zig");
     _ = @import("passes/sighash_validate.zig");

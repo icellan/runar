@@ -26,6 +26,7 @@
 const std = @import("std");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const Expression = types.Expression;
@@ -687,6 +688,8 @@ const Parser = struct {
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
     depth: u32,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: identifier_collision.DeclaredIdents = .{},
 
     const max_depth: u32 = 256;
 
@@ -780,7 +783,16 @@ const Parser = struct {
         self.skipImports();
         self.skipNewlines();
         const contract = self.parseClassDecl();
+        if (contract != null) {
+            if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
+        }
         return .{ .contract = contract, .errors = self.errors.items };
+    }
+
+    /// Convert a DECLARED identifier and record it for the F-017 collision
+    /// rule (see identifier_collision.zig).
+    fn declare(self: *Parser, raw: []const u8) []const u8 {
+        return self.idents.declare(self.allocator, raw, pyConvertName(self.allocator, raw));
     }
 
     /// Skip `from ... import ...` and `import ...` statements.
@@ -911,7 +923,7 @@ const Parser = struct {
 
     fn parsePyProperty(self: *Parser, parent_class: ParentClass) ?PropertyNode {
         const name_tok = self.bump(); // consume property name
-        const prop_name = pyConvertName(self.allocator, name_tok.text);
+        const prop_name = self.declare(name_tok.text);
 
         _ = self.expect(.colon); // consume ':'
 
@@ -1181,7 +1193,7 @@ const Parser = struct {
         }
         const name_tok = self.bump();
         const method_loc = self.tokenSourceLoc(name_tok);
-        const name = pyConvertName(self.allocator, name_tok.text);
+        const name = self.declare(name_tok.text);
 
         const params = self.parsePyParams();
 
@@ -1224,7 +1236,7 @@ const Parser = struct {
             }
 
             params.append(self.allocator, .{
-                .name = pyConvertName(self.allocator, param_name),
+                .name = self.declare(param_name),
                 .type_info = type_info,
                 .type_name = type_name,
             }) catch {};
@@ -1371,7 +1383,7 @@ const Parser = struct {
             self.addError("expected variable name in for loop");
             return null;
         }
-        const var_name = pyConvertName(self.allocator, self.bump().text);
+        const var_name = self.declare(self.bump().text);
 
         // expect 'in'
         if (!self.matchIdent("in")) {
@@ -1482,7 +1494,7 @@ const Parser = struct {
             if (next_tok.kind == .colon) {
                 // This is name: Type [= expr]
                 const name_tok = self.bump();
-                const var_name = pyConvertName(self.allocator, name_tok.text);
+                const var_name = self.declare(name_tok.text);
                 _ = self.bump(); // consume ':'
 
                 const tn = self.parsePyTypeAnnotation();
@@ -1499,6 +1511,7 @@ const Parser = struct {
             }
         }
 
+        const target_tok = self.current;
         const expr = self.parseExpression() orelse {
             _ = self.bump();
             self.skipNewlines();
@@ -1509,6 +1522,9 @@ const Parser = struct {
         if (self.match(.assign)) {
             const value = self.parseExpression() orelse return null;
             self.skipNewlines();
+            if (expr == .identifier and target_tok.kind == .ident) {
+                _ = self.idents.declare(self.allocator, target_tok.text, expr.identifier);
+            }
             return self.buildAssignment(expr, value, loc);
         }
 

@@ -691,7 +691,7 @@
           }
         },
         {
-          "name": "pt",
+          "name": "point",
           "value": {
             "kind": "load_const",
             "value": "@ref:t2"
@@ -701,7 +701,7 @@
           "name": "t3",
           "value": {
             "args": [
-              "pt"
+              "point"
             ],
             "func": "ecPointX",
             "kind": "call"
@@ -734,7 +734,7 @@
           "name": "t7",
           "value": {
             "args": [
-              "pt"
+              "point"
             ],
             "func": "ecPointY",
             "kind": "call"

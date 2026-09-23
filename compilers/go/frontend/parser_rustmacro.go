@@ -24,6 +24,7 @@ func ParseRustMacro(source []byte, fileName string) *ParseResult {
 	}
 
 	contract := p.parse()
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	return &ParseResult{
 		Contract: contract,
 		Errors:   p.errors,
@@ -406,6 +407,9 @@ type rustMacroParser struct {
 	pos      int
 	fileName string
 	errors   []Diagnostic
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
 }
 
 func (p *rustMacroParser) current() rustToken {
@@ -515,7 +519,7 @@ func (p *rustMacroParser) parse() *ContractNode {
 						p.match(rustTokComma)
 
 						// Skip txPreimage — implicit stateful param, not a contract property
-						camelName := rustSnakeToCamel(fieldName)
+						camelName := p.idents.declare(fieldName, rustSnakeToCamel(fieldName))
 						if camelName != "txPreimage" {
 							properties = append(properties, PropertyNode{
 								Name:           camelName,
@@ -808,7 +812,7 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 		rawName = p.current().value
 		p.advance()
 	}
-	name := rustSnakeToCamel(rawName)
+	name := p.idents.declare(rawName, rustSnakeToCamel(rawName))
 
 	p.expect(rustTokLParen)
 	var params []ParamNode
@@ -836,7 +840,7 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 			p.expect(rustTokColon)
 			paramType := p.parseRustType()
 			params = append(params, ParamNode{
-				Name: rustSnakeToCamel(paramName),
+				Name: p.idents.declare(paramName, rustSnakeToCamel(paramName)),
 				Type: paramType,
 			})
 		} else {
@@ -921,7 +925,7 @@ func (p *rustMacroParser) parseStatement() Statement {
 		mutable := p.match(rustTokMut)
 		varName := "unknown"
 		if p.current().kind == rustTokIdent {
-			varName = rustSnakeToCamel(p.current().value)
+			varName = p.idents.declare(p.current().value, rustSnakeToCamel(p.current().value))
 			p.advance()
 		}
 		var typeNode TypeNode
@@ -977,7 +981,7 @@ func (p *rustMacroParser) parseStatement() Statement {
 		p.advance()
 		varName := "_i"
 		if p.current().kind == rustTokIdent {
-			varName = rustSnakeToCamel(p.current().value)
+			varName = p.idents.declare(p.current().value, rustSnakeToCamel(p.current().value))
 			p.advance()
 		}
 		p.match(rustTokIn)

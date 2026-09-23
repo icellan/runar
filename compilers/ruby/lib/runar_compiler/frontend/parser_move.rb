@@ -9,6 +9,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
 
 module RunarCompiler
   module Frontend
@@ -412,6 +413,17 @@ module RunarCompiler
 
       attr_accessor :tokens, :pos, :errors
 
+      # F-017: (source spelling, Rúnar name) of every declared identifier.
+      attr_reader :declared
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.move_snake_to_camel(raw)
+        (@declared ||= []) << [raw, name]
+        name
+      end
+
       # -- Token helpers --------------------------------------------------
 
       def peek
@@ -515,7 +527,7 @@ module RunarCompiler
             while !check(TOK_RBRACE) && !check(TOK_EOF)
               prop_loc = loc
               prop_name_raw = expect(TOK_IDENT).value
-              prop_name = Frontend.move_snake_to_camel(prop_name_raw)
+              prop_name = declare(prop_name_raw)
               expect(TOK_COLON)
 
               # Check for &mut (mutable reference)
@@ -686,7 +698,7 @@ module RunarCompiler
 
         expect_ident("fun")
         raw_name = expect(TOK_IDENT).value
-        name = Frontend.move_snake_to_camel(raw_name)
+        name = declare(raw_name)
 
         expect(TOK_LPAREN)
         params = []
@@ -733,7 +745,7 @@ module RunarCompiler
             end
 
             params << ParamNode.new(
-              name: Frontend.move_snake_to_camel(p_name_raw),
+              name: declare(p_name_raw),
               type: p_type
             )
           end
@@ -841,7 +853,7 @@ module RunarCompiler
             advance
             mutable = true
           end
-          var_name = Frontend.move_snake_to_camel(expect(TOK_IDENT).value)
+          var_name = declare(expect(TOK_IDENT).value)
           var_type = nil
           if match_tok(TOK_COLON)
             var_type = parse_move_type
@@ -1459,6 +1471,7 @@ module RunarCompiler
         )
       end
 
+      p.errors.concat(IdentifierCollision.diagnostics(p.declared || []))
       if p.errors.any?
         return ParseResult.new(contract: contract, errors: p.errors)
       end

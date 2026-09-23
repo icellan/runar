@@ -112,6 +112,10 @@ Special cases:
 - `verify_wots` maps to `verifyWOTS` (not `verifyWots`)
 - All SLH-DSA variants have explicit mappings (e.g., `verify_slh_dsa_sha2_128s` → `verifySLHDSA_SHA2_128s`)
 
+### Identifier Collision Rule
+
+The snake_case to camelCase conversion is not injective: two different identifiers may convert to the same Rúnar name (e.g., `k` and `k_` both become `k`). A contract that declares two distinct source spellings that map to one Rúnar name is refused with: `identifier collision: '<a>' and '<b>' both convert to '<name>'; rename one of them`. Single use of one spelling, or one identifier that maps to a different name (`sum_` → `sum`), is fine.
+
 ### Property Access
 
 Ruby contracts use instance variables (`@var`) to access properties:

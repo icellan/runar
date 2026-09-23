@@ -18,6 +18,7 @@ from runar_compiler.frontend.ast_nodes import (
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +549,15 @@ class _PyParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = py_convert_name(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -763,7 +773,7 @@ class _PyParser:
     def parse_property(self, parent_class: str) -> PropertyNode | None:
         location = self.loc()
         name_tok = self.expect(TOK_IDENT)
-        prop_name = py_convert_name(name_tok.value)
+        prop_name = self.declare(name_tok.value)
         self.expect(TOK_COLON)
 
         is_readonly = False
@@ -854,7 +864,7 @@ class _PyParser:
         location = self.loc()
         self.expect_ident("def")
         name_tok = self.expect(TOK_IDENT)
-        name = py_convert_name(name_tok.value)
+        name = self.declare(name_tok.value)
 
         params = self.parse_params()
 
@@ -891,7 +901,7 @@ class _PyParser:
             if self.match(TOK_COLON):
                 typ = self.parse_type_annotation()
 
-            params.append(ParamNode(name=py_convert_name(param_name), type=typ))
+            params.append(ParamNode(name=self.declare(param_name), type=typ))
 
             if not self.match(TOK_COMMA):
                 break
@@ -1013,7 +1023,7 @@ class _PyParser:
     def _parse_for(self, loc: SourceLocation) -> Statement:
         self.expect_ident("for")
         var_tok = self.expect(TOK_IDENT)
-        var_name = py_convert_name(var_tok.value)
+        var_name = self.declare(var_tok.value)
 
         self.expect_ident("in")
         self.expect_ident("range")
@@ -1103,7 +1113,7 @@ class _PyParser:
                 self.pos + 1 < len(self.tokens) and
                 self.tokens[self.pos + 1].kind == TOK_COLON):
             name_tok = self.advance()
-            var_name = py_convert_name(name_tok.value)
+            var_name = self.declare(name_tok.value)
             self.expect(TOK_COLON)
             typ_node = self.parse_type_annotation()
 
@@ -1121,6 +1131,7 @@ class _PyParser:
                 source_location=loc,
             )
 
+        target_tok = self.peek()
         expr = self.parse_expression()
         if expr is None:
             self.advance()
@@ -1132,6 +1143,8 @@ class _PyParser:
             value = self.parse_expression()
             self.skip_newlines()
             if isinstance(expr, Identifier):
+                if target_tok.kind == TOK_IDENT:
+                    self.declared.append((target_tok.value, expr.name))
                 return VariableDeclStmt(
                     name=expr.name,
                     type=None,
@@ -1493,6 +1506,7 @@ def parse_python(source: str, file_name: str) -> ParseResult:
     except ValueError as e:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

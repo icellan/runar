@@ -40,6 +40,7 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 	if contract == nil && len(p.errors) == 0 {
 		p.addError("no Rúnar contract struct found in Go source")
 	}
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 
 	return &ParseResult{
 		Contract: contract,
@@ -57,6 +58,9 @@ type goContractParser struct {
 	fileName     string
 	errors       []Diagnostic
 	receiverName string // current method's receiver name (e.g. "c", "m", "self")
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
 }
 
 func (p *goContractParser) addError(msg string) {
@@ -143,7 +147,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 				}
 
 				for _, name := range field.Names {
-					propName := goFieldToCamel(name.Name)
+					propName := p.idents.declare(name.Name, goFieldToCamel(name.Name))
 					propType := p.resolveType(field.Type)
 
 					// Check struct tag for readonly
@@ -191,7 +195,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			}
 		}
 
-		methodName := goFieldToCamel(funcDecl.Name.Name)
+		methodName := p.idents.declare(funcDecl.Name.Name, goFieldToCamel(funcDecl.Name.Name))
 		// Exported (capitalized) = public
 		visibility := "private"
 		if funcDecl.Name.IsExported() {
@@ -236,7 +240,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 			continue
 		}
 
-		methodName := goFieldToCamel(funcDecl.Name.Name)
+		methodName := p.idents.declare(funcDecl.Name.Name, goFieldToCamel(funcDecl.Name.Name))
 		p.receiverName = "" // no receiver for standalone functions
 
 		params := p.extractParams(funcDecl.Type.Params)
@@ -391,7 +395,7 @@ func (p *goContractParser) extractParams(fieldList *ast.FieldList) []ParamNode {
 		paramType := p.resolveType(field.Type)
 		for _, name := range field.Names {
 			params = append(params, ParamNode{
-				Name: goFieldToCamel(name.Name),
+				Name: p.idents.declare(name.Name, goFieldToCamel(name.Name)),
 				Type: paramType,
 			})
 		}
@@ -441,6 +445,9 @@ func (p *goContractParser) convertStatement(stmt ast.Stmt) Statement {
 				name := ""
 				if ident, ok := target.(Identifier); ok {
 					name = ident.Name
+					if raw, ok := s.Lhs[0].(*ast.Ident); ok {
+						p.idents.declare(raw.Name, name)
+					}
 				}
 				return VariableDeclStmt{
 					Name:           name,
@@ -483,7 +490,7 @@ func (p *goContractParser) convertStatement(stmt ast.Stmt) Statement {
 				continue
 			}
 			if len(valueSpec.Names) > 0 && len(valueSpec.Values) > 0 {
-				name := goFieldToCamel(valueSpec.Names[0].Name)
+				name := p.idents.declare(valueSpec.Names[0].Name, goFieldToCamel(valueSpec.Names[0].Name))
 				init := p.convertExpression(valueSpec.Values[0])
 				if init == nil {
 					return nil

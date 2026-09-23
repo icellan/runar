@@ -64,11 +64,15 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = RbParser::new(tokens, file, &mut str_errors);
 
     let contract = parser.parse_contract();
+    let collision = parser.idents.collision_diagnostic();
 
-    let errors = str_errors
+    let mut errors: Vec<Diagnostic> = str_errors
         .into_iter()
         .map(|msg| Diagnostic::error(msg, None))
         .collect();
+    if contract.is_some() {
+        errors.extend(collision);
+    }
 
     ParseResult { contract, errors, source_size_err: None }
 }
@@ -752,6 +756,8 @@ struct RbParser<'a> {
     errors: &'a mut Vec<String>,
     /// Track locally declared variables per method scope to distinguish decl from assignment.
     declared_locals: std::collections::HashSet<String>,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: super::identifier_collision::DeclaredIdents,
 }
 
 impl<'a> RbParser<'a> {
@@ -762,6 +768,7 @@ impl<'a> RbParser<'a> {
             file,
             errors,
             declared_locals: std::collections::HashSet::new(),
+            idents: Default::default(),
         }
     }
 
@@ -1127,7 +1134,7 @@ impl<'a> RbParser<'a> {
         }
 
         Some(PropertyNode {
-            name: snake_to_camel(&raw_name),
+            name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
             prop_type: type_node,
             readonly: is_readonly,
             initializer,
@@ -1225,7 +1232,7 @@ impl<'a> RbParser<'a> {
         }
 
         let is_public = pending_visibility.as_ref() == Some(&Visibility::Public);
-        let method_name = snake_to_camel(&raw_name);
+        let method_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
         MethodNode {
             name: method_name,
@@ -1249,7 +1256,7 @@ impl<'a> RbParser<'a> {
 
         while *self.peek() != Token::RParen && *self.peek() != Token::Eof {
             let raw_name = self.expect_ident();
-            let camel_name = snake_to_camel(&raw_name);
+            let camel_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
             // Look up the type from the preceding runar_public/params declaration
             let param_type = if let Some(ref types) = param_types {
@@ -1456,7 +1463,7 @@ impl<'a> RbParser<'a> {
         self.advance(); // consume 'for'
 
         let raw_var = self.expect_ident();
-        let var_name = snake_to_camel(&raw_var);
+        let var_name = self.idents.declare(&raw_var, snake_to_camel(&raw_var));
 
         self.expect(&Token::In);
 
@@ -1681,7 +1688,7 @@ impl<'a> RbParser<'a> {
             self.advance(); // consume ident
             self.advance(); // consume '='
             let value = self.parse_expression();
-            let camel_name = snake_to_camel(&raw_name);
+            let camel_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
             if self.declared_locals.contains(&camel_name) {
                 // Already declared: this is an assignment

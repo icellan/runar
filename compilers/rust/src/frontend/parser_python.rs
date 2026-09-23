@@ -41,6 +41,7 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::Diagnostic;
+use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,10 @@ pub fn parse_python(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut parser = PyParser::new(tokens, file, &mut errors);
 
     let contract = parser.parse_contract();
+    let collision = parser.idents.collision_diagnostic();
+    if contract.is_some() {
+        errors.extend(collision);
+    }
 
     ParseResult { contract, errors, source_size_err: None }
 }
@@ -793,6 +798,8 @@ struct PyParser<'a> {
     pos: usize,
     file: &'a str,
     errors: &'a mut Vec<Diagnostic>,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: DeclaredIdents,
 }
 
 impl<'a> PyParser<'a> {
@@ -802,6 +809,7 @@ impl<'a> PyParser<'a> {
             pos: 0,
             file,
             errors,
+            idents: DeclaredIdents::default(),
         }
     }
 
@@ -1057,7 +1065,7 @@ impl<'a> PyParser<'a> {
         }
 
         Some(PropertyNode {
-            name: snake_to_camel(&raw_name),
+            name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
             prop_type: type_node,
             readonly: is_readonly,
             initializer,
@@ -1148,7 +1156,7 @@ impl<'a> PyParser<'a> {
         }
 
         let is_public = decorators.contains(&"public".to_string());
-        let method_name = snake_to_camel(&raw_name);
+        let method_name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
         MethodNode {
             name: method_name,
@@ -1186,7 +1194,7 @@ impl<'a> PyParser<'a> {
             };
 
             params.push(ParamNode {
-                name: snake_to_camel(&raw_name),
+                name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
                 param_type,
             });
 
@@ -1340,7 +1348,7 @@ impl<'a> PyParser<'a> {
         self.advance(); // consume 'for'
 
         let raw_var = self.expect_ident();
-        let var_name = snake_to_camel(&raw_var);
+        let var_name = self.idents.declare(&raw_var, snake_to_camel(&raw_var));
 
         self.expect(&Token::In);
         self.expect(&Token::Range);
@@ -1602,7 +1610,7 @@ impl<'a> PyParser<'a> {
             };
 
             return Statement::VariableDecl {
-                name: snake_to_camel(&raw_name),
+                name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
                 var_type: Some(type_node),
                 mutable: true,
                 init,
@@ -1616,7 +1624,7 @@ impl<'a> PyParser<'a> {
             self.advance(); // consume '='
             let value = self.parse_expression();
             return Statement::VariableDecl {
-                name: snake_to_camel(&raw_name),
+                name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
                 var_type: None,
                 mutable: true,
                 init: value,

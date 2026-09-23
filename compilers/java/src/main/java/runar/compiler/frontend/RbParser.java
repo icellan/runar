@@ -80,6 +80,8 @@ public final class RbParser {
         List<Token> tokens = tokenize(source);
         Parser parser = new Parser(tokens, filename);
         ContractNode contract = parser.parseTop();
+        String collision = parser.idents.message();
+        if (contract != null && collision != null) parser.errors.add(collision);
         if (!parser.errors.isEmpty()) {
             throw new ParseException(String.join("\n", parser.errors));
         }
@@ -629,6 +631,8 @@ public final class RbParser {
         int pos;
         final List<String> errors = new ArrayList<>();
         Set<String> declaredLocals = new HashSet<>();
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
         Parser(List<Token> tokens, String file) {
             this.tokens = tokens;
@@ -916,7 +920,7 @@ public final class RbParser {
             while (peek().kind != TK.NEWLINE && peek().kind != TK.EOF) advance();
 
             return new PropertyNode(
-                snakeToCamel(rawName),
+                idents.declare(rawName, snakeToCamel(rawName)),
                 typeNode,
                 isReadonly,
                 initializer,
@@ -966,7 +970,7 @@ public final class RbParser {
             }
             boolean isPublic = "public".equals(pendingVisibility);
             return new MethodNode(
-                snakeToCamel(rawName),
+                idents.declare(rawName, snakeToCamel(rawName)),
                 params,
                 body,
                 isPublic ? Visibility.PUBLIC : Visibility.PRIVATE,
@@ -979,7 +983,7 @@ public final class RbParser {
             while (peek().kind != TK.RPAREN && peek().kind != TK.EOF) {
                 Token nameTok = advance();
                 String rawName = nameTok.value;
-                String camelName = snakeToCamel(rawName);
+                String camelName = idents.declare(rawName, snakeToCamel(rawName));
                 TypeNode t = paramTypes != null ? paramTypes.get(rawName) : null;
                 out.add(new ParamNode(camelName, t != null ? t : new CustomType("unknown")));
                 if (!match(TK.COMMA)) break;
@@ -1144,7 +1148,7 @@ public final class RbParser {
         Statement parseForStatement(SourceLocation l) {
             advance(); // 'for'
             Token iterTok = advance();
-            String varName = snakeToCamel(iterTok.value);
+            String varName = idents.declare(iterTok.value, snakeToCamel(iterTok.value));
             expect(TK.IN, "in");
             Expression startExpr = parseExpression();
 
@@ -1282,7 +1286,7 @@ public final class RbParser {
                 advance(); // ident
                 advance(); // '='
                 Expression value = parseExpression();
-                String camel = snakeToCamel(rawName);
+                String camel = idents.declare(rawName, snakeToCamel(rawName));
                 if (declaredLocals.contains(camel)) {
                     return new AssignmentStatement(new Identifier(camel), value, l);
                 }

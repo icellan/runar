@@ -79,6 +79,8 @@ public final class GoParser {
         List<Token> tokens = tokenize(source);
         ParserState state = new ParserState(filename, tokens);
         ContractNode contract = state.parseFile();
+        String collision = state.idents.message();
+        if (contract != null && collision != null) state.errors.add(collision);
         if (contract == null) {
             if (state.errors.isEmpty()) {
                 throw new ParseException("no Rúnar contract struct found in Go source: " + filename);
@@ -631,6 +633,8 @@ public final class GoParser {
         int pos = 0;
         final List<String> errors = new ArrayList<>();
         String receiverName = "";
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
         ParserState(String fileName, List<Token> tokens) {
             this.fileName = fileName;
@@ -903,7 +907,7 @@ public final class GoParser {
                     }
 
                     for (String fname : fieldNames) {
-                        String propName = goFieldToCamel(fname);
+                        String propName = idents.declare(fname, goFieldToCamel(fname));
                         properties.add(new PropertyNode(
                             propName,
                             fieldType,
@@ -1053,7 +1057,7 @@ public final class GoParser {
                 return null;
             }
 
-            String methodName = goFieldToCamel(funcName);
+            String methodName = idents.declare(funcName, goFieldToCamel(funcName));
             List<ParamNode> params = parseFuncParams();
 
             if (!check(Tok.LBRACE)) {
@@ -1116,7 +1120,7 @@ public final class GoParser {
 
                 TypeNode paramType = parseType();
                 for (String pname : names) {
-                    params.add(new ParamNode(goFieldToCamel(pname), paramType));
+                    params.add(new ParamNode(idents.declare(pname, goFieldToCamel(pname)), paramType));
                 }
 
                 if (!match(Tok.COMMA)) break;
@@ -1289,7 +1293,7 @@ public final class GoParser {
         Statement parseVarDecl(SourceLocation loc) {
             expectIdent("var");
             Token nameTok = expect(Tok.IDENT);
-            String varName = goFieldToCamel(nameTok.value);
+            String varName = idents.declare(nameTok.value, goFieldToCamel(nameTok.value));
 
             TypeNode typeNode = null;
             if (!check(Tok.ASSIGN)) typeNode = parseType();
@@ -1305,7 +1309,7 @@ public final class GoParser {
         Statement parseConstDecl(SourceLocation loc) {
             expectIdent("const");
             Token nameTok = expect(Tok.IDENT);
-            String varName = goFieldToCamel(nameTok.value);
+            String varName = idents.declare(nameTok.value, goFieldToCamel(nameTok.value));
 
             TypeNode typeNode = null;
             if (!check(Tok.ASSIGN)) typeNode = parseType();
@@ -1318,6 +1322,7 @@ public final class GoParser {
         }
 
         Statement parseExprStatement(SourceLocation loc, boolean consumeSemis) {
+            Token targetTok = peek();
             Expression expr = parseExpression();
             if (expr == null) {
                 advance();
@@ -1329,7 +1334,10 @@ public final class GoParser {
             if (match(Tok.COLONEQ)) {
                 Expression init = parseExpression();
                 String name = "";
-                if (expr instanceof Identifier id) name = id.name();
+                if (expr instanceof Identifier id) {
+                    name = id.name();
+                    if (targetTok.kind == Tok.IDENT) idents.declare(targetTok.value, name);
+                }
                 if (consumeSemis) skipSemicolons();
                 return new VariableDeclStatement(name, null, init, loc);
             }

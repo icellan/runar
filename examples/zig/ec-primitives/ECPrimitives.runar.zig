@@ -52,9 +52,9 @@ pub const ECPrimitives = struct {
 
     pub fn checkMakePoint(self: *const ECPrimitives, x: i64, y: i64, expectedX: i64, expectedY: i64) void {
         _ = self;
-        const pt = runar.ecMakePoint(x, y);
-        runar.assert(runar.ecPointX(pt) == expectedX);
-        runar.assert(runar.ecPointY(pt) == expectedY);
+        const point = runar.ecMakePoint(x, y);
+        runar.assert(runar.ecPointX(point) == expectedX);
+        runar.assert(runar.ecPointY(point) == expectedY);
     }
 
     pub fn checkEncodeCompressed(self: *const ECPrimitives, expected: runar.ByteString) void {

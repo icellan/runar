@@ -673,6 +673,15 @@ class _RbParser:
         self._errors: list[str] = []
         # Track locally declared variables per method scope
         self._declared_locals: set[str] = set()
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self._declared: list[tuple[str, str]] = []
+
+    def _declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _snake_to_camel(raw)
+        self._declared.append((raw, name))
+        return name
 
     # -----------------------------------------------------------------------
     # Token navigation
@@ -732,6 +741,7 @@ class _RbParser:
 
     def parse(self) -> ParseResult:
         from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+        from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
         self._skip_newlines()
 
@@ -744,6 +754,7 @@ class _RbParser:
         diagnostics = [Diagnostic(message=e, severity=Severity.ERROR) for e in self._errors]
         if contract is None:
             return ParseResult(errors=diagnostics)
+        diagnostics.extend(collision_diagnostics(self._declared))
         return ParseResult(contract=contract, errors=diagnostics)
 
     def _parse_require_line(self) -> None:
@@ -966,7 +977,7 @@ class _RbParser:
             self._advance()
 
         return PropertyNode(
-            name=_snake_to_camel(raw_name),
+            name=self._declare(raw_name),
             type=type_node,
             readonly=is_readonly,
             initializer=initializer,
@@ -1029,7 +1040,7 @@ class _RbParser:
             )
 
         is_public = pending_visibility == "public"
-        method_name = _snake_to_camel(raw_name)
+        method_name = self._declare(raw_name)
 
         return MethodNode(
             name=method_name,
@@ -1048,7 +1059,7 @@ class _RbParser:
         while self._peek().kind not in (TOK_RPAREN, TOK_EOF):
             name_tok = self._advance()
             raw_name = name_tok.value
-            camel_name = _snake_to_camel(raw_name)
+            camel_name = self._declare(raw_name)
 
             type_node: TypeNode | None = None
             if param_types:
@@ -1262,7 +1273,7 @@ class _RbParser:
         self._advance()  # 'for'
 
         iter_tok = self._advance()  # loop variable name
-        var_name = _snake_to_camel(iter_tok.value)
+        var_name = self._declare(iter_tok.value)
 
         self._expect(TOK_IN, "in")
 
@@ -1421,7 +1432,7 @@ class _RbParser:
             self._advance()  # consume ident
             self._advance()  # consume '='
             value = self._parse_expression()
-            camel_name = _snake_to_camel(raw_name)
+            camel_name = self._declare(raw_name)
 
             if camel_name in self._declared_locals:
                 return AssignmentStmt(

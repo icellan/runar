@@ -27,6 +27,7 @@ func ParseRuby(source []byte, fileName string) *ParseResult {
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
 	}
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
 	}
@@ -126,6 +127,9 @@ type rbParser struct {
 	pos           int
 	errors        []Diagnostic
 	declaredLocals map[string]bool // track locally declared variables per method scope
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
 }
 
 func (p *rbParser) addError(msg string) {
@@ -1004,7 +1008,7 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 	}
 
 	return &PropertyNode{
-		Name:           rbConvertName(rawName),
+		Name:           p.idents.declare(rawName, rbConvertName(rawName)),
 		Type:           typeNode,
 		Readonly:       isReadonly,
 		Initializer:    initializer,
@@ -1053,7 +1057,7 @@ func (p *rbParser) parseMethod(pendingVisibility string, pendingParamTypes map[s
 	}
 
 	isPublic := pendingVisibility == "public"
-	methodName := rbConvertName(rawName)
+	methodName := p.idents.declare(rawName, rbConvertName(rawName))
 
 	visibility := "private"
 	if isPublic {
@@ -1075,7 +1079,7 @@ func (p *rbParser) parseParams(paramTypes map[string]TypeNode) []ParamNode {
 	for !p.check(rbTokRParen) && !p.check(rbTokEOF) {
 		nameTok := p.advance()
 		rawName := nameTok.value
-		camelName := rbConvertName(rawName)
+		camelName := p.idents.declare(rawName, rbConvertName(rawName))
 
 		// Look up the type from the preceding runar_public/params declaration
 		var typeNode TypeNode
@@ -1338,7 +1342,7 @@ func (p *rbParser) parseForStatement(loc SourceLocation) Statement {
 	p.advance() // 'for'
 
 	iterVar := p.advance() // loop variable
-	varName := rbConvertName(iterVar.value)
+	varName := p.idents.declare(iterVar.value, rbConvertName(iterVar.value))
 
 	p.expect(rbTokIn)
 
@@ -1534,7 +1538,7 @@ func (p *rbParser) parseIdentStatement(loc SourceLocation) Statement {
 		p.advance() // consume ident
 		p.advance() // consume '='
 		value := p.parseExpression()
-		camelName := rbConvertName(rawName)
+		camelName := p.idents.declare(rawName, rbConvertName(rawName))
 
 		if p.declaredLocals[camelName] {
 			// Already declared: this is an assignment

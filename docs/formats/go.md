@@ -653,6 +653,10 @@ Go uses PascalCase for exported identifiers. The parser converts to camelCase fo
 
 Unexported identifiers (lowercase first letter) are kept as-is.
 
+### Identifier Collision Rule
+
+The PascalCase to camelCase conversion is not injective: two different identifiers may convert to the same Rúnar name (e.g., `K` and `k` both become `k`). A contract that declares two distinct source spellings that map to one Rúnar name is refused with: `identifier collision: '<a>' and '<b>' both convert to '<name>'; rename one of them`. Single use of one spelling is fine.
+
 ### Constructor
 
 The constructor is auto-generated from the struct fields. The parser creates a constructor that:

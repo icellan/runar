@@ -18,7 +18,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { snakeToCamelCore } from './snake-to-camel.js';
+import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
@@ -205,6 +205,17 @@ class MoveParser {
   private file: string;
   private errors: CompilerDiagnostic[];
 
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = snakeToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
+
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
@@ -277,7 +288,7 @@ class MoveParser {
         let hasMutableField = false;
         while (this.current().type !== '}' && this.current().type !== 'eof') {
           const propLoc = this.loc();
-          const propName = snakeToCamel(this.expect('ident').value);
+          const propName = this.declare(this.expect('ident').value);
           this.expect(':');
 
           // Check for &mut (mutable reference)
@@ -373,6 +384,11 @@ class MoveParser {
       sourceFile: this.file,
     };
 
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
+    }
+
     return { contract, errors: this.errors };
   }
 
@@ -448,7 +464,7 @@ class MoveParser {
 
     this.expect('fun');
     const rawName = this.expect('ident').value;
-    const name = snakeToCamel(rawName);
+    const name = this.declare(rawName);
 
     this.expect('(');
     const params: ParamNode[] = [];
@@ -496,7 +512,7 @@ class MoveParser {
 
         params.push({
           kind: 'param',
-          name: snakeToCamel(pNameRaw),
+          name: this.declare(pNameRaw),
           type: pType,
         });
       }
@@ -610,7 +626,7 @@ class MoveParser {
         this.advance();
         mutable = true;
       }
-      const varName = snakeToCamel(this.expect('ident').value);
+      const varName = this.declare(this.expect('ident').value);
       let varType: TypeNode | undefined;
       if (this.current().type === ':') {
         this.advance();

@@ -9,6 +9,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
 
 module RunarCompiler
   module Frontend
@@ -542,6 +543,17 @@ module RunarCompiler
 
       attr_accessor :tokens, :pos, :errors
 
+      # F-017: (source spelling, Rúnar name) of every declared identifier.
+      attr_reader :declared
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.go_to_camel(raw)
+        (@declared ||= []) << [raw, name]
+        name
+      end
+
       # -- Token helpers --------------------------------------------------
 
       def peek
@@ -768,7 +780,7 @@ module RunarCompiler
 
           field_names.each do |field_name|
             properties << PropertyNode.new(
-              name: Frontend.go_to_camel(field_name),
+              name: declare(field_name),
               type: prop_type,
               readonly: readonly,
               source_location: prop_loc
@@ -891,7 +903,7 @@ module RunarCompiler
           p_type = parse_go_type
 
           param_names.each do |p_name|
-            params << ParamNode.new(name: Frontend.go_to_camel(p_name), type: p_type)
+            params << ParamNode.new(name: declare(p_name), type: p_type)
           end
 
           match_tok(TOK_COMMA)
@@ -921,7 +933,7 @@ module RunarCompiler
         visibility = "private" unless has_receiver
 
         # Convert method name from Go PascalCase to Runar camelCase
-        name = Frontend.go_to_camel(func_name)
+        name = declare(func_name)
 
         MethodNode.new(
           name: name,
@@ -960,7 +972,7 @@ module RunarCompiler
         # var declaration: var name Type = expr
         if check_ident("var")
           advance
-          var_name = Frontend.go_to_camel(expect(TOK_IDENT).value)
+          var_name = declare(expect(TOK_IDENT).value)
           var_type = parse_go_type
           expect(TOK_ASSIGN)
           init = parse_expression
@@ -975,7 +987,7 @@ module RunarCompiler
 
         # Short variable declaration: name := expr
         if check(TOK_IDENT) && peek_next.kind == TOK_COLONEQ
-          var_name = Frontend.go_to_camel(advance.value)
+          var_name = declare(advance.value)
           advance # skip ':='
           init = parse_expression
           return VariableDeclStmt.new(
@@ -1076,7 +1088,7 @@ module RunarCompiler
           init_stmt = parse_statement
         else
           # Short variable declaration: name := expr
-          init_name = Frontend.go_to_camel(expect(TOK_IDENT).value)
+          init_name = declare(expect(TOK_IDENT).value)
           expect(TOK_COLONEQ)
           init_value = parse_expression
           init_stmt = VariableDeclStmt.new(
@@ -1507,6 +1519,7 @@ module RunarCompiler
         )
       end
 
+      p.errors.concat(IdentifierCollision.diagnostics(p.declared || []))
       if p.errors.any?
         return ParseResult.new(contract: contract, errors: p.errors)
       end

@@ -25,6 +25,7 @@ func ParseMove(source []byte, fileName string) *ParseResult {
 	if err != nil {
 		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
 	}
+	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
 	}
@@ -101,6 +102,9 @@ type moveParser struct {
 	tokens   []moveToken
 	pos      int
 	errors   []Diagnostic
+
+	// F-017: declared (spelling, Rúnar name) pairs.
+	idents declaredIdents
 }
 
 func (p *moveParser) addError(msg string) {
@@ -690,7 +694,7 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 	var props []PropertyNode
 	for !p.check(moveTokRBrace) && !p.check(moveTokEOF) {
 		nameTok := p.expect(moveTokIdent)
-		fieldName := snakeToCamel(nameTok.value)
+		fieldName := p.idents.declare(nameTok.value, snakeToCamel(nameTok.value))
 
 		p.expect(moveTokColon)
 
@@ -895,7 +899,7 @@ func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
 	p.expectIdent("fun")
 
 	nameTok := p.expect(moveTokIdent)
-	name := snakeToCamel(nameTok.value)
+	name := p.idents.declare(nameTok.value, snakeToCamel(nameTok.value))
 
 	params, hasMutRecv := p.parseMoveParams()
 
@@ -984,7 +988,7 @@ func (p *moveParser) parseMoveParams() ([]ParamNode, bool) {
 		// If param was a reference and there's no type (malformed), skip
 		_ = isRef
 
-		camelName := snakeToCamel(paramName)
+		camelName := p.idents.declare(paramName, snakeToCamel(paramName))
 		params = append(params, ParamNode{
 			Name: camelName,
 			Type: moveMapType(typeName),
@@ -1240,7 +1244,7 @@ func (p *moveParser) parseMoveLetDecl(loc SourceLocation) Statement {
 	}
 
 	nameTok := p.expect(moveTokIdent)
-	varName := snakeToCamel(nameTok.value)
+	varName := p.idents.declare(nameTok.value, snakeToCamel(nameTok.value))
 
 	var typeNode TypeNode
 	if p.match(moveTokColon) {

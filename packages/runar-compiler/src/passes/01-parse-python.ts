@@ -30,7 +30,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { snakeToCamelCore } from './snake-to-camel.js';
+import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
 import { makeDiagnostic } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
@@ -559,11 +559,21 @@ class PyParser {
   private pos = 0;
   private file: string;
   private errors: CompilerDiagnostic[];
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
     this.file = file;
     this.errors = errors;
+  }
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = snakeToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
   }
 
   private current(): Token { return this.tokens[this.pos] ?? this.tokens[this.tokens.length - 1]!; }
@@ -624,6 +634,11 @@ class PyParser {
     const contract = this.parseClass();
     if (!contract) {
       return { contract: null, errors: this.errors };
+    }
+
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
     }
 
     return { contract, errors: this.errors };
@@ -799,7 +814,7 @@ class PyParser {
 
     return {
       kind: 'property',
-      name: snakeToCamel(rawName),
+      name: this.declare(rawName),
       type: typeNode,
       readonly: isReadonly,
       initializer,
@@ -866,7 +881,7 @@ class PyParser {
     }
 
     const isPublic = decorators.includes('public');
-    const methodName = snakeToCamel(rawName);
+    const methodName = this.declare(rawName);
 
     return {
       kind: 'method',
@@ -899,7 +914,7 @@ class PyParser {
 
       params.push({
         kind: 'param',
-        name: snakeToCamel(rawName),
+        name: this.declare(rawName),
         type: typeNode ?? { kind: 'custom_type', name: 'unknown' },
       });
 
@@ -1104,7 +1119,7 @@ class PyParser {
     this.advance(); // 'for'
 
     const iterVar = this.advance(); // loop variable
-    const varName = snakeToCamel(iterVar.value);
+    const varName = this.declare(iterVar.value);
 
     this.expect('in');
     this.expect('range');
@@ -1292,7 +1307,7 @@ class PyParser {
       }
       return {
         kind: 'variable_decl',
-        name: snakeToCamel(rawName),
+        name: this.declare(rawName),
         type: typeNode,
         mutable: true,
         init,
@@ -1309,7 +1324,7 @@ class PyParser {
       const value = this.parseExpression();
       return {
         kind: 'variable_decl',
-        name: snakeToCamel(rawName),
+        name: this.declare(rawName),
         mutable: true,
         init: value,
         sourceLocation: loc,

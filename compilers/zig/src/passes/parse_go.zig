@@ -26,6 +26,7 @@
 const std = @import("std");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const Expression = types.Expression;
@@ -656,8 +657,16 @@ const Parser = struct {
     depth: u32,
     receiver_name: []const u8, // current method's receiver variable name (e.g. "c", "m", "self")
     contract_name: []const u8, // the contract struct name
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: identifier_collision.DeclaredIdents = .{},
 
     const max_depth: u32 = 256;
+
+    /// Convert a DECLARED identifier and record it for the F-017 collision
+    /// rule (see identifier_collision.zig).
+    fn declare(self: *Parser, raw: []const u8) []const u8 {
+        return self.idents.declare(self.allocator, raw, goToCamelCase(self.allocator, raw));
+    }
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
@@ -831,6 +840,7 @@ const Parser = struct {
             .assignments = assignments,
         };
 
+        if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
         return .{
             .contract = ContractNode{
                 .name = self.contract_name,
@@ -934,7 +944,7 @@ const Parser = struct {
             }
 
             const field_name_tok = self.bump();
-            const field_name = goToCamelCase(self.allocator, field_name_tok.text);
+            const field_name = self.declare(field_name_tok.text);
 
             // Parse type — captures FixedArray shape so `expand_fixed_arrays.zig`
             // can see the property after typecheck. Mirrors parse_zig.zig and
@@ -1164,7 +1174,7 @@ const Parser = struct {
         const name_tok = self.bump();
         const raw_name = name_tok.text;
         const method_loc = self.tokenSourceLoc(name_tok);
-        const method_name = goToCamelCase(self.allocator, raw_name);
+        const method_name = self.declare(raw_name);
         const is_public = isExported(raw_name);
 
         // Parse parameters
@@ -1283,7 +1293,7 @@ const Parser = struct {
 
             // Create params for all collected names
             for (names.items) |name| {
-                const camel = goToCamelCase(self.allocator, name);
+                const camel = self.declare(name);
                 params.append(self.allocator, .{
                     .name = camel,
                     .type_info = param_type,
@@ -1350,7 +1360,7 @@ const Parser = struct {
             return null;
         }
         const name_tok = self.bump();
-        const var_name = goToCamelCase(self.allocator, name_tok.text);
+        const var_name = self.declare(name_tok.text);
 
         // Type annotation (optional if initializer present)
         var ti: ?RunarType = null;
@@ -1446,7 +1456,7 @@ const Parser = struct {
             if (self.current.kind == .colon_assign) {
                 // for i := expr; ...
                 three_part = true;
-                var_name = goToCamelCase(self.allocator, name_tok.text);
+                var_name = self.declare(name_tok.text);
                 _ = self.bump(); // consume ':='
 
                 // Parse init expression -- try to extract int literal.
@@ -1617,6 +1627,7 @@ const Parser = struct {
 
     fn parseExpressionStatement(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
+        const target_tok = self.current;
         const expr = self.parseExpression() orelse {
             _ = self.bump();
             return null;
@@ -1630,6 +1641,7 @@ const Parser = struct {
             // Extract the variable name from the LHS identifier
             switch (expr) {
                 .identifier => |id| {
+                    if (target_tok.kind == .ident) _ = self.idents.declare(self.allocator, target_tok.text, id);
                     return .{ .let_decl = .{ .name = id, .type_info = null, .value = rhs, .source_loc = loc } };
                 },
                 else => {

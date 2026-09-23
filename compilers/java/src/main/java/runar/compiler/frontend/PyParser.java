@@ -77,6 +77,8 @@ public final class PyParser {
         impl.tokens = insertIndentation(raw);
         impl.pos = 0;
         ContractNode contract = impl.parseContract();
+        String collision = impl.idents.message();
+        if (collision != null) impl.errors.add(collision);
         if (!impl.errors.isEmpty()) {
             throw new ParseException(String.join("\n", impl.errors));
         }
@@ -697,6 +699,8 @@ public final class PyParser {
         List<Token> tokens = new ArrayList<>();
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** F-017: declared (spelling, Rúnar name) pairs. */
+        final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
 
         PyParserImpl(String fileName) {
             this.fileName = fileName;
@@ -945,7 +949,7 @@ public final class PyParser {
         PropertyNode parseProperty(String parentClassName) {
             SourceLocation location = loc();
             Token nameTok = expect(TokKind.IDENT);
-            String propName = pyConvertName(nameTok.value);
+            String propName = idents.declare(nameTok.value, pyConvertName(nameTok.value));
             expect(TokKind.COLON);
 
             boolean isReadonly = false;
@@ -1027,7 +1031,7 @@ public final class PyParser {
             SourceLocation location = loc();
             expectIdent("def");
             Token nameTok = expect(TokKind.IDENT);
-            String name = pyConvertName(nameTok.value);
+            String name = idents.declare(nameTok.value, pyConvertName(nameTok.value));
 
             List<ParamNode> params = parseParams();
 
@@ -1062,7 +1066,7 @@ public final class PyParser {
                     typ = parseTypeAnnotation();
                 }
 
-                params.add(new ParamNode(pyConvertName(paramName), typ));
+                params.add(new ParamNode(idents.declare(paramName, pyConvertName(paramName)), typ));
 
                 if (!match(TokKind.COMMA)) break;
             }
@@ -1196,7 +1200,7 @@ public final class PyParser {
         Statement parseFor(SourceLocation location) {
             expectIdent("for");
             Token varTok = expect(TokKind.IDENT);
-            String varName = pyConvertName(varTok.value);
+            String varName = idents.declare(varTok.value, pyConvertName(varTok.value));
 
             expectIdent("in");
             expectIdent("range");
@@ -1281,7 +1285,7 @@ public final class PyParser {
                 && pos + 1 < tokens.size()
                 && tokens.get(pos + 1).kind == TokKind.COLON) {
                 Token nameTok = advance();
-                String varName = pyConvertName(nameTok.value);
+                String varName = idents.declare(nameTok.value, pyConvertName(nameTok.value));
                 expect(TokKind.COLON);
                 TypeNode typeNode = parseTypeAnnotation();
                 Expression init;
@@ -1294,6 +1298,7 @@ public final class PyParser {
                 return new VariableDeclStatement(varName, typeNode, init, location);
             }
 
+            Token targetTok = peek();
             Expression expr = parseExpression();
             if (expr == null) {
                 advance();
@@ -1306,6 +1311,7 @@ public final class PyParser {
                 Expression value = parseExpression();
                 skipNewlines();
                 if (expr instanceof Identifier id) {
+                    if (targetTok.kind == TokKind.IDENT) idents.declare(targetTok.value, id.name());
                     return new VariableDeclStatement(id.name(), null, value, location);
                 }
                 return new AssignmentStatement(expr, value, location);

@@ -22,6 +22,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "parse_result"
+require_relative "identifier_collision"
 
 module RunarCompiler
   module Frontend
@@ -707,6 +708,8 @@ module RunarCompiler
         @errors = []
         # Track locally declared variables per method scope
         @declared_locals = Set.new
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        @declared = []
       end
 
       # -------------------------------------------------------------------
@@ -783,10 +786,19 @@ module RunarCompiler
           return ParseResult.new(errors: diagnostics)
         end
 
+        diagnostics.concat(IdentifierCollision.diagnostics(@declared))
         ParseResult.new(contract: contract, errors: diagnostics)
       end
 
       private
+
+      # Convert a DECLARED identifier and record it for the F-017 collision
+      # rule (see identifier_collision.rb).
+      def declare(raw)
+        name = Frontend.snake_to_camel(raw)
+        @declared << [raw, name]
+        name
+      end
 
       def parse_require_line
         advance # 'require'
@@ -1011,7 +1023,7 @@ module RunarCompiler
         advance while peek.kind != TOK_NEWLINE && peek.kind != TOK_EOF
 
         PropertyNode.new(
-          name: Frontend.snake_to_camel(raw_name),
+          name: declare(raw_name),
           type: type_node,
           readonly: is_readonly,
           initializer: initializer,
@@ -1075,7 +1087,7 @@ module RunarCompiler
         end
 
         is_public = pending_visibility == "public"
-        method_name = Frontend.snake_to_camel(raw_name)
+        method_name = declare(raw_name)
 
         MethodNode.new(
           name: method_name,
@@ -1093,7 +1105,7 @@ module RunarCompiler
         while peek.kind != TOK_RPAREN && peek.kind != TOK_EOF
           name_tok = advance
           raw_name = name_tok.value
-          camel_name = Frontend.snake_to_camel(raw_name)
+          camel_name = declare(raw_name)
 
           type_node = nil
           type_node = param_types[raw_name] if param_types
@@ -1321,7 +1333,7 @@ module RunarCompiler
         advance # 'for'
 
         iter_tok = advance # loop variable name
-        var_name = Frontend.snake_to_camel(iter_tok.value)
+        var_name = declare(iter_tok.value)
 
         expect(TOK_IN, "in")
 
@@ -1494,7 +1506,7 @@ module RunarCompiler
           advance # consume ident
           advance # consume '='
           value = parse_expression
-          camel_name = Frontend.snake_to_camel(raw_name)
+          camel_name = declare(raw_name)
 
           if @declared_locals.include?(camel_name)
             return AssignmentStmt.new(

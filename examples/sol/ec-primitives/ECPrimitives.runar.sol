@@ -47,9 +47,9 @@ contract ECPrimitives is SmartContract {
     }
 
     function checkMakePoint(bigint x, bigint y, bigint expectedX, bigint expectedY) public {
-        Point pt = ecMakePoint(x, y);
-        require(ecPointX(pt) == expectedX);
-        require(ecPointY(pt) == expectedY);
+        Point point = ecMakePoint(x, y);
+        require(ecPointX(point) == expectedX);
+        require(ecPointY(point) == expectedY);
     }
 
     function checkEncodeCompressed(ByteString expected) public {

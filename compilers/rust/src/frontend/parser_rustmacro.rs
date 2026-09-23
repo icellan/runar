@@ -10,6 +10,7 @@ use super::ast::{
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::Diagnostic;
+use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -238,11 +239,13 @@ struct RustDslParser {
     pos: usize,
     file: String,
     errors: Vec<Diagnostic>,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: DeclaredIdents,
 }
 
 impl RustDslParser {
     fn new(tokens: Vec<Token>, file: String) -> Self {
-        Self { tokens, pos: 0, file, errors: Vec::new() }
+        Self { tokens, pos: 0, file, errors: Vec::new(), idents: DeclaredIdents::default() }
     }
 
     fn current(&self) -> &Token {
@@ -336,7 +339,7 @@ impl RustDslParser {
                             }
 
                             // Skip txPreimage — it's an implicit stateful param, not a contract property
-                            let camel_name = snake_to_camel(&field_name);
+                            let camel_name = self.idents.declare(&field_name, snake_to_camel(&field_name));
                             if camel_name != "txPreimage" {
                                 properties.push(PropertyNode {
                                     name: camel_name,
@@ -458,6 +461,7 @@ impl RustDslParser {
             source_file: self.file.clone(),
         };
 
+        self.errors.extend(self.idents.collision_diagnostic());
         ParseResult { contract: Some(contract), errors: self.errors, source_size_err: None }
     }
 
@@ -563,7 +567,7 @@ impl RustDslParser {
             self.advance_clone();
             "unknown".to_string()
         };
-        let name = snake_to_camel(&raw_name);
+        let name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
 
         self.expect(&TokenType::LParen);
         let mut params: Vec<ParamNode> = Vec::new();
@@ -595,7 +599,7 @@ impl RustDslParser {
                 }
                 let param_type = self.parse_rust_type();
                 params.push(ParamNode {
-                    name: snake_to_camel(&param_name),
+                    name: self.idents.declare(&param_name, snake_to_camel(&param_name)),
                     param_type,
                 });
             } else {
@@ -672,7 +676,7 @@ impl RustDslParser {
             let mutable = self.match_tok(&TokenType::Mut);
             let var_name = if let TokenType::Ident(name) = self.current().typ.clone() {
                 self.advance_clone();
-                snake_to_camel(&name)
+                self.idents.declare(&name, snake_to_camel(&name))
             } else {
                 self.advance_clone();
                 "unknown".to_string()
@@ -733,7 +737,7 @@ impl RustDslParser {
             self.advance_clone();
             let var_name = if let TokenType::Ident(name) = self.current().typ.clone() {
                 self.advance_clone();
-                snake_to_camel(&name)
+                self.idents.declare(&name, snake_to_camel(&name))
             } else {
                 self.advance_clone();
                 "i".to_string()

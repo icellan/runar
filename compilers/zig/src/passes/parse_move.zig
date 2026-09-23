@@ -23,6 +23,7 @@
 const std = @import("std");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
+const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
 const Expression = types.Expression;
@@ -583,8 +584,16 @@ const Parser = struct {
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
     depth: u32,
+    /// F-017: declared (spelling, Rúnar name) pairs.
+    idents: identifier_collision.DeclaredIdents = .{},
 
     const max_depth: u32 = 256;
+
+    /// Convert a DECLARED identifier and record it for the F-017 collision
+    /// rule (see identifier_collision.zig).
+    fn declare(self: *Parser, raw: []const u8) []const u8 {
+        return self.idents.declare(self.allocator, raw, snakeToCamel(self.allocator, raw));
+    }
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
@@ -662,6 +671,9 @@ const Parser = struct {
 
     fn parse(self: *Parser) ParseResult {
         const contract = self.parseModule();
+        if (contract != null) {
+            if (self.idents.message(self.allocator)) |m| self.errors.append(self.allocator, m) catch {};
+        }
         return .{ .contract = contract, .errors = self.errors.items };
     }
 
@@ -798,7 +810,7 @@ const Parser = struct {
 
             const field_name_tok = self.bump();
             const raw_field_name = field_name_tok.text;
-            const field_name = snakeToCamel(self.allocator, raw_field_name);
+            const field_name = self.declare(raw_field_name);
 
             if (self.expect(.colon) == null) continue;
 
@@ -1046,7 +1058,7 @@ const Parser = struct {
         const name_tok = self.bump();
         const raw_name = name_tok.text;
         const method_loc = self.tokenSourceLoc(name_tok);
-        const method_name = snakeToCamel(self.allocator, raw_name);
+        const method_name = self.declare(raw_name);
 
         const params = self.parseMoveParams();
 
@@ -1138,7 +1150,7 @@ const Parser = struct {
                 break;
             }
 
-            const camel_name = snakeToCamel(self.allocator, param_name);
+            const camel_name = self.declare(param_name);
 
             params.append(self.allocator, .{
                 .name = camel_name,
@@ -1247,7 +1259,7 @@ const Parser = struct {
             return null;
         }
         const name_tok = self.bump();
-        const var_name = snakeToCamel(self.allocator, name_tok.text);
+        const var_name = self.declare(name_tok.text);
 
         // Optional type annotation
         var ti: ?RunarType = null;

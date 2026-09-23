@@ -19,6 +19,7 @@ from runar_compiler.frontend.ast_nodes import (
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +423,15 @@ class _MoveParser:
         self.tokens: list[Token] = []
         self.pos = 0
         self.errors: list[Diagnostic] = []
+        # F-017: (source spelling, Rúnar name) of every declared identifier.
+        self.declared: list[tuple[str, str]] = []
+
+    def declare(self, raw: str) -> str:
+        """Convert a DECLARED identifier and record it for the F-017
+        collision rule (see identifier_collision.py)."""
+        name = _snake_to_camel(raw)
+        self.declared.append((raw, name))
+        return name
 
     def add_error(self, msg: str) -> None:
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
@@ -572,7 +582,7 @@ class _MoveParser:
         props: list[PropertyNode] = []
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             name_tok = self.expect(TOK_IDENT)
-            field_name = _snake_to_camel(name_tok.value)
+            field_name = self.declare(name_tok.value)
 
             self.expect(TOK_COLON)
 
@@ -736,7 +746,7 @@ class _MoveParser:
         self.expect_ident("fun")
 
         name_tok = self.expect(TOK_IDENT)
-        name = _snake_to_camel(name_tok.value)
+        name = self.declare(name_tok.value)
 
         params, has_mut = self._parse_move_params()
 
@@ -820,7 +830,7 @@ class _MoveParser:
                     continue
                 break
 
-            camel_name = _snake_to_camel(param_name)
+            camel_name = self.declare(param_name)
             params.append(ParamNode(
                 name=camel_name,
                 type=_move_map_type(type_name),
@@ -887,7 +897,7 @@ class _MoveParser:
             mutable = True
 
         name_tok = self.expect(TOK_IDENT)
-        var_name = _snake_to_camel(name_tok.value)
+        var_name = self.declare(name_tok.value)
 
         type_node: TypeNode | None = None
         if self.match(TOK_COLON):
@@ -1554,6 +1564,7 @@ def parse_move(source: str, file_name: str) -> ParseResult:
     except ValueError as e:
         return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
+    p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)
     return ParseResult(contract=contract)

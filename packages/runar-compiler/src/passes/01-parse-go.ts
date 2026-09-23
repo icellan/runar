@@ -33,6 +33,7 @@ import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { identifierCollisionMessage } from './snake-to-camel.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
@@ -450,6 +451,17 @@ class GoParser extends ParserCore<GoToken> {
    */
   private contractName = '';
 
+  /** F-017: (source spelling, Rúnar name) of every declared identifier. */
+  private declared: Array<[string, string]> = [];
+
+  /** Convert a DECLARED identifier and record it for the F-017 collision rule
+   *  (see `identifierCollisionMessage` in ./snake-to-camel.ts). */
+  private declare(raw: string): string {
+    const name = goToCamel(raw);
+    this.declared.push([raw, name]);
+    return name;
+  }
+
   parse(): ParseResult {
     // Skip `package contract`
     if (this.current().type === 'package') {
@@ -544,6 +556,11 @@ class GoParser extends ParserCore<GoToken> {
       sourceFile: this.file,
     };
 
+    const collision = identifierCollisionMessage(this.declared);
+    if (collision !== null) {
+      this.errors.push(makeDiagnostic(collision, 'error'));
+    }
+
     return { contract, errors: this.errors };
   }
 
@@ -635,7 +652,7 @@ class GoParser extends ParserCore<GoToken> {
       for (const fieldName of fieldNames) {
         properties.push({
           kind: 'property',
-          name: goToCamel(fieldName),
+          name: this.declare(fieldName),
           type: propType,
           readonly,
           sourceLocation: propLoc,
@@ -767,7 +784,7 @@ class GoParser extends ParserCore<GoToken> {
       const pType = this.parseGoType();
 
       for (const pName of paramNames) {
-        params.push({ kind: 'param', name: goToCamel(pName), type: pType });
+        params.push({ kind: 'param', name: this.declare(pName), type: pType });
       }
 
       if (this.current().type === ',') this.advance();
@@ -799,7 +816,7 @@ class GoParser extends ParserCore<GoToken> {
     }
 
     // Convert method name from Go PascalCase to Rúnar camelCase
-    const name = goToCamel(funcName);
+    const name = this.declare(funcName);
 
     return {
       kind: 'method',
@@ -839,7 +856,7 @@ class GoParser extends ParserCore<GoToken> {
     // var declaration: var name Type = expr
     if (this.current().type === 'var') {
       this.advance();
-      const varName = goToCamel(this.expect('ident').value);
+      const varName = this.declare(this.expect('ident').value);
       const varType = this.parseGoType();
       this.expect('=');
       const init = this.parseExpression();
@@ -856,7 +873,7 @@ class GoParser extends ParserCore<GoToken> {
     // Short variable declaration: name := expr
     // We need to distinguish: ident := expr  vs  expr (which starts with ident)
     if (this.current().type === 'ident' && this.tokens[this.pos + 1]?.type === ':=') {
-      const varName = goToCamel(this.advance().value);
+      const varName = this.declare(this.advance().value);
       this.advance(); // skip ':='
       const init = this.parseExpression();
       return {
@@ -993,7 +1010,7 @@ class GoParser extends ParserCore<GoToken> {
       initStmt = this.parseStatement();
     } else {
       // Short variable declaration: name := expr
-      const initName = goToCamel(this.expect('ident').value);
+      const initName = this.declare(this.expect('ident').value);
       this.expect(':=');
       const initValue = this.parseExpression();
       initStmt = {
