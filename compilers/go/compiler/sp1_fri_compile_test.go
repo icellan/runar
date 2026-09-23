@@ -20,6 +20,12 @@ import (
 //   - compilers/go/codegen/stack.go — receives params via
 //     `LowerToStackOptions.SP1FriParams` (-> `loweringContext.sp1FriParams`).
 //
+// F-007: CompileFromSource now always refuses verifySP1FRI (the verifier is
+// not implemented for v1). Each test below first asserts that refusal, then
+// runs its original script assertions against the test-only
+// lowerSP1FriPocBypassingRefusal, which emits the same bytes CompileFromSource
+// did before the refusal became unconditional.
+//
 // These tests exercise the full path
 // `compiler.CompileFromSource(path, CompileOptions{SP1FriParams: ...})` —
 // the natural production-deploy entry point — and assert the artifact
@@ -83,16 +89,11 @@ func emitProductionBodyHex(t *testing.T, params codegen.SP1FriVerifierParams) st
 // must take this path.
 func TestSp1Fri_CompileFromSource_DefaultParams(t *testing.T) {
 	contractPath := sp1FriPocContractPath(t)
-	artifact, err := CompileFromSource(contractPath)
-	if err != nil {
-		t.Fatalf("CompileFromSource(default): %v", err)
+	// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1.
+	if _, err := CompileFromSource(contractPath); err == nil {
+		t.Fatal("F-007: CompileFromSource(default) compiled verifySP1FRI; v1 must refuse")
 	}
-	if artifact == nil {
-		t.Fatal("expected non-nil artifact")
-	}
-	if artifact.ContractName != "Sp1FriVerifierPoc" {
-		t.Errorf("contractName: got %q want %q", artifact.ContractName, "Sp1FriVerifierPoc")
-	}
+	artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, nil).ScriptHex}
 	if artifact.Script == "" {
 		t.Fatal("expected non-empty Script")
 	}
@@ -144,15 +145,11 @@ func TestSp1Fri_CompileFromSource_DefaultParams(t *testing.T) {
 func TestSp1Fri_CompileFromSource_WithProductionPreset(t *testing.T) {
 	contractPath := sp1FriPocContractPath(t)
 	preset := SP1FriPresetMust("evm-guest")
-	artifact, err := CompileFromSource(contractPath, CompileOptions{
-		SP1FriParams: preset,
-	})
-	if err != nil {
-		t.Fatalf("CompileFromSource(evm-guest preset): %v", err)
+	// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1.
+	if _, err := CompileFromSource(contractPath, CompileOptions{SP1FriParams: preset}); err == nil {
+		t.Fatal("F-007: CompileFromSource(evm-guest preset) compiled verifySP1FRI; v1 must refuse")
 	}
-	if artifact == nil {
-		t.Fatal("expected non-nil artifact")
-	}
+	artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, preset).ScriptHex}
 	if artifact.Script == "" {
 		t.Fatal("expected non-empty Script")
 	}
@@ -192,10 +189,7 @@ func TestSp1Fri_CompileFromSource_WithProductionPreset(t *testing.T) {
 	// larger than the PoC default — the production tuple unrolls 10
 	// commit-phase rounds and 100 query-derive ops vs. PoC's 1 round and
 	// 2 query-derive ops.
-	defaultArtifact, err := CompileFromSource(contractPath)
-	if err != nil {
-		t.Fatalf("CompileFromSource(default) for size comparison: %v", err)
-	}
+	defaultArtifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, nil).ScriptHex}
 	defaultBytes := len(defaultArtifact.Script) / 2
 	if scriptBytes <= defaultBytes {
 		t.Errorf("production-preset script (%d B) should be larger than default (%d B)",
@@ -224,12 +218,12 @@ func TestSp1Fri_CompileFromSource_WithProductionPreset(t *testing.T) {
 func TestSp1Fri_CompileFromSource_PresetByteEqualsCodegen(t *testing.T) {
 	contractPath := sp1FriPocContractPath(t)
 	preset := SP1FriPresetMust("evm-guest")
-	artifact, err := CompileFromSource(contractPath, CompileOptions{
-		SP1FriParams: preset,
-	})
-	if err != nil {
-		t.Fatalf("CompileFromSource(evm-guest): %v", err)
+	// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1; byte-equality checked on the
+	// test-only lowering.
+	if _, err := CompileFromSource(contractPath, CompileOptions{SP1FriParams: preset}); err == nil {
+		t.Fatal("F-007: CompileFromSource(evm-guest) compiled verifySP1FRI; v1 must refuse")
 	}
+	artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, preset).ScriptHex}
 	bodyHex := emitProductionBodyHex(t, *preset)
 	if bodyHex == "" {
 		t.Fatal("emitProductionBodyHex returned empty hex")
@@ -283,13 +277,12 @@ func TestSp1Fri_AllPresetsCompile(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SP1FriPreset(%q): %v", name, err)
 			}
-			artifact, err := CompileFromSource(contractPath, CompileOptions{
-				SP1FriParams: &preset,
-			})
-			if err != nil {
-				t.Fatalf("CompileFromSource(preset=%q): %v", name, err)
+			// F-007: rewritten to expect refusal — verifySP1FRI is not implemented for v1.
+			if _, err := CompileFromSource(contractPath, CompileOptions{SP1FriParams: &preset}); err == nil {
+				t.Fatalf("F-007: CompileFromSource(preset=%q) compiled verifySP1FRI; v1 must refuse", name)
 			}
-			if artifact == nil || artifact.Script == "" {
+			artifact := &Artifact{Script: lowerSP1FriPocBypassingRefusal(t, &preset).ScriptHex}
+			if artifact.Script == "" {
 				t.Fatalf("preset %q produced empty artifact/script", name)
 			}
 			sizes[name] = len(artifact.Script) / 2

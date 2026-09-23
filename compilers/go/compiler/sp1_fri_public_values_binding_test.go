@@ -25,6 +25,11 @@ import (
 // overlay, a second covenant spending on the strength of this one) reads the
 // attacker's choice, not the verified statement.
 //
+// F-007: the emitted body is now fail-closed, so every spend is rejected and
+// these tests can no longer isolate the R-058 binding from the abort. They
+// stay as regression pins on the binding opcodes (still emitted) and on the
+// fact that no tampered witness is accepted.
+//
 // These tests are the machine check on that sentence. They do NOT touch the
 // deep `_obs_public_values` slot — `wrong_public_values` in
 // TestSp1FriVerifier_OnChainRejectsCorruptions already covers tampering
@@ -127,11 +132,11 @@ func TestSp1FriVerifier_TypedPublicValuesIsBound(t *testing.T) {
 	lock := compilePocLockingScript(t)
 	unlocking, pubBytes := sp1MinimalGuestUnlocking(t)
 
-	// Non-vacuity control: the honest spend must succeed. This has to hold
-	// both before and after the fix.
-	if err := runSpend(lock, unlocking); err != nil {
-		t.Fatalf("VACUOUS: the honest canonical spend was REJECTED (%v). The negative below "+
-			"would then pass for a covenant that rejects every spend — fix that first.", err)
+	// Was the non-vacuity control (honest spend ACCEPTED).
+	// F-007: rewritten to expect rejection — the v1 body is fail-closed, so the honest spend is refused too and the
+	// negative below is now satisfied by the fail-closed abort, not by the R-058 binding alone.
+	if err := runSpend(lock, unlocking); err == nil {
+		t.Fatal("F-007: the honest canonical spend was ACCEPTED; the v1 SP1 FRI body must be fail-closed")
 	}
 
 	tampered := tamperTypedPublicValues(t, unlocking, pubBytes)

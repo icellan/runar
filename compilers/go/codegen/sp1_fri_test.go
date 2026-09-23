@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -852,8 +853,13 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	}
 
 	// === Run the main script: [unlocking_prelude] + [locking_body].
-	if err := buildAndExecute(t, ops); err != nil {
-		t.Fatalf("verifier rejected the canonical fixture (Step 1 + 2-5 + 8 + 10): %v", err)
+	// F-007: rewritten to expect rejection — the body is fail-closed for v1 (OP_0 OP_VERIFY after Steps 1/2-5/8/10), so
+	// the honest canonical fixture must be REJECTED. The standalone sub-step gates above still prove the pieces agree
+	// with the reference.
+	if err := buildAndExecute(t, ops); err == nil {
+		t.Fatal("F-007: the fail-closed verifier body ACCEPTED the canonical fixture; it must never accept")
+	} else if !strings.Contains(err.Error(), "OP_VERIFY") {
+		t.Fatalf("F-007: canonical fixture must reach the fail-closed OP_VERIFY abort, got a different failure: %v", err)
 	}
 
 	// Measure compiled script size in bytes for the brief's reporting.
@@ -864,7 +870,7 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		scriptBytes = len(result.ScriptHex) / 2
 	}
 
-	t.Logf("Steps 1 + 2-5 + 6 + 7 + 8 + 10 + 10A + 11 accepted canonical fixture; "+
+	t.Logf("Steps 6 + 7 + 10A + 11 sub-step gates matched; main body (Steps 1 + 2-5 + 8 + 10) reached the F-007 fail-closed abort; "+
 		"|canonical proofBlob|=%d, |unlocking prelude ops|=%d, |locking body ops|=%d, "+
 		"numRounds=%d, finalPolyLen=%d, total ops=%d, total script bytes=%d, "+
 		"queryIndexes=%v",
@@ -2345,11 +2351,15 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 	ops = append(ops, bodyOps...)
 
 	// === Run the main script: [unlocking_prelude] + [locking_body].
+	// F-007: rewritten to expect rejection — the body is fail-closed for v1, so the production fixture must be REJECTED
+	// at the final OP_0 OP_VERIFY abort.
 	startWall := time.Now()
-	if err := buildAndExecute(t, ops); err != nil {
-		t.Fatalf("verifier rejected the evm-guest production-scale fixture "+
-			"(numQueries=%d, logBlowup=%d, logFinalPolyLen=%d, degreeBits=%d): %v",
-			numQueries, logBlowup, logFinalPolyLen, degreeBits, err)
+	if err := buildAndExecute(t, ops); err == nil {
+		t.Fatalf("F-007: the fail-closed verifier body ACCEPTED the evm-guest production-scale fixture "+
+			"(numQueries=%d, logBlowup=%d, logFinalPolyLen=%d, degreeBits=%d)",
+			numQueries, logBlowup, logFinalPolyLen, degreeBits)
+	} else if !strings.Contains(err.Error(), "OP_VERIFY") {
+		t.Fatalf("F-007: evm-guest fixture must reach the fail-closed OP_VERIFY abort, got: %v", err)
 	}
 	wallClock := time.Since(startWall)
 
@@ -2361,7 +2371,7 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 		scriptBytes = len(result.ScriptHex) / 2
 	}
 
-	t.Logf("PRODUCTION FIXTURE ACCEPTED: |canonical proofBlob|=%d B, "+
+	t.Logf("PRODUCTION FIXTURE REJECTED AT F-007 FAIL-CLOSED ABORT: |canonical proofBlob|=%d B, "+
 		"|prelude ops|=%d (= numFinalPolyPushes %d × 4 + everything else), "+
 		"|body ops|=%d, total ops=%d, peak named-stack depth=%d, "+
 		"compiled script=%d B (~%d KB), wall-clock=%v, "+

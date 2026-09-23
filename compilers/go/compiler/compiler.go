@@ -153,16 +153,14 @@ type Artifact struct {
 	Groth16WA *Groth16WAMeta `json:"groth16WA,omitempty"`
 
 	// UnsoundPrimitives names every builtin in this script that the project
-	// itself does not claim is sound (R-062 / CL-BUG-105). Today that is
-	// exactly `verifySP1FRI`, whose codegen is a documented PoC with stubbed
-	// protocol algebra.
+	// itself does not claim is sound (R-062 / CL-BUG-105). Part of the shared
+	// artifact schema, read by every SDK's deploy gate.
 	//
-	// R-012 made the compiler REFUSE such a program unless the author or the
-	// invoker acknowledged the gap — but that acknowledgement stopped at the
-	// person running the compiler. Whoever is handed the artifact afterwards
-	// (a deployer, a reviewer, another tier's SDK) saw an ordinary contract.
-	// The fact travels with the artifact now, and every SDK's deploy path
-	// refuses to fund it unless the caller acknowledges the same list.
+	// F-007: this compiler no longer sets it. The only such builtin was
+	// `verifySP1FRI`, and compiling it is now always refused, so no artifact
+	// this compiler emits can reach it. The field stays for schema parity and
+	// so artifacts from older compilers still round-trip; the SDK gates keep
+	// refusing those.
 	//
 	// `omitempty`: an artifact that reaches no unsound primitive is unchanged,
 	// byte for byte, from before this field existed.
@@ -249,11 +247,11 @@ func buildLowerOptions(o CompileOptions) (codegen.LowerToStackOptions, error) {
 func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifact, error) {
 	o := mergeOptions(opts)
 
-	// R-012: the IR entry points never run frontend.Validate, so the
-	// verifySP1FRI soundness refusal has to be re-asserted here against the
-	// ANF observable. No-op when the frontend already adjudicated it (source
-	// path) or the invoker acknowledged it. See sp1_fri_ir_guard.go.
-	if err := guardUnsoundSP1FriIR(program, o); err != nil {
+	// R-012 / F-007: the IR entry points never run frontend.Validate, so the
+	// verifySP1FRI refusal has to be re-asserted here against the ANF
+	// observable. Unconditional: the verifier is not implemented for v1.
+	// See sp1_fri_ir_guard.go.
+	if err := guardUnsoundSP1FriIR(program); err != nil {
 		return nil, err
 	}
 
@@ -463,14 +461,6 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		BuildTimestamp:       buildTimestamp(),
 	}
 
-	// R-062: record the unsound primitives this script reaches. Same observable
-	// the --ir soundness guard keys on (a `call` binding naming the builtin, at
-	// any nesting depth), so the marker and the refusal can never disagree
-	// about whether a program reaches the verifier.
-	if programCallsSP1FriVerifier(program) {
-		artifact.UnsoundPrimitives = []string{"verifySP1FRI"}
-	}
-
 	// Always include ANF IR for stateful contracts — the SDK uses it
 	// to auto-compute state transitions without requiring manual newState.
 	if isStateful {
@@ -557,14 +547,7 @@ func CompileFromSourceCollectingWarnings(sourcePath string, opts ...CompileOptio
 	}
 
 	// Feed into existing compilation pipeline (passes 4.25+).
-	//
-	// frontend.Validate accepted this contract above, so the verifySP1FRI
-	// soundness refusal (and its @acknowledgeUnsoundSP1FriVerifier directive)
-	// has already been adjudicated against the real source. Mark the options so
-	// the IR-path guard in CompileFromProgram stands down instead of refusing
-	// what Validate just allowed. See sp1_fri_ir_guard.go (R-012).
 	o := mergeOptions(opts)
-	o.sp1FriAdjudicatedByFrontend = true
 
 	// R-162 divergence (3), in the other direction: the issue-#109 embedAlways
 	// DCE notice ran ONLY in the *WithResult paths, so the API whose entire

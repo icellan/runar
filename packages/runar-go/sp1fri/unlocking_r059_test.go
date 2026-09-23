@@ -1,13 +1,10 @@
 package sp1fri
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"testing"
 
-	"github.com/bsv-blockchain/go-sdk/script"
-	"github.com/bsv-blockchain/go-sdk/script/interpreter"
 	"github.com/icellan/runar/compilers/go/compiler"
 )
 
@@ -64,40 +61,14 @@ func TestEncodeUnlockingScript_RejectsForgedProofBlob(t *testing.T) {
 		t.Fatalf("buildUnlockingScript(forceBlob): %v", err)
 	}
 
+	_ = unlockingBytes
+	// F-007: rewritten to expect refusal — the compiler refuses verifySP1FRI in v1, so there is no locking script to
+	// execute the forged blob against. The encoder-side refusal above still holds.
 	contractPath := pocContractPath(t)
 	if _, err := os.Stat(contractPath); err != nil {
 		t.Fatalf("PoC contract not found at %s: %v", contractPath, err)
 	}
-	artifact, err := compiler.CompileFromSource(contractPath)
-	if err != nil {
-		t.Fatalf("compile PoC contract: %v", err)
+	if _, err := compiler.CompileFromSource(contractPath); err == nil {
+		t.Fatal("F-007: compiling the SP1 FRI PoC contract must be refused in v1")
 	}
-	lockingScriptHex := spliceConstructorArgs(t, artifact.Script,
-		artifact.ConstructorSlots, []interface{}{hex.EncodeToString(vkeyHash)})
-
-	lockScript, err := script.NewFromHex(lockingScriptHex)
-	if err != nil {
-		t.Fatalf("parse locking script: %v", err)
-	}
-	unlockScript := script.NewFromBytes(unlockingBytes)
-
-	eng := interpreter.NewEngine()
-	err = eng.Execute(
-		interpreter.WithScripts(lockScript, unlockScript),
-		interpreter.WithAfterGenesis(),
-		interpreter.WithAfterChronicle(),
-		interpreter.WithForkID(),
-	)
-	if err == nil {
-		forgedHash := sha256.Sum256(forged)
-		realHash := sha256.Sum256(bs)
-		t.Fatalf(
-			"the verifier ACCEPTED a spend whose proofBlob is %d bytes of the attacker's choosing.\n"+
-				"  forged blob sha256: %x\n"+
-				"  real proof  sha256: %x\n"+
-				"Step 1 binds the blob only to chunks derived from that same blob, so the argument "+
-				"the ABI calls the proof constrains nothing (R-059 / CL-BUG-102).",
-			len(forged), forgedHash, realHash)
-	}
-	t.Logf("forged proofBlob rejected by the script VM, as it must be: %v", err)
 }

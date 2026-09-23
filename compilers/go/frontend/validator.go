@@ -64,19 +64,10 @@ func Validate(contract *ContractNode) *ValidationResult {
 		}
 	}
 
-	// See sp1_fri_soundness_warning.go: the deployable SP1 FRI verifier accepts
-	// forged Merkle openings at the PoC parameter set. Say so at compile time,
-	// not only in a doc a caller of the built-in would never open.
+	// See sp1_fri_soundness_warning.go: the SP1 FRI verifier is not
+	// implemented for v1 (F-007). Always refuse; there is no override.
 	if contractCallsSP1FriVerifier(contract) {
-		if contract.AckUnsoundSP1Fri {
-			// Explicitly opted in (verifier development / the PoC contract):
-			// still say it, loudly, on every compile.
-			ctx.addWarning(sp1FriSoundnessWarning)
-		} else {
-			// Default: REFUSE. Documenting an unsound verifier is not the same
-			// as preventing its deployment, and this one accepts forged proofs.
-			ctx.addError(sp1FriSoundnessError)
-		}
+		ctx.addError(SP1FriNotImplementedError)
 	}
 
 	return &ValidationResult{

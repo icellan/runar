@@ -1,7 +1,6 @@
 package compiler
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -11,10 +10,10 @@ import (
 // R-062 / CL-BUG-105 — the acknowledged SP1 FRI path reaches a value-bearing
 // deployment with no friction.
 //
-// R-012 closed the COMPILE side: `verifySP1FRI` is refused unless the author
-// writes `@acknowledgeUnsoundSP1FriVerifier`, or the invoker passes
-// `--acknowledge-unsound-sp1-fri`. What neither covers is everything
-// downstream. The reviewer enumerated the artifact's top-level keys — abi, asm,
+// R-012 closed the COMPILE side: `verifySP1FRI` was refused unless the author
+// wrote `@acknowledgeUnsoundSP1FriVerifier`, or the invoker passed
+// `--acknowledge-unsound-sp1-fri` (both removed by F-007). What neither
+// covered was everything downstream. The reviewer enumerated the artifact's top-level keys — abi, asm,
 // buildTimestamp, compilerVersion, constructorSlots, contractName, parentClass,
 // script, version — and found nothing recording that the script contains a
 // verifier the project itself calls unsound, and
@@ -29,39 +28,28 @@ import (
 // from every other artifact (`omitempty`), so this changes nothing for any
 // contract that does not reach the verifier, and the SDK-side deploy guards key
 // on it.
+//
+// F-007: the verifier is not implemented for v1 and every compile that reaches
+// it is refused, so no artifact this compiler emits can carry the marker; the
+// stamping was removed as dead code (the schema field stays for the SDKs).
+//
+// Was: an acknowledged compile produced an artifact marked
+// unsoundPrimitives:["verifySP1FRI"].
+// F-007: rewritten to expect refusal — the acknowledgement override was removed, so there is no artifact to mark.
 func TestArtifact_MarksUnsoundSP1FriVerifier(t *testing.T) {
-	artifact, err := CompileFromIRBytes([]byte(sp1FriIRCall), CompileOptions{
-		AcknowledgeUnsoundSP1Fri: true,
-	})
-	if err != nil {
-		t.Fatalf("acknowledged compile must succeed: %v", err)
+	artifact, err := CompileFromIRBytes([]byte(sp1FriIRCall))
+	if err == nil {
+		t.Fatalf("F-007: compile of verifySP1FRI IR must be refused; got an artifact (marker %v)",
+			artifact.UnsoundPrimitives)
 	}
-	if got := artifact.UnsoundPrimitives; len(got) != 1 || got[0] != "verifySP1FRI" {
-		t.Fatalf("artifact must record the unsound primitive; got %v", got)
-	}
-
-	// The marker has to survive serialisation — the SDKs read JSON, not structs.
-	raw, err := ArtifactToJSON(artifact)
-	if err != nil {
-		t.Fatalf("ArtifactToJSON: %v", err)
-	}
-	if !strings.Contains(string(raw), `"unsoundPrimitives"`) {
-		t.Fatal("serialised artifact does not carry unsoundPrimitives")
-	}
-	var round map[string]any
-	if err := json.Unmarshal(raw, &round); err != nil {
-		t.Fatalf("round-trip: %v", err)
-	}
-	list, ok := round["unsoundPrimitives"].([]any)
-	if !ok || len(list) != 1 || list[0] != "verifySP1FRI" {
-		t.Fatalf("round-tripped marker is wrong: %#v", round["unsoundPrimitives"])
+	if !strings.Contains(err.Error(), "not implemented for v1") {
+		t.Fatalf("refusal must say the verifier is not implemented for v1; got: %v", err)
 	}
 }
 
 // The marker's input is the SAME detector the --ir soundness refusal consults,
-// so the two cannot disagree about whether a program reaches the verifier: a
-// shape the guard refuses unacknowledged is a shape the artifact marks when
-// acknowledged.
+// so the two cannot disagree about whether a program reaches the verifier.
+// F-007: the guard now refuses every such shape; the detector is what it keys on.
 //
 // Asserted on the detector rather than on a compiled artifact because a
 // `verifySP1FRI` call nested inside an `if` arm does not survive stack lowering
@@ -85,7 +73,7 @@ func TestArtifact_MarkerDetectorSeesNestedCalls(t *testing.T) {
 				t.Fatal("detector missed the verifier call, so the artifact would be marked sound")
 			}
 			if _, err := CompileFromIRBytes([]byte(tc.irJSON)); err == nil {
-				t.Fatal("the same shape must still be REFUSED without acknowledgement")
+				t.Fatal("the same shape must be REFUSED")
 			}
 		})
 	}
@@ -94,7 +82,7 @@ func TestArtifact_MarkerDetectorSeesNestedCalls(t *testing.T) {
 // The control, and the reason `omitempty` matters: an ordinary contract's
 // artifact must be byte-identical to what it was before this field existed.
 // Every SDK's deploy guard keys on the field's presence, so a stray empty array
-// would put every contract in the repo through the acknowledgement path.
+// would put every contract in the repo through the SDK acknowledgement path.
 func TestArtifact_OrdinaryContractCarriesNoMarker(t *testing.T) {
 	artifact, err := CompileFromIRBytes([]byte(controlIR))
 	if err != nil {

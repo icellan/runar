@@ -28,7 +28,7 @@ func sp1RefusalPresent(t *testing.T, contract *ContractNode) bool {
 	t.Helper()
 	res := Validate(contract)
 	for _, d := range res.Errors {
-		if d.Severity == SeverityError && containsSubstr(d.Message, "REFUSING to emit a known-unsound") {
+		if d.Severity == SeverityError && containsSubstr(d.Message, "not implemented for v1") {
 			return true
 		}
 	}
@@ -77,23 +77,24 @@ func TestSP1FriSoundnessWarning_FiresWhenBuiltinIsCalled(t *testing.T) {
 	// DEFAULT: refuse. Documenting an unsound verifier is not the same as
 	// preventing its deployment, and this one accepts forged proofs.
 	if !sp1RefusalPresent(t, contract) {
-		t.Fatal("expected verifySP1FRI to be REFUSED without the acknowledgement directive; " +
-			"the emitted script accepts forged Merkle openings and must not compile by default")
+		t.Fatal("expected verifySP1FRI to be REFUSED; the SP1 FRI verifier is not implemented for v1 (F-007)")
 	}
 	if sp1WarningPresent(t, contract) {
 		t.Fatal("without the directive this must be an ERROR, not a downgradeable warning")
 	}
 }
 
-func TestSP1FriSoundness_CompilesWithExplicitAcknowledgement(t *testing.T) {
+// Was TestSP1FriSoundness_CompilesWithExplicitAcknowledgement.
+// F-007: rewritten to expect refusal — the @acknowledgeUnsoundSP1FriVerifier override was removed for v1.
+func TestSP1FriSoundness_NoAcknowledgementOverride(t *testing.T) {
+	// The directive is now an inert comment: a contract that carried it parses
+	// to exactly the AST sp1CallingContract builds, and that is refused.
 	contract := sp1CallingContract()
-	contract.AckUnsoundSP1Fri = true
-	if sp1RefusalPresent(t, contract) {
-		t.Fatal("with @acknowledgeUnsoundSP1FriVerifier the contract must compile (verifier development)")
+	if !sp1RefusalPresent(t, contract) {
+		t.Fatal("verifySP1FRI must be refused unconditionally; there is no acknowledgement override in v1")
 	}
-	// Opting in silences the refusal, never the disclosure.
-	if !sp1WarningPresent(t, contract) {
-		t.Fatal("an acknowledged unsound verifier must still warn on every compile")
+	if sp1WarningPresent(t, contract) {
+		t.Fatal("the refusal must not be downgradeable to a warning")
 	}
 }
 

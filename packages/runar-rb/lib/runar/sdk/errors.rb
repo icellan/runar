@@ -68,6 +68,8 @@ module Runar
     # whoever ran the compiler: the artifact handed on afterwards looked like
     # any other and every SDK funded it in silence. The compiler now stamps
     # +unsoundPrimitives+ into the artifact, and this is the SDK half.
+    # F-007 removed both escape hatches: the compiler now refuses verifySP1FRI
+    # outright, so this gate only matters for artifacts from older compilers.
     #
     # Deploy only, deliberately. Spending an already-deployed contract is how
     # funds are RECOVERED from one.

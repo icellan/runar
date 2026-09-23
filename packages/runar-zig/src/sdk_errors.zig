@@ -131,6 +131,8 @@ pub fn raiseWitnessValueMissing(
 // `--acknowledge-unsound-sp1-fri` (R-012). That acknowledgement stopped at
 // whoever ran the compiler: the artifact handed on afterwards looked like any
 // other, carried no marker of the gap, and every SDK funded it in silence.
+// F-007 removed both escape hatches: the compiler now refuses verifySP1FRI
+// outright, so this gate only matters for artifacts from older compilers.
 //
 // The compiler now stamps `unsoundPrimitives` into the artifact; this is the
 // SDK half. Deploy only, deliberately — spending an already-deployed contract

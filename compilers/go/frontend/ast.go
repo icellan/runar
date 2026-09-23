@@ -58,13 +58,6 @@ type ContractNode struct {
 	Constructor MethodNode
 	Methods     []MethodNode
 	SourceFile  string
-
-	// AckUnsoundSP1Fri is set by ParseSource when the raw source carries
-	// `@acknowledgeUnsoundSP1FriVerifier`. Without it, calling verifySP1FRI is
-	// a hard compile ERROR: the emitted locking script is not a sound proof
-	// verifier (the per-query chain is never emitted, so forged Merkle openings
-	// are accepted on-chain). See frontend/sp1_fri_soundness_warning.go.
-	AckUnsoundSP1Fri bool
 }
 
 // SyntheticArrayLevel is one level of the synthetic FixedArray nesting

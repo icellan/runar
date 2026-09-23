@@ -129,14 +129,15 @@ func TestSp1FriVerifier_VerifyingKeyBindsTheProgram(t *testing.T) {
 		t.Fatalf("off-chain reference rejected the canonical fixture: %v", err)
 	}
 
-	// One compilation at the VK-bound tuple.
+	// One lowering at the VK-bound tuple. F-007: CompileFromSource refuses
+	// verifySP1FRI, so the test-only helper produces the same script bytes.
 	p := sp1VkBindingParams()
-	artifact, err := CompileFromSource(sp1PocContractPath(t), CompileOptions{SP1FriParams: &p})
-	if err != nil {
-		t.Fatalf("compile PoC covenant at SP1VKeyHashByteSize=32: %v", err)
+	if _, err := CompileFromSource(sp1PocContractPath(t), CompileOptions{SP1FriParams: &p}); err == nil {
+		t.Fatal("F-007: CompileFromSource compiled verifySP1FRI at SP1VKeyHashByteSize=32; v1 must refuse")
 	}
-	if artifact == nil || artifact.Script == "" {
-		t.Fatal("compile produced no locking script")
+	artifact := lowerSP1FriPocBypassingRefusal(t, &p)
+	if artifact.ScriptHex == "" {
+		t.Fatal("lowering produced no locking script")
 	}
 
 	// One unlocking script, encoded at the SAME tuple the covenant was
@@ -160,7 +161,7 @@ func TestSp1FriVerifier_VerifyingKeyBindsTheProgram(t *testing.T) {
 	accepts := 0
 	for i := 0; i < sweep; i++ {
 		vk := candidateVk(i)
-		lockHex := spliceVkHash(t, artifact.Script, artifact.ConstructorSlots, vk)
+		lockHex := spliceVkHash(t, artifact.ScriptHex, artifact.ConstructorSlots, vk)
 		lock, err := script.NewFromHex(lockHex)
 		if err != nil {
 			t.Fatalf("parse spliced locking script: %v", err)
@@ -177,10 +178,11 @@ func TestSp1FriVerifier_VerifyingKeyBindsTheProgram(t *testing.T) {
 		}
 	}
 
-	if acceptedVk == nil {
-		t.Fatalf("VACUOUS: no candidate VK was accepted in %d tries. The negative below would pass "+
-			"for a covenant that rejects every spend. Either the VK-bound stack layout is wrong or "+
-			"the grinding witnesses can never hold — fix that before trusting the rejection.", sweep)
+	// Was the non-vacuity control (some VK ACCEPTED).
+	// F-007: rewritten to expect rejection — the v1 body is fail-closed, so NO verifying key may be accepted.
+	if acceptedVk != nil {
+		t.Fatalf("F-007: %d/%d candidate VKs were ACCEPTED (first vk=%x...); the v1 SP1 FRI body "+
+			"must be fail-closed", accepts, sweep, acceptedVk[:8])
 	}
 	if rejectedVk == nil {
 		t.Fatalf("R-057: all %d distinct verifying keys were ACCEPTED against the SAME proof. "+
@@ -189,9 +191,8 @@ func TestSp1FriVerifier_VerifyingKeyBindsTheProgram(t *testing.T) {
 			"Sp1FriVerifierPoc.runar.go:48-50 claims the opposite.", sweep)
 	}
 
-	t.Logf("VK is bound: %d/%d candidate verifying keys accepted the same proof; "+
-		"accepted vk=%x..., rejected vk=%x... (%v)",
-		accepts, sweep, acceptedVk[:8], rejectedVk[:8], rejectErr)
+	t.Logf("fail-closed: 0/%d candidate verifying keys accepted the proof; first rejection vk=%x... (%v)",
+		sweep, rejectedVk[:8], rejectErr)
 }
 
 // TestSp1FriVerifier_VkBindingIsReachableFromParams pins the narrower defect
@@ -202,23 +203,22 @@ func TestSp1FriVerifier_VerifyingKeyBindsTheProgram(t *testing.T) {
 // than producing a VK-bound verifier — a remedy nobody could apply.
 func TestSp1FriVerifier_VkBindingIsReachableFromParams(t *testing.T) {
 	p := sp1VkBindingParams()
-	artifact, err := CompileFromSource(sp1PocContractPath(t), CompileOptions{SP1FriParams: &p})
-	if err != nil {
-		t.Fatalf("SP1VKeyHashByteSize=32 must compile to a VK-bound verifier: %v", err)
+	// F-007: rewritten to expect refusal — CompileFromSource refuses verifySP1FRI in v1; the codegen reachability
+	// below is checked on the test-only lowering instead.
+	if _, err := CompileFromSource(sp1PocContractPath(t), CompileOptions{SP1FriParams: &p}); err == nil {
+		t.Fatal("F-007: CompileFromSource compiled verifySP1FRI at SP1VKeyHashByteSize=32; v1 must refuse")
 	}
-	if artifact == nil || artifact.Script == "" {
-		t.Fatal("compile produced no locking script")
+	artifact := lowerSP1FriPocBypassingRefusal(t, &p)
+	if artifact.ScriptHex == "" {
+		t.Fatal("lowering produced no locking script")
 	}
 
 	// A VK-bound script must differ from the VK-blind one: the absorb adds
 	// real opcodes.
-	blind, err := CompileFromSource(sp1PocContractPath(t))
-	if err != nil {
-		t.Fatalf("compile at the default (VK-blind) tuple: %v", err)
-	}
-	if len(artifact.Script) <= len(blind.Script) {
+	blind := lowerSP1FriPocBypassingRefusal(t, nil)
+	if len(artifact.ScriptHex) <= len(blind.ScriptHex) {
 		t.Fatalf("VK-bound script (%d B) is not larger than the VK-blind script (%d B) — "+
 			"the sp1VKeyHash absorb emitted nothing",
-			len(artifact.Script)/2, len(blind.Script)/2)
+			len(artifact.ScriptHex)/2, len(blind.ScriptHex)/2)
 	}
 }

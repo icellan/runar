@@ -352,6 +352,8 @@ export interface RunarArtifact {
    * and every SDK funded it without a word. Present here, the fact travels with
    * the artifact, and each SDK's deploy path refuses to fund it unless the
    * caller acknowledges the same list.
+   * F-007 removed both escape hatches: the compiler now refuses verifySP1FRI
+   * outright, so this gate only matters for artifacts from older compilers.
    *
    * Absent (not empty) on every artifact that reaches no such builtin, so
    * nothing else in the repo is affected.
