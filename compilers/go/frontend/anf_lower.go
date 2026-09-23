@@ -1766,6 +1766,16 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 	bodyCtx.lowerStatementsWithReads(stmt.Body, bodyReads)
 	ctx.syncCounter(bodyCtx)
 
+	// F-005 backstop for R-127. An output intrinsic in the body registered its
+	// ref on bodyCtx, which is dropped here, so the continuation hash would not
+	// commit to that output. Merging the refs cannot work (one body name denotes
+	// N unrolled slots), so refuse. The validator's syntactic search misses
+	// shapes such as `const xs = [this.addRawOutput(...)]`, and LowerToANF is
+	// exported, so this cannot rely on validation having run.
+	if len(bodyCtx.getAddOutputRefs()) > 0 || len(bodyCtx.getAddDataOutputRefs()) > 0 {
+		panic(loopOutputIntrinsicMsg(firstOutputIntrinsic(bodyCtx.bindings), ""))
+	}
+
 	ctx.emit(ir.ANFValue{
 		Kind:     "loop",
 		Count:    count,
@@ -1775,6 +1785,33 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 		StartRaw: bigIntStartRaw(start),
 		Step:     step,
 	})
+}
+
+// firstOutputIntrinsic names the source intrinsic of the first output node in
+// bindings (searching nested if/loop bodies), for the F-005 refusal.
+func firstOutputIntrinsic(bindings []ir.ANFBinding) string {
+	for _, b := range bindings {
+		switch b.Value.Kind {
+		case "add_output":
+			return "addOutput"
+		case "add_raw_output":
+			return "addRawOutput"
+		case "add_data_output":
+			return "addDataOutput"
+		case "if":
+			if name := firstOutputIntrinsic(b.Value.Then); name != "" {
+				return name
+			}
+			if name := firstOutputIntrinsic(b.Value.Else); name != "" {
+				return name
+			}
+		case "loop":
+			if name := firstOutputIntrinsic(b.Value.Body); name != "" {
+				return name
+			}
+		}
+	}
+	return "addOutput"
 }
 
 // extractLoopShape resolves a for-statement's compile-time loop shape (issue
