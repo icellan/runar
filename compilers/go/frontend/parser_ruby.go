@@ -168,12 +168,31 @@ func (p *rbParser) tokenize(source string) []rbToken {
 	var tokens []rbToken
 	lines := strings.Split(source, "\n")
 	parenDepth := 0
+	// Line number of an open `=begin` embedded document, or 0.
+	blockCommentStart := 0
 
 	for lineIdx, rawLine := range lines {
 		lineNum := lineIdx + 1
 
 		// Strip trailing \r
 		line := strings.TrimRight(rawLine, "\r")
+
+		// F-012: Ruby embedded documents, the Ruby tier's rule (F-018), which is
+		// Ruby's own. `=begin` / `=end` open and close a block comment only at
+		// column 0 and only as a whole word (followed by whitespace or end of
+		// line). Everything from the `=begin` line through the `=end` line is a
+		// comment. Before this, a method "commented out" this way compiled as a
+		// live spend path and the `end` of `=end` closed the class early.
+		if blockCommentStart != 0 {
+			if rbIsEmbeddedDocMarker(line, "=end") {
+				blockCommentStart = 0
+			}
+			continue
+		}
+		if rbIsEmbeddedDocMarker(line, "=begin") {
+			blockCommentStart = lineNum
+			continue
+		}
 
 		// Skip blank lines and comment-only lines
 		stripped := strings.TrimLeft(line, " \t")
@@ -469,8 +488,30 @@ func (p *rbParser) tokenize(source string) []rbToken {
 		}
 	}
 
+	if blockCommentStart != 0 {
+		p.errors = append(p.errors, lexDiag(
+			fmt.Sprintf("unterminated '=begin' block comment starting at line %d: missing '=end'", blockCommentStart),
+			p.fileName, blockCommentStart, 0))
+	}
+
 	tokens = append(tokens, rbToken{kind: rbTokEOF, value: "", line: len(lines) + 1, col: 1})
 	return tokens
+}
+
+// rbIsEmbeddedDocMarker reports whether line starts at column 0 with marker
+// (`=begin` or `=end`) as a whole word: followed by whitespace or end of line.
+func rbIsEmbeddedDocMarker(line, marker string) bool {
+	if !strings.HasPrefix(line, marker) {
+		return false
+	}
+	if len(line) == len(marker) {
+		return true
+	}
+	switch line[len(marker)] {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	}
+	return false
 }
 
 func rbIsIdentStart(ch byte) bool {
