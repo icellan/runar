@@ -160,6 +160,85 @@ class TestParserGo < Minitest::Test
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # F-010: a method is a contract method only if its receiver IS the contract.
+  # This tier ignored the receiver type (an exported method on ANY type became
+  # a PUBLIC entry point) and took the LAST struct as the contract, replacing
+  # its properties. The rule (user decision R9), diagnostics verbatim in all
+  # seven tiers:
+  #   - the contract is THE struct embedding a runar base; others are ignored;
+  #   - zero or several such structs refuse the file;
+  #   - a method whose receiver (value or pointer) is another type refuses it;
+  #   - a free function, exported or not, is a private helper.
+  # Proves: this tier's .runar.go diagnostics and method set per shape.
+  # Does NOT prove: the other tiers, or anything on chain.
+  # ---------------------------------------------------------------------------
+
+  F010_PRELUDE = "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n"
+  F010_GUARDED = "\ntype Guarded struct {\n\trunar.SmartContract\n\tPubKey runar.PubKey `runar:\"readonly\"`\n}\n" \
+                 "\nfunc (c *Guarded) Unlock(sig runar.Sig) {\n\trunar.Assert(runar.CheckSig(sig, c.PubKey))\n}\n"
+  F010_RECEIVER_ERROR = "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; " \
+                        'methods on other types are not allowed'
+
+  def f010_unrelated(recv)
+    "\ntype Unrelated struct{}\n\nfunc (#{recv}) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"
+  end
+
+  def f010_errors(src)
+    parse(src, 'Guarded.runar.go').errors.select { |e| e.severity == 'error' }.map(&:message)
+  end
+
+  def f010_methods(src)
+    parse(src, 'Guarded.runar.go').contract.methods.map { |m| "#{m.name}(#{m.visibility})" }
+  end
+
+  def test_f010_foreign_receiver_refused
+    [
+      F010_PRELUDE + F010_GUARDED + f010_unrelated('u Unrelated'),
+      F010_PRELUDE + F010_GUARDED + f010_unrelated('u *Unrelated'),
+      F010_PRELUDE + f010_unrelated('u Unrelated') + F010_GUARDED,
+      F010_PRELUDE + f010_unrelated('u *Unrelated') + F010_GUARDED,
+      F010_PRELUDE + F010_GUARDED + "\nfunc (u Unrelated) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"
+    ].each_with_index do |src, i|
+      assert_equal [F010_RECEIVER_ERROR], f010_errors(src), "case #{i}"
+    end
+  end
+
+  def test_f010_contract_receivers_kept
+    src = F010_PRELUDE + F010_GUARDED + "\nfunc (c Guarded) Drain(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n"
+    assert_equal [], f010_errors(src)
+    assert_equal ['unlock(public)', 'drain(public)'], f010_methods(src)
+  end
+
+  def test_f010_exported_free_function_is_private_helper
+    src = F010_PRELUDE + F010_GUARDED + "\nfunc Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"
+    assert_equal [], f010_errors(src)
+    assert_equal ['unlock(public)', 'drain(private)'], f010_methods(src)
+  end
+
+  def test_f010_helper_struct_ignored
+    helper = "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"
+    [F010_PRELUDE + F010_GUARDED + helper, F010_PRELUDE + helper + F010_GUARDED].each do |src|
+      result = parse(src, 'Guarded.runar.go')
+      assert_empty result.errors.map(&:format_message)
+      assert_equal 'Guarded', result.contract.name
+      assert_equal ['pubKey'], result.contract.properties.map(&:name)
+    end
+  end
+
+  def test_f010_no_contract_struct
+    src = F010_PRELUDE + "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"
+    assert_equal ['no Rúnar contract struct found in Go source'], f010_errors(src)
+  end
+
+  def test_f010_two_contract_structs
+    src = F010_PRELUDE + F010_GUARDED + "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n"
+    assert_equal [
+      "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; " \
+      'exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract'
+    ], f010_errors(src)
+  end
+
   private
 
   def find_bytestring_literal(stmts)

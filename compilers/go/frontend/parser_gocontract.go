@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"math/big"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 
 	contract := p.extractContract()
 	if contract == nil && len(p.errors) == 0 {
-		p.addError("no Rúnar contract struct found in Go source")
+		p.addError(goNoContractMessage)
 	}
 	p.errors = append(p.errors, p.idents.collisionDiagnostics()...)
 
@@ -61,6 +62,21 @@ type goContractParser struct {
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
+}
+
+// F-010 diagnostics — emitted verbatim by every tier's .runar.go parser
+// (TS reference: goNoContractMessage / goMultipleContractsMessage /
+// goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+const goNoContractMessage = "no Rúnar contract struct found in Go source"
+
+func goMultipleContractsMessage(first, second string) string {
+	return fmt.Sprintf("multiple Rúnar contract structs found in Go source: '%s' and '%s'; "+
+		"exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract", first, second)
+}
+
+func goForeignReceiverMessage(method, receiverType, contract string) string {
+	return fmt.Sprintf("method '%s' has receiver type '%s', not the contract type '%s'; "+
+		"methods on other types are not allowed", method, receiverType, contract)
 }
 
 func (p *goContractParser) addError(msg string) {
@@ -113,18 +129,19 @@ func (p *goContractParser) extractContract() *ContractNode {
 
 			// Check for runar.SmartContract / runar.StatefulSmartContract embed
 			found := false
+			structParent := ""
 			for _, field := range structType.Fields.List {
 				if sel, ok := field.Type.(*ast.SelectorExpr); ok {
 					if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "runar" {
 						switch sel.Sel.Name {
 						case "SmartContract":
-							parentClass = "SmartContract"
+							structParent = "SmartContract"
 							found = true
 						case "StatefulSmartContract":
-							parentClass = "StatefulSmartContract"
+							structParent = "StatefulSmartContract"
 							found = true
 						case "UnsafeSmartContract":
-							parentClass = "UnsafeSmartContract"
+							structParent = "UnsafeSmartContract"
 							found = true
 						}
 					}
@@ -134,7 +151,14 @@ func (p *goContractParser) extractContract() *ContractNode {
 				continue
 			}
 
+			// F-010: exactly one contract struct. The first one is the
+			// contract; any further one is refused, never merged into it.
+			if contractName != "" {
+				p.addError(goMultipleContractsMessage(contractName, typeSpec.Name.Name))
+				continue
+			}
 			contractName = typeSpec.Name.Name
+			parentClass = structParent
 
 			// Extract properties (non-embed fields)
 			for _, field := range structType.Fields.List {
@@ -182,17 +206,19 @@ func (p *goContractParser) extractContract() *ContractNode {
 			continue
 		}
 
-		// Check receiver is *ContractName
+		// F-010: the receiver — value or pointer — must be the contract
+		// type. A method on any other type is refused: it used to become a
+		// public entry point whenever its receiver was a value.
 		if len(funcDecl.Recv.List) == 0 {
 			continue
 		}
 		recvType := funcDecl.Recv.List[0].Type
 		if star, ok := recvType.(*ast.StarExpr); ok {
-			if ident, ok := star.X.(*ast.Ident); ok {
-				if ident.Name != contractName {
-					continue
-				}
-			}
+			recvType = star.X
+		}
+		if recvName := types.ExprString(recvType); recvName != contractName {
+			p.addError(goForeignReceiverMessage(funcDecl.Name.Name, recvName, contractName))
+			continue
 		}
 
 		methodName := p.idents.declare(funcDecl.Name.Name, goFieldToCamel(funcDecl.Name.Name))
@@ -235,10 +261,8 @@ func (p *goContractParser) extractContract() *ContractNode {
 		if funcDecl.Name.Name == "init" || funcDecl.Name.Name == "main" {
 			continue
 		}
-		// Standalone functions must be unexported (private helpers)
-		if funcDecl.Name.IsExported() {
-			continue
-		}
+		// F-010: an exported standalone function is a private helper too,
+		// exactly as in the TS reference.
 
 		methodName := p.idents.declare(funcDecl.Name.Name, goFieldToCamel(funcDecl.Name.Name))
 		p.receiverName = "" // no receiver for standalone functions

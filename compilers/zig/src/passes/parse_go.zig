@@ -68,6 +68,21 @@ pub const ParseResult = struct {
     errors: [][]const u8,
 };
 
+// F-010 diagnostics -- emitted verbatim by every tier's .runar.go parser (TS
+// reference: goNoContractMessage / goMultipleContractsMessage /
+// goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+const go_no_contract_message = "no Rúnar contract struct found in Go source";
+const go_multiple_contracts_fmt = "multiple Rúnar contract structs found in Go source: '{s}' and '{s}'; exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract";
+const go_foreign_receiver_fmt = "method '{s}' has receiver type '{s}', not the contract type '{s}'; methods on other types are not allowed";
+
+/// A parsed `func`: the method, the Go spelling of its name, and its receiver
+/// type (`*` stripped), or null for a free function.
+const FuncDecl = struct {
+    method: MethodNode,
+    go_name: []const u8,
+    receiver_type: ?[]const u8,
+};
+
 pub fn parseGo(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
     var parser = Parser.init(allocator, source, file_name);
     return parser.parse();
@@ -760,6 +775,7 @@ const Parser = struct {
         var properties: std.ArrayListUnmanaged(PropertyNode) = .empty;
         var parent_class: ParentClass = .smart_contract;
         var methods: std.ArrayListUnmanaged(MethodNode) = .empty;
+        var funcs: std.ArrayListUnmanaged(FuncDecl) = .empty;
         var found_struct = false;
 
         // Parse top-level declarations: type struct, func
@@ -767,6 +783,11 @@ const Parser = struct {
             if (self.checkIdent("type")) {
                 const result = self.parseTypeDecl();
                 if (result.found) {
+                    if (found_struct) {
+                        // F-010: exactly one contract struct; never merged.
+                        self.addErrorFmt(go_multiple_contracts_fmt, .{ self.contract_name, result.name });
+                        continue;
+                    }
                     found_struct = true;
                     self.contract_name = result.name;
                     parent_class = result.parent_class;
@@ -775,8 +796,8 @@ const Parser = struct {
                     }
                 }
             } else if (self.checkIdent("func")) {
-                if (self.parseFuncDecl()) |m| {
-                    methods.append(self.allocator, m) catch {};
+                if (self.parseFuncDecl()) |f| {
+                    funcs.append(self.allocator, f) catch {};
                 }
             } else {
                 // Skip unknown top-level tokens
@@ -785,8 +806,24 @@ const Parser = struct {
         }
 
         if (!found_struct) {
-            self.addError("no Runar contract struct found in Go source");
+            self.addError(go_no_contract_message);
             return .{ .contract = null, .errors = self.errors.items };
+        }
+
+        // F-010: a method whose receiver (value or pointer) is not the
+        // contract type is refused -- checked once the whole file is read, so
+        // a method declared before the contract struct is judged the same way.
+        for (funcs.items) |f| {
+            if (f.receiver_type) |recv_type| {
+                if (!std.mem.eql(u8, recv_type, self.contract_name)) {
+                    const msg = std.fmt.allocPrint(self.allocator, go_foreign_receiver_fmt, .{ f.go_name, recv_type, self.contract_name }) catch continue;
+                    const loc = f.method.source_loc orelse self.currentSourceLoc();
+                    const full = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, loc.line, loc.column, msg }) catch continue;
+                    self.errors.append(self.allocator, full) catch {};
+                    continue;
+                }
+            }
+            methods.append(self.allocator, f.method) catch {};
         }
 
         // Process init() method: extract property initializers
@@ -979,10 +1016,9 @@ const Parser = struct {
 
         _ = self.expect(.rbrace);
 
-        if (!found_parent) {
-            self.addErrorFmt("struct '{s}' does not embed runar.SmartContract or runar.StatefulSmartContract", .{name_tok.text});
-            return empty;
-        }
+        // F-010: a struct that embeds no runar base is not the contract and
+        // is ignored (a method on it is what gets refused, in parse()).
+        if (!found_parent) return empty;
 
         return .{
             .found = true,
@@ -1134,11 +1170,15 @@ const Parser = struct {
 
     // ---- Function declarations ----
 
-    fn parseFuncDecl(self: *Parser) ?MethodNode {
+    /// Parse one `func` declaration. `receiver_type` is the receiver's type
+    /// name (`*` stripped) or null for a free function; parse() checks it
+    /// against the contract struct once the whole file is read (F-010).
+    fn parseFuncDecl(self: *Parser) ?FuncDecl {
         _ = self.bump(); // consume 'func'
 
-        // Check for receiver: (c *ContractName)
+        // Check for receiver: (c *Type)
         var has_receiver = false;
+        var receiver_type: ?[]const u8 = null;
         if (self.current.kind == .lparen) {
             // This is a method with a receiver
             _ = self.bump(); // consume '('
@@ -1148,18 +1188,17 @@ const Parser = struct {
                 self.receiver_name = self.bump().text;
             }
 
-            // *ContractName
+            // *Type
             if (self.current.kind == .star) {
                 _ = self.bump(); // consume '*'
             }
+            receiver_type = "";
             if (self.current.kind == .ident) {
-                const recv_type = self.bump().text;
-                // Verify it matches our contract
-                if (self.contract_name.len > 0 and !std.mem.eql(u8, recv_type, self.contract_name)) {
-                    // Method on a different type -- skip
-                    self.skipToEndOfDecl();
-                    return null;
-                }
+                receiver_type = self.bump().text;
+            } else if (self.current.kind == .rparen) {
+                // Unnamed receiver `(Type)`: the only identifier is the type.
+                receiver_type = self.receiver_name;
+                self.receiver_name = "c";
             }
             _ = self.expect(.rparen);
             has_receiver = true;
@@ -1187,22 +1226,13 @@ const Parser = struct {
         const body = self.parseBlock();
 
         if (!has_receiver) {
-            // Standalone function: only allow unexported (private helper) functions
-            if (isExported(raw_name)) {
-                // Skip exported standalone functions (e.g. NewContractName)
-                // Check if this is a constructor function: NewContractName
-                if (raw_name.len > 3 and std.mem.startsWith(u8, raw_name, "New")) {
-                    // This is the constructor function -- we auto-generate constructor, skip it
-                    return null;
-                }
-                return null;
-            }
-            // Private standalone helper function
+            // Standalone function: a private helper. F-010: exported ones
+            // too, exactly as in the TS reference.
             self.receiver_name = "";
-            return .{ .name = method_name, .is_public = false, .params = params, .body = body, .source_loc = method_loc };
+            return .{ .method = .{ .name = method_name, .is_public = false, .params = params, .body = body, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = null };
         }
 
-        return .{ .name = method_name, .is_public = is_public, .params = params, .body = body, .source_loc = method_loc };
+        return .{ .method = .{ .name = method_name, .is_public = is_public, .params = params, .body = body, .source_loc = method_loc }, .go_name = raw_name, .receiver_type = receiver_type };
     }
 
     fn parseGoParams(self: *Parser) []ParamNode {
@@ -2617,4 +2647,103 @@ fn loopStartLiteral(expr: types.Expression) ?i64 {
         },
         else => null,
     };
+}
+
+// ============================================================================
+// F-010: a method is a contract method only if its receiver IS the contract.
+// This tier refused shape A only by accident (it errored on ANY struct not
+// embedding a runar base, so a helper struct was refused but a method on an
+// undeclared type, or declared before the contract struct, got through the
+// empty-contract-name gate). The rule (user decision R9), diagnostics
+// verbatim in all seven tiers:
+//   - the contract is THE struct embedding a runar base; others are ignored;
+//   - zero or several such structs refuse the file;
+//   - a method whose receiver (value or pointer) is another type refuses it;
+//   - a free function, exported or not, is a private helper.
+// Proves: this tier's .runar.go diagnostics and method set per shape.
+// Does NOT prove: the other tiers, or anything on chain.
+// ============================================================================
+
+const f010_prelude = "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n";
+const f010_guarded = "\ntype Guarded struct {\n\trunar.SmartContract\n\tPubKey runar.PubKey `runar:\"readonly\"`\n}\n" ++
+    "\nfunc (c *Guarded) Unlock(sig runar.Sig) {\n\trunar.Assert(runar.CheckSig(sig, c.PubKey))\n}\n";
+const f010_receiver_error = "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; methods on other types are not allowed";
+
+fn f010Unrelated(comptime recv: []const u8) []const u8 {
+    return "\ntype Unrelated struct{}\n\nfunc (" ++ recv ++ ") Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n";
+}
+
+/// Every error is `file:line:col: message`; compare the message part.
+fn f010ExpectOnlyError(source: []const u8, want: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseGo(arena.allocator(), source, "Guarded.runar.go");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 1), r.errors.len);
+    try std.testing.expect(std.mem.endsWith(u8, r.errors[0], want));
+    try std.testing.expect(std.mem.endsWith(u8, r.errors[0][0 .. r.errors[0].len - want.len], ": "));
+}
+
+fn f010ExpectMethods(source: []const u8, want: []const []const u8, want_public: []const bool) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseGo(arena.allocator(), source, "Guarded.runar.go");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const c = r.contract.?;
+    try std.testing.expectEqual(want.len, c.methods.len);
+    for (c.methods, want, want_public) |m, name, public| {
+        try std.testing.expectEqualStrings(name, m.name);
+        try std.testing.expectEqual(public, m.is_public);
+    }
+}
+
+test "F-010: a method on another type is refused (value/pointer, before/after, undeclared)" {
+    try f010ExpectOnlyError(f010_prelude ++ f010_guarded ++ comptime f010Unrelated("u Unrelated"), f010_receiver_error);
+    try f010ExpectOnlyError(f010_prelude ++ f010_guarded ++ comptime f010Unrelated("u *Unrelated"), f010_receiver_error);
+    try f010ExpectOnlyError(f010_prelude ++ comptime f010Unrelated("u Unrelated") ++ f010_guarded, f010_receiver_error);
+    try f010ExpectOnlyError(f010_prelude ++ comptime f010Unrelated("u *Unrelated") ++ f010_guarded, f010_receiver_error);
+    try f010ExpectOnlyError(f010_prelude ++ f010_guarded ++ "\nfunc (u Unrelated) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n", f010_receiver_error);
+}
+
+test "F-010: value- and pointer-receiver methods on the contract are kept" {
+    try f010ExpectMethods(
+        f010_prelude ++ f010_guarded ++ "\nfunc (c Guarded) Drain(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n",
+        &.{ "unlock", "drain" },
+        &.{ true, true },
+    );
+}
+
+test "F-010: an exported free function is a private helper" {
+    try f010ExpectMethods(
+        f010_prelude ++ f010_guarded ++ "\nfunc Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n",
+        &.{ "unlock", "drain" },
+        &.{ true, false },
+    );
+}
+
+test "F-010: a helper struct never renames the contract or replaces its properties" {
+    const helper = "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n";
+    inline for (.{ f010_prelude ++ f010_guarded ++ helper, f010_prelude ++ helper ++ f010_guarded }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const r = parseGo(arena.allocator(), source, "Guarded.runar.go");
+        for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+        try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+        const c = r.contract.?;
+        try std.testing.expectEqualStrings("Guarded", c.name);
+        try std.testing.expectEqual(@as(usize, 1), c.properties.len);
+        try std.testing.expectEqualStrings("pubKey", c.properties[0].name);
+    }
+}
+
+test "F-010: a file with no contract struct is refused" {
+    try f010ExpectOnlyError(f010_prelude ++ "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n", "no Rúnar contract struct found in Go source");
+}
+
+test "F-010: a file with two contract structs is refused" {
+    try f010ExpectOnlyError(
+        f010_prelude ++ f010_guarded ++ "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n",
+        "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract",
+    );
 }

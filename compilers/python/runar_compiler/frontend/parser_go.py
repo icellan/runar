@@ -686,7 +686,8 @@ class _GoParser:
         contract_name = ""
         parent_class = ""
         properties: list[PropertyNode] = []
-        methods: list[MethodNode] = []
+        # (method, Go spelling of its name, receiver type or None)
+        funcs: list[tuple[MethodNode, str, str | None]] = []
         struct_found = False
 
         while not self.check(TOK_EOF):
@@ -698,20 +699,34 @@ class _GoParser:
                 result = self._parse_type_decl()
                 if result is not None:
                     cname, pclass, props = result
+                    if struct_found:
+                        # F-010: exactly one contract struct; never merged.
+                        self.add_error(go_multiple_contracts_message(contract_name, cname))
+                        continue
                     contract_name = cname
                     parent_class = pclass
                     properties = props
                     struct_found = True
             elif self.check_ident("func"):
-                method = self._parse_func_decl(contract_name)
-                if method is not None:
-                    methods.append(method)
+                func = self._parse_func_decl()
+                if func is not None:
+                    funcs.append(func)
             else:
                 # Skip unknown top-level declarations
                 self.advance()
 
         if not struct_found:
             return None
+
+        # F-010: a method whose receiver (value or pointer) is not the
+        # contract type is refused -- checked once the whole file is read, so
+        # a method declared before the contract struct is judged the same way.
+        methods: list[MethodNode] = []
+        for method, go_name, recv_type in funcs:
+            if recv_type is not None and recv_type != contract_name:
+                self.add_error(go_foreign_receiver_message(go_name, recv_type, contract_name))
+                continue
+            methods.append(method)
 
         # Extract init() method as property initializers, if present.
         # init() is a special private method that sets default values.
@@ -917,15 +932,19 @@ class _GoParser:
             return sel_tok.value
         return f"{pkg_tok.value}.{sel_tok.value}"
 
-    def _parse_func_decl(self, contract_name: str) -> MethodNode | None:
-        """Parse a func declaration (method or standalone function)."""
+    def _parse_func_decl(self) -> tuple[MethodNode, str, str | None] | None:
+        """Parse a func declaration (method or standalone function).
+
+        Returns (method, Go spelling of its name, receiver type or None for a
+        free function); parse_file checks the receiver type (F-010).
+        """
         location = self.loc()
         self.expect_ident("func")
 
         # Check for receiver: func (recv *Type) Name(params) retType { ... }
         has_receiver = False
-        is_contract_method = False
         receiver_name = ""
+        receiver_type: str | None = None
 
         if self.check(TOK_LPAREN):
             # Could be receiver or function params -- look ahead
@@ -941,9 +960,7 @@ class _GoParser:
                 self.match(TOK_STAR)
                 type_tok = self.expect(TOK_IDENT)
                 self.expect(TOK_RPAREN)
-
-                if type_tok.value == contract_name:
-                    is_contract_method = True
+                receiver_type = type_tok.value
             else:
                 self.pos = saved
 
@@ -958,22 +975,15 @@ class _GoParser:
             self.receiver_name = ""
 
         # Determine visibility
-        if has_receiver and is_contract_method:
+        if has_receiver:
             visibility = "public" if func_name[0].isupper() else "private"
-        elif not has_receiver:
-            # Standalone functions: skip exported ones, init, main
+        else:
+            # Standalone functions: skip init and main. F-010: an exported
+            # standalone function is a private helper, as in the TS reference.
             if func_name in ("init", "main"):
                 self._skip_func_body()
                 return None
-            if func_name[0].isupper():
-                # Exported standalone function -- skip (not a contract method)
-                self._skip_func_body()
-                return None
             visibility = "private"
-        else:
-            # Method on a different type -- skip
-            self._skip_func_body()
-            return None
 
         method_name = self.declare(func_name)
 
@@ -987,12 +997,16 @@ class _GoParser:
         # Parse body
         body = self._parse_block()
 
-        return MethodNode(
-            name=method_name,
-            params=params,
-            body=body,
-            visibility=visibility,
-            source_location=location,
+        return (
+            MethodNode(
+                name=method_name,
+                params=params,
+                body=body,
+                visibility=visibility,
+                source_location=location,
+            ),
+            func_name,
+            receiver_type,
         )
 
     def _looks_like_receiver(self) -> bool:
@@ -1828,6 +1842,27 @@ def _parse_number(s: str) -> Expression:
 # Public API
 # ---------------------------------------------------------------------------
 
+# F-010 diagnostics -- emitted verbatim by every tier's .runar.go parser (TS
+# reference: goNoContractMessage / goMultipleContractsMessage /
+# goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+GO_NO_CONTRACT_MESSAGE = "no Rúnar contract struct found in Go source"
+
+
+def go_multiple_contracts_message(first: str, second: str) -> str:
+    return (
+        f"multiple Rúnar contract structs found in Go source: '{first}' and '{second}'; "
+        "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract "
+        "or runar.UnsafeSmartContract"
+    )
+
+
+def go_foreign_receiver_message(method: str, receiver_type: str, contract: str) -> str:
+    return (
+        f"method '{method}' has receiver type '{receiver_type}', not the contract type "
+        f"'{contract}'; methods on other types are not allowed"
+    )
+
+
 def parse_go(source: str, file_name: str) -> ParseResult:
     """Parse a Go-syntax Runar contract (.runar.go)."""
     p = _GoParser(file_name)
@@ -1840,7 +1875,7 @@ def parse_go(source: str, file_name: str) -> ParseResult:
         return ParseResult(errors=[Diagnostic(message=f"Go parse error: {e}", severity=Severity.ERROR)])
 
     if contract is None and not p.errors:
-        p.errors.append("no Runar contract struct found in Go source")
+        p.add_error(GO_NO_CONTRACT_MESSAGE)
 
     p.errors.extend(collision_diagnostics(p.declared))
     if p.errors:

@@ -424,4 +424,94 @@ class GoParserTest {
         // Argument is this.a (PropertyAccessExpr), since c.A on the receiver lowers to that.
         assertEquals("a", ((PropertyAccessExpr) call.args().get(0)).property());
     }
+
+    // ------------------------------------------------------------------
+    // F-010: a method is a contract method only if its receiver IS the
+    // contract. This tier silently dropped a method on another type (and any
+    // method declared before the contract struct); the TS reference, Go and
+    // Ruby made it a PUBLIC entry point. The rule (user decision R9),
+    // diagnostics verbatim in all seven tiers:
+    //   - the contract is THE struct embedding a runar base; others ignored;
+    //   - zero or several such structs refuse the file;
+    //   - a method whose receiver (value or pointer) is another type refuses it;
+    //   - a free function, exported or not, is a private helper.
+    // Proves: this tier's .runar.go diagnostics and method set per shape.
+    // Does NOT prove: the other tiers, or anything on chain.
+    // ------------------------------------------------------------------
+
+    private static final String F010_PRELUDE =
+        "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n";
+    private static final String F010_GUARDED =
+        "\ntype Guarded struct {\n\trunar.SmartContract\n\tPubKey runar.PubKey `runar:\"readonly\"`\n}\n"
+        + "\nfunc (c *Guarded) Unlock(sig runar.Sig) {\n\trunar.Assert(runar.CheckSig(sig, c.PubKey))\n}\n";
+    private static final String F010_RECEIVER_ERROR =
+        "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; "
+        + "methods on other types are not allowed";
+
+    private static String f010Unrelated(String recv) {
+        return "\ntype Unrelated struct{}\n\nfunc (" + recv + ") Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n";
+    }
+
+    private static String f010Refusal(String src) {
+        return assertThrows(GoParser.ParseException.class,
+            () -> GoParser.parse(src, "Guarded.runar.go")).getMessage();
+    }
+
+    private static java.util.List<String> f010Methods(String src) throws Exception {
+        ContractNode c = GoParser.parse(src, "Guarded.runar.go");
+        return c.methods().stream()
+            .map(m -> m.name() + "(" + (m.visibility() == Visibility.PUBLIC ? "public" : "private") + ")")
+            .toList();
+    }
+
+    @Test
+    void f010ForeignReceiverRefused() {
+        for (String src : java.util.List.of(
+                F010_PRELUDE + F010_GUARDED + f010Unrelated("u Unrelated"),
+                F010_PRELUDE + F010_GUARDED + f010Unrelated("u *Unrelated"),
+                F010_PRELUDE + f010Unrelated("u Unrelated") + F010_GUARDED,
+                F010_PRELUDE + f010Unrelated("u *Unrelated") + F010_GUARDED,
+                F010_PRELUDE + F010_GUARDED
+                    + "\nfunc (u Unrelated) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n")) {
+            assertEquals(F010_RECEIVER_ERROR, f010Refusal(src));
+        }
+    }
+
+    @Test
+    void f010ContractReceiversKept() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED
+            + "\nfunc (c Guarded) Drain(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n";
+        assertEquals(java.util.List.of("unlock(public)", "drain(public)"), f010Methods(src));
+    }
+
+    @Test
+    void f010ExportedFreeFunctionIsPrivateHelper() throws Exception {
+        String src = F010_PRELUDE + F010_GUARDED + "\nfunc Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n";
+        assertEquals(java.util.List.of("unlock(public)", "drain(private)"), f010Methods(src));
+    }
+
+    @Test
+    void f010HelperStructIgnored() throws Exception {
+        String helper = "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n";
+        for (String src : java.util.List.of(F010_PRELUDE + F010_GUARDED + helper, F010_PRELUDE + helper + F010_GUARDED)) {
+            ContractNode c = GoParser.parse(src, "Guarded.runar.go");
+            assertEquals("Guarded", c.name());
+            assertEquals(java.util.List.of("pubKey"), c.properties().stream().map(PropertyNode::name).toList());
+        }
+    }
+
+    @Test
+    void f010NoContractStruct() {
+        assertEquals("no Rúnar contract struct found in Go source",
+            f010Refusal(F010_PRELUDE + "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"));
+    }
+
+    @Test
+    void f010TwoContractStructs() {
+        assertEquals(
+            "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; "
+                + "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract",
+            f010Refusal(F010_PRELUDE + F010_GUARDED
+                + "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n"));
+    }
 }

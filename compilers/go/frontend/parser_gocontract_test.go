@@ -874,3 +874,143 @@ func TestParseGoContract_NonReferenceCompoundAssignmentRejected(t *testing.T) {
 		})
 	}
 }
+
+// F-010: a method is a contract method only if its receiver IS the contract.
+// The `ident.Name != contractName` guard sat inside the `*ast.StarExpr` branch,
+// so a VALUE receiver on a helper type skipped it and
+// `func (u Unrelated) Drain(...) { runar.Assert(true) }` became a public
+// spending entry point anyone can satisfy with no key.
+//
+// The rule (user decision R9) is shared verbatim with the TS reference
+// (01-parse-go.test.ts "F-010") and the other five tiers:
+//   - the contract is THE struct embedding a runar base; other structs are ignored;
+//   - zero or several such structs refuse the file;
+//   - a method whose receiver (value or pointer) is another type refuses it;
+//   - a free function, exported or not, is a private helper.
+//
+// Proves: this tier's .runar.go diagnostics and method set for each shape.
+// Does NOT prove: the other tiers, nor the on-chain behaviour (see
+// remediation-logs/F-010 for the Spend.validate evidence).
+const f010Prelude = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+`
+
+const f010Guarded = `
+type Guarded struct {
+	runar.SmartContract
+	PubKey runar.PubKey ` + "`" + `runar:"readonly"` + "`" + `
+}
+
+func (c *Guarded) Unlock(sig runar.Sig) {
+	runar.Assert(runar.CheckSig(sig, c.PubKey))
+}
+`
+
+func f010Unrelated(recv string) string {
+	return `
+type Unrelated struct{}
+
+func (` + recv + `) Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`
+}
+
+const f010ReceiverError = "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; " +
+	"methods on other types are not allowed"
+
+func f010Errors(src string) []string {
+	var msgs []string
+	for _, d := range ParseSource([]byte(src), "Guarded.runar.go").Errors {
+		if d.Severity == SeverityError {
+			msgs = append(msgs, d.Message)
+		}
+	}
+	return msgs
+}
+
+func f010Methods(t *testing.T, src string) []string {
+	t.Helper()
+	result := ParseSource([]byte(src), "Guarded.runar.go")
+	if result.Contract == nil {
+		t.Fatalf("no contract: %v", result.ErrorStrings())
+	}
+	var names []string
+	for _, m := range result.Contract.Methods {
+		names = append(names, m.Name+"("+m.Visibility+")")
+	}
+	return names
+}
+
+func TestParseGoContract_F010_ForeignReceiverRefused(t *testing.T) {
+	cases := []struct{ name, src string }{
+		{"value receiver, helper after the contract", f010Prelude + f010Guarded + f010Unrelated("u Unrelated")},
+		{"pointer receiver, helper after the contract", f010Prelude + f010Guarded + f010Unrelated("u *Unrelated")},
+		{"value receiver, helper before the contract", f010Prelude + f010Unrelated("u Unrelated") + f010Guarded},
+		{"pointer receiver, helper before the contract", f010Prelude + f010Unrelated("u *Unrelated") + f010Guarded},
+		{"undeclared receiver type", f010Prelude + f010Guarded + "\nfunc (u Unrelated) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := f010Errors(tc.src)
+			if len(got) != 1 || got[0] != f010ReceiverError {
+				t.Fatalf("errors = %q, want exactly [%q]", got, f010ReceiverError)
+			}
+		})
+	}
+}
+
+func TestParseGoContract_F010_ContractReceiversKept(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc (c Guarded) Drain(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n"
+	if errs := f010Errors(src); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %q", errs)
+	}
+	if got := strings.Join(f010Methods(t, src), ","); got != "unlock(public),drain(public)" {
+		t.Fatalf("methods = %s, want unlock(public),drain(public)", got)
+	}
+}
+
+func TestParseGoContract_F010_ExportedFreeFunctionIsPrivateHelper(t *testing.T) {
+	src := f010Prelude + f010Guarded + "\nfunc Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"
+	if errs := f010Errors(src); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %q", errs)
+	}
+	if got := strings.Join(f010Methods(t, src), ","); got != "unlock(public),drain(private)" {
+		t.Fatalf("methods = %s, want unlock(public),drain(private)", got)
+	}
+}
+
+func TestParseGoContract_F010_HelperStructIgnored(t *testing.T) {
+	helper := "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"
+	for _, src := range []string{f010Prelude + f010Guarded + helper, f010Prelude + helper + f010Guarded} {
+		result := ParseSource([]byte(src), "Guarded.runar.go")
+		if len(result.Errors) != 0 {
+			t.Fatalf("unexpected errors: %v", result.ErrorStrings())
+		}
+		var props []string
+		for _, p := range result.Contract.Properties {
+			props = append(props, p.Name)
+		}
+		if result.Contract.Name != "Guarded" || strings.Join(props, ",") != "pubKey" {
+			t.Fatalf("contract %s props %v, want Guarded [pubKey]", result.Contract.Name, props)
+		}
+	}
+}
+
+func TestParseGoContract_F010_NoContractStruct(t *testing.T) {
+	got := f010Errors(f010Prelude + "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n")
+	want := "no Rúnar contract struct found in Go source"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("errors = %q, want exactly [%q]", got, want)
+	}
+}
+
+func TestParseGoContract_F010_TwoContractStructs(t *testing.T) {
+	got := f010Errors(f010Prelude + f010Guarded + "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n")
+	want := "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; " +
+		"exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("errors = %q, want exactly [%q]", got, want)
+	}
+}

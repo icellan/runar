@@ -565,6 +565,25 @@ fn tokenize(source: &str) -> Vec<Token> {
 // Parser
 // ---------------------------------------------------------------------------
 
+// F-010 diagnostics — emitted verbatim by every tier's .runar.go parser
+// (TS reference: goNoContractMessage / goMultipleContractsMessage /
+// goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+const GO_NO_CONTRACT_MESSAGE: &str = "no Rúnar contract struct found in Go source";
+
+fn go_multiple_contracts_message(first: &str, second: &str) -> String {
+    format!(
+        "multiple Rúnar contract structs found in Go source: '{}' and '{}'; exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract",
+        first, second
+    )
+}
+
+fn go_foreign_receiver_message(method: &str, receiver_type: &str, contract: &str) -> String {
+    format!(
+        "method '{}' has receiver type '{}', not the contract type '{}'; methods on other types are not allowed",
+        method, receiver_type, contract
+    )
+}
+
 struct GoParser<'a> {
     tokens: Vec<Token>,
     pos: usize,
@@ -679,11 +698,25 @@ impl<'a> GoParser<'a> {
         let mut contract_name = String::new();
         let mut parent_class = "SmartContract".to_string();
         let mut properties: Vec<PropertyNode> = Vec::new();
+        // (method, Go spelling of its name, receiver type or None for a free function)
+        let mut funcs: Vec<(MethodNode, String, Option<String>)> = Vec::new();
 
-        // Find `type <Name> struct { ... }`
+        // F-010: one pass over every top-level declaration, in source order.
+        // The contract is THE struct embedding a runar base (the first one;
+        // any further one is refused); `func`s anywhere in the file are
+        // collected and checked against it afterwards, so a method declared
+        // before the contract struct is neither lost nor let through.
         while !matches!(self.current().typ, TokenType::Eof) {
             self.skip_semis();
-            if matches!(self.current().typ, TokenType::Type) {
+            if matches!(self.current().typ, TokenType::Func) {
+                self.advance(); // consume 'func'
+                if matches!(self.current().typ, TokenType::LParen) {
+                    // Method: func (recv *Type) MethodName(...)
+                    funcs.push(self.parse_method());
+                } else if let Some((func, go_name)) = self.parse_standalone_func() {
+                    funcs.push((func, go_name, None));
+                }
+            } else if matches!(self.current().typ, TokenType::Type) {
                 let saved_pos = self.pos;
                 self.advance(); // consume 'type'
                 if let TokenType::Ident(name) = self.current().typ.clone() {
@@ -693,11 +726,18 @@ impl<'a> GoParser<'a> {
                         if matches!(self.current().typ, TokenType::LBrace) {
                             // Try to find runar.SmartContract or runar.StatefulSmartContract
                             let (found_parent, props) = self.parse_struct_body();
-                            if found_parent.is_some() {
-                                contract_name = name;
-                                parent_class = found_parent.unwrap();
-                                properties = props;
-                                break;
+                            if let Some(found_parent) = found_parent {
+                                if contract_name.is_empty() {
+                                    contract_name = name;
+                                    parent_class = found_parent;
+                                    properties = props;
+                                } else {
+                                    self.errors.push(Diagnostic::error(
+                                        go_multiple_contracts_message(&contract_name, &name),
+                                        None,
+                                    ));
+                                }
+                                continue;
                             }
                         }
                         // Not a Rúnar contract struct, restore position
@@ -717,33 +757,22 @@ impl<'a> GoParser<'a> {
         }
 
         if contract_name.is_empty() {
-            self.errors.push(Diagnostic::error("no Rúnar contract struct found in Go source", None));
+            self.errors.push(Diagnostic::error(GO_NO_CONTRACT_MESSAGE, None));
             return None;
         }
 
-        // Collect all methods/functions
+        // F-010: a method whose receiver (value or pointer) is not the
+        // contract type is refused, never silently dropped or admitted.
         let mut raw_methods: Vec<MethodNode> = Vec::new();
-
-        // Continue scanning for func declarations
-        while !matches!(self.current().typ, TokenType::Eof) {
-            self.skip_semis();
-            if !matches!(self.current().typ, TokenType::Func) {
-                self.advance();
-                continue;
-            }
-            self.advance(); // consume 'func'
-
-            // Check if it's a method (with receiver) or a standalone function
-            if matches!(self.current().typ, TokenType::LParen) {
-                // Method: func (recv *ContractName) MethodName(...)
-                if let Some(method) = self.parse_method(&contract_name) {
-                    raw_methods.push(method);
+        for (method, go_name, recv_type) in funcs {
+            match recv_type {
+                Some(recv_type) if recv_type != contract_name => {
+                    self.errors.push(Diagnostic::error(
+                        go_foreign_receiver_message(&go_name, &recv_type, &contract_name),
+                        None,
+                    ));
                 }
-            } else {
-                // Standalone function (no receiver)
-                if let Some(func) = self.parse_standalone_func() {
-                    raw_methods.push(func);
-                }
+                _ => raw_methods.push(method),
             }
         }
 
@@ -1030,13 +1059,15 @@ impl<'a> GoParser<'a> {
     // Method parsing
     // ---------------------------------------------------------------------------
 
-    /// Parse a method: `(recv *ContractName) MethodName(params) ReturnType { body }`
-    /// The `func` keyword has already been consumed.
-    fn parse_method(&mut self, contract_name: &str) -> Option<MethodNode> {
-        // (recv *ContractName)
+    /// Parse a method: `(recv *Type) MethodName(params) ReturnType { body }`
+    /// The `func` keyword has already been consumed. Returns the method, the
+    /// Go spelling of its name and its receiver type (`*` stripped); `parse`
+    /// checks the receiver type against the contract (F-010).
+    fn parse_method(&mut self) -> (MethodNode, String, Option<String>) {
+        // (recv *Type)
         self.expect_tok(&TokenType::LParen);
 
-        let recv_name = if let TokenType::Ident(n) = self.current().typ.clone() {
+        let mut recv_name = if let TokenType::Ident(n) = self.current().typ.clone() {
             let n_clone = n.clone();
             self.advance();
             n_clone
@@ -1044,23 +1075,20 @@ impl<'a> GoParser<'a> {
             "c".to_string()
         };
 
-        // *ContractName or ContractName
+        // *Type or Type
         self.match_tok(&TokenType::Star);
 
         let recv_type = if let TokenType::Ident(n) = self.current().typ.clone() {
             self.advance();
             n
+        } else if matches!(self.current().typ, TokenType::RParen) {
+            // Unnamed receiver `(Type)`: the only identifier is the type.
+            std::mem::replace(&mut recv_name, "c".to_string())
         } else {
             String::new()
         };
 
         self.expect_tok(&TokenType::RParen);
-
-        if recv_type != contract_name {
-            // Not a method on our contract — skip to end of block
-            self.skip_to_matching_brace();
-            return None;
-        }
 
         self.receiver_name = recv_name;
 
@@ -1089,19 +1117,23 @@ impl<'a> GoParser<'a> {
         // Body
         let body = self.parse_block();
 
-        Some(MethodNode {
-            name: method_name,
-            params,
-            body,
-            visibility,
-            source_location: loc,
-            sighash_type: None,
-        })
+        (
+            MethodNode {
+                name: method_name,
+                params,
+                body,
+                visibility,
+                source_location: loc,
+                sighash_type: None,
+            },
+            method_name_raw,
+            Some(recv_type),
+        )
     }
 
     /// Parse a standalone function (no receiver): `FuncName(params) ReturnType { body }`
     /// The `func` keyword has already been consumed.
-    fn parse_standalone_func(&mut self) -> Option<MethodNode> {
+    fn parse_standalone_func(&mut self) -> Option<(MethodNode, String)> {
         let func_name_raw = self.expect_ident();
 
         // Skip init() and main()
@@ -1109,9 +1141,6 @@ impl<'a> GoParser<'a> {
             self.skip_to_matching_brace();
             return None;
         }
-
-        // Exported standalone functions are skipped (only unexported helpers)
-        // (But we parse all, callers can filter)
 
         let func_name = self.idents.declare(&func_name_raw, go_to_camel(&func_name_raw));
         // Standalone functions with receiver = "" → private
@@ -1130,19 +1159,19 @@ impl<'a> GoParser<'a> {
 
         self.receiver_name = saved_recv;
 
-        // Exported standalone functions: skip them (Go compiler also skips them)
-        if func_name_raw.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-            return None;
-        }
-
-        Some(MethodNode {
-            name: func_name,
-            params,
-            body,
-            visibility: Visibility::Private,
-            source_location: loc,
-            sighash_type: None,
-        })
+        // F-010: an exported standalone function is a private helper too,
+        // exactly as in the TS reference.
+        Some((
+            MethodNode {
+                name: func_name,
+                params,
+                body,
+                visibility: Visibility::Private,
+                source_location: loc,
+                sighash_type: None,
+            },
+            func_name_raw,
+        ))
     }
 
     /// Parse parameter list: `(a runar.Type, b runar.Type, ...)`
@@ -2566,5 +2595,102 @@ func (c *VarDemo) Check(data runar.ByteString) {
             }
         }
         assert!(ok, "expected runar.ByteString(data) to unwrap to identifier 'data'");
+    }
+
+    // -----------------------------------------------------------------------
+    // F-010: a method is a contract method only if its receiver IS the
+    // contract. This tier silently dropped a method on another type (and
+    // every method declared before the contract struct); the TS reference,
+    // the Go tier and the Ruby tier made it a PUBLIC entry point. The rule
+    // (user decision R9), with diagnostics shared verbatim by all 7 tiers:
+    //   - the contract is THE struct embedding a runar base; others ignored;
+    //   - zero or several such structs refuse the file;
+    //   - a method whose receiver (value or pointer) is another type refuses it;
+    //   - a free function, exported or not, is a private helper.
+    // Proves: this tier's .runar.go diagnostics and method set per shape.
+    // Does NOT prove: the other tiers, or anything on chain.
+    // -----------------------------------------------------------------------
+
+    const F010_PRELUDE: &str = "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n";
+    const F010_GUARDED: &str = "\ntype Guarded struct {\n\trunar.SmartContract\n\tPubKey runar.PubKey `runar:\"readonly\"`\n}\n\nfunc (c *Guarded) Unlock(sig runar.Sig) {\n\trunar.Assert(runar.CheckSig(sig, c.PubKey))\n}\n";
+    const F010_RECEIVER_ERROR: &str = "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; methods on other types are not allowed";
+
+    fn f010_unrelated(recv: &str) -> String {
+        format!("\ntype Unrelated struct{{}}\n\nfunc ({}) Drain(amount runar.Bigint) {{\n\trunar.Assert(true)\n}}\n", recv)
+    }
+
+    fn f010_errors(src: &str) -> Vec<String> {
+        parse_go_contract(src, Some("Guarded.runar.go"))
+            .errors
+            .iter()
+            .filter(|d| d.severity == crate::frontend::diagnostic::Severity::Error)
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    fn f010_methods(src: &str) -> Vec<String> {
+        let result = parse_go_contract(src, Some("Guarded.runar.go"));
+        let contract = result.contract.expect("contract");
+        contract
+            .methods
+            .iter()
+            .map(|m| format!("{}({})", m.name, if m.visibility == Visibility::Public { "public" } else { "private" }))
+            .collect()
+    }
+
+    #[test]
+    fn test_f010_foreign_receiver_refused() {
+        let cases = [
+            format!("{}{}{}", F010_PRELUDE, F010_GUARDED, f010_unrelated("u Unrelated")),
+            format!("{}{}{}", F010_PRELUDE, F010_GUARDED, f010_unrelated("u *Unrelated")),
+            format!("{}{}{}", F010_PRELUDE, f010_unrelated("u Unrelated"), F010_GUARDED),
+            format!("{}{}{}", F010_PRELUDE, f010_unrelated("u *Unrelated"), F010_GUARDED),
+            format!("{}{}\nfunc (u Unrelated) Drain(amount runar.Bigint) {{\n\trunar.Assert(true)\n}}\n", F010_PRELUDE, F010_GUARDED),
+        ];
+        for (i, src) in cases.iter().enumerate() {
+            assert_eq!(f010_errors(src), vec![F010_RECEIVER_ERROR.to_string()], "case {}", i);
+        }
+    }
+
+    #[test]
+    fn test_f010_contract_receivers_kept() {
+        let src = format!("{}{}\nfunc (c Guarded) Drain(amount runar.Bigint) {{\n\trunar.Assert(amount > 0)\n}}\n", F010_PRELUDE, F010_GUARDED);
+        assert_eq!(f010_errors(&src), Vec::<String>::new());
+        assert_eq!(f010_methods(&src), vec!["unlock(public)", "drain(public)"]);
+    }
+
+    #[test]
+    fn test_f010_exported_free_function_is_private_helper() {
+        let src = format!("{}{}\nfunc Drain(amount runar.Bigint) {{\n\trunar.Assert(true)\n}}\n", F010_PRELUDE, F010_GUARDED);
+        assert_eq!(f010_errors(&src), Vec::<String>::new());
+        assert_eq!(f010_methods(&src), vec!["unlock(public)", "drain(private)"]);
+    }
+
+    #[test]
+    fn test_f010_helper_struct_ignored() {
+        let helper = "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n";
+        for src in [format!("{}{}{}", F010_PRELUDE, F010_GUARDED, helper), format!("{}{}{}", F010_PRELUDE, helper, F010_GUARDED)] {
+            let result = parse_go_contract(&src, Some("Guarded.runar.go"));
+            assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+            let contract = result.contract.expect("contract");
+            assert_eq!(contract.name, "Guarded");
+            let props: Vec<&str> = contract.properties.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(props, vec!["pubKey"]);
+        }
+    }
+
+    #[test]
+    fn test_f010_no_contract_struct() {
+        let src = format!("{}\ntype Helper struct {{\n\tAmount runar.Bigint\n}}\n", F010_PRELUDE);
+        assert_eq!(f010_errors(&src), vec!["no Rúnar contract struct found in Go source".to_string()]);
+    }
+
+    #[test]
+    fn test_f010_two_contract_structs() {
+        let src = format!("{}{}\ntype Other struct {{\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}}\n", F010_PRELUDE, F010_GUARDED);
+        assert_eq!(
+            f010_errors(&src),
+            vec!["multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract".to_string()]
+        );
     }
 }

@@ -119,3 +119,89 @@ type Foo struct {
         # A struct without a runar embedded base is not a Rúnar contract: it
         # should either produce an error or yield no contract.
         assert result.contract is None or len(result.errors) > 0
+
+
+# ---------------------------------------------------------------------------
+# F-010: a method is a contract method only if its receiver IS the contract.
+# This tier silently dropped a method on another type (and any method declared
+# before the contract struct); the TS reference, Go and Ruby made it a PUBLIC
+# entry point. The rule (user decision R9), diagnostics verbatim in all tiers:
+#   - the contract is THE struct embedding a runar base; others are ignored;
+#   - zero or several such structs refuse the file;
+#   - a method whose receiver (value or pointer) is another type refuses it;
+#   - a free function, exported or not, is a private helper.
+# Proves: this tier's .runar.go diagnostics and method set per shape.
+# Does NOT prove: the other tiers, or anything on chain.
+# ---------------------------------------------------------------------------
+
+F010_PRELUDE = 'package contract\n\nimport runar "github.com/icellan/runar/packages/runar-go"\n'
+F010_GUARDED = (
+    "\ntype Guarded struct {\n\trunar.SmartContract\n\tPubKey runar.PubKey `runar:\"readonly\"`\n}\n"
+    "\nfunc (c *Guarded) Unlock(sig runar.Sig) {\n\trunar.Assert(runar.CheckSig(sig, c.PubKey))\n}\n"
+)
+F010_RECEIVER_ERROR = (
+    "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; "
+    "methods on other types are not allowed"
+)
+
+
+def _f010_unrelated(recv: str) -> str:
+    return f"\ntype Unrelated struct{{}}\n\nfunc ({recv}) Drain(amount runar.Bigint) {{\n\trunar.Assert(true)\n}}\n"
+
+
+def _f010_errors(src: str) -> list[str]:
+    result = parse_source(src, "Guarded.runar.go")
+    return [e.message for e in result.errors if e.severity == "error"]
+
+
+def _f010_methods(src: str) -> list[str]:
+    c = parse_source(src, "Guarded.runar.go").contract
+    assert c is not None
+    return [f"{m.name}({m.visibility})" for m in c.methods]
+
+
+class TestF010ContractStructAndReceivers:
+    @pytest.mark.parametrize(
+        "src",
+        [
+            F010_PRELUDE + F010_GUARDED + _f010_unrelated("u Unrelated"),
+            F010_PRELUDE + F010_GUARDED + _f010_unrelated("u *Unrelated"),
+            F010_PRELUDE + _f010_unrelated("u Unrelated") + F010_GUARDED,
+            F010_PRELUDE + _f010_unrelated("u *Unrelated") + F010_GUARDED,
+            F010_PRELUDE + F010_GUARDED
+            + "\nfunc (u Unrelated) Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n",
+        ],
+        ids=["value-after", "pointer-after", "value-before", "pointer-before", "undeclared-type"],
+    )
+    def test_foreign_receiver_refused(self, src):
+        assert _f010_errors(src) == [F010_RECEIVER_ERROR]
+
+    def test_contract_receivers_kept(self):
+        src = F010_PRELUDE + F010_GUARDED + "\nfunc (c Guarded) Drain(amount runar.Bigint) {\n\trunar.Assert(amount > 0)\n}\n"
+        assert _f010_errors(src) == []
+        assert _f010_methods(src) == ["unlock(public)", "drain(public)"]
+
+    def test_exported_free_function_is_private_helper(self):
+        src = F010_PRELUDE + F010_GUARDED + "\nfunc Drain(amount runar.Bigint) {\n\trunar.Assert(true)\n}\n"
+        assert _f010_errors(src) == []
+        assert _f010_methods(src) == ["unlock(public)", "drain(private)"]
+
+    def test_helper_struct_ignored(self):
+        helper = "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"
+        for src in (F010_PRELUDE + F010_GUARDED + helper, F010_PRELUDE + helper + F010_GUARDED):
+            result = parse_source(src, "Guarded.runar.go")
+            assert result.errors == [], result.error_strings()
+            assert result.contract.name == "Guarded"
+            assert [p.name for p in result.contract.properties] == ["pubKey"]
+
+    def test_no_contract_struct(self):
+        src = F010_PRELUDE + "\ntype Helper struct {\n\tAmount runar.Bigint\n}\n"
+        assert _f010_errors(src) == ["no Rúnar contract struct found in Go source"]
+
+    def test_two_contract_structs(self):
+        src = F010_PRELUDE + F010_GUARDED + "\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n"
+        assert _f010_errors(src) == [
+            "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; "
+            "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract "
+            "or runar.UnsafeSmartContract"
+        ]

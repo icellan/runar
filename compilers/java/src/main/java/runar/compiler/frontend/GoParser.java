@@ -83,7 +83,7 @@ public final class GoParser {
         if (contract != null && collision != null) state.errors.add(collision);
         if (contract == null) {
             if (state.errors.isEmpty()) {
-                throw new ParseException("no Rúnar contract struct found in Go source: " + filename);
+                throw new ParseException(GO_NO_CONTRACT_MESSAGE);
             }
             throw new ParseException(String.join("; ", state.errors));
         }
@@ -92,6 +92,24 @@ public final class GoParser {
         }
         return contract;
     }
+
+    // F-010 diagnostics -- emitted verbatim by every tier's .runar.go parser
+    // (TS reference: goNoContractMessage / goMultipleContractsMessage /
+    // goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+    static final String GO_NO_CONTRACT_MESSAGE = "no Rúnar contract struct found in Go source";
+
+    static String goMultipleContractsMessage(String first, String second) {
+        return "multiple Rúnar contract structs found in Go source: '" + first + "' and '" + second + "'; "
+            + "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract";
+    }
+
+    static String goForeignReceiverMessage(String method, String receiverType, String contract) {
+        return "method '" + method + "' has receiver type '" + receiverType + "', not the contract type '"
+            + contract + "'; methods on other types are not allowed";
+    }
+
+    /** A parsed {@code func}: the method, its Go name, and its receiver type or null. */
+    private record FuncDecl(MethodNode method, String goName, String receiverType) {}
 
     /** Checked exception for parse-time problems. */
     public static class ParseException extends Exception {
@@ -730,7 +748,7 @@ public final class GoParser {
             String contractName = "";
             String parentClass = "";
             List<PropertyNode> properties = new ArrayList<>();
-            List<MethodNode> methods = new ArrayList<>();
+            List<FuncDecl> funcs = new ArrayList<>();
             boolean structFound = false;
 
             while (!check(Tok.EOF)) {
@@ -740,20 +758,37 @@ public final class GoParser {
                 if (checkIdent("type")) {
                     TypeDeclResult result = parseTypeDecl();
                     if (result != null) {
+                        if (structFound) {
+                            // F-010: exactly one contract struct; never merged.
+                            addError(goMultipleContractsMessage(contractName, result.name));
+                            continue;
+                        }
                         contractName = result.name;
                         parentClass = result.parent;
                         properties = result.properties;
                         structFound = true;
                     }
                 } else if (checkIdent("func")) {
-                    MethodNode m = parseFuncDecl(contractName);
-                    if (m != null) methods.add(m);
+                    FuncDecl f = parseFuncDecl();
+                    if (f != null) funcs.add(f);
                 } else {
                     advance();
                 }
             }
 
             if (!structFound) return null;
+
+            // F-010: a method whose receiver (value or pointer) is not the
+            // contract type is refused -- checked once the whole file is read,
+            // so a method declared before the contract struct is judged the same way.
+            List<MethodNode> methods = new ArrayList<>();
+            for (FuncDecl f : funcs) {
+                if (f.receiverType() != null && !f.receiverType().equals(contractName)) {
+                    addError(goForeignReceiverMessage(f.goName(), f.receiverType(), contractName));
+                    continue;
+                }
+                methods.add(f.method());
+            }
 
             // Fold init() into property initializers.
             List<MethodNode> finalMethods = new ArrayList<>();
@@ -1007,12 +1042,16 @@ public final class GoParser {
 
         // -- Func declaration --------------------------------------------
 
-        MethodNode parseFuncDecl(String contractName) {
+        /**
+         * Parse one {@code func}. The receiver type ({@code *} stripped, or null
+         * for a free function) is checked against the contract in parseFile (F-010).
+         */
+        FuncDecl parseFuncDecl() {
             SourceLocation location = loc();
             expectIdent("func");
 
             boolean hasReceiver = false;
-            boolean isContractMethod = false;
+            String receiverType = null;
             String localReceiverName = "";
 
             if (check(Tok.LPAREN)) {
@@ -1026,9 +1065,7 @@ public final class GoParser {
                     match(Tok.STAR);
                     Token typeTok = expect(Tok.IDENT);
                     expect(Tok.RPAREN);
-                    if (typeTok.value.equals(contractName)) {
-                        isContractMethod = true;
-                    }
+                    receiverType = typeTok.value;
                 } else {
                     pos = saved;
                 }
@@ -1040,21 +1077,16 @@ public final class GoParser {
             this.receiverName = hasReceiver ? localReceiverName : "";
 
             Visibility visibility;
-            if (hasReceiver && isContractMethod) {
+            if (hasReceiver) {
                 visibility = Character.isUpperCase(funcName.charAt(0)) ? Visibility.PUBLIC : Visibility.PRIVATE;
-            } else if (!hasReceiver) {
+            } else {
+                // Standalone functions: skip init and main. F-010: an exported
+                // standalone function is a private helper, as in the TS reference.
                 if ("init".equals(funcName) || "main".equals(funcName)) {
                     skipFuncBody();
                     return null;
                 }
-                if (Character.isUpperCase(funcName.charAt(0))) {
-                    skipFuncBody();
-                    return null;
-                }
                 visibility = Visibility.PRIVATE;
-            } else {
-                skipFuncBody();
-                return null;
             }
 
             String methodName = idents.declare(funcName, goFieldToCamel(funcName));
@@ -1065,7 +1097,7 @@ public final class GoParser {
             }
             List<Statement> body = parseBlock();
 
-            return new MethodNode(methodName, params, body, visibility, location);
+            return new FuncDecl(new MethodNode(methodName, params, body, visibility, location), funcName, receiverType);
         }
 
         boolean looksLikeReceiver() {

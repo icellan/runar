@@ -1033,3 +1033,130 @@ func (c *AliasSpelling) Unlock(value runar.Int, width runar.Int) {
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// F-010 — a method is a contract method only if its receiver IS the contract.
+//
+// The parser skipped the receiver type entirely, so an exported method on any
+// other type in the file became a public spending entry point:
+//
+//   type Unrelated struct{}
+//   func (u Unrelated) Drain(amount runar.Bigint) { runar.Assert(true) }
+//
+// compiled into the Guarded contract as `drain` — a selector anyone can
+// satisfy with `<amount> <1>` and no key. And the contract itself was
+// "whichever struct came last", so a helper struct declared after the
+// contract renamed it and added its fields as properties.
+//
+// The rule (user decision R9, held identically by all seven tiers):
+//   - the contract is THE struct embedding runar.SmartContract /
+//     StatefulSmartContract / UnsafeSmartContract; other structs are ignored;
+//   - zero or several such structs refuse the file;
+//   - a method whose receiver (value or pointer) is another type refuses it;
+//   - a free function, exported or not, is a private helper.
+//
+// Proves: the TS .runar.go parser's diagnostics and method set for each shape.
+// Does NOT prove: the other six tiers (each has the same cases in its own
+// suite, and conformance/negatives/N51 gates the CLI verdict), nor anything
+// on chain (remediation-logs/F-010 holds the Spend.validate evidence).
+// ---------------------------------------------------------------------------
+
+describe('F-010: the contract struct and its receivers', () => {
+  const PRELUDE = `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+`;
+  const GUARDED = `
+type Guarded struct {
+	runar.SmartContract
+	PubKey runar.PubKey \`runar:"readonly"\`
+}
+
+func (c *Guarded) Unlock(sig runar.Sig) {
+	runar.Assert(runar.CheckSig(sig, c.PubKey))
+}
+`;
+  const unrelated = (recv: string) => `
+type Unrelated struct{}
+
+func (${recv}) Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`;
+  const RECEIVER_ERROR =
+    "method 'Drain' has receiver type 'Unrelated', not the contract type 'Guarded'; " +
+    'methods on other types are not allowed';
+
+  const errorsOf = (src: string) =>
+    parseGoSource(src, 'Guarded.runar.go').errors
+      .filter((e) => e.severity === 'error')
+      .map((e) => e.message);
+  const methodsOf = (src: string) =>
+    parseGoSource(src, 'Guarded.runar.go').contract!.methods.map(
+      (m) => `${m.name}(${m.visibility})`,
+    );
+
+  it.each([
+    ['value receiver, helper after the contract', PRELUDE + GUARDED + unrelated('u Unrelated')],
+    ['pointer receiver, helper after the contract', PRELUDE + GUARDED + unrelated('u *Unrelated')],
+    ['value receiver, helper before the contract', PRELUDE + unrelated('u Unrelated') + GUARDED],
+    ['pointer receiver, helper before the contract', PRELUDE + unrelated('u *Unrelated') + GUARDED],
+  ])('refuses a method on another type (%s)', (_label, src) => {
+    expect(errorsOf(src)).toEqual([RECEIVER_ERROR]);
+  });
+
+  it('refuses a method on a type the file never declares', () => {
+    const src = PRELUDE + GUARDED + `
+func (u Unrelated) Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`;
+    expect(errorsOf(src)).toEqual([RECEIVER_ERROR]);
+  });
+
+  it('keeps value- and pointer-receiver methods on the contract type', () => {
+    const src = PRELUDE + GUARDED + `
+func (c Guarded) Drain(amount runar.Bigint) {
+	runar.Assert(amount > 0)
+}
+`;
+    expect(errorsOf(src)).toEqual([]);
+    expect(methodsOf(src)).toEqual(['unlock(public)', 'drain(public)']);
+  });
+
+  it('keeps an exported free function as a private helper', () => {
+    const src = PRELUDE + GUARDED + `
+func Drain(amount runar.Bigint) {
+	runar.Assert(true)
+}
+`;
+    expect(errorsOf(src)).toEqual([]);
+    expect(methodsOf(src)).toEqual(['unlock(public)', 'drain(private)']);
+  });
+
+  it('a helper struct never renames the contract or replaces its properties', () => {
+    for (const src of [
+      PRELUDE + GUARDED + '\ntype Helper struct {\n\tAmount runar.Bigint\n}\n',
+      PRELUDE + '\ntype Helper struct {\n\tAmount runar.Bigint\n}\n' + GUARDED,
+    ]) {
+      const result = parseGoSource(src, 'Guarded.runar.go');
+      expect(result.errors.filter((e) => e.severity === 'error')).toEqual([]);
+      expect(result.contract!.name).toBe('Guarded');
+      expect(result.contract!.properties.map((p) => p.name)).toEqual(['pubKey']);
+    }
+  });
+
+  it('refuses a file with no contract struct', () => {
+    const src = PRELUDE + '\ntype Helper struct {\n\tAmount runar.Bigint\n}\n';
+    expect(errorsOf(src)).toEqual(['no Rúnar contract struct found in Go source']);
+  });
+
+  it('refuses a file with two contract structs', () => {
+    const src = PRELUDE + GUARDED + '\ntype Other struct {\n\trunar.StatefulSmartContract\n\tCount runar.Bigint\n}\n';
+    expect(errorsOf(src)).toEqual([
+      "multiple Rúnar contract structs found in Go source: 'Guarded' and 'Other'; " +
+        'exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract ' +
+        'or runar.UnsafeSmartContract',
+    ]);
+  });
+});

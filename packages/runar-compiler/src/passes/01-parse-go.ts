@@ -472,28 +472,44 @@ class GoParser extends ParserCore<GoToken> {
     // Skip `import runar "..."`
     this.skipImports();
 
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
-    const properties: PropertyNode[] = [];
-    const methods: MethodNode[] = [];
+    const structs: Array<ReturnType<GoParser['parseStructDecl']>> = [];
+    const funcs: Array<ReturnType<GoParser['parseFuncDecl']>> = [];
 
     // Parse top-level declarations
     while (this.current().type !== 'eof') {
       if (this.current().type === 'type') {
-        // struct declaration
-        const result = this.parseStructDecl();
-        if (result) {
-          this.contractName = result.name;
-          parentClass = result.parentClass;
-          properties.push(...result.properties);
-        }
+        structs.push(this.parseStructDecl());
       } else if (this.current().type === 'func') {
-        const method = this.parseFuncDecl();
-        if (method) {
-          methods.push(method);
-        }
+        funcs.push(this.parseFuncDecl());
       } else {
         this.advance(); // skip unknown top-level tokens
       }
+    }
+
+    // F-010: the contract is THE struct embedding a Rúnar base class — never
+    // "the last struct in the file". Any other struct is ignored, and a
+    // method whose receiver is not the contract type is refused: before this
+    // rule an exported method on a helper type became a public entry point.
+    const contracts = structs.filter(s => s.embedsBase);
+    const contractStruct = contracts[0];
+    if (contractStruct === undefined) {
+      this.errors.push(makeDiagnostic(goNoContractMessage(), 'error'));
+      return { contract: null, errors: this.errors };
+    }
+    for (const extra of contracts.slice(1)) {
+      this.errors.push(makeDiagnostic(goMultipleContractsMessage(contractStruct.name, extra.name), 'error'));
+    }
+    this.contractName = contractStruct.name;
+    const parentClass = contractStruct.parentClass;
+    const properties: PropertyNode[] = [...contractStruct.properties];
+    const methods: MethodNode[] = [];
+    for (const f of funcs) {
+      if (f.receiverType !== null && f.receiverType !== this.contractName) {
+        this.errors.push(makeDiagnostic(
+          goForeignReceiverMessage(f.goName, f.receiverType, this.contractName), 'error', f.method.sourceLocation));
+        continue;
+      }
+      methods.push(f.method);
     }
 
     // Process init() method: extract property initializers
@@ -598,7 +614,9 @@ class GoParser extends ParserCore<GoToken> {
     name: string;
     parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
     properties: PropertyNode[];
-  } | null {
+    /** F-010: embeds runar.SmartContract / StatefulSmartContract / UnsafeSmartContract. */
+    embedsBase: boolean;
+  } {
     this.expect('type');
     const nameToken = this.expect('ident');
     const name = nameToken.value;
@@ -606,6 +624,7 @@ class GoParser extends ParserCore<GoToken> {
     this.expect('{');
 
     let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract' = 'SmartContract';
+    let embedsBase = false;
     const properties: PropertyNode[] = [];
 
     while (this.current().type !== '}' && this.current().type !== 'eof') {
@@ -622,6 +641,10 @@ class GoParser extends ParserCore<GoToken> {
           parentClass = 'StatefulSmartContract';
         } else if (embedName === 'UnsafeSmartContract') {
           parentClass = 'UnsafeSmartContract';
+        }
+        if (embedName === 'SmartContract' || embedName === 'StatefulSmartContract' ||
+            embedName === 'UnsafeSmartContract') {
+          embedsBase = true;
         }
         continue;
       }
@@ -661,7 +684,7 @@ class GoParser extends ParserCore<GoToken> {
     }
     this.expect('}');
 
-    return { name, parentClass, properties };
+    return { name, parentClass, properties, embedsBase };
   }
 
   // -----------------------------------------------------------------------
@@ -704,13 +727,19 @@ class GoParser extends ParserCore<GoToken> {
   // Function/method declaration
   // -----------------------------------------------------------------------
 
-  private parseFuncDecl(): MethodNode | null {
+  /**
+   * Parse one `func` declaration. `receiverType` is the receiver's type name
+   * (`*` stripped) or null for a free function; `parse()` checks it against
+   * the contract struct once the whole file has been read (F-010).
+   */
+  private parseFuncDecl(): { method: MethodNode; goName: string; receiverType: string | null } {
     const location = this.loc();
     this.expect('func');
 
     // Check for receiver: (c *Type)
     let hasReceiver = false;
     let recvName = '';
+    let receiverType: string | null = null;
 
     if (this.current().type === '(') {
       // This is a method with a receiver
@@ -718,8 +747,14 @@ class GoParser extends ParserCore<GoToken> {
       recvName = this.expect('ident').value;
       // Skip '*'
       if (this.current().type === '*') this.advance();
-      // Skip type name
-      if (this.current().type === 'ident') this.advance();
+      // Type name. An unnamed receiver `(Type)` has only the type.
+      receiverType = '';
+      if (this.current().type === 'ident') {
+        receiverType = this.advance().value;
+      } else if (this.current().type === ')') {
+        receiverType = recvName;
+        recvName = '';
+      }
       this.expect(')');
       hasReceiver = true;
     }
@@ -819,12 +854,16 @@ class GoParser extends ParserCore<GoToken> {
     const name = this.declare(funcName);
 
     return {
-      kind: 'method',
-      name,
-      params,
-      body,
-      visibility,
-      sourceLocation: location,
+      method: {
+        kind: 'method',
+        name,
+        params,
+        body,
+        visibility,
+        sourceLocation: location,
+      },
+      goName: funcName,
+      receiverType,
     };
   }
 
@@ -1341,6 +1380,24 @@ class GoParser extends ParserCore<GoToken> {
     this.expect('}');
     return { kind: 'array_literal', elements };
   }
+}
+
+// ---------------------------------------------------------------------------
+// F-010 diagnostics — every tier's .runar.go parser emits these verbatim.
+// ---------------------------------------------------------------------------
+
+export function goNoContractMessage(): string {
+  return 'no Rúnar contract struct found in Go source';
+}
+
+export function goMultipleContractsMessage(first: string, second: string): string {
+  return `multiple Rúnar contract structs found in Go source: '${first}' and '${second}'; ` +
+    'exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract';
+}
+
+export function goForeignReceiverMessage(method: string, receiverType: string, contract: string): string {
+  return `method '${method}' has receiver type '${receiverType}', not the contract type '${contract}'; ` +
+    'methods on other types are not allowed';
 }
 
 // ---------------------------------------------------------------------------

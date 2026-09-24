@@ -529,6 +529,21 @@ module RunarCompiler
     # Go parser
     # -------------------------------------------------------------------
 
+    # F-010 diagnostics -- emitted verbatim by every tier's .runar.go parser
+    # (TS reference: goNoContractMessage / goMultipleContractsMessage /
+    # goForeignReceiverMessage in packages/runar-compiler/src/passes/01-parse-go.ts).
+    GO_NO_CONTRACT_MESSAGE = "no Rúnar contract struct found in Go source"
+
+    def self.go_multiple_contracts_message(first, second)
+      "multiple Rúnar contract structs found in Go source: '#{first}' and '#{second}'; " \
+        "exactly one struct may embed runar.SmartContract, runar.StatefulSmartContract or runar.UnsafeSmartContract"
+    end
+
+    def self.go_foreign_receiver_message(method, receiver_type, contract)
+      "method '#{method}' has receiver type '#{receiver_type}', not the contract type '#{contract}'; " \
+        "methods on other types are not allowed"
+    end
+
     class GoParser
       include GoTokens
 
@@ -620,25 +635,44 @@ module RunarCompiler
         # Skip imports
         skip_imports
 
-        parent_class = "SmartContract"
-        properties = []
-        methods = []
+        structs = []
+        funcs = []
 
         # Parse top-level declarations
         while !check(TOK_EOF)
           if check_ident("type")
-            result = parse_struct_decl
-            if result
-              @contract_name = result[:name]
-              parent_class = result[:parent_class]
-              properties = result[:properties]
-            end
+            structs << parse_struct_decl
           elsif check_ident("func")
-            method = parse_func_decl
-            methods << method if method
+            funcs << parse_func_decl
           else
             advance # skip unknown top-level tokens
           end
+        end
+
+        # F-010: the contract is THE struct embedding a Rúnar base class --
+        # never "the last struct in the file". Any other struct is ignored,
+        # and a method whose receiver is not the contract type is refused:
+        # before this rule an exported method on a helper type became a
+        # public entry point.
+        contracts = structs.select { |st| st[:embeds_base] }
+        if contracts.empty?
+          add_error(Frontend::GO_NO_CONTRACT_MESSAGE)
+          return nil
+        end
+        contract_struct = contracts.first
+        contracts.drop(1).each do |extra|
+          add_error(Frontend.go_multiple_contracts_message(contract_struct[:name], extra[:name]))
+        end
+        @contract_name = contract_struct[:name]
+        parent_class = contract_struct[:parent_class]
+        properties = contract_struct[:properties].dup
+        methods = []
+        funcs.each do |f|
+          if !f[:receiver_type].nil? && f[:receiver_type] != @contract_name
+            add_error(Frontend.go_foreign_receiver_message(f[:go_name], f[:receiver_type], @contract_name))
+            next
+          end
+          methods << f[:method]
         end
 
         # Process init() method: extract property initializers
@@ -741,6 +775,7 @@ module RunarCompiler
         expect(TOK_LBRACE)
 
         parent_class = "SmartContract"
+        embeds_base = false
         properties = []
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
@@ -754,6 +789,7 @@ module RunarCompiler
             embed_name = expect(TOK_IDENT).value
             parent_class = "StatefulSmartContract" if embed_name == "StatefulSmartContract"
             parent_class = "UnsafeSmartContract" if embed_name == "UnsafeSmartContract"
+            embeds_base = true if %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(embed_name)
             next
           end
 
@@ -789,7 +825,7 @@ module RunarCompiler
         end
         expect(TOK_RBRACE)
 
-        { name: name, parent_class: parent_class, properties: properties }
+        { name: name, parent_class: parent_class, properties: properties, embeds_base: embeds_base }
       end
 
       def expect_ident(value)
@@ -845,6 +881,7 @@ module RunarCompiler
         # Check for receiver: (c *Type)
         has_receiver = false
         recv_name = ""
+        receiver_type = nil
 
         if check(TOK_LPAREN)
           advance # '('
@@ -853,9 +890,13 @@ module RunarCompiler
           if check(TOK_STAR)
             advance
           end
-          # Skip type name
+          # Type name. An unnamed receiver `(Type)` has only the type.
+          receiver_type = ""
           if check(TOK_IDENT)
-            advance
+            receiver_type = advance.value
+          elsif check(TOK_RPAREN)
+            receiver_type = recv_name
+            recv_name = ""
           end
           expect(TOK_RPAREN)
           has_receiver = true
@@ -935,13 +976,15 @@ module RunarCompiler
         # Convert method name from Go PascalCase to Runar camelCase
         name = declare(func_name)
 
-        MethodNode.new(
+        method = MethodNode.new(
           name: name,
           params: params,
           body: body,
           visibility: visibility,
           source_location: location
         )
+        # F-010: parse_contract checks receiver_type against the contract.
+        { method: method, go_name: func_name, receiver_type: receiver_type }
       end
 
       # -- Statement parsing -------------------------------------------------
