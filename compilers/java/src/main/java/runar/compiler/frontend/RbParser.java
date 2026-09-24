@@ -348,10 +348,23 @@ public final class RbParser {
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
+    /**
+     * Whether {@code line} starts at column 0 with {@code marker}
+     * ({@code =begin} or {@code =end}) as a whole word: followed by ASCII
+     * whitespace (Ruby's {@code \s}) or end of line.
+     */
+    private static boolean isEmbeddedDocMarker(String line, String marker) {
+        if (!line.startsWith(marker)) return false;
+        if (line.length() == marker.length()) return true;
+        return " \t\n\u000b\f\r".indexOf(line.charAt(marker.length())) >= 0;
+    }
+
     private static List<Token> tokenize(String source, String filename, List<String> lex) throws ParseException {
         List<Token> tokens = new ArrayList<>();
         String[] lines = source.split("\n", -1);
         int parenDepth = 0;
+        // Line number of an open `=begin` embedded document, or 0.
+        int blockCommentStart = 0;
 
         for (int lineIdx = 0; lineIdx < lines.length; lineIdx++) {
             int lineNum = lineIdx + 1;
@@ -361,6 +374,22 @@ public final class RbParser {
                 raw = raw.substring(0, raw.length() - 1);
             }
             String line = raw;
+
+            // N-021: Ruby embedded documents, the Ruby tier's F-018 rule
+            // (Ruby's own). `=begin` / `=end` open and close a block comment
+            // only at column 0 and only as a whole word (followed by
+            // whitespace or end of line). Every line from `=begin` through
+            // `=end` is a comment. Before this, a method "commented out" this
+            // way compiled as a live spend path and the `end` of `=end`
+            // closed the class early.
+            if (blockCommentStart != 0) {
+                if (isEmbeddedDocMarker(line, "=end")) blockCommentStart = 0;
+                continue;
+            }
+            if (isEmbeddedDocMarker(line, "=begin")) {
+                blockCommentStart = lineNum;
+                continue;
+            }
 
             // Detect blank or comment-only lines
             int firstNonSpace = 0;
@@ -612,6 +641,12 @@ public final class RbParser {
             }
         }
 
+        if (blockCommentStart != 0) {
+            // `file:N:` with no column is how the Go tier prints this
+            // diagnostic's column-0 location.
+            lex.add(filename + ":" + blockCommentStart + ": unterminated '=begin' block comment starting at line "
+                + blockCommentStart + ": missing '=end'");
+        }
         tokens.add(new Token(TK.EOF, "", lines.length + 1, 1));
         return tokens;
     }

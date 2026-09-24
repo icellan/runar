@@ -363,6 +363,15 @@ def _is_ident_part(ch: str) -> bool:
     return ch.isalnum() or ch == "_"
 
 
+def _is_embedded_doc_marker(line: str, marker: str) -> bool:
+    """Whether ``line`` starts at column 0 with ``marker`` (``=begin`` or
+    ``=end``) as a whole word: followed by ASCII whitespace (Ruby's ``\\s``)
+    or end of line."""
+    if not line.startswith(marker):
+        return False
+    return len(line) == len(marker) or line[len(marker)] in " \t\n\v\f\r"
+
+
 def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Tokenise a Ruby Runar source file line by line.
 
@@ -374,12 +383,28 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
     lex = lex if lex is not None else []
     lines = source.split("\n")
     paren_depth = 0
+    # Line number of an open ``=begin`` embedded document, or 0.
+    block_comment_start = 0
 
     for line_idx, raw_line in enumerate(lines):
         line_num = line_idx + 1
 
         # Strip trailing carriage return
         line = raw_line.rstrip("\r")
+
+        # N-021: Ruby embedded documents, the Ruby tier's F-018 rule (Ruby's
+        # own). ``=begin`` / ``=end`` open and close a block comment only at
+        # column 0 and only as a whole word (followed by whitespace or end of
+        # line). Every line from ``=begin`` through ``=end`` is a comment.
+        # Before this, a method "commented out" this way compiled as a live
+        # spend path and the ``end`` of ``=end`` closed the class early.
+        if block_comment_start:
+            if _is_embedded_doc_marker(line, "=end"):
+                block_comment_start = 0
+            continue
+        if _is_embedded_doc_marker(line, "=begin"):
+            block_comment_start = line_num
+            continue
 
         # Skip blank lines and comment-only lines
         stripped = line.lstrip()
@@ -613,6 +638,11 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
         # Emit NEWLINE at end of significant line (only if not inside parens)
         if paren_depth == 0:
             tokens.append(Token(TOK_NEWLINE, "", line_num, len(line) + 1))
+
+    if block_comment_start:
+        lex.append(lex_error(
+            f"unterminated '=begin' block comment starting at line {block_comment_start}: missing '=end'",
+            file_name, block_comment_start, 0))
 
     tokens.append(Token(TOK_EOF, "", len(lines) + 1, 1))
     return tokens

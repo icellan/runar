@@ -74,6 +74,8 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
   // Track parenthesis depth for multi-line expressions
   let parenDepth = 0;
+  // Line number of an open `=begin` embedded document, or 0.
+  let blockCommentStart = 0;
 
   function add(type: TokenType, value: string, line: number, col: number) {
     tokens.push({ type, value, line, column: col });
@@ -85,6 +87,21 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
 
     // Strip trailing \r
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+
+    // N-021: Ruby embedded documents, the Ruby tier's F-018 rule (Ruby's
+    // own). `=begin` / `=end` open and close a block comment only at column 0
+    // and only as a whole word (followed by whitespace or end of line). Every
+    // line from `=begin` through `=end` is a comment. Before this, a method
+    // "commented out" this way compiled as a live spend path and the `end` of
+    // `=end` closed the class early.
+    if (blockCommentStart !== 0) {
+      if (isEmbeddedDocMarker(line, '=end')) blockCommentStart = 0;
+      continue;
+    }
+    if (isEmbeddedDocMarker(line, '=begin')) {
+      blockCommentStart = lineNum;
+      continue;
+    }
 
     // Skip blank lines and comment-only lines
     const stripped = line.trimStart();
@@ -342,8 +359,23 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     }
   }
 
+  if (blockCommentStart !== 0) {
+    errors.push(makeDiagnostic(
+      `unterminated '=begin' block comment starting at line ${blockCommentStart}: missing '=end'`,
+      'error',
+      { file, line: blockCommentStart, column: 0 },
+    ));
+  }
+
   add('eof', '', lines.length + 1, 1);
   return tokens;
+}
+
+/** Whether `line` starts at column 0 with `marker` (`=begin` or `=end`) as a
+ *  whole word: followed by ASCII whitespace (Ruby's `\s`) or end of line. */
+function isEmbeddedDocMarker(line: string, marker: string): boolean {
+  if (!line.startsWith(marker)) return false;
+  return line.length === marker.length || ' \t\n\v\f\r'.includes(line[marker.length]!);
 }
 
 // ---------------------------------------------------------------------------

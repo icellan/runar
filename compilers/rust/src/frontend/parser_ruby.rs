@@ -326,6 +326,8 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
     let mut tokens = Vec::new();
     let lines: Vec<&str> = source.split('\n').collect();
     let mut paren_depth: usize = 0;
+    // Line number of an open `=begin` embedded document, or 0.
+    let mut block_comment_start: usize = 0;
 
     for (line_idx, raw_line) in lines.iter().enumerate() {
         let line_num = line_idx + 1;
@@ -335,6 +337,23 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
         } else {
             raw_line
         };
+
+        // N-021: Ruby embedded documents, the Ruby tier's F-018 rule (Ruby's
+        // own). `=begin` / `=end` open and close a block comment only at
+        // column 0 and only as a whole word (followed by whitespace or end of
+        // line). Every line from `=begin` through `=end` is a comment. Before
+        // this, a method "commented out" this way compiled as a live spend
+        // path and the `end` of `=end` closed the class early.
+        if block_comment_start != 0 {
+            if is_embedded_doc_marker(line, "=end") {
+                block_comment_start = 0;
+            }
+            continue;
+        }
+        if is_embedded_doc_marker(line, "=begin") {
+            block_comment_start = line_num;
+            continue;
+        }
 
         // Skip blank lines and comment-only lines
         let stripped = line.trim_start();
@@ -752,8 +771,29 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
         }
     }
 
+    if block_comment_start != 0 {
+        errors.push(lex_error(
+            &format!(
+                "unterminated '=begin' block comment starting at line {}: missing '=end'",
+                block_comment_start
+            ),
+            file,
+            block_comment_start,
+            0,
+        ));
+    }
+
     tokens.push(Token::Eof);
     tokens
+}
+
+/// Whether `line` starts at column 0 with `marker` (`=begin` or `=end`) as a
+/// whole word: followed by ASCII whitespace (Ruby's `\s`) or end of line.
+fn is_embedded_doc_marker(line: &str, marker: &str) -> bool {
+    match line.strip_prefix(marker) {
+        None => false,
+        Some(rest) => matches!(rest.bytes().next(), None | Some(b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')),
+    }
 }
 
 // ---------------------------------------------------------------------------

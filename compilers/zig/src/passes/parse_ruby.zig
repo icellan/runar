@@ -79,7 +79,38 @@ pub fn parseRuby(allocator: Allocator, source: []const u8, file_name: []const u8
     // F-011: report an unterminated literal (the tokenizer records it).
     var t = Tokenizer.init(allocator, source);
     _ = t.tokenize();
-    return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated) };
+    const errors = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    return .{ .contract = r.contract, .errors = prependUnterminatedBegin(allocator, errors, file_name, t.block_comment_start) };
+}
+
+var unterminated_begin_fallback = [_][]const u8{"unterminated '=begin' block comment: missing '=end'"};
+
+/// N-021: `errors` with `file:N: unterminated '=begin' ...` in front when the
+/// `=begin` on line N was never closed (`start` != 0). `file:N:` with no
+/// column is how the Go tier prints this diagnostic's column-0 location. An
+/// allocation failure still refuses the source (it never drops the error).
+fn prependUnterminatedBegin(allocator: Allocator, errors: [][]const u8, file_name: []const u8, start: u32) [][]const u8 {
+    if (start == 0) return errors;
+    const text = std.fmt.allocPrint(
+        allocator,
+        "{s}:{d}: unterminated '=begin' block comment starting at line {d}: missing '=end'",
+        .{ file_name, start, start },
+    ) catch return unterminated_begin_fallback[0..];
+    const out = allocator.alloc([]const u8, errors.len + 1) catch return unterminated_begin_fallback[0..];
+    out[0] = text;
+    @memcpy(out[1..], errors);
+    return out;
+}
+
+/// Whether `line` starts at column 0 with `marker` (`=begin` or `=end`) as a
+/// whole word: followed by ASCII whitespace (Ruby's `\s`) or end of line.
+fn isEmbeddedDocMarker(line: []const u8, marker: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, marker)) return false;
+    if (line.len == marker.len) return true;
+    return switch (line[marker.len]) {
+        ' ', '\t', '\n', 0x0b, 0x0c, '\r' => true,
+        else => false,
+    };
 }
 
 
@@ -178,6 +209,8 @@ const Tokenizer = struct {
     tokens: std.ArrayListUnmanaged(Token),
     /// F-011: the first unterminated quoted literal, if any.
     unterminated: ?lex_diag.Pos = null,
+    /// N-021: line number of an open `=begin` embedded document, or 0.
+    block_comment_start: u32 = 0,
 
     fn init(allocator: Allocator, source: []const u8) Tokenizer {
         return .{ .allocator = allocator, .source = source, .tokens = .empty };
@@ -204,6 +237,24 @@ const Tokenizer = struct {
             }
 
             const raw_line = self.source[line_start..effective_end];
+
+            // N-021: Ruby embedded documents, the Ruby tier's F-018 rule
+            // (Ruby's own). `=begin` / `=end` open and close a block comment
+            // only at column 0 and only as a whole word (followed by
+            // whitespace or end of line). Every line from `=begin` through
+            // `=end` is a comment. Before this, a method "commented out" this
+            // way compiled as a live spend path and the `end` of `=end`
+            // closed the class early.
+            const in_block = self.block_comment_start != 0;
+            if (in_block and isEmbeddedDocMarker(raw_line, "=end")) {
+                self.block_comment_start = 0;
+            } else if (!in_block and isEmbeddedDocMarker(raw_line, "=begin")) {
+                self.block_comment_start = line_num;
+            }
+            if (in_block or self.block_comment_start != 0) {
+                if (line_end < self.source.len) line_start = line_end + 1 else line_start = line_end;
+                continue;
+            }
 
             // Skip blank lines and comment-only lines
             const stripped = trimLeft(raw_line);
