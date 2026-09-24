@@ -651,7 +651,8 @@ public final class JavaParser {
             );
         }
         if (value instanceof Character) {
-            throw new ParseException("char literals are unsupported in " + filename);
+            // F-011: the TS reference's text.
+            throw new ParseException(filename + ": " + LexDiag.JAVA_CHAR_LITERAL);
         }
         if (value instanceof Double || value instanceof Float) {
             throw new ParseException("floating-point literals are unsupported in " + filename);

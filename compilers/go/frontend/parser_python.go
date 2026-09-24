@@ -175,8 +175,16 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			i += 2
 			col += 2
 			start := i
-			for i < len(source) && source[i] != quote {
+			// F-011: a single-line literal that reaches a line break (escaped
+			// or not) or end of file is unterminated; it must never run on
+			// into the following lines.
+			for i < len(source) && source[i] != quote && source[i] != '\n' && source[i] != '\r' {
 				if source[i] == '\\' {
+					if i+1 >= len(source) || source[i+1] == '\n' || source[i+1] == '\r' {
+						i++
+						col++
+						break
+					}
 					i++
 					col++
 				}
@@ -184,9 +192,11 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				col++
 			}
 			val := source[start:i]
-			if i < len(source) {
+			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
 			// Convert Python byte string escapes to hex
 			hexVal := pyByteStringToHex(val)
@@ -203,6 +213,7 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				// Skip it without emitting a token.
 				i += 3
 				col += 3
+				openLine := line
 				for i+2 < len(source) {
 					if source[i] == quote && source[i+1] == quote && source[i+2] == quote {
 						break
@@ -218,14 +229,24 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				if i+2 < len(source) {
 					i += 3
 					col += 3
+				} else {
+					// F-011: still open at end of file.
+					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, openLine, startCol))
+					i = len(source)
 				}
 				continue
 			}
 			i++
 			col++
 			start := i
-			for i < len(source) && source[i] != quote {
+			// F-011: see the byte-string case above.
+			for i < len(source) && source[i] != quote && source[i] != '\n' && source[i] != '\r' {
 				if source[i] == '\\' {
+					if i+1 >= len(source) || source[i+1] == '\n' || source[i+1] == '\r' {
+						i++
+						col++
+						break
+					}
 					i++
 					col++
 				}
@@ -233,9 +254,11 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 				col++
 			}
 			val := source[start:i]
-			if i < len(source) {
+			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
 			tokens = append(tokens, pyToken{kind: pyTokString, value: val, line: line, col: startCol})
 			continue

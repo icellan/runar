@@ -46,7 +46,7 @@ import type {
   ReturnStatement,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
 import { parseMoveSource } from './01-parse-move.js';
@@ -198,6 +198,11 @@ export function parse(source: string, fileName?: string): ParseResult {
   });
 
   const sourceFile = project.createSourceFile(file, source);
+
+  // F-011: ts-morph ends an unterminated string literal at the line break and
+  // records a syntax diagnostic that nothing here reads, so `"cafe;` used to
+  // compile. Refuse it with the diagnostic every tier emits.
+  reportUnterminatedLiterals(sourceFile.compilerNode, file, errors);
 
   // Find the class that extends SmartContract, StatefulSmartContract,
   // or UnsafeSmartContract (the asm() escape hatch).
@@ -1890,6 +1895,21 @@ function parseTernaryExpression(
 // ---------------------------------------------------------------------------
 // Source location helpers
 // ---------------------------------------------------------------------------
+
+function reportUnterminatedLiterals(
+  sf: ts.SourceFile,
+  file: string,
+  errors: CompilerDiagnostic[],
+): void {
+  const visit = (node: ts.Node): void => {
+    if ((node as ts.Node & Partial<ts.LiteralLikeNode>).isUnterminated === true) {
+      const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: line + 1, column: character }));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+}
 
 function locFromNode(node: Node, file: string): SourceLocation {
   const start = node.getStartLineNumber();

@@ -35,7 +35,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ pub fn parse_solidity(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.sol");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source);
+    let tokens = tokenize(source, file, &mut errors);
     let mut parser = SolParser::new(tokens, file, &mut errors);
 
     let contract = parser.parse_contract();
@@ -138,7 +138,7 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
@@ -292,18 +292,27 @@ fn tokenize(source: &str) -> Vec<Token> {
         // String literals
         if ch == '\'' || ch == '"' {
             let quote = ch;
+            let open = i;
             i += 1;
             let start = i;
-            while i < len && chars[i] != quote {
+            // F-011: a literal that reaches a line break (escaped or not) or
+            // end of file is unterminated; it must never run on into the
+            // following lines.
+            while i < len && chars[i] != quote && chars[i] != '\n' && chars[i] != '\r' {
                 if chars[i] == '\\' {
-                    i += 1; // skip escaped char
+                    if i + 1 >= len || chars[i + 1] == '\n' || chars[i + 1] == '\r' {
+                        break;
+                    }
+                    i += 1;
                 }
                 i += 1;
             }
             let val: String = chars[start..i].iter().collect();
             tokens.push(Token::StringLit(val));
-            if i < len {
+            if i < len && chars[i] == quote {
                 i += 1;
+            } else {
+                errors.push(lex_error_at_index(UNTERMINATED_STRING_LITERAL, file, &chars, open));
             }
             continue;
         }

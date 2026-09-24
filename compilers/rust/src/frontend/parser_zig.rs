@@ -49,6 +49,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::{lex_error_at_index, UNTERMINATED_STRING_LITERAL};
 use super::parser::ParseResult;
 use std::collections::HashSet;
 
@@ -63,15 +64,14 @@ pub fn parse_zig(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.zig");
     let mut str_errors: Vec<String> = Vec::new();
 
-    let tokens = tokenize(source);
+    let mut lex_errors: Vec<Diagnostic> = Vec::new();
+    let tokens = tokenize(source, file, &mut lex_errors);
     let mut parser = ZigParser::new(tokens, file, &mut str_errors);
 
     let contract = parser.parse_contract();
 
-    let errors = str_errors
-        .into_iter()
-        .map(|msg| Diagnostic::error(msg, None))
-        .collect();
+    let mut errors = lex_errors;
+    errors.extend(str_errors.into_iter().map(|msg| Diagnostic::error(msg, None)));
 
     ParseResult { contract, errors, source_size_err: None }
 }
@@ -191,7 +191,7 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagnostic>) -> Vec<Token> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = source.chars().collect();
     let mut pos = 0;
@@ -278,20 +278,27 @@ fn tokenize(source: &str) -> Vec<Token> {
 
         // String literals: "..."
         if ch == '"' {
+            let open = pos;
             pos += 1;
             let mut val = String::new();
-            while pos < chars.len() && chars[pos] != '"' {
-                if chars[pos] == '\\' && pos + 1 < chars.len() {
+            // F-011: a Zig string literal cannot span lines; one that reaches
+            // a line break (escaped or not) or end of file is unterminated.
+            while pos < chars.len() && chars[pos] != '"' && chars[pos] != '\n' && chars[pos] != '\r' {
+                if chars[pos] == '\\' && pos + 1 < chars.len() && chars[pos + 1] != '\n' && chars[pos + 1] != '\r' {
                     pos += 1; // skip backslash
                     val.push(chars[pos]);
                     pos += 1;
+                } else if chars[pos] == '\\' {
+                    break;
                 } else {
                     val.push(chars[pos]);
                     pos += 1;
                 }
             }
-            if pos < chars.len() {
+            if pos < chars.len() && chars[pos] == '"' {
                 pos += 1; // skip closing quote
+            } else {
+                errors.push(lex_error_at_index(UNTERMINATED_STRING_LITERAL, file, &chars, open));
             }
             tokens.push(Token::StringLit(val));
             continue;

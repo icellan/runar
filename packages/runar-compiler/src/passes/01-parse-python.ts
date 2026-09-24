@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
@@ -80,6 +80,12 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
   // Track multi-line triple-quoted strings (docstrings).
   // When non-null, holds the closing quote sequence ('"""' or "'''").
   let inTripleQuote: string | null = null;
+  // F-011: where the open triple-quoted string started; if it is still open
+  // at end of file it is unterminated.
+  let tripleStart = { line: 0, column: 0 };
+  function unterminated(line: number, column: number) {
+    errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line, column }));
+  }
 
   function add(type: TokenType, value: string, line: number, col: number) {
     tokens.push({ type, value, line, column: col });
@@ -116,6 +122,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       if (closeIdx === -1) {
         // Multi-line docstring: skip until closing quote found
         inTripleQuote = quote;
+        tripleStart = { line: lineNum, column: line.length - stripped.length + 1 };
       }
       // Either way, skip this line (it's a docstring, not code)
       continue;
@@ -284,7 +291,10 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
             pos++;
           }
         }
+        // F-011: a single-line literal that reaches the line break is
+        // unterminated; it must never run on into the next line.
         if (pos < line.length) pos++; // skip closing quote
+        else unterminated(lineNum, col);
         add('hexstring', hex, lineNum, col);
         continue;
       }
@@ -302,6 +312,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           } else {
             // Multi-line: skip rest of this line, mark for skipping subsequent lines
             inTripleQuote = tripleQuote;
+            tripleStart = { line: lineNum, column: col };
             break; // stop tokenizing this line
           }
           continue; // triple-quoted strings are docstrings — skip, don't emit a token
@@ -321,6 +332,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           }
         }
         if (pos < line.length) pos++; // skip closing quote
+        else unterminated(lineNum, col); // F-011: reached the line break
         add('string', val, lineNum, col);
         continue;
       }
@@ -371,6 +383,10 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       add('NEWLINE', '', lineNum, line.length + 1);
     }
   }
+
+  // F-011: a triple-quoted string still open at end of file swallowed every
+  // line after it; refuse it instead.
+  if (inTripleQuote !== null) unterminated(tripleStart.line, tripleStart.column);
 
   // Emit remaining DEDENTs
   while (indentStack.length > 1) {

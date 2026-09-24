@@ -24,6 +24,7 @@
 //!   - `#` line comments
 
 const std = @import("std");
+const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const identifier_collision = @import("identifier_collision.zig");
@@ -73,7 +74,11 @@ pub const ParseResult = struct {
 
 pub fn parsePython(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
     var parser = Parser.init(allocator, source, file_name);
-    return parser.parse();
+    const r = parser.parse();
+    // F-011: report an unterminated literal (the tokenizer records it).
+    var unterminated: ?lex_diag.Pos = null;
+    _ = tokenizeRawLex(allocator, source, &unterminated);
+    return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, unterminated) };
 }
 
 
@@ -164,6 +169,12 @@ const Tokenizer = struct {
 
 /// Phase 1: produce raw tokens (including NEWLINE) without INDENT/DEDENT.
 fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
+    var unterminated: ?lex_diag.Pos = null;
+    return tokenizeRawLex(allocator, source, &unterminated);
+}
+
+/// `tokenizeRaw`, also recording the first unterminated literal (F-011).
+fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_diag.Pos) []Token {
     var tokens = std.ArrayListUnmanaged(Token).empty;
     var i: usize = 0;
     var line: u32 = 1;
@@ -212,8 +223,12 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
             i += 2;
             col += 2;
             const start = i;
-            while (i < source.len and source[i] != quote) {
+            // F-011: a single-line literal that reaches a line break
+            // (escaped or not) or end of file is unterminated; it must never
+            // run on into the following lines.
+            while (i < source.len and source[i] != quote and source[i] != '\n' and source[i] != '\r') {
                 if (source[i] == '\\') {
+                    if (i + 1 >= source.len or source[i + 1] == '\n' or source[i + 1] == '\r') break;
                     i += 1;
                     col += 1;
                 }
@@ -221,9 +236,11 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
                 col += 1;
             }
             const val = source[start..i];
-            if (i < source.len) {
+            if (i < source.len and source[i] == quote) {
                 i += 1; // skip closing quote
                 col += 1;
+            } else if (unterminated.* == null) {
+                unterminated.* = .{ .line = line, .col = start_col };
             }
             const hex_val = pyByteStringToHex(allocator, val);
             tokens.append(allocator, .{ .kind = .string_literal, .text = hex_val, .line = line, .col = start_col }) catch {};
@@ -239,6 +256,7 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
                 // Skip it without emitting a token.
                 i += 3;
                 col += 3;
+                const open_line = line;
                 while (i + 2 < source.len) {
                     if (source[i] == quote and source[i + 1] == quote and source[i + 2] == quote) break;
                     if (source[i] == '\n') {
@@ -252,6 +270,10 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
                 if (i + 2 < source.len) {
                     i += 3;
                     col += 3;
+                } else {
+                    // F-011: still open at end of file.
+                    if (unterminated.* == null) unterminated.* = .{ .line = open_line, .col = start_col };
+                    i = source.len;
                 }
                 continue;
             }
@@ -259,8 +281,12 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
             i += 1;
             col += 1;
             const start = i;
-            while (i < source.len and source[i] != quote) {
+            // F-011: a single-line literal that reaches a line break
+            // (escaped or not) or end of file is unterminated; it must never
+            // run on into the following lines.
+            while (i < source.len and source[i] != quote and source[i] != '\n' and source[i] != '\r') {
                 if (source[i] == '\\') {
+                    if (i + 1 >= source.len or source[i + 1] == '\n' or source[i + 1] == '\r') break;
                     i += 1;
                     col += 1;
                 }
@@ -268,9 +294,11 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
                 col += 1;
             }
             const val = source[start..i];
-            if (i < source.len) {
+            if (i < source.len and source[i] == quote) {
                 i += 1;
                 col += 1;
+            } else if (unterminated.* == null) {
+                unterminated.* = .{ .line = line, .col = start_col };
             }
             tokens.append(allocator, .{ .kind = .string_literal, .text = val, .line = line, .col = start_col }) catch {};
             continue;

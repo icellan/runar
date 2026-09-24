@@ -67,7 +67,10 @@ public final class TsParser {
 
     public static ContractNode parse(String source, String filename) throws ParseException {
         List<CommentInfo> comments = new ArrayList<>();
-        List<Token> tokens = tokenize(source, comments);
+        List<String> lex = new ArrayList<>();
+        List<Token> tokens = tokenize(source, comments, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         Parser p = new Parser(tokens, filename, comments);
         ContractNode contract = p.parseContract();
         if (!p.errors.isEmpty()) {
@@ -225,7 +228,7 @@ public final class TsParser {
         return ch == '0' || ch == '1';
     }
 
-    private static List<Token> tokenize(String source, List<CommentInfo> comments) {
+    private static List<Token> tokenize(String source, List<CommentInfo> comments, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
@@ -303,6 +306,7 @@ public final class TsParser {
 
             // Template string literals (backticks)
             if (ch == '`') {
+                int tickLine = line;
                 i++;
                 col++;
                 int start = i;
@@ -322,9 +326,13 @@ public final class TsParser {
                     }
                 }
                 String val = source.substring(start, i);
+                // F-011: this literal may span lines; only end of file leaves
+                // it unterminated.
                 if (i < n) {
                     i++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, tickLine, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_STRING, val, line, startCol));
                 continue;
@@ -336,20 +344,23 @@ public final class TsParser {
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches an unescaped line break or end of
+                // file is unterminated (a backslash before the break continues it).
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n) break;
                         i++;
                         col++;
                     }
-                    if (i < n) {
-                        i++;
-                        col++;
-                    }
-                }
-                String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
                     i++;
                     col++;
+                }
+                String val = source.substring(start, Math.min(i, n));
+                if (i < n && source.charAt(i) == quote) {
+                    i++;
+                    col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_STRING, val, line, startCol));
                 continue;

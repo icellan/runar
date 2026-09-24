@@ -60,3 +60,29 @@ impl fmt::Display for Diagnostic {
         write!(f, "{}", self.format_message())
     }
 }
+
+/// F-011's shared diagnostic (the TS reference's `UNTERMINATED_STRING_LITERAL`):
+/// every hand-written tokenizer emits it, at the opening quote, for a quoted
+/// literal that reaches a line break or end of file before its closing quote.
+/// On `.runar.rs`, for Python triple-quoted strings and for `.runar.go`
+/// backtick raw strings, which may span lines, only end of file counts.
+pub const UNTERMINATED_STRING_LITERAL: &str = "unterminated string literal";
+
+/// The TS reference's refusal of a Java char literal.
+pub const JAVA_CHAR_LITERAL: &str = "char literals are unsupported in Rúnar Java contracts";
+
+/// A tokenizer diagnostic at 1-based `line` / 0-based `column` of `file`.
+pub fn lex_error(message: &str, file: &str, line: usize, column: usize) -> Diagnostic {
+    Diagnostic::error(
+        message,
+        Some(SourceLocation { file: file.to_string(), line, column }),
+    )
+}
+
+/// Like [`lex_error`], for a tokenizer that tracks only a char index.
+pub fn lex_error_at_index(message: &str, file: &str, chars: &[char], idx: usize) -> Diagnostic {
+    let before = &chars[..idx.min(chars.len())];
+    let line = 1 + before.iter().filter(|&&c| c == '\n').count();
+    let column = before.iter().rev().take_while(|&&c| c != '\n').count();
+    lex_error(message, file, line, column)
+}

@@ -18,6 +18,7 @@
 //!   - Types: `PubKey`, `Sig`, `Addr`, `ByteString`, `bigint`, `boolean`, `void`
 
 const std = @import("std");
+const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
@@ -67,7 +68,16 @@ pub const ParseResult = struct {
 
 pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
     var parser = Parser.init(allocator, source, file_name);
-    return parser.parse();
+    const r = parser.parse();
+    // F-011: tokenize the whole source once more so an unterminated literal
+    // is reported even where the parser stopped before reaching it.
+    var t = Tokenizer.init(source);
+    var guard: usize = 0;
+    while (guard <= source.len) : (guard += 1) {
+        if (t.next().kind == .eof) break;
+    }
+    const errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    return .{ .contract = r.contract, .errors = errs };
 }
 
 
@@ -145,6 +155,8 @@ const Token = struct {
 
 const Tokenizer = struct {
     source: []const u8,
+    /// F-011: the first unterminated quoted literal, if any.
+    unterminated: ?lex_diag.Pos = null,
     pos: usize,
     line: u32,
     col: u32,
@@ -224,16 +236,21 @@ const Tokenizer = struct {
         if (c == '"' or c == '\'' or c == '`') {
             const quote = c;
             _ = self.advance();
-            while (self.pos < self.source.len and self.source[self.pos] != quote) {
+            // F-011: a '..' / ".." literal that reaches an unescaped line
+            // break or end of file is unterminated (a backslash before the
+            // break continues it, as in TS); a template literal may span
+            // lines, so only end of file ends it.
+            while (self.pos < self.source.len and self.source[self.pos] != quote and (quote == '`' or (self.source[self.pos] != '\n' and self.source[self.pos] != '\r'))) {
                 if (self.source[self.pos] == '\\') _ = self.advance();
                 _ = self.advance();
             }
-            if (self.pos < self.source.len) _ = self.advance();
-            // Return text without quotes
-            const end = self.pos;
-            const content_start = start + 1;
-            const content_end = if (end > 0) end - 1 else end;
-            return .{ .kind = .string_literal, .text = self.source[content_start..content_end], .line = sl, .col = sc };
+            const content_end = self.pos;
+            if (self.pos < self.source.len and self.source[self.pos] == quote) {
+                _ = self.advance();
+            } else if (self.unterminated == null) {
+                self.unterminated = .{ .line = sl, .col = sc };
+            }
+            return .{ .kind = .string_literal, .text = self.source[start + 1 .. content_end], .line = sl, .col = sc };
         }
 
         // Numbers (decimal, hex, octal, binary; strip trailing 'n' for BigInt)

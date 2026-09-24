@@ -19,6 +19,12 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.sighash_directive import extract_sighash_directive
 
@@ -148,8 +154,9 @@ def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -250,7 +257,10 @@ def _tokenize(source: str) -> list[Token]:
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != quote:
+            # F-011: a TS string literal cannot span lines; one that reaches
+            # an unescaped line break or end of file is unterminated. (A
+            # backslash before the line break is a line continuation.)
+            while i < n and source[i] != quote and source[i] not in "\r\n":
                 if source[i] == "\\":
                     i += 1
                     col += 1
@@ -258,9 +268,11 @@ def _tokenize(source: str) -> list[Token]:
                     i += 1
                     col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             _add(Token(TOK_STRING, val, line, start_col))
             continue
 
@@ -1720,9 +1732,15 @@ def _parse_number(s: str) -> Expression:
 # ---------------------------------------------------------------------------
 
 def parse_ts(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    lex: list = []
+    return with_lex_errors(_parse_ts_tokens(source, file_name, lex), lex)
+
+
+def _parse_ts_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a TypeScript-syntax Runar contract (.runar.ts)."""
     p = _TsParser(file_name)
-    p.tokens = _tokenize(source)
+    p.tokens = _tokenize(source, lex, file_name)
     p.pos = 0
 
     try:

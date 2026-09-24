@@ -32,6 +32,12 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +202,10 @@ def _is_ident_part(ch: str) -> bool:
     return ch.isalnum() or ch == "_"
 
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Tokenize a Zig Runar source file."""
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     pos = 0
     line = 1
     col = 1
@@ -320,7 +327,11 @@ def _tokenize(source: str) -> list[Token]:
             pos += 1
             col += 1
             val_chars: list[str] = []
-            while pos < length and source[pos] != '"':
+            # F-011: a Zig string literal cannot span lines; one that reaches
+            # a line break (escaped or not) or end of file is unterminated.
+            while pos < length and source[pos] != '"' and source[pos] not in "\r\n":
+                if source[pos] == "\\" and (pos + 1 >= length or source[pos + 1] in "\r\n"):
+                    break
                 if source[pos] == "\\" and pos + 1 < length:
                     pos += 1
                     col += 1
@@ -331,9 +342,11 @@ def _tokenize(source: str) -> list[Token]:
                     val_chars.append(source[pos])
                     pos += 1
                     col += 1
-            if pos < length:
+            if pos < length and source[pos] == '"':
                 pos += 1  # skip closing quote
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, tok_line, tok_col))
             tokens.append(Token(TOK_STRING, "".join(val_chars), tok_line, tok_col))
             continue
 
@@ -1665,7 +1678,13 @@ def _collect_mutated_in_expr(expr, out):
 # ---------------------------------------------------------------------------
 
 def parse_zig(source: str, file_name: str = "Contract.runar.zig") -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    lex: list = []
+    return with_lex_errors(_parse_zig_tokens(source, file_name, lex), lex)
+
+
+def _parse_zig_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Zig-format Runar contract (.runar.zig) and return a ParseResult."""
-    tokens = _tokenize(source)
+    tokens = _tokenize(source, lex, file_name)
     parser = _ZigParser(tokens, file_name)
     return parser.parse()

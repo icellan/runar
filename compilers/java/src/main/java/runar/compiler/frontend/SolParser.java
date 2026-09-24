@@ -76,7 +76,10 @@ public final class SolParser {
     /** Parse Solidity-syntax source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
         Parser p = new Parser(filename);
-        p.tokens = tokenize(source);
+        List<String> lex = new ArrayList<>();
+        p.tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         p.pos = 0;
         ContractNode contract = p.parseContract();
         rewriteContractProps(contract);
@@ -215,7 +218,7 @@ public final class SolParser {
         return Character.isLetterOrDigit(ch) || ch == '_' || ch == '$';
     }
 
-    private static List<Token> tokenize(String source) {
+    private static List<Token> tokenize(String source, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
@@ -286,20 +289,23 @@ public final class SolParser {
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
-                    if (i < n) {
-                        i++;
-                        col++;
-                    }
-                }
-                String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
                     i++;
                     col++;
+                }
+                String val = source.substring(start, Math.min(i, n));
+                if (i < n && source.charAt(i) == quote) {
+                    i++;
+                    col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_STRING, val, line, startCol));
                 continue;

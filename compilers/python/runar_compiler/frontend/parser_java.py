@@ -37,6 +37,12 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 
 
@@ -244,8 +250,9 @@ def _parse_type_name(name: str) -> TypeNode:
 # Tokenizer
 # ---------------------------------------------------------------------------
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     n = len(source)
     pos = 0
     line = 1
@@ -359,7 +366,12 @@ def _tokenize(source: str) -> list[Token]:
             pos += 1
             col += 1
             start = pos
-            while pos < n and source[pos] != '"':
+            # F-011: a Java string literal cannot span lines; one that
+            # reaches a line break (escaped or not) or end of file is
+            # unterminated and must never run on into the following lines.
+            while pos < n and source[pos] != '"' and source[pos] not in "\r\n":
+                if source[pos] == "\\" and (pos + 1 >= n or source[pos + 1] in "\r\n"):
+                    break
                 if source[pos] == "\\" and pos + 1 < n:
                     # Skip the escape sequence; we don't interpret escapes —
                     # Rúnar only uses these for ByteString.fromHex("...") hex
@@ -374,14 +386,18 @@ def _tokenize(source: str) -> list[Token]:
                     col += 1
                 pos += 1
             val = source[start:pos]
-            if pos < n:
+            if pos < n and source[pos] == '"':
                 pos += 1  # closing quote
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, l, c))
             tokens.append(Token(TOK_STRING, val, l, c))
             continue
 
         # Char literal — rejected later, but tokenize so we produce an error
         if ch == "'":
+            # F-011: refused exactly as the TS reference refuses it.
+            lex.append(lex_error(JAVA_CHAR_LITERAL, file_name, l, c))
             pos += 1
             col += 1
             start = pos
@@ -1620,9 +1636,15 @@ def _compare_to_receiver_arg(e: Expression):
 
 
 def parse_java(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    lex: list = []
+    return with_lex_errors(_parse_java_tokens(source, file_name, lex), lex)
+
+
+def _parse_java_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Java-syntax Runar contract (.runar.java)."""
     parser = _JavaParser(file_name)
-    parser.tokens = _tokenize(source)
+    parser.tokens = _tokenize(source, lex, file_name)
     parser.pos = 0
 
     try:

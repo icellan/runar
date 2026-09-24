@@ -17,6 +17,12 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
@@ -289,7 +295,7 @@ def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize_go(source: str) -> list[Token]:
+def _tokenize_go(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Tokenize Go source code.
 
     Go uses automatic semicolon insertion: a newline acts as a semicolon
@@ -297,6 +303,7 @@ def _tokenize_go(source: str) -> list[Token]:
     We insert TOK_SEMICOLON in those cases and skip other newlines.
     """
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -368,6 +375,7 @@ def _tokenize_go(source: str) -> list[Token]:
 
         # Backtick strings (raw string literals, used for struct tags)
         if ch == "`":
+            start_line = line
             i += 1
             col += 1
             start = i
@@ -379,9 +387,13 @@ def _tokenize_go(source: str) -> list[Token]:
                     col += 1
                 i += 1
             val = source[start:i]
+            # F-011: a raw string may span lines, so only end of file leaves
+            # it unterminated.
             if i < n:
                 i += 1
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, start_line, start_col))
             tokens.append(Token(TOK_BACKTICK_STRING, val, line, start_col))
             continue
 
@@ -390,16 +402,25 @@ def _tokenize_go(source: str) -> list[Token]:
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != '"':
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            while i < n and source[i] != '"' and source[i] not in "\r\n":
                 if source[i] == "\\":
+                    if i + 1 >= n or source[i + 1] in "\r\n":
+                        i += 1
+                        col += 1
+                        break
                     i += 1
                     col += 1
                 i += 1
                 col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == '"':
                 i += 1
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             # Process escape sequences to get the raw string value
             processed = _process_go_string_escapes(val)
             tokens.append(Token(TOK_STRING, processed, line, start_col))
@@ -1864,9 +1885,15 @@ def go_foreign_receiver_message(method: str, receiver_type: str, contract: str) 
 
 
 def parse_go(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    lex: list = []
+    return with_lex_errors(_parse_go_tokens(source, file_name, lex), lex)
+
+
+def _parse_go_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Go-syntax Runar contract (.runar.go)."""
     p = _GoParser(file_name)
-    p.tokens = _tokenize_go(source)
+    p.tokens = _tokenize_go(source, lex, file_name)
     p.pos = 0
 
     try:

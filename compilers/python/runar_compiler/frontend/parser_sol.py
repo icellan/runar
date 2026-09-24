@@ -17,6 +17,12 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 
 
@@ -127,9 +133,10 @@ def _is_ident_part(ch: str) -> bool:
 # Tokenizer
 # ---------------------------------------------------------------------------
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Tokenize Solidity-like source into a flat token list."""
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -189,16 +196,25 @@ def _tokenize(source: str) -> list[Token]:
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != quote:
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            while i < n and source[i] != quote and source[i] not in "\r\n":
                 if source[i] == "\\":
+                    if i + 1 >= n or source[i + 1] in "\r\n":
+                        i += 1
+                        col += 1
+                        break
                     i += 1
                     col += 1
                 i += 1
                 col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             tokens.append(Token(TOK_STRING, val, line, start_col))
             continue
 
@@ -1331,9 +1347,15 @@ def _rewrite_contract_props(contract: ContractNode) -> None:
 
 
 def parse_sol(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    lex: list = []
+    return with_lex_errors(_parse_sol_tokens(source, file_name, lex), lex)
+
+
+def _parse_sol_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Solidity-syntax Runar contract (.runar.sol)."""
     p = _SolParser(file_name)
-    p.tokens = _tokenize(source)
+    p.tokens = _tokenize(source, lex, file_name)
     p.pos = 0
 
     try:

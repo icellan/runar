@@ -41,7 +41,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
@@ -136,10 +136,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     if (ch === '"') {
       let val = '';
       advance(); // opening quote
-      while (pos < source.length && peek() !== '"') {
+      // F-011: a Java string literal cannot span lines; one that reaches a
+      // line break (escaped or not) or end of file is unterminated.
+      while (pos < source.length && peek() !== '"' && peek() !== '\n') {
         if (peek() === '\\') {
           advance();
           const esc = peek();
+          if (esc === '\n' || esc === '') break;
           if (esc === 'n') { val += '\n'; advance(); }
           else if (esc === 't') { val += '\t'; advance(); }
           else if (esc === 'r') { val += '\r'; advance(); }
@@ -152,7 +155,8 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           val += advance();
         }
       }
-      if (pos < source.length) advance(); // closing quote
+      if (peek() === '"') advance(); // closing quote
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
       add('string', val, l, c);
       continue;
     }

@@ -17,6 +17,12 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
@@ -266,8 +272,9 @@ def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize(source: str) -> list[Token]:
+def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     chars = source
     n = len(chars)
     pos = 0
@@ -394,6 +401,11 @@ def _tokenize(source: str) -> list[Token]:
             col += 1
             start = pos
             while pos < n and chars[pos] != '"':
+                # A backslash escapes the next character (as in the TS
+                # reference), so `\"` does not close the literal.
+                if chars[pos] == "\\" and pos + 1 < n:
+                    pos += 1
+                    col += 1
                 if chars[pos] == "\n":
                     line += 1
                     col = 1
@@ -401,9 +413,13 @@ def _tokenize(source: str) -> list[Token]:
                     col += 1
                 pos += 1
             val = chars[start:pos]
+            # F-011: Rust strings may span lines, so only end of file leaves
+            # one unterminated.
             if pos < n:
                 pos += 1  # skip closing quote
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, l, c))
             tokens.append(Token(TOK_HEX_STRING, val, l, c))
             continue
 
@@ -1405,9 +1421,15 @@ class _RustParser:
 # ---------------------------------------------------------------------------
 
 def parse_rust(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    lex: list = []
+    return with_lex_errors(_parse_rust_tokens(source, file_name, lex), lex)
+
+
+def _parse_rust_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Rust-syntax Runar contract (.runar.rs)."""
     p = _RustParser(file_name)
-    p.tokens = _tokenize(source)
+    p.tokens = _tokenize(source, lex, file_name)
     p.pos = 0
 
     try:

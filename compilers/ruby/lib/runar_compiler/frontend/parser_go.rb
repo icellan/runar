@@ -347,7 +347,7 @@ module RunarCompiler
       go_ident_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
-    def self.tokenize_go(source)
+    def self.tokenize_go(source, lex = [], file_name = "")
       tokens = []
       line = 1
       col = 0
@@ -414,6 +414,7 @@ module RunarCompiler
 
         # Backtick-delimited struct tags
         if ch == "`"
+          tag_line = line
           i += 1
           col += 1
           tag_start = i
@@ -427,9 +428,13 @@ module RunarCompiler
             i += 1
           end
           val = source[tag_start...i]
+          # F-011: a raw string may span lines, so only end of file leaves it
+          # unterminated.
           if i < n
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, tag_line, start_col)
           end
           tokens << GoToken.new(kind: GoTokens::TOK_BACKTICK, value: val, line: line, col: start_col)
           next
@@ -440,8 +445,12 @@ module RunarCompiler
           i += 1
           col += 1
           str_start = i
-          while i < n && source[i] != '"'
+          # F-011: a literal that reaches a line break (escaped or not) or end
+          # of file is unterminated; it must never run on into the next lines.
+          while i < n && source[i] != '"' && source[i] != "\n" && source[i] != "\r"
             if source[i] == "\\"
+              break if i + 1 >= n || source[i + 1] == "\n" || source[i + 1] == "\r"
+
               i += 1
               col += 1
             end
@@ -451,9 +460,11 @@ module RunarCompiler
             end
           end
           val = source[str_start...i]
-          if i < n
+          if i < n && source[i] == '"'
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
           end
           tokens << GoToken.new(kind: GoTokens::TOK_STRING, value: val, line: line, col: start_col)
           next
@@ -1550,8 +1561,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_go(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_go_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_go_tokens(source, file_name, lex)
       p = GoParser.new(file_name)
-      p.tokens = tokenize_go(source)
+      p.tokens = tokenize_go(source, lex, file_name)
       p.pos = 0
 
       begin

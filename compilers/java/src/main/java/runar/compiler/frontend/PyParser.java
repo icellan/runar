@@ -73,7 +73,10 @@ public final class PyParser {
 
     public static ContractNode parse(String source, String filename) throws ParseException {
         PyParserImpl impl = new PyParserImpl(filename);
-        List<Token> raw = tokenizeRaw(source);
+        List<String> lex = new ArrayList<>();
+        List<Token> raw = tokenizeRaw(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         impl.tokens = insertIndentation(raw);
         impl.pos = 0;
         ContractNode contract = impl.parseContract();
@@ -395,7 +398,7 @@ public final class PyParser {
         return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
     }
 
-    private static List<Token> tokenizeRaw(String source) {
+    private static List<Token> tokenizeRaw(String source, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int line = 1;
         int col = 0;
@@ -447,8 +450,11 @@ public final class PyParser {
                 i += 2;
                 col += 2;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
@@ -456,9 +462,11 @@ public final class PyParser {
                     col++;
                 }
                 String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
+                if (i < n && source.charAt(i) == quote) {
                     i++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TokKind.STRING, pyByteStringToHex(val), line, startCol));
                 continue;
@@ -471,6 +479,7 @@ public final class PyParser {
                     // Triple-quoted: docstring — consume without emitting a token.
                     i += 3;
                     col += 3;
+                    int openLine = line;
                     while (i + 2 < n) {
                         if (source.charAt(i) == quote
                             && source.charAt(i + 1) == quote
@@ -488,14 +497,21 @@ public final class PyParser {
                     if (i + 2 < n) {
                         i += 3;
                         col += 3;
+                    } else {
+                        // F-011: still open at end of file.
+                        lex.add(LexDiag.at(filename, openLine, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
+                        i = n;
                     }
                     continue;
                 }
                 i++;
                 col++;
                 int start = i;
-                while (i < n && source.charAt(i) != quote) {
+                // F-011: a literal that reaches a line break (escaped or not) or end
+                // of file is unterminated; it must never run on into the next lines.
+                while (i < n && source.charAt(i) != quote && source.charAt(i) != '\n' && source.charAt(i) != '\r') {
                     if (source.charAt(i) == '\\') {
+                        if (i + 1 >= n || source.charAt(i + 1) == '\n' || source.charAt(i + 1) == '\r') break;
                         i++;
                         col++;
                     }
@@ -503,9 +519,11 @@ public final class PyParser {
                     col++;
                 }
                 String val = source.substring(start, Math.min(i, n));
-                if (i < n) {
+                if (i < n && source.charAt(i) == quote) {
                     i++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TokKind.STRING, val, line, startCol));
                 continue;

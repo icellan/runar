@@ -25,6 +25,7 @@
 //!   - `Runar.check_sig(sig, pk)` -> `checkSig(sig, pk)` (Runar. prefix builtins)
 
 const std = @import("std");
+const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const identifier_collision = @import("identifier_collision.zig");
@@ -74,7 +75,11 @@ pub const ParseResult = struct {
 
 pub fn parseRuby(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
     var parser = Parser.init(allocator, source, file_name);
-    return parser.parse();
+    const r = parser.parse();
+    // F-011: report an unterminated literal (the tokenizer records it).
+    var t = Tokenizer.init(allocator, source);
+    _ = t.tokenize();
+    return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated) };
 }
 
 
@@ -171,6 +176,8 @@ const Tokenizer = struct {
     allocator: Allocator,
     source: []const u8,
     tokens: std.ArrayListUnmanaged(Token),
+    /// F-011: the first unterminated quoted literal, if any.
+    unterminated: ?lex_diag.Pos = null,
 
     fn init(allocator: Allocator, source: []const u8) Tokenizer {
         return .{ .allocator = allocator, .source = source, .tokens = .empty };
@@ -316,7 +323,13 @@ const Tokenizer = struct {
                         }
                     }
                     const str_end = pos;
-                    if (pos < raw_line.len) pos += 1; // skip closing quote
+                    if (pos < raw_line.len) {
+                        pos += 1; // skip closing quote
+                    } else if (self.unterminated == null) {
+                        // F-011: line-based, so reaching the line break means
+                        // the literal is unterminated; refuse it.
+                        self.unterminated = .{ .line = line_num, .col = col };
+                    }
                     self.tokens.append(self.allocator, .{
                         .kind = .hex_string,
                         .text = raw_line[str_start..str_end],
@@ -338,7 +351,13 @@ const Tokenizer = struct {
                         }
                     }
                     const str_end = pos;
-                    if (pos < raw_line.len) pos += 1; // skip closing quote
+                    if (pos < raw_line.len) {
+                        pos += 1; // skip closing quote
+                    } else if (self.unterminated == null) {
+                        // F-011: line-based, so reaching the line break means
+                        // the literal is unterminated; refuse it.
+                        self.unterminated = .{ .line = line_num, .col = col };
+                    }
                     self.tokens.append(self.allocator, .{
                         .kind = .string_literal,
                         .text = raw_line[str_start..str_end],

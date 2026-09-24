@@ -1,0 +1,28 @@
+//! F-011 — the tokenizer diagnostics every hand-written surface shares with
+//! the TS reference (packages/runar-compiler/src/errors.ts).
+
+const std = @import("std");
+
+/// A quoted literal that reaches a line break or end of file before its
+/// closing quote (only end of file on .runar.rs, for Python triple-quoted
+/// strings, .runar.go backtick raw strings and .runar.ts template literals).
+pub const UNTERMINATED_STRING_LITERAL = "unterminated string literal";
+
+/// A Java char literal, which Rúnar does not support.
+pub const JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts";
+
+/// 1-based line / 1-based column of an opening quote.
+pub const Pos = struct { line: u32, col: u32 };
+
+var fallback = [_][]const u8{UNTERMINATED_STRING_LITERAL};
+
+/// `errors` with `file:line:col: msg` in front, when `at` is set. An
+/// allocation failure still refuses the source (it never drops the error).
+pub fn prepend(allocator: std.mem.Allocator, errors: [][]const u8, file_name: []const u8, msg: []const u8, at: ?Pos) [][]const u8 {
+    const p = at orelse return errors;
+    const text = std.fmt.allocPrint(allocator, "{s}:{d}:{d}: {s}", .{ file_name, p.line, p.col, msg }) catch return fallback[0..];
+    const out = allocator.alloc([]const u8, errors.len + 1) catch return fallback[0..];
+    out[0] = text;
+    @memcpy(out[1..], errors);
+    return out;
+}

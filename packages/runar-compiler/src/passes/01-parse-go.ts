@@ -32,7 +32,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { identifierCollisionMessage } from './snake-to-camel.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
@@ -124,7 +124,10 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
       while (pos < source.length && peek() !== '`') {
         val += advance();
       }
+      // F-011: a raw string may span lines, so only end of file leaves it
+      // unterminated.
       if (pos < source.length) advance(); // consume closing backtick
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
       add('backtick', val, l, c);
       continue;
     }
@@ -161,10 +164,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
     if (ch === '"') {
       let val = '';
       advance(); // consume opening quote
-      while (pos < source.length && peek() !== '"') {
+      // F-011: a Go interpreted string cannot span lines; one that reaches a
+      // line break (escaped or not) or end of file is unterminated.
+      while (pos < source.length && peek() !== '"' && peek() !== '\n') {
         if (peek() === '\\') {
           advance(); // skip backslash
           const esc = peek();
+          if (esc === '\n' || esc === '') break;
           if (esc === 'n') { val += '\n'; advance(); }
           else if (esc === 't') { val += '\t'; advance(); }
           else if (esc === 'r') { val += '\r'; advance(); }
@@ -187,7 +193,8 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
           val += advance();
         }
       }
-      if (pos < source.length) advance(); // consume closing quote
+      if (peek() === '"') advance(); // consume closing quote
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
       add('string', val, l, c);
       continue;
     }

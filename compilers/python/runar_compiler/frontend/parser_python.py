@@ -17,6 +17,12 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import (  # F-011
+    JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+    lex_error,
+    with_lex_errors,
+)
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
@@ -282,9 +288,10 @@ def _is_hex_digit(ch: str) -> bool:
     return ch in "0123456789abcdefABCDEF"
 
 
-def _tokenize_raw(source: str) -> list[Token]:
+def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> list[Token]:
     """Produce tokens including NEWLINE but without INDENT/DEDENT."""
     tokens: list[Token] = []
+    lex = lex if lex is not None else []
     line = 1
     col = 0
     i = 0
@@ -328,16 +335,25 @@ def _tokenize_raw(source: str) -> list[Token]:
             i += 2
             col += 2
             start = i
-            while i < n and source[i] != quote:
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            while i < n and source[i] != quote and source[i] not in "\r\n":
                 if source[i] == "\\":
+                    if i + 1 >= n or source[i + 1] in "\r\n":
+                        i += 1
+                        col += 1
+                        break
                     i += 1
                     col += 1
                 i += 1
                 col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             hex_val = _py_byte_string_to_hex(val)
             tokens.append(Token(TOK_STRING, hex_val, line, start_col))
             continue
@@ -349,6 +365,7 @@ def _tokenize_raw(source: str) -> list[Token]:
             if i + 2 < n and source[i + 1] == quote and source[i + 2] == quote:
                 i += 3
                 col += 3
+                open_line = line
                 while i + 2 < n:
                     if source[i] == quote and source[i + 1] == quote and source[i + 2] == quote:
                         break
@@ -361,20 +378,33 @@ def _tokenize_raw(source: str) -> list[Token]:
                 if i + 2 < n:
                     i += 3
                     col += 3
+                else:
+                    # F-011: still open at end of file.
+                    lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, open_line, start_col))
+                    i = n
                 continue
             i += 1
             col += 1
             start = i
-            while i < n and source[i] != quote:
+            # F-011: a single-line literal that reaches a line break (escaped or
+            # not) or end of file is unterminated; it must never run on into the
+            # following lines.
+            while i < n and source[i] != quote and source[i] not in "\r\n":
                 if source[i] == "\\":
+                    if i + 1 >= n or source[i + 1] in "\r\n":
+                        i += 1
+                        col += 1
+                        break
                     i += 1
                     col += 1
                 i += 1
                 col += 1
             val = source[start:i]
-            if i < n:
+            if i < n and source[i] == quote:
                 i += 1
                 col += 1
+            else:
+                lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
             tokens.append(Token(TOK_STRING, val, line, start_col))
             continue
 
@@ -1494,10 +1524,16 @@ def _literal_int_value(expr: Expression | None) -> int | None:
 # ---------------------------------------------------------------------------
 
 def parse_python(source: str, file_name: str) -> ParseResult:
+    """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    lex: list = []
+    return with_lex_errors(_parse_python_tokens(source, file_name, lex), lex)
+
+
+def _parse_python_tokens(source: str, file_name: str, lex: list) -> ParseResult:
     """Parse a Python-syntax Runar contract (.runar.py)."""
     p = _PyParser(file_name)
 
-    raw = _tokenize_raw(source)
+    raw = _tokenize_raw(source, lex, file_name)
     p.tokens = _insert_indentation(raw)
     p.pos = 0
 

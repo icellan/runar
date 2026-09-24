@@ -29,3 +29,27 @@ class Diagnostic:
 
     def __str__(self) -> str:
         return self.format_message()
+
+
+# F-011's shared diagnostic (the TS reference's UNTERMINATED_STRING_LITERAL):
+# every hand-written tokenizer emits it, at the opening quote, for a quoted
+# literal that reaches a line break or end of file before its closing quote.
+# On .runar.rs, for Python triple-quoted strings and for .runar.go backtick
+# raw strings, which may span lines, only end of file counts.
+UNTERMINATED_STRING_LITERAL = "unterminated string literal"
+
+# The TS reference's refusal of a Java char literal.
+JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts"
+
+
+def lex_error(message: str, file: str, line: int, column: int) -> Diagnostic:
+    """A tokenizer diagnostic located at line:column of file."""
+    return Diagnostic(message=message, severity=Severity.ERROR,
+                      loc=SourceLocation(file=file, line=line, column=column))
+
+
+def with_lex_errors(result, lex: list):
+    """Put a tokenizer's diagnostics (F-011) in front of a ParseResult's own."""
+    if lex:
+        result.errors = list(lex) + list(result.errors or [])
+    return result

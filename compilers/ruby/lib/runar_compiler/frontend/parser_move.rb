@@ -252,8 +252,9 @@ module RunarCompiler
       move_ident_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
-    def self.tokenize_move(source)
+    def self.tokenize_move(source, lex = [], file_name = "")
       tokens = []
+      closing_quote_at = -1 # F-011, see the quoted-literal check below
       line = 1
       col = 0
       i = 0
@@ -386,6 +387,24 @@ module RunarCompiler
           i += 1
           col += 1
           next
+        end
+
+        # F-011: this surface scans no quoted literal (the quote is skipped
+        # below), but an unterminated one -- reaching a line break or end of
+        # file -- gets the diagnostic every tier emits for it.
+        if (ch == '"' || ch == "'") && i != closing_quote_at
+          k = i + 1
+          while k < n && source[k] != ch && source[k] != "\n" && source[k] != "\r"
+            break if source[k] == "\\" && (k + 1 >= n || source[k + 1] == "\n" || source[k + 1] == "\r")
+
+            k += 1 if source[k] == "\\"
+            k += 1
+          end
+          if k < n && source[k] == ch
+            closing_quote_at = k
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
+          end
         end
 
         # Skip unknown characters
@@ -1459,8 +1478,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_move(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_move_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_move_tokens(source, file_name, lex)
       p = MoveParser.new(file_name)
-      p.tokens = tokenize_move(source)
+      p.tokens = tokenize_move(source, lex, file_name)
       p.pos = 0
 
       begin

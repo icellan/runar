@@ -77,7 +77,10 @@ public final class RbParser {
 
     /** Parse Ruby source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
-        List<Token> tokens = tokenize(source);
+        List<String> lex = new ArrayList<>();
+        List<Token> tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         Parser parser = new Parser(tokens, filename);
         ContractNode contract = parser.parseTop();
         String collision = parser.idents.message();
@@ -345,7 +348,7 @@ public final class RbParser {
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
-    private static List<Token> tokenize(String source) throws ParseException {
+    private static List<Token> tokenize(String source, String filename, List<String> lex) throws ParseException {
         List<Token> tokens = new ArrayList<>();
         String[] lines = source.split("\n", -1);
         int parenDepth = 0;
@@ -517,6 +520,9 @@ public final class RbParser {
                         }
                     }
                     if (pos < line.length()) pos++; // closing quote
+                    // F-011: line-based, so reaching the line break means the
+                    // literal is unterminated; refuse it, never end it silently.
+                    else lex.add(LexDiag.at(filename, lineNum, col, LexDiag.UNTERMINATED_STRING_LITERAL));
                     tokens.add(new Token(TK.HEXSTRING, val.toString(), lineNum, col));
                     continue;
                 }
@@ -536,6 +542,7 @@ public final class RbParser {
                         }
                     }
                     if (pos < line.length()) pos++;
+                    else lex.add(LexDiag.at(filename, lineNum, col, LexDiag.UNTERMINATED_STRING_LITERAL));
                     tokens.add(new Token(TK.STRING, val.toString(), lineNum, col));
                     continue;
                 }

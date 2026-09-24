@@ -26,7 +26,9 @@ func ParseZig(source []byte, fileName string) *ParseResult {
 
 	contract, err := p.parseContract()
 	if err != nil {
-		return &ParseResult{Errors: []Diagnostic{{Message: err.Error(), Severity: SeverityError}}}
+		// Keep the tokenizer's diagnostics (F-011: an unterminated literal
+		// is the real cause of most structural errors that follow it).
+		return &ParseResult{Errors: append(p.errors, Diagnostic{Message: err.Error(), Severity: SeverityError})}
 	}
 	if len(p.errors) > 0 {
 		return &ParseResult{Contract: contract, Errors: p.errors}
@@ -331,16 +333,23 @@ func (p *zigParser) tokenize(source string) []zigToken {
 		if ch == '"' {
 			advance() // skip opening quote
 			val := ""
-			for pos < len(source) && peek() != '"' {
-				if peek() == '\\' && pos+1 < len(source) {
+			// F-011: a Zig string literal cannot span lines; one that reaches
+			// a line break (escaped or not) or end of file is unterminated.
+			for pos < len(source) && peek() != '"' && peek() != '\n' && peek() != '\r' {
+				if peek() == '\\' {
 					advance() // skip backslash
+					if pos >= len(source) || peek() == '\n' || peek() == '\r' {
+						break
+					}
 					val += string(advance())
 				} else {
 					val += string(advance())
 				}
 			}
-			if pos < len(source) {
+			if peek() == '"' {
 				advance() // skip closing quote
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, tokenLine, tokenCol))
 			}
 			add(zigTokString, val, tokenLine, tokenCol)
 			continue

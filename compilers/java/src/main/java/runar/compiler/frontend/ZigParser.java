@@ -73,7 +73,10 @@ public final class ZigParser {
 
     /** Parse a {@code .runar.zig} source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
-        List<Token> tokens = tokenize(source);
+        List<String> lex = new ArrayList<>();
+        List<Token> tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         State s = new State(tokens, filename);
         return s.parseTopLevel();
     }
@@ -223,7 +226,7 @@ public final class ZigParser {
         return Character.isLetterOrDigit(ch) || ch == '_';
     }
 
-    static List<Token> tokenize(String source) {
+    static List<Token> tokenize(String source, String filename, List<String> lex) {
         List<Token> out = new ArrayList<>();
         int pos = 0;
         int line = 1;
@@ -342,7 +345,13 @@ public final class ZigParser {
                 pos++;
                 col++;
                 StringBuilder sb = new StringBuilder();
-                while (pos < n && source.charAt(pos) != '"') {
+                // F-011: a Zig string literal cannot span lines; one that
+                // reaches a line break (escaped or not) or end of file is
+                // unterminated.
+                while (pos < n && source.charAt(pos) != '"' && source.charAt(pos) != '\n' && source.charAt(pos) != '\r') {
+                    if (source.charAt(pos) == '\\' && (pos + 1 >= n || source.charAt(pos + 1) == '\n' || source.charAt(pos + 1) == '\r')) {
+                        break;
+                    }
                     if (source.charAt(pos) == '\\' && pos + 1 < n) {
                         pos++;
                         col++;
@@ -355,9 +364,11 @@ public final class ZigParser {
                         col++;
                     }
                 }
-                if (pos < n) {
+                if (pos < n && source.charAt(pos) == '"') {
                     pos++; // skip closing quote
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, tokLine, tokCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 out.add(new Token(Kind.STRING, sb.toString(), tokLine, tokCol));
                 continue;

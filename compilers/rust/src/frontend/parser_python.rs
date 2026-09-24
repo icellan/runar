@@ -40,7 +40,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
 
@@ -53,7 +53,7 @@ pub fn parse_python(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.py");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source);
+    let tokens = tokenize(source, file, &mut errors);
     let mut parser = PyParser::new(tokens, file, &mut errors);
 
     let contract = parser.parse_contract();
@@ -321,7 +321,7 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
     let mut tokens = Vec::new();
     let lines: Vec<&str> = source.split('\n').collect();
     let mut indent_stack: Vec<usize> = vec![0];
@@ -330,8 +330,12 @@ fn tokenize(source: &str) -> Vec<Token> {
     // the quote character (' or ").  Each line is skipped until we find the
     // closing triple-quote.
     let mut in_triple_quote: Option<char> = None;
+    // F-011: where the open triple-quoted string started (1-based line,
+    // 0-based column); still open at end of file means unterminated.
+    let mut triple_start: (usize, usize) = (0, 0);
 
-    for raw_line in &lines {
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        let line_num = line_idx + 1;
         // Strip trailing \r
         let line = if raw_line.ends_with('\r') {
             &raw_line[..raw_line.len() - 1]
@@ -366,6 +370,7 @@ fn tokenize(source: &str) -> Vec<Token> {
             } else {
                 // Multi-line docstring
                 in_triple_quote = Some(q);
+                triple_start = (line_num, line.chars().count() - stripped.chars().count());
             }
             continue;
         }
@@ -626,6 +631,7 @@ fn tokenize(source: &str) -> Vec<Token> {
                 && (chars[pos + 1] == '\'' || chars[pos + 1] == '"')
             {
                 let quote = chars[pos + 1];
+                let open_col = pos;
                 pos += 2; // skip b and opening quote
                 let mut hex = String::new();
                 while pos < chars.len() && chars[pos] != quote {
@@ -645,8 +651,12 @@ fn tokenize(source: &str) -> Vec<Token> {
                         pos += 1;
                     }
                 }
+                // F-011: a single-line literal that reaches the line break is
+                // unterminated; it must never run on into the next line.
                 if pos < chars.len() {
                     pos += 1; // skip closing quote
+                } else {
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
                 tokens.push(Token::HexStringLit(hex));
                 continue;
@@ -655,6 +665,7 @@ fn tokenize(source: &str) -> Vec<Token> {
             // String literals (single or double quoted, including triple-quoted)
             if ch == '\'' || ch == '"' {
                 let quote = ch;
+                let open_col = pos;
                 // Triple-quoted string — always a docstring in Rúnar.
                 // Skip it without emitting a token.
                 if pos + 2 < chars.len() && chars[pos + 1] == quote && chars[pos + 2] == quote {
@@ -671,7 +682,13 @@ fn tokenize(source: &str) -> Vec<Token> {
                     if pos + 2 < chars.len() {
                         pos += 3;
                     } else {
+                        // F-011: not closed on this line. Like the TS
+                        // reference, the following lines are string text
+                        // until the closing triple quote; if none comes
+                        // before end of file it is unterminated.
                         pos = chars.len();
+                        in_triple_quote = Some(quote);
+                        triple_start = (line_num, open_col);
                     }
                     continue;
                 }
@@ -689,6 +706,9 @@ fn tokenize(source: &str) -> Vec<Token> {
                 }
                 if pos < chars.len() {
                     pos += 1; // skip closing quote
+                } else {
+                    // F-011: reached the line break.
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
                 tokens.push(Token::StringLit(val));
                 continue;
@@ -777,6 +797,12 @@ fn tokenize(source: &str) -> Vec<Token> {
         if paren_depth == 0 {
             tokens.push(Token::Newline);
         }
+    }
+
+    // F-011: a triple-quoted string still open at end of file swallowed every
+    // line after it; refuse it instead.
+    if in_triple_quote.is_some() {
+        errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, triple_start.0, triple_start.1));
     }
 
     // Emit remaining DEDENTs

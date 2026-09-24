@@ -177,8 +177,16 @@ func (p *solParser) tokenize(source string) []solToken {
 			i++
 			col++
 			start := i
-			for i < len(source) && source[i] != quote {
+			// F-011: a literal that reaches a line break (escaped or not) or
+			// end of file is unterminated; it must never run on into the
+			// following lines.
+			for i < len(source) && source[i] != quote && source[i] != '\n' && source[i] != '\r' {
 				if source[i] == '\\' {
+					if i+1 >= len(source) || source[i+1] == '\n' || source[i+1] == '\r' {
+						i++
+						col++
+						break
+					}
 					i++
 					col++
 				}
@@ -186,9 +194,11 @@ func (p *solParser) tokenize(source string) []solToken {
 				col++
 			}
 			val := source[start:i]
-			if i < len(source) {
+			if i < len(source) && source[i] == quote {
 				i++ // skip closing quote
 				col++
+			} else {
+				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
 			tokens = append(tokens, solToken{kind: solTokString, value: val, line: line, col: startCol})
 			continue

@@ -344,7 +344,7 @@ module RunarCompiler
       #
       # +errors+, when given, receives tokenizer diagnostics (currently only an
       # unterminated +=begin+ embedded document).
-      def self.tokenize(source, errors = nil)
+      def self.tokenize(source, errors = nil, lex = [], file_name = "")
       tokens = []
       lines = source.split("\n", -1)
       paren_depth = 0
@@ -549,7 +549,13 @@ module RunarCompiler
                 pos += 1
               end
             end
-            pos += 1 if pos < line.length # skip closing quote
+            if pos < line.length
+              pos += 1 # skip closing quote
+            else
+              # F-011: line-based, so reaching the line break means the
+              # literal is unterminated; refuse it, never end it silently.
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col)
+            end
             tokens << Token.new(kind: TOK_HEXSTRING, value: val_chars, line: line_num, col: col)
             next
           end
@@ -568,7 +574,13 @@ module RunarCompiler
                 pos += 1
               end
             end
-            pos += 1 if pos < line.length # skip closing quote
+            if pos < line.length
+              pos += 1 # skip closing quote
+            else
+              # F-011: line-based, so reaching the line break means the
+              # literal is unterminated; refuse it, never end it silently.
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col)
+            end
             tokens << Token.new(kind: TOK_STRING, value: val_chars, line: line_num, col: col)
             next
           end
@@ -1934,8 +1946,14 @@ module RunarCompiler
     # @param file_name [String] the source file name
     # @return [ParseResult]
     def self.parse_ruby(source, file_name = "contract.runar.rb")
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_ruby_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_ruby_tokens(source, file_name, lex)
       lex_errors = []
-      tokens = RubyTokens.tokenize(source, lex_errors)
+      tokens = RubyTokens.tokenize(source, lex_errors, lex, file_name)
       unless lex_errors.empty?
         return ParseResult.new(errors: lex_errors.map { |e|
           Diagnostic.new(message: "#{file_name}: #{e}", severity: Severity::ERROR)

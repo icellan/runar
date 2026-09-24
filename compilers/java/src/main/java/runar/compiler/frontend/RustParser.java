@@ -83,7 +83,10 @@ public final class RustParser {
     /** Parse Rust DSL source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
         State state = new State(filename);
-        state.tokens = tokenize(source);
+        List<String> lex = new ArrayList<>();
+        state.tokens = tokenize(source, filename, lex);
+        // F-011: refuse an unterminated literal before parsing what follows it.
+        if (!lex.isEmpty()) throw new ParseException(String.join("; ", lex));
         ContractNode contract = parseContract(state);
         String collision = state.idents.message();
         if (collision != null) state.errors.add(collision);
@@ -335,7 +338,7 @@ public final class RustParser {
         return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
     }
 
-    private static List<Token> tokenize(String source) {
+    private static List<Token> tokenize(String source, String filename, List<String> lex) {
         List<Token> tokens = new ArrayList<>();
         int n = source.length();
         int pos = 0;
@@ -453,6 +456,12 @@ public final class RustParser {
                 col++;
                 int start = pos;
                 while (pos < n && source.charAt(pos) != '"') {
+                    // A backslash escapes the next character (as in the TS
+                    // reference), so `\"` does not close the literal.
+                    if (source.charAt(pos) == '\\' && pos + 1 < n) {
+                        pos++;
+                        col++;
+                    }
                     if (source.charAt(pos) == '\n') {
                         line++;
                         col = 1;
@@ -462,9 +471,13 @@ public final class RustParser {
                     pos++;
                 }
                 String val = source.substring(start, Math.min(pos, n));
+                // F-011: Rust strings may span lines, so only end of file
+                // leaves one unterminated.
                 if (pos < n) {
                     pos++;
                     col++;
+                } else {
+                    lex.add(LexDiag.at(filename, startLine, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
                 tokens.add(new Token(TOK_HEX_STRING, val, startLine, startCol));
                 continue;

@@ -42,7 +42,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ pub fn parse_go_contract(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.go");
     let mut errors: Vec<Diagnostic> = Vec::new();
 
-    let tokens = tokenize(source);
+    let tokens = tokenize(source, file, &mut errors);
     let mut parser = GoParser::new(tokens, file, &mut errors);
 
     let contract = parser.parse();
@@ -305,7 +305,7 @@ struct Token {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut pos = 0usize;
@@ -367,9 +367,13 @@ fn tokenize(source: &str) -> Vec<Token> {
                 pos += 1;
                 col += 1;
             }
+            // F-011: a raw string may span lines, so only end of file leaves
+            // it unterminated.
             if pos < chars.len() {
                 pos += 1;
                 col += 1;
+            } else {
+                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c));
             }
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
             continue;
@@ -380,7 +384,13 @@ fn tokenize(source: &str) -> Vec<Token> {
             let mut val = String::new();
             pos += 1;
             col += 1;
-            while pos < chars.len() && chars[pos] != '"' {
+            // F-011: a Go interpreted string cannot span lines; one that
+            // reaches a line break (escaped or not) or end of file is
+            // unterminated and must never run on into the following lines.
+            while pos < chars.len() && chars[pos] != '"' && chars[pos] != '\n' && chars[pos] != '\r' {
+                if chars[pos] == '\\' && (pos + 1 >= chars.len() || chars[pos + 1] == '\n' || chars[pos + 1] == '\r') {
+                    break;
+                }
                 if chars[pos] == '\\' && pos + 1 < chars.len() {
                     pos += 1;
                     col += 1;
@@ -417,9 +427,11 @@ fn tokenize(source: &str) -> Vec<Token> {
                 pos += 1;
                 col += 1;
             }
-            if pos < chars.len() {
+            if pos < chars.len() && chars[pos] == '"' {
                 pos += 1;
                 col += 1;
+            } else {
+                errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c));
             }
             tokens.push(Token { typ: TokenType::StringLit(val), line: l, col: c });
             continue;

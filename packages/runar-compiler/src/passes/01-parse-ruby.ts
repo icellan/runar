@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
@@ -263,6 +263,9 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           }
         }
         if (pos < line.length) pos++; // skip closing quote
+        // F-011: the tokenizer is line-based, so a literal that reaches the
+        // line break is unterminated; refuse it rather than end it silently.
+        else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: lineNum, column: col }));
         add('hexstring', val, lineNum, col);
         continue;
       }
@@ -282,6 +285,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           }
         }
         if (pos < line.length) pos++; // skip closing quote
+        else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: lineNum, column: col }));
         add('string', val, lineNum, col);
         continue;
       }

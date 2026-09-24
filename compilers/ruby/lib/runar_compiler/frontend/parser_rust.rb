@@ -280,7 +280,7 @@ module RunarCompiler
 
     HEX_DIGITS_SET = "0123456789abcdefABCDEF"
 
-    def self.tokenize_rust(source)
+    def self.tokenize_rust(source, lex = [], file_name = "")
       tokens = []
       n = source.length
       pos = 0
@@ -416,7 +416,13 @@ module RunarCompiler
             pos += 1
             col += 1
           end
-          pos += 1 if pos < n # closing quote
+          # F-011: Rust strings may span lines, so only end of file leaves
+          # one unterminated.
+          if pos < n
+            pos += 1 # closing quote
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, l, c)
+          end
           col += 1
           tokens << RustToken.new(kind: RustTokens::TOK_STRING, value: val, line: l, col: c)
           next
@@ -1617,8 +1623,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_rust(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_rust_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_rust_tokens(source, file_name, lex)
       p = RustParser.new(file_name)
-      p.tokens = tokenize_rust(source)
+      p.tokens = tokenize_rust(source, lex, file_name)
       p.pos = 0
 
       begin

@@ -201,7 +201,7 @@ module RunarCompiler
     #
     # @param source [String]
     # @return [Array<ZigToken>]
-    def self.tokenize_zig(source)
+    def self.tokenize_zig(source, lex = [], file_name = "")
       tokens = []
       line = 1
       col = 0
@@ -276,8 +276,12 @@ module RunarCompiler
           i += 1
           col += 1
           start = i
-          while i < n && source[i] != '"'
+          # F-011: a literal that reaches a line break (escaped or not) or end
+          # of file is unterminated; it must never run on into the next lines.
+          while i < n && source[i] != '"' && source[i] != "\n" && source[i] != "\r"
             if source[i] == "\\"
+              break if i + 1 >= n || source[i + 1] == "\n" || source[i + 1] == "\r"
+
               i += 1
               col += 1
             end
@@ -287,9 +291,11 @@ module RunarCompiler
             end
           end
           val = source[start...i]
-          if i < n
+          if i < n && source[i] == '"'
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
           end
           tokens << ZigToken.new(kind: ZigTokens::TOK_STRING, value: val, line: line, col: start_col)
           next
@@ -1857,8 +1863,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_zig(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_zig_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_zig_tokens(source, file_name, lex)
       p = ZigParser.new(file_name)
-      p.tokens = tokenize_zig(source)
+      p.tokens = tokenize_zig(source, lex, file_name)
       p.pos = 0
 
       begin

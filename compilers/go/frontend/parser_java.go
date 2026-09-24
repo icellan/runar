@@ -34,11 +34,12 @@ import (
 //     Point, P256Point, P384Point, SigHashPreimage, RabinSig, RabinPubKey,
 //     OpCodeType); FixedArray<T, N> with integer-literal N.
 func ParseJava(source []byte, fileName string) *ParseResult {
-	tokens := javaTokenize(string(source))
+	tokens, lexErrors := javaTokenize(string(source), fileName)
 	p := &javaParser{
 		tokens:   tokens,
 		pos:      0,
 		fileName: fileName,
+		errors:   lexErrors,
 	}
 
 	contract := p.parse()
@@ -153,9 +154,10 @@ var javaKeywords = map[string]javaTokKind{
 	"null":       javaTokNull,
 }
 
-func javaTokenize(source string) []javaToken {
+func javaTokenize(source, fileName string) ([]javaToken, []Diagnostic) {
 	chars := []rune(source)
 	var tokens []javaToken
+	var errs []Diagnostic
 	pos := 0
 	line := 1
 	// 0-based column, matching this tier's other format parsers
@@ -378,7 +380,13 @@ func javaTokenize(source string) []javaToken {
 			var val strings.Builder
 			pos++
 			col++
-			for pos < len(chars) && chars[pos] != '"' {
+			// F-011: a Java string literal cannot span lines; one that
+			// reaches a line break (escaped or not) or end of file is
+			// unterminated and must never run on into the following lines.
+			for pos < len(chars) && chars[pos] != '"' && chars[pos] != '\n' && chars[pos] != '\r' {
+				if chars[pos] == '\\' && (pos+1 >= len(chars) || chars[pos+1] == '\n' || chars[pos+1] == '\r') {
+					break
+				}
 				if chars[pos] == '\\' && pos+1 < len(chars) {
 					// Minimal escape handling: preserve common escapes literally.
 					esc := chars[pos+1]
@@ -413,18 +421,22 @@ func javaTokenize(source string) []javaToken {
 				val.WriteRune(chars[pos])
 				pos++
 			}
-			if pos < len(chars) {
+			if pos < len(chars) && chars[pos] == '"' {
 				pos++ // closing quote
 				col++
+			} else {
+				errs = append(errs, lexDiag(UnterminatedStringLiteralMsg, fileName, l, c))
 			}
 			tokens = append(tokens, javaToken{kind: javaTokString, value: val.String(), line: l, col: c})
 			continue
 		}
 
-		// Character literal: skip (not supported). Consume one char to avoid
-		// an infinite loop — the parser will surface an error if this is
-		// reached during real parsing.
+		// Character literal: not supported. F-011: it used to be skipped with
+		// no diagnostic, up to the next single quote wherever that was, which
+		// silently dropped the code in between. Refuse it as the TS
+		// reference does.
 		if ch == '\'' {
+			errs = append(errs, lexDiag(JavaCharLiteralMsg, fileName, l, c))
 			pos++
 			col++
 			for pos < len(chars) && chars[pos] != '\'' {
@@ -440,7 +452,7 @@ func javaTokenize(source string) []javaToken {
 				pos++
 				col++
 			}
-			// Emit an error-ish placeholder by skipping; no token produced.
+			// Refused above; no token produced.
 			continue
 		}
 
@@ -450,7 +462,7 @@ func javaTokenize(source string) []javaToken {
 	}
 
 	tokens = append(tokens, javaToken{kind: javaTokEOF, line: line, col: col})
-	return tokens
+	return tokens, errs
 }
 
 func javaIsHexDigit(ch rune) bool {

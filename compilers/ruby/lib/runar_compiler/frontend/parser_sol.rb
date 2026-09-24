@@ -152,7 +152,7 @@ module RunarCompiler
       #
       # @param source [String]
       # @return [Array<Token>]
-      def self.tokenize(source)
+      def self.tokenize(source, lex = [], file_name = "")
         tokens = []
         line = 1
         col = 0
@@ -228,8 +228,12 @@ module RunarCompiler
             i += 1
             col += 1
             start = i
-            while i < n && source[i] != quote
+            # F-011: a literal that reaches a line break (escaped or not) or end
+            # of file is unterminated; it must never run on into the next lines.
+            while i < n && source[i] != quote && source[i] != "\n" && source[i] != "\r"
               if source[i] == "\\"
+                break if i + 1 >= n || source[i + 1] == "\n" || source[i + 1] == "\r"
+
                 i += 1
                 col += 1
               end
@@ -239,9 +243,11 @@ module RunarCompiler
               end
             end
             val = source[start...i]
-            if i < n
+            if i < n && source[i] == quote
               i += 1
               col += 1
+            else
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
             end
             tokens << Token.new(kind: TOK_STRING, value: val, line: line, col: start_col)
             next
@@ -1513,8 +1519,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_sol(source, file_name = "contract.runar.sol")
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_sol_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_sol_tokens(source, file_name, lex)
       p = SolParser.new(file_name)
-      p.tokens = SolTokens.tokenize(source)
+      p.tokens = SolTokens.tokenize(source, lex, file_name)
       p.pos = 0
 
       begin

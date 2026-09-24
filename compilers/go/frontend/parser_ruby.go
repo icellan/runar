@@ -334,6 +334,10 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				}
 				if pos < len(line) {
 					pos++ // skip closing quote
+				} else {
+					// F-011: line-based, so reaching the line break means the
+					// literal is unterminated; refuse it, never end it silently.
+					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, lineNum, col))
 				}
 				tokens = append(tokens, rbToken{kind: rbTokHexString, value: val, line: lineNum, col: col})
 				continue
@@ -355,6 +359,10 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				}
 				if pos < len(line) {
 					pos++ // skip closing quote
+				} else {
+					// F-011: line-based, so reaching the line break means the
+					// literal is unterminated; refuse it, never end it silently.
+					p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, lineNum, col))
 				}
 				tokens = append(tokens, rbToken{kind: rbTokString, value: val, line: lineNum, col: col})
 				continue

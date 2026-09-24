@@ -24,6 +24,7 @@
 //!   - `var name Type = value` for variable declarations
 
 const std = @import("std");
+const lex_diag = @import("lex_diag.zig");
 const int_literal = @import("int_literal.zig");
 const types = @import("../ir/types.zig");
 const identifier_collision = @import("identifier_collision.zig");
@@ -85,7 +86,16 @@ const FuncDecl = struct {
 
 pub fn parseGo(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
     var parser = Parser.init(allocator, source, file_name);
-    return parser.parse();
+    const r = parser.parse();
+    // F-011: tokenize the whole source once more so an unterminated literal
+    // is reported even where the parser stopped before reaching it.
+    var t = Tokenizer.init(source);
+    var guard: usize = 0;
+    while (guard <= source.len) : (guard += 1) {
+        if (t.next().kind == .eof) break;
+    }
+    const errs = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, t.unterminated);
+    return .{ .contract = r.contract, .errors = errs };
 }
 
 
@@ -155,6 +165,8 @@ const Token = struct {
 
 const Tokenizer = struct {
     source: []const u8,
+    /// F-011: the first unterminated quoted literal, if any.
+    unterminated: ?lex_diag.Pos = null,
     pos: usize,
     line: u32,
     col: u32,
@@ -223,26 +235,41 @@ const Tokenizer = struct {
         // String literals: double quotes
         if (c == '"') {
             _ = self.advance();
-            while (self.pos < self.source.len and self.source[self.pos] != '"') {
-                if (self.source[self.pos] == '\\') _ = self.advance();
+            // F-011: a literal that reaches a line break (escaped or not) or
+            // end of file is unterminated; it must never run on into the
+            // following lines.
+            while (self.pos < self.source.len and self.source[self.pos] != '"' and self.source[self.pos] != '\n' and self.source[self.pos] != '\r') {
+                if (self.source[self.pos] == '\\') {
+                    const nx = self.peekAt(1);
+                    if (self.pos + 1 >= self.source.len or nx == '\n' or nx == '\r') break;
+                    _ = self.advance();
+                }
                 _ = self.advance();
             }
-            if (self.pos < self.source.len) _ = self.advance();
-            const content_start = start + 1;
-            const content_end = self.pos - 1;
-            return .{ .kind = .string_literal, .text = self.source[content_start..content_end], .line = sl, .col = sc };
+            const content_end = self.pos;
+            if (self.pos < self.source.len and self.source[self.pos] == '"') {
+                _ = self.advance();
+            } else if (self.unterminated == null) {
+                self.unterminated = .{ .line = sl, .col = sc };
+            }
+            return .{ .kind = .string_literal, .text = self.source[start + 1 .. content_end], .line = sl, .col = sc };
         }
 
         // Backtick-delimited struct tags: `runar:"readonly"`
         if (c == '`') {
             _ = self.advance();
+            // F-011: this literal may span lines, so only end of file leaves
+            // it unterminated.
             while (self.pos < self.source.len and self.source[self.pos] != '`') {
                 _ = self.advance();
             }
-            if (self.pos < self.source.len) _ = self.advance();
-            const content_start = start + 1;
-            const content_end = self.pos - 1;
-            return .{ .kind = .backtick_string, .text = self.source[content_start..content_end], .line = sl, .col = sc };
+            const content_end = self.pos;
+            if (self.pos < self.source.len) {
+                _ = self.advance();
+            } else if (self.unterminated == null) {
+                self.unterminated = .{ .line = sl, .col = sc };
+            }
+            return .{ .kind = .backtick_string, .text = self.source[start + 1 .. content_end], .line = sl, .col = sc };
         }
 
         // Numbers (decimal, hex, octal, binary)

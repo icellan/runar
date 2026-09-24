@@ -30,7 +30,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
@@ -158,15 +158,19 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Z
     if (ch === '"') {
       let value = '';
       advance();
-      while (pos < source.length && peek() !== '"') {
+      // F-011: a Zig string literal cannot span lines; one that reaches a
+      // line break (escaped or not) or end of file is unterminated.
+      while (pos < source.length && peek() !== '"' && peek() !== '\n') {
         if (peek() === '\\') {
           advance();
+          if (peek() === '\n' || peek() === '') break;
           value += advance();
         } else {
           value += advance();
         }
       }
-      if (pos < source.length) advance();
+      if (peek() === '"') advance();
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: tokenLine, column: tokenColumn }));
       add('string', value, tokenLine, tokenColumn);
       continue;
     }

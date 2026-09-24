@@ -16,11 +16,12 @@ import (
 // produces the standard Rúnar AST. Uses a hand-written tokenizer and
 // recursive descent parser.
 func ParseRustMacro(source []byte, fileName string) *ParseResult {
-	tokens := rustTokenize(string(source))
+	tokens, lexErrors := rustTokenize(string(source), fileName)
 	p := &rustMacroParser{
 		tokens:   tokens,
 		pos:      0,
 		fileName: fileName,
+		errors:   lexErrors,
 	}
 
 	contract := p.parse()
@@ -109,9 +110,10 @@ type rustToken struct {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-func rustTokenize(source string) []rustToken {
+func rustTokenize(source, fileName string) ([]rustToken, []Diagnostic) {
 	chars := []rune(source)
 	var tokens []rustToken
+	var errs []Diagnostic
 	pos := 0
 	line := 1
 	// 0-based column, matching this tier's other format parsers
@@ -337,13 +339,24 @@ func rustTokenize(source string) []rustToken {
 			pos++
 			col++
 			for pos < len(chars) && chars[pos] != '"' {
+				// A backslash escapes the next character (as in the TS
+				// reference), so `\"` does not close the literal.
+				if chars[pos] == '\\' && pos+1 < len(chars) {
+					val.WriteRune(chars[pos])
+					pos++
+					col++
+				}
 				val.WriteRune(chars[pos])
 				pos++
 				col++
 			}
+			// F-011: Rust strings may span lines, so only end of file leaves
+			// one unterminated.
 			if pos < len(chars) {
 				pos++ // skip closing "
 				col++
+			} else {
+				errs = append(errs, lexDiag(UnterminatedStringLiteralMsg, fileName, l, c))
 			}
 			tokens = append(tokens, rustToken{kind: rustTokHexString, value: val.String(), line: l, col: c})
 			continue
@@ -355,7 +368,7 @@ func rustTokenize(source string) []rustToken {
 	}
 
 	tokens = append(tokens, rustToken{kind: rustTokEOF, line: line, col: col})
-	return tokens
+	return tokens, errs
 }
 
 func rustKeyword(name string) rustTokKind {

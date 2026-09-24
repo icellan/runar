@@ -197,7 +197,7 @@ module RunarCompiler
       java_ident_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
-    def self.tokenize_java(source)
+    def self.tokenize_java(source, lex = [], file_name = "")
       tokens = []
       n = source.length
       i = 0
@@ -258,7 +258,11 @@ module RunarCompiler
           i += 1
           col += 1
           val = +""
-          while i < n && source[i] != '"'
+          # F-011: a Java string literal cannot span lines; one that reaches
+          # a line break (escaped or not) or end of file is unterminated.
+          while i < n && source[i] != '"' && source[i] != "\n" && source[i] != "\r"
+            break if source[i] == "\\" && (i + 1 >= n || source[i + 1] == "\n" || source[i + 1] == "\r")
+
             if source[i] == "\\" && i + 1 < n
               nx = source[i + 1]
               case nx
@@ -279,7 +283,11 @@ module RunarCompiler
               col += 1
             end
           end
-          i += 1 if i < n # closing quote
+          if i < n && source[i] == '"'
+            i += 1 # closing quote
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, start_line, start_col)
+          end
           col += 1
           tokens << JavaToken.new(kind: JavaTokens::TOK_STRING, value: val, line: start_line, col: start_col)
           next
@@ -287,6 +295,8 @@ module RunarCompiler
 
         # Character literal (parsed but not used in Runar subset; rejected later)
         if ch == "'"
+          # F-011: refused exactly as the TS reference refuses it.
+          lex << Frontend.lex_error(JAVA_CHAR_LITERAL, file_name, start_line, start_col)
           i += 1
           col += 1
           val = +""
@@ -1599,7 +1609,7 @@ module RunarCompiler
 
         # Character literal -- rejected.
         if tok.kind == TOK_CHAR
-          fatal("char literals are unsupported in #{@file_name}")
+          fatal(JAVA_CHAR_LITERAL)
         end
 
         # Booleans
@@ -1770,8 +1780,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_java(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_java_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_java_tokens(source, file_name, lex)
       p = JavaParser.new(file_name)
-      p.tokens = tokenize_java(source)
+      p.tokens = tokenize_java(source, lex, file_name)
       p.pos = 0
 
       begin

@@ -18,7 +18,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
@@ -75,6 +75,7 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
     tokens.push({ type, value, line: l, column: c });
   }
 
+  let closingQuoteAt = -1; // F-011, see the quoted-literal check below
   while (pos < source.length) {
     const ch = peek();
     const l = line;
@@ -154,6 +155,29 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       const kwType = KEYWORDS.get(val);
       add(kwType || 'ident', val, l, c);
       continue;
+    }
+
+    // F-011: this surface accepts no quoted literal (a terminated one is
+    // refused as an unexpected character below), but an unterminated one --
+    // reaching a line break or end of file -- gets the diagnostic every tier
+    // emits for it.
+    if ((ch === '"' || ch === "'") && pos !== closingQuoteAt) {
+      let k = pos + 1;
+      while (k < source.length && source[k] !== ch && source[k] !== '\n') {
+        if (source[k] === '\\') {
+          if (k + 1 >= source.length || source[k + 1] === '\n') break;
+          k++;
+        }
+        k++;
+      }
+      if (source[k] !== ch) {
+        errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
+        advance();
+        continue;
+      }
+      // Terminated: both quotes stay unexpected characters, as before; the
+      // closing one must not be re-read as an opening quote.
+      closingQuoteAt = k;
     }
 
     // Unrecognized character — reject it rather than dropping it silently.

@@ -36,7 +36,7 @@ import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.j
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
 // ---------------------------------------------------------------------------
@@ -156,12 +156,16 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): R
       while (pos < source.length && peek() !== '"') {
         if (peek() === '\\') {
           advance(); // skip backslash
+          if (pos >= source.length) break;
           val += advance(); // take escaped char
         } else {
           val += advance();
         }
       }
+      // F-011: Rust strings may span lines, so only end of file leaves one
+      // unterminated.
       if (pos < source.length) advance(); // consume closing quote
+      else errors.push(makeDiagnostic(UNTERMINATED_STRING_LITERAL, 'error', { file, line: l, column: c }));
       add('string', val, l, c);
       continue;
     }

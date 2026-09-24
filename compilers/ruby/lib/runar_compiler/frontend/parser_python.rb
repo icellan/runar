@@ -267,12 +267,13 @@ module RunarCompiler
     # NEWLINE tokens are emitted at the end of each significant line.
     # -----------------------------------------------------------------------
 
-    def self.tokenize_python(source)
+    def self.tokenize_python(source, lex = [], file_name = "")
       tokens = []
       lines = source.split("\n", -1)
       indent_stack = [0]
       paren_depth = 0
       in_triple_quote = nil
+      triple_start = nil # F-011: [line, col] of the open triple-quoted string
 
       lines.each_with_index do |raw_line, line_idx|
         line_num = line_idx + 1
@@ -296,6 +297,7 @@ module RunarCompiler
           close_idx = stripped.index(quote, 3)
           if close_idx.nil?
             in_triple_quote = quote
+            triple_start = [line_num, line.length - stripped.length + 1]
           end
           next
         end
@@ -359,7 +361,13 @@ module RunarCompiler
               pos += 1
             end
             val = line[start...pos]
-            pos += 1 if pos < line.length
+            # F-011: a single-line literal that reaches the line break is
+            # unterminated; it must never run on into the next line.
+            if pos < line.length
+              pos += 1
+            else
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col)
+            end
             hex_val = py_byte_string_to_hex(val)
             tokens << PythonToken.new(kind: PythonTokens::TOK_HEXSTRING, value: hex_val, line: line_num, col: col)
             next
@@ -376,6 +384,7 @@ module RunarCompiler
                 pos = close_idx + 3
               else
                 in_triple_quote = triple
+                triple_start = [line_num, col]
                 break
               end
               next
@@ -393,7 +402,11 @@ module RunarCompiler
               end
               pos += 1
             end
-            pos += 1 if pos < line.length
+            if pos < line.length
+              pos += 1
+            else
+              lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col) # F-011
+            end
             tokens << PythonToken.new(kind: PythonTokens::TOK_STRING, value: val, line: line_num, col: col)
             next
           end
@@ -546,6 +559,12 @@ module RunarCompiler
         if paren_depth == 0
           tokens << PythonToken.new(kind: PythonTokens::TOK_NEWLINE, value: "", line: line_num, col: line.length + 1)
         end
+      end
+
+      # F-011: a triple-quoted string still open at end of file swallowed
+      # every line after it; refuse it instead.
+      if in_triple_quote
+        lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, triple_start[0], triple_start[1])
       end
 
       # Emit remaining DEDENTs
@@ -1732,8 +1751,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_python(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_python_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_python_tokens(source, file_name, lex)
       p = PythonParser.new(file_name)
-      p.tokens = tokenize_python(source)
+      p.tokens = tokenize_python(source, lex, file_name)
       p.pos = 0
 
       begin

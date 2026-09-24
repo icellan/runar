@@ -46,6 +46,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::{lex_error, UNTERMINATED_STRING_LITERAL};
 use super::parser::ParseResult;
 use std::collections::HashMap;
 
@@ -60,16 +61,15 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.rb");
     let mut str_errors: Vec<String> = Vec::new();
 
-    let tokens = tokenize(source);
+    let mut lex_errors: Vec<Diagnostic> = Vec::new();
+    let tokens = tokenize(source, file, &mut lex_errors);
     let mut parser = RbParser::new(tokens, file, &mut str_errors);
 
     let contract = parser.parse_contract();
     let collision = parser.idents.collision_diagnostic();
 
-    let mut errors: Vec<Diagnostic> = str_errors
-        .into_iter()
-        .map(|msg| Diagnostic::error(msg, None))
-        .collect();
+    let mut errors: Vec<Diagnostic> = lex_errors;
+    errors.extend(str_errors.into_iter().map(|msg| Diagnostic::error(msg, None)));
     if contract.is_some() {
         errors.extend(collision);
     }
@@ -322,12 +322,13 @@ enum Token {
     Eof,
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagnostic>) -> Vec<Token> {
     let mut tokens = Vec::new();
     let lines: Vec<&str> = source.split('\n').collect();
     let mut paren_depth: usize = 0;
 
-    for raw_line in &lines {
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        let line_num = line_idx + 1;
         // Strip trailing \r
         let line = if raw_line.ends_with('\r') {
             &raw_line[..raw_line.len() - 1]
@@ -612,6 +613,7 @@ fn tokenize(source: &str) -> Vec<Token> {
 
             // Single-quoted string literals: hex ByteStrings
             if ch == '\'' {
+                let open_col = pos;
                 pos += 1;
                 let mut val = String::new();
                 while pos < chars.len() && chars[pos] != '\'' {
@@ -626,6 +628,10 @@ fn tokenize(source: &str) -> Vec<Token> {
                 }
                 if pos < chars.len() {
                     pos += 1; // skip closing quote
+                } else {
+                    // F-011: line-based, so reaching the line break means the
+                    // literal is unterminated; refuse it, never end it silently.
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
                 tokens.push(Token::HexStringLit(val));
                 continue;
@@ -633,6 +639,7 @@ fn tokenize(source: &str) -> Vec<Token> {
 
             // Double-quoted string literals
             if ch == '"' {
+                let open_col = pos;
                 pos += 1;
                 let mut val = String::new();
                 while pos < chars.len() && chars[pos] != '"' {
@@ -647,6 +654,10 @@ fn tokenize(source: &str) -> Vec<Token> {
                 }
                 if pos < chars.len() {
                     pos += 1; // skip closing quote
+                } else {
+                    // F-011: line-based, so reaching the line break means the
+                    // literal is unterminated; refuse it, never end it silently.
+                    errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
                 }
                 tokens.push(Token::StringLit(val));
                 continue;

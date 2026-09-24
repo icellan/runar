@@ -63,6 +63,15 @@ export class TypeError extends CompilerError {
 }
 
 /**
+ * F-011: the one diagnostic every tier's hand-written tokenizers emit, at the
+ * opening quote, for a quoted literal that reaches a line break or end of file
+ * before its closing quote. On `.runar.rs`, for Python triple-quoted strings
+ * and for `.runar.go` backtick raw strings, which may span lines, only end of
+ * file counts.
+ */
+export const UNTERMINATED_STRING_LITERAL = 'unterminated string literal';
+
+/**
  * Helper: create a diagnostic object without throwing.
  */
 export function makeDiagnostic(

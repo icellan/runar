@@ -9,7 +9,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
 
@@ -49,7 +49,7 @@ struct Token {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut pos = 0;
@@ -215,10 +215,19 @@ fn tokenize(source: &str) -> Vec<Token> {
             let mut val = String::new();
             pos += 1; col += 1;
             while pos < chars.len() && chars[pos] != '"' {
+                // A backslash escapes the next character (as in the TS
+                // reference), so `\"` does not close the literal.
+                if chars[pos] == '\\' && pos + 1 < chars.len() {
+                    val.push(chars[pos]);
+                    pos += 1; col += 1;
+                }
                 val.push(chars[pos]);
                 pos += 1; col += 1;
             }
+            // F-011: Rust strings may span lines, so only end of file leaves
+            // one unterminated.
             if pos < chars.len() { pos += 1; col += 1; } // skip closing quote
+            else { errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, l, c)); }
             tokens.push(Token { typ: TokenType::HexString(val), line: l, col: c });
             continue;
         }
@@ -1315,9 +1324,13 @@ fn map_rust_builtin(name: &str) -> String {
 
 pub fn parse_rust_dsl(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.rs").to_string();
-    let tokens = tokenize(source);
+    let mut lex_errors: Vec<Diagnostic> = Vec::new();
+    let tokens = tokenize(source, &file, &mut lex_errors);
     let parser = RustDslParser::new(tokens, file);
-    parser.parse()
+    let mut result = parser.parse();
+    lex_errors.append(&mut result.errors);
+    result.errors = lex_errors;
+    result
 }
 
 // ---------------------------------------------------------------------------

@@ -197,7 +197,7 @@ module RunarCompiler
       #
       # @param source [String]
       # @return [Array(Array<Token>, Array<Hash>)] tokens and directive records
-      def self.tokenize(source)
+      def self.tokenize(source, lex = [], file_name = "")
       tokens = []
       directives = []
       line = 1
@@ -279,6 +279,7 @@ module RunarCompiler
 
         # Template string literals (backticks)
         if ch == "`"
+          tick_line = line
           i += 1
           col += 1
           start = i
@@ -298,9 +299,13 @@ module RunarCompiler
             end
           end
           val = source[start...i]
+          # F-011: a template literal may span lines; only end of file
+          # leaves it unterminated.
           if i < n
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, tick_line, start_col)
           end
           tokens << Token.new(kind: TOK_STRING, value: val, line: line, col: start_col)
           next
@@ -312,7 +317,9 @@ module RunarCompiler
           i += 1
           col += 1
           start = i
-          while i < n && source[i] != quote
+          # F-011: a literal that reaches an unescaped line break or end of
+          # file is unterminated (a backslash before the break continues it).
+          while i < n && source[i] != quote && source[i] != "\n" && source[i] != "\r"
             if source[i] == "\\"
               i += 1
               col += 1
@@ -323,9 +330,11 @@ module RunarCompiler
             end
           end
           val = source[start...i]
-          if i < n
+          if i < n && source[i] == quote
             i += 1
             col += 1
+          else
+            lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col)
           end
           tokens << Token.new(kind: TOK_STRING, value: val, line: line, col: start_col)
           next
@@ -1876,8 +1885,14 @@ module RunarCompiler
     # @param file_name [String] the file name (used in diagnostics)
     # @return [ParseResult]
     def self.parse_ts(source, file_name)
+      # F-011: run the parser below and keep its tokenizer's diagnostics.
+      lex = []
+      Frontend.with_lex_errors(_parse_ts_tokens(source, file_name, lex), lex)
+    end
+
+    def self._parse_ts_tokens(source, file_name, lex)
       p = TsParser.new(file_name)
-      toks, directives = TsTokens.tokenize(source)
+      toks, directives = TsTokens.tokenize(source, lex, file_name)
       p.tokens = toks
       p.directives = directives
       p.pos = 0
