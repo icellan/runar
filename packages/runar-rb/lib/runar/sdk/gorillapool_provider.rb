@@ -2,6 +2,7 @@
 
 require 'net/http'
 require 'json'
+require 'digest'
 require 'uri'
 require_relative 'provider'
 require_relative 'types'
@@ -36,38 +37,22 @@ module Runar
       # Standard Provider methods
       # -------------------------------------------------------------------
 
-      # Fetch a TransactionData by its txid.
+      # Fetch a TransactionData by its txid via GET /tx/{txid}/raw (the bare
+      # serialized transaction). Each output's satoshis is read from its
+      # 8-byte little-endian field, so values are exact (F-027: the former JSON
+      # `vout[].value` decode with its `< 1000 -> BTC` guess targeted a field
+      # GorillaPool never returns). The body must hash to the requested txid.
       #
       # @param txid [String] transaction id (64 hex chars)
       # @return [TransactionData]
       def get_transaction(txid)
-        data = api_get("/tx/#{txid}")
-
-        inputs = Array(data['vin']).map do |vin|
-          TxInput.new(
-            txid: vin['txid'],
-            output_index: vin['vout'],
-            script: vin.dig('scriptSig', 'hex') || '',
-            sequence: vin['sequence'] || 0xFFFFFFFF
-          )
+        raw = api_get_raw("/tx/#{txid}/raw")
+        body_txid = Digest::SHA256.digest(Digest::SHA256.digest(raw)).reverse.unpack1('H*')
+        unless body_txid == txid.downcase
+          raise "GorillaPool getTransaction: txid mismatch: response body hashes to #{body_txid}, requested #{txid}"
         end
 
-        outputs = Array(data['vout']).map do |vout|
-          satoshis = vout['value'].is_a?(Numeric) && vout['value'] < 1000 ? (vout['value'] * 1e8).round : vout['value']
-          TxOutput.new(
-            satoshis: satoshis,
-            script: vout.dig('scriptPubKey', 'hex') || ''
-          )
-        end
-
-        TransactionData.new(
-          txid: data['txid'],
-          version: data['version'] || 1,
-          inputs: inputs,
-          outputs: outputs,
-          locktime: data['locktime'] || 0,
-          raw: data['hex'] || ''
-        )
+        decode_raw_tx(body_txid, raw)
       end
 
       # Broadcast a raw transaction hex to the network.
@@ -287,6 +272,68 @@ module Runar
       end
 
       private
+
+      # Perform an HTTP GET request and return the raw (binary) response body.
+      #
+      # @param path [String] API path (appended to base_url)
+      # @return [String] response body bytes (ASCII-8BIT)
+      def api_get_raw(path)
+        uri = URI("#{@base_url}#{path}")
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.use_ssl = true
+
+        response = http.request(Net::HTTP::Get.new(uri))
+        unless response.is_a?(Net::HTTPSuccess)
+          raise "GorillaPool getTransaction failed (#{response.code}): #{response.body}"
+        end
+
+        response.body.b
+      end
+
+      # Decode a serialized transaction into TransactionData, keeping the input
+      # scripts. The SDK's other raw-tx parsers (Bip143 / OpPushTx) discard
+      # scriptSigs, so this one is local.
+      #
+      # @param txid [String]
+      # @param raw [String] binary transaction bytes
+      # @return [TransactionData]
+      def decode_raw_tx(txid, raw)
+        pos = 0
+        read = lambda do |n|
+          raise 'GorillaPool getTransaction: truncated transaction' if pos + n > raw.bytesize
+
+          chunk = raw.byteslice(pos, n)
+          pos += n
+          chunk
+        end
+        read_varint = lambda do
+          first = read.call(1).unpack1('C')
+          case first
+          when 0xFD then read.call(2).unpack1('v')
+          when 0xFE then read.call(4).unpack1('V')
+          when 0xFF then read.call(8).unpack1('Q<')
+          else first
+          end
+        end
+
+        version = read.call(4).unpack1('V')
+        inputs = Array.new(read_varint.call) do
+          prev_txid = read.call(32).reverse.unpack1('H*')
+          prev_index = read.call(4).unpack1('V')
+          script = read.call(read_varint.call).unpack1('H*')
+          TxInput.new(txid: prev_txid, output_index: prev_index, script: script,
+                      sequence: read.call(4).unpack1('V'))
+        end
+        outputs = Array.new(read_varint.call) do
+          satoshis = read.call(8).unpack1('Q<')
+          TxOutput.new(satoshis: satoshis, script: read.call(read_varint.call).unpack1('H*'))
+        end
+        locktime = read.call(4).unpack1('V')
+        raise 'GorillaPool getTransaction: trailing bytes after transaction' unless pos == raw.bytesize
+
+        TransactionData.new(txid: txid, version: version, inputs: inputs, outputs: outputs,
+                            locktime: locktime, raw: raw.unpack1('H*'))
+      end
 
       # Perform an HTTP GET request against the GorillaPool API and parse the JSON response.
       #

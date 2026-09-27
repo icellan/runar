@@ -10,6 +10,7 @@
 //   Testnet: https://testnet.ordinals.gorillapool.io/api/
 // ---------------------------------------------------------------------------
 
+import { Transaction as BsvTransaction, Hash, Utils } from '@bsv/sdk';
 import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
 import type { TransactionData, TxInput, TxOutput, UTXO } from '../types.js';
@@ -31,28 +32,6 @@ export interface InscriptionInfo {
 
 export interface InscriptionDetail extends InscriptionInfo {
   data: string; // hex-encoded content
-}
-
-interface GpTxVin {
-  txid: string;
-  vout: number;
-  scriptSig: { hex: string };
-  sequence: number;
-}
-
-interface GpTxVout {
-  value: number;
-  n: number;
-  scriptPubKey: { hex: string };
-}
-
-interface GpTxResponse {
-  txid: string;
-  version: number;
-  vin: GpTxVin[];
-  vout: GpTxVout[];
-  locktime: number;
-  hex?: string;
 }
 
 interface GpUtxoEntry {
@@ -82,34 +61,46 @@ export class GorillaPoolProvider implements Provider {
   // Standard Provider methods
   // -----------------------------------------------------------------------
 
+  /**
+   * Fetch a transaction via GET /tx/{txid}/raw, which returns the bare
+   * serialized transaction (binary). Each output's satoshis is read from its
+   * 8-byte little-endian field, so values are exact (F-027: the former JSON
+   * `vout[].value` decode with its `< 1000 → BTC` guess targeted a field
+   * GorillaPool never returns). The body must hash to the requested txid.
+   */
   async getTransaction(txid: string): Promise<TransactionData> {
-    const resp = await fetch(`${this.baseUrl}/tx/${txid}`);
+    const resp = await fetch(`${this.baseUrl}/tx/${txid}/raw`);
     if (!resp.ok) {
       throw new Error(`GorillaPool getTransaction failed (${resp.status}): ${await resp.text()}`);
     }
-    const data = (await resp.json()) as GpTxResponse;
+    const raw = Array.from(new Uint8Array(await resp.arrayBuffer()));
+    const bodyTxid = Utils.toHex(Hash.hash256(raw).reverse());
+    if (bodyTxid !== txid.toLowerCase()) {
+      throw new Error(
+        `GorillaPool getTransaction: txid mismatch: response body hashes to ${bodyTxid}, requested ${txid}`,
+      );
+    }
+    const tx = BsvTransaction.fromBinary(raw);
 
-    const inputs: TxInput[] = (data.vin ?? []).map((vin) => ({
-      txid: vin.txid,
-      outputIndex: vin.vout,
-      script: vin.scriptSig?.hex ?? '',
-      sequence: vin.sequence,
+    const inputs: TxInput[] = tx.inputs.map((input) => ({
+      txid: input.sourceTXID ?? '',
+      outputIndex: input.sourceOutputIndex,
+      script: input.unlockingScript?.toHex() ?? '',
+      sequence: input.sequence ?? 0xffffffff,
     }));
 
-    const outputs: TxOutput[] = (data.vout ?? []).map((vout) => ({
-      satoshis: typeof vout.value === 'number' && vout.value < 1000
-        ? Math.round(vout.value * 1e8)
-        : vout.value,
-      script: vout.scriptPubKey?.hex ?? '',
+    const outputs: TxOutput[] = tx.outputs.map((output) => ({
+      satoshis: output.satoshis ?? 0,
+      script: output.lockingScript.toHex(),
     }));
 
     return {
-      txid: data.txid,
-      version: data.version,
+      txid: bodyTxid,
+      version: tx.version,
       inputs,
       outputs,
-      locktime: data.locktime,
-      raw: data.hex,
+      locktime: tx.lockTime,
+      raw: Utils.toHex(raw),
     };
   }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("sdk_types.zig");
 const provider_mod = @import("sdk_provider.zig");
 const errors_mod = @import("sdk_errors.zig");
+const bsvz = @import("bsvz");
 
 // ---------------------------------------------------------------------------
 // GorillaPoolProvider -- HTTP-based 1sat Ordinals provider
@@ -138,114 +139,67 @@ pub const GorillaPoolProvider = struct {
     // VTable implementations
     // -----------------------------------------------------------------------
 
+    /// Fetch a transaction via GET /tx/{txid}/raw (the bare serialized tx).
+    /// Each output's satoshis is read from its 8-byte little-endian field, so
+    /// values are exact (F-027: the former JSON `vout[].value` decode with its
+    /// float→×1e8 rule targeted a field GorillaPool never returns). The body
+    /// must hash to the requested txid; a mismatch or an unparseable body is
+    /// reported as NetworkError (the provider's decode-failure error).
     fn getTransactionImpl(ctx: *anyopaque, allocator: std.mem.Allocator, txid: []const u8) provider_mod.ProviderError!types.TransactionData {
         const self: *GorillaPoolProvider = @ptrCast(@alignCast(ctx));
 
-        const path = std.fmt.allocPrint(self.allocator, "/tx/{s}", .{txid}) catch return provider_mod.ProviderError.OutOfMemory;
+        const path = std.fmt.allocPrint(self.allocator, "/tx/{s}/raw", .{txid}) catch return provider_mod.ProviderError.OutOfMemory;
         defer self.allocator.free(path);
 
         const body = try self.httpGet(allocator, path);
         defer allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return provider_mod.ProviderError.NetworkError;
-        defer parsed.deinit();
+        var digest = bsvz.crypto.hash.hash256(body).bytes;
+        std.mem.reverse(u8, &digest);
+        const body_txid = std.fmt.bytesToHex(digest, .lower);
+        if (!std.ascii.eqlIgnoreCase(&body_txid, txid)) return provider_mod.ProviderError.NetworkError;
 
-        const root = parsed.value.object;
-        const tx_txid = if (root.get("txid")) |v| (if (v == .string) v.string else txid) else txid;
-        const version: i32 = if (root.get("version")) |v| (if (v == .integer) @as(i32, @intCast(v.integer)) else 1) else 1;
-        const locktime: u32 = if (root.get("locktime")) |v| (if (v == .integer) @as(u32, @intCast(v.integer)) else 0) else 0;
+        const tx = bsvz.transaction.Transaction.parse(allocator, body) catch |err| switch (err) {
+            error.OutOfMemory => return provider_mod.ProviderError.OutOfMemory,
+            else => return provider_mod.ProviderError.NetworkError,
+        };
+        defer tx.deinit(allocator);
 
-        // Parse inputs
-        var inputs: []types.TxInput = &.{};
-        if (root.get("vin")) |vin_val| {
-            if (vin_val == .array) {
-                const items = vin_val.array.items;
-                var inp_list = allocator.alloc(types.TxInput, items.len) catch return provider_mod.ProviderError.OutOfMemory;
-                for (items, 0..) |item, i| {
-                    if (item == .object) {
-                        const obj = item.object;
-                        const in_txid = if (obj.get("txid")) |v| (if (v == .string) v.string else "") else "";
-                        const vout: i32 = if (obj.get("vout")) |v| (if (v == .integer) @as(i32, @intCast(v.integer)) else 0) else 0;
-                        var script_hex: []const u8 = "";
-                        if (obj.get("scriptSig")) |ss| {
-                            if (ss == .object) {
-                                if (ss.object.get("hex")) |h| {
-                                    if (h == .string) script_hex = h.string;
-                                }
-                            }
-                        }
-                        const seq: u32 = if (obj.get("sequence")) |v| (if (v == .integer) @as(u32, @intCast(v.integer)) else 0xffffffff) else 0xffffffff;
-                        inp_list[i] = .{
-                            .txid = allocator.dupe(u8, in_txid) catch return provider_mod.ProviderError.OutOfMemory,
-                            .output_index = vout,
-                            .script = allocator.dupe(u8, script_hex) catch return provider_mod.ProviderError.OutOfMemory,
-                            .sequence = seq,
-                        };
-                    } else {
-                        inp_list[i] = .{};
-                    }
-                }
-                inputs = inp_list;
-            }
+        const inputs = allocator.alloc(types.TxInput, tx.inputs.len) catch return provider_mod.ProviderError.OutOfMemory;
+        for (tx.inputs, 0..) |input, i| {
+            var prev = input.previous_outpoint.txid.bytes;
+            std.mem.reverse(u8, &prev);
+            const prev_hex = std.fmt.bytesToHex(prev, .lower);
+            inputs[i] = .{
+                .txid = allocator.dupe(u8, &prev_hex) catch return provider_mod.ProviderError.OutOfMemory,
+                .output_index = @bitCast(input.previous_outpoint.index),
+                .script = try hexAlloc(allocator, input.unlocking_script.bytes),
+                .sequence = input.sequence,
+            };
         }
 
-        // Parse outputs
-        var outputs: []types.TxOutput = &.{};
-        if (root.get("vout")) |vout_val| {
-            if (vout_val == .array) {
-                const items = vout_val.array.items;
-                var out_list = allocator.alloc(types.TxOutput, items.len) catch return provider_mod.ProviderError.OutOfMemory;
-                for (items, 0..) |item, i| {
-                    if (item == .object) {
-                        const obj = item.object;
-                        var sats: i64 = 0;
-                        if (obj.get("value")) |v| {
-                            if (v == .float) {
-                                sats = @intFromFloat(@round(v.float * 1e8));
-                            } else if (v == .integer) {
-                                sats = @intCast(v.integer);
-                            }
-                        }
-                        // GorillaPool uses "satoshis" field in some responses
-                        if (sats == 0) {
-                            if (obj.get("satoshis")) |v| {
-                                if (v == .integer) sats = @intCast(v.integer);
-                            }
-                        }
-                        var script_hex: []const u8 = "";
-                        if (obj.get("scriptPubKey")) |sp| {
-                            if (sp == .object) {
-                                if (sp.object.get("hex")) |h| {
-                                    if (h == .string) script_hex = h.string;
-                                }
-                            }
-                        }
-                        out_list[i] = .{
-                            .satoshis = sats,
-                            .script = allocator.dupe(u8, script_hex) catch return provider_mod.ProviderError.OutOfMemory,
-                        };
-                    } else {
-                        out_list[i] = .{};
-                    }
-                }
-                outputs = out_list;
-            }
-        }
-
-        // Raw hex
-        var raw: []const u8 = &.{};
-        if (root.get("hex")) |v| {
-            if (v == .string) raw = allocator.dupe(u8, v.string) catch return provider_mod.ProviderError.OutOfMemory;
+        const outputs = allocator.alloc(types.TxOutput, tx.outputs.len) catch return provider_mod.ProviderError.OutOfMemory;
+        for (tx.outputs, 0..) |output, i| {
+            outputs[i] = .{
+                .satoshis = output.satoshis,
+                .script = try hexAlloc(allocator, output.locking_script.bytes),
+            };
         }
 
         return .{
-            .txid = allocator.dupe(u8, tx_txid) catch return provider_mod.ProviderError.OutOfMemory,
-            .version = version,
+            .txid = allocator.dupe(u8, &body_txid) catch return provider_mod.ProviderError.OutOfMemory,
+            .version = tx.version,
             .inputs = inputs,
             .outputs = outputs,
-            .locktime = locktime,
-            .raw = raw,
+            .locktime = tx.lock_time,
+            .raw = try hexAlloc(allocator, body),
         };
+    }
+
+    fn hexAlloc(allocator: std.mem.Allocator, bytes: []const u8) provider_mod.ProviderError![]u8 {
+        const out = allocator.alloc(u8, bytes.len * 2) catch return provider_mod.ProviderError.OutOfMemory;
+        _ = bsvz.primitives.hex.encodeLower(bytes, out) catch unreachable;
+        return out;
     }
 
     fn broadcastImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) provider_mod.ProviderError![]u8 {
@@ -522,4 +476,122 @@ test "GorillaPoolProvider broadcast via mock transport strips quotes" {
     try std.testing.expect(std.mem.indexOf(u8, mock.last_body, "\"rawTx\":\"0100deadbeef\"") != null);
     try std.testing.expectEqualStrings("application/json", mock.last_content_type);
     try std.testing.expectEqualStrings("POST", mock.method);
+}
+
+// ---------------------------------------------------------------------------
+// F-027: getTransaction decodes the real GorillaPool response.
+//
+// GET /tx/{txid} is binary, not the JSON `vout[].value` the old decoder (with
+// its float→×1e8 / integer→as-is rule) expected. getTransaction now fetches
+// /tx/{txid}/raw and reads each output's 8-byte LE satoshis from the raw tx.
+// Proves: the shared recorded vectors (conformance/sdk-gorillapool) decode
+// exactly — a real 1-sat inscription output is 1 sat; 999/1000/1e12/2.1e15
+// exact — and a body hashing to another txid is rejected (NetworkError, the
+// provider's decode-failure error). Does NOT prove the live API still serves
+// /tx/{txid}/raw (recorded 2026-09-27).
+// ---------------------------------------------------------------------------
+
+const GP_VECTORS_REL_PATH = "../../conformance/sdk-gorillapool/vectors.json";
+
+fn f027LoadVectors(allocator: std.mem.Allocator) !std.json.Parsed(std.json.Value) {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, GP_VECTORS_REL_PATH, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(bytes);
+    return std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .allocate = .alloc_always });
+}
+
+fn f027Sha256Hex(allocator: std.mem.Allocator, hex_text: []const u8) ![64]u8 {
+    const bytes = try allocator.alloc(u8, hex_text.len / 2);
+    defer allocator.free(bytes);
+    _ = try std.fmt.hexToBytes(bytes, hex_text);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn f027FreeTx(allocator: std.mem.Allocator, tx: *types.TransactionData) void {
+    for (tx.inputs) |inp| {
+        allocator.free(inp.txid);
+        allocator.free(inp.script);
+    }
+    for (tx.outputs) |out| allocator.free(out.script);
+    tx.deinit(allocator);
+}
+
+test "F-027 getTransaction decodes the recorded raw-tx vectors exactly" {
+    const allocator = std.testing.allocator;
+    var parsed = try f027LoadVectors(allocator);
+    defer parsed.deinit();
+    const vectors = parsed.value.object.get("vectors").?.array.items;
+    try std.testing.expect(vectors.len >= 3);
+
+    for (vectors) |v| {
+        const txid = v.object.get("txid").?.string;
+        const resp_hex = v.object.get("responseHex").?.string;
+        const exp = v.object.get("expected").?.object;
+        const body = try allocator.alloc(u8, resp_hex.len / 2);
+        defer allocator.free(body);
+        _ = try std.fmt.hexToBytes(body, resp_hex);
+
+        var mock = MockHttpTransport.init(allocator, body);
+        defer mock.deinit();
+        var gp = GorillaPoolProvider.init(allocator, .mainnet);
+        defer gp.deinit();
+        gp.setTransport(mock.transport());
+
+        var tx = try gp.provider().getTransaction(allocator, txid);
+        defer f027FreeTx(allocator, &tx);
+
+        const want_url = try std.fmt.allocPrint(allocator, "https://ordinals.gorillapool.io/api/tx/{s}/raw", .{txid});
+        defer allocator.free(want_url);
+        try std.testing.expectEqualStrings(want_url, mock.last_url);
+
+        try std.testing.expectEqualStrings(txid, tx.txid);
+        try std.testing.expectEqual(exp.get("version").?.integer, @as(i64, tx.version));
+        try std.testing.expectEqual(exp.get("locktime").?.integer, @as(i64, tx.locktime));
+        try std.testing.expectEqualStrings(resp_hex, tx.raw);
+        try std.testing.expectEqual(@as(usize, @intCast(exp.get("inputCount").?.integer)), tx.inputs.len);
+
+        const fi = exp.get("firstInput").?.object;
+        const in0 = tx.inputs[0];
+        try std.testing.expectEqualStrings(fi.get("txid").?.string, in0.txid);
+        try std.testing.expectEqual(fi.get("outputIndex").?.integer, @as(i64, in0.output_index));
+        try std.testing.expectEqual(fi.get("sequence").?.integer, @as(i64, in0.sequence));
+        try std.testing.expectEqual(@as(usize, @intCast(2 * fi.get("scriptLen").?.integer)), in0.script.len);
+        const in0_sha = try f027Sha256Hex(allocator, in0.script);
+        try std.testing.expectEqualStrings(fi.get("scriptSha256").?.string, &in0_sha);
+
+        const outs = exp.get("outputs").?.array.items;
+        try std.testing.expectEqual(outs.len, tx.outputs.len);
+        for (outs, tx.outputs) |want, got| {
+            try std.testing.expectEqual(want.object.get("satoshis").?.integer, got.satoshis);
+            try std.testing.expectEqual(@as(usize, @intCast(2 * want.object.get("scriptLen").?.integer)), got.script.len);
+            const sha = try f027Sha256Hex(allocator, got.script);
+            try std.testing.expectEqualStrings(want.object.get("scriptSha256").?.string, &sha);
+        }
+    }
+}
+
+test "F-027 getTransaction rejects a body that hashes to another txid" {
+    const allocator = std.testing.allocator;
+    var parsed = try f027LoadVectors(allocator);
+    defer parsed.deinit();
+    const vectors = parsed.value.object.get("vectors").?.array.items;
+    for (parsed.value.object.get("rejection_vectors").?.array.items) |rv| {
+        const requested = rv.object.get("requestedTxid").?.string;
+        const source_name = rv.object.get("responseOf").?.string;
+        var resp_hex: []const u8 = "";
+        for (vectors) |v| {
+            if (std.mem.eql(u8, v.object.get("name").?.string, source_name)) resp_hex = v.object.get("responseHex").?.string;
+        }
+        const body = try allocator.alloc(u8, resp_hex.len / 2);
+        defer allocator.free(body);
+        _ = try std.fmt.hexToBytes(body, resp_hex);
+
+        var mock = MockHttpTransport.init(allocator, body);
+        defer mock.deinit();
+        var gp = GorillaPoolProvider.init(allocator, .mainnet);
+        defer gp.deinit();
+        gp.setTransport(mock.transport());
+        try std.testing.expectError(provider_mod.ProviderError.NetworkError, gp.provider().getTransaction(allocator, requested));
+    }
 }

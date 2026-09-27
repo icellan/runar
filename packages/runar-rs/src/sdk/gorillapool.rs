@@ -69,6 +69,17 @@ impl GorillaPoolProvider {
         }
     }
 
+    /// Perform an HTTP GET request and return the raw response body bytes.
+    fn http_get_bytes(&self, url: &str) -> Result<Vec<u8>, String> {
+        let resp = ureq::get(url)
+            .call()
+            .map_err(|e| format!("GorillaPool GET {} failed: {}", url, e))?;
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut resp.into_reader(), &mut body)
+            .map_err(|e| format!("GorillaPool GET {} read body: {}", url, e))?;
+        Ok(body)
+    }
+
     /// Perform an HTTP GET request and return the response body as a string.
     fn http_get(&self, url: &str) -> Result<String, String> {
         let resp = ureq::get(url)
@@ -247,52 +258,60 @@ fn urlencoded(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 impl Provider for GorillaPoolProvider {
+    /// Fetch a transaction via GET /tx/{txid}/raw (the bare serialized tx).
+    ///
+    /// Each output's satoshis is read from its 8-byte little-endian field, so
+    /// values are exact (F-027: the former JSON `vout[].value` decode with its
+    /// `< 1000 → BTC` guess targeted a field GorillaPool never returns). The
+    /// body must hash to the requested txid.
     fn get_transaction(&self, txid: &str) -> Result<TransactionData, String> {
-        let url = format!("{}/tx/{}", self.base_url, txid);
-        let body = self.http_get(&url)?;
-        let data: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("GorillaPool getTransaction parse: {}", e))?;
+        let url = format!("{}/tx/{}/raw", self.base_url, txid);
+        let raw = self.http_get_bytes(&url)?;
 
-        let inputs: Vec<TxInput> = data["vin"]
-            .as_array()
-            .unwrap_or(&vec![])
+        let mut digest = bsv::primitives::hash::hash256(&raw);
+        digest.reverse();
+        let body_txid = bsv::primitives::utils::to_hex(&digest);
+        if body_txid != txid.to_ascii_lowercase() {
+            return Err(format!(
+                "GorillaPool getTransaction: txid mismatch: response body hashes to {}, requested {}",
+                body_txid, txid
+            ));
+        }
+
+        let tx = BsvTransaction::from_binary(&mut std::io::Cursor::new(&raw))
+            .map_err(|e| format!("GorillaPool getTransaction: parsing tx: {}", e))?;
+
+        let inputs: Vec<TxInput> = tx
+            .inputs
             .iter()
-            .map(|vin| TxInput {
-                txid: vin["txid"].as_str().unwrap_or("").to_string(),
-                output_index: vin["vout"].as_u64().unwrap_or(0) as u32,
-                script: vin["scriptSig"]["hex"].as_str().unwrap_or("").to_string(),
-                sequence: vin["sequence"].as_u64().unwrap_or(0xffffffff) as u32,
+            .map(|input| TxInput {
+                txid: input.source_txid.clone().unwrap_or_default(),
+                output_index: input.source_output_index,
+                script: input
+                    .unlocking_script
+                    .as_ref()
+                    .map(|s| s.to_hex())
+                    .unwrap_or_default(),
+                sequence: input.sequence,
             })
             .collect();
 
-        let outputs: Vec<TxOutput> = data["vout"]
-            .as_array()
-            .unwrap_or(&vec![])
+        let outputs: Vec<TxOutput> = tx
+            .outputs
             .iter()
-            .map(|vout| {
-                // GorillaPool may return value in BTC or satoshis
-                let val = vout["value"].as_f64().unwrap_or(0.0);
-                let satoshis = if val < 1000.0 {
-                    (val * 1e8).round() as i64
-                } else {
-                    val as i64
-                };
-                TxOutput {
-                    satoshis,
-                    script: vout["scriptPubKey"]["hex"].as_str().unwrap_or("").to_string(),
-                }
+            .map(|output| TxOutput {
+                satoshis: output.satoshis.unwrap_or(0) as i64,
+                script: output.locking_script.to_hex(),
             })
             .collect();
-
-        let raw = data["hex"].as_str().map(|s| s.to_string());
 
         Ok(TransactionData {
-            txid: data["txid"].as_str().unwrap_or(txid).to_string(),
-            version: data["version"].as_u64().unwrap_or(1) as u32,
+            txid: body_txid,
+            version: tx.version,
             inputs,
             outputs,
-            locktime: data["locktime"].as_u64().unwrap_or(0) as u32,
-            raw,
+            locktime: tx.lock_time,
+            raw: Some(bsv::primitives::utils::to_hex(&raw)),
         })
     }
 
@@ -421,6 +440,131 @@ mod tests {
     fn gorillapool_provider_get_fee_rate() {
         let p = GorillaPoolProvider::new("mainnet");
         assert_eq!(p.get_fee_rate().unwrap(), 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // F-027: get_transaction decodes the real GorillaPool response.
+    //
+    // GET /tx/{txid} is binary, not the JSON `vout[].value` the old decoder
+    // (with its `< 1000 → BTC` guess) expected. get_transaction now fetches
+    // /tx/{txid}/raw and reads each output's 8-byte LE satoshis.
+    // Proves: the shared recorded vectors (conformance/sdk-gorillapool)
+    // decode exactly — a real 1-sat inscription output is 1 sat; 999, 1000,
+    // 1e12 and 2.1e15 are exact; a body hashing to another txid is rejected.
+    // Does NOT prove the live API still serves /tx/{txid}/raw.
+    // -----------------------------------------------------------------------
+
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    fn load_vectors() -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/sdk-gorillapool/vectors.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn sha256_hex_of_hex(h: &str) -> String {
+        bsv::primitives::utils::to_hex(&bsv::primitives::hash::sha256(
+            &bsv::primitives::utils::from_hex(h).unwrap(),
+        ))
+    }
+
+    /// One-shot HTTP server: serves `body` at `/tx/{txid}/raw`, 404 otherwise.
+    fn serve_raw_tx(txid: &str, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let want = format!("GET /tx/{}/raw ", txid);
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let (status, payload) = if buf.starts_with(want.as_bytes()) {
+                    ("200 OK", body)
+                } else {
+                    ("404 Not Found", br#"{"message":"Not Found"}"#.to_vec())
+                };
+                let head = format!(
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    status,
+                    payload.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&payload);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn provider_at(base_url: String) -> GorillaPoolProvider {
+        let mut p = GorillaPoolProvider::new("mainnet");
+        p.base_url = base_url;
+        p
+    }
+
+    #[test]
+    fn f027_get_transaction_decodes_recorded_raw_tx_vectors() {
+        let doc = load_vectors();
+        let vectors = doc["vectors"].as_array().unwrap();
+        assert!(vectors.len() >= 3);
+        for v in vectors {
+            let name = v["name"].as_str().unwrap();
+            let txid = v["txid"].as_str().unwrap();
+            let resp_hex = v["responseHex"].as_str().unwrap();
+            let exp = &v["expected"];
+            let body = bsv::primitives::utils::from_hex(resp_hex).unwrap();
+            let p = provider_at(serve_raw_tx(txid, body));
+            let data = p
+                .get_transaction(txid)
+                .unwrap_or_else(|e| panic!("{}: get_transaction failed: {}", name, e));
+
+            assert_eq!(data.txid, txid, "{}", name);
+            assert_eq!(data.version as u64, exp["version"].as_u64().unwrap(), "{}", name);
+            assert_eq!(data.locktime as u64, exp["locktime"].as_u64().unwrap(), "{}", name);
+            assert_eq!(data.raw.as_deref(), Some(resp_hex), "{}: raw", name);
+            assert_eq!(data.inputs.len() as u64, exp["inputCount"].as_u64().unwrap(), "{}", name);
+            let fi = &exp["firstInput"];
+            let in0 = &data.inputs[0];
+            assert_eq!(in0.txid, fi["txid"].as_str().unwrap(), "{}", name);
+            assert_eq!(in0.output_index as u64, fi["outputIndex"].as_u64().unwrap(), "{}", name);
+            assert_eq!(in0.sequence as u64, fi["sequence"].as_u64().unwrap(), "{}", name);
+            assert_eq!(in0.script.len() as u64, 2 * fi["scriptLen"].as_u64().unwrap(), "{}", name);
+            assert_eq!(sha256_hex_of_hex(&in0.script), fi["scriptSha256"].as_str().unwrap(), "{}", name);
+            let outs = exp["outputs"].as_array().unwrap();
+            let got: Vec<i64> = data.outputs.iter().map(|o| o.satoshis).collect();
+            let want: Vec<i64> = outs.iter().map(|o| o["satoshis"].as_i64().unwrap()).collect();
+            assert_eq!(got, want, "{}: output satoshis", name);
+            for (o, e) in data.outputs.iter().zip(outs) {
+                assert_eq!(o.script.len() as u64, 2 * e["scriptLen"].as_u64().unwrap(), "{}", name);
+                assert_eq!(sha256_hex_of_hex(&o.script), e["scriptSha256"].as_str().unwrap(), "{}", name);
+            }
+        }
+    }
+
+    #[test]
+    fn f027_get_transaction_rejects_txid_mismatch() {
+        let doc = load_vectors();
+        for rv in doc["rejection_vectors"].as_array().unwrap() {
+            let requested = rv["requestedTxid"].as_str().unwrap();
+            let src = doc["vectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == rv["responseOf"])
+                .unwrap();
+            let body = bsv::primitives::utils::from_hex(src["responseHex"].as_str().unwrap()).unwrap();
+            let p = provider_at(serve_raw_tx(requested, body));
+            let err = p.get_transaction(requested).err().expect("expected an error");
+            assert!(err.contains("txid mismatch"), "{}: got {}", rv["name"], err);
+        }
     }
 
     #[test]

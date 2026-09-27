@@ -17,7 +17,9 @@ closes that gap by:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import pathlib
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
@@ -69,46 +71,70 @@ class TestGorillaPoolInit:
 # get_transaction
 # ---------------------------------------------------------------------------
 
+# F-027: GorillaPool's GET /tx/{txid} returns a BINARY body, not the JSON
+# ``vout[].value`` the old decoder expected (with a ``value < 1000 -> BTC``
+# guess that turned a 1-sat ordinal into 100,000,000 sat). get_transaction now
+# fetches GET /tx/{txid}/raw and reads each output's 8-byte LE satoshis.
+# These tests replay the shared recorded vectors in conformance/sdk-gorillapool.
+# Proves: exact decoding of a real 1-sat output, 999/1000/1e12/2.1e15, the
+# input/output shape, and rejection of a body hashing to another txid.
+# Does NOT prove the live API still serves /tx/{txid}/raw (recorded 2026-09-27).
+
+_VECTORS = json.loads(
+    (pathlib.Path(__file__).resolve().parents[3] / "conformance" / "sdk-gorillapool" / "vectors.json").read_text()
+)
+
+
+def _sha256_hex_of_hex(h: str) -> str:
+    return hashlib.sha256(bytes.fromhex(h)).hexdigest()
+
+
 class TestGetTransaction:
     def test_url_shape(self):
+        # F-027: the endpoint moved from /tx/{txid} (binary, prefixed) to /tx/{txid}/raw.
+        v = _VECTORS["vectors"][0]
         provider = GorillaPoolProvider("mainnet")
-        body = json.dumps({"txid": "aa" * 32, "vin": [], "vout": []}).encode()
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            provider.get_transaction("aa" * 32)
+            mock_urlopen.return_value = _make_response(bytes.fromhex(v["responseHex"]))
+            provider.get_transaction(v["txid"])
         req = mock_urlopen.call_args[0][0]
-        assert req.full_url == f"https://ordinals.gorillapool.io/api/tx/{'aa' * 32}"
+        assert req.full_url == f"https://ordinals.gorillapool.io/api/tx/{v['txid']}/raw"
 
-    def test_parses_outputs_with_btc_denominated_value(self):
+    # F-027: replaces test_parses_outputs_with_btc_denominated_value and
+    # test_parses_outputs_with_satoshi_denominated_value, which pinned the
+    # ``< 1000 -> BTC`` heuristic on a JSON field GorillaPool never returns.
+    @pytest.mark.parametrize("v", _VECTORS["vectors"], ids=lambda v: v["name"])
+    def test_decodes_recorded_raw_tx(self, v):
         provider = GorillaPoolProvider("mainnet")
-        body = json.dumps({
-            "txid": "bb" * 32,
-            "version": 1,
-            "vin": [],
-            # value < 1000 -> treated as BTC, multiplied by 1e8.
-            "vout": [{"value": 0.0001, "scriptPubKey": {"hex": "76a914...88ac"}}],
-            "locktime": 0,
-            "hex": "01abcd",
-        }).encode()
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            tx = provider.get_transaction("bb" * 32)
-        assert tx.outputs[0].satoshis == 10_000
+            mock_urlopen.return_value = _make_response(bytes.fromhex(v["responseHex"]))
+            tx = provider.get_transaction(v["txid"])
+        exp = v["expected"]
+        assert tx.txid == v["txid"]
+        assert tx.version == exp["version"]
+        assert tx.locktime == exp["locktime"]
+        assert tx.raw == v["responseHex"]
+        assert len(tx.inputs) == exp["inputCount"]
+        fi, in0 = exp["firstInput"], tx.inputs[0]
+        assert in0.txid == fi["txid"]
+        assert in0.output_index == fi["outputIndex"]
+        assert in0.sequence == fi["sequence"]
+        assert len(in0.script) == 2 * fi["scriptLen"]
+        assert _sha256_hex_of_hex(in0.script) == fi["scriptSha256"]
+        assert [o.satoshis for o in tx.outputs] == [o["satoshis"] for o in exp["outputs"]]
+        for got, want in zip(tx.outputs, exp["outputs"]):
+            assert isinstance(got.satoshis, int)
+            assert len(got.script) == 2 * want["scriptLen"]
+            assert _sha256_hex_of_hex(got.script) == want["scriptSha256"]
 
-    def test_parses_outputs_with_satoshi_denominated_value(self):
-        """Values >=1000 are treated as already-in-satoshis (GorillaPool returns
-        either denomination depending on the endpoint)."""
+    @pytest.mark.parametrize("rv", _VECTORS["rejection_vectors"], ids=lambda rv: rv["name"])
+    def test_rejects_body_for_another_txid(self, rv):
+        src = next(v for v in _VECTORS["vectors"] if v["name"] == rv["responseOf"])
         provider = GorillaPoolProvider("mainnet")
-        body = json.dumps({
-            "txid": "cc" * 32,
-            "vin": [],
-            "vout": [{"value": 50000, "scriptPubKey": {"hex": "abc"}}],
-        }).encode()
         with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            tx = provider.get_transaction("cc" * 32)
-        # 50000 >= 1000 so the value is already satoshis -> no *1e8.
-        assert tx.outputs[0].satoshis == 50000
+            mock_urlopen.return_value = _make_response(bytes.fromhex(src["responseHex"]))
+            with pytest.raises(RuntimeError, match="txid mismatch"):
+                provider.get_transaction(rv["requestedTxid"])
 
 
 # ---------------------------------------------------------------------------
@@ -345,9 +371,10 @@ class TestBsv21:
 
 def test_testnet_uses_testnet_base():
     provider = GorillaPoolProvider("testnet")
-    body = json.dumps({"txid": "00" * 32, "vin": [], "vout": []}).encode()
+    # F-027: get_transaction now needs a real raw tx body that hashes to the txid.
+    v = _VECTORS["vectors"][0]
     with patch("runar.sdk.gorillapool.urlopen") as mock_urlopen:
-        mock_urlopen.return_value = _make_response(body)
-        provider.get_transaction("00" * 32)
+        mock_urlopen.return_value = _make_response(bytes.fromhex(v["responseHex"]))
+        provider.get_transaction(v["txid"])
     req = mock_urlopen.call_args[0][0]
     assert req.full_url.startswith("https://testnet.ordinals.gorillapool.io/api/")

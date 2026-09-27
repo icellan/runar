@@ -1,10 +1,11 @@
 package runar
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -55,32 +56,6 @@ func NewGorillaPoolProvider(network string) (*GorillaPoolProvider, error) {
 // GorillaPool API response shapes
 // ---------------------------------------------------------------------------
 
-type gpTxVin struct {
-	Txid      string `json:"txid"`
-	Vout      int    `json:"vout"`
-	ScriptSig struct {
-		Hex string `json:"hex"`
-	} `json:"scriptSig"`
-	Sequence uint32 `json:"sequence"`
-}
-
-type gpTxVout struct {
-	Value        json.Number `json:"value"`
-	N            int         `json:"n"`
-	ScriptPubKey struct {
-		Hex string `json:"hex"`
-	} `json:"scriptPubKey"`
-}
-
-type gpTxResponse struct {
-	Txid     string     `json:"txid"`
-	Version  int        `json:"version"`
-	Vin      []gpTxVin  `json:"vin"`
-	Vout     []gpTxVout `json:"vout"`
-	Locktime int        `json:"locktime"`
-	Hex      string     `json:"hex,omitempty"`
-}
-
 type gpUtxoEntry struct {
 	Txid     string `json:"txid"`
 	Vout     int    `json:"vout"`
@@ -109,8 +84,14 @@ type InscriptionDetail struct {
 // ---------------------------------------------------------------------------
 
 // GetTransaction fetches a transaction by its txid from GorillaPool.
+//
+// It uses GET /tx/{txid}/raw, which returns the bare serialized transaction
+// (binary). Each output's satoshis is read from its 8-byte little-endian
+// field, so the value is exact (F-027: the former JSON `vout[].value` decode,
+// with its `< 1000 → BTC` guess, targeted a field GorillaPool never returns).
+// The body must hash to the requested txid.
 func (p *GorillaPoolProvider) GetTransaction(txid string) (*TransactionData, error) {
-	apiURL := fmt.Sprintf("%s/tx/%s", p.baseURL, txid)
+	apiURL := fmt.Sprintf("%s/tx/%s/raw", p.baseURL, txid)
 	resp, err := p.client.Get(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("GorillaPool getTransaction request failed: %w", err)
@@ -122,41 +103,57 @@ func (p *GorillaPoolProvider) GetTransaction(txid string) (*TransactionData, err
 		return nil, fmt.Errorf("GorillaPool getTransaction failed (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var data gpTxResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("GorillaPool getTransaction JSON decode failed: %w", err)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("GorillaPool getTransaction read failed: %w", err)
+	}
+	first := sha256.Sum256(raw)
+	second := sha256.Sum256(first[:])
+	for i, j := 0, len(second)-1; i < j; i, j = i+1, j-1 {
+		second[i], second[j] = second[j], second[i]
+	}
+	if got := hex.EncodeToString(second[:]); got != strings.ToLower(txid) {
+		return nil, fmt.Errorf("GorillaPool getTransaction: txid mismatch: response body hashes to %s, requested %s", got, txid)
 	}
 
-	inputs := make([]TxInput, len(data.Vin))
-	for i, vin := range data.Vin {
+	tx, err := transaction.NewTransactionFromBytes(raw)
+	if err != nil {
+		return nil, fmt.Errorf("GorillaPool getTransaction: parsing tx: %w", err)
+	}
+
+	inputs := make([]TxInput, len(tx.Inputs))
+	for i, inp := range tx.Inputs {
+		var scriptHex string
+		if inp.UnlockingScript != nil {
+			scriptHex = hex.EncodeToString(*inp.UnlockingScript)
+		}
 		inputs[i] = TxInput{
-			Txid:        vin.Txid,
-			OutputIndex: vin.Vout,
-			Script:      vin.ScriptSig.Hex,
-			Sequence:    vin.Sequence,
+			Txid:        inp.SourceTXID.String(),
+			OutputIndex: int(inp.SourceTxOutIndex),
+			Script:      scriptHex,
+			Sequence:    inp.SequenceNumber,
 		}
 	}
 
-	outputs := make([]TxOutput, len(data.Vout))
-	for i, vout := range data.Vout {
-		val, _ := vout.Value.Float64()
-		satoshis := int64(val)
-		if val < 1000 {
-			satoshis = int64(math.Round(val * 1e8))
+	outputs := make([]TxOutput, len(tx.Outputs))
+	for i, out := range tx.Outputs {
+		var scriptHex string
+		if out.LockingScript != nil {
+			scriptHex = hex.EncodeToString(*out.LockingScript)
 		}
 		outputs[i] = TxOutput{
-			Satoshis: satoshis,
-			Script:   vout.ScriptPubKey.Hex,
+			Satoshis: int64(out.Satoshis),
+			Script:   scriptHex,
 		}
 	}
 
 	return &TransactionData{
-		Txid:     data.Txid,
-		Version:  data.Version,
+		Txid:     strings.ToLower(txid),
+		Version:  int(tx.Version),
 		Inputs:   inputs,
 		Outputs:  outputs,
-		Locktime: data.Locktime,
-		Raw:      data.Hex,
+		Locktime: int(tx.LockTime),
+		Raw:      hex.EncodeToString(raw),
 	}, nil
 }
 

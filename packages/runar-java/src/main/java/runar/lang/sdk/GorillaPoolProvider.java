@@ -28,6 +28,18 @@ public final class GorillaPoolProvider implements Provider {
     private final String network;
     private final String baseUrl;
     private final HttpTransport transport;
+    private final RawFetcher rawFetcher;
+
+    /**
+     * Binary GET seam for {@code /tx/{txid}/raw}. {@link HttpTransport} decodes
+     * bodies as text, which would corrupt a serialized transaction.
+     */
+    interface RawFetcher {
+        RawResponse get(String url);
+    }
+
+    /** Binary HTTP response holder for {@link RawFetcher}. */
+    record RawResponse(int statusCode, byte[] body) {}
 
     /** Explicitly selects mainnet. Use {@link #GorillaPoolProvider(String)} to choose. */
     public GorillaPoolProvider() {
@@ -38,8 +50,13 @@ public final class GorillaPoolProvider implements Provider {
         this(network, HttpTransport.jdkDefault());
     }
 
-    // Package-private full constructor so tests can inject a fake transport.
+    // Package-private constructor so tests can inject a fake transport.
     GorillaPoolProvider(String network, HttpTransport transport) {
+        this(network, transport, null);
+    }
+
+    // Package-private full constructor so tests can also inject a fake binary fetcher.
+    GorillaPoolProvider(String network, HttpTransport transport, RawFetcher rawFetcher) {
         // Network must be exactly "mainnet" or "testnet". Any other value —
         // including null and the empty string — is rejected rather than
         // defaulted, so a typo or an unvalidated user-supplied value can never
@@ -54,6 +71,7 @@ public final class GorillaPoolProvider implements Provider {
             ? "https://testnet.ordinals.gorillapool.io/api"
             : "https://ordinals.gorillapool.io/api";
         this.transport = transport == null ? HttpTransport.jdkDefault() : transport;
+        this.rawFetcher = rawFetcher == null ? GorillaPoolProvider::jdkGetBytes : rawFetcher;
     }
 
     public String getNetwork() {
@@ -115,31 +133,69 @@ public final class GorillaPoolProvider implements Provider {
         return body;
     }
 
+    /**
+     * Fetches the transaction via {@code /tx/{txid}/raw} (the bare serialized
+     * transaction) and returns output {@code vout}. The satoshis are read from
+     * the output's 8-byte little-endian field, so the value is exact (F-027:
+     * the former JSON {@code vout[].value} decode with its {@code < 1000 → BTC}
+     * guess targeted a field GorillaPool never returns). The body must hash to
+     * the requested txid. Returns {@code null} on 404 or an out-of-range vout.
+     */
     @Override
     public UTXO getUtxo(String txid, int vout) {
-        HttpTransport.Response resp = transport.send(
-            "GET", baseUrl + "/tx/" + txid, null, null);
+        RawResponse resp = rawFetcher.get(baseUrl + "/tx/" + txid + "/raw");
         if (resp.statusCode() == 404) return null;
-        requireOk(resp, "GorillaPool getTransaction");
-
-        Map<String, Object> data = Json.asObject(parseJson(resp.body(), "GorillaPool getTransaction"));
-        Object voutArr = data.get("vout");
-        if (!(voutArr instanceof List<?> outs) || vout < 0 || vout >= outs.size()) return null;
-        Map<String, Object> out = Json.asObject(outs.get(vout));
-        long sats = btcOrSatToSatoshis(out.get("value"));
-        String script = "";
-        if (out.get("scriptPubKey") instanceof Map<?, ?> sp) {
-            Object hex = ((Map<?, ?>) sp).get("hex");
-            if (hex instanceof String s) script = s;
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            String body = resp.body() == null ? "" : new String(resp.body(), StandardCharsets.UTF_8);
+            throw new ProviderException("GorillaPool getTransaction failed (" + resp.statusCode() + "): "
+                + RPCProvider.truncate(body, 256), resp.statusCode());
         }
+        byte[] raw = resp.body() == null ? new byte[0] : resp.body();
+        String bodyTxid = ScriptUtils.reverseHex(ScriptUtils.bytesToHex(Hash160.doubleSha256(raw)));
+        if (!bodyTxid.equals(txid.toLowerCase(java.util.Locale.ROOT))) {
+            throw new ProviderException("GorillaPool getTransaction: txid mismatch: response body hashes to "
+                + bodyTxid + ", requested " + txid);
+        }
+        RawTx tx;
+        try {
+            tx = RawTxParser.parse(ScriptUtils.bytesToHex(raw));
+        } catch (RuntimeException re) {
+            throw new ProviderException("GorillaPool getTransaction: parsing tx: " + re.getMessage(), re);
+        }
+        if (vout < 0 || vout >= tx.outputs.size()) return null;
+        RawTx.Output out = tx.outputs.get(vout);
+        String script = out.scriptPubKeyHex == null ? "" : out.scriptPubKeyHex;
         if (!script.isEmpty()) {
             ScriptSizeExceededError.assertScriptHexUnderLimit(
                 script, InputLimits.MAX_SCRIPT_BYTES,
                 "GorillaPoolProvider.getUtxo(" + txid + ":" + vout + ")"
             );
         }
-        return new UTXO(txid, vout, sats, script);
+        return new UTXO(bodyTxid, vout, out.satoshis, script);
     }
+
+    /** Default {@link RawFetcher}: a JDK HttpClient GET that keeps the body as bytes. */
+    private static RawResponse jdkGetBytes(String url) {
+        java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+            .uri(java.net.URI.create(url))
+            .timeout(java.time.Duration.ofMinutes(10))
+            .GET()
+            .build();
+        try {
+            java.net.http.HttpResponse<byte[]> resp = RAW_CLIENT.send(
+                req, java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+            return new RawResponse(resp.statusCode(), resp.body() == null ? new byte[0] : resp.body());
+        } catch (java.io.IOException ioe) {
+            throw new ProviderException("HTTP GET " + url + " failed: " + ioe.getMessage(), ioe);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new ProviderException("HTTP GET " + url + " interrupted", ie);
+        }
+    }
+
+    private static final java.net.http.HttpClient RAW_CLIENT = java.net.http.HttpClient.newBuilder()
+        .connectTimeout(java.time.Duration.ofSeconds(30))
+        .build();
 
     /**
      * Fetches the raw transaction hex by txid via {@code /tx/{txid}/hex}.
@@ -237,25 +293,6 @@ public final class GorillaPoolProvider implements Provider {
             utxos.add(new UTXO(txid, vout, sats, script));
         }
         return utxos;
-    }
-
-    private static long btcOrSatToSatoshis(Object value) {
-        if (value == null) return 0L;
-        if (value instanceof Double d) {
-            // GorillaPool may serialize as raw satoshis (integer-shaped doubles)
-            // or as BTC. Mirror the Go SDK heuristic: < 1000 means BTC.
-            if (d < 1000.0) return Math.round(d * 1e8);
-            return d.longValue();
-        }
-        if (value instanceof Long l) return l;
-        if (value instanceof Integer i) return i;
-        if (value instanceof java.math.BigInteger bi) return bi.longValueExact();
-        if (value instanceof String s) {
-            double parsed = Double.parseDouble(s);
-            if (parsed < 1000.0) return Math.round(parsed * 1e8);
-            return (long) parsed;
-        }
-        throw new ProviderException("expected numeric vout.value, got " + typeName(value));
     }
 
     private static void requireOk(HttpTransport.Response resp, String op) {

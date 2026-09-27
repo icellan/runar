@@ -9,8 +9,9 @@ Endpoints:
 
 from __future__ import annotations
 
+import hashlib
 import json
-import math
+import struct
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -65,37 +66,21 @@ class GorillaPoolProvider(Provider):
     # -- Standard Provider methods --
 
     def get_transaction(self, txid: str) -> TransactionData:
-        raw = self._get(f'/tx/{txid}')
-        data = json.loads(raw)
+        """Fetch a transaction via GET /tx/{txid}/raw (the bare serialized tx).
 
-        inputs: list[TxInput] = []
-        for vin in data.get('vin', []):
-            inputs.append(TxInput(
-                txid=vin['txid'],
-                output_index=vin['vout'],
-                script=vin.get('scriptSig', {}).get('hex', ''),
-                sequence=vin.get('sequence', 0xFFFFFFFF),
-            ))
-
-        outputs: list[TxOutput] = []
-        for vout in data.get('vout', []):
-            value = vout['value']
-            # Handle both satoshi-denominated and BTC-denominated responses
-            if isinstance(value, (int, float)) and value < 1000:
-                satoshis = round(value * 1e8)
-            else:
-                satoshis = value
-            script_hex = vout.get('scriptPubKey', {}).get('hex', '')
-            outputs.append(TxOutput(satoshis=satoshis, script=script_hex))
-
-        return TransactionData(
-            txid=data['txid'],
-            version=data.get('version', 1),
-            inputs=inputs,
-            outputs=outputs,
-            locktime=data.get('locktime', 0),
-            raw=data.get('hex', ''),
-        )
+        Each output's satoshis is read from its 8-byte little-endian field, so
+        values are exact (F-027: the former JSON ``vout[].value`` decode with
+        its ``< 1000 -> BTC`` guess targeted a field GorillaPool never
+        returns). The body must hash to the requested txid.
+        """
+        raw = self._get(f'/tx/{txid}/raw')
+        body_txid = hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1].hex()
+        if body_txid != txid.lower():
+            raise RuntimeError(
+                f'GorillaPool getTransaction: txid mismatch: response body hashes to '
+                f'{body_txid}, requested {txid}'
+            )
+        return _decode_raw_tx(body_txid, raw)
 
     def broadcast(self, tx) -> str:
         if isinstance(tx, str):
@@ -277,3 +262,54 @@ class GorillaPoolProvider(Provider):
             )
             for e in entries
         ]
+
+
+def _decode_raw_tx(txid: str, raw: bytes) -> TransactionData:
+    """Decode a serialized transaction into TransactionData, keeping scriptSigs.
+
+    The SDK's other raw-tx parsers (wallet/oppushtx/local_signer) discard the
+    input scripts and do not bounds-check, so this one is local.
+    """
+    offset = 0
+
+    def read(n: int) -> bytes:
+        nonlocal offset
+        if offset + n > len(raw):
+            raise RuntimeError('GorillaPool getTransaction: truncated transaction')
+        chunk = raw[offset:offset + n]
+        offset += n
+        return chunk
+
+    def read_varint() -> int:
+        first = read(1)[0]
+        if first < 0xfd:
+            return first
+        if first == 0xfd:
+            return struct.unpack('<H', read(2))[0]
+        if first == 0xfe:
+            return struct.unpack('<I', read(4))[0]
+        return struct.unpack('<Q', read(8))[0]
+
+    version = struct.unpack('<I', read(4))[0]
+    inputs: list[TxInput] = []
+    for _ in range(read_varint()):
+        prev_txid = read(32)[::-1].hex()
+        prev_index = struct.unpack('<I', read(4))[0]
+        script = read(read_varint()).hex()
+        sequence = struct.unpack('<I', read(4))[0]
+        inputs.append(TxInput(txid=prev_txid, output_index=prev_index, script=script, sequence=sequence))
+    outputs: list[TxOutput] = []
+    for _ in range(read_varint()):
+        satoshis = struct.unpack('<Q', read(8))[0]
+        outputs.append(TxOutput(satoshis=satoshis, script=read(read_varint()).hex()))
+    locktime = struct.unpack('<I', read(4))[0]
+    if offset != len(raw):
+        raise RuntimeError('GorillaPool getTransaction: trailing bytes after transaction')
+    return TransactionData(
+        txid=txid,
+        version=version,
+        inputs=inputs,
+        outputs=outputs,
+        locktime=locktime,
+        raw=raw.hex(),
+    )

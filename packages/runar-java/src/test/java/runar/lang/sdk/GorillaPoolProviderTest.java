@@ -142,32 +142,104 @@ class GorillaPoolProviderTest {
     }
 
     // ------------------------------------------------------------------
-    // getUtxo hits /tx/{txid}
+    // getUtxo hits /tx/{txid}/raw (F-027)
+    //
+    // GorillaPool's GET /tx/{txid} is binary, not the JSON `vout[].value` the
+    // old decoder (with its `< 1000 → BTC` guess) expected. getUtxo now fetches
+    // /tx/{txid}/raw and reads the output's 8-byte LE satoshis from the raw tx.
+    // Proves: every output of the shared recorded vectors
+    // (conformance/sdk-gorillapool) decodes exactly — a real 1-sat inscription
+    // output is 1 sat; 999/1000/1e12/2.1e15 exact — and a body hashing to
+    // another txid is rejected. Does NOT prove the live API still serves
+    // /tx/{txid}/raw (recorded 2026-09-27).
     // ------------------------------------------------------------------
 
+    /** Binary fake: serves {@code body} at {@code url}, 404 elsewhere. */
+    private static final class FakeRawFetcher implements GorillaPoolProvider.RawFetcher {
+        final List<String> urls = new ArrayList<>();
+        final String url;
+        final byte[] body;
+
+        FakeRawFetcher(String url, byte[] body) {
+            this.url = url;
+            this.body = body;
+        }
+
+        @Override
+        public GorillaPoolProvider.RawResponse get(String u) {
+            urls.add(u);
+            return u.equals(url)
+                ? new GorillaPoolProvider.RawResponse(200, body)
+                : new GorillaPoolProvider.RawResponse(404, "{\"message\":\"Not Found\"}".getBytes());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> loadGorillaPoolVectors() throws Exception {
+        java.nio.file.Path p = java.nio.file.Paths.get(System.getProperty("user.dir"),
+            "..", "..", "conformance", "sdk-gorillapool", "vectors.json");
+        return (Map<String, Object>) Json.parse(java.nio.file.Files.readString(p));
+    }
+
+    private static String sha256Hex(String hex) {
+        return ScriptUtils.bytesToHex(Hash160.sha256(ScriptUtils.hexToBytes(hex)));
+    }
+
+    private static String rawUrl(String txid) {
+        return "https://ordinals.gorillapool.io/api/tx/" + txid + "/raw";
+    }
+
+    // F-027: replaces getUtxoIndexesVoutAndExtractsScript, which pinned the
+    // `value >= 1000 is treated as raw satoshis` heuristic on JSON GorillaPool never returns.
     @Test
-    void getUtxoIndexesVoutAndExtractsScript() {
-        String body = "{\"txid\":\"" + "ab".repeat(32) + "\",\"version\":1,\"vin\":[],"
-            + "\"vout\":["
-            + "  {\"value\":1000000,\"n\":0,\"scriptPubKey\":{\"hex\":\"76a91400\"}},"
-            + "  {\"value\":42,\"n\":1,\"scriptPubKey\":{\"hex\":\"6a\"}}"
-            + "],\"locktime\":0}";
-        FakeTransport t = new FakeTransport().queue(200, body);
-        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
+    @SuppressWarnings("unchecked")
+    void getUtxoDecodesRecordedRawTxVectors() throws Exception {
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) loadGorillaPoolVectors().get("vectors");
+        assertTrue(vectors.size() >= 3);
+        for (Map<String, Object> v : vectors) {
+            String name = (String) v.get("name");
+            String txid = (String) v.get("txid");
+            FakeRawFetcher f = new FakeRawFetcher(rawUrl(txid),
+                ScriptUtils.hexToBytes((String) v.get("responseHex")));
+            GorillaPoolProvider p = new GorillaPoolProvider("mainnet", new FakeTransport(), f);
+            List<Map<String, Object>> outs = (List<Map<String, Object>>)
+                ((Map<String, Object>) v.get("expected")).get("outputs");
+            for (int i = 0; i < outs.size(); i++) {
+                UTXO u = p.getUtxo(txid, i);
+                assertNotNull(u, name + " vout " + i);
+                assertEquals(txid, u.txid(), name);
+                assertEquals(i, u.outputIndex(), name);
+                assertEquals(Json.asLong(outs.get(i).get("satoshis")), u.satoshis(), name + " vout " + i + " satoshis");
+                assertEquals(2 * Json.asLong(outs.get(i).get("scriptLen")), u.scriptHex().length(), name);
+                assertEquals(outs.get(i).get("scriptSha256"), sha256Hex(u.scriptHex()), name);
+            }
+            assertNull(p.getUtxo(txid, outs.size()), name + ": vout past the end");
+            assertEquals(rawUrl(txid), f.urls.get(0));
+        }
+    }
 
-        UTXO u = p.getUtxo("ab".repeat(32), 0);
-        assertNotNull(u);
-        assertEquals(1_000_000L, u.satoshis(), "value >= 1000 is treated as raw satoshis");
-        assertEquals("76a91400", u.scriptHex());
-
-        assertEquals("https://ordinals.gorillapool.io/api/tx/" + "ab".repeat(32),
-            t.calls.get(0).url());
+    @Test
+    @SuppressWarnings("unchecked")
+    void getUtxoRejectsBodyForAnotherTxid() throws Exception {
+        Map<String, Object> doc = loadGorillaPoolVectors();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) doc.get("vectors");
+        for (Map<String, Object> rv : (List<Map<String, Object>>) doc.get("rejection_vectors")) {
+            String requested = (String) rv.get("requestedTxid");
+            Map<String, Object> src = vectors.stream()
+                .filter(v -> v.get("name").equals(rv.get("responseOf"))).findFirst().orElseThrow();
+            FakeRawFetcher f = new FakeRawFetcher(rawUrl(requested),
+                ScriptUtils.hexToBytes((String) src.get("responseHex")));
+            GorillaPoolProvider p = new GorillaPoolProvider("mainnet", new FakeTransport(), f);
+            ProviderException pe = assertThrows(ProviderException.class, () -> p.getUtxo(requested, 0));
+            assertTrue(pe.getMessage().contains("txid mismatch"), pe.getMessage());
+        }
     }
 
     @Test
     void getUtxoReturnsNullOn404() {
-        FakeTransport t = new FakeTransport().queue(404, "");
-        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", t);
+        // F-027: the 404 now comes from the binary /tx/{txid}/raw fetch.
+        FakeRawFetcher f = new FakeRawFetcher("nothing-matches", new byte[0]);
+        GorillaPoolProvider p = new GorillaPoolProvider("mainnet", new FakeTransport(), f);
         assertNull(p.getUtxo("ab".repeat(32), 0));
     }
 
