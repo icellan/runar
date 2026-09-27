@@ -435,6 +435,11 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
         # the property_access / member paths, which prefer a real property.
         for p in method.params:
             method_ctx.add_param(p.name)
+            # N-016: a private helper's parameter is not part of any ABI, so one
+            # that shadows a property is bound under the collision-proof local
+            # name. (A PUBLIC parameter keeps its ABI name.)
+            if method.visibility == "private" and method_ctx.is_property(p.name):
+                method_ctx._renamed_private_params[p.name] = method_ctx.local_name(p.name)
 
         if contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
             # Continuation requirements come from the side-effect
@@ -640,6 +645,8 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # their auto-injected witness params so a public method that
             # inlines this private picks them up via the shared method_scope.
             augmented = _lower_params(method.params)
+            for ap in augmented:
+                ap.name = method_ctx.param_slot(ap.name)
             augmented += list(method_ctx.method_scope.auto_injected_params)
             result.append(ANFMethod(
                 name=method.name,
@@ -650,6 +657,17 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             ))
 
     return result
+
+
+# N-016: suffix of the binding name of a local that shadows a property.
+SHADOW_LOCAL_SUFFIX = "@local"
+
+
+def _source_local_name(binding_name: str) -> str:
+    """N-016: the source spelling of a local's binding name."""
+    if binding_name.endswith(SHADOW_LOCAL_SUFFIX):
+        return binding_name[: -len(SHADOW_LOCAL_SUFFIX)]
+    return binding_name
 
 
 def _lower_params(params: list) -> list[ANFParam]:
@@ -747,6 +765,10 @@ class _LowerCtx:
         self._add_output_refs: list[str] = []
         self._add_data_output_refs: list[str] = []
         self._local_aliases: dict[str, str] = {}
+        # N-016: private-helper params renamed because they shadow a property,
+        # and loop variables in scope whose name is a property's.
+        self._renamed_private_params: dict[str, str] = {}
+        self._shadowing_loop_vars: set[str] = set()
         self._local_byte_vars: set[str] = set()
         self.current_source_loc: SourceLocation | None = None
         # Param substitution stack used when inlining a private method's
@@ -915,6 +937,32 @@ class _LowerCtx:
     def is_property(self, name: str) -> bool:
         return any(p.name == name for p in self._contract.properties)
 
+    def local_name(self, name: str) -> str:
+        """N-016: the ANF binding name for a source-level local (or loop
+        variable, or private-helper parameter) called ``name``.
+
+        Binding names and property names share one namespace downstream --
+        stack lowering resolves ``load_prop`` / ``update_prop`` / the state
+        continuation / an ``if``'s ``results`` by name -- so a local bound as
+        ``x`` next to a property ``x`` made ``this.x`` read the local. A
+        property-named local is bound under ``<name>@local`` (``@`` is in no
+        surface's identifiers, so it cannot collide with a property, another
+        local or a temp); every other name is unchanged, keeping non-shadowing
+        ANF byte-identical.
+        """
+        return name + SHADOW_LOCAL_SUFFIX if self.is_property(name) else name
+
+    def local_target(self, name: str) -> str:
+        """N-016: the binding a write to the bare identifier ``name`` rebinds --
+        the local's (possibly renamed) binding when a local of that name is in
+        scope, otherwise the name itself, exactly as before."""
+        local = self.local_name(name)
+        return local if self.is_local(local) else name
+
+    def param_slot(self, name: str) -> str:
+        """N-016: the ``load_param`` name a source parameter resolves to."""
+        return self._renamed_private_params.get(name, name)
+
     def _is_private_method(self, name: str) -> bool:
         """Whether ``name`` is a private (non-public) method on the contract.
         Used to route bare-identifier calls through the method_call inlining
@@ -961,6 +1009,8 @@ class _LowerCtx:
         # sub-contexts resolve parameter types against the same method.
         sub._param_types = self._param_types
         sub._local_aliases = dict(self._local_aliases)
+        sub._renamed_private_params = dict(self._renamed_private_params)
+        sub._shadowing_loop_vars = set(self._shadowing_loop_vars)
         sub._local_byte_vars = set(self._local_byte_vars)
         # Deep-copy the inlined-param alias stack. ``_inline_private_method_call``
         # pushes the caller's argument refs onto the CURRENT context before
@@ -1060,10 +1110,11 @@ class _LowerCtx:
 
     def _lower_variable_decl(self, stmt: VariableDeclStmt) -> None:
         value_ref = self.lower_expr_to_ref(stmt.init)
-        self.add_local(stmt.name)
+        binding_name = self.local_name(stmt.name)
+        self.add_local(binding_name)
         if _is_byte_typed_expr(stmt.init, self):
             self._local_byte_vars.add(stmt.name)
-        self.emit_named(stmt.name, _make_load_const_string("@ref:" + value_ref))
+        self.emit_named(binding_name, _make_load_const_string("@ref:" + value_ref))
 
     def _lower_assignment(self, stmt: AssignmentStmt) -> None:
         value_ref = self.lower_expr_to_ref(stmt.value)
@@ -1075,7 +1126,7 @@ class _LowerCtx:
 
         # local = expr -> re-bind
         if isinstance(stmt.target, Identifier):
-            self.emit_named(stmt.target.name, _make_load_const_string("@ref:" + value_ref))
+            self.emit_named(self.local_target(stmt.target.name), _make_load_const_string("@ref:" + value_ref))
             return
 
         # For other targets, lower the target expression
@@ -1314,6 +1365,8 @@ class _LowerCtx:
             _collect_statement_reads(s, body_reads)
 
         body_ctx = self.sub_context()
+        if stmt.init and self.is_property(stmt.init.name):
+            body_ctx._shadowing_loop_vars.add(stmt.init.name)
         body_ctx.lower_statements(stmt.body, frozenset(body_reads))
         self.sync_counter(body_ctx)
 
@@ -1321,7 +1374,7 @@ class _LowerCtx:
             kind="loop",
             count=count,
             body=body_ctx.bindings,
-            iter_var=stmt.init.name if stmt.init else "",
+            iter_var=self.local_name(stmt.init.name) if stmt.init else "",
             start=start,
             step=step,
         ))
@@ -1477,15 +1530,21 @@ class _LowerCtx:
 
         # Check if it's a registered parameter (e.g. txPreimage)
         if self.is_param(name):
-            return self.emit(ANFValue(kind="load_param", name=name))
+            return self.emit(ANFValue(kind="load_param", name=self.param_slot(name)))
 
         # Check if it's a local variable -- reference it directly
         # (or use its alias if reassigned by an if-statement)
-        if self.is_local(name):
-            alias = self.get_local_alias(name)
+        local = self.local_name(name)
+        if self.is_local(local):
+            alias = self.get_local_alias(local)
             if alias:
                 return alias
-            return name
+            return local
+
+        # N-016: a loop variable named like a property is the loop variable,
+        # not the property (it used to fall through to load_prop below).
+        if name in self._shadowing_loop_vars:
+            return self.emit(ANFValue(kind="load_param", name=local))
 
         # Check if it's a contract property
         if self.is_property(name):
@@ -1992,7 +2051,7 @@ class _LowerCtx:
 
         # If the operand is a named variable, update it
         if isinstance(e.operand, Identifier):
-            self.emit_named(e.operand.name, _make_load_const_string("@ref:" + result))
+            self.emit_named(self.local_target(e.operand.name), _make_load_const_string("@ref:" + result))
         if isinstance(e.operand, PropertyAccessExpr):
             self.emit(_make_update_prop(e.operand.property, result))
 
@@ -2007,7 +2066,7 @@ class _LowerCtx:
 
         # If the operand is a named variable, update it
         if isinstance(e.operand, Identifier):
-            self.emit_named(e.operand.name, _make_load_const_string("@ref:" + result))
+            self.emit_named(self.local_target(e.operand.name), _make_load_const_string("@ref:" + result))
         if isinstance(e.operand, PropertyAccessExpr):
             self.emit(_make_update_prop(e.operand.property, result))
 
@@ -2284,7 +2343,7 @@ def _branch_output_rejection_reason(
 
     # 4. INV-B: a rebound local that survives the ``if`` is protected from being
     #    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
-    live_merged = [name for name in merged_locals if name in reads_after]
+    live_merged = [name for name in merged_locals if _source_local_name(name) in reads_after]
     if live_merged:
         return f"reassigns local variables read after it ({', '.join(live_merged)})"
 

@@ -1476,7 +1476,11 @@ func (ctx *loweringContext) lowerLoadProp(bindingName, propName string) {
 		}
 	}
 
-	if ctx.sm.has(propName) {
+	// N-016: only a MUTABLE property ever lives on the stack (deserialize_state
+	// / update_prop). A readonly property is a deploy-time constant, so a slot
+	// that merely shares its name is a param, local or temp — reading it made
+	// `this.target` return whatever that slot held.
+	if (prop == nil || !prop.Readonly) && ctx.sm.has(propName) {
 		// Property has been updated (via update_prop) — use the stack value.
 		// Must check this BEFORE InitialValue — after update_prop, we need the
 		// updated value, not the original constant.

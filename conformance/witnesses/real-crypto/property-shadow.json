@@ -1,0 +1,48 @@
+{
+  "fixture": "property-shadow",
+  "kind": "stateful",
+  "signerKey": "alice",
+  "note": "N-016 / R12. `bump` declares a local named like each property before reading it: `const target = n + 1n; assert(target == this.target)` and `const count = n; this.count = this.count + count; assert(this.count > count)`. Before N-016 every tier resolved `this.target` / `this.count` to the same-named LOCAL's stack slot, so the target guard compiled to OP_DUP OP_NUMEQUAL (always true: any n spent) and the continuation committed n + n instead of old + n. The accepts pin the committed state by hand from the source (old count + n); the business near-miss is the exact input the pre-fix script accepted; the tampered-output reject proves the continuation is committed to by hashOutputs.",
+  "constructorArgs": [
+    "10n",
+    "4n"
+  ],
+  "spends": [
+    {
+      "method": "bump",
+      "args": [
+        "9n"
+      ],
+      "expect": "accept",
+      "note": "9 + 1 == target 10; count = 4 + 9 = 13 (pre-fix committed 9 + 9 = 18)",
+      "satoshis": 1000,
+      "expectedState": {
+        "count": "13n"
+      }
+    },
+    {
+      "method": "bump",
+      "args": [
+        "5n"
+      ],
+      "expect": "reject",
+      "note": "business near-miss: 5 + 1 != target 10. The pre-fix script compared the local with itself and ACCEPTED this.",
+      "satoshis": 1000
+    },
+    {
+      "method": "bump",
+      "args": [
+        "9n"
+      ],
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered continuation output — the count written after the shadowing local must be committed to by hashOutputs",
+      "satoshis": 1000
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "1611091e8144b9db94e8044317ceb86b6fafa006c328769dcb311659e1d71e0b",
+    "expected-ir.json": "952684f06fc1e98b2aa2c830974052d1d011b3f72a41d720a56a78e2f70b3d3b"
+  }
+}

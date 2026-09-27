@@ -394,6 +394,13 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
         // is_property before is_param (see PropertyAccess / lower_member_expr).
         for p in &method.params {
             method_ctx.add_param(&p.name);
+            // N-016: a private helper's parameter is not part of any ABI, so
+            // one that shadows a property is bound under the collision-proof
+            // local name. (A PUBLIC parameter keeps its ABI name.)
+            if method.visibility == Visibility::Private && method_ctx.is_property(&p.name) {
+                let slot = method_ctx.local_name(&p.name);
+                method_ctx.renamed_private_params.insert(p.name.clone(), slot);
+            }
         }
 
         if contract.parent_class == "StatefulSmartContract"
@@ -719,6 +726,9 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             // public's method_scope, so the auto-injection registers at
             // the public method's ABI augmentation step above.)
             let mut augmented = lower_params(&method.params);
+            for p in augmented.iter_mut() {
+                p.name = method_ctx.param_slot(&p.name);
+            }
             for p in method_ctx.method_scope.borrow().auto_injected_params.iter() {
                 augmented.push(p.clone());
             }
@@ -827,6 +837,10 @@ struct LoweringContext<'a> {
     /// Maps local variable names to their current ANF binding name.
     /// Updated after if-statements that reassign locals in both branches.
     local_aliases: HashMap<String, String>,
+    /// N-016: private-helper params renamed because they shadow a property.
+    renamed_private_params: HashMap<String, String>,
+    /// N-016: loop variables in scope whose name is a property's.
+    shadowing_loop_vars: HashSet<String>,
     /// Tracks local variables known to be byte-typed.
     local_byte_vars: HashSet<String>,
     /// Maps the CURRENT method's (or constructor's) parameter names to their
@@ -898,6 +912,8 @@ impl<'a> LoweringContext<'a> {
             add_output_refs: Vec::new(),
             add_data_output_refs: Vec::new(),
             local_aliases: HashMap::new(),
+            renamed_private_params: HashMap::new(),
+            shadowing_loop_vars: HashSet::new(),
             local_byte_vars: HashSet::new(),
             param_types: HashMap::new(),
             current_source_loc: None,
@@ -1076,6 +1092,43 @@ impl<'a> LoweringContext<'a> {
         self.contract.properties.iter().any(|p| p.name == name)
     }
 
+    /// N-016: the ANF binding name for a source-level local (or loop variable,
+    /// or private-helper parameter) called `name`. Binding names and property
+    /// names share one namespace downstream — stack lowering resolves
+    /// `load_prop` / `update_prop` / the state continuation / an `if`'s
+    /// `results` by name — so a local bound as `x` next to a property `x` made
+    /// `this.x` read the local. A property-named local is bound under
+    /// `<name>@local` (`@` is in no surface's identifiers, so it cannot collide
+    /// with a property, another local or a temp); every other name is
+    /// unchanged, keeping non-shadowing ANF byte-identical.
+    fn local_name(&self, name: &str) -> String {
+        if self.is_property(name) {
+            format!("{}{}", name, SHADOW_LOCAL_SUFFIX)
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// N-016: the binding a write to the bare identifier `name` rebinds — the
+    /// local's (possibly renamed) binding when a local of that name is in
+    /// scope, otherwise the name itself, exactly as before.
+    fn local_target(&self, name: &str) -> String {
+        let local = self.local_name(name);
+        if self.is_local(&local) {
+            local
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// N-016: the `load_param` name a source parameter resolves to.
+    fn param_slot(&self, name: &str) -> String {
+        self.renamed_private_params
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
     /// Report whether `name` is a private (non-public) method on the contract.
     /// Used to route bare-identifier calls (e.g. Move's `require_owner(sig)`
     /// after `contract` stripping) through the method_call inlining path.
@@ -1095,6 +1148,8 @@ impl<'a> LoweringContext<'a> {
         sub.param_names = self.param_names.clone();
         sub.local_names = self.local_names.clone();
         sub.local_aliases = self.local_aliases.clone();
+        sub.renamed_private_params = self.renamed_private_params.clone();
+        sub.shadowing_loop_vars = self.shadowing_loop_vars.clone();
         sub.local_byte_vars = self.local_byte_vars.clone();
         // Share the current method's parameter types so byte-type analysis
         // inside nested blocks resolves params against the SAME method scope
@@ -1402,17 +1457,28 @@ fn lower_statement_with_reads(
     }
 }
 
+/// N-016: suffix of the binding name of a local that shadows a property.
+const SHADOW_LOCAL_SUFFIX: &str = "@local";
+
+/// N-016: the source spelling of a local's binding name (undoes `local_name`).
+fn source_local_name(binding_name: &str) -> &str {
+    binding_name
+        .strip_suffix(SHADOW_LOCAL_SUFFIX)
+        .unwrap_or(binding_name)
+}
+
 /// Lower a variable declaration. Matches the TS reference:
 /// Lower the init expression, register the variable as local, then emit
 /// a named binding that aliases the variable to the computed value via @ref.
 fn lower_variable_decl(name: &str, init: &Expression, ctx: &mut LoweringContext) {
     let value_ref = lower_expr_to_ref(init, ctx);
-    ctx.add_local(name);
+    let binding_name = ctx.local_name(name);
+    ctx.add_local(&binding_name);
     if is_byte_typed_expr(init, ctx) {
         ctx.local_byte_vars.insert(name.to_string());
     }
     ctx.emit_named(
-        name,
+        &binding_name,
         ANFValue::LoadConst {
             value: serde_json::Value::String(format!("@ref:{}", value_ref)),
         },
@@ -1436,8 +1502,9 @@ fn lower_assignment(target: &Expression, value: &Expression, ctx: &mut LoweringC
 
     // local = expr -> re-bind (emit a new named binding with @ref)
     if let Expression::Identifier { name } = target {
+        let binding_name = ctx.local_target(name);
         ctx.emit_named(
-            name,
+            &binding_name,
             ANFValue::LoadConst {
                 value: serde_json::Value::String(format!("@ref:{}", value_ref)),
             },
@@ -1862,7 +1929,7 @@ fn branch_output_rejection_reason(
     //    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
     let live_merged: Vec<String> = merged_locals
         .iter()
-        .filter(|name| reads_after.contains(*name))
+        .filter(|name| reads_after.contains(source_local_name(name)))
         .cloned()
         .collect();
     if !live_merged.is_empty() {
@@ -1926,9 +1993,13 @@ fn lower_for_statement(
     }
 
     let mut body_ctx = ctx.sub_context();
+    if ctx.is_property(&iter_var) {
+        body_ctx.shadowing_loop_vars.insert(iter_var.clone());
+    }
     lower_statements_with_reads(body, &mut body_ctx, &body_reads);
     ctx.sync_counter(&body_ctx);
 
+    let iter_var = ctx.local_name(&iter_var);
     ctx.emit(ANFValue::Loop {
         count,
         body: body_ctx.bindings,
@@ -2193,18 +2264,21 @@ fn lower_identifier(name: &str, ctx: &mut LoweringContext) -> String {
 
     // Check if it's a registered parameter (e.g. txPreimage for StatefulSmartContract)
     if ctx.is_param(name) {
-        return ctx.emit(ANFValue::LoadParam {
-            name: name.to_string(),
-        });
+        let slot = ctx.param_slot(name);
+        return ctx.emit(ANFValue::LoadParam { name: slot });
     }
 
     // Check if it's a local variable -- reference it directly
     // (or use its alias if reassigned by an if-statement)
-    if ctx.is_local(name) {
-        return ctx
-            .get_local_alias(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_string());
+    let local = ctx.local_name(name);
+    if ctx.is_local(&local) {
+        return ctx.get_local_alias(&local).cloned().unwrap_or(local);
+    }
+
+    // N-016: a loop variable named like a property is the loop variable, not
+    // the property (it used to fall through to load_prop below).
+    if ctx.shadowing_loop_vars.contains(name) {
+        return ctx.emit(ANFValue::LoadParam { name: local });
     }
 
     // Check if it's a contract property
@@ -3004,8 +3078,9 @@ fn lower_increment_expr(
 
     // If the operand is a named variable, update it
     if let Expression::Identifier { name } = operand {
+        let binding_name = ctx.local_target(name);
         ctx.emit_named(
-            name,
+            &binding_name,
             ANFValue::LoadConst {
                 value: serde_json::Value::String(format!("@ref:{}", result)),
             },
@@ -3043,8 +3118,9 @@ fn lower_decrement_expr(
 
     // If the operand is a named variable, update it
     if let Expression::Identifier { name } = operand {
+        let binding_name = ctx.local_target(name);
         ctx.emit_named(
-            name,
+            &binding_name,
             ANFValue::LoadConst {
                 value: serde_json::Value::String(format!("@ref:{}", result)),
             },

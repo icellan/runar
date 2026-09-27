@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-09-16T05:04:30.494097Z",
   "summary": {
-    "byte-match": 85,
+    "byte-match": 86,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
@@ -10,7 +10,7 @@
   "pathBreakdown": {
     "assert-recognizer": 1,
     "raw_script": 4,
-    "template": 80
+    "template": 81
   },
   "rows": [
     {
@@ -355,6 +355,11 @@
     },
     {
       "id": "property-initializers/PropertyInitializers",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "property-shadow/PropertyShadow",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

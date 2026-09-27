@@ -29,6 +29,7 @@ test {
     _ = @import("tests/f017_identifier_collision.zig");
     _ = @import("tests/f011_unterminated_literal.zig");
     _ = @import("tests/n021_ruby_block_comment.zig");
+    _ = @import("tests/n016_property_shadow_scoping.zig");
     _ = @import("passes/parse_java.zig");
     _ = @import("passes/validate.zig");
     _ = @import("passes/sighash_validate.zig");

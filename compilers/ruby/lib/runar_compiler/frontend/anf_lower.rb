@@ -364,6 +364,12 @@ module RunarCompiler
         # property? before param? (below), so a stored property still wins.
         method.params.each do |p|
           method_ctx.add_param(p.name)
+          # N-016: a private helper's parameter is not part of any ABI, so one
+          # that shadows a property is bound under the collision-proof local
+          # name. (A PUBLIC parameter keeps its ABI name.)
+          if method.visibility == "private" && method_ctx.property?(p.name)
+            method_ctx.rename_private_param(p.name)
+          end
         end
 
         if contract.parent_class == "StatefulSmartContract" && method.visibility == "public"
@@ -579,6 +585,7 @@ module RunarCompiler
           augmented = _lower_params(
             method.params.reject { |p| _is_stateful_context_param(p) }
           )
+          augmented.each { |ap| ap.name = method_ctx.param_slot(ap.name) }
           # Private methods can also call the intent intrinsics; capture
           # their auto-injected witness params so a public method that
           # inlines this private picks them up via the shared methodScope.
@@ -641,6 +648,9 @@ module RunarCompiler
     end
     private_class_method :_is_stateful_context_param
 
+    # N-016: suffix of the binding name of a local that shadows a property.
+    SHADOW_LOCAL_SUFFIX = "@local"
+
     # @param params [Array<ParamNode>]
     # @return [Array<IR::ANFParam>]
     def self._lower_params(params)
@@ -700,6 +710,10 @@ module RunarCompiler
         @add_output_refs = []
         @add_data_output_refs = []
         @local_aliases = {}
+        # N-016: private-helper params renamed because they shadow a property,
+        # and loop variables in scope whose name is a property's.
+        @renamed_private_params = {}
+        @shadowing_loop_vars = Set.new
         @local_byte_vars = Set.new
         @current_source_loc = nil
         # Param substitution stack used when inlining a private method's body
@@ -979,6 +993,45 @@ module RunarCompiler
         @contract.properties.any? { |p| p.name == name }
       end
 
+      # N-016: the ANF binding name for a source-level local (or loop variable,
+      # or private-helper parameter) called +name+. Binding names and property
+      # names share one namespace downstream -- stack lowering resolves
+      # load_prop / update_prop / the state continuation / an if's results by
+      # name -- so a local bound as `x` next to a property `x` made `this.x`
+      # read the local. A property-named local is bound under `<name>@local`
+      # (`@` is in no surface's identifiers, so it cannot collide with a
+      # property, another local or a temp); every other name is unchanged,
+      # keeping non-shadowing ANF byte-identical.
+      # @return [String]
+      def local_name(name)
+        property?(name) ? "#{name}#{Frontend::SHADOW_LOCAL_SUFFIX}" : name
+      end
+
+      # N-016: the binding a write to the bare identifier +name+ rebinds -- the
+      # local's (possibly renamed) binding when a local of that name is in
+      # scope, otherwise the name itself, exactly as before.
+      # @return [String]
+      def local_target(name)
+        local = local_name(name)
+        local?(local) ? local : name
+      end
+
+      # N-016: record a private helper's parameter that shadows a property.
+      def rename_private_param(name)
+        @renamed_private_params[name] = local_name(name)
+      end
+
+      # N-016: the load_param name a source parameter resolves to.
+      # @return [String]
+      def param_slot(name)
+        @renamed_private_params.fetch(name, name)
+      end
+
+      # N-016: register a loop variable that shadows a property in this scope.
+      def add_shadowing_loop_var(name)
+        @shadowing_loop_vars.add(name)
+      end
+
       # Whether `name` is a private (non-public) method on the contract.
       # Used to route bare-identifier calls through the method_call inlining
       # path so Move's free-function helpers match TypeScript's `this.foo()`.
@@ -1024,6 +1077,8 @@ module RunarCompiler
         sub.instance_variable_set(:@param_names, @param_names.dup)
         sub.instance_variable_set(:@param_types, @param_types.dup)
         sub.instance_variable_set(:@local_aliases, @local_aliases.dup)
+        sub.instance_variable_set(:@renamed_private_params, @renamed_private_params.dup)
+        sub.instance_variable_set(:@shadowing_loop_vars, @shadowing_loop_vars.dup)
         sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
         # Deep-copy the inlined-param alias stack. +_inline_private_method_call+
         # pushes the caller's argument refs onto the CURRENT context before
@@ -1279,11 +1334,12 @@ module RunarCompiler
       # @param stmt [VariableDeclStmt]
       def _lower_variable_decl(stmt)
         value_ref = lower_expr_to_ref(stmt.init)
-        add_local(stmt.name)
+        binding_name = local_name(stmt.name)
+        add_local(binding_name)
         if Frontend._is_byte_typed_expr(stmt.init, self)
           @local_byte_vars.add(stmt.name)
         end
-        emit_named(stmt.name, Frontend._make_load_const_string("@ref:#{value_ref}"))
+        emit_named(binding_name, Frontend._make_load_const_string("@ref:#{value_ref}"))
       end
 
       # @param stmt [AssignmentStmt]
@@ -1298,7 +1354,7 @@ module RunarCompiler
 
         # local = expr -> re-bind
         if stmt.target.is_a?(Identifier)
-          emit_named(stmt.target.name, Frontend._make_load_const_string("@ref:#{value_ref}"))
+          emit_named(local_target(stmt.target.name), Frontend._make_load_const_string("@ref:#{value_ref}"))
           return
         end
 
@@ -1536,13 +1592,14 @@ module RunarCompiler
         stmt.body.each { |s| Frontend._collect_statement_reads(s, body_reads) }
 
         body_ctx = sub_context
+        body_ctx.add_shadowing_loop_var(stmt.init.name) if stmt.init && property?(stmt.init.name)
         body_ctx.lower_statements(stmt.body, body_reads)
         sync_counter(body_ctx)
 
         emit(IR::ANFValue.new(kind: "loop").tap do |v|
           v.count = shape[:count]
           v.body = body_ctx.bindings
-          v.iter_var = stmt.init ? stmt.init.name : ""
+          v.iter_var = stmt.init ? local_name(stmt.init.name) : ""
           v.start = shape[:start]
           v.step = shape[:step]
         end)
@@ -1563,14 +1620,21 @@ module RunarCompiler
         return param_alias unless param_alias.nil?
 
         # Check if it's a registered parameter (e.g. txPreimage)
-        return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = name }) if param?(name)
+        return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = param_slot(name) }) if param?(name)
 
         # Check if it's a local variable -- reference it directly
         # (or use its alias if reassigned by an if-statement)
-        if local?(name)
-          a = get_local_alias(name)
+        local = local_name(name)
+        if local?(local)
+          a = get_local_alias(local)
           return a unless a.empty?
-          return name
+          return local
+        end
+
+        # N-016: a loop variable named like a property is the loop variable,
+        # not the property (it used to fall through to load_prop below).
+        if @shadowing_loop_vars.include?(name)
+          return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = local })
         end
 
         # Check if it's a contract property
@@ -2084,7 +2148,7 @@ module RunarCompiler
 
         # If the operand is a named variable, update it
         if e.operand.is_a?(Identifier)
-          emit_named(e.operand.name, Frontend._make_load_const_string("@ref:#{result}"))
+          emit_named(local_target(e.operand.name), Frontend._make_load_const_string("@ref:#{result}"))
         end
         if e.operand.is_a?(PropertyAccessExpr)
           emit(Frontend._make_update_prop(e.operand.property, result))
@@ -2106,7 +2170,7 @@ module RunarCompiler
 
         # If the operand is a named variable, update it
         if e.operand.is_a?(Identifier)
-          emit_named(e.operand.name, Frontend._make_load_const_string("@ref:#{result}"))
+          emit_named(local_target(e.operand.name), Frontend._make_load_const_string("@ref:#{result}"))
         end
         if e.operand.is_a?(PropertyAccessExpr)
           emit(Frontend._make_update_prop(e.operand.property, result))
@@ -2371,7 +2435,7 @@ module RunarCompiler
       # 4. INV-B: a rebound local that survives the +if+ is protected from being
       #    rolled away, so the arm ends one slot deeper than lowerIf accounts
       #    for.
-      live_merged = merged_locals.select { |name| reads_after.include?(name) }
+      live_merged = merged_locals.select { |name| reads_after.include?(name.delete_suffix(SHADOW_LOCAL_SUFFIX)) }
       unless live_merged.empty?
         return "reassigns local variables read after it (#{live_merged.join(', ')})"
       end

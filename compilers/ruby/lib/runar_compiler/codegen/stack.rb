@@ -1655,7 +1655,11 @@ module RunarCompiler::Codegen
     def _lower_load_prop(binding_name, prop_name)
       prop = @properties.find { |p| p.name == prop_name }
 
-      if @sm.has?(prop_name)
+      # N-016: only a MUTABLE property ever lives on the stack
+      # (deserialize_state / update_prop). A readonly property is a deploy-time
+      # constant, so a slot that merely shares its name is a param, local or
+      # temp -- reading it made `this.target` return whatever that slot held.
+      if (prop.nil? || !prop.readonly) && @sm.has?(prop_name)
         # Property has been updated -- use the stack value
         bring_to_top(prop_name, false)
         @sm.pop

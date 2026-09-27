@@ -408,6 +408,12 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 		// emit load_prop regardless of param registration.
 		for _, p := range method.Params {
 			methodCtx.addParam(p.Name)
+			// N-016: a private helper's parameter is not part of any ABI, so one
+			// that shadows a property is bound under the collision-proof local
+			// name. (A PUBLIC parameter keeps its ABI name.)
+			if method.Visibility == "private" && methodCtx.isProperty(p.Name) {
+				methodCtx.renamePrivateParamTo(p.Name, methodCtx.localName(p.Name))
+			}
 		}
 
 		if contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
@@ -623,6 +629,9 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			}
 			methodCtx.lowerStatements(method.Body)
 			augmented := lowerParams(method.Params)
+			for i := range augmented {
+				augmented[i].Name = methodCtx.paramSlot(augmented[i].Name)
+			}
 			// Private methods can also call the intent intrinsics; capture
 			// their auto-injected witness params so a public method that
 			// inlines this private picks them up via the shared methodScope.
@@ -697,6 +706,10 @@ type lowerCtx struct {
 	addOutputRefs     []string           // tracks addOutput / addRawOutput binding refs (state outputs)
 	addDataOutputRefs []string           // tracks addDataOutput binding refs — data outputs are included in the continuation hash AFTER state outputs and BEFORE the change output
 	localAliases      map[string]string  // maps local variable names to their current ANF binding name (updated after if-statements that reassign locals in both branches)
+	// N-016: private-helper params renamed because they shadow a property,
+	// and loop variables in scope whose name is a property's. Nil until used.
+	renamedPrivateParams map[string]string
+	shadowingLoopVars    map[string]bool
 	localByteVars     map[string]bool    // tracks local variables known to be byte-typed
 	currentSourceLoc  *ir.SourceLocation // Debug: source location to attach to emitted ANF bindings
 	// Param substitution stack used when inlining a private method's body
@@ -1006,6 +1019,61 @@ func (ctx *lowerCtx) isProperty(name string) bool {
 	return false
 }
 
+// shadowLocalSuffix (N-016) is appended to the binding name of a local that
+// shares a contract property's name. `@` appears in no surface's identifiers,
+// so the result cannot collide with a property, another local or a temp.
+const shadowLocalSuffix = "@local"
+
+// localName (N-016) returns the ANF binding name for a source-level local (or
+// loop variable, or private-helper parameter) called name. Binding names and
+// property names share one namespace downstream — stack lowering resolves
+// load_prop / update_prop / the state continuation / an if's results by name
+// — so a local bound as `x` next to a property `x` made `this.x` read the
+// local. Non-shadowing names are returned unchanged (byte-identical ANF).
+func (ctx *lowerCtx) localName(name string) string {
+	if ctx.isProperty(name) {
+		return name + shadowLocalSuffix
+	}
+	return name
+}
+
+// localTarget (N-016) is the binding a write to the bare identifier name
+// rebinds: the local's (possibly renamed) binding when a local of that name is
+// in scope, otherwise the name itself, exactly as before.
+func (ctx *lowerCtx) localTarget(name string) string {
+	if local := ctx.localName(name); ctx.isLocal(local) {
+		return local
+	}
+	return name
+}
+
+func (ctx *lowerCtx) renamePrivateParamTo(name, slot string) {
+	if ctx.renamedPrivateParams == nil {
+		ctx.renamedPrivateParams = make(map[string]string)
+	}
+	ctx.renamedPrivateParams[name] = slot
+}
+
+// paramSlot (N-016) is the load_param name a source parameter resolves to.
+func (ctx *lowerCtx) paramSlot(name string) string {
+	if slot, ok := ctx.renamedPrivateParams[name]; ok {
+		return slot
+	}
+	return name
+}
+
+func (ctx *lowerCtx) addShadowingLoopVar(name string) {
+	if ctx.shadowingLoopVars == nil {
+		ctx.shadowingLoopVars = make(map[string]bool)
+	}
+	ctx.shadowingLoopVars[name] = true
+}
+
+// sourceLocalName (N-016) undoes localName.
+func sourceLocalName(bindingName string) string {
+	return strings.TrimSuffix(bindingName, shadowLocalSuffix)
+}
+
 func (ctx *lowerCtx) getParamType(name string) (string, bool) {
 	// Restricted to the CURRENT method's parameters (issue #34). A cross-method
 	// lookup poisoned the byte-type analysis when two methods shared a parameter
@@ -1065,6 +1133,13 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 	// Share local aliases
 	for k, v := range ctx.localAliases {
 		sub.localAliases[k] = v
+	}
+	// N-016: share the shadowing renames.
+	for k, v := range ctx.renamedPrivateParams {
+		sub.renamePrivateParamTo(k, v)
+	}
+	for k := range ctx.shadowingLoopVars {
+		sub.addShadowingLoopVar(k)
 	}
 	// Deep-copy the inlined-param alias stack. inlinePrivateMethodCall pushes
 	// the caller's arg refs on the CURRENT context before lowering the private
@@ -1307,11 +1382,12 @@ func stmtSourceLoc(stmt Statement) *ir.SourceLocation {
 // a named binding that aliases the variable to the computed value via @ref.
 func (ctx *lowerCtx) lowerVariableDecl(stmt VariableDeclStmt) {
 	valueRef := ctx.lowerExprToRef(stmt.Init)
-	ctx.addLocal(stmt.Name)
+	bindingName := ctx.localName(stmt.Name)
+	ctx.addLocal(bindingName)
 	if isByteTypedExpr(stmt.Init, ctx) {
 		ctx.localByteVars[stmt.Name] = true
 	}
-	ctx.emitNamed(stmt.Name, makeLoadConstString("@ref:"+valueRef))
+	ctx.emitNamed(bindingName, makeLoadConstString("@ref:"+valueRef))
 }
 
 // lowerAssignment matches the TS reference:
@@ -1328,7 +1404,7 @@ func (ctx *lowerCtx) lowerAssignment(stmt AssignmentStmt) {
 
 	// local = expr -> re-bind (emit a new named binding with @ref)
 	if id, ok := stmt.Target.(Identifier); ok {
-		ctx.emitNamed(id.Name, makeLoadConstString("@ref:"+valueRef))
+		ctx.emitNamed(ctx.localTarget(id.Name), makeLoadConstString("@ref:"+valueRef))
 		return
 	}
 
@@ -1714,7 +1790,7 @@ func branchOutputRejectionReason(
 	//    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
 	var liveMerged []string
 	for _, name := range mergedLocals {
-		if readsAfter[name] {
+		if readsAfter[sourceLocalName(name)] {
 			liveMerged = append(liveMerged, name)
 		}
 	}
@@ -1763,6 +1839,9 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 	}
 
 	bodyCtx := ctx.subContext()
+	if ctx.isProperty(stmt.Init.Name) {
+		bodyCtx.addShadowingLoopVar(stmt.Init.Name)
+	}
 	bodyCtx.lowerStatementsWithReads(stmt.Body, bodyReads)
 	ctx.syncCounter(bodyCtx)
 
@@ -1780,7 +1859,7 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 		Kind:     "loop",
 		Count:    count,
 		Body:     bodyCtx.bindings,
-		IterVar:  stmt.Init.Name,
+		IterVar:  ctx.localName(stmt.Init.Name),
 		Start:    start,
 		StartRaw: bigIntStartRaw(start),
 		Step:     step,
@@ -2102,16 +2181,23 @@ func (ctx *lowerCtx) lowerIdentifier(id Identifier) string {
 
 	// Check if it's a registered parameter (e.g. txPreimage in StatefulSmartContract)
 	if ctx.isParam(name) {
-		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: name})
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: ctx.paramSlot(name)})
 	}
 
 	// Check if it's a local variable -- reference it directly
 	// (or use its alias if reassigned by an if-statement)
-	if ctx.isLocal(name) {
-		if alias := ctx.getLocalAlias(name); alias != "" {
+	local := ctx.localName(name)
+	if ctx.isLocal(local) {
+		if alias := ctx.getLocalAlias(local); alias != "" {
 			return alias
 		}
-		return name
+		return local
+	}
+
+	// N-016: a loop variable named like a property is the loop variable, not
+	// the property (it used to fall through to load_prop below).
+	if ctx.shadowingLoopVars[name] {
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: local})
 	}
 
 	// Check if it's a contract property
@@ -2574,7 +2660,7 @@ func (ctx *lowerCtx) lowerIncrementExpr(e IncrementExpr) string {
 
 	// If the operand is a named variable, update it
 	if id, ok := e.Operand.(Identifier); ok {
-		ctx.emitNamed(id.Name, makeLoadConstString("@ref:"+result))
+		ctx.emitNamed(ctx.localTarget(id.Name), makeLoadConstString("@ref:"+result))
 	}
 	if pa, ok := e.Operand.(PropertyAccessExpr); ok {
 		ctx.emit(makeUpdateProp(pa.Property, result))
@@ -2593,7 +2679,7 @@ func (ctx *lowerCtx) lowerDecrementExpr(e DecrementExpr) string {
 
 	// If the operand is a named variable, update it
 	if id, ok := e.Operand.(Identifier); ok {
-		ctx.emitNamed(id.Name, makeLoadConstString("@ref:"+result))
+		ctx.emitNamed(ctx.localTarget(id.Name), makeLoadConstString("@ref:"+result))
 	}
 	if pa, ok := e.Operand.(PropertyAccessExpr); ok {
 		ctx.emit(makeUpdateProp(pa.Property, result))

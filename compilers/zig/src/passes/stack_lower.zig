@@ -1517,8 +1517,16 @@ const LowerCtx = struct {
     }
 
     fn lowerPropertyRead(self: *LowerCtx, bind_name: []const u8, prop_name: []const u8) !void {
+        // N-016: only a MUTABLE property ever lives on the stack
+        // (deserialize_state / update_prop). A readonly property is a
+        // deploy-time constant, so a slot that merely shares its name is a
+        // param, local or temp — reading it made `this.target` return whatever
+        // that slot held.
+        const may_be_on_stack = for (self.program.properties) |prop| {
+            if (std.mem.eql(u8, prop.name, prop_name)) break !prop.readonly;
+        } else true;
         // Check if property has been updated on stack
-        if (self.updated_props.get(prop_name) != null) {
+        if (may_be_on_stack and self.updated_props.get(prop_name) != null) {
             if (self.stack.findDepth(prop_name)) |_| {
                 try self.bringToTop(prop_name, false);
                 try self.stack.renameAtDepth(self.allocator, 0, bind_name);
@@ -1526,7 +1534,7 @@ const LowerCtx = struct {
             }
         }
         // Property might be on stack from setup
-        if (self.stack.findDepth(prop_name)) |_| {
+        if (!may_be_on_stack) {} else if (self.stack.findDepth(prop_name)) |_| {
             try self.bringToTop(prop_name, false);
             try self.stack.renameAtDepth(self.allocator, 0, bind_name);
             return;

@@ -1559,7 +1559,13 @@ impl LoweringContext {
     fn lower_load_prop(&mut self, binding_name: &str, prop_name: &str) {
         let prop = self.properties.iter().find(|p| p.name == prop_name).cloned();
 
-        if self.sm.has(prop_name) {
+        // N-016: only a MUTABLE property ever lives on the stack
+        // (deserialize_state / update_prop). A readonly property is a
+        // deploy-time constant, so a slot that merely shares its name is a
+        // param, local or temp — reading it made `this.target` return whatever
+        // that slot held.
+        let may_be_on_stack = prop.as_ref().map_or(true, |p| !p.readonly);
+        if may_be_on_stack && self.sm.has(prop_name) {
             // Property has been updated (via update_prop) — use the stack value.
             // Must check this BEFORE initial_value — after update_prop, we need the
             // updated value, not the original constant.

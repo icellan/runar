@@ -1347,7 +1347,12 @@ class _LoweringContext:
                 prop = p
                 break
 
-        if self.sm.has(prop_name):
+        # N-016: only a MUTABLE property ever lives on the stack
+        # (deserialize_state / update_prop). A readonly property is a
+        # deploy-time constant, so a slot that merely shares its name is a
+        # param, local or temp -- reading it made ``this.target`` return
+        # whatever that slot held.
+        if (prop is None or not prop.readonly) and self.sm.has(prop_name):
             # Property has been updated -- use the stack value
             self.bring_to_top(prop_name, False)
             self.sm.pop()

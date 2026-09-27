@@ -1594,7 +1594,12 @@ public final class StackLower {
                 if (p.name().equals(propName)) { prop = p; break; }
             }
 
-            if (sm.has(propName)) {
+            // N-016: only a MUTABLE property ever lives on the stack
+            // (deserialize_state / update_prop). A readonly property is a
+            // deploy-time constant, so a slot that merely shares its name is a
+            // param, local or temp — reading it made `this.target` return
+            // whatever that slot held.
+            if ((prop == null || !prop.readonly()) && sm.has(propName)) {
                 bringToTop(propName, false);
                 sm.pop();
             } else if (prop != null && prop.initialValue() != null) {

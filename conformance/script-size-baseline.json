@@ -67,6 +67,7 @@
     "post-quantum-wots": 19587,
     "private-helper-outputs": 2125,
     "property-initializers": 1376,
+    "property-shadow": 694,
     "r1-k1-wallet": 959322,
     "schnorr-zkp": 877253,
     "selector": 736,

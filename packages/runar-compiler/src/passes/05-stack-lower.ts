@@ -1579,7 +1579,11 @@ class LoweringContext {
     // Properties are embedded as constants in the script.
     // Look up the property value from the contract properties.
     const prop = this._properties.find(p => p.name === propName);
-    if (this.stackMap.has(propName)) {
+    // N-016: only a MUTABLE property ever lives on the stack (deserialize_state
+    // / update_prop). A readonly property is a deploy-time constant, so a slot
+    // that merely shares its name is a param, local or temp — reading it made
+    // `this.target` return whatever that slot held.
+    if (prop?.readonly !== true && this.stackMap.has(propName)) {
       // If the property has been updated (via update_prop), it lives on the stack.
       // Must check this BEFORE initialValue — after update_prop, we need the
       // updated value, not the original constant.

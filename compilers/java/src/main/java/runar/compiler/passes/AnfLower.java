@@ -378,6 +378,12 @@ public final class AnfLower {
             // property_access branch (isProperty checked before isParam).
             for (ParamNode p : method.params()) {
                 ctx.addParam(p.name());
+                // N-016: a private helper's parameter is not part of any ABI, so
+                // one that shadows a property is bound under the collision-proof
+                // local name. (A PUBLIC parameter keeps its ABI name.)
+                if (method.visibility() != Visibility.PUBLIC && ctx.isProperty(p.name())) {
+                    ctx.renamedPrivateParams.put(p.name(), ctx.localName(p.name()));
+                }
             }
 
             // Issue #123: a non-default @sighash mode drives the OP_PUSH_TX
@@ -544,7 +550,10 @@ public final class AnfLower {
                     embedInjected = true;
                 }
                 ctx.lowerStatements(method.body());
-                List<AnfParam> privAugmented = new ArrayList<>(lowerParams(method.params()));
+                List<AnfParam> privAugmented = new ArrayList<>();
+                for (AnfParam ap : lowerParams(method.params())) {
+                    privAugmented.add(new AnfParam(ctx.paramSlot(ap.name()), ap.type()));
+                }
                 // Private methods can also call the intent intrinsics; capture
                 // their auto-injected witness params on the private's own ABI.
                 // (When the private is inlined into a public via
@@ -561,6 +570,16 @@ public final class AnfLower {
         }
 
         return out;
+    }
+
+    /** N-016: suffix of the binding name of a local that shadows a property. */
+    private static final String SHADOW_LOCAL_SUFFIX = "@local";
+
+    /** N-016: the source spelling of a local's binding name (undoes localName). */
+    private static String sourceLocalName(String bindingName) {
+        return bindingName.endsWith(SHADOW_LOCAL_SUFFIX)
+            ? bindingName.substring(0, bindingName.length() - SHADOW_LOCAL_SUFFIX.length())
+            : bindingName;
     }
 
     private static List<AnfParam> lowerParams(List<ParamNode> params) {
@@ -607,6 +626,10 @@ public final class AnfLower {
         final List<String> addOutputRefs = new ArrayList<>();
         final List<String> addDataOutputRefs = new ArrayList<>();
         final Map<String, String> localAliases = new HashMap<>();
+        // N-016: private-helper params renamed because they shadow a property,
+        // and loop variables in scope whose name is a property's.
+        final Map<String, String> renamedPrivateParams = new HashMap<>();
+        final Set<String> shadowingLoopVars = new HashSet<>();
         final Set<String> localByteVars = new HashSet<>();
         // GAP-002: source location of the AST statement currently being
         // lowered. Stamped onto every AnfBinding the helpers below emit so
@@ -849,6 +872,37 @@ public final class AnfLower {
             return false;
         }
 
+        /**
+         * N-016: the ANF binding name for a source-level local (or loop
+         * variable, or private-helper parameter) called {@code name}. Binding
+         * names and property names share one namespace downstream — stack
+         * lowering resolves load_prop / update_prop / the state continuation /
+         * an if's results by name — so a local bound as {@code x} next to a
+         * property {@code x} made {@code this.x} read the local. A
+         * property-named local is bound under {@code <name>@local} ({@code @} is
+         * in no surface's identifiers, so it cannot collide with a property,
+         * another local or a temp); every other name is unchanged, keeping
+         * non-shadowing ANF byte-identical.
+         */
+        String localName(String name) {
+            return isProperty(name) ? name + SHADOW_LOCAL_SUFFIX : name;
+        }
+
+        /**
+         * N-016: the binding a write to the bare identifier {@code name}
+         * rebinds — the local's (possibly renamed) binding when a local of that
+         * name is in scope, otherwise the name itself, exactly as before.
+         */
+        String localTarget(String name) {
+            String local = localName(name);
+            return isLocal(local) ? local : name;
+        }
+
+        /** N-016: the load_param name a source parameter resolves to. */
+        String paramSlot(String name) {
+            return renamedPrivateParams.getOrDefault(name, name);
+        }
+
         boolean isPrivateMethod(String name) {
             for (MethodNode m : contract.methods()) {
                 if (m.name().equals(name) && !m.name().equals("constructor")
@@ -878,6 +932,8 @@ public final class AnfLower {
             sub.localNames.addAll(this.localNames);
             sub.paramNames.addAll(this.paramNames);
             sub.localAliases.putAll(this.localAliases);
+            sub.renamedPrivateParams.putAll(this.renamedPrivateParams);
+            sub.shadowingLoopVars.addAll(this.shadowingLoopVars);
             sub.localByteVars.addAll(this.localByteVars);
             // Deep-copy the inlined-param alias stack. inlinePrivateMethodCall
             // pushes the caller's argument refs onto the CURRENT context before
@@ -1115,11 +1171,12 @@ public final class AnfLower {
 
         void lowerVariableDecl(VariableDeclStatement stmt) {
             String valueRef = lowerExprToRef(stmt.init());
-            addLocal(stmt.name());
+            String bindingName = localName(stmt.name());
+            addLocal(bindingName);
             if (isByteTypedExpr(stmt.init())) {
                 localByteVars.add(stmt.name());
             }
-            emitNamed(stmt.name(), makeLoadConstString("@ref:" + valueRef));
+            emitNamed(bindingName, makeLoadConstString("@ref:" + valueRef));
         }
 
         void lowerAssignment(AssignmentStatement stmt) {
@@ -1129,7 +1186,7 @@ public final class AnfLower {
                 return;
             }
             if (stmt.target() instanceof Identifier id) {
-                emitNamed(id.name(), makeLoadConstString("@ref:" + valueRef));
+                emitNamed(localTarget(id.name()), makeLoadConstString("@ref:" + valueRef));
                 return;
             }
             // Fallback
@@ -1518,7 +1575,7 @@ public final class AnfLower {
             //    lowerIf accounts for.
             List<String> liveMerged = new ArrayList<>();
             for (String name : mergedLocals) {
-                if (readsAfter.contains(name)) {
+                if (readsAfter.contains(sourceLocalName(name))) {
                     liveMerged.add(name);
                 }
             }
@@ -1569,10 +1626,13 @@ public final class AnfLower {
             }
 
             LowerCtx bodyCtx = subContext();
+            if (stmt.init() != null && isProperty(stmt.init().name())) {
+                bodyCtx.shadowingLoopVars.add(stmt.init().name());
+            }
             bodyCtx.lowerStatements(stmt.body(), bodyReads);
             syncCounter(bodyCtx);
 
-            String iterVar = stmt.init() != null ? stmt.init().name() : "";
+            String iterVar = stmt.init() != null ? localName(stmt.init().name()) : "";
             emit(new Loop(shape.count, bodyCtx.bindings, iterVar, shape.start, shape.step));
         }
 
@@ -1726,13 +1786,20 @@ public final class AnfLower {
             }
 
             if (isParam(name)) {
-                return emit(new LoadParam(name));
+                return emit(new LoadParam(paramSlot(name)));
             }
 
-            if (isLocal(name)) {
-                String alias = getLocalAlias(name);
+            String local = localName(name);
+            if (isLocal(local)) {
+                String alias = getLocalAlias(local);
                 if (alias != null) return alias;
-                return name;
+                return local;
+            }
+
+            // N-016: a loop variable named like a property is the loop
+            // variable, not the property (it used to fall through to load_prop).
+            if (shadowingLoopVars.contains(name)) {
+                return emit(new LoadParam(local));
             }
 
             if (isProperty(name)) {
@@ -2160,7 +2227,7 @@ public final class AnfLower {
             String result = emit(new BinOp("+", operandRef, oneRef, null));
 
             if (e.operand() instanceof Identifier id) {
-                emitNamed(id.name(), makeLoadConstString("@ref:" + result));
+                emitNamed(localTarget(id.name()), makeLoadConstString("@ref:" + result));
             }
             if (e.operand() instanceof PropertyAccessExpr pa) {
                 emit(new UpdateProp(pa.property(), result));
@@ -2174,7 +2241,7 @@ public final class AnfLower {
             String result = emit(new BinOp("-", operandRef, oneRef, null));
 
             if (e.operand() instanceof Identifier id) {
-                emitNamed(id.name(), makeLoadConstString("@ref:" + result));
+                emitNamed(localTarget(id.name()), makeLoadConstString("@ref:" + result));
             }
             if (e.operand() instanceof PropertyAccessExpr pa) {
                 emit(new UpdateProp(pa.property(), result));

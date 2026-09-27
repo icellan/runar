@@ -39,6 +39,9 @@ import { isByteStringFamilyType } from './03-typecheck.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
 
+/** N-016: suffix of the binding name of a local that shadows a property. */
+const SHADOW_LOCAL_SUFFIX = '@local';
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -306,6 +309,12 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
     // always emits `load_prop` regardless of param registration.
     for (const p of method.params) {
       methodCtx.addParam(p.name);
+      // N-016: a private helper's parameter is not part of any ABI, so one that
+      // shadows a property is bound under the collision-proof local name. (A
+      // PUBLIC parameter keeps its ABI name; stack lowering reserves its slot.)
+      if (method.visibility === 'private' && methodCtx.isProperty(p.name)) {
+        methodCtx.renamePrivateParam(p.name);
+      }
     }
 
     if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
@@ -535,7 +544,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // inlinePrivateMethodCall), so the auto-injection registers at
       // the public method's ABI augmentation step above. The private's
       // own ABI is still informative for non-inlined callees.
-      const params = lowerParams(method.params);
+      const params = lowerParams(method.params).map(p => ({ ...p, name: methodCtx.paramSlot(p.name) }));
       for (const p of methodCtx.methodScope.autoInjectedParams) {
         params.push(p);
       }
@@ -641,6 +650,10 @@ class LoweringContext {
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
+  /** N-016: private-helper params renamed because they shadow a property. */
+  private readonly renamedPrivateParams: Map<string, string> = new Map();
+  /** N-016: loop variables in scope whose name is a property's. */
+  private readonly shadowingLoopVars: Set<string> = new Set();
   /**
    * Param substitution stack used when inlining a private method's body
    * directly into this context. Entry on top is the active alias for
@@ -770,6 +783,42 @@ class LoweringContext {
 
   isProperty(name: string): boolean {
     return this.contract.properties.some(p => p.name === name);
+  }
+
+  /**
+   * N-016: the ANF binding name for a source-level local (or loop variable, or
+   * private-helper parameter) called `name`.
+   *
+   * Binding names and property names share one namespace downstream: stack
+   * lowering resolves `load_prop x`, `update_prop x`, the state continuation
+   * and an `if`'s `results` by name, so a local bound as `x` next to a
+   * property `x` made `this.x` read the local. A local that shares a
+   * property's name is therefore bound under `<name>@local` instead — `@`
+   * appears in no surface's identifiers, so the result cannot collide with a
+   * property, another local or a compiler temp. Every other name is returned
+   * unchanged, which keeps the ANF of non-shadowing contracts byte-identical.
+   */
+  localName(name: string): string {
+    return this.isProperty(name) ? `${name}${SHADOW_LOCAL_SUFFIX}` : name;
+  }
+
+  /** N-016: record a private helper's parameter that shadows a property. */
+  renamePrivateParam(name: string): void {
+    this.renamedPrivateParams.set(name, this.localName(name));
+  }
+
+  /** N-016: the `load_param` name a source parameter resolves to. */
+  paramSlot(name: string): string {
+    return this.renamedPrivateParams.get(name) ?? name;
+  }
+
+  /** N-016: register a loop variable that shadows a property in this scope. */
+  addShadowingLoopVar(name: string): void {
+    this.shadowingLoopVars.add(name);
+  }
+
+  isShadowingLoopVar(name: string): boolean {
+    return this.shadowingLoopVars.has(name);
   }
 
   /** Contract property names in declaration order. */
@@ -934,6 +983,8 @@ class LoweringContext {
     for (const l of this.localNames) sub.localNames.add(l);
     for (const b of this.localByteVars) sub.localByteVars.add(b);
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
+    for (const [k, v] of this.renamedPrivateParams) sub.renamedPrivateParams.set(k, v);
+    for (const v of this.shadowingLoopVars) sub.shadowingLoopVars.add(v);
     // Deep-copy the inlined-param alias stack. `inlinePrivateMethodCall`
     // pushes the caller's argument refs onto the CURRENT context before
     // lowering the private body; without this, an if arm / loop body /
@@ -1179,7 +1230,8 @@ function lowerVariableDecl(
   ctx: LoweringContext,
 ): void {
   const valueRef = lowerExprToRef(stmt.init, ctx);
-  ctx.addLocal(stmt.name);
+  const bindingName = ctx.localName(stmt.name);
+  ctx.addLocal(bindingName);
 
   // Track byte-typed locals so equality comparisons use OP_EQUAL
   if (isByteTypedExpr(stmt.init, ctx)) {
@@ -1188,7 +1240,24 @@ function lowerVariableDecl(
 
   // Emit a binding that aliases the variable name to the computed value.
   // We load the temp as a const reference to the computed value.
-  ctx.emitNamed(stmt.name, { kind: 'load_const', value: `@ref:${valueRef}` });
+  ctx.emitNamed(bindingName, { kind: 'load_const', value: `@ref:${valueRef}` });
+}
+
+/**
+ * N-016: the binding a write to the bare identifier `name` rebinds — the local's
+ * (possibly renamed) binding when a local of that name is in scope, otherwise
+ * the name itself, exactly as before.
+ */
+function localTarget(name: string, ctx: LoweringContext): string {
+  const local = ctx.localName(name);
+  return ctx.isLocal(local) ? local : name;
+}
+
+/** N-016: the source spelling of a local's binding name (undoes `localName`). */
+function sourceLocalName(bindingName: string): string {
+  return bindingName.endsWith(SHADOW_LOCAL_SUFFIX)
+    ? bindingName.slice(0, -SHADOW_LOCAL_SUFFIX.length)
+    : bindingName;
 }
 
 function lowerAssignment(
@@ -1205,7 +1274,7 @@ function lowerAssignment(
 
   // local = expr -> re-bind (in ANF, this is just a new binding with the same name)
   if (stmt.target.kind === 'identifier') {
-    ctx.emitNamed(stmt.target.name, { kind: 'load_const', value: `@ref:${valueRef}` });
+    ctx.emitNamed(localTarget(stmt.target.name, ctx), { kind: 'load_const', value: `@ref:${valueRef}` });
     return;
   }
 
@@ -1620,7 +1689,7 @@ function branchOutputRejectionReason(
 
   // 4. INV-B: a rebound local that survives the `if` is protected from being
   //    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
-  const liveMerged = mergedLocals.filter((name) => readsAfter.has(name));
+  const liveMerged = mergedLocals.filter((name) => readsAfter.has(sourceLocalName(name)));
   if (liveMerged.length > 0) {
     return `reassigns local variables read after it (${liveMerged.join(', ')})`;
   }
@@ -1697,6 +1766,7 @@ function lowerForStatement(
   for (const s of stmt.body) collectStatementReads(s, bodyReads);
 
   const bodyCtx = ctx.subContext();
+  if (ctx.isProperty(stmt.init.name)) bodyCtx.addShadowingLoopVar(stmt.init.name);
   lowerStatements(stmt.body, bodyCtx, bodyReads);
   ctx.syncCounter(bodyCtx);
 
@@ -1704,7 +1774,7 @@ function lowerForStatement(
     kind: 'loop',
     count,
     body: bodyCtx.bindings,
-    iterVar: stmt.init.name,
+    iterVar: ctx.localName(stmt.init.name),
     start,
     step,
   });
@@ -1942,13 +2012,20 @@ function lowerIdentifier(
 
   // Check if it's a parameter
   if (ctx.isParam(name)) {
-    return ctx.emit({ kind: 'load_param', name });
+    return ctx.emit({ kind: 'load_param', name: ctx.paramSlot(name) });
   }
 
   // Check if it's a local variable -- reference it directly
   // (or use its alias if reassigned by an if-statement)
-  if (ctx.isLocal(name)) {
-    return ctx.getLocalAlias(name) ?? name;
+  const local = ctx.localName(name);
+  if (ctx.isLocal(local)) {
+    return ctx.getLocalAlias(local) ?? local;
+  }
+
+  // N-016: a loop variable named like a property is the loop variable, not
+  // the property (it used to fall through to `load_prop` below).
+  if (ctx.isShadowingLoopVar(name)) {
+    return ctx.emit({ kind: 'load_param', name: local });
   }
 
   // Check if it's a contract property
@@ -2649,7 +2726,7 @@ function lowerIncrementExpr(
 
   // If the operand is a named variable, update it
   if (expr.operand.kind === 'identifier') {
-    ctx.emitNamed(expr.operand.name, { kind: 'load_const', value: `@ref:${result}` });
+    ctx.emitNamed(localTarget(expr.operand.name, ctx), { kind: 'load_const', value: `@ref:${result}` });
   }
   if (expr.operand.kind === 'property_access') {
     ctx.emit({ kind: 'update_prop', name: expr.operand.property, value: result });
@@ -2669,7 +2746,7 @@ function lowerDecrementExpr(
 
   // If the operand is a named variable, update it
   if (expr.operand.kind === 'identifier') {
-    ctx.emitNamed(expr.operand.name, { kind: 'load_const', value: `@ref:${result}` });
+    ctx.emitNamed(localTarget(expr.operand.name, ctx), { kind: 'load_const', value: `@ref:${result}` });
   }
   if (expr.operand.kind === 'property_access') {
     ctx.emit({ kind: 'update_prop', name: expr.operand.property, value: result });

@@ -523,6 +523,12 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
         for (method.params) |param| {
             try method_ctx.addParam(param.name);
             if (isByteType(param.type_info)) try method_ctx.markByteTyped(param.name);
+            // N-016: a private helper's parameter is not part of any ABI, so
+            // one that shadows a property is bound under the collision-proof
+            // local name. (A PUBLIC parameter keeps its ABI name.)
+            if (!method.is_public and method_ctx.isProperty(param.name)) {
+                try method_ctx.renamed_private_params.put(allocator, param.name, try method_ctx.localName(param.name));
+            }
         }
 
         // Issue #123: a non-default @sighash mode drives the OP_PUSH_TX binding
@@ -559,9 +565,15 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode, diag: ?*LowerDiagn
             // (matches the pre-Phase-13 behaviour expected by callers that
             // do not own the returned ANFProgram's params slice).
             var params_out: []ParamNode = method.params;
-            if (method_ctx.methodScope().auto_injected_params.items.len > 0) {
+            if (method_ctx.methodScope().auto_injected_params.items.len > 0 or
+                method_ctx.renamed_private_params.count() > 0)
+            {
                 var nonpub_params: std.ArrayListUnmanaged(ParamNode) = .empty;
-                for (method.params) |p| try nonpub_params.append(allocator, p);
+                for (method.params) |p| {
+                    var renamed = p;
+                    renamed.name = method_ctx.paramSlot(p.name);
+                    try nonpub_params.append(allocator, renamed);
+                }
                 for (method_ctx.methodScope().auto_injected_params.items) |p| {
                     try nonpub_params.append(allocator, p);
                 }
@@ -966,6 +978,17 @@ const MethodScope = struct {
 // LowerCtx -- manages temp variable generation and binding emission
 // ============================================================================
 
+/// N-016: suffix of the binding name of a local that shadows a property.
+const SHADOW_LOCAL_SUFFIX = "@local";
+
+/// N-016: the source spelling of a local's binding name (undoes `localName`).
+fn sourceLocalName(binding_name: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, binding_name, SHADOW_LOCAL_SUFFIX)) {
+        return binding_name[0 .. binding_name.len - SHADOW_LOCAL_SUFFIX.len];
+    }
+    return binding_name;
+}
+
 const LowerCtx = struct {
     allocator: Allocator,
     contract: ContractNode,
@@ -974,6 +997,10 @@ const LowerCtx = struct {
     local_names: std.StringHashMapUnmanaged(void),
     param_names: std.StringHashMapUnmanaged(void),
     local_aliases: std.StringHashMapUnmanaged([]const u8),
+    /// N-016: private-helper params renamed because they shadow a property.
+    renamed_private_params: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// N-016: loop variables in scope whose name is a property's.
+    shadowing_loop_vars: std.StringHashMapUnmanaged(void) = .empty,
     local_byte_vars: std.StringHashMapUnmanaged(void),
     add_output_refs: std.ArrayListUnmanaged([]const u8),
     /// Tracks addDataOutput binding refs — data outputs are included in the
@@ -1188,6 +1215,46 @@ const LowerCtx = struct {
         return false;
     }
 
+    /// N-016: the ANF binding name for a source-level local (or loop variable,
+    /// or private-helper parameter) called `name`. Binding names and property
+    /// names share one namespace downstream — stack lowering resolves
+    /// `load_prop` / `update_prop` / the state continuation / an `if`'s
+    /// `results` by name — so a local bound as `x` next to a property `x` made
+    /// `this.x` read the local. A property-named local is bound under
+    /// `<name>@local` (`@` is in no surface's identifiers, so it cannot collide
+    /// with a property, another local or a temp); every other name is returned
+    /// unchanged, keeping non-shadowing ANF byte-identical.
+    fn localName(self: *const LowerCtx, name: []const u8) Allocator.Error![]const u8 {
+        if (!self.isProperty(name)) return name;
+        return std.fmt.allocPrint(self.allocator, "{s}" ++ SHADOW_LOCAL_SUFFIX, .{name});
+    }
+
+    /// N-016: the in-scope binding of a local that shadows property `name`,
+    /// or null. Non-allocating (a lookup must not leak a probe string).
+    fn shadowLocalBinding(self: *const LowerCtx, name: []const u8) ?[]const u8 {
+        if (!self.isProperty(name)) return null;
+        var it = self.local_names.keyIterator();
+        while (it.next()) |key| {
+            const k = key.*;
+            if (k.len == name.len + SHADOW_LOCAL_SUFFIX.len and
+                std.mem.startsWith(u8, k, name) and
+                std.mem.endsWith(u8, k, SHADOW_LOCAL_SUFFIX)) return k;
+        }
+        return null;
+    }
+
+    /// N-016: the binding a read of / write to the bare identifier `name`
+    /// resolves to when it names a local — the renamed binding of a local that
+    /// shadows a property, otherwise the name itself, exactly as before.
+    fn localTarget(self: *const LowerCtx, name: []const u8) []const u8 {
+        return self.shadowLocalBinding(name) orelse name;
+    }
+
+    /// N-016: the `load_param` name a source parameter resolves to.
+    fn paramSlot(self: *const LowerCtx, name: []const u8) []const u8 {
+        return self.renamed_private_params.get(name) orelse name;
+    }
+
     fn subContext(self: *LowerCtx) Allocator.Error!LowerCtx {
         var sub = LowerCtx.init(self.allocator, self.contract);
         sub.counter = self.counter;
@@ -1218,6 +1285,15 @@ const LowerCtx = struct {
         var alias_it = self.local_aliases.iterator();
         while (alias_it.next()) |entry| {
             try sub.local_aliases.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+        // N-016: copy the shadowing renames.
+        var rp_it = self.renamed_private_params.iterator();
+        while (rp_it.next()) |entry| {
+            try sub.renamed_private_params.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+        var lv_it = self.shadowing_loop_vars.iterator();
+        while (lv_it.next()) |entry| {
+            try sub.shadowing_loop_vars.put(self.allocator, entry.key_ptr.*, {});
         }
         // Copy local byte vars
         var byte_it = self.local_byte_vars.iterator();
@@ -1274,6 +1350,8 @@ const LowerCtx = struct {
         self.local_names.deinit(self.allocator);
         self.param_names.deinit(self.allocator);
         self.local_aliases.deinit(self.allocator);
+        self.renamed_private_params.deinit(self.allocator);
+        self.shadowing_loop_vars.deinit(self.allocator);
         self.local_byte_vars.deinit(self.allocator);
         self.add_output_refs.deinit(self.allocator);
         self.add_data_output_refs.deinit(self.allocator);
@@ -1452,22 +1530,24 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
     switch (stmt) {
         .const_decl => |decl| {
             const value_ref = try lowerExprToRef(ctx, decl.value);
-            try ctx.addLocal(decl.name);
+            const binding_name = try ctx.localName(decl.name);
+            try ctx.addLocal(binding_name);
             if (isByteTypedExpr(decl.value, ctx)) {
                 try ctx.local_byte_vars.put(ctx.allocator, decl.name, {});
             }
-            try ctx.emitNamed(decl.name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
+            try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
         },
         .let_decl => |decl| {
             if (decl.value) |val| {
                 const value_ref = try lowerExprToRef(ctx, val);
-                try ctx.addLocal(decl.name);
+                const binding_name = try ctx.localName(decl.name);
+                try ctx.addLocal(binding_name);
                 if (isByteTypedExpr(val, ctx)) {
                     try ctx.local_byte_vars.put(ctx.allocator, decl.name, {});
                 }
-                try ctx.emitNamed(decl.name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
+                try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
             } else {
-                try ctx.addLocal(decl.name);
+                try ctx.addLocal(try ctx.localName(decl.name));
                 _ = try ctx.emit(makeLoadConstInt(0));
             }
         },
@@ -1488,15 +1568,17 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
             // property write. The read path (`lowerIdentifier`) already
             // resolves isLocal first; matching that order here is what makes
             // the two consistent.
+            // N-016: a property-named local is bound under `localName`.
+            const local = ctx.localTarget(assign.target);
             const writes_property = assign.target_is_property or
-                (!ctx.isLocal(assign.target) and ctx.isProperty(assign.target));
+                (!ctx.isLocal(local) and ctx.isProperty(assign.target));
             if (writes_property) {
                 _ = try ctx.emit(.{ .update_prop = .{
                     .name = assign.target,
                     .value = value_ref,
                 } });
-            } else if (ctx.isLocal(assign.target)) {
-                try ctx.emitNamed(assign.target, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
+            } else if (ctx.isLocal(local)) {
+                try ctx.emitNamed(local, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
             } else {
                 _ = try lowerExprToRef(ctx, .{ .identifier = assign.target });
             }
@@ -1829,7 +1911,7 @@ fn branchOutputRejectionReason(
     //    rolled away, so the arm ends one slot deeper than lowerIf accounts for.
     var live_merged: std.ArrayListUnmanaged([]const u8) = .empty;
     for (merged_locals) |name| {
-        if (reads_after.contains(name)) try live_merged.append(ctx.allocator, name);
+        if (reads_after.contains(sourceLocalName(name))) try live_merged.append(ctx.allocator, name);
     }
     if (live_merged.items.len > 0) {
         const names = std.mem.join(ctx.allocator, ", ", live_merged.items) catch "";
@@ -1925,6 +2007,9 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     }
 
     var body_ctx = try ctx.subContext();
+    if (ctx.isProperty(for_s.var_name)) {
+        try body_ctx.shadowing_loop_vars.put(ctx.allocator, for_s.var_name, {});
+    }
     try lowerStatementsWithReads(&body_ctx, for_s.body, &body_reads);
     ctx.syncCounter(&body_ctx);
 
@@ -1932,7 +2017,7 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     loop_val.* = .{
         .count = count,
         .body = try body_ctx.bindings.toOwnedSlice(ctx.allocator),
-        .iter_var = for_s.var_name,
+        .iter_var = try ctx.localName(for_s.var_name),
         .start = start,
         .step = step,
     };
@@ -2118,15 +2203,22 @@ fn lowerIdentifier(ctx: *LowerCtx, name: []const u8) LowerError![]const u8 {
 
     // Check if it's a registered parameter
     if (ctx.isParam(name)) {
-        return try ctx.emit(.{ .load_param = .{ .name = name } });
+        return try ctx.emit(.{ .load_param = .{ .name = ctx.paramSlot(name) } });
     }
 
     // Check if it's a local variable
-    if (ctx.isLocal(name)) {
-        if (ctx.getLocalAlias(name)) |alias| {
+    const local = ctx.localTarget(name);
+    if (ctx.isLocal(local)) {
+        if (ctx.getLocalAlias(local)) |alias| {
             return alias;
         }
-        return name;
+        return local;
+    }
+
+    // N-016: a loop variable named like a property is the loop variable, not
+    // the property (it used to fall through to load_prop below).
+    if (ctx.shadowing_loop_vars.get(name) != null) {
+        return try ctx.emit(.{ .load_param = .{ .name = try ctx.localName(name) } });
     }
 
     // Check if it's a contract property
@@ -2669,7 +2761,7 @@ fn lowerIncrementExpr(ctx: *LowerCtx, inc: *const types.IncrementExpr) LowerErro
     // If operand is a named variable, update it
     switch (inc.operand) {
         .identifier => |name| {
-            try ctx.emitNamed(name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
+            try ctx.emitNamed(ctx.localTarget(name), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
         },
         .property_access => |pa| {
             if (isReadonlyProperty(ctx.contract.properties, pa.property)) {
@@ -2699,7 +2791,7 @@ fn lowerDecrementExpr(ctx: *LowerCtx, dec: *const types.DecrementExpr) LowerErro
     // If operand is a named variable, update it
     switch (dec.operand) {
         .identifier => |name| {
-            try ctx.emitNamed(name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
+            try ctx.emitNamed(ctx.localTarget(name), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
         },
         .property_access => |pa| {
             if (isReadonlyProperty(ctx.contract.properties, pa.property)) {
