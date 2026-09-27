@@ -589,7 +589,16 @@ def _run_method(
     implicit_params = {'_changePKH', '_changeAmount', '_newAmount', 'txPreimage'}
     for param in method.get('params', []):
         pname = param['name']
-        if pname in implicit_params:
+        # F-024 (R14): a caller that knows the continuation's satoshis binds
+        # ``_newAmount`` (what ``continuationAmount()`` reads), and one that
+        # knows the spent UTXO's satoshis passes them as an INTEGER
+        # ``txPreimage`` (a real preimage is bytes / hex), which
+        # ``extractAmount`` then returns.
+        caller_bound = pname in args and (
+            pname == '_newAmount'
+            or (pname == 'txPreimage' and isinstance(args[pname], int) and not isinstance(args[pname], bool))
+        )
+        if pname in implicit_params and not caller_bound:
             continue
         if pname in args:
             env[pname] = args[pname]
@@ -1294,6 +1303,9 @@ def _eval_call(
             return intent.mock_preimage_bytes['outputHash'].hex()
         return '00' * 32
     if func == 'extractAmount':
+        # F-024 (R14): an integer ``txPreimage`` is the caller-supplied input amount.
+        if args and isinstance(args[0], int) and not isinstance(args[0], bool):
+            return args[0]
         if intent is not None and 'amount' in intent.mock_preimage:
             return intent.mock_preimage['amount']
         return '00' * 32

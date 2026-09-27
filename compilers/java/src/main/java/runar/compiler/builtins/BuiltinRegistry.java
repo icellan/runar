@@ -242,6 +242,9 @@ public final class BuiltinRegistry {
         add(m, "extractPrevOutputScript", new String[][]{{"inputIndex", "bigint"}, {"expectedScriptHash", "ByteString"}}, "ByteString");
         add(m, "requireOutputP2PKH",      new String[][]{{"outputIndex", "bigint"}, {"pubkeyHash", "ByteString"}, {"amount", "bigint"}}, "void");
         add(m, "currentBlockHeight",      new String[0][0], "bigint");
+        // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+        // satoshis of the default single-output state continuation.
+        add(m, "continuationAmount",      new String[0][0], "bigint");
 
         SIGNATURES = Collections.unmodifiableMap(m);
     }

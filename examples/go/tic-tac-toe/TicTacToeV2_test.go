@@ -79,7 +79,8 @@ func TestTicTacToeV2_ByteIdenticalToV1(t *testing.T) {
 	v1Bytes := len(v1.Script) / 2
 	v2Bytes := len(v2.Script) / 2
 
-	const expectedBytes = 7796 // W1: +18 bytes, six 32-bit-extractor zero-pad sites
+	// F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly).
+	const expectedBytes = 7832 // W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36
 	if v1Bytes != expectedBytes {
 		t.Errorf("v1 script length = %d bytes, want %d", v1Bytes, expectedBytes)
 	}

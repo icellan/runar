@@ -94,7 +94,9 @@ async function deployAndUpdate(
   await contract.deploy({ satoshis: 1000 });
   const deployed = contract.getUtxo()!.script;
 
-  await contract.call('update', [next], { satoshis: 600 });
+  // F-024 (R14): the continuation may not hold less than the input (1000);
+  // this used to shed 400 sats, which the injected value check now rejects.
+  await contract.call('update', [next], { satoshis: 1000 });
   const post = contract.getUtxo()!.script;
 
   return {

@@ -84,6 +84,12 @@ import runar.compiler.ir.ast.Visibility;
  */
 public final class AnfLower {
 
+    /** F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount(). */
+    public static final String CONTINUATION_AMOUNT_UNAVAILABLE =
+        "continuationAmount() is only available in a public StatefulSmartContract method whose state "
+            + "continues through the default single-output continuation (it mutates state or emits a data "
+            + "output, and does not call addOutput/addRawOutput)";
+
     private AnfLower() {}
 
     // ------------------------------------------------------------------
@@ -465,6 +471,24 @@ public final class AnfLower {
                 List<String> addOutputRefs = ctx.addOutputRefs;
                 List<String> addDataOutputRefs = ctx.addDataOutputRefs;
                 if (!addOutputRefs.isEmpty() || !addDataOutputRefs.isEmpty() || mutates) {
+                    // F-024 (R14): the default single-output continuation
+                    // carries the spender-chosen `_newAmount` into the new
+                    // state UTXO. Without this check a spender sets
+                    // `_newAmount = 1` and pays the rest of the input value to
+                    // their own change output — the committed outputs then
+                    // match the covenant's hash exactly. Value may grow (a
+                    // deposit) but never shrink below the input amount.
+                    // addOutput/addRawOutput methods size their outputs
+                    // explicitly and terminal methods have no continuation.
+                    // Mirrors 04-anf-lower.ts binding for binding.
+                    if (addOutputRefs.isEmpty()) {
+                        String amountPreimageRef = ctx.emit(new LoadParam("txPreimage"));
+                        String inputAmountRef = ctx.emit(new Call("extractAmount", List.of(amountPreimageRef)));
+                        String newAmountCheckRef = ctx.emit(new LoadParam("_newAmount"));
+                        String amountOkRef = ctx.emit(new BinOp(">=", newAmountCheckRef, inputAmountRef, null));
+                        ctx.emit(new Assert(amountOkRef));
+                    }
+
                     // Build the P2PKH change output for hashOutputs verification.
                     //
                     // Issue #116: the SDK's buildCallTransaction OMITS the change
@@ -2020,6 +2044,20 @@ public final class AnfLower {
                 String extractedRef = emit(new Call("substr", List.of(serialisedRef2, offsetRef, lengthRef)));
                 String outEqRef = emit(new BinOp("===", extractedRef, expectedOutputRef, "bytes"));
                 return emit(new Assert(outEqRef));
+            }
+
+            // continuationAmount() -> bigint. F-024 (R14): a read-only view of
+            // the auto-injected `_newAmount` witness. It exists only in a
+            // public StatefulSmartContract method that continues through the
+            // default single-output continuation; anywhere else (private
+            // helpers, terminal methods, addOutput methods) it is refused.
+            // Mirrors 04-anf-lower.ts.
+            if (callee instanceof Identifier caId
+                && "continuationAmount".equals(caId.name())) {
+                if (!isParam("_newAmount")) {
+                    throw new IllegalStateException(CONTINUATION_AMOUNT_UNAVAILABLE);
+                }
+                return emit(new LoadParam("_newAmount"));
             }
 
             // currentBlockHeight() -> bigint. Pure source-level desugar to

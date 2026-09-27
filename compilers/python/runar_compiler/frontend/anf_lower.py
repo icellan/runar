@@ -533,6 +533,25 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # locking script will not match the auto-injected parameter
             # list.
             if needs_change_output:
+                # F-024 (R14): the default single-output continuation carries
+                # the spender-chosen ``_newAmount`` into the new state UTXO.
+                # Without this check a spender sets ``_newAmount = 1`` and pays
+                # the rest of the input value to their own change output -- the
+                # committed outputs then match the covenant's hash exactly.
+                # Value may grow (a deposit) but never shrink below the input
+                # amount. addOutput/addRawOutput methods size their outputs
+                # explicitly and terminal methods have no continuation.
+                # Mirrors 04-anf-lower.ts binding for binding.
+                if not add_output_refs:
+                    amount_preimage_ref = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
+                    input_amount_ref = method_ctx.emit(_make_call("extractAmount", [amount_preimage_ref]))
+                    new_amount_check_ref = method_ctx.emit(ANFValue(kind="load_param", name="_newAmount"))
+                    amount_ok_ref = method_ctx.emit(ANFValue(
+                        kind="bin_op", op=">=",
+                        left=new_amount_check_ref, right=input_amount_ref,
+                    ))
+                    method_ctx.emit(_make_assert(amount_ok_ref))
+
                 # Build the P2PKH change output for hashOutputs verification.
                 #
                 # Issue #116: the SDK's build_call_transaction OMITS the change
@@ -1759,6 +1778,16 @@ class _LowerCtx:
             ))
             return self.emit(_make_assert(out_eq_ref))
 
+        # continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+        # auto-injected ``_newAmount`` witness. It exists only in a public
+        # StatefulSmartContract method that continues through the default
+        # single-output continuation; anywhere else (private helpers, terminal
+        # methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+        if isinstance(callee, Identifier) and callee.name == "continuationAmount":
+            if not self.is_param("_newAmount"):
+                raise ValueError(CONTINUATION_AMOUNT_UNAVAILABLE)
+            return self.emit(ANFValue(kind="load_param", name="_newAmount"))
+
         # currentBlockHeight() -> bigint. Pure source-level desugar to
         # extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
         # methods (typecheck enforces). No new ANF kind or stack codegen needed.
@@ -2366,6 +2395,13 @@ def _collect_updated_props(bindings: list[ANFBinding], out: list[str]) -> None:
         elif value.kind == "loop":
             _collect_updated_props(value.body or [], out)
 
+
+# F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount().
+CONTINUATION_AMOUNT_UNAVAILABLE = (
+    "continuationAmount() is only available in a public StatefulSmartContract method whose state "
+    "continues through the default single-output continuation (it mutates state or emits a data "
+    "output, and does not call addOutput/addRawOutput)"
+)
 
 def _make_assert(value_ref: str) -> ANFValue:
     raw = value_ref

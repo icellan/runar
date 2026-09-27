@@ -56,6 +56,10 @@ import runar.compiler.ir.ast.Visibility;
  */
 public final class Typecheck {
 
+    /** F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount(). */
+    public static final String CONTINUATION_AMOUNT_READ_ONLY =
+        "continuationAmount() is read-only and cannot be assigned";
+
     private Typecheck() {}
 
     // ------------------------------------------------------------------
@@ -301,6 +305,19 @@ public final class Typecheck {
                     ? "void"
                     : inferReturnType(m);
                 methodSigs.put(m.name(), new FuncSig(params, ret));
+            }
+        }
+
+        /**
+         * F-024 (R14): {@code continuationAmount()} is a read-only view of the
+         * auto-injected {@code _newAmount}. Without this check an assignment to
+         * it would lower as a plain read and silently drop the write.
+         */
+        void refuseContinuationAmountWrite(Expression target) {
+            if (target instanceof CallExpr c
+                && c.callee() instanceof Identifier id
+                && "continuationAmount".equals(id.name())) {
+                error(CONTINUATION_AMOUNT_READ_ONLY);
             }
         }
 
@@ -741,6 +758,7 @@ public final class Typecheck {
                     }
                 }
             } else if (s instanceof AssignmentStatement a) {
+                refuseContinuationAmountWrite(a.target());
                 String targetType = inferExpr(a.target(), env);
                 String valueType = inferExpr(a.value(), env);
                 if (!isSubtype(valueType, targetType)) {
@@ -923,6 +941,7 @@ public final class Typecheck {
             }
 
             if (e instanceof IncrementExpr ie) {
+                refuseContinuationAmountWrite(ie.operand());
                 String t = inferExpr(ie.operand(), env);
                 if (!isBigintFamily(t)) {
                     error("++ operator requires bigint, got '" + t + "'");
@@ -930,6 +949,7 @@ public final class Typecheck {
                 return "bigint";
             }
             if (e instanceof DecrementExpr de) {
+                refuseContinuationAmountWrite(de.operand());
                 String t = inferExpr(de.operand(), env);
                 if (!isBigintFamily(t)) {
                     error("-- operator requires bigint, got '" + t + "'");
@@ -1544,10 +1564,11 @@ public final class Typecheck {
                 return returnType;
             }
 
-            // requireOutputP2PKH and currentBlockHeight need the
-            // auto-injected txPreimage — only available in
-            // StatefulSmartContract methods.
-            if ("requireOutputP2PKH".equals(name) || "currentBlockHeight".equals(name)) {
+            // requireOutputP2PKH, currentBlockHeight and continuationAmount
+            // need the auto-injected txPreimage / _newAmount — only available
+            // in StatefulSmartContract methods.
+            if ("requireOutputP2PKH".equals(name) || "currentBlockHeight".equals(name)
+                || "continuationAmount".equals(name)) {
                 if (contract != null && contract.parentClass() != ParentClass.STATEFUL_SMART_CONTRACT) {
                     error(name + "() is only available in StatefulSmartContract methods");
                 }

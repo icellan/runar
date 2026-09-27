@@ -634,6 +634,42 @@ In `StatefulSmartContract`, `checkPreimage` and state continuation are handled a
 | `extractLocktime` | `(preimage: SigHashPreimage) => bigint` | Extract nLocktime (4 bytes) |
 | `extractSigHashType` | `(preimage: SigHashPreimage) => bigint` | Extract sighash type (4 bytes, e.g. 0x41 for ALL\|FORKID) |
 | `extractInputIndex` | `(preimage: SigHashPreimage) => bigint` | Extract prevout index (vout) from the outpoint field |
+| `continuationAmount` | `() => bigint` | Satoshis of the default state continuation output (read-only; see below) |
+
+#### Value of the state continuation
+
+A public stateful method that mutates state (or emits a data output) and does
+**not** call `addOutput` / `addRawOutput` continues through the default
+single-output continuation. Its satoshis come from the compiler-injected
+`_newAmount` witness, which the spender chooses. The compiler therefore also
+injects
+
+```ts
+assert(_newAmount >= extractAmount(this.txPreimage));
+```
+
+before the continuation output is built, so the contract's value may grow (a
+deposit paid by a funding input) but never shrink: a spender cannot keep the
+state chain alive at 1 sat and pay the rest of the input to their own change
+output. Methods that size their outputs with `addOutput` / `addRawOutput`, and
+terminal methods, get no such check — the author owns those amounts.
+
+`continuationAmount()` is a read-only view of that same `_newAmount`, so a
+contract can state a stricter rule, for example a join that must add a bet:
+
+```ts
+public join(bet: bigint) {
+  assert(continuationAmount() == extractAmount(this.txPreimage) + bet);
+  this.count = this.count + 1n;
+}
+```
+
+It is valid only directly in a public method that has a default continuation
+(not in private helpers, terminal methods, or `addOutput` methods, and not in
+`SmartContract`), and it cannot be assigned. Each surface spells it like its
+other builtins: `runar.ContinuationAmount()` (Go), `continuation_amount()`
+(Python, Ruby, Rust, Move), `runar.continuationAmount()` (Zig),
+`continuationAmount()` (TypeScript, Solidity, Java).
 
 ### Oracle
 

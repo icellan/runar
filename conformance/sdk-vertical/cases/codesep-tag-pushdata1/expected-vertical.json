@@ -16,7 +16,7 @@
       "value": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
     }
   ],
-  "codePartByteLength": 2216,
+  "codePartByteLength": 2248,
   "slots": [
     {
       "name": "tag",
@@ -33,11 +33,11 @@
     {
       "name": "owner",
       "paramIndex": 2,
-      "templateByteOffset": 2102,
-      "byteOffset": 2179,
+      "templateByteOffset": 2134,
+      "byteOffset": 2211,
       "byteLength": 34,
       "headerBytes": 1,
-      "valueByteOffset": 2180,
+      "valueByteOffset": 2212,
       "valueByteLength": 33,
       "encoding": "data",
       "pushedHex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -58,9 +58,9 @@
       "actualBakedValue": 1
     },
     {
-      "templateByteOffset": 1420,
+      "templateByteOffset": 1436,
       "templateCodeSepIndex": 1,
-      "deployedByteOffset": 1497,
+      "deployedByteOffset": 1513,
       "expectedBakedValue": 1,
       "actualBakedValue": 1
     }

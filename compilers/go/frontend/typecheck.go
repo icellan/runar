@@ -226,6 +226,24 @@ var builtinFunctions = map[string]funcSig{
 	"extractPrevOutputScript": {params: []string{"bigint", "ByteString"}, returnType: "ByteString"},
 	"requireOutputP2PKH":      {params: []string{"bigint", "ByteString", "bigint"}, returnType: "void"},
 	"currentBlockHeight":      {params: []string{}, returnType: "bigint"},
+	// F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+	// satoshis of the default single-output state continuation.
+	"continuationAmount": {params: []string{}, returnType: "bigint"},
+}
+
+// ContinuationAmountReadOnly is the one diagnostic every tier emits for a
+// write to continuationAmount() (F-024 / R14).
+const ContinuationAmountReadOnly = "continuationAmount() is read-only and cannot be assigned"
+
+// refuseContinuationAmountWrite: continuationAmount() is a read-only view of
+// the auto-injected `_newAmount`. Without this check an assignment to it would
+// lower as a plain read and silently drop the write (F-024 / R14).
+func (tc *typeChecker) refuseContinuationAmountWrite(target Expression) {
+	if call, ok := target.(CallExpr); ok {
+		if id, ok := call.Callee.(Identifier); ok && id.Name == "continuationAmount" {
+			tc.addError(ContinuationAmountReadOnly)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -918,6 +936,7 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		}
 
 	case AssignmentStmt:
+		tc.refuseContinuationAmountWrite(s.Target)
 		targetType := tc.inferExprType(s.Target, env)
 		valueType := tc.inferExprType(s.Value, env)
 		if !isSubtype(valueType, targetType) {
@@ -1151,6 +1170,7 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		return "<unknown>"
 
 	case IncrementExpr:
+		tc.refuseContinuationAmountWrite(e.Operand)
 		operandType := tc.inferExprType(e.Operand, env)
 		if !isBigintFamily(operandType) {
 			tc.addError(fmt.Sprintf("++ operator requires bigint, got '%s'", operandType))
@@ -1158,6 +1178,7 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 		return "bigint"
 
 	case DecrementExpr:
+		tc.refuseContinuationAmountWrite(e.Operand)
 		operandType := tc.inferExprType(e.Operand, env)
 		if !isBigintFamily(operandType) {
 			tc.addError(fmt.Sprintf("-- operator requires bigint, got '%s'", operandType))
@@ -1677,9 +1698,10 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 		return sig.returnType
 	}
 
-	// requireOutputP2PKH and currentBlockHeight need the auto-injected
-	// txPreimage — only available in StatefulSmartContract methods.
-	if funcName == "requireOutputP2PKH" || funcName == "currentBlockHeight" {
+	// requireOutputP2PKH, currentBlockHeight and continuationAmount need the
+	// auto-injected txPreimage / _newAmount — only available in
+	// StatefulSmartContract methods.
+	if funcName == "requireOutputP2PKH" || funcName == "currentBlockHeight" || funcName == "continuationAmount" {
 		if tc.contract != nil && tc.contract.ParentClass != "StatefulSmartContract" {
 			tc.addError(fmt.Sprintf("%s() is only available in StatefulSmartContract methods", funcName))
 		}

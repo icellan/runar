@@ -90,6 +90,9 @@ pub const LowerError = error{
     /// the call site has no value to reference. See
     /// `inlinePrivateMethodCall` (R-290).
     EmptyInlinedPrivateBody,
+    /// F-024 (R14): `continuationAmount()` used where no `_newAmount` witness
+    /// exists (a private helper, a terminal method, an addOutput method).
+    ContinuationAmountUnavailable,
     /// `requireOutputP2PKH(i, ...)` with a literal `i` other than 0 (W2).
     /// The emitted assertion reads output i at byte offset i*34, which is an
     /// output boundary only if every earlier output is exactly 34 bytes --
@@ -121,6 +124,11 @@ const EMPTY_NAME_SET = NameSet{};
 pub const LowerDiagnostic = struct {
     message: ?[]const u8 = null,
 };
+
+/// F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount().
+pub const CONTINUATION_AMOUNT_UNAVAILABLE = "continuationAmount() is only available in a public StatefulSmartContract method whose state " ++
+    "continues through the default single-output continuation (it mutates state or emits a data " ++
+    "output, and does not call addOutput/addRawOutput)";
 
 /// Lower a type-checked ContractNode AST into an ANFProgram IR.
 pub fn lowerToANF(allocator: Allocator, contract: ContractNode) LowerError!ANFProgram {
@@ -811,6 +819,29 @@ fn lowerStatefulPublicMethod(
     _ = allocator;
 
     if (add_output_refs.len > 0 or add_data_output_refs.len > 0 or methodMutatesState(method, contract)) {
+        // F-024 (R14): the default single-output continuation carries the
+        // spender-chosen `_newAmount` into the new state UTXO. Without this
+        // check a spender sets `_newAmount = 1` and pays the rest of the input
+        // value to their own change output — the committed outputs then match
+        // the covenant's hash exactly. Value may grow (a deposit) but never
+        // shrink below the input amount. addOutput/addRawOutput methods size
+        // their outputs explicitly and terminal methods have no continuation.
+        // Mirrors 04-anf-lower.ts binding for binding.
+        if (add_output_refs.len == 0) {
+            const amount_preimage_ref = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
+            const input_amount_ref = try ctx.emit(.{ .call = .{
+                .func = "extractAmount",
+                .args = try ctx.allocSlice(&.{amount_preimage_ref}),
+            } });
+            const new_amount_check_ref = try ctx.emit(.{ .load_param = .{ .name = "_newAmount" } });
+            const amount_ok_ref = try ctx.emit(.{ .bin_op = .{
+                .op = ">=",
+                .left = new_amount_check_ref,
+                .right = input_amount_ref,
+            } });
+            _ = try ctx.emit(.{ .assert = .{ .value = amount_ok_ref } });
+        }
+
         // Build the P2PKH change output for hashOutputs verification.
         //
         // Issue #116: the SDK's buildCallTransaction OMITS the change output when
@@ -2487,6 +2518,19 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
             .result_type = "bytes",
         } });
         return try ctx.emit(.{ .assert = .{ .value = out_eq_ref } });
+    }
+
+    // continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+    // auto-injected `_newAmount` witness. It exists only in a public
+    // StatefulSmartContract method that continues through the default
+    // single-output continuation; anywhere else (private helpers, terminal
+    // methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+    if (std.mem.eql(u8, c.callee, "continuationAmount")) {
+        if (!ctx.isParam("_newAmount")) {
+            ctx.setDiagnostic("{s}", .{CONTINUATION_AMOUNT_UNAVAILABLE});
+            return LowerError.ContinuationAmountUnavailable;
+        }
+        return try ctx.emit(.{ .load_param = .{ .name = "_newAmount" } });
     }
 
     // currentBlockHeight() -> bigint. Pure source-level desugar to

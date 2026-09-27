@@ -63,6 +63,8 @@ interface SpendSpec {
    *  an all-final transaction, whose nLockTime consensus ignores entirely. */
   sequence?: number;
   satoshis?: number;
+  /** Satoshis the deploy locks (F-024 value-conservation specs). */
+  deploySatoshis?: number;
   tamperOutput?: boolean;
   /** Independent, hand-authored expected continuation state after an accepted
    *  stateful spend (audit #4). Property → scalar ("1n" | true | "0x.."). The
@@ -250,6 +252,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               lockTime: s.lockTime,
               sequence: s.sequence,
               satoshis: s.satoshis,
+              deploySatoshis: s.deploySatoshis,
               tamperOutput: s.tamperOutput,
             });
             expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');

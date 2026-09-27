@@ -232,7 +232,23 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     .{ "extractPrevOutputScript", sig(&.{ .bigint, .byte_string }, .byte_string) },
     .{ "requireOutputP2PKH", sig(&.{ .bigint, .byte_string, .bigint }, .void) },
     .{ "currentBlockHeight", sig(&.{}, .bigint) },
+    // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+    // satoshis of the default single-output state continuation.
+    .{ "continuationAmount", sig(&.{}, .bigint) },
 });
+
+/// F-024 (R14): the one diagnostic every tier emits for a write to
+/// continuationAmount(). Also raised by `parse_ts.zig` for an assignment,
+/// because this tier's `Assign` node carries a name, not an expression target.
+pub const CONTINUATION_AMOUNT_READ_ONLY = "continuationAmount() is read-only and cannot be assigned";
+
+/// True when `e` is a call to `continuationAmount()`.
+pub fn isContinuationAmountCall(e: types.Expression) bool {
+    return switch (e) {
+        .call => |c| std.mem.eql(u8, c.callee, "continuationAmount"),
+        else => false,
+    };
+}
 
 // ============================================================================
 // Subtyping
@@ -859,6 +875,7 @@ const TypeChecker = struct {
                 return .unknown;
             },
             .increment => |inc| {
+                if (isContinuationAmountCall(inc.operand)) self.addError("{s}", .{CONTINUATION_AMOUNT_READ_ONLY});
                 // N-019: `inferOperandType`, not `inferExprType` — a FixedArray
                 // element read resolves to the array's declared element type
                 // here, the same way `checkBinaryExpr` resolves its operands.
@@ -875,6 +892,7 @@ const TypeChecker = struct {
                 return .bigint;
             },
             .decrement => |dec| {
+                if (isContinuationAmountCall(dec.operand)) self.addError("{s}", .{CONTINUATION_AMOUNT_READ_ONLY});
                 const operand_type = self.inferOperandType(dec.operand, env);
                 if (!isBigintFamily(operand_type)) {
                     self.addError("-- operator requires bigint, got '{s}'", .{types.runarTypeToString(operand_type)});
@@ -1483,10 +1501,12 @@ const TypeChecker = struct {
             return func_sig.return_type;
         }
 
-        // requireOutputP2PKH and currentBlockHeight need the auto-injected
-        // txPreimage — only available in StatefulSmartContract methods.
+        // requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        // the auto-injected txPreimage / _newAmount — only available in
+        // StatefulSmartContract methods.
         if (std.mem.eql(u8, func_name, "requireOutputP2PKH") or
-            std.mem.eql(u8, func_name, "currentBlockHeight"))
+            std.mem.eql(u8, func_name, "currentBlockHeight") or
+            std.mem.eql(u8, func_name, "continuationAmount"))
         {
             if (self.contract.parent_class != .stateful_smart_contract) {
                 self.addError("{s}() is only available in StatefulSmartContract methods", .{func_name});
@@ -2135,6 +2155,7 @@ test "builtin_functions: all 60+ entries present" {
         "extractOutputs",  "extractLocktime",   "extractSigHashType",
         // Intent sub-covenant intrinsics (BSVM Phase 13)
         "extractPrevOutputScript", "requireOutputP2PKH", "currentBlockHeight",
+        "continuationAmount",
     };
     for (expected) |name| {
         try std.testing.expect(builtin_functions.get(name) != null);

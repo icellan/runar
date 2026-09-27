@@ -1317,9 +1317,17 @@ export class RunarContract {
       const flatState = flattenFixedArrayState(this._state, this.artifact.stateFields);
       const flatCtorArgs = flattenFixedArrayArgs(this.constructorArgs, this.artifact.abi.constructor.params);
       try {
+        // F-024 (R14): a default single-output continuation reads its own
+        // satoshis (`continuationAmount()` = `_newAmount`) and the spent
+        // UTXO's (`extractAmount(txPreimage)`); both are known before the tx
+        // is built, and the state the script re-derives must match.
+        const interpArgs = methodNeedsNewAmount
+          ? { ...namedArgs, _newAmount: BigInt(options?.satoshis ?? this.currentUtxo!.satoshis) }
+          : namedArgs;
         const { state: computed, dataOutputs: anfDataOutputs, outputs: anfOutputs } = computeNewStateAndDataOutputs(
-          this.artifact.anf, methodName, flatState, namedArgs,
+          this.artifact.anf, methodName, flatState, interpArgs,
           flatCtorArgs,
+          this.currentUtxo ? { inputAmount: BigInt(this.currentUtxo.satoshis) } : undefined,
         );
         autoComputedState = computed;
         autoFlatState = flatState;

@@ -349,6 +349,7 @@ export const GO_BUILTIN_MAP: Record<string, string> = {
   ExtractPrevOutputScript: 'extractPrevOutputScript',
   RequireOutputP2PKH: 'requireOutputP2PKH',
   CurrentBlockHeight: 'currentBlockHeight',
+  ContinuationAmount: 'continuationAmount',
   // Output construction
   AddOutput: 'addOutput', AddRawOutput: 'addRawOutput', AddDataOutput: 'addDataOutput',
   GetStateScript: 'getStateScript',

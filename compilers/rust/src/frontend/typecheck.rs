@@ -26,6 +26,9 @@ impl TypeCheckResult {
 }
 
 /// Type-check a Rúnar AST. Returns any type errors found.
+/// F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
+pub const CONTINUATION_AMOUNT_READ_ONLY: &str = "continuationAmount() is read-only and cannot be assigned";
+
 pub fn typecheck(contract: &ContractNode) -> TypeCheckResult {
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut checker = TypeChecker::new(contract, &mut errors);
@@ -234,6 +237,9 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("extractPrevOutputScript", FuncSig { params: vec!["bigint", "ByteString"], return_type: "ByteString" });
     m.insert("requireOutputP2PKH", FuncSig { params: vec!["bigint", "ByteString", "bigint"], return_type: "void" });
     m.insert("currentBlockHeight", FuncSig { params: vec![], return_type: "bigint" });
+    // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+    // satoshis of the default single-output state continuation.
+    m.insert("continuationAmount", FuncSig { params: vec![], return_type: "bigint" });
 
     m
 }
@@ -490,6 +496,17 @@ impl<'a> TypeChecker<'a> {
         self.errors.push(Diagnostic::error(msg, self.current_method_loc.clone()));
     }
 
+    /// F-024 (R14): `continuationAmount()` is a read-only view of the
+    /// auto-injected `_newAmount`. Without this check an assignment to it
+    /// would lower as a plain read and silently drop the write.
+    fn refuse_continuation_amount_write(&mut self, target: &Expression) {
+        if let Expression::CallExpr { callee, .. } = target {
+            if matches!(callee.as_ref(), Expression::Identifier { name } if name == "continuationAmount") {
+                self.add_error(CONTINUATION_AMOUNT_READ_ONLY);
+            }
+        }
+    }
+
     fn check_constructor(&mut self) {
         let ctor = &self.contract.constructor;
         let mut env = TypeEnv::new();
@@ -635,6 +652,7 @@ terminal (no state mutation)",
             }
 
             Statement::Assignment { target, value, .. } => {
+                self.refuse_continuation_amount_write(target);
                 let target_type = self.infer_expr_type(target, env);
                 let value_type = self.infer_expr_type(value, env);
                 if !is_subtype(&value_type, &target_type) {
@@ -899,6 +917,7 @@ terminal (no state mutation)",
 
             Expression::IncrementExpr { operand, .. }
             | Expression::DecrementExpr { operand, .. } => {
+                self.refuse_continuation_amount_write(operand);
                 let operand_type = self.infer_expr_type(operand, env);
                 if !is_bigint_family(&operand_type) {
                     let op_str = if matches!(expr, Expression::IncrementExpr { .. }) {
@@ -1618,10 +1637,13 @@ terminal (no state mutation)",
             return return_type.to_string();
         }
 
-        // requireOutputP2PKH and currentBlockHeight need the
-        // auto-injected txPreimage — only available in
+        // requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        // the auto-injected txPreimage / _newAmount — only available in
         // StatefulSmartContract methods.
-        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight" {
+        if func_name == "requireOutputP2PKH"
+            || func_name == "currentBlockHeight"
+            || func_name == "continuationAmount"
+        {
             if self.contract.parent_class != "StatefulSmartContract" {
                 self.add_error(format!(
                     "{}() is only available in StatefulSmartContract methods",

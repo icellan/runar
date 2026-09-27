@@ -122,10 +122,32 @@ export function computeNewState(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
+  continuation?: ContinuationContext,
 ): Record<string, unknown> {
   return computeNewStateAndDataOutputs(
-    anf, methodName, currentState, args, constructorArgs,
+    anf, methodName, currentState, args, constructorArgs, continuation,
   ).state;
+}
+
+/**
+ * F-024 (R14): the values of the spend that the default state continuation
+ * reads. `inputAmount` is the satoshis of the UTXO being spent — what
+ * `extractAmount(txPreimage)` returns on-chain. The continuation's own
+ * satoshis (`continuationAmount()`) are passed as the `_newAmount` arg. When
+ * `inputAmount` is omitted, `extractAmount` keeps its historical dummy answer.
+ */
+export interface ContinuationContext {
+  inputAmount?: bigint;
+}
+
+/** Stand-in for `txPreimage` when the caller supplied the input amount. */
+interface MockPreimageValue {
+  readonly __runarMockPreimage: true;
+  readonly amount: bigint;
+}
+
+function isMockPreimage(v: unknown): v is MockPreimageValue {
+  return typeof v === 'object' && v !== null && (v as MockPreimageValue).__runarMockPreimage === true;
 }
 
 /**
@@ -142,8 +164,9 @@ export function computeNewStateAndDataOutputs(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
+  continuation?: ContinuationContext,
 ): ExecutionResult {
-  return runMethod(anf, methodName, currentState, args, constructorArgs, null);
+  return runMethod(anf, methodName, currentState, args, constructorArgs, null, continuation);
 }
 
 /**
@@ -180,10 +203,11 @@ export function executeStrict(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
+  continuation?: ContinuationContext,
 ): ExecutionResult {
   return runMethod(anf, methodName, currentState, args, constructorArgs, {
     methodName,
-  });
+  }, continuation);
 }
 
 /**
@@ -263,6 +287,7 @@ function runMethod(
   args: Record<string, unknown>,
   constructorArgs: unknown[],
   strict: StrictCtx | null,
+  continuation?: ContinuationContext,
 ): ExecutionResult {
   // Find the method in ANF
   const method = anf.methods.find(
@@ -302,10 +327,17 @@ function runMethod(
     '_changePKH', '_changeAmount', '_newAmount', 'txPreimage',
   ]);
   for (const param of method.params) {
-    if (implicitParams.has(param.name)) continue;
+    // F-024 (R14): `_newAmount` is what `continuationAmount()` reads and what
+    // the injected `_newAmount >= extractAmount(txPreimage)` check compares,
+    // so a caller that knows the continuation's satoshis binds it.
+    if (implicitParams.has(param.name) && !(param.name === '_newAmount' && param.name in args)) continue;
     if (param.name in args) {
       env[param.name] = args[param.name];
     }
+  }
+  if (continuation?.inputAmount !== undefined && method.params.some((p) => p.name === 'txPreimage')) {
+    const mock: MockPreimageValue = { __runarMockPreimage: true, amount: continuation.inputAmount };
+    env['txPreimage'] = mock;
   }
 
   // Track state mutations, data outputs, and raw outputs.
@@ -1007,8 +1039,11 @@ function evalCall(
     }
 
     // Preimage intrinsics — return dummy values in simulation
-    case 'extractOutputHash':
     case 'extractAmount':
+      // F-024 (R14): the spent UTXO's satoshis when the caller supplied them.
+      if (isMockPreimage(args[0])) return args[0].amount;
+      return '00'.repeat(32);
+    case 'extractOutputHash':
       return '00'.repeat(32);
     case 'extractLocktime':
       return 0n;

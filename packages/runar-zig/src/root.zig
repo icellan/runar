@@ -160,6 +160,8 @@ pub const extractScriptCode = builtins.extractScriptCode;
 pub const extractOutputHash = builtins.extractOutputHash;
 pub const extractLocktime = builtins.extractLocktime;
 pub const extractSequence = builtins.extractSequence;
+// F-024 (R14): read-only view of the default continuation's satoshis.
+pub const continuationAmount = builtins.continuationAmount;
 pub const buildChangeOutput = builtins.buildChangeOutput;
 pub const buildChangeOutputChecked = builtins.buildChangeOutputChecked;
 pub const BuildChangeOutputError = builtins.BuildChangeOutputError;
@@ -264,6 +266,7 @@ test {
     _ = @import("sdk_g1_raw_outputs_test.zig");
     _ = @import("sdk_null_bytestring_arg_test.zig");
     _ = @import("sdk_satcounter_continuation_test.zig");
+    _ = @import("sdk_f024_continuation_amount_test.zig");
     _ = @import("sdk_mock_broadcast_validation_test.zig");
     _ = @import("sdk_always_ack_allowlist_test.zig");
     _ = @import("sdk_envelope.zig");

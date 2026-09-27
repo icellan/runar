@@ -94,6 +94,7 @@ test {
     _ = @import("tests/property_initializer_literal.zig");
     _ = @import("tests/loop_bound_narrowing.zig");
     _ = @import("tests/f025_loop_bound_surfaces.zig");
+    _ = @import("tests/f024_continuation_amount.zig");
     _ = @import("tests/r189_private_call_arity.zig");
     _ = @import("tests/r290_void_sentinel.zig");
     _ = @import("tests/loop_update_clause.zig");

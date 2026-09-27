@@ -582,6 +582,17 @@ public final class Builtins {
         return BigInteger.ZERO;
     }
 
+    /**
+     * Read-only view of the satoshis the call puts in the next state UTXO
+     * (F-024 / R14). On-chain the compiler lowers it to the injected
+     * {@code _newAmount} witness, already bound to
+     * {@code >= extractAmount(txPreimage)}. Returns 10000 off-chain — the mock
+     * input amount, i.e. an honest continuation.
+     */
+    public static BigInteger continuationAmount() {
+        return BigInteger.valueOf(10000);
+    }
+
     // ===================================================================
     // Rabin-typed overloads. Rabin signatures / pub keys are plain big
     // integers on-chain; the wrapper types carry semantic intent.

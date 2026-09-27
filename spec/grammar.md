@@ -785,6 +785,7 @@ BuiltinFunction_Intent
     = 'requireOutputP2PKH'      /* requireOutputP2PKH(outputIndex: bigint, pubKeyHash: ByteString, amount: bigint): void */
     | 'extractPrevOutputScript' /* extractPrevOutputScript(witnessSlot: bigint, expectedHash: ByteString): ByteString -- hash-preimage check on a caller-supplied string; does NOT read an input (W6) */
     | 'currentBlockHeight'      /* currentBlockHeight(): bigint */
+    | 'continuationAmount'      /* continuationAmount(): bigint -- read-only _newAmount of the default continuation */
     ;
 ```
 
@@ -801,6 +802,8 @@ BuiltinFunction_Intent
 3. the change output — a P2PKH to the SDK-supplied `_changePKH` with value `_changeAmount`.
 
 This is the equation `hashOutputs(txPreimage) == hash256([state outputs] || [data outputs] || changeOutput)`. Both single-output and multi-output state continuations support interleaving data outputs.
+
+**Value conservation of the single-output continuation.** The single auto-computed state output carries the spender-supplied `_newAmount`. Before building it the compiler asserts `_newAmount >= extractAmount(txPreimage)`, lowered in every tier to the same five ANF bindings (`load_param txPreimage`, `call extractAmount`, `load_param _newAmount`, `bin_op >=`, `assert`) placed after the method body and before the change output. Methods with `addOutput` / `addRawOutput` state outputs, and terminal methods, carry no such check. `continuationAmount()` is a read-only view of `_newAmount`, lowered to `load_param _newAmount`; it is a compile error outside a public `StatefulSmartContract` method with a single-output continuation, and as an assignment or `++`/`--` target.
 
 The complete set of built-in functions is:
 

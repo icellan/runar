@@ -184,7 +184,10 @@ def test_increment_pushes_8_for_satoshis_and_state_widths():
 
 # These counts pin the precise shape of the lowering. Update only if the
 # stateful-counter contract or add_output codegen changes intentionally.
-EXPECTED_INCREMENT_TOTAL_OPS = 221  # captured emission (incl. GAP-302 sighash-type pin, W1: +2 ops for the zero-pad ahead of its OP_BIN2NUM; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard; R-010: +65 ops for the `_codePart` authentication, minus the per-method OP_CODESEPARATOR now emitted once by the emitter)
+# F-024 (R14): +15 ops for the injected _newAmount >= extractAmount(txPreimage)
+# value check; the method's hex is pinned by conformance/tests/stateful-counter,
+# whose check-stripped ANF re-emits the previous golden exactly.
+EXPECTED_INCREMENT_TOTAL_OPS = 236  # captured emission (incl. GAP-302 sighash-type pin, W1: +2 ops for the zero-pad ahead of its OP_BIN2NUM; BUG-100: checkPreimage binding is now one raw_bytes op; issue #116: +11 ops for the `if (_changeAmount != 0)` change-output guard; R-010: +65 ops for the `_codePart` authentication, minus the per-method OP_CODESEPARATOR now emitted once by the emitter)
 
 def test_increment_total_op_count_pinned():
     flat = _flatten_ops(_increment_ops())

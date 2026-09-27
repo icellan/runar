@@ -129,13 +129,17 @@ describe('P256Point / P384Point are fixed-width raw state', () => {
       // W1 added a 3-byte zero-pad (`01 00 7e`) before the auto-injected
       // sighash-type pin's OP_BIN2NUM, so every shape here is 6 hex chars
       // longer than it was; the discriminating equalities are unchanged.
-      { shape: 0, type: 'Point', digest: '8d309734', hexLen: 1360 },
-      { shape: 0, type: 'P256Point', digest: '8d309734', hexLen: 1360 },
-      { shape: 0, type: 'P384Point', digest: '0aa41b99', hexLen: 1360 },
-      { shape: 0, type: 'PubKey', digest: 'c0ba2f04', hexLen: 1360 },
-      { shape: 0, type: 'Sha256', digest: '2e528831', hexLen: 1360 },
-      { shape: 0, type: 'ByteString', digest: '5f873f91', hexLen: 1616 },
-      { shape: 0, type: 'Sig', digest: '5f873f91', hexLen: 1616 },
+      // F-024 (R14) re-stamp: shape 0 (the mutating write) gains the injected
+      // `_newAmount >= extractAmount(txPreimage)` value check, +32 hex chars for
+      // every type; the check-stripped ANF re-emits each previous pin, and the
+      // discriminating equalities (Point == P256Point, ByteString == Sig) hold.
+      { shape: 0, type: 'Point', digest: '43b6233d', hexLen: 1392 },
+      { shape: 0, type: 'P256Point', digest: '43b6233d', hexLen: 1392 },
+      { shape: 0, type: 'P384Point', digest: '3ee23454', hexLen: 1392 },
+      { shape: 0, type: 'PubKey', digest: 'a513320b', hexLen: 1392 },
+      { shape: 0, type: 'Sha256', digest: 'c55faa90', hexLen: 1392 },
+      { shape: 0, type: 'ByteString', digest: '3d3784b9', hexLen: 1648 },
+      { shape: 0, type: 'Sig', digest: '3d3784b9', hexLen: 1648 },
       { shape: 1, type: 'Point', digest: 'a1e544fa', hexLen: 942 },
       { shape: 1, type: 'P256Point', digest: 'a1e544fa', hexLen: 942 },
       { shape: 1, type: 'P384Point', digest: '69b87cde', hexLen: 942 },

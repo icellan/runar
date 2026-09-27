@@ -469,6 +469,26 @@ module RunarCompiler
           add_output_refs = method_ctx.get_add_output_refs
           add_data_output_refs = method_ctx.get_add_data_output_refs
           if add_output_refs.any? || add_data_output_refs.any? || _method_mutates_state(method, contract)
+            # F-024 (R14): the default single-output continuation carries the
+            # spender-chosen +_newAmount+ into the new state UTXO. Without this
+            # check a spender sets +_newAmount = 1+ and pays the rest of the
+            # input value to their own change output -- the committed outputs
+            # then match the covenant's hash exactly. Value may grow (a
+            # deposit) but never shrink below the input amount. addOutput /
+            # addRawOutput methods size their outputs explicitly and terminal
+            # methods have no continuation. Mirrors 04-anf-lower.ts.
+            if add_output_refs.empty?
+              amount_preimage_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
+              input_amount_ref = method_ctx.emit(_make_call("extractAmount", [amount_preimage_ref]))
+              new_amount_check_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_newAmount" })
+              amount_ok_ref = method_ctx.emit(IR::ANFValue.new(kind: "bin_op").tap do |v|
+                v.op = ">="
+                v.left = new_amount_check_ref
+                v.right = input_amount_ref
+              end)
+              method_ctx.emit(_make_assert(amount_ok_ref))
+            end
+
             # Build the P2PKH change output for hashOutputs verification
             #
             # #116: the SDK's buildCallTransaction OMITS the change output when
@@ -1872,6 +1892,17 @@ module RunarCompiler
           return emit(Frontend._make_assert(out_eq_ref))
         end
 
+        # continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+        # auto-injected +_newAmount+ witness. It exists only in a public
+        # StatefulSmartContract method that continues through the default
+        # single-output continuation; anywhere else (private helpers, terminal
+        # methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+        if callee.is_a?(Identifier) && callee.name == "continuationAmount"
+          raise Frontend::CONTINUATION_AMOUNT_UNAVAILABLE unless param?("_newAmount")
+
+          return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_newAmount" })
+        end
+
         # currentBlockHeight() -> bigint. Pure source-level desugar to
         # extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
         # methods (typecheck enforces).
@@ -2463,6 +2494,12 @@ module RunarCompiler
 
     # @param value_ref [String]
     # @return [IR::ANFValue]
+    # F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount().
+    CONTINUATION_AMOUNT_UNAVAILABLE =
+      "continuationAmount() is only available in a public StatefulSmartContract method whose state " \
+      "continues through the default single-output continuation (it mutates state or emits a data " \
+      "output, and does not call addOutput/addRawOutput)"
+
     def self._make_assert(value_ref)
       raw = JSON.generate(value_ref)
       IR::ANFValue.new(kind: "assert").tap do |v|

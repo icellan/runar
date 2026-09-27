@@ -183,6 +183,7 @@ fn map_go_builtin(name: &str) -> String {
         "ExtractPrevOutputScript" => "extractPrevOutputScript".to_string(),
         "RequireOutputP2PKH" => "requireOutputP2PKH".to_string(),
         "CurrentBlockHeight" => "currentBlockHeight".to_string(),
+        "ContinuationAmount" => "continuationAmount".to_string(),
         "AddOutput" => "addOutput".to_string(),
         "AddRawOutput" => "addRawOutput".to_string(),
         "AddDataOutput" => "addDataOutput".to_string(),

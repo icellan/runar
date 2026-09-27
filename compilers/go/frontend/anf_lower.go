@@ -520,6 +520,23 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// param injection. Both must agree or the deployed locking
 			// script will not match the auto-injected parameter list.
 			if needsChangeOutput {
+				// F-024 (R14): the default single-output continuation carries
+				// the spender-chosen `_newAmount` into the new state UTXO.
+				// Without this check a spender sets `_newAmount = 1` and pays
+				// the rest of the input value to their own change output — the
+				// committed outputs then match the covenant's hash exactly.
+				// Value may grow (a deposit) but never shrink below the input
+				// amount. addOutput/addRawOutput methods size their outputs
+				// explicitly and terminal methods have no continuation.
+				// Mirrors 04-anf-lower.ts binding for binding.
+				if len(addOutputRefs) == 0 {
+					amountPreimageRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+					inputAmountRef := methodCtx.emit(makeCall("extractAmount", []string{amountPreimageRef}))
+					newAmountCheckRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
+					amountOkRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: ">=", Left: newAmountCheckRef, Right: inputAmountRef})
+					methodCtx.emit(makeAssert(amountOkRef))
+				}
+
 				// Build the P2PKH change output for hashOutputs verification.
 				//
 				// Issue #116: the SDK's BuildCallTransaction OMITS the change
@@ -2427,6 +2444,18 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		return ctx.emit(makeAssert(outEqRef))
 	}
 
+	// continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+	// auto-injected `_newAmount` witness. It exists only in a public
+	// StatefulSmartContract method that continues through the default
+	// single-output continuation; anywhere else (private helpers, terminal
+	// methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+	if id, ok := callee.(Identifier); ok && id.Name == "continuationAmount" {
+		if !ctx.isParam("_newAmount") {
+			panic(ContinuationAmountUnavailable)
+		}
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
+	}
+
 	// currentBlockHeight() -> bigint. Pure source-level desugar to
 	// extractLocktime(this.txPreimage). Only valid in StatefulSmartContract
 	// methods (typecheck enforces). No new ANF kind or stack codegen needed.
@@ -2748,6 +2777,12 @@ func makeCall(funcName string, args []string) ir.ANFValue {
 		Args: args,
 	}
 }
+
+// ContinuationAmountUnavailable is the one diagnostic every tier emits for a
+// misplaced continuationAmount() (F-024 / R14).
+const ContinuationAmountUnavailable = "continuationAmount() is only available in a public StatefulSmartContract method whose state " +
+	"continues through the default single-output continuation (it mutates state or emits a data " +
+	"output, and does not call addOutput/addRawOutput)"
 
 func makeAssert(valueRef string) ir.ANFValue {
 	raw, _ := json.Marshal(valueRef)

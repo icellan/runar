@@ -1299,6 +1299,7 @@ fn map_rust_builtin(name: &str) -> String {
         "extractOutputHash" => "extractOutputHash".to_string(),
         "extractPrevOutputScript" => "extractPrevOutputScript".to_string(),
         "currentBlockHeight" => "currentBlockHeight".to_string(),
+        "continuationAmount" => "continuationAmount".to_string(),
         "extractVersion" => "extractVersion".to_string(),
         "extractHashPrevouts" => "extractHashPrevouts".to_string(),
         "extractHashSequence" => "extractHashSequence".to_string(),

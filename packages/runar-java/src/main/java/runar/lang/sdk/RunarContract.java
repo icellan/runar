@@ -546,8 +546,18 @@ public final class RunarContract {
                     // StateSerializer.flattenFixedArrayState.
                     Map<String, Object> flatState =
                         StateSerializer.flattenFixedArrayState(artifact.stateFields(), state);
+                    // F-024 (R14): a default single-output continuation reads
+                    // its own satoshis (`continuationAmount()` = `_newAmount`;
+                    // this SDK always continues at the input's value) and the
+                    // spent UTXO's (`extractAmount(txPreimage)`); the state
+                    // the script re-derives must match.
+                    Map<String, Object> interpArgs = new java.util.LinkedHashMap<>(namedArgs);
+                    interpArgs.put("txPreimage", java.math.BigInteger.valueOf(currentUtxo.satoshis()));
+                    if (hasParam(m, "_newAmount")) {
+                        interpArgs.put("_newAmount", java.math.BigInteger.valueOf(currentUtxo.satoshis()));
+                    }
                     AnfInterpreter.ExecutionResult execResult = AnfInterpreter.computeNewStateAndDataOutputs(
-                        artifact.anf(), methodName, flatState, namedArgs, constructorArgs
+                        artifact.anf(), methodName, flatState, interpArgs, constructorArgs
                     );
                     // Caller-supplied state wins; the interpreter's is the
                     // fallback. The output shape below is taken either way.

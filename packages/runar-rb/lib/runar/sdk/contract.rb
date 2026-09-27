@@ -505,9 +505,20 @@ module Runar
           # grouped FixedArray entry has to be spread over its synthetic leaves
           # first — see flatten_fixed_array_state.
           flat_state = flatten_fixed_array_state(@state, @artifact.state_fields)
+          # F-024 (R14): a default single-output continuation reads its own
+          # satoshis (continuationAmount() = _newAmount) and the spent UTXO's
+          # (extractAmount(txPreimage)); both are known before the tx is built,
+          # and the state the script re-derives must match.
+          interp_args = named_args.dup
+          if @current_utxo
+            interp_args['txPreimage'] = @current_utxo.satoshis.to_i
+            if method_needs_new_amount
+              interp_args['_newAmount'] = (opts.satoshis.positive? ? opts.satoshis : @current_utxo.satoshis).to_i
+            end
+          end
           computed_state, anf_data_outputs, _anf_raw_outputs, anf_ordered_outputs =
             ANFInterpreter.compute_new_state_and_data_outputs(
-              @artifact.anf, method_name, flat_state, named_args,
+              @artifact.anf, method_name, flat_state, interp_args,
               constructor_args: @constructor_args
             )
           if opts.new_state.nil?

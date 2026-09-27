@@ -380,6 +380,10 @@ export interface StatefulSpendOptions {
   /** Near-miss: after building a valid call, tamper the continuation output so
    *  the on-chain checkPreimage binding must fail. */
   tamperOutput?: boolean;
+  /** Satoshis the deploy locks in the contract output (SDK default when
+   *  unset). F-024: a value-conservation spec needs an input worth more than
+   *  the continuation it tries to build. */
+  deploySatoshis?: number;
 }
 
 function mutateLastByte(hex: string): string {
@@ -503,7 +507,7 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
   });
 
   const contract = new RunarContract(artifact, opts.constructorArgs);
-  await contract.deploy(provider, signer, {});
+  await contract.deploy(provider, signer, opts.deploySatoshis !== undefined ? { satoshis: opts.deploySatoshis } : {});
   const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
 
   let vmAccepted = false;

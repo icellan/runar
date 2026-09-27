@@ -803,8 +803,20 @@ class RunarContract:
             )
             try:
                 ordered: list[dict] = []
+                # F-024 (R14): a default single-output continuation reads its
+                # own satoshis (``continuationAmount()`` = ``_newAmount``) and
+                # the spent UTXO's (``extractAmount(txPreimage)``); both are
+                # known before the tx is built, and the state the script
+                # re-derives must match.
+                interp_args = dict(named_args)
+                if self._current_utxo is not None:
+                    interp_args['txPreimage'] = int(self._current_utxo.satoshis)
+                    if method_needs_new_amount:
+                        interp_args['_newAmount'] = int(
+                            opts.satoshis if opts is not None and opts.satoshis else self._current_utxo.satoshis
+                        )
                 computed, data_outs, _raw_outs = compute_new_state_and_data_outputs(
-                    self.artifact.anf, method_name, flat_state, named_args,
+                    self.artifact.anf, method_name, flat_state, interp_args,
                     flat_ctor_args, ordered_outputs=ordered,
                 )
                 anf_ordered_outputs = ordered

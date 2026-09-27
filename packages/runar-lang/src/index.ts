@@ -203,6 +203,8 @@ export {
   extractPrevOutputScript,
   requireOutputP2PKH,
   currentBlockHeight,
+  // F-024 (R14): read-only view of the default continuation's satoshis
+  continuationAmount,
 } from './preimage.js';
 
 // ---------------------------------------------------------------------------

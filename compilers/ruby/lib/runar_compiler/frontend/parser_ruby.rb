@@ -191,6 +191,7 @@ module RunarCompiler
       "extract_prev_output_script" => "extractPrevOutputScript",
       "require_output_p2pkh"       => "requireOutputP2PKH",
       "current_block_height"       => "currentBlockHeight",
+      "continuation_amount"        => "continuationAmount",
       "mul_div"                    => "mulDiv",
       "percent_of"                 => "percentOf",
       "reverse_bytes"              => "reverseBytes",

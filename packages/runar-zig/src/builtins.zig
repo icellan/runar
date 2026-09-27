@@ -400,6 +400,15 @@ pub fn currentBlockHeight() base.Bigint {
     return 0;
 }
 
+/// continuationAmount is the test-mode stub for the read-only view of the
+/// satoshis the call puts in the next state UTXO (F-024 / R14). On-chain the
+/// compiler lowers it to the injected `_newAmount` witness, already bound to
+/// `>= extractAmount(txPreimage)`. Returns 10000 — the mock input amount the
+/// other tiers' `extractAmount` stubs return (an honest continuation).
+pub fn continuationAmount() base.Bigint {
+    return 10000;
+}
+
 pub const BuildChangeOutputError = error{
     OutOfMemory,
     InvalidPubKeyHashLength,

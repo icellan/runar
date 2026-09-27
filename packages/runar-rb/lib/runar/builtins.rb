@@ -499,6 +499,15 @@ module Runar
       0
     end
 
+    # continuation_amount: read-only view of the satoshis the call puts in the
+    # next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
+    # injected _newAmount witness, already bound to
+    # >= extract_amount(tx_preimage). Mock returns 10_000 -- the mock input
+    # amount extract_amount returns, i.e. an honest continuation.
+    def continuation_amount
+      10_000
+    end
+
     # -- Math Utilities --------------------------------------------------------
 
     def safediv(a, b)

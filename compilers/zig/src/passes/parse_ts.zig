@@ -1380,7 +1380,6 @@ const Parser = struct {
     }
 
     fn buildAssignment(self: *Parser, target: Expression, value: Expression, loc: types.SourceLocation) ?Statement {
-        _ = self;
         const is_prop = types.targetIsProperty(target);
         switch (target) {
             .property_access => |pa| {
@@ -1407,6 +1406,16 @@ const Parser = struct {
                     .source_loc = loc,
                     .target_is_property = is_prop,
                 } };
+            },
+            .call => |c| {
+                // F-024 (R14): continuationAmount() is a read-only view of the
+                // injected `_newAmount`; the `else` arm below would turn the
+                // write into an assignment to a local named "unknown".
+                if (std.mem.eql(u8, c.callee, "continuationAmount")) {
+                    self.addError("continuationAmount() is read-only and cannot be assigned");
+                    return null;
+                }
+                return .{ .assign = .{ .target = "unknown", .value = value, .source_loc = loc, .target_is_property = is_prop } };
             },
             else => {
                 // For more complex targets, use identifier name if possible

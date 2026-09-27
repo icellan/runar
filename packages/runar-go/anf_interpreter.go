@@ -416,6 +416,34 @@ func ComputeNewStateAndDataOutputs(
 	return state, dataOutputs, rawOutputs, ordered, err
 }
 
+// MockPreimageAmount stands in for the `txPreimage` arg when the caller knows
+// the satoshis of the UTXO being spent (F-024 / R14): `extractAmount` then
+// returns Amount. Pass it as args["txPreimage"], together with
+// args["_newAmount"] (the continuation's satoshis, which `continuationAmount()`
+// reads), so a default single-output continuation's post-state is derived with
+// the same values the script uses.
+type MockPreimageAmount struct {
+	Amount *big.Int
+}
+
+// continuationArg reports whether an implicit param is one the caller may bind
+// (F-024 / R14): `_newAmount` when supplied, and `txPreimage` when supplied as
+// a MockPreimageAmount. The others stay skipped.
+func continuationArg(name string, args map[string]interface{}) bool {
+	v, ok := args[name]
+	if !ok {
+		return false
+	}
+	switch name {
+	case "_newAmount":
+		return true
+	case "txPreimage":
+		_, isMock := v.(MockPreimageAmount)
+		return isMock
+	}
+	return false
+}
+
 // runMethod is the shared entry-point for both lenient and strict modes.
 // strict == nil -> lenient (asserts skipped).
 // strict != nil -> strict (asserts enforced; first falsy predicate returns
@@ -479,7 +507,7 @@ func runMethod(
 		"txPreimage":    true,
 	}
 	for _, param := range method.Params {
-		if implicit[param.Name] {
+		if implicit[param.Name] && !continuationArg(param.Name, args) {
 			continue
 		}
 		if v, ok := args[param.Name]; ok {
@@ -1287,7 +1315,15 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		return new(big.Int).Quo(prod, big.NewInt(10000))
 
 	// Preimage intrinsics — return dummy values
-	case "extractOutputHash", "extractAmount":
+	case "extractAmount":
+		// F-024 (R14): the spent UTXO's satoshis when the caller supplied them.
+		if len(args) > 0 {
+			if mp, ok := args[0].(MockPreimageAmount); ok && mp.Amount != nil {
+				return new(big.Int).Set(mp.Amount)
+			}
+		}
+		return strings.Repeat("00", 32)
+	case "extractOutputHash":
 		return strings.Repeat("00", 32)
 
 	// -------------------------------------------------------------------

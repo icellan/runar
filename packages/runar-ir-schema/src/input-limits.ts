@@ -10,8 +10,9 @@
  *   1 MiB cap incorrectly rejected p384-wallet — calibration bug caught
  *   by the script-size baseline (Major-2).
  * - MAX_IR_BYTES = 16 MiB — the largest compiled-IR JSON in the corpus is
- *   `conformance/tests/token-ft/expected-ir.json` at 91,018 B (0.087 MiB),
- *   so 16 MiB is ~184× headroom. An earlier note put the largest at "~2 MiB
+ *   `conformance/tests/math-demo/expected-ir.json` at 99,721 B (0.095 MiB),
+ *   so 16 MiB is ~168× headroom (re-measured for F-024, whose value check
+ *   grew math-demo's 14 default-continuation methods past token-ft). An earlier note put the largest at "~2 MiB
  *   (Mode 3 STARK contracts)" and the headroom at 8×; no checked-in
  *   `expected-ir.json` has ever come within 24× of that figure. The bound is
  *   sized against a pathological producer, not against this corpus, so the

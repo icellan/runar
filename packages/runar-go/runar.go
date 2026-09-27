@@ -794,6 +794,13 @@ func RequireOutputP2PKH(outputIndex int64, pubkeyHash ByteString, amount int64) 
 // shorthand. On-chain the compiler desugars to ExtractLocktime(txPreimage).
 func CurrentBlockHeight() int64 { return 0 }
 
+// ContinuationAmount is the test-mode stub for the read-only view of the
+// satoshis the call puts in the next state UTXO (F-024 / R14). On-chain the
+// compiler lowers it to the injected `_newAmount` witness, which it has
+// already bound to `>= ExtractAmount(txPreimage)`. Returns 10000 — the mock
+// input amount ExtractAmount returns, i.e. an honest continuation.
+func ContinuationAmount() int64 { return 10000 }
+
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------

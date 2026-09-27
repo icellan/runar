@@ -858,7 +858,10 @@ pub const RunarContract = struct {
                 new_locking_script = try self.getLockingScript();
             } else if (needs_change and self.artifact.anf_json != null) {
                 // Auto-compute new state + data outputs from ANF IR
-                anf_data_outputs = try self.autoComputeState(method_name, user_params, resolved_args, &anf_ordered_outputs);
+                anf_data_outputs = try self.autoComputeState(method_name, user_params, resolved_args, &anf_ordered_outputs, .{
+                    .input_amount = contract_utxo.satoshis,
+                    .new_amount = new_satoshis,
+                });
                 new_locking_script = try self.getLockingScript();
             } else {
                 new_locking_script = try self.getLockingScript();
@@ -2944,6 +2947,9 @@ pub const RunarContract = struct {
         user_params: []types.ABIParam,
         resolved_args: []const types.StateValue,
         ordered_out: ?*std.ArrayListUnmanaged(anf_interp.OrderedOutputEntry),
+        // F-024 (R14): the spent UTXO's satoshis (`extractAmount(txPreimage)`)
+        // and the continuation's (`continuationAmount()` = `_newAmount`).
+        continuation: struct { input_amount: i64, new_amount: i64 },
     ) ![]anf_interp.DataOutputEntry {
         const empty: []anf_interp.DataOutputEntry = &.{};
         const anf_json = self.artifact.anf_json orelse return empty;
@@ -2976,6 +2982,11 @@ pub const RunarContract = struct {
                 named_args.put(param.name, stateValueToAnf(resolved_args[i])) catch continue;
             }
         }
+        // F-024 (R14): a default single-output continuation reads both amounts,
+        // and the state the script re-derives must match. The interpreter binds
+        // them only for a method that declares the matching implicit params.
+        try named_args.put("txPreimage", .{ .int = continuation.input_amount });
+        try named_args.put("_newAmount", .{ .int = continuation.new_amount });
 
         // Convert constructor_args to ANFValue slice for the interpreter
         var ctor_anf_args = try work.alloc(anf_interp.ANFValue, self.constructor_args.len);

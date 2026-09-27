@@ -94,6 +94,19 @@ module Runar
       # Implicit params injected by the compiler — never required from the caller.
       IMPLICIT_PARAMS = %w[_changePKH _changeAmount _newAmount txPreimage].freeze
 
+      # F-024 (R14): a caller that knows the continuation's satoshis binds
+      # +_newAmount+ (what +continuationAmount()+ reads), and one that knows the
+      # spent UTXO's satoshis passes them as an INTEGER +txPreimage+ (a real
+      # preimage is hex), which +extractAmount+ then returns.
+      def self.caller_bound_continuation_arg?(pname, args)
+        v = args.key?(pname) ? args[pname] : args[pname.to_sym]
+        case pname
+        when '_newAmount' then args.key?(pname) || args.key?(pname.to_sym)
+        when 'txPreimage' then v.is_a?(Integer)
+        else false
+        end
+      end
+
       # The on-disk ANF spelling of a bigint literal: decimal digits with a
       # trailing +n+. Unambiguous against a hex ByteString literal, which never
       # contains +n+.
@@ -352,7 +365,7 @@ module Runar
         # Load method params, skipping implicit compiler-injected ones.
         Array(method['params']).each do |param|
           pname = param['name']
-          next if IMPLICIT_PARAMS.include?(pname)
+          next if IMPLICIT_PARAMS.include?(pname) && !caller_bound_continuation_arg?(pname, args)
           next unless args.key?(pname) || args.key?(pname.to_sym)
 
           env[pname] = args.key?(pname) ? args[pname] : args[pname.to_sym]
@@ -1034,7 +1047,10 @@ module Runar
 
         when 'extractAmount'
           mock_pre = Thread.current[:runar_mock_preimage]
-          if mock_pre && (mock_pre.key?('amount') || mock_pre.key?(:amount))
+          # F-024 (R14): an Integer txPreimage is the caller-supplied input amount.
+          if args[0].is_a?(Integer)
+            args[0]
+          elsif mock_pre && (mock_pre.key?('amount') || mock_pre.key?(:amount))
             to_int(mock_pre['amount'] || mock_pre[:amount])
           else
             '00' * 32

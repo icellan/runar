@@ -287,6 +287,16 @@ export class TestContract {
   }
 
   /**
+   * F-024 (R14): set the value `continuationAmount()` returns — the satoshis
+   * the call puts in the next state UTXO (`_newAmount`). Pass `undefined` to
+   * go back to the default, the mock preimage's `amount` (an honest
+   * continuation that keeps the input value).
+   */
+  setContinuationAmount(amount: bigint | undefined): void {
+    this.interpreter.setContinuationAmount(amount);
+  }
+
+  /**
    * Configure mock preimage values for testing time locks, amounts, etc.
    */
   setMockPreimage(overrides: Partial<MockPreimage>): void {

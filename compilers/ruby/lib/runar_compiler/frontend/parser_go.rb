@@ -168,6 +168,7 @@ module RunarCompiler
       "ExtractPrevOutputScript" => "extractPrevOutputScript",
       "RequireOutputP2PKH" => "requireOutputP2PKH",
       "CurrentBlockHeight" => "currentBlockHeight",
+      "ContinuationAmount" => "continuationAmount",
       # Output construction
       "AddOutput" => "addOutput", "AddRawOutput" => "addRawOutput",
       "AddDataOutput" => "addDataOutput",

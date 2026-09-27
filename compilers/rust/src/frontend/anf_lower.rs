@@ -38,6 +38,9 @@ use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFSyn
 // ---------------------------------------------------------------------------
 
 /// Lower a type-checked Rúnar AST to ANF IR.
+/// F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount().
+pub const CONTINUATION_AMOUNT_UNAVAILABLE: &str = "continuationAmount() is only available in a public StatefulSmartContract method whose state continues through the default single-output continuation (it mutates state or emits a data output, and does not call addOutput/addRawOutput)";
+
 pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     let properties = lower_properties(contract);
     let mut methods = lower_methods(contract);
@@ -535,6 +538,38 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             // locking script will not match the auto-injected
             // parameter list.
             if needs_change_output {
+                // F-024 (R14): the default single-output continuation carries
+                // the spender-chosen `_newAmount` into the new state UTXO.
+                // Without this check a spender sets `_newAmount = 1` and pays
+                // the rest of the input value to their own change output — the
+                // committed outputs then match the covenant's hash exactly.
+                // Value may grow (a deposit) but never shrink below the input
+                // amount. addOutput/addRawOutput methods size their outputs
+                // explicitly and terminal methods have no continuation.
+                // Mirrors 04-anf-lower.ts binding for binding.
+                if add_output_refs.is_empty() {
+                    let amount_preimage_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let input_amount_ref = method_ctx.emit(ANFValue::Call {
+                        func: "extractAmount".to_string(),
+                        args: vec![amount_preimage_ref],
+                    });
+                    let new_amount_check_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_newAmount".to_string(),
+                    });
+                    let amount_ok_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: ">=".to_string(),
+                        left: new_amount_check_ref,
+                        right: input_amount_ref,
+                        result_type: None,
+                    });
+                    method_ctx.emit(ANFValue::Assert {
+                        value: amount_ok_ref,
+                        is_auto_injected_state_check: false,
+                    });
+                }
+
                 // Build the P2PKH change output for hashOutputs verification.
                 //
                 // Issue #116: the SDK's build_call_transaction OMITS the change
@@ -2765,6 +2800,22 @@ fn lower_call_expr(
                 result_type: Some("bytes".to_string()),
             });
             return ctx.emit(ANFValue::Assert { value: out_eq_ref, is_auto_injected_state_check: false });
+        }
+    }
+
+    // continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+    // auto-injected `_newAmount` witness. It exists only in a public
+    // StatefulSmartContract method that continues through the default
+    // single-output continuation; anywhere else (private helpers, terminal
+    // methods, addOutput methods) it is refused. Mirrors 04-anf-lower.ts.
+    if let Expression::Identifier { name } = callee {
+        if name == "continuationAmount" {
+            if !ctx.is_param("_newAmount") {
+                panic!("{}", CONTINUATION_AMOUNT_UNAVAILABLE);
+            }
+            return ctx.emit(ANFValue::LoadParam {
+                name: "_newAmount".to_string(),
+            });
         }
     }
 

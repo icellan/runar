@@ -634,6 +634,15 @@ def current_block_height() -> int:
     return 0
 
 
+def continuation_amount() -> int:
+    """Test-mode stub for the read-only view of the satoshis the call puts in
+    the next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
+    injected ``_newAmount`` witness, already bound to
+    ``>= extract_amount(tx_preimage)``. Returns 10000 -- the mock input amount
+    ``extract_amount`` returns, i.e. an honest continuation."""
+    return 10000
+
+
 # -- Math Utilities ----------------------------------------------------------
 
 def safediv(a: int, b: int) -> int:

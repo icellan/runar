@@ -977,6 +977,20 @@ func (c *RunarContract) PrepareCall(
 		// first -- see flattenFixedArrayState. c.constructorArgs is already
 		// flat (NewRunarContract runs flattenFixedArrayCtorArgs).
 		flatState := flattenFixedArrayState(c.state, c.Artifact.StateFields)
+		// F-024 (R14): a default single-output continuation reads its own
+		// satoshis (`continuationAmount()` = `_newAmount`) and the spent
+		// UTXO's (`extractAmount(txPreimage)`); both are known before the tx
+		// is built, and the state the script re-derives must match.
+		if c.currentUtxo != nil {
+			namedArgs["txPreimage"] = MockPreimageAmount{Amount: big.NewInt(c.currentUtxo.Satoshis)}
+			if methodNeedsNewAmount {
+				newSats := c.currentUtxo.Satoshis
+				if options != nil && options.Satoshis > 0 {
+					newSats = options.Satoshis
+				}
+				namedArgs["_newAmount"] = big.NewInt(newSats)
+			}
+		}
 		state, dataOuts, _, ordered, err := ComputeNewStateAndDataOutputs(
 			c.Artifact.ANF, methodName, flatState, namedArgs, c.constructorArgs,
 		)

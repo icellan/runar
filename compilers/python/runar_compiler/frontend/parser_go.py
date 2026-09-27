@@ -210,6 +210,7 @@ _GO_BUILTIN_MAP: dict[str, str] = {
     "ExtractPrevOutputScript": "extractPrevOutputScript",
     "RequireOutputP2PKH":      "requireOutputP2PKH",
     "CurrentBlockHeight":      "currentBlockHeight",
+    "ContinuationAmount":      "continuationAmount",
     "AddOutput": "addOutput",
     "AddRawOutput": "addRawOutput",
     "AddDataOutput": "addDataOutput",

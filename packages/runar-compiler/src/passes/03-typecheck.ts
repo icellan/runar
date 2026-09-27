@@ -219,6 +219,9 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['extractPrevOutputScript', { params: ['bigint', 'ByteString'], returnType: 'ByteString' }],
   ['requireOutputP2PKH',      { params: ['bigint', 'ByteString', 'bigint'], returnType: 'void' }],
   ['currentBlockHeight',      { params: [], returnType: 'bigint' }],
+  // F-024 (R14): read-only view of the auto-injected `_newAmount` — the
+  // satoshis of the default single-output state continuation.
+  ['continuationAmount',      { params: [], returnType: 'bigint' }],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -859,6 +862,18 @@ class TypeChecker {
    */
   private currentStmtLoc: SourceLocation | undefined;
 
+  /**
+   * F-024 (R14): `continuationAmount()` is a read-only view of the
+   * auto-injected `_newAmount`. Without this check an assignment to it would
+   * lower as a plain read and silently drop the write.
+   */
+  private refuseContinuationAmountWrite(target: Expression, loc: SourceLocation | undefined): void {
+    if (target.kind === 'call_expr' && target.callee.kind === 'identifier' && target.callee.name === 'continuationAmount') {
+      // F-024 (R14): the one diagnostic every tier emits for this write.
+      this.errors.push(makeDiagnostic('continuationAmount() is read-only and cannot be assigned', 'error', loc));
+    }
+  }
+
   private checkStatement(stmt: Statement, env: TypeEnv): void {
     this.currentStmtLoc = stmt.sourceLocation ?? this.currentStmtLoc;
     switch (stmt.kind) {
@@ -893,6 +908,7 @@ class TypeChecker {
       }
 
       case 'assignment': {
+        this.refuseContinuationAmountWrite(stmt.target, stmt.sourceLocation);
         const targetType = this.inferExprType(stmt.target, env);
         const valueType = this.inferExprType(stmt.value, env);
         if (!isSubtype(valueType, targetType)) {
@@ -1143,6 +1159,7 @@ class TypeChecker {
 
       case 'increment_expr':
       case 'decrement_expr': {
+        this.refuseContinuationAmountWrite(expr.operand, expr.sourceLocation);
         const operandType = this.inferExprType(expr.operand, env);
         if (!isBigintFamily(operandType)) {
           this.errors.push(makeDiagnostic(
@@ -2091,9 +2108,10 @@ class TypeChecker {
       return sig.returnType;
     }
 
-    // requireOutputP2PKH and currentBlockHeight need the auto-injected
-    // txPreimage — only available in StatefulSmartContract methods.
-    if (funcName === 'requireOutputP2PKH' || funcName === 'currentBlockHeight') {
+    // requireOutputP2PKH, currentBlockHeight and continuationAmount need the
+    // auto-injected txPreimage / _newAmount — only available in
+    // StatefulSmartContract methods.
+    if (funcName === 'requireOutputP2PKH' || funcName === 'currentBlockHeight' || funcName === 'continuationAmount') {
       if (this.contract.parentClass !== 'StatefulSmartContract') {
         this.errors.push(makeDiagnostic(
           `${funcName}() is only available in StatefulSmartContract methods`,

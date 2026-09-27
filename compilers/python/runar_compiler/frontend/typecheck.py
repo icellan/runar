@@ -239,7 +239,13 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "extractPrevOutputScript": FuncSig(params=["bigint", "ByteString"], return_type="ByteString"),
     "requireOutputP2PKH":      FuncSig(params=["bigint", "ByteString", "bigint"], return_type="void"),
     "currentBlockHeight":      FuncSig(params=[], return_type="bigint"),
+    # F-024 (R14): read-only view of the auto-injected ``_newAmount`` -- the
+    # satoshis of the default single-output state continuation.
+    "continuationAmount":      FuncSig(params=[], return_type="bigint"),
 }
+
+# F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
+CONTINUATION_AMOUNT_READ_ONLY = "continuationAmount() is read-only and cannot be assigned"
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +453,14 @@ class _TypeChecker:
                 ret_type = _infer_method_return_type(method)
             self.method_sigs[method.name] = FuncSig(params=params, return_type=ret_type)
 
+    def _refuse_continuation_amount_write(self, target) -> None:
+        """F-024 (R14): ``continuationAmount()`` is a read-only view of the
+        auto-injected ``_newAmount``. Without this check an assignment to it
+        would lower as a plain read and silently drop the write."""
+        if (isinstance(target, CallExpr) and isinstance(target.callee, Identifier)
+                and target.callee.name == "continuationAmount"):
+            self._add_error(CONTINUATION_AMOUNT_READ_ONLY)
+
     def _add_error(self, msg: str) -> None:
         loc = self._current_stmt_loc if self._current_stmt_loc is not None else self._current_method_loc
         self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR, loc=loc))
@@ -585,6 +599,7 @@ class _TypeChecker:
                     self.affine_aliases[stmt.name] = origin
 
         elif isinstance(stmt, AssignmentStmt):
+            self._refuse_continuation_amount_write(stmt.target)
             target_type = self._infer_expr_type(stmt.target, env)
             value_type = self._infer_expr_type(stmt.value, env)
             if not is_subtype(value_type, target_type):
@@ -773,12 +788,14 @@ class _TypeChecker:
             return "<unknown>"
 
         if isinstance(expr, IncrementExpr):
+            self._refuse_continuation_amount_write(expr.operand)
             operand_type = self._infer_expr_type(expr.operand, env)
             if not is_bigint_family(operand_type):
                 self._add_error(f"++ operator requires bigint, got '{operand_type}'")
             return "bigint"
 
         if isinstance(expr, DecrementExpr):
+            self._refuse_continuation_amount_write(expr.operand)
             operand_type = self._infer_expr_type(expr.operand, env)
             if not is_bigint_family(operand_type):
                 self._add_error(f"-- operator requires bigint, got '{operand_type}'")
@@ -1304,9 +1321,10 @@ class _TypeChecker:
                 self._infer_expr_type(args[2], env)
             return sig.return_type
 
-        # requireOutputP2PKH and currentBlockHeight need the auto-injected
-        # txPreimage -- only available in StatefulSmartContract methods.
-        if func_name in ("requireOutputP2PKH", "currentBlockHeight"):
+        # requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        # the auto-injected txPreimage / _newAmount -- only available in
+        # StatefulSmartContract methods.
+        if func_name in ("requireOutputP2PKH", "currentBlockHeight", "continuationAmount"):
             if self.contract is not None and self.contract.parent_class != "StatefulSmartContract":
                 self._add_error(
                     f"{func_name}() is only available in StatefulSmartContract methods"

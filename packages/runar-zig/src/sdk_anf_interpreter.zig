@@ -645,7 +645,16 @@ fn runMethod(
 
     // Load method params (skip implicit ones)
     for (meth.params) |param| {
-        if (isImplicitParam(param.name)) continue;
+        // F-024 (R14): a caller that knows the continuation's satoshis binds
+        // `_newAmount` (what `continuationAmount()` reads), and one that knows
+        // the spent UTXO's satoshis passes them as an INTEGER `txPreimage` (a
+        // real preimage is bytes), which `extractAmount` then returns.
+        const caller_bound = if (args.get(param.name)) |v|
+            std.mem.eql(u8, param.name, "_newAmount") or
+                (std.mem.eql(u8, param.name, "txPreimage") and v == .int)
+        else
+            false;
+        if (isImplicitParam(param.name) and !caller_bound) continue;
         if (args.get(param.name)) |val| {
             try env.put(param.name, val);
         }
@@ -1697,6 +1706,9 @@ fn evalCall(
         return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
     }
     if (std.mem.eql(u8, func, "extractAmount")) {
+        // F-024 (R14): an integer `txPreimage` is the caller-supplied input amount.
+        const pre = getArg(arg_names, 0, env);
+        if (pre == .int) return pre;
         if (mock_env) |me| return .{ .int = me.amount };
         return .{ .bytes = "0000000000000000000000000000000000000000000000000000000000000000" };
     }

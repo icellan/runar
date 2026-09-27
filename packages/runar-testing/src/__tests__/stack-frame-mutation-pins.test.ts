@@ -220,8 +220,12 @@ export class SinkDistance extends StatefulSmartContract {
   // authentication, +79 hex chars fold-OFF), so the pin is `sha256(scriptHex)`
   // rather than a kilobyte of literal hex. Same detection power; when it fires,
   // diff the two scripts rather than reading the digest.
-  foldOff: 'e4e9723d6c78546fd0267cb413843973117f4652e78831cb6ddc07f6481a3f83',
-  foldOn: 'e69b341b4934f092f0230de6ca5c97e9d606caa77bf043354883688c6a40538b',
+  // F-024 (R14) re-stamp: the injected `_newAmount >= extractAmount(txPreimage)`
+  // check added 32 bytes (+64 hex) to both modes. Re-measured with the
+  // 2538 `d + nDeclared` mutant applied: fold-OFF 1496 / fold-ON 1512 hex
+  // chars, different digests — the pin still kills it.
+  foldOff: 'c6c0be0341c3f36739a19e6a23e654aecac5611c446829374f9d0a97f6b17220',
+  foldOn: '3d1a315bca0cb99e1f2ffbc109d17c80853c67946742d0364e54eadfa8206b35',
 };
 
 const PINS: Pin[] = [W1, W2, W3, W4];
@@ -242,8 +246,9 @@ describe('stack-frame byte pins (mutation survivors the golden corpus misses)', 
       if (p === W4) {
         // W1's zero-pad before the auto-injected sighash-type pin's OP_BIN2NUM
         // added 6 hex chars to both modes.
-        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1446);
-        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1464);
+        // F-024 (R14): +64 hex chars in both modes for the value check.
+        expect(off.length, `${p.fileName} fold-OFF script length moved`).toBe(1478);
+        expect(on.length, `${p.fileName} fold-ON script length moved`).toBe(1496);
         expect(sha256(off), `${p.fileName} fold-OFF bytes moved`).toBe(p.foldOff);
         expect(sha256(on), `${p.fileName} fold-ON bytes moved`).toBe(p.foldOn);
       } else {

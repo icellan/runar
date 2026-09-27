@@ -430,6 +430,22 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // `private-helper-outputs` conformance fixture (its `partition`
       // and `log` methods route outputs through private helpers).
       if (needsChangeOutput) {
+        // F-024 (R14): the default single-output continuation carries the
+        // spender-chosen `_newAmount` into the new state UTXO. Without this
+        // check a spender sets `_newAmount = 1` and pays the rest of the
+        // input value to their own change output — the committed outputs
+        // then match the covenant's hash exactly. Value may grow (a deposit
+        // paid by a funding input) but never shrink below the input amount.
+        // addOutput/addRawOutput methods size their outputs explicitly and
+        // terminal methods have no continuation, so neither gets the check.
+        if (addOutputRefs.length === 0) {
+          const amountPreimageRef = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+          const inputAmountRef = methodCtx.emit({ kind: 'call', func: 'extractAmount', args: [amountPreimageRef] });
+          const newAmountCheckRef = methodCtx.emit({ kind: 'load_param', name: '_newAmount' });
+          const amountOkRef = methodCtx.emit({ kind: 'bin_op', op: '>=', left: newAmountCheckRef, right: inputAmountRef });
+          methodCtx.emit({ kind: 'assert', value: amountOkRef });
+        }
+
         // Build the P2PKH change output for hashOutputs verification.
         //
         // Issue #116: the SDK's buildCallTransaction OMITS the change output
@@ -2375,6 +2391,22 @@ function lowerCallExpr(
     return ctx.emit({ kind: 'call', func: 'extractLocktime', args: [preimageRef] });
   }
 
+  // continuationAmount() -> bigint. F-024 (R14): a read-only view of the
+  // auto-injected `_newAmount` witness — the satoshis of the default
+  // single-output state continuation, which the compiler has already bound to
+  // `>= extractAmount(txPreimage)`. Authors use it to state stricter rules
+  // (e.g. `continuationAmount() === extractAmount(this.txPreimage) + bet`).
+  // `_newAmount` exists only in a public StatefulSmartContract method that
+  // continues through the default continuation (it mutates state or emits a
+  // data output, and never calls addOutput/addRawOutput); anywhere else —
+  // private helpers, terminal methods, addOutput methods — it is refused.
+  if (callee.kind === 'identifier' && callee.name === 'continuationAmount') {
+    if (!ctx.isParam('_newAmount')) {
+      throw new Error(CONTINUATION_AMOUNT_UNAVAILABLE);
+    }
+    return ctx.emit({ kind: 'load_param', name: '_newAmount' });
+  }
+
   // asm({ body, in_arity?, out_arity? }) — parser has already normalised
   // the object-literal argument into three positional args
   // (body: bytestring_literal, in_arity: bigint_literal, out_arity:
@@ -2548,6 +2580,12 @@ function isStatefulContextParam(param: ParamNode): boolean {
  * naturally: when we lower A's body and hit the call to B, the same
  * `lowerCallExpr` path runs and inlines B too.
  */
+/** F-024 (R14): the one diagnostic every tier emits for a misplaced continuationAmount(). */
+export const CONTINUATION_AMOUNT_UNAVAILABLE =
+  'continuationAmount() is only available in a public StatefulSmartContract method whose state ' +
+  'continues through the default single-output continuation (it mutates state or emits a data ' +
+  'output, and does not call addOutput/addRawOutput)';
+
 function inlinePrivateMethodCall(
   methodName: string,
   argRefs: string[],

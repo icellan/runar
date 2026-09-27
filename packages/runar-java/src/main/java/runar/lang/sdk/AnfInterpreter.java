@@ -62,6 +62,15 @@ public final class AnfInterpreter {
         "_changePKH", "_changeAmount", "_newAmount", "txPreimage"
     );
 
+    /** F-024 (R14): true for the integer shapes a caller may pass as the input amount. */
+    private static boolean isInteger(Object v) {
+        return v instanceof BigInteger || v instanceof Long || v instanceof Integer;
+    }
+
+    private static BigInteger toBigIntegerValue(Object v) {
+        return v instanceof BigInteger b ? b : BigInteger.valueOf(((Number) v).longValue());
+    }
+
     /**
      * The on-disk ANF spelling of a bigint literal: decimal digits with a
      * trailing {@code n}. Unambiguous against a hex ByteString literal, which
@@ -496,7 +505,14 @@ public final class AnfInterpreter {
         List<Map<String, Object>> params = listOfObjects(method.get("params"));
         for (Map<String, Object> param : params) {
             String pname = (String) param.get("name");
-            if (IMPLICIT_PARAMS.contains(pname)) continue;
+            // F-024 (R14): a caller that knows the continuation's satoshis
+            // binds `_newAmount` (what `continuationAmount()` reads), and one
+            // that knows the spent UTXO's satoshis passes them as an INTEGER
+            // `txPreimage` (a real preimage is bytes), which `extractAmount`
+            // then returns.
+            boolean callerBound = ("_newAmount".equals(pname) && args.containsKey(pname))
+                || ("txPreimage".equals(pname) && isInteger(args.get(pname)));
+            if (IMPLICIT_PARAMS.contains(pname) && !callerBound) continue;
             if (pname != null && pname.startsWith("_prevOutScript_")) {
                 int idx;
                 try {
@@ -543,6 +559,18 @@ public final class AnfInterpreter {
             if (args.containsKey(pname)) {
                 env.put(pname, args.get(pname));
             }
+        }
+        // F-024 (R14): with no caller-supplied `_newAmount`, model the honest
+        // continuation — it keeps the input's value, i.e. whatever
+        // `extractAmount(txPreimage)` answers in this run — so the injected
+        // `_newAmount >= extractAmount(txPreimage)` check (enforced in strict
+        // mode) and `continuationAmount()` reads see a defined amount.
+        boolean hasNewAmountParam = params.stream().anyMatch(p -> "_newAmount".equals(p.get("name")));
+        if (hasNewAmountParam && !env.containsKey("_newAmount")) {
+            Object txp = env.get("txPreimage");
+            env.put("_newAmount", isInteger(txp)
+                ? toBigIntegerValue(txp)
+                : (witness != null ? witness.mockBigInt("amount", BigInteger.valueOf(10_000)) : BigInteger.valueOf(10_000)));
         }
 
         Map<String, Object> stateDelta = new LinkedHashMap<>();
@@ -1390,6 +1418,8 @@ public final class AnfInterpreter {
                     ? witness.mockBigInt("locktime", BigInteger.ZERO)
                     : BigInteger.ZERO;
             case "extractAmount":
+                // F-024 (R14): an integer txPreimage is the caller-supplied input amount.
+                if (!args.isEmpty() && isInteger(args.get(0))) return toBigIntegerValue(args.get(0));
                 return witness != null
                     ? witness.mockBigInt("amount", BigInteger.valueOf(10_000))
                     : BigInteger.valueOf(10_000);

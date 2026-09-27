@@ -346,6 +346,10 @@ export class RunarInterpreter {
     sequence: 0xfffffffen,
   };
   private _mockPreimageBytes: Record<string, Uint8Array> = {};
+  // F-024 (R14): the value `continuationAmount()` reads (the default
+  // continuation's `_newAmount`). Unset = the honest continuation, which
+  // keeps the input's value (the mock preimage's `amount`).
+  private _continuationAmount: bigint | undefined;
   // Witness bytes for auto-injected intent-intrinsic params, keyed by the
   // ANF-level synthetic name (`_prevOutScript_<idx>`, `_serialisedOutputs`).
   // Tests populate these via TestContract.setPrevOutScript / .setSerialisedOutputs;
@@ -366,6 +370,7 @@ export class RunarInterpreter {
   setContract(contract: ContractNode): void { this._contract = contract; }
   setMockPreimage(overrides: Record<string, bigint>): void { Object.assign(this._mockPreimage, overrides); }
   setMockPreimageBytes(overrides: Record<string, Uint8Array>): void { Object.assign(this._mockPreimageBytes, overrides); }
+  setContinuationAmount(amount: bigint | undefined): void { this._continuationAmount = amount; }
   setPrevOutScript(inputIndex: bigint | number, bytes: Uint8Array): void {
     const idx = typeof inputIndex === 'bigint' ? inputIndex.toString() : String(inputIndex);
     this._witnessBytes[`_prevOutScript_${idx}`] = bytes;
@@ -1419,6 +1424,11 @@ export class RunarInterpreter {
 
       case 'extractAmount':
         return { kind: 'bigint', value: this._mockPreimage.amount ?? 10000n };
+
+      case 'continuationAmount':
+        // F-024 (R14): read-only view of the default continuation's
+        // `_newAmount`; defaults to the input amount (an honest continuation).
+        return { kind: 'bigint', value: this._continuationAmount ?? this._mockPreimage.amount ?? 10000n };
 
       case 'extractVersion':
         return { kind: 'bigint', value: this._mockPreimage.version ?? 1n };

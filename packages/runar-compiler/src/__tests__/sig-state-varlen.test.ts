@@ -216,15 +216,19 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
     };
 
     const WRITE_PINS: Record<string, string> = {
-      ByteString: '5f873f911dbb2caf364021413581423af0f6aaf8ba882d787c8ee9f72d0c0e5b',
-      PubKey: 'c0ba2f049c2a412f6ee80f36ca97d7c615c938cf75f19c33888aa9a26d8cd572',
-      bigint: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
+      // F-024 (R14) re-stamp: every mutating method gains the injected
+      // `_newAmount >= extractAmount(txPreimage)` value check (+16 B, +17 B for
+      // boolean); each check-stripped ANF re-emits the previous digest, and
+      // bigint == RabinSig still holds.
+      ByteString: '3d3784b9326243f3a70f227fba84e017a3f1e8274af7acdac8b6429ef07c2ea1',
+      PubKey: 'a513320b54ef7740778454b67e1901010ac8e71cffe76c0a0ebea2fe1df4cbd8',
+      bigint: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
       // parameter and so gains the 9-byte ABI-domain gate. `bigint` and
       // `RabinSig` still agree with each other, which is the equality this
       // table exists to defend.
-      boolean: '9d0412948a994626f8d3f87b74bdf191ef7cad96d668df73bb944b5d0646a918',
-      RabinSig: 'e4768c70ce306481adb9e106a99da87b4d241d0fef0e9b1a28ae4255bf7a8c2f',
+      boolean: 'f38514e87b397d0351f23fc7d9f5a055af45a660982b11f32d41bf229ceab8c4',
+      RabinSig: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
     };
 
     for (const [type, digest] of Object.entries(TERMINAL_PINS)) {

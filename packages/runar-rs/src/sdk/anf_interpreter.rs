@@ -745,7 +745,16 @@ fn run_method(
     // Load method params (skip implicit ones)
     let implicit: &[&str] = &["_changePKH", "_changeAmount", "_newAmount", "txPreimage"];
     for param in &method.params {
-        if implicit.contains(&param.name.as_str()) {
+        // F-024 (R14): a caller that knows the continuation's satoshis binds
+        // `_newAmount` (what `continuationAmount()` reads), and one that knows
+        // the spent UTXO's satoshis passes them as an INTEGER `txPreimage`
+        // (a real preimage is bytes), which `extractAmount` then returns.
+        let caller_bound = match param.name.as_str() {
+            "_newAmount" => args.contains_key("_newAmount"),
+            "txPreimage" => matches!(args.get("txPreimage"), Some(SdkValue::Int(_))),
+            _ => false,
+        };
+        if implicit.contains(&param.name.as_str()) && !caller_bound {
             continue;
         }
         if let Some(sv) = args.get(&param.name) {
@@ -1726,6 +1735,8 @@ fn eval_call(
                 .and_then(|w| w.mock_preimage.get("locktime").copied())
                 .unwrap_or(0),
         ),
+        // F-024 (R14): an integer `txPreimage` is the caller-supplied input amount.
+        "extractAmount" if matches!(args.first(), Some(Val::Int(_))) => args[0].clone(),
         "extractAmount" => match witness {
             Some(w) => Val::Int(w.mock_preimage.get("amount").copied().unwrap_or(10000)),
             // Pre-witness simulation kept this as a 32-zero byte string;

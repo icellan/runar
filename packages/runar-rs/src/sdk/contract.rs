@@ -917,9 +917,27 @@ impl RunarContract {
                     .as_deref()
                     .unwrap_or(&empty_fields);
                 let flat_state = flatten_fixed_array_state(&self.state, state_fields);
+                // F-024 (R14): a default single-output continuation reads its
+                // own satoshis (`continuationAmount()` = `_newAmount`) and the
+                // spent UTXO's (`extractAmount(txPreimage)`); both are known
+                // before the tx is built, and the state the script re-derives
+                // must match.
+                let mut interp_args = named_args.clone();
+                if let Some(utxo) = self.current_utxo.as_ref() {
+                    interp_args.insert("txPreimage".to_string(), SdkValue::Int(utxo.satoshis));
+                    if method_needs_new_amount {
+                        // Same rule the continuation output is sized by below
+                        // (no addOutput here, so no ANF-recorded amounts).
+                        let names: Vec<&str> = user_params.iter().map(|p| p.name.as_str()).collect();
+                        let new_sats = resolve_continuation_satoshis(
+                            &names, &resolved_args, options.and_then(|o| o.satoshis), &[], utxo.satoshis,
+                        );
+                        interp_args.insert("_newAmount".to_string(), SdkValue::Int(new_sats));
+                    }
+                }
                 let (state, data_outs, _raw_outs, ordered_outs) =
                     anf_interpreter::compute_new_state_and_data_outputs(
-                        anf, method_name, &flat_state, &named_args,
+                        anf, method_name, &flat_state, &interp_args,
                         &self.constructor_args,
                     )
                     .map_err(|e| {

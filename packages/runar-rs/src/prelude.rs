@@ -644,6 +644,16 @@ pub fn current_block_height() -> i64 {
     0
 }
 
+/// Test-mode stub for the read-only view of the satoshis the call puts in the
+/// next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
+/// injected `_newAmount` witness, which it has already bound to
+/// `>= extract_amount(tx_preimage)`. Returns 10000 off-chain — the mock input
+/// amount the other tiers' `extract_amount` stubs return (an honest
+/// continuation).
+pub fn continuation_amount() -> i64 {
+    10000
+}
+
 // ---------------------------------------------------------------------------
 // asm — the raw-script escape hatch (UnsafeSmartContract only)
 // ---------------------------------------------------------------------------

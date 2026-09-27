@@ -187,7 +187,13 @@ module RunarCompiler
       "extractPrevOutputScript" => FuncSig.new(params: ["bigint", "ByteString"], return_type: "ByteString"),
       "requireOutputP2PKH"      => FuncSig.new(params: ["bigint", "ByteString", "bigint"], return_type: "void"),
       "currentBlockHeight"      => FuncSig.new(params: [], return_type: "bigint"),
+      # F-024 (R14): read-only view of the auto-injected +_newAmount+ -- the
+      # satoshis of the default single-output state continuation.
+      "continuationAmount"      => FuncSig.new(params: [], return_type: "bigint"),
     }.freeze
+
+    # F-024 (R14): the one diagnostic every tier emits for a write to continuationAmount().
+    CONTINUATION_AMOUNT_READ_ONLY = "continuationAmount() is read-only and cannot be assigned"
 
     # -------------------------------------------------------------------
     # Subtyping
@@ -905,6 +911,16 @@ module RunarCompiler
         slots
       end
 
+      # F-024 (R14): +continuationAmount()+ is a read-only view of the
+      # auto-injected +_newAmount+. Without this check an assignment to it
+      # would lower as a plain read and silently drop the write.
+      def refuse_continuation_amount_write(target)
+        return unless target.is_a?(CallExpr) && target.callee.is_a?(Identifier) &&
+                      target.callee.name == "continuationAmount"
+
+        add_error(CONTINUATION_AMOUNT_READ_ONLY)
+      end
+
       def add_error(msg)
         loc = @current_stmt_loc || @current_method_loc
         @errors << Diagnostic.new(message: msg, severity: Severity::ERROR, loc: loc)
@@ -960,6 +976,7 @@ module RunarCompiler
           end
 
         when AssignmentStmt
+          refuse_continuation_amount_write(stmt.target)
           target_type = infer_expr_type(stmt.target, env)
           value_type = infer_expr_type(stmt.value, env)
           unless Frontend.subtype?(value_type, target_type)
@@ -1148,6 +1165,7 @@ module RunarCompiler
           "<unknown>"
 
         when IncrementExpr
+          refuse_continuation_amount_write(expr.operand)
           operand_type = infer_expr_type(expr.operand, env)
           unless Frontend.bigint_family?(operand_type)
             add_error("++ operator requires bigint, got '#{operand_type}'")
@@ -1155,6 +1173,7 @@ module RunarCompiler
           "bigint"
 
         when DecrementExpr
+          refuse_continuation_amount_write(expr.operand)
           operand_type = infer_expr_type(expr.operand, env)
           unless Frontend.bigint_family?(operand_type)
             add_error("-- operator requires bigint, got '#{operand_type}'")
@@ -1505,9 +1524,10 @@ module RunarCompiler
           return sig.return_type
         end
 
-        # requireOutputP2PKH and currentBlockHeight need the auto-injected
-        # txPreimage -- only available in StatefulSmartContract methods.
-        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight"
+        # requireOutputP2PKH, currentBlockHeight and continuationAmount need
+        # the auto-injected txPreimage / _newAmount -- only available in
+        # StatefulSmartContract methods.
+        if func_name == "requireOutputP2PKH" || func_name == "currentBlockHeight" || func_name == "continuationAmount"
           if !@contract.nil? && @contract.parent_class != "StatefulSmartContract"
             add_error("#{func_name}() is only available in StatefulSmartContract methods")
           end
