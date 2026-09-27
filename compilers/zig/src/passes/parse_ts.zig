@@ -66,6 +66,22 @@ pub const ParseResult = struct {
     errors: [][]const u8,
 };
 
+/// F-025: an integer literal, or a negated one, as a loop bound. Same shape as
+/// the other surface parsers' `loopStartLiteral`.
+fn loopBoundLiteral(expr: types.Expression) ?i64 {
+    return switch (expr) {
+        .literal_int => |v| v,
+        .unary_op => |u| switch (u.op) {
+            .negate => switch (u.operand) {
+                .literal_int => |v| -v,
+                else => null,
+            },
+            else => null,
+        },
+        else => null,
+    };
+}
+
 pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
     var parser = Parser.init(allocator, source, file_name);
     const r = parser.parse();
@@ -1219,6 +1235,7 @@ const Parser = struct {
         // (`i < this.x`) or an identifier bound (`i < N`) must be rejected by
         // the validator rather than silently collapsing to a 0-iteration loop.
         var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
         // W4: whether the condition's left-hand side is the iterator itself.
         // A header with no condition at all keeps the `true` default; a
         // condition that is not a comparison sets it false below.
@@ -1282,12 +1299,15 @@ const Parser = struct {
                             .identifier => |n| std.mem.eql(u8, n, var_name),
                             else => false,
                         };
-                        switch (bop.right) {
-                            .literal_int => |v| {
-                                bound = v;
-                                bound_is_const = true;
-                            },
-                            else => {},
+                        // F-025: a negated literal (`i > -2n`) is a literal
+                        // too, as the reference's `extractBigIntValue` has it;
+                        // an identifier bound gets the reference's ANF-lowering
+                        // sentence rather than the runtime-bound one.
+                        if (loopBoundLiteral(bop.right)) |v| {
+                            bound = v;
+                            bound_is_const = true;
+                        } else if (bop.right == .identifier) {
+                            bound_ident = bop.right.identifier;
                         }
                     },
                     else => cond_tests_iter = false,
@@ -1309,7 +1329,7 @@ const Parser = struct {
 
         const body = self.parseBlockOrStatement();
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .init_is_const = init_is_const, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .bound = bound, .descending = descending, .inclusive = inclusive, .bound_is_const = bound_is_const, .bound_ident = bound_ident, .init_is_const = init_is_const, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

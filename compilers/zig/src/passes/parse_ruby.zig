@@ -1671,19 +1671,24 @@ const Parser = struct {
         }
 
         var bound: i64 = 0;
-        switch (end_expr) {
-            .literal_int => |v| {
-                if (descending or is_exclusive) {
-                    // `downto`'s bound is inclusive and this tier records that
-                    // as `inclusive`, so the raw value goes through unchanged
-                    // — the +1 below is the ASCENDING inclusive range's
-                    // exclusive-bound conversion and must not be applied here.
-                    bound = v;
-                } else {
-                    bound = v + 1; // inclusive range: bound becomes exclusive
-                }
-            },
-            else => {},
+        // F-025: see `ForStmt.bound_is_const`. Only a (possibly negated)
+        // integer literal is unrollable; anything else used to leave `bound`
+        // at 0 and compile a loop that runs zero times.
+        var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
+        if (loopStartLiteral(end_expr)) |v| {
+            bound_is_const = true;
+            if (descending or is_exclusive) {
+                // `downto`'s bound is inclusive and this tier records that
+                // as `inclusive`, so the raw value goes through unchanged
+                // — the +1 below is the ASCENDING inclusive range's
+                // exclusive-bound conversion and must not be applied here.
+                bound = v;
+            } else {
+                bound = v + 1; // inclusive range: bound becomes exclusive
+            }
+        } else if (end_expr == .identifier) {
+            bound_ident = end_expr.identifier;
         }
 
         return .{ .for_stmt = .{
@@ -1691,6 +1696,8 @@ const Parser = struct {
             .init_value = init_value,
             .init_is_const = init_is_const,
             .bound = bound,
+            .bound_is_const = bound_is_const,
+            .bound_ident = bound_ident,
             .descending = descending,
             .inclusive = descending,
             .body = body,

@@ -1352,6 +1352,15 @@ fn findOutputIntrinsicInExpr(
 const loop_start_diagnostic = "Cannot determine loop start at compile time. " ++
     "For-loop iterators must start at an integer literal.";
 
+/// F-025: the BOUND's counterpart, for a bound that is a bare identifier (a
+/// parameter or a local). The reference's `isCompileTimeConstant` lets an
+/// identifier through pass 2 and `extractLoopShape` refuses it from ANF
+/// lowering with this sentence; a `this.<prop>` bound is refused by pass 2
+/// with the compile-time-constant sentence below instead. Same raise-early
+/// reasoning as `loop_start_diagnostic`.
+const loop_bound_ident_diagnostic = "Cannot determine loop bound at compile time. " ++
+    "For-loop bounds must be integer literals.";
+
 /// The cross-tier loop-update diagnostic. Shared VERBATIM with the other six
 /// tiers — `compilers/rust/src/frontend/validator.rs` is the source of truth,
 /// and `compilers/go/frontend/validator.go`,
@@ -1475,7 +1484,10 @@ fn validateStatement(
             // `iterVar = start + i*step` on each unrolled iteration).
             if (!f.bound_is_const) {
                 try errors.append(allocator, .{
-                    .message = "For loop bound must be a compile-time constant (literal or const variable)",
+                    .message = if (f.bound_ident != null)
+                        loop_bound_ident_diagnostic
+                    else
+                        "For loop bound must be a compile-time constant (literal or const variable)",
                     .severity = .@"error",
                 });
             }

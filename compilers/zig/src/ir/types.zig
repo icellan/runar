@@ -302,8 +302,19 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 // 0), so a runtime bound (`i < this.x`) or an identifier bound (`i < N`) would
 // otherwise silently become a 0-iteration loop. When false, the validator
 // rejects the loop with a compile-time-constant diagnostic (matching the
-// reference TS compiler). Defaults to true so unrelated construction sites and
-// format parsers stay literal-bounded by default.
+// reference TS compiler).
+//
+// F-025: it used to default to `true` "so unrelated construction sites and
+// format parsers stay literal-bounded by default" -- and seven of the nine
+// format parsers never set it, so on `.sol`/`.go`/`.rs`/`.py`/`.zig`/`.rb`/
+// `.java` a runtime bound compiled to a script with the loop body gone. It now
+// defaults to `false` (fail-closed): a parser that forgets it gets a refusal,
+// not a silently empty loop. Every parser sets it to `true` exactly when it
+// recognised a (possibly negated) integer literal and stored it in `bound`.
+// `bound_ident` names the bound when it was a bare identifier (a parameter or
+// a local). The reference refuses that shape from ANF lowering with a
+// different sentence than a `this.<prop>` bound, and validate.zig picks the
+// sentence from it. `null` for a literal or any other expression.
 /// A pre-digested loop shape: the surface parsers resolve the iterator, its
 /// start value, the bound and the direction, so there is no init/condition/
 /// update triple here the way the other six tiers carry one.
@@ -343,7 +354,7 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// anything but the iterator; the range-based surfaces (`for i in 0..N`,
 /// `range(N)`, `while (c) : (i += 1)`) test it by construction and keep the
 /// `true` default.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = true, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = false, bound_ident: ?[]const u8 = null, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {

@@ -1144,6 +1144,9 @@ const Parser = struct {
         // It used to be thrown away, so `i + 1n < 2n` unrolled twice for a loop
         // the source runs once. Rejected by passes/validate.zig.
         var cond_tests_iter: bool = true;
+        // F-025: see `ForStmt.bound_is_const`.
+        var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
 
         // Init: `Type name = expr;` or plain expression
         if (self.current.kind == .ident) {
@@ -1206,9 +1209,14 @@ const Parser = struct {
                             .identifier => |n| std.mem.eql(u8, n, var_name),
                             else => false,
                         };
-                        switch (bop.right) {
-                            .literal_int => |v| bound = v,
-                            else => {},
+                        // F-025: only a (possibly negated) integer literal is
+                        // unrollable; anything else used to leave `bound` at 0
+                        // and compile a loop that runs zero times.
+                        if (loopStartLiteral(bop.right)) |v| {
+                            bound = v;
+                            bound_is_const = true;
+                        } else if (bop.right == .identifier) {
+                            bound_ident = bop.right.identifier;
                         }
                     },
                     else => cond_tests_iter = false,
@@ -1276,7 +1284,7 @@ const Parser = struct {
         _ = self.expect(.rparen);
 
         const body = self.parseStmtOrBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .bound_is_const = bound_is_const, .bound_ident = bound_ident, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

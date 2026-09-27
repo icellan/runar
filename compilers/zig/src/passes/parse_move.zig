@@ -1435,6 +1435,7 @@ const Parser = struct {
         var var_name: []const u8 = "_w";
         var bound: i64 = 0;
         var bound_is_const = false;
+        var bound_ident: ?[]const u8 = null;
         var descending = false;
         var inclusive = false;
         var representable = false;
@@ -1460,10 +1461,19 @@ const Parser = struct {
                         // bound is not unrollable, and leaving
                         // `bound_is_const` at its `true` default silently
                         // collapsed it to a 0-iteration loop here.
+                        //
+                        // F-025: the SHAPE is still a counting loop, though.
+                        // The reference folds it (`foldCountingWhile` does not
+                        // look at the bound) and refuses the bound afterwards
+                        // with the for-loop sentence, so the shape diagnostic
+                        // here is not the reference's. Fold it and let
+                        // validate.zig refuse the bound the same way.
+                        representable = true;
                         if (loopStartLiteral(bop.right)) |v| {
                             bound = v;
                             bound_is_const = true;
-                            representable = true;
+                        } else if (bop.right == .identifier) {
+                            bound_ident = bop.right.identifier;
                         }
                     }
                 },
@@ -1524,6 +1534,7 @@ const Parser = struct {
             .init_value = 0,
             .bound = bound,
             .bound_is_const = bound_is_const,
+            .bound_ident = bound_ident,
             .descending = descending,
             .inclusive = inclusive,
             .update = update,

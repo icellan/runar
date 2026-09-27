@@ -941,6 +941,11 @@ const Parser = struct {
         // was still read from the right -- the phantom-lap shape, on the
         // `.runar.zig` surface. Rejected by passes/validate.zig.
         var cond_tests_iter: bool = true;
+        // F-025: see `ForStmt.bound_is_const`. Only a (possibly negated)
+        // integer literal is unrollable; a bound this function did not
+        // recognise used to stay at 0 and compile a loop that runs zero times.
+        var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
         switch (cond) {
             .binary_op => |bop| {
                 if (bop.op == .lt or bop.op == .lte) {
@@ -950,18 +955,29 @@ const Parser = struct {
                     } else {
                         cond_tests_iter = false;
                     }
-                    if (bop.right == .literal_int) {
-                        bound = bop.right.literal_int;
+                    if (loopStartLiteral(bop.right)) |v| {
+                        bound = v;
                         if (bop.op == .lte) bound += 1;
+                        bound_is_const = true;
+                    } else if (bop.right == .identifier) {
+                        bound_ident = bop.right.identifier;
                     }
                 } else if (bop.op == .gt or bop.op == .gte) {
                     if (bop.left != .identifier and bop.right != .identifier) {
                         cond_tests_iter = false;
                     }
-                    if (bop.left == .identifier and bop.right == .literal_int) {
+                    if (bop.left == .identifier and loopStartLiteral(bop.right) != null) {
                         // ident > N or ident >= N (countdown)
                         var_name = bop.left.identifier;
-                        bound = bop.right.literal_int;
+                        bound = loopStartLiteral(bop.right).?;
+                        bound_is_const = true;
+                        descending = true;
+                        inclusive = bop.op == .gte;
+                    } else if (bop.left == .identifier) {
+                        // ident > <non-literal> (countdown) -- F-025: refused
+                        // by validate.zig through `bound_is_const = false`.
+                        var_name = bop.left.identifier;
+                        if (bop.right == .identifier) bound_ident = bop.right.identifier;
                         descending = true;
                         inclusive = bop.op == .gte;
                     } else if (bop.left == .literal_int and bop.right == .identifier) {
@@ -969,6 +985,7 @@ const Parser = struct {
                         var_name = bop.right.identifier;
                         bound = bop.left.literal_int;
                         if (bop.op == .gte) bound += 1;
+                        bound_is_const = true;
                     }
                 } else if (bop.op == .neq) {
                     // `i != N` is NOT a loop bound. `spec/grammar.md`'s RelOp
@@ -1036,6 +1053,8 @@ const Parser = struct {
             .var_name = var_name,
             .init_value = 0, // will be patched by parseBlock if preceding let_decl matches
             .bound = bound,
+            .bound_is_const = bound_is_const,
+            .bound_ident = bound_ident,
             .descending = descending,
             .inclusive = inclusive,
             .cond_tests_iter = cond_tests_iter,

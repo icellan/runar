@@ -1021,6 +1021,14 @@ const Parser = struct {
                 .for_stmt => |*f| {
                     // `ForStmt` carries integer bounds, not expressions — only
                     // the loop variable and the body need scoping.
+                    //
+                    // F-025: except the NAME of an identifier bound, which
+                    // picks the refusal sentence. A bare state variable
+                    // (`i < n`) is `this.n` in the reference, so it takes the
+                    // runtime-bound sentence, not the identifier one.
+                    if (f.bound_ident) |name| {
+                        if (solIsBareProp(name, properties, locals)) f.bound_ident = null;
+                    }
                     var body_locals = locals.clone(self.allocator) catch return;
                     defer body_locals.deinit(self.allocator);
                     body_locals.put(self.allocator, f.var_name, {}) catch {};
@@ -1346,6 +1354,9 @@ const Parser = struct {
         // It used to be thrown away, so `i + 1n < 2n` unrolled twice for a loop
         // the source runs once. Rejected by passes/validate.zig.
         var cond_tests_iter: bool = true;
+        // F-025: see `ForStmt.bound_is_const`.
+        var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
 
         // Initializer: Type varname = expr OR let/const varname = expr
         if (self.current.kind == .ident and self.isTypeStart()) {
@@ -1400,11 +1411,14 @@ const Parser = struct {
                             .identifier => |n| std.mem.eql(u8, n, var_name),
                             else => false,
                         };
-                        switch (bop.right) {
-                            .literal_int => |v| {
-                                bound = v;
-                            },
-                            else => {},
+                        // F-025: only a (possibly negated) integer literal is
+                        // unrollable; anything else used to leave `bound` at 0
+                        // and compile a loop that runs zero times.
+                        if (loopStartLiteral(bop.right)) |v| {
+                            bound = v;
+                            bound_is_const = true;
+                        } else if (bop.right == .identifier) {
+                            bound_ident = bop.right.identifier;
                         }
                     },
                     else => cond_tests_iter = false,
@@ -1424,7 +1438,7 @@ const Parser = struct {
 
         const body = self.parseBlockOrStatement();
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .bound_is_const = bound_is_const, .bound_ident = bound_ident, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

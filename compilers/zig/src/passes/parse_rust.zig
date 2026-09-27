@@ -1190,6 +1190,10 @@ const Parser = struct {
         // N-137: a start that is not a compile-time literal cannot be unrolled.
         var init_is_const: bool = true;
         var bound: i64 = 0;
+        // F-025: see `ForStmt.bound_is_const`. The endpoint that becomes the
+        // bound decides, exactly as `init_is_const` follows the other one.
+        var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
         var descending = false;
 
         const has_paren = self.current.kind == .lparen;
@@ -1198,6 +1202,8 @@ const Parser = struct {
         // Parse range start
         var range_start: i64 = 0;
         var range_start_is_const = true;
+        // F-025: the identifier's name, when a non-literal endpoint was one.
+        var range_start_ident: ?[]const u8 = null;
         if (self.current.kind == .number) {
             const start_tok = self.bump();
             range_start = parseNumberLiteral(start_tok.text);
@@ -1205,6 +1211,7 @@ const Parser = struct {
             // N-138: keep a negated literal instead of discarding it.
             if (loopStartLiteral(e)) |v| range_start = v else {
                 range_start_is_const = false;
+                if (e == .identifier) range_start_ident = e.identifier;
             }
         } else {
             range_start_is_const = false;
@@ -1220,6 +1227,7 @@ const Parser = struct {
         // Parse range end
         var range_end: i64 = 0;
         var range_end_is_const = true;
+        var range_end_ident: ?[]const u8 = null;
         if (self.current.kind == .number) {
             const end_tok = self.bump();
             range_end = parseNumberLiteral(end_tok.text);
@@ -1229,6 +1237,7 @@ const Parser = struct {
             if (bound_expr) |expr| {
                 if (loopStartLiteral(expr)) |v| range_end = v else {
                     range_end_is_const = false;
+                    if (expr == .identifier) range_end_ident = expr.identifier;
                 }
             } else {
                 range_end_is_const = false;
@@ -1255,15 +1264,19 @@ const Parser = struct {
             init_value = range_end - 1;
             init_is_const = range_end_is_const;
             bound = range_start;
+            bound_is_const = range_start_is_const;
+            bound_ident = range_start_ident;
         } else {
             init_value = range_start;
             init_is_const = range_start_is_const;
             bound = range_end;
+            bound_is_const = range_end_is_const;
+            bound_ident = range_end_ident;
         }
 
         // Body
         if (self.expect(.lbrace) == null) {
-            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = descending, .body = &.{}, .source_loc = loc } };
+            return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .bound_is_const = bound_is_const, .bound_ident = bound_ident, .descending = descending, .inclusive = descending, .body = &.{}, .source_loc = loc } };
         }
         var body: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
@@ -1271,7 +1284,7 @@ const Parser = struct {
         }
         _ = self.expect(.rbrace);
 
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .descending = descending, .inclusive = descending, .body = body.items, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .bound_is_const = bound_is_const, .bound_ident = bound_ident, .descending = descending, .inclusive = descending, .body = body.items, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

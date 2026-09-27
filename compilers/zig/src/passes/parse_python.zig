@@ -1445,6 +1445,9 @@ const Parser = struct {
         // N-137: a start that is not a compile-time literal cannot be unrolled.
         var init_is_const: bool = true;
         var bound: i64 = 0;
+        // F-025: see `ForStmt.bound_is_const`.
+        var bound_is_const: bool = false;
+        var bound_ident: ?[]const u8 = null;
         var descending = false;
 
         if (self.match(.comma)) {
@@ -1455,11 +1458,14 @@ const Parser = struct {
             if (loopStartLiteral(first)) |v| init_value = v else {
                 init_is_const = false;
             }
-            switch (second) {
-                .literal_int => |v| {
-                    bound = v;
-                },
-                else => {},
+            // F-025: only a (possibly negated) integer literal is unrollable;
+            // anything else used to leave `bound` at 0 and compile a loop that
+            // runs zero times.
+            if (loopStartLiteral(second)) |v| {
+                bound = v;
+                bound_is_const = true;
+            } else if (second == .identifier) {
+                bound_ident = second.identifier;
             }
             if (self.match(.comma)) {
                 const step_expr = self.parseExpression() orelse return null;
@@ -1475,11 +1481,11 @@ const Parser = struct {
         } else {
             // range(n) — init = 0, limit = n
             init_value = 0;
-            switch (first) {
-                .literal_int => |v| {
-                    bound = v;
-                },
-                else => {},
+            if (loopStartLiteral(first)) |v| {
+                bound = v;
+                bound_is_const = true;
+            } else if (first == .identifier) {
+                bound_ident = first.identifier;
             }
         }
 
@@ -1495,6 +1501,8 @@ const Parser = struct {
             .init_value = init_value,
             .init_is_const = init_is_const,
             .bound = bound,
+            .bound_is_const = bound_is_const,
+            .bound_ident = bound_ident,
             .descending = descending,
             .body = body,
             .source_loc = loc,
