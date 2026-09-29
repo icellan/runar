@@ -30,12 +30,13 @@
 //! - Types before names (Solidity convention)
 
 use num_bigint::{BigInt, Sign};
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -319,8 +320,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
 
         // Numbers (and hex byte string literals: 0x...)
         if ch.is_ascii_digit() {
-            // Hex byte string literal -> ByteString
-            if ch == '0' && i + 1 < len && (chars[i + 1] == 'x' || chars[i + 1] == 'X') {
+            // Hex byte string literal -> ByteString (lowercase x only, as the
+            // TS reference; `0X` is an invalid integer literal).
+            if ch == '0' && i + 1 < len && chars[i + 1] == 'x' {
                 i += 2;
                 let hex_start = i;
                 while i < len && chars[i].is_ascii_hexdigit() {
@@ -330,14 +332,17 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 tokens.push(Token::HexLit(hex_str));
                 continue;
             }
+            // F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
             let start = i;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == 'n') {
-                i += 1;
-            }
-            let num_str: String = chars[start..i].iter().collect();
-            let num_str = num_str.trim_end_matches('n');
-            let val = <BigInt as Num>::from_str_radix(num_str, 10)
-                .unwrap_or_else(|_| BigInt::from(0));
+            i = scan_number_end(&chars, i);
+            let text: String = chars[start..i].iter().collect();
+            let val = match parse_int_literal("sol", &text) {
+                Some(lit) => lit.value,
+                None => {
+                    errors.push(lex_error_at_index(&invalid_integer_literal("sol", &text), file, &chars, start));
+                    BigInt::from(0)
+                }
+            };
             tokens.push(Token::NumberLit(val));
             continue;
         }

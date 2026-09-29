@@ -591,7 +591,8 @@ pub const Hex = struct {
 		t.Fatalf("expected contract, got nil (errors: %v)", result.ErrorStrings())
 	}
 
-	// Verify 0xaabb was parsed as ByteStringLiteral
+	// F-026: `0xaabb` is a Zig integer literal (0xaabb = 43707), as in Zig
+	// and in the TS reference, not a ByteString.
 	body := result.Contract.Methods[0].Body
 	if len(body) == 0 {
 		t.Fatalf("expected at least 1 statement")
@@ -602,9 +603,9 @@ pub const Hex = struct {
 		if call, ok := exprStmt.Expr.(CallExpr); ok {
 			if len(call.Args) > 0 {
 				if binExpr, ok := call.Args[0].(BinaryExpr); ok {
-					if bs, ok := binExpr.Right.(ByteStringLiteral); ok {
-						if bs.Value != "aabb" {
-							t.Errorf("expected hex value 'aabb', got %s", bs.Value)
+					if lit, ok := binExpr.Right.(BigIntLiteral); ok {
+						if lit.Value.Int64() != 0xaabb {
+							t.Errorf("expected 0xaabb = 43707, got %s", lit.Value)
 						}
 						found = true
 					}
@@ -613,7 +614,7 @@ pub const Hex = struct {
 		}
 	}
 	if !found {
-		t.Error("did not find ByteStringLiteral for hex literal 0xaabb")
+		t.Error("did not find BigIntLiteral for hex literal 0xaabb")
 	}
 }
 

@@ -104,6 +104,10 @@ type rustToken struct {
 	value string
 	line  int
 	col   int
+	// F-026: a number token's text as written, and whether it is valid
+	// only under a unary minus (`128i8`).
+	raw     string
+	negOnly bool
 }
 
 // ---------------------------------------------------------------------------
@@ -294,17 +298,20 @@ func rustTokenize(source, fileName string) ([]rustToken, []Diagnostic) {
 			continue
 		}
 
-		// Number
+		// Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust
+		// integer literal (a lowercase `0x` was taken above as a ByteString).
 		if ch >= '0' && ch <= '9' {
-			var val strings.Builder
-			for pos < len(chars) && (chars[pos] >= '0' && chars[pos] <= '9' || chars[pos] == '_') {
-				if chars[pos] != '_' {
-					val.WriteRune(chars[pos])
-				}
-				pos++
-				col++
+			end := scanNumberEndRunes(chars, pos)
+			text := string(chars[pos:end])
+			col += end - pos
+			pos = end
+			tok := rustToken{kind: rustTokNumber, value: "0", line: l, col: c, raw: text}
+			if lit := parseIntLiteral("rs", text); lit != nil {
+				tok.value, tok.negOnly = lit.Value.String(), lit.NegOnly
+			} else {
+				errs = append(errs, lexDiag(invalidIntegerLiteralMsg("rs", text), fileName, l, c))
 			}
-			tokens = append(tokens, rustToken{kind: rustTokNumber, value: val.String(), line: l, col: c})
+			tokens = append(tokens, tok)
 			continue
 		}
 
@@ -1313,6 +1320,24 @@ func (p *rustMacroParser) parseUnary() Expression {
 		return UnaryExpr{Op: "!", Operand: p.parseUnary()}
 	case rustTokMinus:
 		p.advance()
+		// F-026: a signed-suffix minimum (`128i8`) is legal under this
+		// minus, through parentheses, as rustc's overflowing_literals lint.
+		k, opens := p.pos, 0
+		for k < len(p.tokens) && p.tokens[k].kind == rustTokLParen {
+			k++
+			opens++
+		}
+		if k < len(p.tokens) && p.tokens[k].kind == rustTokNumber && p.tokens[k].negOnly {
+			closed := true
+			for j := 1; j <= opens; j++ {
+				if k+j >= len(p.tokens) || p.tokens[k+j].kind != rustTokRParen {
+					closed = false
+				}
+			}
+			if closed {
+				p.tokens[k].negOnly = false
+			}
+		}
 		return UnaryExpr{Op: "-", Operand: p.parseUnary()}
 	case rustTokTilde:
 		p.advance()
@@ -1390,6 +1415,9 @@ func (p *rustMacroParser) parsePrimary() Expression {
 	t := p.current()
 	switch t.kind {
 	case rustTokNumber:
+		if t.negOnly {
+			p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("rs", t.raw), p.fileName, t.line, t.col))
+		}
 		p.advance()
 		bi := new(big.Int)
 		if _, ok := bi.SetString(t.value, 0); !ok {

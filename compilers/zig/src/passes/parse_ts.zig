@@ -155,6 +155,10 @@ const Token = struct {
     text: []const u8,
     line: u32,
     col: u32,
+    /// F-026: a number token's literal as written (`text` holds its value).
+    raw: []const u8 = "",
+    /// F-026: valid only as the operand of a unary minus.
+    neg_only: bool = false,
     /// Byte offset into the source where this token's lexeme starts (after any
     /// leading whitespace/comment trivia). Issue #109/#123: lets the parser
     /// recover the leading comment trivia of a class member — the source region
@@ -271,25 +275,11 @@ const Tokenizer = struct {
 
         // Numbers (decimal, hex, octal, binary; strip trailing 'n' for BigInt)
         if (c >= '0' and c <= '9') {
-            if (c == '0' and (self.peekAt(1) == 'x' or self.peekAt(1) == 'X')) {
-                _ = self.advance(); // '0'
-                _ = self.advance(); // 'x'
-                while (self.pos < self.source.len and isHexDigit(self.source[self.pos])) _ = self.advance();
-            } else if (c == '0' and (self.peekAt(1) == 'o' or self.peekAt(1) == 'O')) {
-                _ = self.advance();
-                _ = self.advance();
-                while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '7') _ = self.advance();
-            } else if (c == '0' and (self.peekAt(1) == 'b' or self.peekAt(1) == 'B')) {
-                _ = self.advance();
-                _ = self.advance();
-                while (self.pos < self.source.len and (self.source[self.pos] == '0' or self.source[self.pos] == '1')) _ = self.advance();
-            } else {
-                while (self.pos < self.source.len and ((self.source[self.pos] >= '0' and self.source[self.pos] <= '9') or self.source[self.pos] == '_')) _ = self.advance();
-            }
-            // Strip trailing BigInt suffix 'n'
-            const num_end = self.pos;
-            if (self.pos < self.source.len and self.source[self.pos] == 'n') _ = self.advance();
-            return .{ .kind = .number, .text = self.source[start..num_end], .line = sl, .col = sc };
+            // F-026: the whole glued [0-9A-Za-z_] run is one integer literal
+            // (prefix, digits, separators and any suffix), validated whole.
+            while (self.pos < self.source.len and int_literal.isNumberContinue(self.source[self.pos])) _ = self.advance();
+            const lit_text = self.source[start..self.pos];
+            return .{ .kind = .number, .text = if (lit_text[lit_text.len - 1] == 'n') lit_text[0 .. lit_text.len - 1] else lit_text, .raw = lit_text, .line = sl, .col = sc };
         }
 
         // Identifiers and keywords
@@ -442,7 +432,9 @@ const Parser = struct {
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0, .prev_token_end = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0, .prev_token_end = 0 };
+        p.current = p.normalizeNumber(p.current);
+        return p;
     }
 
     /// The leading comment/whitespace trivia immediately preceding `self.current`
@@ -489,7 +481,7 @@ const Parser = struct {
     fn bump(self: *Parser) Token {
         const prev = self.current;
         self.prev_token_end = prev.end;
-        self.current = self.tokenizer.next();
+        self.current = self.fetch();
         return prev;
     }
 
@@ -1726,46 +1718,7 @@ const Parser = struct {
         return switch (self.current.kind) {
             .number => blk: {
                 const tok = self.bump();
-                // Strip underscores from number text. Buffer sized for 256-bit
-                // decimal literals (78 digits) with headroom; oversize tokens
-                // are rejected explicitly so byte-level parity is preserved.
-                var stripped_buf: [160]u8 = undefined;
-                var stripped_len: usize = 0;
-                var overflow = false;
-                for (tok.text) |ch| {
-                    if (ch == '_') continue;
-                    if (stripped_len >= stripped_buf.len) {
-                        overflow = true;
-                        break;
-                    }
-                    stripped_buf[stripped_len] = ch;
-                    stripped_len += 1;
-                }
-                if (overflow) {
-                    self.addErrorFmt("integer literal too long: '{s}'", .{tok.text});
-                    break :blk null;
-                }
-                const stripped = stripped_buf[0..stripped_len];
-                if (std.fmt.parseInt(i64, stripped, 0)) |val| {
-                    break :blk Expression{ .literal_int = val };
-                } else |_| {
-                    // Oversize decimal literal (e.g. the 256-bit secp256k1
-                    // group order used in schnorr-zkp's s-bound assert).
-                    // Carry the canonical decimal text on a `literal_bigint`
-                    // node so the value survives ANF / IR JSON / codegen
-                    // intact; the Zig codegen tier widens this to a
-                    // decimal-string-backed push during emit, matching
-                    // TS / Go / Python byte-for-byte.
-                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
-                    // ordinary way to write secp256k1's group order, and accepted by the
-                    // other six tiers -- used to fall into the `invalid integer` arm
-                    // below, because this fallback only recognised decimal digits.
-                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
-                        break :blk Expression{ .literal_bigint = decimal };
-                    }
-                    self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
-                    break :blk null;
-                }
+                break :blk self.numberLiteral(tok);
             },
             .string_literal => blk: {
                 const tok = self.bump();
@@ -2129,6 +2082,38 @@ const Parser = struct {
             else => .add,
         };
     }
+
+    /// F-026: a number token's `text` becomes the canonical decimal value of
+    /// its literal (`raw` keeps the literal as written), validated against
+    /// this surface's host-language rules
+    /// (packages/runar-compiler/src/passes/int-literal.ts). A malformed
+    /// literal is refused with the shared `invalid <Language> integer literal`.
+    fn normalizeNumber(self: *Parser, tok: Token) Token {
+        if (tok.kind != .number) return tok;
+        var t = tok;
+        const lit = int_literal.parse(self.allocator, "ts", tok.raw) orelse {
+            const msg = int_literal.invalidIntegerLiteral(self.allocator, "ts", tok.raw);
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            self.errors.append(self.allocator, f) catch {};
+            t.text = "0";
+            return t;
+        };
+        t.text = if (lit.small) |v| (std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch "0") else lit.big.?;
+        t.neg_only = lit.neg_only;
+        return t;
+    }
+
+    fn fetch(self: *Parser) Token {
+        return self.normalizeNumber(self.tokenizer.next());
+    }
+
+    /// F-026: the AST value of a (normalized) number token.
+    fn numberLiteral(self: *Parser, tok: Token) ?Expression {
+        _ = self;
+        if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
+        return Expression{ .literal_bigint = tok.text };
+    }
+
 };
 
 // ============================================================================

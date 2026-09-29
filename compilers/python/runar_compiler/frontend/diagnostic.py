@@ -38,6 +38,14 @@ class Diagnostic:
 # raw strings, which may span lines, only end of file counts.
 UNTERMINATED_STRING_LITERAL = "unterminated string literal"
 
+# F-026: a .runar.zig call argument list or array literal whose elements are
+# not separated by commas (the TS reference's ZIG_LIST_COMMA).
+ZIG_LIST_COMMA = "expected ',' between list elements"
+
+# F-026: a second .runar.py statement on the same line (the TS reference's
+# PY_STATEMENT_LINE_BREAK).
+PY_STATEMENT_LINE_BREAK = "expected a line break between statements"
+
 # The TS reference's refusal of a Java char literal.
 JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts"
 

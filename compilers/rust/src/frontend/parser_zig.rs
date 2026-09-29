@@ -44,12 +44,13 @@
 //! - Compound assignment desugaring (`+=`, `-=`, etc.)
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error_at_index, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error_at_index, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 use std::collections::HashSet;
 
@@ -304,37 +305,19 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
             continue;
         }
 
-        // Numbers (decimal and hex)
+        // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one Zig
+        // integer literal; stopping at the first non-digit read `0b1010` as
+        // `0` + `b1010`.
         if ch.is_ascii_digit() {
-            let mut num_str = String::new();
-            if ch == '0' && pos + 1 < chars.len() && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
-            {
-                num_str.push_str("0x");
-                pos += 2;
-                while pos < chars.len()
-                    && (chars[pos].is_ascii_hexdigit() || chars[pos] == '_')
-                {
-                    if chars[pos] != '_' {
-                        num_str.push(chars[pos]);
-                    }
-                    pos += 1;
+            let start = pos;
+            pos = scan_number_end(&chars, pos);
+            let text: String = chars[start..pos].iter().collect();
+            let val = match parse_int_literal("zig", &text) {
+                Some(lit) => lit.value,
+                None => {
+                    errors.push(lex_error_at_index(&invalid_integer_literal("zig", &text), file, &chars, start));
+                    BigInt::from(0)
                 }
-            } else {
-                while pos < chars.len()
-                    && (chars[pos].is_ascii_digit() || chars[pos] == '_')
-                {
-                    if chars[pos] != '_' {
-                        num_str.push(chars[pos]);
-                    }
-                    pos += 1;
-                }
-            }
-            let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                <BigInt as Num>::from_str_radix(&num_str[2..], 16)
-                    .unwrap_or_else(|_| BigInt::from(0))
-            } else {
-                <BigInt as Num>::from_str_radix(&num_str, 10)
-                    .unwrap_or_else(|_| BigInt::from(0))
             };
             tokens.push(Token::NumberLit(val));
             continue;
@@ -1653,11 +1636,7 @@ impl<'a> ZigParser<'a> {
             self.advance(); // &
             self.advance(); // .
             self.advance(); // {
-            let mut elements = Vec::new();
-            while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
-                elements.push(self.parse_expression());
-                self.match_tok(&Token::Comma);
-            }
+            let elements = self.parse_list_elements(&Token::RBrace);
             self.expect(&Token::RBrace);
             return Expression::ArrayLiteral { elements };
         }
@@ -1666,11 +1645,7 @@ impl<'a> ZigParser<'a> {
         if *self.peek() == Token::Dot && *self.peek_at(1) == Token::LBrace {
             self.advance(); // .
             self.advance(); // {
-            let mut elements = Vec::new();
-            while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
-                elements.push(self.parse_expression());
-                self.match_tok(&Token::Comma);
-            }
+            let elements = self.parse_list_elements(&Token::RBrace);
             self.expect(&Token::RBrace);
             return Expression::ArrayLiteral { elements };
         }
@@ -1710,11 +1685,7 @@ impl<'a> ZigParser<'a> {
         // Array literal: [ ... ]
         if *self.peek() == Token::LBracket {
             self.advance();
-            let mut elements = Vec::new();
-            while *self.peek() != Token::RBracket && *self.peek() != Token::Eof {
-                elements.push(self.parse_expression());
-                self.match_tok(&Token::Comma);
-            }
+            let elements = self.parse_list_elements(&Token::RBracket);
             self.expect(&Token::RBracket);
             return Expression::ArrayLiteral { elements };
         }
@@ -1862,17 +1833,32 @@ impl<'a> ZigParser<'a> {
         }
     }
 
+    /// F-026: the elements of a call argument list or array literal up to
+    /// (not including) `close`. Zig requires `,` between elements (a trailing
+    /// one is allowed); without it a stray token after a literal used to
+    /// become an extra element.
+    fn parse_list_elements(&mut self, close: &Token) -> Vec<Expression> {
+        let mut elements = Vec::new();
+        while self.peek() != close && *self.peek() != Token::Eof {
+            elements.push(self.parse_expression());
+            if self.match_tok(&Token::Comma) {
+                continue;
+            }
+            if self.peek() != close {
+                self.errors.push(ZIG_LIST_COMMA.to_string());
+            }
+            break;
+        }
+        elements
+    }
+
     /// Parse postfix operations: `.prop`, `(args)`, `[index]`.
     fn parse_postfix(&mut self, mut expr: Expression) -> Expression {
         loop {
             match self.peek() {
                 Token::LParen => {
                     self.advance(); // (
-                    let mut args = Vec::new();
-                    while *self.peek() != Token::RParen && *self.peek() != Token::Eof {
-                        args.push(self.parse_expression());
-                        self.match_tok(&Token::Comma);
-                    }
+                    let args = self.parse_list_elements(&Token::RParen);
                     self.expect(&Token::RParen);
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),

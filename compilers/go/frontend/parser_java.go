@@ -128,6 +128,10 @@ type javaToken struct {
 	value string
 	line  int
 	col   int
+	// F-026: a number token's text as written, and whether it is valid
+	// only as the direct operand of a unary minus (`2147483648`).
+	raw     string
+	negOnly bool
 }
 
 // ---------------------------------------------------------------------------
@@ -326,34 +330,21 @@ func javaTokenize(source, fileName string) ([]javaToken, []Diagnostic) {
 			continue
 		}
 
-		// Numeric literal: integer (decimal or hex). No floats.
+		// Numeric literal (F-026): the whole glued [0-9A-Za-z_] run is one
+		// Java integer literal (JLS 3.10.1), with Java's value: hex / octal /
+		// binary int and long literals wrap to two's complement.
 		if ch >= '0' && ch <= '9' {
-			var val strings.Builder
-			if ch == '0' && pos+1 < len(chars) && (chars[pos+1] == 'x' || chars[pos+1] == 'X') {
-				val.WriteRune(chars[pos])
-				val.WriteRune(chars[pos+1])
-				pos += 2
-				col += 2
-				for pos < len(chars) && javaIsHexDigit(chars[pos]) {
-					val.WriteRune(chars[pos])
-					pos++
-					col++
-				}
+			end := scanNumberEndRunes(chars, pos)
+			text := string(chars[pos:end])
+			col += end - pos
+			pos = end
+			tok := javaToken{kind: javaTokNumber, value: "0", line: l, col: c, raw: text}
+			if lit := parseIntLiteral("java", text); lit != nil {
+				tok.value, tok.negOnly = lit.Value.String(), lit.NegOnly
 			} else {
-				for pos < len(chars) && (chars[pos] >= '0' && chars[pos] <= '9' || chars[pos] == '_') {
-					if chars[pos] != '_' {
-						val.WriteRune(chars[pos])
-					}
-					pos++
-					col++
-				}
+				errs = append(errs, lexDiag(invalidIntegerLiteralMsg("java", text), fileName, l, c))
 			}
-			// Optional L/l suffix (long literal)
-			if pos < len(chars) && (chars[pos] == 'L' || chars[pos] == 'l') {
-				pos++
-				col++
-			}
-			tokens = append(tokens, javaToken{kind: javaTokNumber, value: val.String(), line: l, col: c})
+			tokens = append(tokens, tok)
 			continue
 		}
 
@@ -1589,6 +1580,11 @@ func (p *javaParser) parseUnary() Expression {
 		return UnaryExpr{Op: "!", Operand: p.parseUnary()}
 	case javaTokMinus:
 		p.advance()
+		// F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+		// legal only as the direct operand of this minus.
+		if p.pos < len(p.tokens) && p.tokens[p.pos].kind == javaTokNumber {
+			p.tokens[p.pos].negOnly = false
+		}
 		return UnaryExpr{Op: "-", Operand: p.parseUnary()}
 	case javaTokPlus:
 		// +x == x
@@ -1869,6 +1865,9 @@ func (p *javaParser) parsePrimary() Expression {
 	t := p.current()
 	switch t.kind {
 	case javaTokNumber:
+		if t.negOnly {
+			p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("java", t.raw), p.fileName, t.line, t.col))
+		}
 		p.advance()
 		bi := new(big.Int)
 		if _, ok := bi.SetString(t.value, 0); !ok {

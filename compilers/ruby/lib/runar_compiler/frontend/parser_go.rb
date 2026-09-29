@@ -471,27 +471,12 @@ module RunarCompiler
           next
         end
 
-        # Hex literal: 0x...
-        if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
-          i += 2
-          col += 2
-          hex_start = i
-          while i < n && GO_HEX_CHARS.include?(source[i])
-            i += 1
-            col += 1
-          end
-          tokens << GoToken.new(kind: GoTokens::TOK_HEXSTRING, value: source[hex_start...i], line: line, col: start_col)
-          next
-        end
-
-        # Number
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
         if ch >= "0" && ch <= "9"
-          num_start = i
-          while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-            i += 1
-            col += 1
-          end
-          tokens << GoToken.new(kind: GoTokens::TOK_NUMBER, value: source[num_start...i].delete("_"), line: line, col: start_col)
+          stop, value, = IntLiteral.lex_number("go", source, i, lex, file_name, line, start_col)
+          col += stop - i
+          i = stop
+          tokens << GoToken.new(kind: GoTokens::TOK_NUMBER, value: value, line: line, col: start_col)
           next
         end
 

@@ -17,8 +17,10 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
+    PY_STATEMENT_LINE_BREAK,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
     with_lex_errors,
@@ -409,20 +411,11 @@ def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> 
             tokens.append(Token(TOK_STRING, val, line, start_col))
             continue
 
-        # Numbers
-        if ch.isdigit():
-            start = i
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
-                i += 2
-                col += 2
-                while i < n and _is_hex_digit(source[i]):
-                    i += 1
-                    col += 1
-            else:
-                while i < n and (source[i].isdigit() or source[i] == "_"):
-                    i += 1
-                    col += 1
-            num_str = source[start:i].replace("_", "")
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+        if "0" <= ch <= "9":
+            end, num_str, _, _ = lex_number("py", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
             tokens.append(Token(TOK_NUMBER, num_str, line, start_col))
             continue
 
@@ -822,6 +815,8 @@ class _PyParser:
         if self.match(TOK_ASSIGN):
             initializer = self.parse_expression()
 
+        # F-026: the field declaration ends at its line break.
+        self._expect_statement_end()
         self.skip_newlines()
 
         return PropertyNode(
@@ -954,9 +949,24 @@ class _PyParser:
             stmt = self.parse_statement()
             if stmt is not None:
                 stmts.append(stmt)
+            self._expect_statement_end()
 
         self.match(TOK_DEDENT)
         return stmts
+
+    def _expect_statement_end(self) -> None:
+        """F-026: a simple statement ends at its line break; compound
+        statements end on a NEWLINE / DEDENT they consumed themselves.
+        Pre-fix, ``lim = 0b1010`` parsed as ``lim = 0`` plus a second
+        statement ``b1010``."""
+        nxt = self.peek()
+        if nxt.kind in (TOK_NEWLINE, TOK_DEDENT, TOK_EOF):
+            return
+        if self.pos > 0 and self.tokens[self.pos - 1].kind in (TOK_NEWLINE, TOK_DEDENT):
+            return
+        self.errors.append(lex_error(PY_STATEMENT_LINE_BREAK, self.file_name, nxt.line, nxt.col))
+        while not (self.check(TOK_NEWLINE) or self.check(TOK_DEDENT) or self.check(TOK_EOF)):
+            self.advance()
 
     # -- Statement parsing ---------------------------------------------------
 

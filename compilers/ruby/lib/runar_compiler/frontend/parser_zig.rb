@@ -301,23 +301,12 @@ module RunarCompiler
           next
         end
 
-        # Numbers
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one Zig integer
+        # literal. Stopping at the first non-digit read `0b1010` as `0` + `b1010`.
         if ch >= "0" && ch <= "9"
-          start = i
-          if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
-            i += 2
-            col += 2
-            while i < n && "0123456789abcdefABCDEF".include?(source[i])
-              i += 1
-              col += 1
-            end
-          else
-            while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-              i += 1
-              col += 1
-            end
-          end
-          num_str = source[start...i].delete("_")
+          stop, num_str, = IntLiteral.lex_number("zig", source, i, lex, file_name, line, start_col)
+          col += stop - i
+          i = stop
           tokens << ZigToken.new(kind: ZigTokens::TOK_NUMBER, value: num_str, line: line, col: start_col)
           next
         end
@@ -1402,11 +1391,7 @@ module RunarCompiler
           advance # consume &
           advance # consume .
           advance # consume {
-          elements = []
-          while !check(TOK_RBRACE) && !check(TOK_EOF)
-            elements << parse_expression
-            match_tok(TOK_COMMA)
-          end
+          elements = parse_list_elements(TOK_RBRACE)
           expect(TOK_RBRACE)
           return ArrayLiteralExpr.new(elements: elements)
         end
@@ -1415,11 +1400,7 @@ module RunarCompiler
         if tok.kind == TOK_DOT && peek_at(1).kind == TOK_LBRACE
           advance # consume .
           advance # consume {
-          elements = []
-          while !check(TOK_RBRACE) && !check(TOK_EOF)
-            elements << parse_expression
-            match_tok(TOK_COMMA)
-          end
+          elements = parse_list_elements(TOK_RBRACE)
           expect(TOK_RBRACE)
           return ArrayLiteralExpr.new(elements: elements)
         end
@@ -1462,11 +1443,7 @@ module RunarCompiler
         # Array literal: [ ... ]
         if tok.kind == TOK_LBRACKET
           advance
-          elements = []
-          while !check(TOK_RBRACKET) && !check(TOK_EOF)
-            elements << parse_expression
-            match_tok(TOK_COMMA)
-          end
+          elements = parse_list_elements(TOK_RBRACKET)
           expect(TOK_RBRACKET)
           return ArrayLiteralExpr.new(elements: elements)
         end
@@ -1579,15 +1556,30 @@ module RunarCompiler
 
       # -- Postfix chain (. [] ()) ------------------------------------------
 
+      # F-026: the elements of a call argument list or array literal up to (not
+      # including) +close+. Zig requires `,` between elements (a trailing one is
+      # allowed); without it a stray token after a literal used to become an
+      # extra element.
+      def parse_list_elements(close)
+        elements = []
+        while !check(close) && !check(TOK_EOF)
+          elements << parse_expression
+          next if match_tok(TOK_COMMA)
+
+          unless check(close)
+            t = peek
+            @errors << Frontend.lex_error(ZIG_LIST_COMMA, @file_name, t.line, t.col)
+          end
+          break
+        end
+        elements
+      end
+
       def parse_postfix_chain(expr)
         loop do
           if check(TOK_LPAREN)
             advance
-            args = []
-            while !check(TOK_RPAREN) && !check(TOK_EOF)
-              args << parse_expression
-              match_tok(TOK_COMMA)
-            end
+            args = parse_list_elements(TOK_RPAREN)
             expect(TOK_RPAREN)
             expr = CallExpr.new(callee: expr, args: args)
 

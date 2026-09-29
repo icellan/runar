@@ -30,6 +30,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
@@ -597,23 +598,10 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                 tokens.append(Token(TOK_STRING, "".join(val_chars), line_num, col))
                 continue
 
-            # Numbers (decimal and hex)
-            if ch.isdigit():
-                num_chars: list[str] = []
-                if (ch == "0" and pos + 1 < len(line)
-                        and line[pos + 1] in ("x", "X")):
-                    num_chars.append("0x")
-                    pos += 2
-                    while pos < len(line) and (line[pos] in "0123456789abcdefABCDEF_"):
-                        if line[pos] != "_":
-                            num_chars.append(line[pos])
-                        pos += 1
-                else:
-                    while pos < len(line) and (line[pos].isdigit() or line[pos] == "_"):
-                        if line[pos] != "_":
-                            num_chars.append(line[pos])
-                        pos += 1
-                tokens.append(Token(TOK_NUMBER, "".join(num_chars), line_num, col))
+            # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+            if "0" <= ch <= "9":
+                pos, num_str, _, _ = lex_number("rb", line, pos, lex, file_name, line_num, col)
+                tokens.append(Token(TOK_NUMBER, num_str, line_num, col))
                 continue
 
             # Identifiers and keywords

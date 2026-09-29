@@ -40,6 +40,15 @@ func (d Diagnostic) FormatMessage() string {
 // triple-quoted strings, which may span lines, only end of file counts.
 const UnterminatedStringLiteralMsg = "unterminated string literal"
 
+// ZigListCommaMsg is F-026's refusal of a .runar.zig call argument list or
+// array literal whose elements are not separated by commas (the TS reference's
+// ZIG_LIST_COMMA).
+const ZigListCommaMsg = "expected ',' between list elements"
+
+// PyStatementLineBreakMsg is F-026's refusal of a second .runar.py statement
+// on the same line (the TS reference's PY_STATEMENT_LINE_BREAK).
+const PyStatementLineBreakMsg = "expected a line break between statements"
+
 // JavaCharLiteralMsg is the TS reference's refusal of a Java char literal.
 const JavaCharLiteralMsg = "char literals are unsupported in Rúnar Java contracts"
 

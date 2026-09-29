@@ -194,6 +194,10 @@ const Token = struct {
     text: []const u8,
     line: u32,
     col: u32,
+    /// F-026: a number token's literal as written (`text` holds its value).
+    raw: []const u8 = "",
+    /// F-026: valid only as the operand of a unary minus.
+    neg_only: bool = false,
 };
 
 // ============================================================================
@@ -420,16 +424,13 @@ const Tokenizer = struct {
 
                 // Numbers (decimal and hex)
                 if (ch >= '0' and ch <= '9') {
+                    // F-026: the whole glued [0-9A-Za-z_] run is one Ruby literal.
                     const num_start = pos;
-                    if (ch == '0' and pos + 1 < raw_line.len and (raw_line[pos + 1] == 'x' or raw_line[pos + 1] == 'X')) {
-                        pos += 2;
-                        while (pos < raw_line.len and (isHexDigit(raw_line[pos]) or raw_line[pos] == '_')) pos += 1;
-                    } else {
-                        while (pos < raw_line.len and ((raw_line[pos] >= '0' and raw_line[pos] <= '9') or raw_line[pos] == '_')) pos += 1;
-                    }
+                    pos = int_literal.scanNumberEnd(raw_line, pos);
                     self.tokens.append(self.allocator, .{
                         .kind = .number,
                         .text = raw_line[num_start..pos],
+                        .raw = raw_line[num_start..pos],
                         .line = line_num,
                         .col = col,
                     }) catch {};
@@ -767,7 +768,7 @@ const Parser = struct {
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(allocator, source);
         const tokens = tokenizer.tokenize();
-        return .{
+        var p: Parser = .{
             .allocator = allocator,
             .tokens = tokens,
             .pos = 0,
@@ -776,6 +777,8 @@ const Parser = struct {
             .depth = 0,
             .declared_locals = .empty,
         };
+        for (p.tokens) |*t| t.* = p.normalizeNumber(t.*);
+        return p;
     }
 
     fn cloneDeclaredLocals(self: *Parser) std.StringHashMapUnmanaged(void) {
@@ -2222,7 +2225,7 @@ const Parser = struct {
         // Number literal
         if (tok.kind == .number) {
             _ = self.bump();
-            return self.parseRbNumber(tok.text);
+            return self.numberLiteral(tok);
         }
 
         // Boolean literals
@@ -2394,6 +2397,34 @@ const Parser = struct {
             else => .add,
         };
     }
+
+    /// F-026: a number token's `text` becomes the canonical decimal value of
+    /// its literal (`raw` keeps the literal as written), validated against
+    /// this surface's host-language rules
+    /// (packages/runar-compiler/src/passes/int-literal.ts). A malformed
+    /// literal is refused with the shared `invalid <Language> integer literal`.
+    fn normalizeNumber(self: *Parser, tok: Token) Token {
+        if (tok.kind != .number) return tok;
+        var t = tok;
+        const lit = int_literal.parse(self.allocator, "rb", tok.raw) orelse {
+            const msg = int_literal.invalidIntegerLiteral(self.allocator, "rb", tok.raw);
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            self.errors.append(self.allocator, f) catch {};
+            t.text = "0";
+            return t;
+        };
+        t.text = if (lit.small) |v| (std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch "0") else lit.big.?;
+        t.neg_only = lit.neg_only;
+        return t;
+    }
+
+    /// F-026: the AST value of a (normalized) number token.
+    fn numberLiteral(self: *Parser, tok: Token) ?Expression {
+        _ = self;
+        if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
+        return Expression{ .literal_bigint = tok.text };
+    }
+
 };
 
 // ============================================================================

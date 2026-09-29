@@ -10,6 +10,7 @@ use super::ast::{
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
 
@@ -23,6 +24,9 @@ enum TokenType {
     True, False, Self_,
     AssertMacro, AssertEqMacro,
     Ident(String), Number(String), HexString(String),
+    /// F-026: a signed-suffix minimum such as `128i8` (value, text as
+    /// written): legal only under a unary minus.
+    NegOnlyNumber(String, String),
     // Attributes
     HashBracket, // #[
     // Punctuation
@@ -163,14 +167,22 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             continue;
         }
 
-        // Number
+        // Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust
+        // integer literal (a lowercase `0x` was taken above as a ByteString).
         if ch.is_ascii_digit() {
-            let mut val = String::new();
-            while pos < chars.len() && (chars[pos].is_ascii_digit() || chars[pos] == '_') {
-                if chars[pos] != '_' { val.push(chars[pos]); }
-                pos += 1; col += 1;
-            }
-            tokens.push(Token { typ: TokenType::Number(val), line: l, col: c });
+            let end = scan_number_end(&chars, pos);
+            let text: String = chars[pos..end].iter().collect();
+            col += end - pos;
+            pos = end;
+            let typ = match parse_int_literal("rs", &text) {
+                Some(lit) if lit.neg_only => TokenType::NegOnlyNumber(lit.value.to_string(), text),
+                Some(lit) => TokenType::Number(lit.value.to_string()),
+                None => {
+                    errors.push(lex_error(&invalid_integer_literal("rs", &text), file, l, c));
+                    TokenType::Number("0".to_string())
+                }
+            };
+            tokens.push(Token { typ, line: l, col: c });
             continue;
         }
 
@@ -1057,7 +1069,24 @@ impl RustDslParser {
     fn parse_unary(&mut self) -> Expression {
         match self.current().typ {
             TokenType::Bang => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Not, operand: Box::new(self.parse_unary()) } }
-            TokenType::Minus => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.parse_unary()) } }
+            TokenType::Minus => {
+                self.advance_clone();
+                // F-026: a signed-suffix minimum (`128i8`) is legal under this
+                // minus, through parentheses, as rustc's overflowing_literals lint.
+                let mut k = self.pos;
+                let mut opens = 0;
+                while k < self.tokens.len() && matches!(self.tokens[k].typ, TokenType::LParen) {
+                    k += 1;
+                    opens += 1;
+                }
+                if let Some(TokenType::NegOnlyNumber(v, _)) = self.tokens.get(k).map(|t| t.typ.clone()) {
+                    let closed = (1..=opens).all(|j| matches!(self.tokens.get(k + j).map(|t| &t.typ), Some(TokenType::RParen)));
+                    if closed {
+                        self.tokens[k].typ = TokenType::Number(v);
+                    }
+                }
+                Expression::UnaryExpr { op: UnaryOp::Neg, operand: Box::new(self.parse_unary()) }
+            }
             TokenType::Tilde => { self.advance_clone(); Expression::UnaryExpr { op: UnaryOp::BitNot, operand: Box::new(self.parse_unary()) } }
             TokenType::Amp => {
                 self.advance_clone();
@@ -1131,6 +1160,14 @@ impl RustDslParser {
     fn parse_primary(&mut self) -> Expression {
         match self.current().typ.clone() {
             TokenType::Number(val) => {
+                self.advance_clone();
+                let n = <BigInt as Num>::from_str_radix(&val, 10)
+                    .unwrap_or_else(|_| BigInt::from(0));
+                Expression::BigIntLiteral { value: n }
+            }
+            TokenType::NegOnlyNumber(val, text) => {
+                let t = self.current().clone();
+                self.errors.push(lex_error(&invalid_integer_literal("rs", &text), &self.file.clone(), t.line, t.col));
                 self.advance_clone();
                 let n = <BigInt as Num>::from_str_radix(&val, 10)
                     .unwrap_or_else(|_| BigInt::from(0));

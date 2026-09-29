@@ -439,7 +439,7 @@ func (c *C) M() { runar.Assert(true) }
       expect(boolLit.value).toBe(true);
     });
 
-    it('parses hex string literals', () => {
+    it('parses hex integer literals (F-026: `0x` is a Go integer, not a ByteString)', () => {
       const go = `
 package contract
 import runar "github.com/icellan/runar/packages/runar-go"
@@ -454,9 +454,9 @@ func (c *C) M() {
       const result = parseGoSource(go);
       const method = result.contract!.methods[0]!;
       const decl = method.body[0] as VariableDeclStatement;
-      expect(decl.init.kind).toBe('bytestring_literal');
-      if (decl.init.kind === 'bytestring_literal') {
-        expect(decl.init.value).toBe('abcd');
+      expect(decl.init.kind).toBe('bigint_literal');
+      if (decl.init.kind === 'bigint_literal') {
+        expect(decl.init.value).toBe(0xabcdn);
       }
     });
 

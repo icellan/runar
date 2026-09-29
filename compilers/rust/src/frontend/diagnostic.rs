@@ -68,6 +68,14 @@ impl fmt::Display for Diagnostic {
 /// backtick raw strings, which may span lines, only end of file counts.
 pub const UNTERMINATED_STRING_LITERAL: &str = "unterminated string literal";
 
+/// F-026: a .runar.zig call argument list or array literal whose elements are
+/// not separated by commas (the TS reference's `ZIG_LIST_COMMA`).
+pub const ZIG_LIST_COMMA: &str = "expected ',' between list elements";
+
+/// F-026: a second .runar.py statement on the same line (the TS reference's
+/// `PY_STATEMENT_LINE_BREAK`).
+pub const PY_STATEMENT_LINE_BREAK: &str = "expected a line break between statements";
+
 /// The TS reference's refusal of a Java char literal.
 pub const JAVA_CHAR_LITERAL: &str = "char literals are unsupported in Rúnar Java contracts";
 

@@ -100,7 +100,9 @@ module RunarCompiler
     end
 
     # A single token produced by the Rust tokenizer.
-    RustToken = Struct.new(:kind, :value, :line, :col, keyword_init: true)
+    # F-026: +raw+ is a number token's text as written; +neg_only+ marks a
+    # signed-suffix minimum (`128i8`), legal only under a unary minus.
+    RustToken = Struct.new(:kind, :value, :line, :col, :raw, :neg_only, keyword_init: true)
 
     # -----------------------------------------------------------------------
     # Name conversion: Rust snake_case -> camelCase
@@ -429,7 +431,8 @@ module RunarCompiler
         end
 
         # Hex literal: 0x...
-        if ch == "0" && pos + 1 < n && (source[pos + 1] == "x" || source[pos + 1] == "X")
+        # (lowercase x only, as the TS reference: `0X` is an invalid integer)
+        if ch == "0" && pos + 1 < n && source[pos + 1] == "x"
           pos += 2
           col += 2
           start = pos
@@ -442,15 +445,13 @@ module RunarCompiler
           next
         end
 
-        # Number
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust integer
+        # literal (a lowercase `0x` was taken above as a ByteString).
         if ch >= "0" && ch <= "9"
-          start = pos
-          while pos < n && ((source[pos] >= "0" && source[pos] <= "9") || source[pos] == "_")
-            pos += 1
-            col += 1
-          end
-          val = source[start...pos].delete("_")
-          tokens << RustToken.new(kind: RustTokens::TOK_NUMBER, value: val, line: l, col: c)
+          stop, val, lit, raw = IntLiteral.lex_number("rs", source, pos, lex, file_name, l, c)
+          col += stop - pos
+          pos = stop
+          tokens << RustToken.new(kind: RustTokens::TOK_NUMBER, value: val, line: l, col: c, raw: raw, neg_only: lit&.neg_only || false)
           next
         end
 
@@ -1392,6 +1393,15 @@ module RunarCompiler
           return UnaryExpr.new(op: "!", operand: operand)
         end
         if match_tok(TOK_MINUS)
+          # F-026: a signed-suffix minimum (`128i8`) is legal under this minus,
+          # through parentheses, as rustc's overflowing_literals lint.
+          k = @pos
+          k += 1 while k < @tokens.length && @tokens[k].kind == TOK_LPAREN
+          opens = k - @pos
+          if k < @tokens.length && @tokens[k].kind == TOK_NUMBER && @tokens[k].neg_only &&
+             (1..opens).all? { |j| k + j < @tokens.length && @tokens[k + j].kind == TOK_RPAREN }
+            @tokens[k].neg_only = false
+          end
           operand = parse_unary
           return UnaryExpr.new(op: "-", operand: operand)
         end
@@ -1511,6 +1521,7 @@ module RunarCompiler
 
         # Number literal
         if tok.kind == TOK_NUMBER
+          @errors << Frontend.lex_error(IntLiteral.invalid_integer_literal("rs", tok.raw), @file_name, tok.line, tok.col) if tok.neg_only
           advance
           return parse_number(tok.value)
         end

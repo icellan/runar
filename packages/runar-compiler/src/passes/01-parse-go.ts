@@ -35,6 +35,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { identifierCollisionMessage } from './snake-to-camel.js';
 import { assertSourceWithinLimits } from './source-limits.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -199,24 +200,14 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): G
       continue;
     }
 
-    // Hex literal: 0x...
-    if (ch === '0' && peekN(1) === 'x') {
-      let val = '';
-      advance(); advance(); // consume 0x
-      while (pos < source.length && /[0-9a-fA-F]/.test(peek())) {
-        val += advance();
-      }
-      add('hexstring', val, l, c);
-      continue;
-    }
-
-    // Number
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one Go integer
+    // literal, `0x` included (Go reads it as an integer, not a ByteString).
     if (/[0-9]/.test(ch)) {
-      let val = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) {
-        val += advance();
-      }
-      add('number', val.replace(/_/g, ''), l, c);
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      const lit = parseIntLiteral('go', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('go', text), 'error', { file, line: l, column: c }));
+      add('number', lit ? lit.value.toString() : '0', l, c);
       continue;
     }
 

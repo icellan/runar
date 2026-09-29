@@ -111,7 +111,9 @@ module RunarCompiler
     end
 
     # A single token produced by the Java tokenizer.
-    JavaToken = Struct.new(:kind, :value, :line, :col, keyword_init: true)
+    # F-026: +raw+ is a number token's text as written; +neg_only+ marks
+    # `2147483648` / `9223372036854775808L`, legal only under a unary minus.
+    JavaToken = Struct.new(:kind, :value, :line, :col, :raw, :neg_only, keyword_init: true)
 
     # -----------------------------------------------------------------------
     # Java type mapping -- Java/Runar type name -> Runar canonical type
@@ -317,39 +319,15 @@ module RunarCompiler
           next
         end
 
-        # Number
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one Java integer
+        # literal (JLS 3.10.1), with Java's value: hex / octal / binary int and
+        # long literals wrap to two's complement.
         if ch >= "0" && ch <= "9"
-          num_start = i
-          # Hex / bin / octal prefixes
-          if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
-            i += 2
-            col += 2
-            while i < n && source[i].match?(/[0-9a-fA-F_]/)
-              i += 1
-              col += 1
-            end
-          elsif ch == "0" && i + 1 < n && (source[i + 1] == "b" || source[i + 1] == "B")
-            i += 2
-            col += 2
-            while i < n && source[i].match?(/[01_]/)
-              i += 1
-              col += 1
-            end
-          else
-            while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-              i += 1
-              col += 1
-            end
-          end
-          # Java integer literal suffix L/l (ignored)
-          if i < n && (source[i] == "L" || source[i] == "l")
-            i += 1
-            col += 1
-          end
-          val = source[num_start...i].delete("_")
-          # Strip trailing L/l from the captured text
-          val = val.sub(/[Ll]\z/, "")
-          tokens << JavaToken.new(kind: JavaTokens::TOK_NUMBER, value: val, line: start_line, col: start_col)
+          stop, val, lit, raw = IntLiteral.lex_number("java", source, i, lex, file_name, start_line, start_col)
+          col += stop - i
+          i = stop
+          tokens << JavaToken.new(kind: JavaTokens::TOK_NUMBER, value: val, line: start_line, col: start_col,
+                                  raw: raw, neg_only: lit&.neg_only || false)
           next
         end
 
@@ -1342,6 +1320,9 @@ module RunarCompiler
           return UnaryExpr.new(op: "!", operand: parse_unary)
         end
         if match_tok(TOK_MINUS)
+          # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+          # legal only as the direct operand of this minus.
+          peek.neg_only = false if check(TOK_NUMBER)
           return UnaryExpr.new(op: "-", operand: parse_unary)
         end
         if match_tok(TOK_PLUS)
@@ -1590,6 +1571,7 @@ module RunarCompiler
 
         # Number literal -> BigIntLiteral (Rúnar has no Number type)
         if tok.kind == TOK_NUMBER
+          @errors << Frontend.lex_error(IntLiteral.invalid_integer_literal("java", tok.raw), @file_name, tok.line, tok.col) if tok.neg_only
           advance
           return parse_number(tok.value)
         end

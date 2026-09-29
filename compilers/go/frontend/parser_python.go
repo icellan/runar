@@ -264,23 +264,18 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			continue
 		}
 
-		// Numbers
+		// Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
 		if ch >= '0' && ch <= '9' {
-			start := i
-			if ch == '0' && i+1 < len(source) && (source[i+1] == 'x' || source[i+1] == 'X') {
-				i += 2
-				col += 2
-				for i < len(source) && isHexDigit(source[i]) {
-					i++
-					col++
-				}
+			end := scanNumberEnd(source, i)
+			text := source[i:end]
+			col += end - i
+			i = end
+			numStr := "0"
+			if lit := parseIntLiteral("py", text); lit != nil {
+				numStr = lit.Value.String()
 			} else {
-				for i < len(source) && (source[i] >= '0' && source[i] <= '9' || source[i] == '_') {
-					i++
-					col++
-				}
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("py", text), p.fileName, line, startCol))
 			}
-			numStr := strings.ReplaceAll(source[start:i], "_", "")
 			tokens = append(tokens, pyToken{kind: pyTokNumber, value: numStr, line: line, col: startCol})
 			continue
 		}
@@ -1066,6 +1061,8 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 		initializer = p.parsePyExpression()
 	}
 
+	// F-026: the field declaration ends at its line break.
+	p.expectStatementEnd()
 	p.skipNewlines()
 
 	return &PropertyNode{
@@ -1242,10 +1239,31 @@ func (p *pyParser) parsePyBlock() []Statement {
 		if stmt != nil {
 			stmts = append(stmts, stmt)
 		}
+		p.expectStatementEnd()
 	}
 
 	p.match(pyTokDedent)
 	return stmts
+}
+
+// expectStatementEnd refuses more code on a statement's line (F-026). A
+// simple statement ends at its line break; compound statements end on a
+// NEWLINE / DEDENT they consumed themselves. Pre-fix, `lim = 0b1010` parsed
+// as `lim = 0` plus a second statement `b1010`.
+func (p *pyParser) expectStatementEnd() {
+	next := p.peek()
+	if next.kind == pyTokNewline || next.kind == pyTokDedent || next.kind == pyTokEOF {
+		return
+	}
+	if p.pos > 0 {
+		if prev := p.tokens[p.pos-1]; prev.kind == pyTokNewline || prev.kind == pyTokDedent {
+			return
+		}
+	}
+	p.errors = append(p.errors, lexDiag(PyStatementLineBreakMsg, p.fileName, next.line, next.col))
+	for !p.check(pyTokNewline) && !p.check(pyTokDedent) && !p.check(pyTokEOF) {
+		p.advance()
+	}
 }
 
 // ---------------------------------------------------------------------------

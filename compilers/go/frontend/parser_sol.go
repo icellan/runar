@@ -206,9 +206,9 @@ func (p *solParser) tokenize(source string) []solToken {
 
 		// Numbers
 		if ch >= '0' && ch <= '9' {
-			start := i
-			if ch == '0' && i+1 < len(source) && (source[i+1] == 'x' || source[i+1] == 'X') {
-				// Hex byte string literal: 0x... -> ByteString
+			if ch == '0' && i+1 < len(source) && source[i+1] == 'x' {
+				// Hex byte string literal: 0x... -> ByteString (lowercase x
+				// only, as the TS reference; `0X` is an invalid integer).
 				i += 2
 				col += 2
 				hexStart := i
@@ -219,16 +219,18 @@ func (p *solParser) tokenize(source string) []solToken {
 				tokens = append(tokens, solToken{kind: solTokHexString, value: source[hexStart:i], line: line, col: startCol})
 				continue
 			}
-			for i < len(source) && source[i] >= '0' && source[i] <= '9' {
-				i++
-				col++
+			// F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
+			end := scanNumberEnd(source, i)
+			text := source[i:end]
+			col += end - i
+			i = end
+			value := "0"
+			if lit := parseIntLiteral("sol", text); lit != nil {
+				value = lit.Value.String()
+			} else {
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("sol", text), p.fileName, line, startCol))
 			}
-			// Skip trailing 'n' for bigint literals
-			if i < len(source) && source[i] == 'n' {
-				i++
-				col++
-			}
-			tokens = append(tokens, solToken{kind: solTokNumber, value: source[start:i], line: line, col: startCol})
+			tokens = append(tokens, solToken{kind: solTokNumber, value: value, line: line, col: startCol})
 			continue
 		}
 

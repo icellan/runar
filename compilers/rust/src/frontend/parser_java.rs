@@ -47,6 +47,7 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error, Diagnostic, JAVA_CHAR_LITERAL, UNTERMINATED_STRING_LITERAL};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -160,6 +161,9 @@ enum TokenType {
     // Literals
     Ident(String),
     Number(i128),
+    /// F-026: `2147483648` / `9223372036854775808L` (value, text as written):
+    /// legal only as the direct operand of a unary minus.
+    NegOnlyNumber(i128, String),
     StringLit(String),
     // End
     Eof,
@@ -365,24 +369,25 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             continue;
         }
 
-        // Number literal (allow optional trailing L/l suffix for long
-        // literals, and underscores between digits).
+        // Number literal (F-026): the whole glued [0-9A-Za-z_] run is one
+        // Java integer literal (JLS 3.10.1), with Java's value: hex / octal /
+        // binary int and long literals wrap to two's complement.
         if ch.is_ascii_digit() {
-            let mut val = String::new();
-            while pos < chars.len() && (chars[pos].is_ascii_digit() || chars[pos] == '_') {
-                if chars[pos] != '_' {
-                    val.push(chars[pos]);
+            let end = scan_number_end(&chars, pos);
+            let text: String = chars[pos..end].iter().collect();
+            col += end - pos;
+            pos = end;
+            let typ = match parse_int_literal("java", &text) {
+                Some(lit) => {
+                    let n: i128 = lit.value.to_string().parse().unwrap_or(0);
+                    if lit.neg_only { TokenType::NegOnlyNumber(n, text) } else { TokenType::Number(n) }
                 }
-                pos += 1;
-                col += 1;
-            }
-            // optional L / l long suffix
-            if pos < chars.len() && (chars[pos] == 'L' || chars[pos] == 'l') {
-                pos += 1;
-                col += 1;
-            }
-            let n: i128 = val.parse().unwrap_or(0);
-            tokens.push(Token { typ: TokenType::Number(n), line: l, col: c });
+                None => {
+                    errors.push(lex_error(&invalid_integer_literal("java", &text), file, l, c));
+                    TokenType::Number(0)
+                }
+            };
+            tokens.push(Token { typ, line: l, col: c });
             continue;
         }
 
@@ -1665,6 +1670,11 @@ impl<'a> JavaParser<'a> {
             }
             TokenType::Minus => {
                 self.advance();
+                // F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L`
+                // are legal only as the direct operand of this minus.
+                if let TokenType::NegOnlyNumber(n, _) = self.current().typ.clone() {
+                    self.tokens[self.pos].typ = TokenType::Number(n);
+                }
                 let operand = self.parse_unary()?;
                 Some(Expression::UnaryExpr {
                     op: UnaryOp::Neg,
@@ -1793,6 +1803,11 @@ impl<'a> JavaParser<'a> {
     fn parse_primary(&mut self) -> Option<Expression> {
         match self.current().typ.clone() {
             TokenType::Number(n) => {
+                self.advance();
+                Some(Expression::BigIntLiteral { value: BigInt::from(n) })
+            }
+            TokenType::NegOnlyNumber(n, text) => {
+                self.error(invalid_integer_literal("java", &text));
                 self.advance();
                 Some(Expression::BigIntLiteral { value: BigInt::from(n) })
             }

@@ -586,22 +586,9 @@ module RunarCompiler
             next
           end
 
-          # Numbers (decimal and hex)
+          # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
           if ch.match?(/[0-9]/)
-            num_chars = +""
-            if ch == "0" && pos + 1 < line.length && (line[pos + 1] == "x" || line[pos + 1] == "X")
-              num_chars << "0x"
-              pos += 2
-              while pos < line.length && line[pos].match?(/[0-9a-fA-F_]/)
-                num_chars << line[pos] unless line[pos] == "_"
-                pos += 1
-              end
-            else
-              while pos < line.length && (line[pos].match?(/[0-9]/) || line[pos] == "_")
-                num_chars << line[pos] unless line[pos] == "_"
-                pos += 1
-              end
-            end
+            pos, num_chars, = IntLiteral.lex_number("rb", line, pos, lex, file_name, line_num, col)
             tokens << Token.new(kind: TOK_NUMBER, value: num_chars, line: line_num, col: col)
             next
           end

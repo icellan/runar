@@ -165,6 +165,11 @@ func Parse(source []byte, fileName string) *ParseResult {
 		fileName: fileName,
 	}
 
+	// F-026: every number, extended over the [0-9A-Za-z_] characters glued to
+	// it (tree-sitter ends `0b102` at `0b10`), must be a TypeScript integer
+	// literal; `012`, `10_`, `0b102` are refused with the shared diagnostic.
+	p.checkNumericLiterals(root)
+
 	// tree-sitter is error-tolerant: malformed source still yields a tree, with
 	// the bad region marked ERROR/MISSING. Walking such a tree silently DROPS
 	// whatever failed to resolve (a statement parser returning nil is simply
@@ -208,6 +213,30 @@ type parseContext struct {
 
 // firstBadNode returns the first ERROR or MISSING node in the tree, so the
 // diagnostic can point at the offending line instead of the whole file.
+// checkNumericLiterals refuses every malformed .runar.ts numeric literal
+// (F-026, the TS reference's reportInvalidNumericLiterals).
+func (p *parseContext) checkNumericLiterals(root *sitter.Node) {
+	coveredTo := -1
+	var visit func(n *sitter.Node)
+	visit = func(n *sitter.Node) {
+		if n.Type() == "number" && int(n.StartByte()) >= coveredTo {
+			start, end := int(n.StartByte()), int(n.EndByte())
+			for end < len(p.source) && isNumberContinue(p.source[end]) {
+				end++
+			}
+			coveredTo = end
+			text := string(p.source[start:end])
+			if parseIntLiteral("ts", text) == nil {
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("ts", text), p.fileName, int(n.StartPoint().Row)+1, int(n.StartPoint().Column)))
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			visit(n.Child(i))
+		}
+	}
+	visit(root)
+}
+
 func firstBadNode(n *sitter.Node) *sitter.Node {
 	if n.IsError() || n.IsMissing() {
 		return n

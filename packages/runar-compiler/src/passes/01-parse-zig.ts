@@ -30,8 +30,9 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
 import { assertSourceWithinLimits } from './source-limits.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -175,12 +176,14 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Z
       continue;
     }
 
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one Zig integer
+    // literal. Stopping at the first non-digit read `0b1010` as `0` + `b1010`.
     if (/[0-9]/.test(ch)) {
-      let value = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) {
-        value += advance();
-      }
-      add('number', value.replace(/_/g, ''), tokenLine, tokenColumn);
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      const lit = parseIntLiteral('zig', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('zig', text), 'error', { file, line: tokenLine, column: tokenColumn }));
+      add('number', lit ? lit.value.toString() : '0', tokenLine, tokenColumn);
       continue;
     }
 
@@ -1029,11 +1032,7 @@ class ZigParser extends ParserCore<ZigToken> {
       this.advance();
       this.advance();
       this.advance();
-      const elements: Expression[] = [];
-      while (this.current().type !== '}' && this.current().type !== 'eof') {
-        elements.push(this.parseExpression());
-        if (this.current().type === ',') this.advance();
-      }
+      const elements = this.parseListElements('}');
       this.expect('}');
       return { kind: 'array_literal', elements };
     }
@@ -1041,11 +1040,7 @@ class ZigParser extends ParserCore<ZigToken> {
     if (token.type === '.' && this.tokens[this.pos + 1]?.type === '{') {
       this.advance();
       this.advance();
-      const elements: Expression[] = [];
-      while (this.current().type !== '}' && this.current().type !== 'eof') {
-        elements.push(this.parseExpression());
-        if (this.current().type === ',') this.advance();
-      }
+      const elements = this.parseListElements('}');
       this.expect('}');
       return { kind: 'array_literal', elements };
     }
@@ -1090,20 +1085,12 @@ class ZigParser extends ParserCore<ZigToken> {
         this.advance(); // ']'
         this.parseType(); // discard element type
         this.expect('{');
-        const elements: Expression[] = [];
-        while (this.current().type !== '}' && this.current().type !== 'eof') {
-          elements.push(this.parseExpression());
-          if (this.current().type === ',') this.advance();
-        }
+        const elements = this.parseListElements('}');
         this.expect('}');
         return { kind: 'array_literal', elements };
       }
       this.advance();
-      const elements: Expression[] = [];
-      while (this.current().type !== ']' && this.current().type !== 'eof') {
-        elements.push(this.parseExpression());
-        if (this.current().type === ',') this.advance();
-      }
+      const elements = this.parseListElements(']');
       this.expect(']');
       return { kind: 'array_literal', elements };
     }
@@ -1423,15 +1410,34 @@ class ZigParser extends ParserCore<ZigToken> {
     }
   }
 
+  /**
+   * F-026: the elements of a call argument list or array literal, up to (not
+   * including) `close`. Zig requires `,` between elements; a trailing one is
+   * allowed. Without the comma a stray token after a literal (`0b1010` read as
+   * `0` + `b1010`) used to become an extra argument.
+   */
+  private parseListElements(close: string): Expression[] {
+    const elements: Expression[] = [];
+    while (this.current().type !== close && this.current().type !== 'eof') {
+      elements.push(this.parseExpression());
+      if (this.current().type === ',') {
+        this.advance();
+        continue;
+      }
+      if (this.current().type !== close) {
+        const t = this.current();
+        this.errors.push(makeDiagnostic(ZIG_LIST_COMMA, 'error', { file: this.file, line: t.line, column: t.column }));
+      }
+      break;
+    }
+    return elements;
+  }
+
   protected parsePostfixChain(expr: Expression, selfNames: Set<string>): Expression {
     while (true) {
       if (this.current().type === '(') {
         this.advance();
-        const args: Expression[] = [];
-        while (this.current().type !== ')' && this.current().type !== 'eof') {
-          args.push(this.parseExpression());
-          if (this.current().type === ',') this.advance();
-        }
+        const args = this.parseListElements(')');
         this.expect(')');
         expr = { kind: 'call_expr', callee: expr, args };
       } else if (this.current().type === '.') {

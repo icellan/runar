@@ -38,6 +38,7 @@ import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { assertSourceWithinLimits } from './source-limits.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -64,6 +65,10 @@ interface RustToken extends Token {
   value: string;
   line: number;
   column: number;
+  /** F-026: a number token's text as written. */
+  raw?: string;
+  /** F-026: valid only under a unary minus (`128i8`). */
+  negOnly?: boolean;
 }
 
 const KEYWORDS = new Map<string, TokenType>([
@@ -181,13 +186,14 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): R
       continue;
     }
 
-    // Number
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust integer
+    // literal (a lowercase `0x` was taken above as a ByteString).
     if (/[0-9]/.test(ch)) {
-      let val = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) {
-        val += advance();
-      }
-      add('number', val.replace(/_/g, ''), l, c);
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      const lit = parseIntLiteral('rs', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('rs', text), 'error', { file, line: l, column: c }));
+      tokens.push({ type: 'number', value: lit ? lit.value.toString() : '0', line: l, column: c, raw: text, negOnly: lit?.negOnly ?? false });
       continue;
     }
 
@@ -1191,6 +1197,17 @@ class RustParser extends ParserCore<RustToken> {
     }
     if (this.current().type === '-') {
       this.advance();
+      // F-026: a signed-suffix minimum (`128i8`) is legal under this minus,
+      // through parentheses, as rustc's overflowing_literals lint allows.
+      let k = this.pos;
+      let opens = 0;
+      while (this.tokens[k]?.type === '(') { k++; opens++; }
+      const lit = this.tokens[k] as RustToken | undefined;
+      if (lit?.type === 'number' && lit.negOnly) {
+        let closed = true;
+        for (let j = 1; j <= opens; j++) if (this.tokens[k + j]?.type !== ')') closed = false;
+        if (closed) lit.negOnly = false;
+      }
       return { kind: 'unary_expr', op: '-', operand: this.parseUnary(), sourceLocation: at };
     }
     if (this.current().type === '~') {
@@ -1214,6 +1231,8 @@ class RustParser extends ParserCore<RustToken> {
 
     // Number literal
     if (t.type === 'number') {
+      const nt = t as RustToken;
+      if (nt.negOnly) this.errors.push(makeDiagnostic(invalidIntegerLiteral('rs', nt.raw ?? nt.value), 'error', this.loc()));
       this.advance();
       return { kind: 'bigint_literal', value: BigInt(t.value) };
     }

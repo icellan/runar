@@ -46,7 +46,8 @@ import type {
   ReturnStatement,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral } from './int-literal.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
 import { parseMoveSource } from './01-parse-move.js';
@@ -203,6 +204,14 @@ export function parse(source: string, fileName?: string): ParseResult {
   // records a syntax diagnostic that nothing here reads, so `"cafe;` used to
   // compile. Refuse it with the diagnostic every tier emits.
   reportUnterminatedLiterals(sourceFile.compilerNode, file, errors);
+
+  // F-026: ts-morph records syntax errors (`0b102`, `0o19`, `10_`, `012`, an
+  // unclosed call) in parseDiagnostics and then recovers, so the program used
+  // to compile with its own reading of the broken text (`0b102` as 2). Refuse
+  // every malformed integer literal with the shared diagnostic, then every
+  // remaining TypeScript syntax error.
+  reportInvalidNumericLiterals(sourceFile.compilerNode, source, file, errors);
+  reportSyntaxDiagnostics(sourceFile.compilerNode, file, errors);
 
   // Find the class that extends SmartContract, StatefulSmartContract,
   // or UnsafeSmartContract (the asm() escape hatch).
@@ -1147,17 +1156,11 @@ function parseExpression(
     case SyntaxKind.Identifier:
       return { kind: 'identifier', name: node.getText(), sourceLocation: locFromNode(node, file) };
 
-    case SyntaxKind.BigIntLiteral: {
-      const text = node.getText();
-      // BigInt literals in TS end with 'n', e.g. '42n'
-      const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-      return { kind: 'bigint_literal', value: BigInt(numStr) };
-    }
-
+    case SyntaxKind.BigIntLiteral:
     case SyntaxKind.NumericLiteral: {
-      // Plain numeric literals (e.g., 42) -- treat as bigint for Rúnar
-      const numText = node.getText();
-      return { kind: 'bigint_literal', value: BigInt(numText) };
+      // `42n` and plain `42` are both Rúnar bigints. A malformed literal was
+      // already refused by reportInvalidNumericLiterals (F-026).
+      return { kind: 'bigint_literal', value: tsLiteralValue(node.getText()) ?? 0n };
     }
 
     case SyntaxKind.TrueKeyword:
@@ -1685,10 +1688,8 @@ function encodeAsmPushLiteral(
 ): string | undefined {
   if (node.isKind(SyntaxKind.BigIntLiteral)) {
     const text = node.getText();
-    const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-    try {
-      return encodePushBigIntHex(BigInt(numStr));
-    } catch {
+    const v = tsLiteralValue(text);
+    if (v === null) {
       errors.push(makeDiagnostic(
         `push() argument is not a valid BigInt literal: '${text}'`,
         'error',
@@ -1696,12 +1697,13 @@ function encodeAsmPushLiteral(
       ));
       return undefined;
     }
+    return encodePushBigIntHex(v);
   }
 
   if (node.isKind(SyntaxKind.NumericLiteral)) {
     const text = node.getText();
-    const n = Number(text);
-    if (!Number.isFinite(n) || Math.floor(n) !== n) {
+    const v = tsLiteralValue(text);
+    if (v === null) {
       errors.push(makeDiagnostic(
         `push() numeric argument must be an integer, got '${text}'`,
         'error',
@@ -1709,7 +1711,7 @@ function encodeAsmPushLiteral(
       ));
       return undefined;
     }
-    return encodePushBigIntHex(BigInt(n));
+    return encodePushBigIntHex(v);
   }
 
   if (node.isKind(SyntaxKind.PrefixUnaryExpression)) {
@@ -1720,18 +1722,10 @@ function encodeAsmPushLiteral(
       if (inner === undefined) return undefined;
       // Re-encode as negative by reparsing — simplest way to keep the
       // script-number sign-bit logic in one place.
-      if (operand.isKind(SyntaxKind.BigIntLiteral)) {
-        const text = operand.getText();
-        const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-        try {
-          return encodePushBigIntHex(-BigInt(numStr));
-        } catch {
-          // already diagnosed
-          return undefined;
-        }
-      }
-      if (operand.isKind(SyntaxKind.NumericLiteral)) {
-        return encodePushBigIntHex(-BigInt(operand.getText()));
+      if (operand.isKind(SyntaxKind.BigIntLiteral) || operand.isKind(SyntaxKind.NumericLiteral)) {
+        const v = tsLiteralValue(operand.getText());
+        // null was already diagnosed by the recursive call above
+        return v === null ? undefined : encodePushBigIntHex(-v);
       }
     }
     errors.push(makeDiagnostic(
@@ -1790,8 +1784,7 @@ function parseArityLiteral(
   // BigInt literal: `0n`, `1n`, ...
   if (initNode.isKind(SyntaxKind.BigIntLiteral)) {
     const text = initNode.getText();
-    const numStr = text.endsWith('n') ? text.slice(0, -1) : text;
-    const n = Number(numStr);
+    const n = Number(tsLiteralValue(text) ?? NaN);
     if (!Number.isFinite(n) || Math.floor(n) !== n || n < 0) {
       errors.push(makeDiagnostic(
         `asm() ${fieldName} must be a non-negative integer literal, got '${text}'`,
@@ -1806,7 +1799,7 @@ function parseArityLiteral(
   // Plain numeric literal: `0`, `1`, ...
   if (initNode.isKind(SyntaxKind.NumericLiteral)) {
     const text = initNode.getText();
-    const n = Number(text);
+    const n = Number(tsLiteralValue(text) ?? NaN);
     if (!Number.isFinite(n) || Math.floor(n) !== n || n < 0) {
       errors.push(makeDiagnostic(
         `asm() ${fieldName} must be a non-negative integer literal, got '${text}'`,
@@ -1895,6 +1888,55 @@ function parseTernaryExpression(
 // ---------------------------------------------------------------------------
 // Source location helpers
 // ---------------------------------------------------------------------------
+
+/** F-026: the exact value of a .runar.ts numeric literal, or null. */
+function tsLiteralValue(text: string): bigint | null {
+  return parseIntLiteral('ts', text)?.value ?? null;
+}
+
+/**
+ * F-026: every NumericLiteral / BigIntLiteral, extended over the
+ * [0-9A-Za-z_] characters glued to it (TypeScript ends `0b102` at `0b10` and
+ * starts a new literal at `2`), must be a TypeScript integer literal.
+ */
+function reportInvalidNumericLiterals(
+  sf: ts.SourceFile,
+  source: string,
+  file: string,
+  errors: CompilerDiagnostic[],
+): void {
+  let coveredTo = -1;
+  const visit = (node: ts.Node): void => {
+    if (node.kind === ts.SyntaxKind.NumericLiteral || node.kind === ts.SyntaxKind.BigIntLiteral) {
+      const start = node.getStart(sf);
+      if (start >= coveredTo) {
+        let end = node.getEnd();
+        while (end < source.length && isNumberContinue(source[end])) end++;
+        coveredTo = end;
+        const text = source.slice(start, end);
+        if (parseIntLiteral('ts', text) === null) {
+          const { line, character } = sf.getLineAndCharacterOfPosition(start);
+          errors.push(makeDiagnostic(invalidIntegerLiteral('ts', text), 'error', { file, line: line + 1, column: character }));
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+}
+
+/** F-026: TypeScript's own syntax errors, which ts-morph records and recovers from. */
+function reportSyntaxDiagnostics(sf: ts.SourceFile, file: string, errors: CompilerDiagnostic[]): void {
+  const diags = (sf as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
+  for (const d of diags) {
+    const { line, character } = sf.getLineAndCharacterOfPosition(d.start ?? 0);
+    errors.push(makeDiagnostic(
+      TS_SYNTAX_ERROR_PREFIX + ts.flattenDiagnosticMessageText(d.messageText, ' '),
+      'error',
+      { file, line: line + 1, column: character },
+    ));
+  }
+}
 
 function reportUnterminatedLiterals(
   sf: ts.SourceFile,

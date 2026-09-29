@@ -509,20 +509,9 @@ module RunarCompiler
             next
           end
 
-          # Numbers
+          # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
           if ch >= "0" && ch <= "9"
-            start = pos
-            if ch == "0" && pos + 1 < line.length && (line[pos + 1] == "x" || line[pos + 1] == "X")
-              pos += 2
-              while pos < line.length && "0123456789abcdefABCDEF".include?(line[pos])
-                pos += 1
-              end
-            else
-              while pos < line.length && ((line[pos] >= "0" && line[pos] <= "9") || line[pos] == "_")
-                pos += 1
-              end
-            end
-            num_str = line[start...pos].delete("_")
+            pos, num_str, = IntLiteral.lex_number("py", line, pos, lex, file_name, line_num, col)
             tokens << PythonToken.new(kind: PythonTokens::TOK_NUMBER, value: num_str, line: line_num, col: col)
             next
           end
@@ -834,10 +823,8 @@ module RunarCompiler
           initializer = parse_expression
         end
 
-        # Skip rest of line
-        until check(TOK_NEWLINE) || check(TOK_EOF) || check(TOK_DEDENT)
-          advance
-        end
+        # F-026: the field declaration ends at its line break.
+        expect_statement_end
 
         PropertyNode.new(
           name: declare(raw_name),
@@ -1003,10 +990,23 @@ module RunarCompiler
 
           stmt = parse_statement
           stmts << stmt if stmt
+          expect_statement_end
           skip_newlines
         end
 
         stmts
+      end
+
+      # F-026: a simple statement ends at its line break; compound statements
+      # end on a NEWLINE / DEDENT they consumed themselves. Pre-fix,
+      # `lim = 0b1010` parsed as `lim = 0` plus a second statement `b1010`.
+      def expect_statement_end
+        return if check(TOK_NEWLINE) || check(TOK_DEDENT) || check(TOK_EOF)
+        return if @pos.positive? && [TOK_NEWLINE, TOK_DEDENT].include?(@tokens[@pos - 1].kind)
+
+        t = peek
+        @errors << Frontend.lex_error(PY_STATEMENT_LINE_BREAK, @file_name, t.line, t.col)
+        advance until check(TOK_NEWLINE) || check(TOK_DEDENT) || check(TOK_EOF)
       end
 
       def parse_statement

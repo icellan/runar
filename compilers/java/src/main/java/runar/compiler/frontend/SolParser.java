@@ -313,7 +313,8 @@ public final class SolParser {
 
             // Numbers (and hex byte string literals: 0x... -> ByteString)
             if (ch >= '0' && ch <= '9') {
-                if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
+                // (lowercase x only, as the TS reference: `0X` is an invalid integer)
+                if (ch == '0' && i + 1 < n && source.charAt(i + 1) == 'x') {
                     i += 2;
                     col += 2;
                     int hexStart = i;
@@ -324,17 +325,11 @@ public final class SolParser {
                     tokens.add(new Token(TOK_HEXSTRING, source.substring(hexStart, i), line, startCol));
                     continue;
                 }
-                int start = i;
-                while (i < n && source.charAt(i) >= '0' && source.charAt(i) <= '9') {
-                    i++;
-                    col++;
-                }
-                // Skip trailing 'n' for bigint literals (TS-style)
-                if (i < n && source.charAt(i) == 'n') {
-                    i++;
-                    col++;
-                }
-                tokens.add(new Token(TOK_NUMBER, source.substring(start, i), line, startCol));
+                // F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
+                IntLiteral.Scan sc = IntLiteral.lex("sol", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                tokens.add(new Token(TOK_NUMBER, sc.value(), line, startCol));
                 continue;
             }
 

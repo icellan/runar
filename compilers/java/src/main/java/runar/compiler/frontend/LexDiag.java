@@ -15,6 +15,18 @@ final class LexDiag {
      */
     static final String UNTERMINATED_STRING_LITERAL = "unterminated string literal";
 
+    /**
+     * F-026: a .runar.zig call argument list or array literal whose elements are
+     * not separated by commas (the TS reference's ZIG_LIST_COMMA).
+     */
+    static final String ZIG_LIST_COMMA = "expected ',' between list elements";
+
+    /**
+     * F-026: a second .runar.py statement on the same line (the TS reference's
+     * PY_STATEMENT_LINE_BREAK).
+     */
+    static final String PY_STATEMENT_LINE_BREAK = "expected a line break between statements";
+
     /** A Java char literal, which Rúnar does not support. */
     static final String JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts";
 

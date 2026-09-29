@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/scanner"
 	"go/token"
 	"go/types"
 	"math/big"
@@ -25,6 +26,12 @@ func bytesToHex(b []byte) string {
 // ParseGoContract parses a Go contract syntax (.runar.go) source file and
 // produces the standard Rúnar AST. Uses Go's built-in go/parser.
 func ParseGoContract(source []byte, fileName string) *ParseResult {
+	// F-026: every number token, extended over the [0-9A-Za-z_] characters
+	// glued to it, must be a Go integer literal. go/parser would refuse most
+	// malformed ones with its own words; this gives them the shared text.
+	if diags := checkGoNumericLiterals(source, fileName); len(diags) > 0 {
+		return &ParseResult{Errors: diags}
+	}
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, fileName, source, parser.ParseComments)
 	if err != nil {
@@ -47,6 +54,43 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 		Contract: contract,
 		Errors:   p.errors,
 	}
+}
+
+// checkGoNumericLiterals scans source with go/scanner (Go's own lexer, so
+// strings, runes and comments are skipped exactly) and refuses every number
+// token that is not a Go integer literal with the shared F-026 diagnostic.
+func checkGoNumericLiterals(source []byte, fileName string) []Diagnostic {
+	fset := token.NewFileSet()
+	f := fset.AddFile(fileName, -1, len(source))
+	var s scanner.Scanner
+	s.Init(f, source, func(token.Position, string) {}, 0)
+	var diags []Diagnostic
+	covered := -1
+	for {
+		pos, tok, _ := s.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok != token.INT && tok != token.FLOAT && tok != token.IMAG {
+			continue
+		}
+		start := f.Offset(pos)
+		if start < covered {
+			continue
+		}
+		end := scanNumberEnd(string(source), start)
+		// A FLOAT / IMAG token may run past the identifier characters (`1.5`).
+		for tok != token.INT && end < len(source) && (source[end] == '.' || isNumberContinue(source[end])) {
+			end++
+		}
+		covered = end
+		text := string(source[start:end])
+		if parseIntLiteral("go", text) == nil {
+			p := f.Position(pos)
+			diags = append(diags, lexDiag(invalidIntegerLiteralMsg("go", text), fileName, p.Line, p.Column))
+		}
+	}
+	return diags
 }
 
 // ---------------------------------------------------------------------------

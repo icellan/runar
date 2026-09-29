@@ -210,40 +210,32 @@ func (p *moveParser) tokenize(source string) []moveToken {
 
 		// Numbers
 		if ch >= '0' && ch <= '9' {
-			start := i
-			isHex := false
-			if ch == '0' && i+1 < len(source) && (source[i+1] == 'x' || source[i+1] == 'X') {
-				isHex = true
+			if ch == '0' && i+1 < len(source) && source[i+1] == 'x' {
+				// F-026: a lowercase `0x` is a ByteString literal on this
+				// surface, whatever its length (as the TS reference; an odd
+				// length is refused downstream).
 				i += 2
 				col += 2
+				hexStart := i
 				for i < len(source) && moveIsHexDigit(source[i]) {
 					i++
 					col++
 				}
+				tokens = append(tokens, moveToken{kind: moveTokString, value: source[hexStart:i], line: line, col: startCol})
+				continue
+			}
+			// F-026: the whole glued [0-9A-Za-z_] run is one Move literal.
+			end := scanNumberEnd(source, i)
+			text := source[i:end]
+			col += end - i
+			i = end
+			value := "0"
+			if lit := parseIntLiteral("move", text); lit != nil {
+				value = lit.Value.String()
 			} else {
-				for i < len(source) && source[i] >= '0' && source[i] <= '9' {
-					i++
-					col++
-				}
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("move", text), p.fileName, line, startCol))
 			}
-			// Skip trailing 'u8', 'u64', etc.
-			if !isHex && i < len(source) && source[i] == 'u' {
-				i++
-				col++
-				for i < len(source) && source[i] >= '0' && source[i] <= '9' {
-					i++
-					col++
-				}
-			}
-			// Hex literals with even digit count → ByteString; otherwise a numeric literal.
-			if isHex {
-				hexDigits := source[start+2 : i]
-				if len(hexDigits) > 0 && len(hexDigits)%2 == 0 {
-					tokens = append(tokens, moveToken{kind: moveTokString, value: hexDigits, line: line, col: startCol})
-					continue
-				}
-			}
-			tokens = append(tokens, moveToken{kind: moveTokNumber, value: source[start:i], line: line, col: startCol})
+			tokens = append(tokens, moveToken{kind: moveTokNumber, value: value, line: line, col: startCol})
 			continue
 		}
 

@@ -37,12 +37,13 @@
 //! - standalone functions (no receiver) -> private helper methods
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -521,18 +522,20 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             continue;
         }
 
-        // Number literal
+        // Number literal (F-026): the whole glued [0-9A-Za-z_] run is one Go
+        // integer literal, `0x` / `0o` / `0b` and legacy octal included.
         if ch.is_ascii_digit() {
-            let mut val = String::new();
-            while pos < chars.len() && (chars[pos].is_ascii_digit() || chars[pos] == '_') {
-                if chars[pos] != '_' {
-                    val.push(chars[pos]);
+            let end = scan_number_end(&chars, pos);
+            let text: String = chars[pos..end].iter().collect();
+            col += end - pos;
+            pos = end;
+            let n = match parse_int_literal("go", &text) {
+                Some(lit) => lit.value,
+                None => {
+                    errors.push(lex_error(&invalid_integer_literal("go", &text), file, l, c));
+                    BigInt::from(0)
                 }
-                pos += 1;
-                col += 1;
-            }
-            let n = <BigInt as Num>::from_str_radix(&val, 10)
-                .unwrap_or_else(|_| BigInt::from(0));
+            };
             tokens.push(Token { typ: TokenType::Number(n), line: l, col: c });
             continue;
         }

@@ -28,6 +28,7 @@
  *     domain type, `FixedArray<T, N>` (N literal)
  */
 
+import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 import type {
   ContractNode,
   PropertyNode,
@@ -73,6 +74,10 @@ interface Token {
   value: string;
   line: number;
   column: number;
+  /** F-026: a number token's text as written. */
+  raw?: string;
+  /** F-026: valid only as the direct operand of a unary minus (`2147483648`). */
+  negOnly?: boolean;
 }
 
 const KEYWORDS = new Map<string, TokenType>([
@@ -225,49 +230,28 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       continue;
     }
 
-    // Hex literal: 0x...
-    if (ch === '0' && (peekN(1) === 'x' || peekN(1) === 'X')) {
-      let val = '';
-      advance(); advance();
-      while (pos < source.length && /[0-9a-fA-F_]/.test(peek())) {
-        const d = advance();
-        if (d !== '_') val += d;
-      }
-      // Java numeric suffixes L/l
-      if (peek() === 'L' || peek() === 'l') advance();
-      add('number', String(BigInt('0x' + val)), l, c);
-      continue;
-    }
-
-    // Decimal number (Java integer literal). No floats in the subset.
+    // Number (F-026): the whole glued [0-9A-Za-z_] run is one Java integer
+    // literal (JLS 3.10.1), with Java's value: hex / octal / binary int and
+    // long literals wrap to two's complement (`0xFFFFFFFF` is -1).
     if (/[0-9]/.test(ch)) {
-      let val = '';
-      while (pos < source.length && /[0-9_]/.test(peek())) {
-        const d = advance();
-        if (d !== '_') val += d;
-      }
-      // Reject floats explicitly
+      const text = source.slice(pos, scanNumberEnd(source, pos));
+      while (pos < source.length && isNumberContinue(peek())) advance();
+      // A fraction (`1.5`) keeps its own wording; glued forms such as `1e3`
+      // or `10f` are not integer literals and take the shared refusal below.
       if (peek() === '.' && /[0-9]/.test(peekN(1))) {
         errors.push(makeDiagnostic(
           'floating-point literals are unsupported in Rúnar Java contracts',
           'error',
           { file, line: l, column: c },
         ));
-        // consume the fractional part
         advance();
-        while (pos < source.length && /[0-9_eE+\-]/.test(peek())) advance();
+        while (pos < source.length && /[0-9_eE+\-fFdD]/.test(peek())) advance();
+        add('number', '0', l, c);
+        continue;
       }
-      // Suffixes L/l (long) accepted; f/F/d/D rejected
-      if (peek() === 'L' || peek() === 'l') advance();
-      else if (peek() === 'f' || peek() === 'F' || peek() === 'd' || peek() === 'D') {
-        errors.push(makeDiagnostic(
-          'floating-point literals are unsupported in Rúnar Java contracts',
-          'error',
-          { file, line: l, column: c },
-        ));
-        advance();
-      }
-      add('number', val, l, c);
+      const lit = parseIntLiteral('java', text);
+      if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('java', text), 'error', { file, line: l, column: c }));
+      tokens.push({ type: 'number', value: lit ? lit.value.toString() : '0', line: l, column: c, raw: text, negOnly: lit?.negOnly ?? false });
       continue;
     }
 
@@ -1096,6 +1080,10 @@ class JavaParser {
     }
     if (t === '-') {
       this.advance();
+      // F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+      // legal only as the direct operand of this minus.
+      const next = this.current();
+      if (next.type === 'number' && next.negOnly) next.negOnly = false;
       return { kind: 'unary_expr', op: '-', operand: this.parseUnary() };
     }
     if (t === '+') {
@@ -1285,6 +1273,7 @@ class JavaParser {
 
     switch (t.type) {
       case 'number':
+        if (t.negOnly) this.errorAt(t, invalidIntegerLiteral('java', t.raw ?? t.value));
         this.advance();
         return { kind: 'bigint_literal', value: BigInt(t.value) };
       case 'true':

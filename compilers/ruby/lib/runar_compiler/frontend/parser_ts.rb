@@ -340,42 +340,12 @@ module RunarCompiler
           next
         end
 
-        # Numbers (including BigInt suffix 'n')
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one TypeScript
+        # integer literal, BigInt suffix `n` included.
         if ch >= "0" && ch <= "9"
-          start = i
-          if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
-            i += 2
-            col += 2
-            while i < n && hex_digit?(source[i])
-              i += 1
-              col += 1
-            end
-          elsif ch == "0" && i + 1 < n && (source[i + 1] == "o" || source[i + 1] == "O")
-            i += 2
-            col += 2
-            while i < n && source[i] >= "0" && source[i] <= "7"
-              i += 1
-              col += 1
-            end
-          elsif ch == "0" && i + 1 < n && (source[i + 1] == "b" || source[i + 1] == "B")
-            i += 2
-            col += 2
-            while i < n && (source[i] == "0" || source[i] == "1")
-              i += 1
-              col += 1
-            end
-          else
-            while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-              i += 1
-              col += 1
-            end
-          end
-          num_str = source[start...i].delete("_")
-          # Strip trailing BigInt suffix 'n'
-          if i < n && source[i] == "n"
-            i += 1
-            col += 1
-          end
+          stop, num_str, = IntLiteral.lex_number("ts", source, i, lex, file_name, line, start_col)
+          col += stop - i
+          i = stop
           tokens << Token.new(kind: TOK_NUMBER, value: num_str, line: line, col: start_col)
           next
         end

@@ -101,6 +101,10 @@ const Token = struct {
     text: []const u8,
     line: u32,
     col: u32,
+    /// F-026: a number token's literal as written (`text` holds its value).
+    raw: []const u8 = "",
+    /// F-026: valid only as the operand of a unary minus.
+    neg_only: bool = false,
 };
 
 // ============================================================================
@@ -186,8 +190,11 @@ const Tokenizer = struct {
             return .{ .kind = .string_literal, .text = self.source[start + 1 .. content_end], .line = sl, .col = sc };
         }
         if (c >= '0' and c <= '9') {
-            while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') _ = self.advance();
-            return .{ .kind = .number, .text = self.source[start..self.pos], .line = sl, .col = sc };
+            // F-026: the whole glued [0-9A-Za-z_] run is one Zig integer literal;
+            // stopping at the first non-digit read `0b1010` as `0` + `b1010`.
+            while (self.pos < self.source.len and int_literal.isNumberContinue(self.source[self.pos])) _ = self.advance();
+            const lit_text = self.source[start..self.pos];
+            return .{ .kind = .number, .text = lit_text, .raw = lit_text, .line = sl, .col = sc };
         }
         if (isIdentStart(c)) {
             while (self.pos < self.source.len and isIdentChar(self.source[self.pos])) _ = self.advance();
@@ -264,7 +271,9 @@ const Parser = struct {
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        p.current = p.normalizeNumber(p.current);
+        return p;
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -279,7 +288,7 @@ const Parser = struct {
         self.errors.append(self.allocator, f) catch {};
     }
 
-    fn bump(self: *Parser) Token { const prev = self.current; self.current = self.tokenizer.next(); return prev; }
+    fn bump(self: *Parser) Token { const prev = self.current; self.current = self.fetch(); return prev; }
 
     fn currentSourceLoc(self: *const Parser) types.SourceLocation {
         return .{ .file = self.file_name, .line = self.current.line, .column = self.current.col };
@@ -1323,44 +1332,21 @@ const Parser = struct {
                 _ = self.bump();
                 if (self.current.kind != .lbrace) { self.addError("expected '{' after '&.'"); break :blk null; }
                 _ = self.bump();
-                var elems: std.ArrayListUnmanaged(Expression) = .empty;
-                while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                    const elem = self.parseExpression() orelse return null;
-                    elems.append(self.allocator, elem) catch return null;
-                    if (self.current.kind == .comma) _ = self.bump();
-                }
+                const elems = self.parseListElements(.rbrace) orelse return null;
                 _ = self.expect(.rbrace);
-                break :blk .{ .array_literal = elems.items };
+                break :blk .{ .array_literal = elems };
             },
             .dot => blk: {
                 _ = self.bump();
                 if (self.current.kind != .lbrace) break :blk null;
                 _ = self.bump();
-                var elems: std.ArrayListUnmanaged(Expression) = .empty;
-                while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                    const elem = self.parseExpression() orelse return null;
-                    elems.append(self.allocator, elem) catch return null;
-                    if (self.current.kind == .comma) _ = self.bump();
-                }
+                const elems = self.parseListElements(.rbrace) orelse return null;
                 _ = self.expect(.rbrace);
-                break :blk .{ .array_literal = elems.items };
+                break :blk .{ .array_literal = elems };
             },
             .number => blk: {
                 const tok = self.bump();
-                if (std.fmt.parseInt(i64, tok.text, 10)) |val| {
-                    break :blk Expression{ .literal_int = val };
-                } else |_| {
-                    // Oversize decimal literal — carry as `literal_bigint`.
-                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
-                    // ordinary way to write secp256k1's group order, and accepted by the
-                    // other six tiers -- used to fall into the `invalid integer` arm
-                    // below, because this fallback only recognised decimal digits.
-                    if (int_literal.oversizeToDecimal(self.allocator, tok.text)) |decimal| {
-                        break :blk Expression{ .literal_bigint = decimal };
-                    }
-                    self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
-                    break :blk null;
-                }
+                break :blk self.numberLiteral(tok);
             },
             .kw_true => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = true }; },
             .kw_false => blk: { _ = self.bump(); break :blk Expression{ .literal_bool = false }; },
@@ -1387,14 +1373,9 @@ const Parser = struct {
                 _ = self.expect(.rbracket) orelse break :blk null;
                 _ = self.parseTypeNode(); // discard element type
                 _ = self.expect(.lbrace) orelse break :blk null;
-                var elems: std.ArrayListUnmanaged(Expression) = .empty;
-                while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                    const elem = self.parseExpression() orelse return null;
-                    elems.append(self.allocator, elem) catch return null;
-                    if (self.current.kind == .comma) _ = self.bump();
-                }
+                const elems = self.parseListElements(.rbrace) orelse return null;
                 _ = self.expect(.rbrace);
-                break :blk .{ .array_literal = elems.items };
+                break :blk .{ .array_literal = elems };
             },
             .at_sign => blk: {
                 // Zig builtins: @divTrunc(a,b) → a/b, @rem(a,b) → a%b, @mod(a,b) → a%b,
@@ -1431,10 +1412,34 @@ const Parser = struct {
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             const arg = self.parseExpression() orelse break;
             args.append(self.allocator, arg) catch {};
-            if (self.current.kind == .comma) _ = self.bump() else break;
+            if (self.current.kind == .comma) {
+                _ = self.bump();
+                continue;
+            }
+            // F-026: Zig requires the comma between arguments.
+            if (self.current.kind != .rparen) self.addError(lex_diag.ZIG_LIST_COMMA);
+            break;
         }
         _ = self.expect(.rparen);
         return args.items;
+    }
+
+    /// F-026: the elements of an array literal up to (not including) `close`.
+    /// Zig requires `,` between elements (a trailing one is allowed); without
+    /// it a stray token after a literal used to become an extra element.
+    fn parseListElements(self: *Parser, close: TokenKind) ?[]Expression {
+        var elems: std.ArrayListUnmanaged(Expression) = .empty;
+        while (self.current.kind != close and self.current.kind != .eof) {
+            const elem = self.parseExpression() orelse return null;
+            elems.append(self.allocator, elem) catch return null;
+            if (self.current.kind == .comma) {
+                _ = self.bump();
+                continue;
+            }
+            if (self.current.kind != close) self.addError(lex_diag.ZIG_LIST_COMMA);
+            break;
+        }
+        return elems.items;
     }
 
     // ---- Helpers ----
@@ -1460,6 +1465,38 @@ const Parser = struct {
     fn binOpFromCompoundAssign(k: TokenKind) BinOperator {
         return switch (k) { .plus_eq => .add, .minus_eq => .sub, .star_eq => .mul, .slash_eq => .div, .percent_eq => .mod, else => .add };
     }
+
+    /// F-026: a number token's `text` becomes the canonical decimal value of
+    /// its literal (`raw` keeps the literal as written), validated against
+    /// this surface's host-language rules
+    /// (packages/runar-compiler/src/passes/int-literal.ts). A malformed
+    /// literal is refused with the shared `invalid <Language> integer literal`.
+    fn normalizeNumber(self: *Parser, tok: Token) Token {
+        if (tok.kind != .number) return tok;
+        var t = tok;
+        const lit = int_literal.parse(self.allocator, "zig", tok.raw) orelse {
+            const msg = int_literal.invalidIntegerLiteral(self.allocator, "zig", tok.raw);
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            self.errors.append(self.allocator, f) catch {};
+            t.text = "0";
+            return t;
+        };
+        t.text = if (lit.small) |v| (std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch "0") else lit.big.?;
+        t.neg_only = lit.neg_only;
+        return t;
+    }
+
+    fn fetch(self: *Parser) Token {
+        return self.normalizeNumber(self.tokenizer.next());
+    }
+
+    /// F-026: the AST value of a (normalized) number token.
+    fn numberLiteral(self: *Parser, tok: Token) ?Expression {
+        _ = self;
+        if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
+        return Expression{ .literal_bigint = tok.text };
+    }
+
 };
 
 // ============================================================================

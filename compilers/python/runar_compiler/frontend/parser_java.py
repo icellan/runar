@@ -37,6 +37,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
@@ -155,13 +156,17 @@ _KEYWORDS: dict[str, int] = {
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "raw", "neg_only")
 
-    def __init__(self, kind: int, value: str, line: int, col: int):
+    def __init__(self, kind: int, value: str, line: int, col: int, raw: str = "", neg_only: bool = False):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # F-026: a number token's text as written, and whether it is valid
+        # only under a unary minus.
+        self.raw = raw
+        self.neg_only = neg_only
 
 
 # ---------------------------------------------------------------------------
@@ -416,29 +421,14 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             tokens.append(Token(TOK_STRING, val, l, c))
             continue
 
-        # Hex integer literal 0x...
-        if ch == "0" and pos + 1 < n and source[pos + 1] in ("x", "X"):
-            start = pos
-            pos += 2
-            col += 2
-            while pos < n and (source[pos].isdigit() or source[pos] in "abcdefABCDEF_"):
-                pos += 1
-                col += 1
-            val = source[start:pos].replace("_", "")
-            tokens.append(Token(TOK_NUMBER, val, l, c))
-            continue
-
-        # Numeric literal (decimal). Trailing L/l suffix accepted.
-        if ch.isdigit():
-            start = pos
-            while pos < n and (source[pos].isdigit() or source[pos] == "_"):
-                pos += 1
-                col += 1
-            if pos < n and source[pos] in ("L", "l"):
-                pos += 1
-                col += 1
-            val = source[start:pos].replace("_", "").rstrip("Ll")
-            tokens.append(Token(TOK_NUMBER, val, l, c))
+        # Numeric literal (F-026): the whole glued [0-9A-Za-z_] run is one Java
+        # integer literal (JLS 3.10.1), with Java's value: hex / octal /
+        # binary int and long literals wrap to two's complement.
+        if "0" <= ch <= "9":
+            end, val, lit, raw = lex_number("java", source, pos, lex, file_name, l, c)
+            col += end - pos
+            pos = end
+            tokens.append(Token(TOK_NUMBER, val, l, c, raw, bool(lit and lit.neg_only)))
             continue
 
         # Identifier / keyword
@@ -1258,6 +1248,10 @@ class _JavaParser:
         if self.match_tok(TOK_TILDE):
             return UnaryExpr(op="~", operand=self._parse_unary())
         if self.match_tok(TOK_MINUS):
+            # F-026 / JLS 3.10.1: `2147483648` and `9223372036854775808L` are
+            # legal only as the direct operand of this minus.
+            if self.check(TOK_NUMBER):
+                self.peek().neg_only = False
             return UnaryExpr(op="-", operand=self._parse_unary())
         if self.match_tok(TOK_PLUS):
             # Unary +x == x (matches Java parser reference).
@@ -1401,9 +1395,11 @@ class _JavaParser:
         tok = self.peek()
 
         if tok.kind == TOK_NUMBER:
+            if tok.neg_only:
+                self.errors.append(lex_error(invalid_integer_literal("java", tok.raw), self.file_name, tok.line, tok.col))
             self.advance()
             try:
-                val = int(tok.value, 0) if tok.value.startswith(("0x", "0X")) else int(tok.value)
+                val = int(tok.value)
             except ValueError:
                 val = 0
             return BigIntLiteral(value=val)

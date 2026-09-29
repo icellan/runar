@@ -255,7 +255,8 @@ module RunarCompiler
 
           # Numbers (and hex byte string literals: 0x... -> ByteString)
           if ch >= "0" && ch <= "9"
-            if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
+            # (lowercase x only, as the TS reference: `0X` is an invalid integer)
+            if ch == "0" && i + 1 < n && source[i + 1] == "x"
               i += 2
               col += 2
               hex_start = i
@@ -266,17 +267,11 @@ module RunarCompiler
               tokens << Token.new(kind: TOK_HEXSTRING, value: source[hex_start...i], line: line, col: start_col)
               next
             end
-            start = i
-            while i < n && source[i] >= "0" && source[i] <= "9"
-              i += 1
-              col += 1
-            end
-            # Skip trailing BigInt suffix 'n' (from TS syntax)
-            if i < n && source[i] == "n"
-              i += 1
-              col += 1
-            end
-            tokens << Token.new(kind: TOK_NUMBER, value: source[start...i], line: line, col: start_col)
+            # F-026: the whole glued [0-9A-Za-z_] run is one Solidity literal.
+            stop, value, = IntLiteral.lex_number("sol", source, i, lex, file_name, line, start_col)
+            col += stop - i
+            i = stop
+            tokens << Token.new(kind: TOK_NUMBER, value: value, line: line, col: start_col)
             next
           end
 

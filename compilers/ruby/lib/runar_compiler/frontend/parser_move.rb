@@ -319,7 +319,8 @@ module RunarCompiler
         start_col = col
 
         # Hex literal: 0x...
-        if ch == "0" && i + 1 < n && (source[i + 1] == "x" || source[i + 1] == "X")
+        # (lowercase x only, as the TS reference: `0X` is an invalid integer)
+        if ch == "0" && i + 1 < n && source[i + 1] == "x"
           i += 2
           col += 2
           hex_start = i
@@ -331,14 +332,12 @@ module RunarCompiler
           next
         end
 
-        # Number
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
         if ch >= "0" && ch <= "9"
-          num_start = i
-          while i < n && ((source[i] >= "0" && source[i] <= "9") || source[i] == "_")
-            i += 1
-            col += 1
-          end
-          tokens << MoveToken.new(kind: MoveTokens::TOK_NUMBER, value: source[num_start...i].delete("_"), line: line, col: start_col)
+          stop, value, = IntLiteral.lex_number("move", source, i, lex, file_name, line, start_col)
+          col += stop - i
+          i = stop
+          tokens << MoveToken.new(kind: MoveTokens::TOK_NUMBER, value: value, line: line, col: start_col)
           next
         end
 

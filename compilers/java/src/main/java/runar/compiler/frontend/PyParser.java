@@ -529,24 +529,12 @@ public final class PyParser {
                 continue;
             }
 
-            // Numbers.
-            if (Character.isDigit(ch)) {
-                int start = i;
-                if (ch == '0' && i + 1 < n && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
-                    i += 2;
-                    col += 2;
-                    while (i < n && isHexDigit(source.charAt(i))) {
-                        i++;
-                        col++;
-                    }
-                } else {
-                    while (i < n && (Character.isDigit(source.charAt(i)) || source.charAt(i) == '_')) {
-                        i++;
-                        col++;
-                    }
-                }
-                String numStr = source.substring(start, i).replace("_", "");
-                tokens.add(new Token(TokKind.NUMBER, numStr, line, startCol));
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+            if (ch >= '0' && ch <= '9') {
+                IntLiteral.Scan sc = IntLiteral.lex("py", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                tokens.add(new Token(TokKind.NUMBER, sc.value(), line, startCol));
                 continue;
             }
 
@@ -987,6 +975,8 @@ public final class PyParser {
             if (match(TokKind.ASSIGN)) {
                 initializer = parseExpression();
             }
+            // F-026: the field declaration ends at its line break.
+            expectStatementEnd();
             skipNewlines();
 
             return new PropertyNode(propName, typeNode, isReadonly, initializer, location, null);
@@ -1105,9 +1095,27 @@ public final class PyParser {
                 if (check(TokKind.DEDENT) || check(TokKind.EOF)) break;
                 Statement s = parseStatement();
                 if (s != null) stmts.add(s);
+                expectStatementEnd();
             }
             match(TokKind.DEDENT);
             return stmts;
+        }
+
+        /**
+         * F-026: a simple statement ends at its line break; compound statements
+         * end on a NEWLINE / DEDENT they consumed themselves. Pre-fix,
+         * {@code lim = 0b1010} parsed as {@code lim = 0} plus a second statement
+         * {@code b1010}.
+         */
+        void expectStatementEnd() {
+            if (check(TokKind.NEWLINE) || check(TokKind.DEDENT) || check(TokKind.EOF)) return;
+            if (pos > 0) {
+                TokKind prev = tokens.get(pos - 1).kind;
+                if (prev == TokKind.NEWLINE || prev == TokKind.DEDENT) return;
+            }
+            Token t = tokens.get(pos);
+            errors.add(LexDiag.at(fileName, t.line, t.col, LexDiag.PY_STATEMENT_LINE_BREAK));
+            while (!check(TokKind.NEWLINE) && !check(TokKind.DEDENT) && !check(TokKind.EOF)) advance();
         }
 
         // -- Statement parsing -----------------------------------------------

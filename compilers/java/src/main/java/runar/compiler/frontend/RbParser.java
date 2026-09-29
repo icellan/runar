@@ -576,37 +576,11 @@ public final class RbParser {
                     continue;
                 }
 
-                // Number (decimal or hex)
-                if (Character.isDigit(ch)) {
-                    StringBuilder buf = new StringBuilder();
-                    if (ch == '0' && pos + 1 < line.length()
-                        && (line.charAt(pos + 1) == 'x' || line.charAt(pos + 1) == 'X')) {
-                        buf.append("0x");
-                        pos += 2;
-                        while (pos < line.length()) {
-                            char c2 = line.charAt(pos);
-                            if (c2 == '_') { pos++; continue; }
-                            if (Character.isDigit(c2)
-                                || (c2 >= 'a' && c2 <= 'f') || (c2 >= 'A' && c2 <= 'F')) {
-                                buf.append(c2);
-                                pos++;
-                            } else {
-                                break;
-                            }
-                        }
-                    } else {
-                        while (pos < line.length()) {
-                            char c2 = line.charAt(pos);
-                            if (c2 == '_') { pos++; continue; }
-                            if (Character.isDigit(c2)) {
-                                buf.append(c2);
-                                pos++;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    tokens.add(new Token(TK.NUMBER, buf.toString(), lineNum, col));
+                // Number (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+                if (ch >= '0' && ch <= '9') {
+                    IntLiteral.Scan sc = IntLiteral.lex("rb", line, pos, lex, filename, lineNum, col);
+                    pos = sc.end();
+                    tokens.add(new Token(TK.NUMBER, sc.value(), lineNum, col));
                     continue;
                 }
 

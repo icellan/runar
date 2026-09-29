@@ -28,12 +28,13 @@
 //! - Move builtins mapped: `check_sig` -> `checkSig`, `hash160` -> `hash160`, etc.
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error_at_index, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -418,18 +419,18 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             continue;
         }
 
-        // Numbers
+        // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one Move literal.
         if ch.is_ascii_digit() {
             let start = i;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == '_' || chars[i] == 'n') {
-                i += 1;
-            }
-            let num_str: String = chars[start..i]
-                .iter()
-                .filter(|c| **c != '_' && **c != 'n')
-                .collect();
-            let val = <BigInt as Num>::from_str_radix(&num_str, 10)
-                .unwrap_or_else(|_| BigInt::from(0));
+            i = scan_number_end(&chars, i);
+            let text: String = chars[start..i].iter().collect();
+            let val = match parse_int_literal("move", &text) {
+                Some(lit) => lit.value,
+                None => {
+                    errors.push(lex_error_at_index(&invalid_integer_literal("move", &text), file, &chars, start));
+                    BigInt::from(0)
+                }
+            };
             tokens.push(Token::NumberLit(val));
             continue;
         }

@@ -138,6 +138,10 @@ const Token = struct {
     text: []const u8,
     line: u32,
     col: u32,
+    /// F-026: a number token's literal as written (`text` holds its value).
+    raw: []const u8 = "",
+    /// F-026: valid only as the operand of a unary minus.
+    neg_only: bool = false,
 };
 
 // ============================================================================
@@ -306,21 +310,12 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
 
         // Numbers
         if (ch >= '0' and ch <= '9') {
+            // F-026: the whole glued [0-9A-Za-z_] run is one Python literal.
             const start = i;
-            if (ch == '0' and i + 1 < source.len and (source[i + 1] == 'x' or source[i + 1] == 'X')) {
-                i += 2;
-                col += 2;
-                while (i < source.len and isHexDigit(source[i])) {
-                    i += 1;
-                    col += 1;
-                }
-            } else {
-                while (i < source.len and ((source[i] >= '0' and source[i] <= '9') or source[i] == '_')) {
-                    i += 1;
-                    col += 1;
-                }
-            }
-            tokens.append(allocator, .{ .kind = .number, .text = source[start..i], .line = line, .col = start_col }) catch {};
+            const stop = int_literal.scanNumberEnd(source, i);
+            col += @intCast(stop - i);
+            i = stop;
+            tokens.append(allocator, .{ .kind = .number, .text = source[start..i], .raw = source[start..i], .line = line, .col = start_col }) catch {};
             continue;
         }
 
@@ -727,7 +722,9 @@ const Parser = struct {
         const tokens = insertIndentation(allocator, raw);
         var tokenizer = Tokenizer.initFromTokens(tokens);
         const first = tokenizer.next();
-        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        p.current = p.normalizeNumber(p.current);
+        return p;
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -764,7 +761,7 @@ const Parser = struct {
 
     fn bump(self: *Parser) Token {
         const prev = self.current;
-        self.current = self.tokenizer.next();
+        self.current = self.fetch();
         return prev;
     }
 
@@ -976,6 +973,8 @@ const Parser = struct {
             initializer = self.parseExpression();
         }
 
+        // F-026: the field declaration ends at its line break.
+        self.expectStatementEnd();
         self.skipNewlines();
 
         // Capture FixedArray shape so expand_fixed_arrays.zig can see the
@@ -1286,9 +1285,25 @@ const Parser = struct {
             self.skipNewlines();
             if (self.current.kind == .dedent or self.current.kind == .eof) break;
             if (self.parseStatement()) |s| stmts.append(self.allocator, s) catch {};
+            self.expectStatementEnd();
         }
         _ = self.match(.dedent);
         return stmts.items;
+    }
+
+    /// F-026: a simple statement ends at its line break; compound statements
+    /// end on a NEWLINE / DEDENT they consumed themselves. Pre-fix,
+    /// `lim = 0b1010` parsed as `lim = 0` plus a second statement `b1010`.
+    fn expectStatementEnd(self: *Parser) void {
+        const k = self.current.kind;
+        if (k == .newline or k == .dedent or k == .eof) return;
+        // `current` is tokens[pos - 1], so the last consumed token is tokens[pos - 2].
+        if (self.tokenizer.pos >= 2) {
+            const prev = self.tokenizer.tokens[self.tokenizer.pos - 2].kind;
+            if (prev == .newline or prev == .dedent) return;
+        }
+        self.addError(lex_diag.PY_STATEMENT_LINE_BREAK);
+        while (self.current.kind != .newline and self.current.kind != .dedent and self.current.kind != .eof) _ = self.bump();
     }
 
     // ---- Statements ----
@@ -1938,42 +1953,7 @@ const Parser = struct {
         return switch (self.current.kind) {
             .number => blk: {
                 const tok = self.bump();
-                // Strip underscores from number text. Buffer sized for 256-bit
-                // decimal literals (78 digits) with headroom; oversize tokens
-                // are rejected explicitly instead of being silently truncated.
-                var stripped_buf: [160]u8 = undefined;
-                var stripped_len: usize = 0;
-                var overflow = false;
-                for (tok.text) |ch| {
-                    if (ch == '_') continue;
-                    if (stripped_len >= stripped_buf.len) {
-                        overflow = true;
-                        break;
-                    }
-                    stripped_buf[stripped_len] = ch;
-                    stripped_len += 1;
-                }
-                if (overflow) {
-                    self.addErrorFmt("integer literal too long: '{s}'", .{tok.text});
-                    break :blk null;
-                }
-                const stripped = stripped_buf[0..stripped_len];
-                if (std.fmt.parseInt(i64, stripped, 0)) |val| {
-                    break :blk Expression{ .literal_int = val };
-                } else |_| {
-                    // Oversize decimal literal — carry the canonical decimal
-                    // text on a `literal_bigint` node so codegen emits the
-                    // correct push bytes (matches TS / Go / Python).
-                    // N-134: an oversize literal in ANY radix. `0xFFFF...41n` -- the
-                    // ordinary way to write secp256k1's group order, and accepted by the
-                    // other six tiers -- used to fall into the `invalid integer` arm
-                    // below, because this fallback only recognised decimal digits.
-                    if (int_literal.oversizeToDecimal(self.allocator, stripped)) |decimal| {
-                        break :blk Expression{ .literal_bigint = decimal };
-                    }
-                    self.addErrorFmt("invalid integer: '{s}'", .{tok.text});
-                    break :blk null;
-                }
+                break :blk self.numberLiteral(tok);
             },
             .string_literal => blk: {
                 const tok = self.bump();
@@ -2105,6 +2085,38 @@ const Parser = struct {
             else => .add,
         };
     }
+
+    /// F-026: a number token's `text` becomes the canonical decimal value of
+    /// its literal (`raw` keeps the literal as written), validated against
+    /// this surface's host-language rules
+    /// (packages/runar-compiler/src/passes/int-literal.ts). A malformed
+    /// literal is refused with the shared `invalid <Language> integer literal`.
+    fn normalizeNumber(self: *Parser, tok: Token) Token {
+        if (tok.kind != .number) return tok;
+        var t = tok;
+        const lit = int_literal.parse(self.allocator, "py", tok.raw) orelse {
+            const msg = int_literal.invalidIntegerLiteral(self.allocator, "py", tok.raw);
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            self.errors.append(self.allocator, f) catch {};
+            t.text = "0";
+            return t;
+        };
+        t.text = if (lit.small) |v| (std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch "0") else lit.big.?;
+        t.neg_only = lit.neg_only;
+        return t;
+    }
+
+    fn fetch(self: *Parser) Token {
+        return self.normalizeNumber(self.tokenizer.next());
+    }
+
+    /// F-026: the AST value of a (normalized) number token.
+    fn numberLiteral(self: *Parser, tok: Token) ?Expression {
+        _ = self;
+        if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
+        return Expression{ .literal_bigint = tok.text };
+    }
+
 };
 
 // ============================================================================

@@ -72,6 +72,22 @@ export class TypeError extends CompilerError {
 export const UNTERMINATED_STRING_LITERAL = 'unterminated string literal';
 
 /**
+ * F-026: a .runar.zig call argument list or array literal whose elements are
+ * not separated by commas. Zig requires the comma (a trailing one is allowed).
+ */
+export const ZIG_LIST_COMMA = "expected ',' between list elements";
+
+/**
+ * F-026: a .runar.py statement (or class-level field) followed by more code on
+ * the same line. Rúnar's Python surface has no `;`, so a statement must end at
+ * the line break.
+ */
+export const PY_STATEMENT_LINE_BREAK = 'expected a line break between statements';
+
+/** F-026: prefix of a TypeScript syntactic diagnostic surfaced on .runar.ts. */
+export const TS_SYNTAX_ERROR_PREFIX = 'TypeScript syntax error: ';
+
+/**
  * Helper: create a diagnostic object without throwing.
  */
 export function makeDiagnostic(

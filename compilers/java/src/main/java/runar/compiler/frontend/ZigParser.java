@@ -374,26 +374,14 @@ public final class ZigParser {
                 continue;
             }
 
-            // Number literal
-            if (Character.isDigit(ch)) {
-                StringBuilder sb = new StringBuilder();
-                if (ch == '0' && pos + 1 < n && (source.charAt(pos + 1) == 'x' || source.charAt(pos + 1) == 'X')) {
-                    sb.append("0x");
-                    pos += 2;
-                    col += 2;
-                    while (pos < n && isHexDigitOrUnderscore(source.charAt(pos))) {
-                        if (source.charAt(pos) != '_') sb.append(source.charAt(pos));
-                        pos++;
-                        col++;
-                    }
-                } else {
-                    while (pos < n && (Character.isDigit(source.charAt(pos)) || source.charAt(pos) == '_')) {
-                        if (source.charAt(pos) != '_') sb.append(source.charAt(pos));
-                        pos++;
-                        col++;
-                    }
-                }
-                out.add(new Token(Kind.NUMBER, sb.toString(), tokLine, tokCol));
+            // Number literal (F-026): the whole glued [0-9A-Za-z_] run is one
+            // Zig integer literal. Stopping at the first non-digit read
+            // `0b1010` as `0` + `b1010`.
+            if (ch >= '0' && ch <= '9') {
+                IntLiteral.Scan sc = IntLiteral.lex("zig", source, pos, lex, filename, tokLine, tokCol);
+                col += sc.end() - pos;
+                pos = sc.end();
+                out.add(new Token(Kind.NUMBER, sc.value(), tokLine, tokCol));
                 continue;
             }
 
@@ -1321,11 +1309,7 @@ public final class ZigParser {
                 advance(); // '&'
                 advance(); // '.'
                 advance(); // '{'
-                List<Expression> elements = new ArrayList<>();
-                while (current().kind != Kind.RBRACE && current().kind != Kind.EOF) {
-                    elements.add(parseExpression());
-                    match(Kind.COMMA);
-                }
+                List<Expression> elements = parseListElements(Kind.RBRACE);
                 expect(Kind.RBRACE, "}");
                 return new ArrayLiteralExpr(elements);
             }
@@ -1334,11 +1318,7 @@ public final class ZigParser {
             if (tok.kind == Kind.DOT && peekAhead(1).kind == Kind.LBRACE) {
                 advance(); // '.'
                 advance(); // '{'
-                List<Expression> elements = new ArrayList<>();
-                while (current().kind != Kind.RBRACE && current().kind != Kind.EOF) {
-                    elements.add(parseExpression());
-                    match(Kind.COMMA);
-                }
+                List<Expression> elements = parseListElements(Kind.RBRACE);
                 expect(Kind.RBRACE, "}");
                 return new ArrayLiteralExpr(elements);
             }
@@ -1367,11 +1347,7 @@ public final class ZigParser {
             }
             if (tok.kind == Kind.LBRACKET) {
                 advance();
-                List<Expression> elements = new ArrayList<>();
-                while (current().kind != Kind.RBRACKET && current().kind != Kind.EOF) {
-                    elements.add(parseExpression());
-                    match(Kind.COMMA);
-                }
+                List<Expression> elements = parseListElements(Kind.RBRACKET);
                 expect(Kind.RBRACKET, "]");
                 return new ArrayLiteralExpr(elements);
             }
@@ -1460,15 +1436,31 @@ public final class ZigParser {
             return new Identifier(tok.value == null || tok.value.isEmpty() ? "unknown" : tok.value);
         }
 
+        /**
+         * F-026: the elements of a call argument list or array literal up to (not
+         * including) {@code close}. Zig requires {@code ,} between elements (a
+         * trailing one is allowed); without it a stray token after a literal used
+         * to become an extra element.
+         */
+        List<Expression> parseListElements(Kind close) {
+            List<Expression> elements = new ArrayList<>();
+            while (current().kind != close && current().kind != Kind.EOF) {
+                elements.add(parseExpression());
+                if (match(Kind.COMMA)) continue;
+                if (current().kind != close) {
+                    Token t = current();
+                    errors.add(LexDiag.at(file, t.line, t.col, LexDiag.ZIG_LIST_COMMA));
+                }
+                break;
+            }
+            return elements;
+        }
+
         Expression parsePostfixChain(Expression expr) {
             while (true) {
                 if (current().kind == Kind.LPAREN) {
                     advance();
-                    List<Expression> args = new ArrayList<>();
-                    while (current().kind != Kind.RPAREN && current().kind != Kind.EOF) {
-                        args.add(parseExpression());
-                        match(Kind.COMMA);
-                    }
+                    List<Expression> args = parseListElements(Kind.RPAREN);
                     expect(Kind.RPAREN, ")");
                     expr = new CallExpr(expr, args);
                     continue;

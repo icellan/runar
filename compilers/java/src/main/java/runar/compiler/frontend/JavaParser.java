@@ -159,6 +159,10 @@ public final class JavaParser {
         List<String> errors = new ArrayList<>();
         for (var d : diagnostics.getDiagnostics()) {
             if (d.getKind() == Diagnostic.Kind.ERROR) {
+                // F-026: javac's error on a malformed integer literal also
+                // gets the shared text every other tier emits for it.
+                String shared = sharedLiteralDiagnostic(source, (int) d.getPosition());
+                if (shared != null) errors.add(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + shared);
                 errors.add(d.getLineNumber() + ":" + d.getColumnNumber() + ": " + d.getMessage(null));
             }
         }
@@ -172,6 +176,24 @@ public final class JavaParser {
             throw new ParseException("no compilation unit parsed from " + filename);
         }
         return new Unit(iter.next(), Trees.instance(task).getSourcePositions());
+    }
+
+    /**
+     * F-026: when javac reports an error inside a number token (the run of
+     * {@code [0-9A-Za-z_]} starting at a digit that contains {@code pos}), the
+     * shared refusal of that literal. javac has already judged the context, so a
+     * literal valid only under a unary minus counts as refused here.
+     */
+    private static String sharedLiteralDiagnostic(String source, int pos) {
+        if (pos < 0 || pos >= source.length() || !IntLiteral.isNumberContinue(source.charAt(pos))) return null;
+        int start = pos;
+        while (start > 0 && IntLiteral.isNumberContinue(source.charAt(start - 1))) start--;
+        char first = source.charAt(start);
+        if (first < '0' || first > '9') return null;
+        String text = source.substring(start, IntLiteral.scanEnd(source, start));
+        IntLiteral.Lit lit = IntLiteral.parse("java", text);
+        if (lit != null && !lit.negOnly()) return null;
+        return IntLiteral.invalid("java", text);
     }
 
     private static String stripRunarInfix(String filename) {
@@ -692,8 +714,12 @@ public final class JavaParser {
             && (isBigIntegerValueOf(ms) || isBigintOf(ms))
             && mi.getArguments().size() == 1
             && mi.getArguments().get(0) instanceof LiteralTree n
-            && n.getValue() instanceof Number num) {
-            return new BigIntLiteral(BigInteger.valueOf(num.longValue()));
+            && (n.getValue() instanceof Integer || n.getValue() instanceof Long)) {
+            // F-026: only an int / long literal. A floating-point one
+            // (`Bigint.of(1e3)`, `BigInteger.valueOf(1.5)`) used to be
+            // truncated here by longValue(); it now falls through to
+            // convertLiteral, which refuses it.
+            return new BigIntLiteral(BigInteger.valueOf(((Number) n.getValue()).longValue()));
         }
         // Bigint.of(<arbitrary expression>) — wrapping a BigInteger-typed value
         // (e.g. the result of a builtin like `percentOf` or `extractLocktime`)

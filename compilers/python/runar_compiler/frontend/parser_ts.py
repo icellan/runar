@@ -19,6 +19,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
@@ -276,36 +277,12 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             _add(Token(TOK_STRING, val, line, start_col))
             continue
 
-        # Numbers (including BigInt suffix 'n')
-        if ch.isdigit():
-            start = i
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
-                i += 2
-                col += 2
-                while i < n and _is_hex_digit(source[i]):
-                    i += 1
-                    col += 1
-            elif ch == "0" and i + 1 < n and source[i + 1] in ("o", "O"):
-                i += 2
-                col += 2
-                while i < n and source[i] in "01234567":
-                    i += 1
-                    col += 1
-            elif ch == "0" and i + 1 < n and source[i + 1] in ("b", "B"):
-                i += 2
-                col += 2
-                while i < n and source[i] in "01":
-                    i += 1
-                    col += 1
-            else:
-                while i < n and (source[i].isdigit() or source[i] == "_"):
-                    i += 1
-                    col += 1
-            num_str = source[start:i].replace("_", "")
-            # Strip trailing BigInt suffix 'n'
-            if i < n and source[i] == "n":
-                i += 1
-                col += 1
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one TypeScript
+        # integer literal, BigInt suffix `n` included.
+        if "0" <= ch <= "9":
+            end, num_str, _, _ = lex_number("ts", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
             _add(Token(TOK_NUMBER, num_str, line, start_col))
             continue
 

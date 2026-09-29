@@ -18,6 +18,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
@@ -315,34 +316,22 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
 
         # Numbers
         if "0" <= ch <= "9":
-            start = i
-            is_hex = False
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
-                is_hex = True
+            if ch == "0" and i + 1 < n and source[i + 1] == "x":
+                # F-026: a lowercase `0x` is a ByteString literal on this
+                # surface, whatever its length (as the TS reference).
                 i += 2
                 col += 2
+                hex_start = i
                 while i < n and _is_hex_digit(source[i]):
                     i += 1
                     col += 1
-            else:
-                while i < n and "0" <= source[i] <= "9":
-                    i += 1
-                    col += 1
-            # Skip trailing type suffixes like u8, u64, etc.
-            if not is_hex and i < n and source[i] == "u":
-                i += 1
-                col += 1
-                while i < n and "0" <= source[i] <= "9":
-                    i += 1
-                    col += 1
-            # Hex literals with even digit count → ByteString token; otherwise
-            # fall back to a numeric literal.
-            if is_hex:
-                hex_digits = source[start + 2 : i]
-                if len(hex_digits) > 0 and len(hex_digits) % 2 == 0:
-                    tokens.append(Token(TOK_STRING, hex_digits, line, start_col))
-                    continue
-            tokens.append(Token(TOK_NUMBER, source[start:i], line, start_col))
+                tokens.append(Token(TOK_STRING, source[hex_start:i], line, start_col))
+                continue
+            # F-026: the whole glued [0-9A-Za-z_] run is one Move literal.
+            end, value, _, _ = lex_number("move", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
+            tokens.append(Token(TOK_NUMBER, value, line, start_col))
             continue
 
         # Identifiers and keywords

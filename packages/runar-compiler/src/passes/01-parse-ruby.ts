@@ -34,6 +34,7 @@ import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.j
 import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
+import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -307,23 +308,14 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
         continue;
       }
 
-      // Numbers (decimal and hex)
+      // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
       if (ch >= '0' && ch <= '9') {
-        let num = '';
-        if (ch === '0' && pos + 1 < line.length && (line[pos + 1] === 'x' || line[pos + 1] === 'X')) {
-          num = '0x';
-          pos += 2;
-          while (pos < line.length && /[0-9a-fA-F_]/.test(line[pos]!)) {
-            if (line[pos] !== '_') num += line[pos];
-            pos++;
-          }
-        } else {
-          while (pos < line.length && /[0-9_]/.test(line[pos]!)) {
-            if (line[pos] !== '_') num += line[pos];
-            pos++;
-          }
-        }
-        add('number', num, lineNum, col);
+        const end = scanNumberEnd(line, pos);
+        const text = line.slice(pos, end);
+        pos = end;
+        const lit = parseIntLiteral('rb', text);
+        if (!lit) errors.push(makeDiagnostic(invalidIntegerLiteral('rb', text), 'error', { file, line: lineNum, column: col }));
+        add('number', lit ? lit.value.toString() : '0', lineNum, col);
         continue;
       }
 

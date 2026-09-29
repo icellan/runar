@@ -139,6 +139,10 @@ const Token = struct {
     text: []const u8,
     line: u32,
     col: u32,
+    /// F-026: a number token's literal as written (`text` holds its value).
+    raw: []const u8 = "",
+    /// F-026: valid only as the operand of a unary minus.
+    neg_only: bool = false,
 };
 
 // ============================================================================
@@ -234,8 +238,9 @@ const Tokenizer = struct {
 
         // Numbers: decimal, hex (0x...)
         if (c >= '0' and c <= '9') {
-            if (c == '0' and (self.peekAt(1) == 'x' or self.peekAt(1) == 'X')) {
-                // Hex literal: 0x...
+            if (c == '0' and self.peekAt(1) == 'x') {
+                // Hex literal: 0x... (lowercase only, as the TS reference: `0X`
+                // is refused as an integer literal)
                 _ = self.advance(); // '0'
                 _ = self.advance(); // 'x'
                 const hex_start = self.pos;
@@ -243,13 +248,11 @@ const Tokenizer = struct {
                 // Return just the hex digits (without 0x prefix) as hex_string
                 return .{ .kind = .hex_string, .text = self.source[hex_start..self.pos], .line = sl, .col = sc };
             }
-            // Decimal number (skip underscores for Rust numeric literals)
-            while (self.pos < self.source.len and ((self.source[self.pos] >= '0' and self.source[self.pos] <= '9') or self.source[self.pos] == '_')) _ = self.advance();
-            // Skip type suffixes like i128, u64, etc.
-            if (self.pos < self.source.len and (self.source[self.pos] == 'i' or self.source[self.pos] == 'u')) {
-                while (self.pos < self.source.len and isIdentChar(self.source[self.pos])) _ = self.advance();
-            }
-            return .{ .kind = .number, .text = self.source[start..self.pos], .line = sl, .col = sc };
+            // F-026: the whole glued [0-9A-Za-z_] run is one Rust integer
+            // literal (digits, separators and any type suffix), validated whole.
+            while (self.pos < self.source.len and int_literal.isNumberContinue(self.source[self.pos])) _ = self.advance();
+            const lit_text = self.source[start..self.pos];
+            return .{ .kind = .number, .text = lit_text, .raw = lit_text, .line = sl, .col = sc };
         }
 
         // Identifiers and keywords
@@ -504,6 +507,9 @@ const Parser = struct {
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
     depth: u32,
+    /// F-026: the text of the one number token a unary minus has just
+    /// licensed to be its negation-only minimum (`2147483648`, `128i8`).
+    neg_allowed: ?[]const u8 = null,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: identifier_collision.DeclaredIdents = .{},
 
@@ -518,7 +524,9 @@ const Parser = struct {
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        var p: Parser = .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
+        p.current = p.normalizeNumber(p.current);
+        return p;
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -551,7 +559,7 @@ const Parser = struct {
 
     fn bump(self: *Parser) Token {
         const prev = self.current;
-        self.current = self.tokenizer.next();
+        self.current = self.fetch();
         return prev;
     }
 
@@ -1536,6 +1544,24 @@ const Parser = struct {
     fn parseUnary(self: *Parser) ?Expression {
         if (self.current.kind == .minus) {
             _ = self.bump();
+            // F-026: a signed-suffix minimum (`128i8`) is legal under this
+            // minus, through parentheses, as rustc's overflowing_literals lint.
+            // The tokenizer is a plain value, so a copy is a free lookahead.
+            var look = self.tokenizer;
+            var t = self.current;
+            var opens: usize = 0;
+            while (t.kind == .lparen) : (opens += 1) t = look.next();
+            if (t.kind == .number) {
+                var closed = true;
+                var j: usize = 0;
+                while (j < opens) : (j += 1) {
+                    if (look.next().kind != .rparen) {
+                        closed = false;
+                        break;
+                    }
+                }
+                if (closed) self.neg_allowed = t.raw;
+            }
             const o = self.parseUnary() orelse return null;
             const uop = self.allocator.create(UnaryOp) catch return null;
             uop.* = .{ .op = .negate, .operand = o };
@@ -1658,8 +1684,7 @@ const Parser = struct {
         return switch (self.current.kind) {
             .number => blk: {
                 const tok = self.bump();
-                if (self.parseNumberExpr(tok.text)) |expr| break :blk expr;
-                break :blk null;
+                break :blk self.numberLiteral(tok);
             },
             .hex_string => blk: {
                 const tok = self.bump();
@@ -1772,6 +1797,46 @@ const Parser = struct {
             else => .add,
         };
     }
+
+    /// F-026: a number token's `text` becomes the canonical decimal value of
+    /// its literal (`raw` keeps the literal as written), validated against
+    /// this surface's host-language rules
+    /// (packages/runar-compiler/src/passes/int-literal.ts). A malformed
+    /// literal is refused with the shared `invalid <Language> integer literal`.
+    fn normalizeNumber(self: *Parser, tok: Token) Token {
+        if (tok.kind != .number) return tok;
+        var t = tok;
+        const lit = int_literal.parse(self.allocator, "rs", tok.raw) orelse {
+            const msg = int_literal.invalidIntegerLiteral(self.allocator, "rs", tok.raw);
+            const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+            self.errors.append(self.allocator, f) catch {};
+            t.text = "0";
+            return t;
+        };
+        t.text = if (lit.small) |v| (std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch "0") else lit.big.?;
+        t.neg_only = lit.neg_only;
+        return t;
+    }
+
+    fn fetch(self: *Parser) Token {
+        return self.normalizeNumber(self.tokenizer.next());
+    }
+
+    /// F-026: the AST value of a (normalized) number token.
+    fn numberLiteral(self: *Parser, tok: Token) ?Expression {
+        if (tok.neg_only) {
+            const ok = if (self.neg_allowed) |p| p.ptr == tok.raw.ptr else false;
+            if (!ok) {
+                const msg = int_literal.invalidIntegerLiteral(self.allocator, "rs", tok.raw);
+                const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch msg;
+                self.errors.append(self.allocator, f) catch {};
+                return null;
+            }
+        }
+        if (std.fmt.parseInt(i64, tok.text, 10)) |v| return Expression{ .literal_int = v } else |_| {}
+        return Expression{ .literal_bigint = tok.text };
+    }
+
 };
 
 

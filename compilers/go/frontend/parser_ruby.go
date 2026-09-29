@@ -387,25 +387,16 @@ func (p *rbParser) tokenize(source string) []rbToken {
 				continue
 			}
 
-			// Numbers (decimal and hex)
+			// Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
 			if ch >= '0' && ch <= '9' {
-				num := ""
-				if ch == '0' && pos+1 < len(line) && (line[pos+1] == 'x' || line[pos+1] == 'X') {
-					num = "0x"
-					pos += 2
-					for pos < len(line) && (isHexDigit(line[pos]) || line[pos] == '_') {
-						if line[pos] != '_' {
-							num += string(line[pos])
-						}
-						pos++
-					}
+				end := scanNumberEnd(line, pos)
+				text := line[pos:end]
+				pos = end
+				num := "0"
+				if lit := parseIntLiteral("rb", text); lit != nil {
+					num = lit.Value.String()
 				} else {
-					for pos < len(line) && ((line[pos] >= '0' && line[pos] <= '9') || line[pos] == '_') {
-						if line[pos] != '_' {
-							num += string(line[pos])
-						}
-						pos++
-					}
+					p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("rb", text), p.fileName, lineNum, col))
 				}
 				tokens = append(tokens, rbToken{kind: rbTokNumber, value: num, line: lineNum, col: col})
 				continue

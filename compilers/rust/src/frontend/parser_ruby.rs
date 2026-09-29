@@ -41,12 +41,13 @@
 //! - snake_case identifiers -> camelCase in AST
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{lex_error, UNTERMINATED_STRING_LITERAL};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 use std::collections::HashMap;
 
@@ -682,41 +683,18 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagno
                 continue;
             }
 
-            // Numbers (decimal and hex)
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
             if ch.is_ascii_digit() {
-                let mut num_str = String::new();
-                if ch == '0'
-                    && pos + 1 < chars.len()
-                    && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
-                {
-                    // Hex number
-                    num_str.push_str("0x");
-                    pos += 2;
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_hexdigit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
+                let end = scan_number_end(&chars, pos);
+                let text: String = chars[pos..end].iter().collect();
+                let val = match parse_int_literal("rb", &text) {
+                    Some(lit) => lit.value,
+                    None => {
+                        errors.push(lex_error(&invalid_integer_literal("rb", &text), file, line_num, pos));
+                        BigInt::from(0)
                     }
-                } else {
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_digit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
-                    }
-                }
-                let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                    <BigInt as Num>::from_str_radix(&num_str[2..], 16)
-                        .unwrap_or_else(|_| BigInt::from(0))
-                } else {
-                    <BigInt as Num>::from_str_radix(&num_str, 10)
-                        .unwrap_or_else(|_| BigInt::from(0))
                 };
+                pos = end;
                 tokens.push(Token::NumberLit(val));
                 continue;
             }

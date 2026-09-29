@@ -17,6 +17,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
@@ -93,13 +94,17 @@ TOK_DOTDOT = 69
 
 
 class Token:
-    __slots__ = ("kind", "value", "line", "col")
+    __slots__ = ("kind", "value", "line", "col", "raw", "neg_only")
 
-    def __init__(self, kind: int, value: str, line: int, col: int):
+    def __init__(self, kind: int, value: str, line: int, col: int, raw: str = "", neg_only: bool = False):
         self.kind = kind
         self.value = value
         self.line = line
         self.col = col
+        # F-026: a number token's text as written, and whether it is valid
+        # only under a unary minus.
+        self.raw = raw
+        self.neg_only = neg_only
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +389,8 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             continue
 
         # Hex literal: 0x...
-        if ch == "0" and pos + 1 < n and chars[pos + 1] in ("x", "X"):
+        # (lowercase x only, as the TS reference: `0X` is an invalid integer)
+        if ch == "0" and pos + 1 < n and chars[pos + 1] == "x":
             pos += 2
             col += 2
             start = pos
@@ -423,14 +429,13 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             tokens.append(Token(TOK_HEX_STRING, val, l, c))
             continue
 
-        # Number
-        if ch.isdigit():
-            start = pos
-            while pos < n and (chars[pos].isdigit() or chars[pos] == "_"):
-                pos += 1
-                col += 1
-            val = chars[start:pos].replace("_", "")
-            tokens.append(Token(TOK_NUMBER, val, l, c))
+        # Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust integer
+        # literal (a lowercase `0x` was taken above as a ByteString).
+        if "0" <= ch <= "9":
+            end, val, lit, raw = lex_number("rs", chars, pos, lex, file_name, l, c)
+            col += end - pos
+            pos = end
+            tokens.append(Token(TOK_NUMBER, val, l, c, raw, bool(lit and lit.neg_only)))
             continue
 
         # Identifier / keyword
@@ -1283,6 +1288,15 @@ class _RustParser:
         if self.match_tok(TOK_BANG):
             return UnaryExpr(op="!", operand=self._parse_unary())
         if self.match_tok(TOK_MINUS):
+            # F-026: a signed-suffix minimum (`128i8`) is legal under this
+            # minus, through parentheses, as rustc's overflowing_literals lint.
+            k = self.pos
+            while k < len(self.tokens) and self.tokens[k].kind == TOK_LPAREN:
+                k += 1
+            opens = k - self.pos
+            if k < len(self.tokens) and self.tokens[k].kind == TOK_NUMBER and self.tokens[k].neg_only:
+                if all(k + j < len(self.tokens) and self.tokens[k + j].kind == TOK_RPAREN for j in range(1, opens + 1)):
+                    self.tokens[k].neg_only = False
             return UnaryExpr(op="-", operand=self._parse_unary())
         if self.match_tok(TOK_TILDE):
             return UnaryExpr(op="~", operand=self._parse_unary())
@@ -1360,6 +1374,8 @@ class _RustParser:
         tok = self.peek()
 
         if tok.kind == TOK_NUMBER:
+            if tok.neg_only:
+                self.errors.append(lex_error(invalid_integer_literal("rs", tok.raw), self.file_name, tok.line, tok.col))
             self.advance()
             try:
                 val = int(tok.value)

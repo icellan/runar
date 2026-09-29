@@ -355,26 +355,19 @@ func (p *zigParser) tokenize(source string) []zigToken {
 			continue
 		}
 
-		// Numbers (decimal and hex)
+		// Numbers (F-026): the whole glued [0-9A-Za-z_] run is one Zig
+		// integer literal; `0x` is an integer here, not a ByteString.
 		if ch >= '0' && ch <= '9' {
-			num := ""
-			if ch == '0' && pos+1 < len(source) && (source[pos+1] == 'x' || source[pos+1] == 'X') {
-				num = "0x"
-				advance() // '0'
-				advance() // 'x'
-				for pos < len(source) && (isHexDigit(peek()) || peek() == '_') {
-					if peek() != '_' {
-						num += string(peek())
-					}
-					advance()
-				}
+			end := scanNumberEnd(source, pos)
+			text := source[pos:end]
+			for pos < end {
+				advance()
+			}
+			num := "0"
+			if lit := parseIntLiteral("zig", text); lit != nil {
+				num = lit.Value.String()
 			} else {
-				for pos < len(source) && ((peek() >= '0' && peek() <= '9') || peek() == '_') {
-					if peek() != '_' {
-						num += string(peek())
-					}
-					advance()
-				}
+				p.errors = append(p.errors, lexDiag(invalidIntegerLiteralMsg("zig", text), p.fileName, tokenLine, tokenCol))
 			}
 			add(zigTokNumber, num, tokenLine, tokenCol)
 			continue
@@ -1500,11 +1493,7 @@ func (p *zigParser) parsePrimary() Expression {
 		p.advance() // '&'
 		p.advance() // '.'
 		p.advance() // '{'
-		var elements []Expression
-		for !p.check(zigTokRBrace) && !p.check(zigTokEOF) {
-			elements = append(elements, p.parseExpression())
-			p.match(zigTokComma)
-		}
+		elements := p.parseListElements(zigTokRBrace)
 		p.expect(zigTokRBrace)
 		return ArrayLiteralExpr{Elements: elements}
 	}
@@ -1513,11 +1502,7 @@ func (p *zigParser) parsePrimary() Expression {
 	if tok.kind == zigTokDot && p.peekAt(1).kind == zigTokLBrace {
 		p.advance() // '.'
 		p.advance() // '{'
-		var elements []Expression
-		for !p.check(zigTokRBrace) && !p.check(zigTokEOF) {
-			elements = append(elements, p.parseExpression())
-			p.match(zigTokComma)
-		}
+		elements := p.parseListElements(zigTokRBrace)
 		p.expect(zigTokRBrace)
 		return ArrayLiteralExpr{Elements: elements}
 	}
@@ -1555,11 +1540,7 @@ func (p *zigParser) parsePrimary() Expression {
 	// Array literal: [elem, ...]
 	if tok.kind == zigTokLBracket {
 		p.advance()
-		var elements []Expression
-		for !p.check(zigTokRBracket) && !p.check(zigTokEOF) {
-			elements = append(elements, p.parseExpression())
-			p.match(zigTokComma)
-		}
+		elements := p.parseListElements(zigTokRBracket)
 		p.expect(zigTokRBracket)
 		return ArrayLiteralExpr{Elements: elements}
 	}
@@ -1676,16 +1657,32 @@ func (p *zigParser) parseZigBuiltin(name string, tokLine, tokCol int) Expression
 // Postfix chain: calls, member access, indexing
 // ---------------------------------------------------------------------------
 
+// parseListElements parses the elements of a call argument list or array
+// literal up to (not including) close. F-026: Zig requires `,` between
+// elements (a trailing one is allowed); without it a stray token after a
+// literal used to become an extra element.
+func (p *zigParser) parseListElements(close zigTokenKind) []Expression {
+	var elements []Expression
+	for !p.check(close) && !p.check(zigTokEOF) {
+		elements = append(elements, p.parseExpression())
+		if p.match(zigTokComma) {
+			continue
+		}
+		if !p.check(close) {
+			t := p.peek()
+			p.errors = append(p.errors, lexDiag(ZigListCommaMsg, p.fileName, t.line, t.col))
+		}
+		break
+	}
+	return elements
+}
+
 func (p *zigParser) parsePostfixChain(expr Expression) Expression {
 	for {
 		// Function call: expr(args...)
 		if p.check(zigTokLParen) {
 			p.advance() // '('
-			var args []Expression
-			for !p.check(zigTokRParen) && !p.check(zigTokEOF) {
-				args = append(args, p.parseExpression())
-				p.match(zigTokComma)
-			}
+			args := p.parseListElements(zigTokRParen)
 			p.expect(zigTokRParen)
 			expr = CallExpr{Callee: expr, Args: args}
 			continue
@@ -1731,16 +1728,8 @@ func (p *zigParser) parsePostfixChain(expr Expression) Expression {
 // ---------------------------------------------------------------------------
 
 func (p *zigParser) parseZigNumber(s string) Expression {
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-		// Hex literal -> ByteStringLiteral
-		hex := s[2:]
-		// Ensure even length
-		if len(hex)%2 != 0 {
-			hex = "0" + hex
-		}
-		return ByteStringLiteral{Value: hex}
-	}
-
+	// F-026: the tokenizer already validated the literal and wrote its
+	// decimal value (a Zig `0x` literal is an integer, not a ByteString).
 	bi := new(big.Int)
 	if _, ok := bi.SetString(s, 10); !ok {
 		p.addError(fmt.Sprintf("line %d: invalid number literal %q", p.peek().line, s))

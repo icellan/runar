@@ -35,12 +35,13 @@
 //! - snake_case identifiers -> camelCase in AST
 
 use num_bigint::BigInt;
-use num_traits::{Num, ToPrimitive};
+use num_traits::ToPrimitive;
 use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, Diagnostic, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL};
+use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
 
@@ -714,41 +715,18 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 continue;
             }
 
-            // Numbers (decimal and hex)
+            // Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
             if ch.is_ascii_digit() {
-                let mut num_str = String::new();
-                if ch == '0'
-                    && pos + 1 < chars.len()
-                    && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
-                {
-                    // Hex number
-                    num_str.push_str("0x");
-                    pos += 2;
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_hexdigit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
+                let end = scan_number_end(&chars, pos);
+                let text: String = chars[pos..end].iter().collect();
+                let val = match parse_int_literal("py", &text) {
+                    Some(lit) => lit.value,
+                    None => {
+                        errors.push(lex_error(&invalid_integer_literal("py", &text), file, line_num, pos));
+                        BigInt::from(0)
                     }
-                } else {
-                    while pos < chars.len()
-                        && (chars[pos].is_ascii_digit() || chars[pos] == '_')
-                    {
-                        if chars[pos] != '_' {
-                            num_str.push(chars[pos]);
-                        }
-                        pos += 1;
-                    }
-                }
-                let val = if num_str.starts_with("0x") || num_str.starts_with("0X") {
-                    <BigInt as Num>::from_str_radix(&num_str[2..], 16)
-                        .unwrap_or_else(|_| BigInt::from(0))
-                } else {
-                    <BigInt as Num>::from_str_radix(&num_str, 10)
-                        .unwrap_or_else(|_| BigInt::from(0))
                 };
+                pos = end;
                 tokens.push(Token::NumberLit(val));
                 continue;
             }
@@ -1082,13 +1060,8 @@ impl<'a> PyParser<'a> {
             None
         };
 
-        // Skip rest of line
-        while *self.peek() != Token::Newline
-            && *self.peek() != Token::Eof
-            && *self.peek() != Token::Dedent
-        {
-            self.advance();
-        }
+        // F-026: the field declaration ends at its line break.
+        self.expect_statement_end();
 
         Some(PropertyNode {
             name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
@@ -1248,10 +1221,27 @@ impl<'a> PyParser<'a> {
             if let Some(stmt) = self.parse_statement() {
                 stmts.push(stmt);
             }
+            self.expect_statement_end();
             self.skip_newlines();
         }
 
         stmts
+    }
+
+    /// F-026: a simple statement ends at its line break; compound statements
+    /// end on a NEWLINE / DEDENT they consumed themselves. Pre-fix,
+    /// `lim = 0b1010` parsed as `lim = 0` plus a second statement `b1010`.
+    fn expect_statement_end(&mut self) {
+        if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+            return;
+        }
+        if self.pos > 0 && matches!(self.tokens.get(self.pos - 1), Some(Token::Newline | Token::Dedent)) {
+            return;
+        }
+        self.errors.push(Diagnostic::error(PY_STATEMENT_LINE_BREAK, None));
+        while !matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+            self.advance();
+        }
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {

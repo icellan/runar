@@ -22,7 +22,8 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::Diagnostic;
+use super::diagnostic::{lex_error, Diagnostic};
+use super::int_literal::{invalid_integer_literal, parse_int_literal};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -48,6 +49,54 @@ impl ParseResult {
 }
 
 /// Parse a TypeScript source string and extract the Rúnar contract AST.
+/// F-026 (the TS reference's reportInvalidNumericLiterals): scan the source
+/// with swc's own lexer and validate every numeric literal token.
+fn check_ts_numeric_literals(
+    fm: &Lrc<swc_common::SourceFile>,
+    source: &str,
+    file: &str,
+    errors: &mut Vec<Diagnostic>,
+) {
+    use swc_ecma_parser::token::Token as SwcToken;
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsSyntax { tsx: false, decorators: false, ..Default::default() }),
+        EsVersion::Es2022,
+        StringInput::from(&**fm),
+        None,
+    );
+    let base = fm.start_pos.0;
+    let bytes = source.as_bytes();
+    let mut covered = 0usize;
+    for t in lexer {
+        let start = (t.span.lo.0 - base) as usize;
+        if start < covered || start >= bytes.len() {
+            continue;
+        }
+        // swc turns some malformed numbers (`0xG`, `10i64`) into an error
+        // token rather than a number: treat any token that starts a number
+        // (a digit not glued to an identifier) the same way.
+        let starts_number = matches!(t.token, SwcToken::Num { .. } | SwcToken::BigInt { .. })
+            || (matches!(t.token, SwcToken::Error(_))
+                && bytes[start].is_ascii_digit()
+                && (start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_' || bytes[start - 1] == b'$')));
+        if !starts_number {
+            continue;
+        }
+        let mut end = ((t.span.hi.0 - base) as usize).min(bytes.len());
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        covered = end;
+        let text = &source[start..end];
+        if parse_int_literal("ts", text).is_none() {
+            let before = &source[..start];
+            let line = 1 + before.matches('\n').count();
+            let column = before.rsplit('\n').next().map(|s| s.chars().count()).unwrap_or(0);
+            errors.push(lex_error(&invalid_integer_literal("ts", text), file, line, column));
+        }
+    }
+}
+
 pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     // DoS-bound size guard. Reject oversized source BEFORE the tokenizer
     // touches the input. BUG-008 follow-up.
@@ -67,6 +116,13 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     let cm: Lrc<SourceMap> = Lrc::new(SourceMap::default());
     let fm = cm.new_source_file(Lrc::new(FileName::Custom(file.to_string())), source.to_string());
     let comments = SingleThreadedComments::default();
+
+    // F-026: every numeric literal, extended over the [0-9A-Za-z_]
+    // characters glued to it, must be a TypeScript integer literal. `012`,
+    // `10_`, `1.5` and `0b102` are refused with the shared diagnostic (swc
+    // would otherwise read `1.5` as 1 and `012` as 10).
+    check_ts_numeric_literals(&fm, source, file, &mut errors);
+
     let lexer = Lexer::new(
         Syntax::Typescript(TsSyntax {
             tsx: false,

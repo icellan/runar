@@ -204,6 +204,10 @@ public final class RustParser {
         final String value;
         final int line;
         final int col;
+        /** F-026: a number token's text as written. */
+        String raw;
+        /** F-026: a signed-suffix minimum (`128i8`), legal only under a unary minus. */
+        boolean negOnly;
 
         Token(int kind, String value, int line, int col) {
             this.kind = kind;
@@ -436,8 +440,9 @@ public final class RustParser {
                 continue;
             }
 
-            // Hex literal
-            if (ch == '0' && pos + 1 < n && (source.charAt(pos + 1) == 'x' || source.charAt(pos + 1) == 'X')) {
+            // Hex literal (lowercase x only, as the TS reference: `0X` is an
+            // invalid integer)
+            if (ch == '0' && pos + 1 < n && source.charAt(pos + 1) == 'x') {
                 pos += 2;
                 col += 2;
                 int start = pos;
@@ -483,20 +488,16 @@ public final class RustParser {
                 continue;
             }
 
-            // Number
+            // Number (F-026): the whole glued [0-9A-Za-z_] run is one Rust
+            // integer literal (a lowercase `0x` was taken above as a ByteString).
             if (ch >= '0' && ch <= '9') {
-                int start = pos;
-                while (pos < n) {
-                    char d = source.charAt(pos);
-                    if ((d >= '0' && d <= '9') || d == '_') {
-                        pos++;
-                        col++;
-                    } else {
-                        break;
-                    }
-                }
-                String val = source.substring(start, pos).replace("_", "");
-                tokens.add(new Token(TOK_NUMBER, val, startLine, startCol));
+                IntLiteral.Scan sc = IntLiteral.lex("rs", source, pos, lex, filename, startLine, startCol);
+                col += sc.end() - pos;
+                pos = sc.end();
+                Token t = new Token(TOK_NUMBER, sc.value(), startLine, startCol);
+                t.raw = sc.raw();
+                t.negOnly = sc.lit() != null && sc.lit().negOnly();
+                tokens.add(t);
                 continue;
             }
 
@@ -1453,6 +1454,18 @@ public final class RustParser {
             return new UnaryExpr(Expression.UnaryOp.NOT, parseUnary(s));
         }
         if (s.matchTok(TOK_MINUS)) {
+            // F-026: a signed-suffix minimum (`128i8`) is legal under this
+            // minus, through parentheses, as rustc's overflowing_literals lint.
+            int k = s.pos;
+            while (k < s.tokens.size() && s.tokens.get(k).kind == TOK_LPAREN) k++;
+            int opens = k - s.pos;
+            if (k < s.tokens.size() && s.tokens.get(k).kind == TOK_NUMBER && s.tokens.get(k).negOnly) {
+                boolean closed = true;
+                for (int j = 1; j <= opens; j++) {
+                    if (k + j >= s.tokens.size() || s.tokens.get(k + j).kind != TOK_RPAREN) closed = false;
+                }
+                if (closed) s.tokens.get(k).negOnly = false;
+            }
             return new UnaryExpr(Expression.UnaryOp.NEG, parseUnary(s));
         }
         if (s.matchTok(TOK_TILDE)) {
@@ -1524,6 +1537,7 @@ public final class RustParser {
         Token tok = s.peek();
 
         if (tok.kind == TOK_NUMBER) {
+            if (tok.negOnly) s.errors.add(LexDiag.at(s.filename, tok.line, tok.col, IntLiteral.invalid("rs", tok.raw)));
             s.advance();
             BigInteger value;
             try {

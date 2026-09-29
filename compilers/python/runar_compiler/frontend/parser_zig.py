@@ -32,7 +32,9 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
+    ZIG_LIST_COMMA,
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
@@ -350,25 +352,14 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
             tokens.append(Token(TOK_STRING, "".join(val_chars), tok_line, tok_col))
             continue
 
-        # Number literal
-        if ch.isdigit():
-            num_chars: list[str] = []
-            if ch == "0" and pos + 1 < length and source[pos + 1] in ("x", "X"):
-                num_chars.append("0x")
-                pos += 2
-                col += 2
-                while pos < length and source[pos] in "0123456789abcdefABCDEF_":
-                    if source[pos] != "_":
-                        num_chars.append(source[pos])
-                    pos += 1
-                    col += 1
-            else:
-                while pos < length and (source[pos].isdigit() or source[pos] == "_"):
-                    if source[pos] != "_":
-                        num_chars.append(source[pos])
-                    pos += 1
-                    col += 1
-            tokens.append(Token(TOK_NUMBER, "".join(num_chars), tok_line, tok_col))
+        # Number literal (F-026): the whole glued [0-9A-Za-z_] run is one Zig
+        # integer literal. Stopping at the first non-digit read `0b1010` as
+        # `0` + `b1010`.
+        if "0" <= ch <= "9":
+            end, num_str, _, _ = lex_number("zig", source, pos, lex, file_name, tok_line, tok_col)
+            col += end - pos
+            pos = end
+            tokens.append(Token(TOK_NUMBER, num_str, tok_line, tok_col))
             continue
 
         # Identifiers and keywords
@@ -1379,10 +1370,7 @@ class _ZigParser:
             self._advance()  # '&'
             self._advance()  # '.'
             self._advance()  # '{'
-            elements: list[Expression] = []
-            while self._current().kind != TOK_RBRACE and self._current().kind != TOK_EOF:
-                elements.append(self._parse_expression())
-                self._match(TOK_COMMA)
+            elements = self._parse_list_elements(TOK_RBRACE)
             self._expect(TOK_RBRACE, "}")
             return ArrayLiteralExpr(elements=elements)
 
@@ -1390,10 +1378,7 @@ class _ZigParser:
         if tok.kind == TOK_DOT and self._peek_ahead(1).kind == TOK_LBRACE:
             self._advance()  # '.'
             self._advance()  # '{'
-            elements: list[Expression] = []
-            while self._current().kind != TOK_RBRACE and self._current().kind != TOK_EOF:
-                elements.append(self._parse_expression())
-                self._match(TOK_COMMA)
+            elements = self._parse_list_elements(TOK_RBRACE)
             self._expect(TOK_RBRACE, "}")
             return ArrayLiteralExpr(elements=elements)
 
@@ -1425,10 +1410,7 @@ class _ZigParser:
         # Array literal: [elem, ...]
         if tok.kind == TOK_LBRACKET:
             self._advance()
-            elements = []
-            while self._current().kind != TOK_RBRACKET and self._current().kind != TOK_EOF:
-                elements.append(self._parse_expression())
-                self._match(TOK_COMMA)
+            elements = self._parse_list_elements(TOK_RBRACKET)
             self._expect(TOK_RBRACKET, "]")
             return ArrayLiteralExpr(elements=elements)
 
@@ -1522,16 +1504,29 @@ class _ZigParser:
         self._advance()
         return Identifier(name=tok.value or "unknown")
 
+    def _parse_list_elements(self, close: int) -> list[Expression]:
+        """F-026: the elements of a call argument list or array literal up to
+        (not including) ``close``. Zig requires ``,`` between elements (a
+        trailing one is allowed); without it a stray token after a literal
+        used to become an extra element."""
+        elements: list[Expression] = []
+        while self._current().kind != close and self._current().kind != TOK_EOF:
+            elements.append(self._parse_expression())
+            if self._match(TOK_COMMA):
+                continue
+            if self._current().kind != close:
+                t = self._current()
+                self._errors.append(f"{self._file}:{t.line}:{t.col}: {ZIG_LIST_COMMA}")
+            break
+        return elements
+
     def _parse_postfix_chain(self, expr: Expression) -> Expression:
         """Parse postfix operations (call, member access, index access)."""
         while True:
             # Function/method call: expr(args...)
             if self._current().kind == TOK_LPAREN:
                 self._advance()
-                args: list[Expression] = []
-                while self._current().kind != TOK_RPAREN and self._current().kind != TOK_EOF:
-                    args.append(self._parse_expression())
-                    self._match(TOK_COMMA)
+                args = self._parse_list_elements(TOK_RPAREN)
                 self._expect(TOK_RPAREN, ")")
                 expr = CallExpr(callee=expr, args=args)
                 continue

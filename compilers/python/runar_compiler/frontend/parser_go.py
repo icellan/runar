@@ -17,6 +17,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
@@ -427,20 +428,11 @@ def _tokenize_go(source: str, lex: list | None = None, file_name: str = "") -> l
             tokens.append(Token(TOK_STRING, processed, line, start_col))
             continue
 
-        # Numbers
-        if ch.isdigit():
-            start = i
-            if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
-                i += 2
-                col += 2
-                while i < n and _is_hex_digit(source[i]):
-                    i += 1
-                    col += 1
-            else:
-                while i < n and (source[i].isdigit() or source[i] == "_"):
-                    i += 1
-                    col += 1
-            num_str = source[start:i].replace("_", "")
+        # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.
+        if "0" <= ch <= "9":
+            end, num_str, _, _ = lex_number("go", source, i, lex, file_name, line, start_col)
+            col += end - i
+            i = end
             tokens.append(Token(TOK_NUMBER, num_str, line, start_col))
             continue
 

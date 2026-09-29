@@ -189,39 +189,24 @@ public final class MoveParser {
 
             // Numbers
             if (ch >= '0' && ch <= '9') {
-                int start = i;
-                boolean isHex = false;
-                if (ch == '0' && i + 1 < n
-                    && (source.charAt(i + 1) == 'x' || source.charAt(i + 1) == 'X')) {
-                    isHex = true;
+                if (ch == '0' && i + 1 < n && source.charAt(i + 1) == 'x') {
+                    // F-026: a lowercase `0x` is a ByteString literal on this
+                    // surface, whatever its length (as the TS reference).
                     i += 2;
                     col += 2;
+                    int hexStart = i;
                     while (i < n && isHexDigit(source.charAt(i))) {
                         i++;
                         col++;
                     }
-                } else {
-                    while (i < n && source.charAt(i) >= '0' && source.charAt(i) <= '9') {
-                        i++;
-                        col++;
-                    }
+                    out.add(new Token(Kind.STRING, source.substring(hexStart, i), line, startCol));
+                    continue;
                 }
-                if (!isHex && i < n && source.charAt(i) == 'u') {
-                    i++;
-                    col++;
-                    while (i < n && source.charAt(i) >= '0' && source.charAt(i) <= '9') {
-                        i++;
-                        col++;
-                    }
-                }
-                if (isHex) {
-                    String hexDigits = source.substring(start + 2, i);
-                    if (!hexDigits.isEmpty() && hexDigits.length() % 2 == 0) {
-                        out.add(new Token(Kind.STRING, hexDigits, line, startCol));
-                        continue;
-                    }
-                }
-                out.add(new Token(Kind.NUMBER, source.substring(start, i), line, startCol));
+                // F-026: the whole glued [0-9A-Za-z_] run is one Move literal.
+                IntLiteral.Scan sc = IntLiteral.lex("move", source, i, lex, filename, line, startCol);
+                col += sc.end() - i;
+                i = sc.end();
+                out.add(new Token(Kind.NUMBER, sc.value(), line, startCol));
                 continue;
             }
 
