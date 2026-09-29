@@ -509,27 +509,62 @@ pub fn within(value: base.Bigint, lo: base.Bigint, hi: base.Bigint) bool {
     return value >= lo and value < hi;
 }
 
+// F-033: the math builtins below must return what the compiled script
+// returns (05-stack-lower.ts), vector-checked against Spend.validate in
+// builtins_math_onchain_test.zig. Where the script aborts, these abort too.
+
+/// Script: `<v> <lo> OP_MAX <hi> OP_MIN`. The order matters when lo > hi:
+/// the result is then always `hi`.
 pub fn clamp(value: base.Bigint, lo: base.Bigint, hi: base.Bigint) base.Bigint {
-    return @max(lo, @min(hi, value));
+    return @min(@max(value, lo), hi);
 }
 
+/// Script: `OP_DUP OP_0NOTEQUAL OP_VERIFY OP_DIV` — a zero divisor fails.
 pub fn safediv(lhs: base.Bigint, rhs: base.Bigint) base.Bigint {
-    if (rhs == 0) return 0;
+    assert(rhs != 0);
     return @divTrunc(lhs, rhs);
 }
 
+/// Script: `OP_DUP OP_0NOTEQUAL OP_VERIFY OP_MOD` — a zero divisor fails.
 pub fn safemod(lhs: base.Bigint, rhs: base.Bigint) base.Bigint {
-    if (rhs == 0) return 0;
+    assert(rhs != 0);
     return @rem(lhs, rhs);
+}
+
+/// Script: `OP_2DUP OP_DIV ... OP_MOD OP_DROP` — the truncated quotient; a
+/// zero divisor fails in OP_DIV.
+pub fn divmod(lhs: base.Bigint, rhs: base.Bigint) base.Bigint {
+    // CONTRACT-ABORT: OP_DIV by zero fails the script.
+    if (rhs == 0) @panic("divmod: division by zero");
+    return @divTrunc(lhs, rhs);
+}
+
+pub fn abs(value: base.Bigint) base.Bigint {
+    return checkedAbs(value);
+}
+
+pub fn min(a: base.Bigint, b: base.Bigint) base.Bigint {
+    return @min(a, b);
+}
+
+pub fn max(a: base.Bigint, b: base.Bigint) base.Bigint {
+    return @max(a, b);
+}
+
+/// The Rúnar `bool(x)` builtin (`x != 0`); exported from root.zig as
+/// `runar.bool`.
+pub fn boolCast(value: base.Bigint) bool {
+    return value != 0;
 }
 
 pub fn sign(value: base.Bigint) base.Bigint {
     return if (value < 0) -1 else if (value > 0) 1 else 0;
 }
 
+/// Script: `OP_DUP 0 33 OP_WITHIN OP_VERIFY` then 32 unrolled rounds — any
+/// exponent outside 0..32 fails (R-169), even where the power is trivial.
 pub fn pow(base_value: base.Bigint, exponent: base.Bigint) base.Bigint {
-    // CONTRACT-ABORT: negative exponent is an in-contract math error.
-    if (exponent < 0) @panic("pow: negative exponent");
+    assert(within(exponent, 0, 33));
     if (exponent == 0) return 1;
 
     var result: i64 = 1;
@@ -542,25 +577,35 @@ pub fn pow(base_value: base.Bigint, exponent: base.Bigint) base.Bigint {
     return result;
 }
 
+/// Script: `<a> <b> OP_MUL <c> OP_DIV` — truncated; a zero divisor fails.
 pub fn mulDiv(a: base.Bigint, b: base.Bigint, divisor: base.Bigint) base.Bigint {
-    if (divisor == 0) return 0;
+    // CONTRACT-ABORT: OP_DIV by zero fails the script.
+    if (divisor == 0) @panic("mulDiv: division by zero");
     return @divTrunc(checkedMul(a, b), divisor);
 }
 
-pub fn percentOf(value: base.Bigint, percentage: base.Bigint) base.Bigint {
-    return @divTrunc(checkedMul(value, percentage), 100);
+/// Script: `<amount> <bps> OP_MUL 10000 OP_DIV` — basis points, truncated
+/// toward zero.
+pub fn percentOf(amount: base.Bigint, bps: base.Bigint) base.Bigint {
+    return @divTrunc(checkedMul(amount, bps), 10000);
 }
 
+/// Script: n >= 0 is VERIFIED, then `guess = n` and 256 rounds of
+/// `guess = min(guess, (guess + n / guess) / 2)`, which is exact floor(sqrt(n)).
+/// Iterating to the fixed point gives the same result; i128 keeps
+/// `guess + n / guess` from overflowing at n near maxInt(i64).
 pub fn sqrt(value: base.Bigint) base.Bigint {
-    if (value <= 0) return 0;
+    assert(value >= 0);
+    if (value == 0) return 0;
 
-    var x = value;
-    var y = @divTrunc(value, 2) + 1;
-    while (y < x) {
-        x = y;
-        y = @divTrunc(y + @divTrunc(value, y), 2);
+    const n: i128 = value;
+    var guess: i128 = n;
+    while (true) {
+        const next = @divTrunc(guess + @divTrunc(n, guess), 2);
+        if (next >= guess) break;
+        guess = next;
     }
-    return x;
+    return @intCast(guess);
 }
 
 pub fn gcd(a: base.Bigint, b: base.Bigint) base.Bigint {
@@ -2236,7 +2281,11 @@ test "wide signed-magnitude values flow through bin2num and secp256k1 scalar mul
 test "safemod keeps the dividend sign" {
     try std.testing.expectEqual(@as(i64, -1), safemod(-7, 3));
     try std.testing.expectEqual(@as(i64, 1), safemod(7, 3));
-    try std.testing.expectEqual(@as(i64, 0), safemod(7, 0));
+    // F-033: `safemod(7, 0) == 0` used to be asserted here. The script VERIFIES
+    // a non-zero divisor, so a zero divisor fails on-chain (vector
+    // `safemod(5, 0)` in fixtures/f033-math-builtins-onchain.json) and now
+    // aborts natively; that abort is checked out-of-process by the
+    // examples/zig `moduloBy(0)` vector (a panic cannot be caught here).
 }
 
 test "sha256Compress matches known abc hash" {

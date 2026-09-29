@@ -73,6 +73,42 @@ pub fn expectAssertFailure(probe_case: []const u8) !void {
     try runar.expectAssertFailure(std.testing.allocator, probe_case);
 }
 
+/// F-033: an on-chain `abort` vector must abort natively too. The probe prints
+/// `F033_VECTOR_CALL` right before the contract call, so dying earlier (bad
+/// index, JSON error) does not count; after that the process must die with a
+/// Runar assertion (the script's OP_VERIFY guards) or a division by zero (the
+/// script's OP_DIV by zero). Returning normally exits 0 and fails here.
+pub fn expectVectorAbort(probe_case: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{ assert_probe_path, probe_case },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    const aborted = switch (result.term) {
+        .exited => |code| code != 0,
+        .signal => true,
+        else => false,
+    };
+    const out = result.stderr;
+    const reached = std.mem.indexOf(u8, out, "F033_VECTOR_CALL") != null;
+    const expected_abort =
+        std.mem.indexOf(u8, out, runtime.assertFailureMessage) != null or
+        std.mem.indexOf(u8, out, "division by zero") != null;
+    if (!(aborted and reached and expected_abort)) {
+        std.debug.print(
+            "vector probe {s}: aborted={} reached={} expected_abort={}\nstdout:\n{s}\nstderr:\n{s}\n",
+            .{ probe_case, aborted, reached, expected_abort, result.stdout, result.stderr },
+        );
+        return error.TestUnexpectedResult;
+    }
+}
+
 test {
     _ = @import("./auction/Auction_test.zig");
     _ = @import("./babybear/BabyBearDemo_test.zig");

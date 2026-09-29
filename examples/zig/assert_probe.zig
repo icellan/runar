@@ -10,6 +10,8 @@ const CovenantVault = @import("covenant-vault/CovenantVault.runar.zig").Covenant
 const ECDemo = @import("ec-demo/ECDemo.runar.zig").ECDemo;
 const FunctionPatterns = @import("function-patterns/FunctionPatterns.runar.zig").FunctionPatterns;
 const MathDemo = @import("math-demo/MathDemo.runar.zig").MathDemo;
+const math_demo_vectors = @import("math-demo/onchain_vectors.zig");
+const function_patterns_vectors = @import("function-patterns/onchain_vectors.zig");
 const OraclePriceFeed = @import("oracle-price/OraclePriceFeed.runar.zig").OraclePriceFeed;
 const OrdinalNFT = @import("ordinal-nft/OrdinalNFT.runar.zig").OrdinalNFT;
 const P2Blake3PKH = @import("p2blake3pkh/P2Blake3PKH.runar.zig").P2Blake3PKH;
@@ -45,7 +47,17 @@ pub fn main(init: std.process.Init) !void {
     try runCase(probe_case);
 }
 
+/// F-033 on-chain vectors: run one natively. `run` announces
+/// `F033_VECTOR_CALL` right before the contract call, so a probe that dies
+/// earlier (bad index, JSON error) cannot pass as the call aborting.
+fn runVector(comptime vectors: type, index_text: []const u8) !void {
+    const index = try std.fmt.parseInt(usize, index_text, 10);
+    _ = try vectors.run(std.heap.page_allocator, index, true);
+}
+
 fn runCase(probe_case: []const u8) !void {
+    if (std.mem.startsWith(u8, probe_case, "math-demo-vector:")) return runVector(math_demo_vectors, probe_case["math-demo-vector:".len..]);
+    if (std.mem.startsWith(u8, probe_case, "function-patterns-vector:")) return runVector(function_patterns_vectors, probe_case["function-patterns-vector:".len..]);
     if (std.mem.eql(u8, probe_case, "p2pkh-wrong-pubkey")) return probeP2PKHWrongPubkey();
     if (std.mem.eql(u8, probe_case, "p2pkh-wrong-sig")) return probeP2PKHWrongSig();
     if (std.mem.eql(u8, probe_case, "p2blake3pkh-wrong-pubkey")) return probeP2Blake3PKHWrongPubkey();

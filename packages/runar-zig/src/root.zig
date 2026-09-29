@@ -185,6 +185,11 @@ pub const percentOf = builtins.percentOf;
 pub const sqrt = builtins.sqrt;
 pub const gcd = builtins.gcd;
 pub const log2 = builtins.log2;
+pub const divmod = builtins.divmod;
+pub const abs = builtins.abs;
+pub const min = builtins.min;
+pub const max = builtins.max;
+pub const @"bool" = builtins.boolCast;
 pub const sha256Compress = builtins.sha256Compress;
 pub const sha256Finalize = builtins.sha256Finalize;
 pub const blake3Compress = builtins.blake3Compress;
@@ -290,6 +295,7 @@ test {
     _ = @import("analyzer_opcode_concerns.zig");
     _ = @import("analyzer_conformance_test.zig");
     _ = @import("runtime_vectors_test.zig");
+    _ = @import("builtins_math_onchain_test.zig");
     _ = @import("leak_detector_probe_test.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");
