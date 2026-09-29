@@ -462,3 +462,87 @@ func assertOnCurveG1(t *testing.T, p [2]*big.Int) {
 		t.Fatal(fmt.Sprintf("forged prepared_inputs (%s, %s) is not on the BN254 curve; the test would only be re-proving the existing on-curve check", p[0], p[1]))
 	}
 }
+
+// TestGroth16WAMSM_PublicInputAtOrderRBindsAsZero — F-036.
+//
+// The attack witness: pub_0 = r (the BN254 Fr order), with a proof and a
+// prepared_inputs honestly derived — by the SDK itself,
+// bn254witness.BuildFromProofWithInputs — as if pub_0 were 0. The SDK
+// reduces pub_i mod r, so it considers pub_0 = r and pub_0 = 0 the same
+// statement and hands back the SAME prepared_inputs for both (asserted
+// below). The on-chain MSM binding must reach the same verdict: before
+// F-036 its unreduced ladder walked pub_0 = r through the non-zero branch
+// and rejected the spend, i.e. on-chain and off-chain disagreed about what
+// the witness attests to.
+//
+// The verifier is emitted WITHOUT CompileGroth16WA's compile-time pins
+// (those refuse any value outside [0, r) and would mask the MSM binding);
+// this is the shape the Mode-3 groth16PublicInput(i) path embeds.
+//
+// Proves: the full MSM-binding verifier, executed on the go-sdk
+// interpreter, accepts the honest spend and treats pub_0 = r exactly as the
+// SDK does (≡ 0). Does NOT prove: that a contract body reading
+// groth16PublicInput(0) sees 0 — it sees the raw witness value r, so a body
+// that needs canonical scalars must range-check them itself.
+func TestGroth16WAMSM_PublicInputAtOrderRBindsAsZero(t *testing.T) {
+	s := newSynthGroth16(t)
+
+	honest := honestPublicInputs(t)
+	honest[0] = big.NewInt(0)
+	adversarial := honestPublicInputs(t)
+	adversarial[0] = new(big.Int).Set(fr.Modulus())
+
+	proof := s.proofFor(honest)
+	s.sanityCheck(t, proof, honest)
+	// proofFor reduces mod r too (B and C are fixed), so the two statements
+	// share a proof; if they did not, the premise below would be false.
+	adv := s.proofFor(adversarial)
+	for i := range adv.A {
+		if adv.A[i].Cmp(proof.A[i]) != 0 {
+			t.Fatal("proofFor(pub_0 = r) differs from proofFor(pub_0 = 0); harness premise broken")
+		}
+	}
+
+	config, err := loadGroth16WAConfig(s.vkPath)
+	if err != nil {
+		t.Fatalf("loadGroth16WAConfig: %v", err)
+	}
+	var ops []codegen.StackOp
+	codegen.EmitGroth16VerifierWitnessAssistedWithMSM(func(op codegen.StackOp) {
+		ops = append(ops, op)
+	}, config)
+	ops = codegen.OptimizeStackOps(ops)
+	ops = codegen.OptimizeBN254Ops(ops)
+	emitted, err := codegen.Emit([]codegen.StackMethod{{Name: "verify", Ops: ops}})
+	if err != nil {
+		t.Fatalf("emit MSM verifier: %v", err)
+	}
+	art := &Artifact{Script: emitted.ScriptHex}
+
+	honestW, err := bn254witness.BuildFromProofWithInputs(s.vk, proof, honest)
+	if err != nil {
+		t.Fatalf("BuildFromProofWithInputs(honest): %v", err)
+	}
+	advW, err := bn254witness.BuildFromProofWithInputs(s.vk, proof, adversarial)
+	if err != nil {
+		t.Fatalf("BuildFromProofWithInputs(pub_0 = r): %v", err)
+	}
+	// The SDK's view: pub_0 = r and pub_0 = 0 give the same accumulator.
+	for i := 0; i < 2; i++ {
+		if advW.PreparedInputs[i].Cmp(honestW.PreparedInputs[i]) != 0 {
+			t.Fatalf("SDK premise broken: prepared_inputs(pub_0 = r) != prepared_inputs(pub_0 = 0) at coord %d", i)
+		}
+	}
+	if advW.PublicInputs[0].Cmp(fr.Modulus()) != 0 {
+		t.Fatalf("witness must carry the raw pub_0 = r, got %s", advW.PublicInputs[0])
+	}
+
+	// Control: the honest witness verifies.
+	if err := executeArtifactWithWitness(t, art, honestW); err != nil {
+		t.Fatalf("honest MSM spend rejected: %v", err)
+	}
+	// The binding must agree with the SDK: pub_0 = r ≡ 0.
+	if err := executeArtifactWithWitness(t, art, advW); err != nil {
+		t.Fatalf("on-chain MSM binding disagrees with the SDK: pub_0 = r was rejected although the SDK derived prepared_inputs for it as pub_0 = 0: %v", err)
+	}
+}

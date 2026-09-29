@@ -1918,7 +1918,8 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 // must be handled explicitly for the MSM-binding preamble to match
 // computePreparedInputs off-chain.
 //
-// Implementation: each term is wrapped in OP_IF guarded by (pub_i != 0).
+// Implementation: each term is wrapped in OP_IF guarded by
+// (pub_i mod r != 0) — the scalar is reduced first, see the loop body.
 // In the non-zero branch we run the existing scalar-mul + affine-add and
 // then use the altstack to clean up the intermediate garbage so both
 // branches leave the same stack shape. In the zero branch we just drop
@@ -1949,11 +1950,25 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		t.pushBigInt(bxName, config.IC[i+1][0])
 		t.pushBigInt(byName, config.IC[i+1][1])
 
-		// Compute the OP_IF condition: flag = (pub_i != 0). OP_0NOTEQUAL
+		// Reduce a COPY of pub_i into [0, r-1] (F-036). The scalar is
+		// witness-supplied, and the +3r ladder in emitG1ScalarMulNamed is
+		// only sound on that interval (see EmitBN254G1ScalarMul). The
+		// zero flag below must test the REDUCED value too: pub_i = r is
+		// 0 mod r, and routing it through the non-zero branch runs the
+		// ladder into the point at infinity. The off-chain SDK
+		// (bn254witness.computePreparedInputs) reduces the same way, so
+		// on-chain and off-chain agree on every witness. The raw _pub_i
+		// slot is left untouched: it is what groth16PublicInput(i) exposes.
+		kRawName := pfx + "k_raw_" + itoa(i)
+		kName := pfx + "k_" + itoa(i)
+		t.copyToTop(scalarName, kRawName)
+		bn254EmitScalarReduce(t, kRawName, kName)
+
+		// Compute the OP_IF condition: flag = (k_i != 0). OP_0NOTEQUAL
 		// collapses any nonzero bigint to 1 and 0 to 0.
 		chkName := pfx + "chk_" + itoa(i)
 		isNzName := pfx + "is_nz_" + itoa(i)
-		t.copyToTop(scalarName, chkName)
+		t.copyToTop(kName, chkName)
 		t.rawBlock([]string{chkName}, isNzName, func(e func(StackOp)) {
 			e(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
 		})
@@ -1981,7 +1996,7 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		newAccX := pfx + "new_acc_x_" + itoa(i)
 		newAccY := pfx + "new_acc_y_" + itoa(i)
 
-		emitG1ScalarMulNamed(nz, bxName, byName, scalarName, txName, tyName)
+		emitG1ScalarMulNamed(nz, bxName, byName, kName, txName, tyName)
 		emitG1AffineAddNamed(nz, accXName, accYName, txName, tyName, newAccX, newAccY)
 
 		// Rename the new acc coords to the stable names so both branches
@@ -2000,10 +2015,14 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		nz.toTop(accXName)
 		nz.toAlt()
 
+		// The reduced scalar is only copied by the ladder; consume it.
+		nz.toTop(kName)
+		nz.drop()
+
 		// Drop every intermediate left on the main stack. After this,
 		// the main stack matches the pre-iteration state with the old
-		// acc_x / acc_y / bx / by consumed (length branchLen - 4).
-		dropTarget := branchLen - 4
+		// acc_x / acc_y / bx / by / k consumed (length branchLen - 5).
+		dropTarget := branchLen - 5
 		for len(nz.nm) > dropTarget {
 			nz.drop()
 		}
@@ -2013,7 +2032,8 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		nz.fromAlt(accYName)
 
 		// ------------------------------------------------------------------
-		// Zero branch: acc unchanged; discard the pushed IC base point.
+		// Zero branch: acc unchanged; discard the reduced scalar and the
+		// pushed IC base point.
 		// ------------------------------------------------------------------
 		var zeroOps []StackOp
 		zeroEmit := func(op StackOp) { zeroOps = append(zeroOps, op) }
@@ -2022,6 +2042,8 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 		zr.qAtBottom = t.qAtBottom
 		zr.modThreshold = t.modThreshold
 
+		zr.toTop(kName)
+		zr.drop()
 		zr.toTop(byName)
 		zr.drop()
 		zr.toTop(bxName)
@@ -2075,6 +2097,11 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 //
 // This mirrors EmitBN254G1ScalarMul but operates directly on named raw-Fp
 // coordinates on the tracker instead of the 64-byte Point blob form.
+//
+// PRECONDITION: the scalar is already in [0, r-1]. Unlike
+// EmitBN254G1ScalarMul this ladder does not reduce it, because its only
+// caller (emitWAGroth16MSMBind) must reduce BEFORE its zero test anyway and
+// passes the reduced value here (F-036).
 func emitG1ScalarMulNamed(t *BN254Tracker, bxName, byName, scalarName, resultXName, resultYName string) {
 	// Rename base (bx, by) to the names the Jacobian add/double helpers
 	// expect: ax / ay (affine base point).
