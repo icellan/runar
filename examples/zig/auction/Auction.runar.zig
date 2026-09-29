@@ -44,11 +44,14 @@ pub const Auction = struct {
     }
 
     pub fn bid(self: *Auction, ctx: runar.StatefulContext, sig: runar.Sig, bidder: runar.PubKey, bidAmount: i64) void {
-        // bid reads no preimage field of its own (W7 removed the deadline
-        // check); the compiler still injects the stateful context.
-        _ = ctx;
         runar.assert(runar.checkSig(sig, bidder));
         runar.assert(bidAmount > self.highestBid);
+        // The bid must be paid into the pot (N-027): the continuation carries the
+        // prior pot plus the new bid. This example never refunds an outbid bidder,
+        // so the pot is the deposit plus every bid, and close() hands all of it to
+        // the auctioneer. `>=` lets a bidder add more; the compiler's own
+        // `>= input` floor alone would let a bid pay nothing.
+        runar.assert(runar.continuationAmount() >= runar.extractAmount(ctx.txPreimage) + bidAmount);
         self.highestBidder = bidder;
         self.highestBid = bidAmount;
     }

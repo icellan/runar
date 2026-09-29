@@ -1,6 +1,7 @@
 from runar import (
     StatefulSmartContract, PubKey, Sig, Bigint, Readonly,
-    public, assert_, check_sig, extract_locktime, extract_sequence,
+    public, assert_, check_sig, continuation_amount, extract_amount,
+    extract_locktime, extract_sequence,
 )
 
 
@@ -81,6 +82,12 @@ class Auction(StatefulSmartContract):
         assert_(check_sig(sig, bidder))
         # Reject bids that do not exceed the current highest
         assert_(bid_amount > self.highest_bid)
+        # The bid must be paid into the pot (N-027): the continuation carries the
+        # prior pot plus the new bid. This example never refunds an outbid bidder,
+        # so the pot is the deposit plus every bid, and close() hands all of it to
+        # the auctioneer. `>=` lets a bidder add more; the compiler's own
+        # `>= input` floor alone would let a bid pay nothing.
+        assert_(continuation_amount() >= extract_amount(self.tx_preimage) + bid_amount)
         # Persist new leader into on-chain state
         self.highest_bidder = bidder
         self.highest_bid = bid_amount

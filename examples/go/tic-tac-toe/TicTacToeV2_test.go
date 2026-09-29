@@ -80,7 +80,8 @@ func TestTicTacToeV2_ByteIdenticalToV1(t *testing.T) {
 	v2Bytes := len(v2.Script) / 2
 
 	// F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly).
-	const expectedBytes = 7832 // W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36
+	// N-027 took it 7832 -> 7849: join's own continuationAmount() == extractAmount(txPreimage) + betAmount rule (+17; the betAmount reference is a 1-byte constructor slot).
+	const expectedBytes = 7849 // W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17
 	if v1Bytes != expectedBytes {
 		t.Errorf("v1 script length = %d bytes, want %d", v1Bytes, expectedBytes)
 	}

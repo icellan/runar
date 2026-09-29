@@ -949,8 +949,8 @@ const auction = new AuctionContract(artifact, {
 auction.connect(provider, signer);
 await auction.deploy({ satoshis: 10000 });
 
-// State-mutating call
-await auction.bid(bidderPubKey, 5000n, { satoshis: 10000 });
+// State-mutating call — the new UTXO holds the prior pot plus the bid
+await auction.bid(bidderPubKey, 5000n, { satoshis: 15000 });
 
 // Terminal call — sends funds to an address
 await auction.close([{ address: winnerAddress, satoshis: 9000 }]);

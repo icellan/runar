@@ -249,6 +249,8 @@ contract Auction is StatefulSmartContract {
     function bid(Sig sig, PubKey bidder, bigint bidAmount) public {
         require(checkSig(sig, bidder));
         require(bidAmount > this.highestBid);
+        // The bid must be paid into the pot (continuation = prior pot + bid).
+        require(continuationAmount() >= extractAmount(this.txPreimage) + bidAmount);
         require(extractLocktime(this.txPreimage) < this.deadline);
 
         this.highestBidder = bidder;

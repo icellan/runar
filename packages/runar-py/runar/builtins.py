@@ -639,8 +639,25 @@ def continuation_amount() -> int:
     the next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
     injected ``_newAmount`` witness, already bound to
     ``>= extract_amount(tx_preimage)``. Returns 10000 -- the mock input amount
-    ``extract_amount`` returns, i.e. an honest continuation."""
-    return 10000
+    ``extract_amount`` returns, i.e. an honest continuation -- unless a test
+    has set another value with ``set_mock_continuation_amount``."""
+    return _mock_continuation_amount
+
+
+_mock_continuation_amount = 10000
+
+
+def set_mock_continuation_amount(amount: int) -> int:
+    """Set what ``continuation_amount()`` returns in test mode; returns the
+    previous value so a test can restore it. ``extract_amount`` stays 10000,
+    so a native test of an author rule such as
+    ``continuation_amount() == extract_amount(self.tx_preimage) + bet`` sets
+    10000 + bet for the paying call and anything else for a non-paying one
+    (N-027)."""
+    global _mock_continuation_amount
+    prev = _mock_continuation_amount
+    _mock_continuation_amount = amount
+    return prev
 
 
 # -- Math Utilities ----------------------------------------------------------

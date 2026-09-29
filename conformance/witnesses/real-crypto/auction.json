@@ -92,14 +92,70 @@
       ],
       "signerKey": "alice",
       "lockTime": 500,
+      "deploySatoshis": 10000,
+      "satoshis": 10100,
       "expect": "accept",
-      "note": "bidder sig + bid 100>1 + locktime 500 < deadline 1000",
+      "note": "bidder sig + bid 100>1 + locktime 500 < deadline 1000 N-027: the bid is paid, continuation 10000 -> 10100 = prior pot + bid, funded by the signer's UTXO.",
       "expectedState": {
         "highestBidder": {
           "$pubkey": "alice"
         },
         "highestBid": "100n"
       }
+    },
+    {
+      "method": "bid",
+      "args": [
+        null,
+        {
+          "$pubkey": "alice"
+        },
+        "100n"
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 500,
+      "deploySatoshis": 10000,
+      "satoshis": 10000,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-027 UNPAID BID: bid 100 declared but the continuation stays at the 10000-sat prior pot. F-024's injected _newAmount >= extractAmount(txPreimage) floor accepts it; the example's own continuationAmount() >= extractAmount(txPreimage) + bidAmount must reject it on the Spend engine."
+    },
+    {
+      "method": "bid",
+      "args": [
+        null,
+        {
+          "$pubkey": "alice"
+        },
+        "100n"
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        {
+          "$pubkey": "alice"
+        },
+        "1n",
+        "1000n"
+      ],
+      "signerKey": "alice",
+      "lockTime": 500,
+      "deploySatoshis": 10000,
+      "satoshis": 10099,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-027 SHORT BID: continuation 10099 is one satoshi short of prior pot 10000 + bid 100; the continuationAmount() >= extractAmount(txPreimage) + bidAmount rule must reject it."
     },
     {
       "method": "close",
@@ -171,8 +227,10 @@
       ],
       "signerKey": "alice",
       "lockTime": 2000,
+      "deploySatoshis": 10000,
+      "satoshis": 10100,
       "expect": "accept",
-      "note": "W7: a bid at nLockTime 2000, past the deadline of 1000, is accepted. bid() does not read nLockTime; the deadline guard that used to 'reject' this was satisfiable by any late bidder writing a stale locktime.",
+      "note": "W7: a bid at nLockTime 2000, past the deadline of 1000, is accepted. bid() does not read nLockTime; the deadline guard that used to 'reject' this was satisfiable by any late bidder writing a stale locktime. N-027: the bid is paid, continuation 10000 -> 10100 = prior pot + bid, funded by the signer's UTXO.",
       "expectedState": {
         "highestBidder": {
           "$pubkey": "alice"
@@ -182,6 +240,6 @@
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "fe1abb42d62bb8ffe6ad57a172347e9c92186087df7c503e58c287acb71af820"
+    "expected-script.hex": "45c6c9c8ada179ffa22eac5dcc227c6eba771b13b4ce3a5ad305ebc0d53ffc6a"
   }
 }

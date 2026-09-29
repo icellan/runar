@@ -17,7 +17,7 @@ from runar.builtins import (
     extract_version, extract_sequence,
     extract_hash_prevouts, extract_outpoint, extract_script_code,
     extract_prev_output_script, require_output_p2pkh, current_block_height,
-    continuation_amount,
+    continuation_amount, set_mock_continuation_amount,
     num2bin, bin2num, int_to_str, cat, substr, reverse_bytes, len_,
     verify_rabin_sig,
     safediv, safemod, clamp, sign, pow_, mul_div, percent_of,
@@ -114,6 +114,8 @@ __all__ = [
     'extract_prev_output_script', 'require_output_p2pkh', 'current_block_height',
     # F-024 (R14): read-only view of the default continuation's satoshis
     'continuation_amount',
+    # N-027: test-mode knob for continuation_amount()
+    'set_mock_continuation_amount',
     # Binary utilities
     'num2bin', 'bin2num', 'int_to_str', 'cat', 'substr', 'reverse_bytes', 'len_',
     # Math

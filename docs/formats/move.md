@@ -295,7 +295,7 @@ module Escrow {
 ```move
 module Auction {
     use runar::types::{PubKey, Sig};
-    use runar::crypto::{check_sig, extract_locktime};
+    use runar::crypto::{check_sig, extract_amount, extract_locktime};
 
     resource struct Auction {
         auctioneer: PubKey,
@@ -307,6 +307,8 @@ module Auction {
     public fun bid(contract: &mut Auction, sig: Sig, bidder: PubKey, bid_amount: bigint) {
         assert!(check_sig(sig, bidder), 0);
         assert!(bid_amount > contract.highest_bid, 0);
+        // The bid must be paid into the pot (continuation = prior pot + bid).
+        assert!(continuation_amount() >= extract_amount(contract.tx_preimage) + bid_amount, 0);
         assert!(extract_locktime(contract.tx_preimage) < contract.deadline, 0);
 
         contract.highest_bidder = bidder;

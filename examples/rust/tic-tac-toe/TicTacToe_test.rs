@@ -82,6 +82,15 @@ fn playing_game() -> TicTacToe {
     g
 }
 
+/// Player O joins paying exactly the bet: `extract_amount` (the input, player
+/// X's bet) is 10000 off-chain, so the continuation is 10000 + bet_amount
+/// (N-027).
+fn join_paying(game: &mut TicTacToe) {
+    let prev = set_mock_continuation_amount(10000 + game.bet_amount);
+    game.join(player_o(), &player_o_sig());
+    set_mock_continuation_amount(prev);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -89,7 +98,7 @@ fn playing_game() -> TicTacToe {
 #[test]
 fn test_join() {
     let mut game = new_game();
-    game.join(player_o(), &player_o_sig());
+    join_paying(&mut game);
     assert_eq!(game.player_o, player_o());
     assert_eq!(game.status, 1);
     assert_eq!(game.turn, 1);
@@ -99,7 +108,25 @@ fn test_join() {
 #[should_panic]
 fn test_join_rejects_when_already_playing() {
     let mut game = playing_game();
-    game.join(player_o(), &player_o_sig());
+    join_paying(&mut game);
+}
+
+/// N-027: a join must pay exactly the bet. Carrying the input forward unpaid
+/// (10000) passes F-024's `>= input` floor but not join's rule, and neither
+/// does a continuation one satoshi short or over.
+#[test]
+fn test_join_rejects_wrong_payment() {
+    for extra in [0, -1, 1] {
+        let bet = new_game().bet_amount;
+        let amount = if extra == 0 { 10000 } else { 10000 + bet + extra };
+        let caught = std::panic::catch_unwind(|| {
+            set_mock_continuation_amount(amount);
+            let mut game = new_game();
+            game.join(player_o(), &player_o_sig());
+        });
+        set_mock_continuation_amount(10000);
+        assert!(caught.is_err(), "join with continuation {amount} must be rejected");
+    }
 }
 
 #[test]
@@ -163,7 +190,7 @@ fn test_full_game_join_and_moves() {
     let mut game = new_game();
 
     // Join
-    game.join(player_o(), &player_o_sig());
+    join_paying(&mut game);
     assert_eq!(game.status, 1);
 
     // X@0, O@3, X@1, O@4 — set up X to win with position 2 (top row)

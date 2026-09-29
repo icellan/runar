@@ -160,8 +160,11 @@ pub const extractScriptCode = builtins.extractScriptCode;
 pub const extractOutputHash = builtins.extractOutputHash;
 pub const extractLocktime = builtins.extractLocktime;
 pub const extractSequence = builtins.extractSequence;
+pub const extractAmount = builtins.extractAmount;
 // F-024 (R14): read-only view of the default continuation's satoshis.
 pub const continuationAmount = builtins.continuationAmount;
+// N-027: test-mode knob for continuationAmount().
+pub const setMockContinuationAmount = builtins.setMockContinuationAmount;
 pub const buildChangeOutput = builtins.buildChangeOutput;
 pub const buildChangeOutputChecked = builtins.buildChangeOutputChecked;
 pub const BuildChangeOutputError = builtins.BuildChangeOutputError;

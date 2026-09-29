@@ -8,7 +8,7 @@ from TS/Go/Rust on contracts with position-dispatch patterns (nested
 All 6 Rúnar compilers must produce byte-identical Bitcoin Script for the
 same canonical TypeScript source. For the canonical TicTacToe contracts
 (both v1 hand-rolled and v2 FixedArray), the expected locking script size
-is **7832 bytes** (15664 hex chars). Independent changes moved this
+is **7849 bytes** (15698 hex chars). Independent changes moved this
 number and all of them are recorded, because a merged count that only
 mentions one of them is how a pin stops meaning anything.
 
@@ -72,8 +72,8 @@ TS_V1 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.runar.ts"
 TS_V2 = REPO_ROOT / "examples" / "ts" / "tic-tac-toe" / "TicTacToe.v2.runar.ts"
 PY_DSL = REPO_ROOT / "examples" / "python" / "tic-tac-toe" / "TicTacToe.runar.py"
 
-# F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly).
-EXPECTED_BYTES = 7832  # W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36
+# F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly). N-027 took it 7832 -> 7849: join's own continuationAmount() == extractAmount(txPreimage) + betAmount rule (+17; the betAmount reference is a 1-byte constructor slot).
+EXPECTED_BYTES = 7849  # W1: +18 bytes, six 32-bit-extractor zero-pad sites; F-024: +36; N-027: +17
 
 
 def _byte_len(hex_str: str) -> int:

@@ -11,6 +11,8 @@ import runar.lang.types.Sig;
 import static runar.lang.Builtins.assertThat;
 import static runar.lang.Builtins.cat;
 import static runar.lang.Builtins.checkSig;
+import static runar.lang.Builtins.continuationAmount;
+import static runar.lang.Builtins.extractAmount;
 import static runar.lang.Builtins.extractOutputHash;
 import static runar.lang.Builtins.hash160;
 import static runar.lang.Builtins.hash256;
@@ -67,6 +69,11 @@ class TicTacToe extends StatefulSmartContract {
     void join(PubKey opponentPK, Sig sig) {
         assertThat(this.status.eq(Bigint.ZERO));
         assertThat(checkSig(sig, opponentPK));
+        // Player O must pay exactly the bet (N-027): the continuation holds the
+        // input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+        // payout methods pay out. The compiler's own `>= input` floor alone would
+        // let O join for free.
+        assertThat(Bigint.of(continuationAmount()).eq(Bigint.of(extractAmount(this.txPreimage)).plus(this.betAmount)));
         this.playerO = opponentPK;
         this.status = Bigint.ONE;
         this.turn = Bigint.ONE;

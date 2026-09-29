@@ -25,6 +25,22 @@ def make_game(**overrides)
   game
 end
 
+# Run the block with continuation_amount() returning `amount`
+# (extract_amount stays at its mock 10_000).
+def with_continuation(amount)
+  prev = Runar::Builtins.mock_continuation_amount
+  Runar::Builtins.mock_continuation_amount = amount
+  yield
+ensure
+  Runar::Builtins.mock_continuation_amount = prev
+end
+
+# Player O joins paying exactly the bet: the continuation is the input
+# (10_000 off-chain) plus bet_amount (N-027).
+def join_paying(game)
+  with_continuation(10_000 + game.bet_amount) { game.join(PLAYER_O, Runar::TestKeys::BOB.test_sig) }
+end
+
 # Create a TicTacToe contract in the playing state (after join).
 def make_playing_game(**overrides)
   defaults = { player_o: PLAYER_O, status: 1, turn: 1 }
@@ -35,7 +51,7 @@ RSpec.describe TicTacToe do
   describe 'join' do
     it 'player O can join a waiting game' do
       game = make_game
-      game.join(PLAYER_O, Runar::TestKeys::BOB.test_sig)
+      join_paying(game)
       expect(game.player_o).to eq(PLAYER_O)
       expect(game.status).to eq(1)
       expect(game.turn).to eq(1)
@@ -43,7 +59,19 @@ RSpec.describe TicTacToe do
 
     it 'cannot join a game that is already in progress' do
       game = make_playing_game
-      expect { game.join(PLAYER_O, Runar::TestKeys::BOB.test_sig) }.to raise_error(RuntimeError)
+      expect { join_paying(game) }.to raise_error(RuntimeError)
+    end
+
+    # N-027: a join must pay exactly the bet. Carrying the input forward unpaid
+    # (10_000) passes F-024's `>= input` floor but not join's rule.
+    [10_000, 10_000 + BET_AMOUNT - 1, 10_000 + BET_AMOUNT + 1].each do |amount|
+      it "rejects a join whose continuation is #{amount}" do
+        game = make_game
+        expect do
+          with_continuation(amount) { game.join(PLAYER_O, Runar::TestKeys::BOB.test_sig) }
+        end.to raise_error(RuntimeError)
+        expect(game.status).to eq(0)
+      end
     end
   end
 
@@ -91,7 +119,7 @@ RSpec.describe TicTacToe do
       game = make_game
 
       # Player O joins
-      game.join(PLAYER_O, Runar::TestKeys::BOB.test_sig)
+      join_paying(game)
       expect(game.status).to eq(1)
       expect(game.turn).to eq(1)
 

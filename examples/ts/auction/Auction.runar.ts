@@ -2,6 +2,8 @@ import {
   StatefulSmartContract,
   assert,
   checkSig,
+  continuationAmount,
+  extractAmount,
   extractLocktime,
   extractSequence,
 } from 'runar-lang';
@@ -85,6 +87,13 @@ class Auction extends StatefulSmartContract {
 
     // Reject bids that do not exceed the current highest
     assert(bidAmount > this.highestBid);
+
+    // The bid must be paid into the pot (N-027): the continuation carries the
+    // prior pot plus the new bid. This example never refunds an outbid bidder,
+    // so the pot is the deposit plus every bid, and close() hands all of it to
+    // the auctioneer. `>=` lets a bidder add more; the compiler's own
+    // `>= input` floor alone would let a bid pay nothing.
+    assert(continuationAmount() >= extractAmount(this.txPreimage) + bidAmount);
 
     // Persist new leader into on-chain state
     this.highestBidder = bidder;

@@ -46,6 +46,9 @@ describe('TicTacToe (Solidity)', () => {
   describe('join', () => {
     it('allows player O to join a waiting game', () => {
       const game = makeGame();
+      // N-027: the input is player X's bet; O's join must add exactly the bet.
+      game.setMockPreimage({ amount: BET_AMOUNT });
+      game.setContinuationAmount(BET_AMOUNT * 2n);
       const result = game.call('join', { opponentPK: PLAYER_O, sig: SIG_O });
       expect(result.success).toBe(true);
       expect(game.state.playerO).toBe(PLAYER_O);
@@ -57,6 +60,17 @@ describe('TicTacToe (Solidity)', () => {
       const game = makePlayingGame();
       const result = game.call('join', { opponentPK: PLAYER_O, sig: SIG_O });
       expect(result.success).toBe(false);
+    });
+
+    it('rejects a join that does not pay exactly the bet (N-027)', () => {
+      const game = makeGame();
+      game.setMockPreimage({ amount: BET_AMOUNT });
+      // Carrying the input forward unpaid passes F-024's `>= input` floor, not join's rule.
+      for (const continuation of [BET_AMOUNT, BET_AMOUNT * 2n - 1n, BET_AMOUNT * 2n + 1n]) {
+        game.setContinuationAmount(continuation);
+        expect(game.call('join', { opponentPK: PLAYER_O, sig: SIG_O }).success).toBe(false);
+      }
+      expect(game.state.status).toBe(0n);
     });
   });
 
@@ -134,8 +148,11 @@ describe('TicTacToe (Solidity)', () => {
   describe('full game flow', () => {
     it('plays through join + moves + X wins top row', () => {
       const game = makeGame();
+      game.setMockPreimage({ amount: BET_AMOUNT });
+      game.setContinuationAmount(BET_AMOUNT * 2n); // N-027: O pays the bet
       const joinResult = game.call('join', { opponentPK: PLAYER_O, sig: SIG_O });
       expect(joinResult.success).toBe(true);
+      game.setContinuationAmount(undefined);
       expect(game.state.status).toBe(1n);
 
       // X@0, O@3, X@1, O@4 — set up X to win with position 2 (top row)

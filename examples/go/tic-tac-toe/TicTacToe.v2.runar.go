@@ -36,6 +36,11 @@ func (c *TicTacToeV2) init() {
 func (c *TicTacToeV2) Join(opponentPK runar.PubKey, sig runar.Sig) {
 	runar.Assert(c.Status == 0)
 	runar.Assert(runar.CheckSig(sig, opponentPK))
+	// Player O must pay exactly the bet (N-027): the continuation holds the
+	// input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+	// payout methods pay out. The compiler's own `>= input` floor alone would
+	// let O join for free.
+	runar.Assert(runar.ContinuationAmount() == runar.ExtractAmount(c.TxPreimage)+c.BetAmount)
 	c.PlayerO = opponentPK
 	c.Status = 1
 	c.Turn = 1

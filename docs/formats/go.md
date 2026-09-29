@@ -525,6 +525,8 @@ type Auction struct {
 
 func (c *Auction) Bid(bidder runar.PubKey, bidAmount int64) {
     runar.Assert(bidAmount > c.HighestBid)
+    // The bid must be paid into the pot (continuation = prior pot + bid).
+    runar.Assert(runar.ContinuationAmount() >= runar.ExtractAmount(c.TxPreimage)+bidAmount)
     runar.Assert(runar.ExtractLocktime(c.TxPreimage) < c.Deadline)
 
     c.HighestBidder = bidder

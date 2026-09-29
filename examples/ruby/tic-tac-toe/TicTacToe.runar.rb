@@ -48,6 +48,11 @@ class TicTacToe < Runar::StatefulSmartContract
   def join(opponent_pk, sig)
     assert @status == 0
     assert check_sig(sig, opponent_pk)
+    # Player O must pay exactly the bet (N-027): the continuation holds the
+    # input (player X's bet) plus betAmount, so the pot is the 2 * betAmount the
+    # payout methods pay out. The compiler's own `>= input` floor alone would
+    # let O join for free.
+    assert continuation_amount() == extract_amount(@tx_preimage) + @bet_amount
     @player_o = opponent_pk
     @status   = 1
     @turn     = 1

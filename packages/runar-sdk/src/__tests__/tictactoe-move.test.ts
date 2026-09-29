@@ -73,11 +73,12 @@ describe('TicTacToe move method script validation', () => {
     const contract = new RunarContract(artifact, [playerX.pubKeyHex, 5000n]);
 
     // Deploy
-    await contract.deploy(provider, playerX.signer, {});
+    await contract.deploy(provider, playerX.signer, { satoshis: 5000 });
     expect(provider.getBroadcastedTxs().length).toBe(1);
 
-    // Join — this works on-chain, so it should work locally
-    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer);
+    // Join — this works on-chain, so it should work locally. N-027: player O
+    // must add exactly the 5000 bet to player X's 5000.
+    await contract.call('join', [playerO.pubKeyHex, null], provider, playerO.signer, { satoshis: 10000 });
     expect(provider.getBroadcastedTxs().length).toBe(2);
     expect(contract.state.status).toBe(1n);
     expect(contract.state.turn).toBe(1n);

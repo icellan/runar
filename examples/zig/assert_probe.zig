@@ -79,6 +79,8 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "bounded-counter-inactive")) return probeBoundedCounterInactive();
     if (std.mem.eql(u8, probe_case, "counter-underflow")) return probeCounterUnderflow();
     if (std.mem.eql(u8, probe_case, "auction-bid-too-low")) return probeAuctionBidTooLow();
+    if (std.mem.eql(u8, probe_case, "auction-bid-unpaid")) return probeAuctionBidWithContinuation(10000);
+    if (std.mem.eql(u8, probe_case, "auction-bid-short")) return probeAuctionBidWithContinuation(10000 + 150 - 1);
     if (std.mem.eql(u8, probe_case, "auction-close-too-early")) return probeAuctionCloseTooEarly();
     if (std.mem.eql(u8, probe_case, "auction-close-wrong-sig")) return probeAuctionCloseWrongSig();
     if (std.mem.eql(u8, probe_case, "covenant-vault-wrong-output")) return probeCovenantVaultWrongOutput();
@@ -92,6 +94,9 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "oracle-price-below-threshold")) return probeOraclePriceBelowThreshold();
     if (std.mem.eql(u8, probe_case, "oracle-price-wrong-receiver-sig")) return probeOraclePriceWrongReceiverSig();
     if (std.mem.eql(u8, probe_case, "tictactoe-join-twice")) return probeTicTacToeJoinTwice();
+    if (std.mem.eql(u8, probe_case, "tictactoe-join-unpaid")) return probeTicTacToeJoinWithContinuation(10000);
+    if (std.mem.eql(u8, probe_case, "tictactoe-join-short")) return probeTicTacToeJoinWithContinuation(10000 + 100 - 1);
+    if (std.mem.eql(u8, probe_case, "tictactoe-join-over")) return probeTicTacToeJoinWithContinuation(10000 + 100 + 1);
     if (std.mem.eql(u8, probe_case, "tictactoe-move-wrong-player")) return probeTicTacToeMoveWrongPlayer();
     if (std.mem.eql(u8, probe_case, "tictactoe-move-occupied-cell")) return probeTicTacToeMoveOccupiedCell();
     if (std.mem.eql(u8, probe_case, "tictactoe-cancel-before-join-wrong-sig")) return probeTicTacToeCancelBeforeJoinWrongSig();
@@ -257,7 +262,20 @@ fn probeAuctionBidTooLow() !void {
     defer runtime.deinit();
     var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{ .locktime = 499 }));
+    // Paid (N-027), so the only failing assert is `bidAmount > highestBid`.
+    _ = runar.setMockContinuationAmount(10000 + 100);
     auction.bid(ctx, runar.signTestMessage(runar.BOB), runar.BOB.pubKey, 100);
+}
+
+// N-027: carrying the pot forward unpaid passes F-024's `>= input` floor but
+// not bid's `continuationAmount() >= extractAmount(ctx.txPreimage) + bidAmount`.
+fn probeAuctionBidWithContinuation(amount: i64) !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    var auction = Auction.init(runar.ALICE.pubKey, runar.ALICE.pubKey, 100, 500);
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{ .locktime = 499 }));
+    _ = runar.setMockContinuationAmount(amount);
+    auction.bid(ctx, runar.signTestMessage(runar.BOB), runar.BOB.pubKey, 150);
 }
 
 fn probeAuctionCloseTooEarly() !void {
@@ -393,21 +411,49 @@ fn probeOraclePriceWrongReceiverSig() !void {
     contract.settle(price, &[_]u8{0x00}, padding, runar.signTestMessage(runar.BOB));
 }
 
+/// Join paying exactly the bet: extractAmount (the input, player X's bet) is
+/// 10000 off-chain, so the continuation is 10000 + betAmount (N-027).
+fn ticTacToeJoinPaying(game: *TicTacToe, ctx: runar.StatefulContext, joiner: runar.TestKeyPair) void {
+    const prev = runar.setMockContinuationAmount(10000 + game.betAmount);
+    defer _ = runar.setMockContinuationAmount(prev);
+    game.join(ctx, joiner.pubKey, runar.signTestMessage(joiner));
+}
+
 fn probeTicTacToeJoinTwice() !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
-    game.join(runar.CHARLIE.pubKey, runar.signTestMessage(runar.CHARLIE));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
+    ticTacToeJoinPaying(&game, ctx, runar.CHARLIE);
+}
+
+// N-027: carrying the input forward unpaid passes F-024's `>= input` floor but
+// not join's `continuationAmount() == extractAmount(ctx.txPreimage) + betAmount`.
+fn probeTicTacToeJoinWithContinuation(amount: i64) !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
+    var game = TicTacToe.init(runar.ALICE.pubKey, 100);
+    _ = runar.setMockContinuationAmount(amount);
+    game.join(ctx, runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
 }
 
 fn probeTicTacToeMoveWrongPlayer() !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.move(0, runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
 }
 
 fn probeTicTacToeMoveOccupiedCell() !void {
+    var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.move(0, runar.ALICE.pubKey, runar.signTestMessage(runar.ALICE));
     game.move(0, runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
 }
@@ -437,12 +483,12 @@ fn probeTicTacToeCancelWrongSigX() !void {
     var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
     defer runtime.deinit();
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
     const out1 = payoutOutput(100, runar.ALICE.pubKey);
     const out2 = payoutOutput(100, runar.BOB.pubKey);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
         .outputHash = runar.hash256(runar.cat(out1, out2)),
     }));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.cancel(ctx, runar.signTestMessage(runar.CHARLIE), runar.signTestMessage(runar.BOB), runar.hash160(runar.CHARLIE.pubKey), 0);
 }
 
@@ -450,12 +496,12 @@ fn probeTicTacToeCancelWrongSigO() !void {
     var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
     defer runtime.deinit();
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
     const out1 = payoutOutput(100, runar.ALICE.pubKey);
     const out2 = payoutOutput(100, runar.BOB.pubKey);
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
         .outputHash = runar.hash256(runar.cat(out1, out2)),
     }));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.cancel(ctx, runar.signTestMessage(runar.ALICE), runar.signTestMessage(runar.CHARLIE), runar.hash160(runar.CHARLIE.pubKey), 0);
 }
 
@@ -463,10 +509,10 @@ fn probeTicTacToeCancelWrongOutput() !void {
     var runtime = runar.StatefulSmartContract.init(std.heap.page_allocator);
     defer runtime.deinit();
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
     const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
         .outputHash = runar.hash256("wrong-output"),
     }));
+    ticTacToeJoinPaying(&game, ctx, runar.BOB);
     game.cancel(ctx, runar.signTestMessage(runar.ALICE), runar.signTestMessage(runar.BOB), runar.hash160(runar.CHARLIE.pubKey), 0);
 }
 

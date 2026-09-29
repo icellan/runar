@@ -344,6 +344,7 @@ describe('OP_CODESEPARATOR: stateful terminal method without terminalOutputs', (
       'bid',
       [null, pubKeyHex, 200n],
       provider, signer,
+      { satoshis: 50_000 + 200 }, // N-027: the bid is paid into the pot
     );
     expect(result.txid).toBeTruthy();
 

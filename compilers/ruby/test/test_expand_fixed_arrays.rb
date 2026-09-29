@@ -349,8 +349,9 @@ class TestExpandFixedArrays < Minitest::Test
     # W1 took it 7778 -> 7796: six 32-bit-extractor call sites each gained a
     # 3-byte zero-pad ahead of their OP_BIN2NUM.
     # F-024 took it 7796 -> 7832: the injected _newAmount >= extractAmount(txPreimage) check in its two default-continuation methods (the check-stripped ANF re-emits the 7796-byte script exactly).
-    assert_equal 7832, v1.script.length / 2, "v1 script must be 7832 bytes"
-    assert_equal 7832, v2.script.length / 2, "v2 script must be 7832 bytes"
+    # N-027 took it 7832 -> 7849: join's own continuationAmount() == extractAmount(txPreimage) + betAmount rule (+17; the betAmount reference is a 1-byte constructor slot).
+    assert_equal 7849, v1.script.length / 2, "v1 script must be 7849 bytes"
+    assert_equal 7849, v2.script.length / 2, "v2 script must be 7849 bytes"
     assert_equal v1.script, v2.script, "TicTacToe v1 and v2 scripts must be byte-identical"
   end
 

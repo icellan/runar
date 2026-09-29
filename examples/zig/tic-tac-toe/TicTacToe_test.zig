@@ -18,10 +18,21 @@ test "compile-check TicTacToe.runar.zig" {
     try root.runar.compileCheckSource(allocator, contract_source, "TicTacToe.runar.zig");
 }
 
+/// Player O joins paying exactly the bet: extractAmount (the input, player X's
+/// bet) is 10000 off-chain, so the continuation is 10000 + betAmount (N-027).
+fn joinPaying(game: *TicTacToe, ctx: runar.StatefulContext) void {
+    const prev = runar.setMockContinuationAmount(10000 + game.betAmount);
+    defer _ = runar.setMockContinuationAmount(prev);
+    game.join(ctx, runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
+}
+
 test "tic tac toe join and move update the real contract state" {
+    var runtime = runar.StatefulSmartContract.init(std.testing.allocator);
+    defer runtime.deinit();
+    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{}));
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
 
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
+    joinPaying(&game, ctx);
     try std.testing.expectEqual(@as(i64, 1), game.status);
     try std.testing.expectEqual(@as(i64, 1), game.turn);
     try std.testing.expectEqualSlices(u8, runar.BOB.pubKey, game.playerO);
@@ -37,6 +48,10 @@ test "tic tac toe join and move update the real contract state" {
 
 test "tic tac toe rejects invalid joins and moves through the real contract" {
     try root.expectAssertFailure("tictactoe-join-twice");
+    // N-027: a join must pay exactly the bet.
+    try root.expectAssertFailure("tictactoe-join-unpaid");
+    try root.expectAssertFailure("tictactoe-join-short");
+    try root.expectAssertFailure("tictactoe-join-over");
     try root.expectAssertFailure("tictactoe-move-wrong-player");
     try root.expectAssertFailure("tictactoe-move-occupied-cell");
 }
@@ -63,7 +78,11 @@ test "tic tac toe cancel validates the real dual-payout output" {
     var runtime = runar.StatefulSmartContract.init(std.testing.allocator);
     defer runtime.deinit();
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
+    {
+        var join_runtime = runar.StatefulSmartContract.init(std.testing.allocator);
+        defer join_runtime.deinit();
+        joinPaying(&game, try runar.StatefulContext.init(&join_runtime, runar.mockPreimage(.{})));
+    }
 
     const out1 = runar.testing.buildP2pkhOutput(runar.hash160(runar.ALICE.pubKey), 100);
     const out2 = runar.testing.buildP2pkhOutput(runar.hash160(runar.BOB.pubKey), 100);

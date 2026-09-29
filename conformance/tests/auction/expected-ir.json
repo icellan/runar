@@ -269,69 +269,70 @@
           "name": "t18",
           "value": {
             "kind": "load_param",
-            "name": "bidder"
+            "name": "_newAmount"
           }
         },
         {
           "name": "t19",
-          "value": {
-            "kind": "update_prop",
-            "name": "highestBidder",
-            "value": "t18"
-          }
-        },
-        {
-          "name": "t20",
-          "value": {
-            "kind": "load_param",
-            "name": "bidAmount"
-          }
-        },
-        {
-          "name": "t21",
-          "value": {
-            "kind": "update_prop",
-            "name": "highestBid",
-            "value": "t20"
-          }
-        },
-        {
-          "name": "t22",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t23",
+          "name": "t20",
           "value": {
             "args": [
-              "t22"
+              "t19"
             ],
             "func": "extractAmount",
             "kind": "call"
           }
         },
         {
-          "name": "t24",
+          "name": "t21",
           "value": {
             "kind": "load_param",
-            "name": "_newAmount"
+            "name": "bidAmount"
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "bin_op",
+            "left": "t20",
+            "op": "+",
+            "right": "t21"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "kind": "bin_op",
+            "left": "t18",
+            "op": ">=",
+            "right": "t22"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "kind": "assert",
+            "value": "t23"
           }
         },
         {
           "name": "t25",
           "value": {
-            "kind": "bin_op",
-            "left": "t24",
-            "op": ">=",
-            "right": "t23"
+            "kind": "load_param",
+            "name": "bidder"
           }
         },
         {
           "name": "t26",
           "value": {
-            "kind": "assert",
+            "kind": "update_prop",
+            "name": "highestBidder",
             "value": "t25"
           }
         },
@@ -339,39 +340,94 @@
           "name": "t27",
           "value": {
             "kind": "load_param",
-            "name": "_changePKH"
+            "name": "bidAmount"
           }
         },
         {
           "name": "t28",
+          "value": {
+            "kind": "update_prop",
+            "name": "highestBid",
+            "value": "t27"
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "args": [
+              "t29"
+            ],
+            "func": "extractAmount",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t31",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
+            "kind": "bin_op",
+            "left": "t31",
+            "op": ">=",
+            "right": "t30"
+          }
+        },
+        {
+          "name": "t33",
+          "value": {
+            "kind": "assert",
+            "value": "t32"
+          }
+        },
+        {
+          "name": "t34",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t35",
           "value": {
             "kind": "load_param",
             "name": "_changeAmount"
           }
         },
         {
-          "name": "t29",
+          "name": "t36",
           "value": {
             "kind": "load_const",
             "value": 0
           }
         },
         {
-          "name": "t30",
+          "name": "t37",
           "value": {
             "kind": "bin_op",
-            "left": "t28",
+            "left": "t35",
             "op": "!==",
-            "right": "t29"
+            "right": "t36"
           }
         },
         {
-          "name": "t33",
+          "name": "t40",
           "value": {
-            "cond": "t30",
+            "cond": "t37",
             "else": [
               {
-                "name": "t32",
+                "name": "t39",
                 "value": {
                   "kind": "load_const",
                   "value": ""
@@ -381,11 +437,11 @@
             "kind": "if",
             "then": [
               {
-                "name": "t31",
+                "name": "t38",
                 "value": {
                   "args": [
-                    "t27",
-                    "t28"
+                    "t34",
+                    "t35"
                   ],
                   "func": "buildChangeOutput",
                   "kind": "call"
@@ -395,91 +451,91 @@
           }
         },
         {
-          "name": "t34",
+          "name": "t41",
           "value": {
             "kind": "get_state_script"
           }
         },
         {
-          "name": "t35",
+          "name": "t42",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t36",
+          "name": "t43",
           "value": {
             "kind": "load_param",
             "name": "_newAmount"
           }
         },
         {
-          "name": "t37",
+          "name": "t44",
           "value": {
             "args": [
-              "t35",
-              "t34",
-              "t36"
+              "t42",
+              "t41",
+              "t43"
             ],
             "func": "computeStateOutput",
             "kind": "call"
           }
         },
         {
-          "name": "t38",
+          "name": "t45",
           "value": {
             "args": [
-              "t37",
-              "t33"
+              "t44",
+              "t40"
             ],
             "func": "cat",
             "kind": "call"
           }
         },
         {
-          "name": "t39",
+          "name": "t46",
           "value": {
             "args": [
-              "t38"
+              "t45"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t40",
+          "name": "t47",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t41",
+          "name": "t48",
           "value": {
             "args": [
-              "t40"
+              "t47"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t42",
+          "name": "t49",
           "value": {
             "kind": "bin_op",
-            "left": "t39",
+            "left": "t46",
             "op": "===",
             "result_type": "bytes",
-            "right": "t41"
+            "right": "t48"
           }
         },
         {
-          "name": "t43",
+          "name": "t50",
           "value": {
             "isAutoInjectedStateCheck": true,
             "kind": "assert",
-            "value": "t42"
+            "value": "t49"
           }
         }
       ],

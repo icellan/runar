@@ -661,6 +661,8 @@ async function exampleAuction() {
   //
   // The contract enforces:
   //   - bidAmount > this.highestBid
+  //   - continuationAmount() >= extractAmount(txPreimage) + bidAmount
+  //     (the bid is paid into the pot: 50_000 + 5000 here)
   //   - extractLocktime(txPreimage) < this.deadline  (auction still open)
   //   - State is updated: highestBidder = Bob, highestBid = bidAmount
   //   - Output hash matches the updated state script
@@ -676,7 +678,7 @@ async function exampleAuction() {
     [bobPubKey, 5000n, fakeTxPreimage],
     provider,
     alice,
-    { satoshis: 50_000 },
+    { satoshis: 55_000 },
   );
   console.log('\nBob bid 5000 sats, txid:', bid1Result.txid);
   console.log('State after bid:', auction.state);
@@ -689,7 +691,7 @@ async function exampleAuction() {
     [carolPubKey, 10000n, fakeTxPreimage],
     provider,
     alice,
-    { satoshis: 50_000 },
+    { satoshis: 65_000 },
   );
   console.log('Carol bid 10000 sats, txid:', bid2Result.txid);
   console.log('State after outbid:', auction.state);

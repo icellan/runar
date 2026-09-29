@@ -503,9 +503,19 @@ module Runar
     # next state UTXO (F-024 / R14). On-chain the compiler lowers it to the
     # injected _newAmount witness, already bound to
     # >= extract_amount(tx_preimage). Mock returns 10_000 -- the mock input
-    # amount extract_amount returns, i.e. an honest continuation.
+    # amount extract_amount returns, i.e. an honest continuation -- unless a
+    # test has set Runar::Builtins.mock_continuation_amount.
     def continuation_amount
-      10_000
+      Builtins.mock_continuation_amount
+    end
+
+    # What continuation_amount returns in test mode (N-027). extract_amount
+    # stays 10_000, so a native test of an author rule such as
+    # continuation_amount() == extract_amount(@tx_preimage) + bet sets
+    # 10_000 + bet for the paying call and anything else for a non-paying one.
+    @mock_continuation_amount = 10_000
+    class << self
+      attr_accessor :mock_continuation_amount
     end
 
     # -- Math Utilities --------------------------------------------------------

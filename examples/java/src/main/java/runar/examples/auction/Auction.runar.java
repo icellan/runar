@@ -9,6 +9,8 @@ import runar.lang.types.Sig;
 
 import static runar.lang.Builtins.assertThat;
 import static runar.lang.Builtins.checkSig;
+import static runar.lang.Builtins.continuationAmount;
+import static runar.lang.Builtins.extractAmount;
 import static runar.lang.Builtins.extractLocktime;
 import static runar.lang.Builtins.extractSequence;
 
@@ -73,6 +75,12 @@ class Auction extends StatefulSmartContract {
     void bid(Sig sig, PubKey bidder, Bigint bidAmount) {
         assertThat(checkSig(sig, bidder));
         assertThat(bidAmount.gt(this.highestBid));
+        // The bid must be paid into the pot (N-027): the continuation carries the
+        // prior pot plus the new bid. This example never refunds an outbid bidder,
+        // so the pot is the deposit plus every bid, and close() hands all of it to
+        // the auctioneer. `>=` lets a bidder add more; the compiler's own
+        // `>= input` floor alone would let a bid pay nothing.
+        assertThat(Bigint.of(continuationAmount()).ge(Bigint.of(extractAmount(this.txPreimage)).plus(bidAmount)));
         this.highestBidder = bidder;
         this.highestBid = bidAmount;
     }

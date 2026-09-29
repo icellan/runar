@@ -1,8 +1,10 @@
 package runar.examples.tictactoe;
 
+import java.math.BigInteger;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import runar.lang.runtime.ContractSimulator;
+import runar.lang.runtime.Preimage;
 import runar.lang.sdk.CompileCheck;
 import runar.lang.types.Bigint;
 import runar.lang.types.PubKey;
@@ -26,11 +28,24 @@ class TicTacToeTest {
         return new TicTacToe(ALICE, Bigint.of(1000));
     }
 
+    /**
+     * N-027: join requires {@code continuationAmount() == extractAmount(txPreimage) + betAmount}.
+     * Off-chain {@code continuationAmount()} is fixed at 10000, so a paying join
+     * is one whose input (the preimage amount, player X's bet) is 10000 - bet.
+     */
+    private static Preimage inputOf(long sats) {
+        return Preimage.builder().amount(BigInteger.valueOf(sats)).build();
+    }
+
+    private static void joinPaying(ContractSimulator sim) {
+        sim.callStateful("join", inputOf(10000 - 1000), BOB, SIG);
+    }
+
     @Test
     void joinActivatesGame() {
         TicTacToe g = freshGame();
         ContractSimulator sim = ContractSimulator.stateful(g);
-        sim.call("join", BOB, SIG);
+        joinPaying(sim);
         assertEquals(BOB, g.playerO);
         assertEquals(Bigint.ONE, g.status);
         assertEquals(Bigint.ONE, g.turn);
@@ -40,7 +55,7 @@ class TicTacToeTest {
     void moveFlipsTurn() {
         TicTacToe g = freshGame();
         ContractSimulator sim = ContractSimulator.stateful(g);
-        sim.call("join", BOB, SIG);
+        joinPaying(sim);
         sim.call("move", Bigint.ZERO, ALICE, SIG); // turn was X (1), Alice plays cell 0
         assertEquals(Bigint.ONE, g.c0);
         assertEquals(Bigint.TWO, g.turn);
@@ -50,7 +65,7 @@ class TicTacToeTest {
     void moveRejectsOccupiedCell() {
         TicTacToe g = freshGame();
         ContractSimulator sim = ContractSimulator.stateful(g);
-        sim.call("join", BOB, SIG);
+        joinPaying(sim);
         sim.call("move", Bigint.ZERO, ALICE, SIG);
         // Bob tries to play on the occupied cell 0.
         assertThrows(AssertionError.class, () -> sim.call("move", Bigint.ZERO, BOB, SIG));
@@ -60,9 +75,25 @@ class TicTacToeTest {
     void moveRejectsWrongPlayer() {
         TicTacToe g = freshGame();
         ContractSimulator sim = ContractSimulator.stateful(g);
-        sim.call("join", BOB, SIG);
+        joinPaying(sim);
         // Turn is 1 (X = Alice), but Bob tries to move.
         assertThrows(AssertionError.class, () -> sim.call("move", Bigint.ZERO, BOB, SIG));
+    }
+
+    /**
+     * N-027: a join must pay exactly the bet. An input of 10000 carried forward
+     * unpaid (continuation 10000) passes F-024's {@code >= input} floor but not
+     * join's rule, and neither does a continuation one satoshi short or over.
+     */
+    @Test
+    void joinRejectsWrongPayment() {
+        for (long input : new long[] {10000, 10000 - 1000 + 1, 10000 - 1000 - 1}) {
+            TicTacToe g = freshGame();
+            ContractSimulator sim = ContractSimulator.stateful(g);
+            assertThrows(AssertionError.class, () -> sim.callStateful("join", inputOf(input), BOB, SIG),
+                "join with input " + input + " must be rejected");
+            assertEquals(Bigint.ZERO, g.status);
+        }
     }
 
     /**

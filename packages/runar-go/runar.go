@@ -798,8 +798,22 @@ func CurrentBlockHeight() int64 { return 0 }
 // satoshis the call puts in the next state UTXO (F-024 / R14). On-chain the
 // compiler lowers it to the injected `_newAmount` witness, which it has
 // already bound to `>= ExtractAmount(txPreimage)`. Returns 10000 — the mock
-// input amount ExtractAmount returns, i.e. an honest continuation.
-func ContinuationAmount() int64 { return 10000 }
+// input amount ExtractAmount returns, i.e. an honest continuation — unless a
+// test has set another value with SetMockContinuationAmount.
+func ContinuationAmount() int64 { return mockContinuationAmount }
+
+var mockContinuationAmount int64 = 10000
+
+// SetMockContinuationAmount sets what ContinuationAmount returns in test mode
+// and returns a func that restores the previous value. ExtractAmount stays
+// 10000, so a native test of an author rule such as
+// `ContinuationAmount() == ExtractAmount(c.TxPreimage) + bet` sets 10000 + bet
+// for the paying call and anything else for a non-paying one (N-027).
+func SetMockContinuationAmount(v int64) (restore func()) {
+	prev := mockContinuationAmount
+	mockContinuationAmount = v
+	return func() { mockContinuationAmount = prev }
+}
 
 // ---------------------------------------------------------------------------
 // Utility functions

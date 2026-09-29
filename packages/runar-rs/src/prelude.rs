@@ -553,6 +553,12 @@ pub fn extract_locktime(_p: &[u8]) -> Int {
     0
 }
 
+/// Returns 10000 in test mode — the mock input amount every other tier's
+/// `extract_amount` stub returns, and the default of [`continuation_amount`].
+pub fn extract_amount(_p: &[u8]) -> Int {
+    10000
+}
+
 /// Returns 0xfffffffe in test mode. That is
 /// the SDK's own non-final default (`resolveInputSequence`), the value the
 /// TypeScript TestContract interpreter returns, and the value all the SDK ANF
@@ -649,9 +655,24 @@ pub fn current_block_height() -> i64 {
 /// injected `_newAmount` witness, which it has already bound to
 /// `>= extract_amount(tx_preimage)`. Returns 10000 off-chain — the mock input
 /// amount the other tiers' `extract_amount` stubs return (an honest
-/// continuation).
+/// continuation) — unless a test has set another value with
+/// [`set_mock_continuation_amount`].
 pub fn continuation_amount() -> i64 {
-    10000
+    MOCK_CONTINUATION_AMOUNT.with(|c| c.get())
+}
+
+thread_local! {
+    static MOCK_CONTINUATION_AMOUNT: std::cell::Cell<i64> = const { std::cell::Cell::new(10000) };
+}
+
+/// Sets what [`continuation_amount`] returns in test mode on this thread and
+/// returns the previous value. [`extract_amount`] stays 10000, so a native test
+/// of an author rule such as
+/// `continuation_amount() == extract_amount(&self.tx_preimage) + bet` sets
+/// 10000 + bet for the paying call and anything else for a non-paying one
+/// (N-027).
+pub fn set_mock_continuation_amount(amount: i64) -> i64 {
+    MOCK_CONTINUATION_AMOUNT.with(|c| c.replace(amount))
 }
 
 // ---------------------------------------------------------------------------

@@ -353,6 +353,13 @@ pub fn extractLocktime(preimage: base.SigHashPreimage) base.Bigint {
     return extracted;
 }
 
+/// Returns 10000 in test mode — the mock input amount every other tier's
+/// `extractAmount` stub returns, and the default of `continuationAmount`.
+pub fn extractAmount(preimage: base.SigHashPreimage) base.Bigint {
+    _ = preimage;
+    return 10000;
+}
+
 /// Returns 0xfffffffe in test mode. That is
 /// the SDK's own non-final default (`resolveInputSequence`), the value the
 /// TypeScript TestContract interpreter returns, and the value all the SDK ANF
@@ -404,9 +411,23 @@ pub fn currentBlockHeight() base.Bigint {
 /// satoshis the call puts in the next state UTXO (F-024 / R14). On-chain the
 /// compiler lowers it to the injected `_newAmount` witness, already bound to
 /// `>= extractAmount(txPreimage)`. Returns 10000 — the mock input amount the
-/// other tiers' `extractAmount` stubs return (an honest continuation).
+/// other tiers' `extractAmount` stubs return (an honest continuation) —
+/// unless a test has set another value with `setMockContinuationAmount`.
 pub fn continuationAmount() base.Bigint {
-    return 10000;
+    return mock_continuation_amount;
+}
+
+var mock_continuation_amount: base.Bigint = 10000;
+
+/// Sets what `continuationAmount` returns in test mode and returns the
+/// previous value. `extractAmount` stays 10000, so a native test of an author
+/// rule such as `continuationAmount() == extractAmount(ctx.txPreimage) + bet`
+/// sets 10000 + bet for the paying call and anything else for a non-paying one
+/// (N-027).
+pub fn setMockContinuationAmount(amount: base.Bigint) base.Bigint {
+    const prev = mock_continuation_amount;
+    mock_continuation_amount = amount;
+    return prev;
 }
 
 pub const BuildChangeOutputError = error{
