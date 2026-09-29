@@ -95,6 +95,13 @@ final class RawTx {
      * stateful contracts).
      */
     byte[] sighashBIP143(int inputIndex, String subscriptHex, long inputSatoshis, int sighashType) {
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if (subscriptHex == null || subscriptHex.isEmpty()) {
+            throw new IllegalArgumentException(
+                "RawTx.sighashBIP143: refusing to sign input " + inputIndex
+                    + " with an empty subscript (scriptCode); pass the locking script of the UTXO being spent");
+        }
         boolean anyoneCanPay = (sighashType & 0x80) != 0;
         int baseType = sighashType & 0x1f;
 

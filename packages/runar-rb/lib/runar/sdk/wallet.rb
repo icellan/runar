@@ -354,6 +354,14 @@ module Runar
       # @param sighash_type [Integer, nil] sighash type (default: SIGHASH_ALL|FORKID = 0x41)
       # @return [String] DER + sighash byte, hex-encoded
       def sign(tx_hex, input_index, subscript, satoshis, sighash_type = nil)
+        # F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        # signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if subscript.nil? || subscript.empty?
+          raise ArgumentError,
+                "WalletSigner: refusing to sign input #{input_index} with an empty subscript (scriptCode); " \
+                'pass the locking script of the UTXO being spent'
+        end
+
         sighash_type ||= SIGHASH_ALL_FORKID
 
         # 1. Compute BIP-143 preimage

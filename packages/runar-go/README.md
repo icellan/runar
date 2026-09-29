@@ -628,7 +628,7 @@ provider, err := runar.NewWhatsOnChainProvider("mainnet") // or "testnet"
 
 The network must be exactly `"mainnet"` or `"testnet"`. Any other value — including the empty string — returns an error rather than defaulting, so a typo can never silently point the SDK at live mainnet.
 
-Wraps the public WhatsOnChain API at `https://api.whatsonchain.com/v1/bsv/{main,test}`. Note that WoC does not return locking scripts in its UTXO list response, so `GetUtxos(...).Script` will be empty — fetch the parent transaction with `GetTransaction` if you need the script.
+Wraps the public WhatsOnChain API at `https://api.whatsonchain.com/v1/bsv/{main,test}`. WoC's UTXO list response has no locking scripts, so `GetUtxos` fetches each UTXO's transaction from `/tx/{txid}/hex`, checks that it hashes to the txid and that the listed output and value exist, and returns the real `Script`. It returns an error rather than an empty script (F-040).
 
 ### `GorillaPoolProvider`
 
@@ -1744,7 +1744,7 @@ A: `NewLocalSigner` derives an `AddressString` with `mainnet=true`. If you need 
 
 **Q: `WhatsOnChainProvider.GetUtxos` returns UTXOs with empty `Script`.**
 
-A: Documented limitation — WoC's `/address/{addr}/unspent` endpoint does not include locking scripts. Fetch the parent transaction with `GetTransaction(utxo.Txid)` if you need the script.
+A: No longer: WoC's `/address/{addr}/unspent` endpoint has no locking scripts, so since F-040 `GetUtxos` reads each script from the verified `/tx/{txid}/hex` and returns an error if it cannot. `GetContractUtxo` still returns an empty `Script`.
 
 **Q: I want to use the SDK in async / concurrent code.**
 

@@ -833,7 +833,7 @@ from runar.sdk import WhatsOnChainProvider
 provider = WhatsOnChainProvider(network="mainnet")  # or "testnet"
 ```
 
-Source: [runar/sdk/woc_provider.py](runar/sdk/woc_provider.py). `get_utxos(address)` does not return locking scripts (WoC limitation); `get_contract_utxo(script_hash)` does work.
+Source: [runar/sdk/woc_provider.py](runar/sdk/woc_provider.py). `get_utxos(address)` reads each UTXO's locking script from the verified `/tx/{txid}/hex` (WoC's listing has none) and raises rather than return an empty script (F-040); `get_contract_utxo(script_hash)` still returns `script=''`.
 
 ### GorillaPoolProvider
 
@@ -1723,7 +1723,7 @@ Off-chain testing uses mock crypto (`check_sig` always True). On-chain, the scri
 
 **Q. `WhatsOnChainProvider.get_utxos(address)` returns UTXOs with empty `script` fields.**
 
-WoC's `address/<a>/unspent` endpoint doesn't include locking scripts. Use `get_contract_utxo(script_hash)` for contract UTXOs (which does include scripts), or fetch the locking script via `get_transaction(txid)` and read `outputs[output_index].script`.
+WoC's `address/<a>/unspent` endpoint doesn't include locking scripts, so since F-040 `get_utxos` fetches `/tx/{txid}/hex` for each UTXO, checks it hashes to the txid, and returns the real script. `get_contract_utxo(script_hash)` does not, and still returns `script=''`.
 
 **Q. How do I sign with a hardware wallet?**
 

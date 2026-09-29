@@ -3,9 +3,11 @@
 require 'net/http'
 require 'json'
 require 'uri'
+require 'digest'
 require_relative 'provider'
 require_relative 'types'
 require_relative 'errors'
+require_relative 'bip143'
 
 # WhatsOnChainProvider — HTTP-based BSV API provider.
 #
@@ -84,10 +86,15 @@ module Runar
         JSON.parse(response.body)
       end
 
-      # Return all UTXOs for a given address.
+      # Return all UTXOs for a given address, each with its real locking script.
       #
-      # Note: WoC does not return locking scripts in UTXO lists, so the
-      # script field is set to an empty string.
+      # WoC's GET /address/{address}/unspent listing carries outpoints and
+      # values but no locking script. The script is the BIP-143 scriptCode a
+      # signer commits to, so an empty one yields signatures no OP_CHECKSIG
+      # accepts (F-040). Each distinct txid is therefore fetched via
+      # GET /tx/{txid}/hex, its double-SHA256 must equal the txid, and tx_pos
+      # must be an output whose value equals the listed value. Any failure
+      # raises; no UTXO is returned with an empty script.
       #
       # @param address [String] BSV address
       # @return [Array<Utxo>]
@@ -95,25 +102,31 @@ module Runar
         entries = api_get("/address/#{address}/unspent")
         return [] unless entries.is_a?(Array)
 
-        utxos = entries.map do |e|
-          Utxo.new(
-            txid: e['tx_hash'],
-            output_index: e['tx_pos'],
-            satoshis: e['value'],
-            script: ''
-          )
-        end
-        # DoS-bound: defensive — WoC currently returns empty scripts but a
-        # future enriched response must not bypass MAX_SCRIPT_BYTES.
-        utxos.each do |u|
-          next if u.script.nil? || u.script.empty?
+        txs = {}
+        entries.map do |e|
+          txid = e['tx_hash']
+          tx_pos = e['tx_pos']
+          value = e['value']
+          txs[txid] ||= fetch_verified_tx(txid)
+          outputs = txs[txid][:outputs]
+          unless tx_pos.is_a?(Integer) && tx_pos >= 0 && tx_pos < outputs.length
+            raise "WoC getUtxos: no output #{tx_pos} in tx #{txid} (#{outputs.length} outputs)"
+          end
+
+          out = outputs[tx_pos]
+          unless out[:satoshis] == value
+            raise "WoC getUtxos: value mismatch for #{txid}:#{tx_pos}: listing says #{value}, tx says #{out[:satoshis]}"
+          end
+
+          script = out[:script].unpack1('H*')
+          raise "WoC getUtxos: empty locking script for #{txid}:#{tx_pos}" if script.empty?
 
           SDK.assert_script_hex_under_limit(
-            u.script, SDK::MAX_SCRIPT_BYTES,
+            script, SDK::MAX_SCRIPT_BYTES,
             "WhatsOnChainProvider.get_utxos(#{address})"
           )
+          Utxo.new(txid: txid, output_index: tx_pos, satoshis: value, script: script)
         end
-        utxos
       end
 
       # Find a contract UTXO by its script hash.
@@ -179,6 +192,25 @@ module Runar
       end
 
       private
+
+      # Fetch GET /tx/{txid}/hex and parse it, requiring the body to hash to txid (F-040).
+      #
+      # @param txid [String]
+      # @return [Hash] BIP143.parse_raw_tx result
+      def fetch_verified_tx(txid)
+        raw_hex = get_raw_transaction(txid)
+        raise "WoC getUtxos: /tx/#{txid}/hex body is not hex" unless raw_hex.match?(/\A(?:[0-9a-fA-F]{2})*\z/)
+
+        raw = [raw_hex].pack('H*')
+        body_txid = Digest::SHA256.digest(Digest::SHA256.digest(raw)).reverse.unpack1('H*')
+        unless body_txid == txid.downcase
+          raise "WoC getUtxos: txid mismatch: /tx/#{txid}/hex body hashes to #{body_txid}"
+        end
+
+        BIP143.parse_raw_tx(raw)
+      rescue ArgumentError => e
+        raise "WoC getUtxos: parsing tx #{txid}: #{e.message}"
+      end
 
       # Perform an HTTP GET request against the WoC API and parse the JSON response.
       #

@@ -116,6 +116,13 @@ class LocalSigner(Signer):
 
         Returns the DER-encoded signature with sighash byte, hex-encoded.
         """
+        # F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        # signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if not subscript:
+            raise ValueError(
+                f'LocalSigner: refusing to sign input {input_index} with an empty subscript '
+                '(scriptCode); pass the locking script of the UTXO being spent'
+            )
         flag = sighash_type if sighash_type is not None else _SIGHASH_ALL_FORKID
 
         if self._backend == 'bsv':

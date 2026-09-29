@@ -1051,7 +1051,7 @@ provider.get_utxos('1A1zP1eP...')
 provider.broadcast(raw_tx_hex)
 ```
 
-Note: WhatsOnChain does not return locking scripts in UTXO lists, so `get_utxos` returns `Utxo` rows with `script: ''`. Implementation: [`lib/runar/sdk/woc_provider.rb`](lib/runar/sdk/woc_provider.rb). The other six SDKs use the same class name, `WhatsOnChainProvider`; the Ruby file is named `woc_provider.rb` for historical reasons but the public class name matches.
+Note: WhatsOnChain does not return locking scripts in UTXO lists, so `get_utxos` reads each script from the verified `/tx/{txid}/hex` and raises rather than return `script: ''` (F-040). Implementation: [`lib/runar/sdk/woc_provider.rb`](lib/runar/sdk/woc_provider.rb). The other six SDKs use the same class name, `WhatsOnChainProvider`; the Ruby file is named `woc_provider.rb` for historical reasons but the public class name matches.
 
 ### 12.4 `GorillaPoolProvider`
 

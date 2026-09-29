@@ -5,6 +5,7 @@ Uses only stdlib (urllib.request) for HTTP — no external dependencies required
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from urllib.error import HTTPError
@@ -14,6 +15,8 @@ from runar.sdk.provider import Provider
 from runar.sdk.types import TransactionData, TxInput, TxOutput, Utxo
 from runar.sdk.errors import assert_script_hex_under_limit
 from runar.sdk.input_limits import MAX_SCRIPT_BYTES
+# The GorillaPool provider's bounds-checked raw-tx decoder (F-027).
+from runar.sdk.gorillapool import _decode_raw_tx
 
 
 class WhatsOnChainProvider(Provider):
@@ -101,26 +104,59 @@ class WhatsOnChainProvider(Provider):
         return str(txid)
 
     def get_utxos(self, address: str) -> list[Utxo]:
+        """Return the address's UTXOs, each with its real locking script.
+
+        WoC's GET /address/{address}/unspent listing carries outpoints and
+        values but no locking script. The script is the BIP-143 scriptCode a
+        signer commits to, so an empty one yields signatures no OP_CHECKSIG
+        accepts (F-040). Each distinct txid is therefore fetched via
+        GET /tx/{txid}/hex, its double-SHA256 must equal the txid, and tx_pos
+        must be an output whose value equals the listed value. Any failure
+        raises; no UTXO is returned with an empty script.
+        """
         raw = self._get(f'/address/{address}/unspent')
         entries = json.loads(raw)
 
+        txs: dict[str, TransactionData] = {}
         utxos: list[Utxo] = []
         for e in entries:
-            utxos.append(Utxo(
-                txid=e['tx_hash'],
-                output_index=e['tx_pos'],
-                satoshis=e['value'],
-                script='',  # WoC doesn't return locking script in UTXO list
-            ))
-        # DoS-bound: defensive — WoC currently returns empty scripts but a
-        # future enriched response must not bypass MAX_SCRIPT_BYTES.
-        for u in utxos:
-            if not u.script:
-                continue
+            txid = e['tx_hash']
+            tx_pos = e['tx_pos']
+            value = e['value']
+            tx = txs.get(txid)
+            if tx is None:
+                raw_hex = self.get_raw_transaction(txid)
+                try:
+                    body = bytes.fromhex(raw_hex)
+                except ValueError as exc:
+                    raise RuntimeError(f'WoC getUtxos: /tx/{txid}/hex body is not hex: {exc}') from exc
+                body_txid = hashlib.sha256(hashlib.sha256(body).digest()).digest()[::-1].hex()
+                if body_txid != txid.lower():
+                    raise RuntimeError(
+                        f'WoC getUtxos: txid mismatch: /tx/{txid}/hex body hashes to {body_txid}'
+                    )
+                try:
+                    tx = _decode_raw_tx(body_txid, body)
+                except RuntimeError as exc:
+                    raise RuntimeError(f'WoC getUtxos: parsing tx {txid}: {exc}') from exc
+                txs[txid] = tx
+            if not isinstance(tx_pos, int) or tx_pos < 0 or tx_pos >= len(tx.outputs):
+                raise RuntimeError(
+                    f'WoC getUtxos: no output {tx_pos} in tx {txid} ({len(tx.outputs)} outputs)'
+                )
+            out = tx.outputs[tx_pos]
+            if out.satoshis != value:
+                raise RuntimeError(
+                    f'WoC getUtxos: value mismatch for {txid}:{tx_pos}: '
+                    f'listing says {value}, tx says {out.satoshis}'
+                )
+            if not out.script:
+                raise RuntimeError(f'WoC getUtxos: empty locking script for {txid}:{tx_pos}')
             assert_script_hex_under_limit(
-                u.script, MAX_SCRIPT_BYTES,
+                out.script, MAX_SCRIPT_BYTES,
                 f"WhatsOnChainProvider.get_utxos({address})",
             )
+            utxos.append(Utxo(txid=txid, output_index=tx_pos, satoshis=value, script=out.script))
         return utxos
 
     def get_contract_utxo(self, script_hash: str) -> Utxo | None:

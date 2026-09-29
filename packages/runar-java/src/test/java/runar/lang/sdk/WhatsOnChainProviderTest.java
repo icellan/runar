@@ -58,25 +58,39 @@ class WhatsOnChainProviderTest {
     // listUtxos hits /address/{addr}/unspent
     // ------------------------------------------------------------------
 
+    // F-040: this test used to assert the empty script as "WoC unspent listing
+    // has no script". That empty script became the BIP-143 scriptCode of every
+    // funding signature. listUtxos now also fetches /tx/{txid}/hex per UTXO, so
+    // the test replays the recorded listing + raw txs (conformance/sdk-woc).
     @Test
-    void listUtxosParsesWocUnspentArray() {
-        FakeTransport t = new FakeTransport().queue(200,
-            "[{\"tx_hash\":\"" + "aa".repeat(32) + "\",\"tx_pos\":2,\"value\":12345,\"height\":700000},"
-                + "{\"tx_hash\":\"" + "bb".repeat(32) + "\",\"tx_pos\":0,\"value\":1,\"height\":700001}]");
+    @SuppressWarnings("unchecked")
+    void listUtxosParsesWocUnspentArray() throws Exception {
+        java.nio.file.Path vp = java.nio.file.Paths.get(System.getProperty("user.dir"),
+            "..", "..", "conformance", "sdk-woc", "vectors.json");
+        Map<String, Object> v = (Map<String, Object>) Json.parse(java.nio.file.Files.readString(vp));
+        Map<String, Object> raw = (Map<String, Object>) v.get("rawTxHex");
+        List<Map<String, Object>> expected = (List<Map<String, Object>>) v.get("expected");
+        String address = (String) v.get("address");
+        FakeTransport t = new FakeTransport()
+            .queue(200, (String) v.get("unspentBody"))
+            .queue(200, (String) raw.get(expected.get(0).get("txid")))
+            .queue(200, (String) raw.get(expected.get(1).get("txid")));
         WhatsOnChainProvider p = new WhatsOnChainProvider("mainnet", t);
 
-        List<UTXO> got = p.listUtxos("1ABC");
+        List<UTXO> got = p.listUtxos(address);
         assertEquals(2, got.size());
-        assertEquals("aa".repeat(32), got.get(0).txid());
-        assertEquals(2, got.get(0).outputIndex());
-        assertEquals(12345L, got.get(0).satoshis());
-        assertEquals("", got.get(0).scriptHex(), "WoC unspent listing has no script");
+        assertEquals(expected.get(0).get("txid"), got.get(0).txid());
+        assertEquals(1, got.get(0).outputIndex());
+        assertEquals(29884L, got.get(0).satoshis());
+        assertEquals(expected.get(0).get("script"), got.get(0).scriptHex());
 
         // Request shape.
         FakeTransport.Recorded c = t.calls.get(0);
         assertEquals("GET", c.method());
-        assertEquals("https://api.whatsonchain.com/v1/bsv/main/address/1ABC/unspent", c.url());
+        assertEquals("https://api.whatsonchain.com/v1/bsv/main/address/" + address + "/unspent", c.url());
         assertNull(c.body());
+        assertEquals("https://api.whatsonchain.com/v1/bsv/main/tx/" + expected.get(0).get("txid") + "/hex",
+            t.calls.get(1).url());
     }
 
     @Test

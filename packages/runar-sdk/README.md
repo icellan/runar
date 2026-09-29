@@ -672,7 +672,7 @@ import { WhatsOnChainProvider } from 'runar-sdk';
 const provider = new WhatsOnChainProvider('mainnet'); // 'mainnet' | 'testnet'
 ```
 
-WoC's UTXO endpoint does not return locking scripts, so `getUtxos` populates `script: ''`. If you need the script, fetch the source transaction with `getTransaction(txid)` and read it from the `outputs[outputIndex]`.
+WoC's UTXO endpoint does not return locking scripts, so `getUtxos` fetches each UTXO's transaction from `/tx/{txid}/hex`, checks that it hashes to the txid and that the listed output and value exist, and returns the real `script`. It throws rather than return an empty script (F-040).
 
 ### GorillaPoolProvider
 
@@ -936,7 +936,7 @@ Issues JSON-RPC calls (`getrawtransaction`, `sendrawtransaction`, `listunspent`,
 new WhatsOnChainProvider(network?: 'mainnet' | 'testnet') // default 'mainnet'
 ```
 
-UTXO entries returned by `getUtxos()` have empty `script` strings (WoC API limitation). `getFeeRate()` returns the BSV standard 100 sat/KB.
+UTXO entries returned by `getUtxos()` carry the locking script read from the verified `/tx/{txid}/hex` (one extra request per distinct txid). `getFeeRate()` returns the BSV standard 100 sat/KB.
 
 #### `GorillaPoolProvider` ([src/providers/gorillapool.ts](src/providers/gorillapool.ts))
 

@@ -2,6 +2,7 @@
 // runar-sdk/providers/woc.ts — WhatsOnChain provider (HTTP-based BSV API)
 // ---------------------------------------------------------------------------
 
+import { Transaction as BsvTransaction, Hash, Utils } from '@bsv/sdk';
 import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
 import type { TransactionData, TxInput, TxOutput, UTXO } from '../types.js';
@@ -108,6 +109,15 @@ export class WhatsOnChainProvider implements Provider {
     return txid;
   }
 
+  /**
+   * WoC's GET /address/{address}/unspent listing carries outpoints and values
+   * but no locking script. The script is the BIP-143 scriptCode a signer
+   * commits to, so an empty one yields signatures no OP_CHECKSIG accepts
+   * (F-040). Each distinct txid is therefore fetched via GET /tx/{txid}/hex,
+   * its double-SHA256 must equal the txid, and tx_pos must be an output whose
+   * value equals the listed value. Any failure throws; no UTXO is ever
+   * returned with an empty script.
+   */
   async getUtxos(address: string): Promise<UTXO[]> {
     const resp = await fetch(`${this.baseUrl}/address/${address}/unspent`);
     if (!resp.ok) {
@@ -115,23 +125,42 @@ export class WhatsOnChainProvider implements Provider {
     }
     const entries = (await resp.json()) as WocUtxoEntry[];
 
-    // WoC doesn't return the locking script in the UTXO list, so we set it
-    // to empty and callers can look it up if needed.
-    const utxos = entries.map((e) => ({
-      txid: e.tx_hash,
-      outputIndex: e.tx_pos,
-      satoshis: e.value,
-      script: '',
-    }));
-    // DoS-bound: defensive guard — WoC currently returns empty scripts but a
-    // future enriched response must not bypass MAX_SCRIPT_BYTES.
-    for (const u of utxos) {
-      if (u.script) {
-        assertScriptHexUnderLimit(
-          u.script, InputLimits.MAX_SCRIPT_BYTES,
-          `WhatsOnChainProvider.getUtxos(${address})`,
+    const txs = new Map<string, BsvTransaction>();
+    const utxos: UTXO[] = [];
+    for (const e of entries) {
+      let tx = txs.get(e.tx_hash);
+      if (!tx) {
+        const rawHex = await this.getRawTransaction(e.tx_hash);
+        const raw = Utils.toArray(rawHex, 'hex');
+        const bodyTxid = Utils.toHex(Hash.hash256(raw).reverse());
+        if (bodyTxid !== e.tx_hash.toLowerCase()) {
+          throw new Error(
+            `WoC getUtxos: txid mismatch: /tx/${e.tx_hash}/hex body hashes to ${bodyTxid}`,
+          );
+        }
+        tx = BsvTransaction.fromBinary(raw);
+        txs.set(e.tx_hash, tx);
+      }
+      const out = tx.outputs[e.tx_pos];
+      if (!out) {
+        throw new Error(
+          `WoC getUtxos: no output ${e.tx_pos} in tx ${e.tx_hash} (${tx.outputs.length} outputs)`,
         );
       }
+      if (out.satoshis !== e.value) {
+        throw new Error(
+          `WoC getUtxos: value mismatch for ${e.tx_hash}:${e.tx_pos}: listing says ${e.value}, tx says ${out.satoshis}`,
+        );
+      }
+      const script = out.lockingScript.toHex();
+      if (script === '') {
+        throw new Error(`WoC getUtxos: empty locking script for ${e.tx_hash}:${e.tx_pos}`);
+      }
+      assertScriptHexUnderLimit(
+        script, InputLimits.MAX_SCRIPT_BYTES,
+        `WhatsOnChainProvider.getUtxos(${address})`,
+      );
+      utxos.push({ txid: e.tx_hash, outputIndex: e.tx_pos, satoshis: e.value, script });
     }
     return utxos;
   }

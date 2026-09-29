@@ -579,6 +579,15 @@ impl<W: WalletClient> Signer for WalletSigner<W> {
     ) -> Result<String, String> {
         let flag = sig_hash_type.unwrap_or(SIGHASH_ALL_FORKID);
 
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if subscript.is_empty() {
+            return Err(format!(
+                "WalletSigner: refusing to sign input {} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent",
+                input_index
+            ));
+        }
+
         // 1. Compute BIP-143 sighash from the transaction context
         let tx_bytes = hex_to_bytes(tx_hex)?;
         let tx = parse_raw_tx(&tx_bytes)?;
@@ -1075,6 +1084,22 @@ mod tests {
         // Address is a 40-char hex pubkey hash
         assert_eq!(addr.len(), 40);
         assert!(addr.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // F-040: WalletSigner computes the BIP-143 digest locally, so an empty
+    // subscript must be refused before the wallet is asked to sign.
+    #[test]
+    fn f040_wallet_signer_refuses_empty_subscript() {
+        let wallet = MockWalletClient::new();
+        let signer = WalletSigner::new(wallet, (2, "test".to_string()), "1".to_string());
+        let tx_hex = format!(
+            "0100000001{}0000000000ffffffff015000000000000000015100000000",
+            "00".repeat(32)
+        );
+        let err = signer
+            .sign(&tx_hex, 0, "", 1000, None)
+            .expect_err("WalletSigner.sign with an empty subscript must fail");
+        assert!(err.contains("empty subscript"), "error: {}", err);
     }
 
     #[test]

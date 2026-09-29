@@ -496,6 +496,12 @@ func (s *WalletSigner) Sign(txHex string, inputIndex int, subscript string, sato
 		flag = sighash.Flag(*sigHashType)
 	}
 
+	// F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+	// signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+	if subscript == "" {
+		return "", fmt.Errorf("WalletSigner.Sign: refusing to sign input %d with an empty subscript (scriptCode); pass the locking script of the UTXO being spent", inputIndex)
+	}
+
 	tx, err := transaction.NewTransactionFromHex(txHex)
 	if err != nil {
 		return "", fmt.Errorf("WalletSigner.Sign: failed to parse transaction: %w", err)

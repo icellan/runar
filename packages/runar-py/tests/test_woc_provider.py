@@ -215,24 +215,23 @@ class TestGetUtxos:
         )
 
     def test_parses_utxo_list(self):
-        provider = WhatsOnChainProvider("mainnet")
-        body = json.dumps([
-            {"tx_hash": "aa" * 32, "tx_pos": 0, "value": 12345},
-            {"tx_hash": "bb" * 32, "tx_pos": 7, "value": 67890},
-        ]).encode()
+        # F-040: this test used to assert ``script == ""`` as "correct". That
+        # empty script became the BIP-143 scriptCode of every funding
+        # signature. get_utxos now also fetches /tx/{txid}/hex per UTXO, so the
+        # test replays the recorded listing + raw txs (conformance/sdk-woc).
+        from test_f040_woc_utxo_script import VECTORS, _serve
 
-        with patch("runar.sdk.woc_provider.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            utxos = provider.get_utxos("1Addr")
+        provider = WhatsOnChainProvider("mainnet")
+        with _serve(VECTORS["address"], VECTORS["unspentBody"], VECTORS["rawTxHex"]):
+            utxos = provider.get_utxos(VECTORS["address"])
 
         assert len(utxos) == 2
-        assert utxos[0].txid == "aa" * 32
-        assert utxos[0].output_index == 0
-        assert utxos[0].satoshis == 12345
-        # WoC unspent endpoint omits the locking script -- empty string is correct.
-        assert utxos[0].script == ""
-        assert utxos[1].output_index == 7
-        assert utxos[1].satoshis == 67890
+        assert utxos[0].txid == VECTORS["expected"][0]["txid"]
+        assert utxos[0].output_index == 1
+        assert utxos[0].satoshis == 29884
+        assert utxos[0].script == VECTORS["expected"][0]["script"]
+        assert utxos[1].output_index == 1
+        assert utxos[1].satoshis == 70997
 
 
 # ---------------------------------------------------------------------------

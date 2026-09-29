@@ -128,6 +128,14 @@ module Runar
       # @param sighash_type [Integer, nil] sighash flags (default: SIGHASH_ALL|FORKID = 0x41)
       # @return [String] DER + sighash byte, hex-encoded
       def sign(tx_hex, input_index, subscript, satoshis, sighash_type = nil)
+        # F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        # signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if subscript.nil? || subscript.empty?
+          raise ArgumentError,
+                "LocalSigner: refusing to sign input #{input_index} with an empty subscript (scriptCode); " \
+                'pass the locking script of the UTXO being spent'
+        end
+
         flag = sighash_type || default_sighash_flag
 
         if @backend == :bsv

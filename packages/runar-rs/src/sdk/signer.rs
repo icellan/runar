@@ -106,6 +106,15 @@ impl Signer for LocalSigner {
     ) -> Result<String, String> {
         let flag = sig_hash_type.unwrap_or(SIGHASH_ALL_FORKID);
 
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if subscript.is_empty() {
+            return Err(format!(
+                "LocalSigner: refusing to sign input {} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent",
+                input_index
+            ));
+        }
+
         let tx_bytes = hex_to_bytes(tx_hex)
             .map_err(|e| format!("LocalSigner: invalid tx hex: {}", e))?;
         let tx = parse_raw_tx(&tx_bytes)?;
@@ -497,6 +506,18 @@ mod tests {
              00000000",
             "00".repeat(32)
         )
+    }
+
+    // F-040: an empty subscript (what WoC's get_utxos used to return) is the
+    // BIP-143 scriptCode of a signature no OP_CHECKSIG accepts, so sign must
+    // refuse it. Proves the refusal; the Spend.validate harm demo is in TS.
+    #[test]
+    fn f040_local_signer_refuses_empty_subscript() {
+        let signer = LocalSigner::new(PRIV_KEY_1).unwrap();
+        let err = signer
+            .sign(&minimal_tx_hex(), 0, "", 1000, None)
+            .expect_err("LocalSigner.sign with an empty subscript must fail");
+        assert!(err.contains("empty subscript"), "error: {}", err);
     }
 
     // --- Constructor ---

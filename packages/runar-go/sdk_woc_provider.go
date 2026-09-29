@@ -1,6 +1,8 @@
 package runar
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -161,6 +163,14 @@ func (p *WhatsOnChainProvider) Broadcast(tx *transaction.Transaction) (string, e
 }
 
 // GetUtxos returns all UTXOs for a given address from WhatsOnChain.
+//
+// WoC's GET /address/{address}/unspent listing carries outpoints and values
+// but no locking script. The script is the BIP-143 scriptCode a signer commits
+// to, so an empty one yields signatures no OP_CHECKSIG accepts (F-040). Each
+// distinct txid is therefore fetched via GET /tx/{txid}/hex, its double-SHA256
+// must equal the txid, and tx_pos must be an output whose value equals the
+// listed value. Any failure is an error; no UTXO is returned with an empty
+// script.
 func (p *WhatsOnChainProvider) GetUtxos(address string) ([]UTXO, error) {
 	url := fmt.Sprintf("%s/address/%s/unspent", p.baseURL, address)
 	resp, err := p.client.Get(url)
@@ -179,26 +189,58 @@ func (p *WhatsOnChainProvider) GetUtxos(address string) ([]UTXO, error) {
 		return nil, fmt.Errorf("WoC getUtxos JSON decode failed: %w", err)
 	}
 
+	txs := make(map[string]*transaction.Transaction)
 	utxos := make([]UTXO, len(entries))
 	for i, e := range entries {
+		tx, ok := txs[e.TxHash]
+		if !ok {
+			rawHex, err := p.GetRawTransaction(e.TxHash)
+			if err != nil {
+				return nil, fmt.Errorf("WoC getUtxos: fetching tx %s: %w", e.TxHash, err)
+			}
+			raw, err := hex.DecodeString(rawHex)
+			if err != nil {
+				return nil, fmt.Errorf("WoC getUtxos: /tx/%s/hex body is not hex: %w", e.TxHash, err)
+			}
+			first := sha256.Sum256(raw)
+			second := sha256.Sum256(first[:])
+			for a, b := 0, len(second)-1; a < b; a, b = a+1, b-1 {
+				second[a], second[b] = second[b], second[a]
+			}
+			if got := hex.EncodeToString(second[:]); got != strings.ToLower(e.TxHash) {
+				return nil, fmt.Errorf("WoC getUtxos: txid mismatch: /tx/%s/hex body hashes to %s", e.TxHash, got)
+			}
+			tx, err = transaction.NewTransactionFromBytes(raw)
+			if err != nil {
+				return nil, fmt.Errorf("WoC getUtxos: parsing tx %s: %w", e.TxHash, err)
+			}
+			txs[e.TxHash] = tx
+		}
+		if e.TxPos < 0 || e.TxPos >= len(tx.Outputs) {
+			return nil, fmt.Errorf("WoC getUtxos: no output %d in tx %s (%d outputs)", e.TxPos, e.TxHash, len(tx.Outputs))
+		}
+		out := tx.Outputs[e.TxPos]
+		if e.Value < 0 || uint64(e.Value) != out.Satoshis {
+			return nil, fmt.Errorf("WoC getUtxos: value mismatch for %s:%d: listing says %d, tx says %d", e.TxHash, e.TxPos, e.Value, out.Satoshis)
+		}
+		var scriptHex string
+		if out.LockingScript != nil {
+			scriptHex = hex.EncodeToString(*out.LockingScript)
+		}
+		if scriptHex == "" {
+			return nil, fmt.Errorf("WoC getUtxos: empty locking script for %s:%d", e.TxHash, e.TxPos)
+		}
+		if err := assertScriptHexUnderLimit(
+			scriptHex, MaxScriptBytes,
+			fmt.Sprintf("WhatsOnChainProvider.GetUtxos(%s)", address),
+		); err != nil {
+			return nil, err
+		}
 		utxos[i] = UTXO{
 			Txid:        e.TxHash,
 			OutputIndex: e.TxPos,
 			Satoshis:    e.Value,
-			Script:      "", // WoC doesn't return locking script in UTXO list
-		}
-	}
-	// DoS-bound: defensive guard — WoC currently returns empty scripts but a
-	// future enriched response must not bypass MaxScriptBytes.
-	for _, u := range utxos {
-		if u.Script == "" {
-			continue
-		}
-		if err := assertScriptHexUnderLimit(
-			u.Script, MaxScriptBytes,
-			fmt.Sprintf("WhatsOnChainProvider.GetUtxos(%s)", address),
-		); err != nil {
-			return nil, err
+			Script:      scriptHex,
 		}
 	}
 	return utxos, nil

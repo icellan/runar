@@ -422,6 +422,13 @@ class WalletSigner(Signer):
 
         Returns the DER-encoded signature with sighash byte appended, hex-encoded.
         """
+        # F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        # signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if not subscript:
+            raise ValueError(
+                f'WalletSigner: refusing to sign input {input_index} with an empty subscript '
+                '(scriptCode); pass the locking script of the UTXO being spent'
+            )
         flag = sighash_type if sighash_type is not None else self.SIGHASH_ALL_FORKID
 
         # 1. Compute BIP-143 preimage

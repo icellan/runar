@@ -456,6 +456,10 @@ pub const WalletSigner = struct {
         const self: *WalletSigner = @ptrCast(@alignCast(ctx));
         const bsvz = @import("bsvz");
 
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if (subscript_hex.len == 0) return error.EmptySubscript;
+
         const scope = sighash_type orelse (bsvz.transaction.sighash.SigHashType.forkid | bsvz.transaction.sighash.SigHashType.all);
 
         // 1. Parse the transaction
@@ -714,4 +718,24 @@ test "WalletSigner getPublicKey caches result" {
 
     try std.testing.expectEqual(@as(usize, 66), pk1.len);
     try std.testing.expectEqualStrings(pk1, pk2);
+}
+
+// F-040: WalletSigner computes the BIP-143 digest locally, so an empty
+// subscript must be refused (EmptySubscript) before the wallet is asked to sign.
+test "F-040 WalletSigner refuses an empty subscript" {
+    const allocator = std.testing.allocator;
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+    var ws = WalletSigner.init(allocator, mock.walletClient(), .{ .level = 2, .name = "test" }, "1");
+    defer ws.deinit();
+    var s = ws.signer();
+
+    const tx = "01000000" ++ "01" ++ ("11" ** 32) ++ "00000000" ++ "00" ++ "ffffffff" ++
+        "01" ++ "8403000000000000" ++ "01" ++ "51" ++ "00000000";
+    if (s.sign(allocator, tx, 0, "", 1000, null)) |sig| {
+        allocator.free(sig);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
+    }
 }

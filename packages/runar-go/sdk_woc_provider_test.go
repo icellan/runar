@@ -160,30 +160,21 @@ func TestWhatsOnChainProvider_GetTransaction_HTTPError(t *testing.T) {
 // GetUtxos
 // ---------------------------------------------------------------------------
 
+// F-040: the listing has no locking script, so GetUtxos also fetches
+// /tx/{txid}/hex per UTXO. This test used synthetic txids with no raw tx
+// behind them and never checked Script (it was always ""); it now serves the
+// recorded listing + raw txs from conformance/sdk-woc/vectors.json.
 func TestWhatsOnChainProvider_GetUtxos(t *testing.T) {
-	address := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+	v := loadWocF040Vectors(t)
+	address := v.Address
+	serve := wocF040Handler(address, v.UnspentBody, v.RawTxHex)
 
 	provider, server := newTestWoCProvider(func(w http.ResponseWriter, r *http.Request) {
 		expectedPath := "/address/" + address + "/unspent"
-		if r.URL.Path != expectedPath {
+		if r.URL.Path != expectedPath && !wocF040TxHexPath.MatchString(r.URL.Path) {
 			t.Errorf("unexpected path: %q", r.URL.Path)
 		}
-		entries := []map[string]interface{}{
-			{
-				"tx_hash": strings.Repeat("aa", 32),
-				"tx_pos":  0,
-				"value":   1000000,
-				"height":  700000,
-			},
-			{
-				"tx_hash": strings.Repeat("bb", 32),
-				"tx_pos":  1,
-				"value":   5000000,
-				"height":  700001,
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
+		serve(w, r)
 	})
 	defer server.Close()
 
@@ -194,11 +185,11 @@ func TestWhatsOnChainProvider_GetUtxos(t *testing.T) {
 	if len(utxos) != 2 {
 		t.Fatalf("expected 2 UTXOs, got %d", len(utxos))
 	}
-	if utxos[0].Txid != strings.Repeat("aa", 32) || utxos[0].Satoshis != 1000000 || utxos[0].OutputIndex != 0 {
-		t.Errorf("unexpected utxo[0]: %+v", utxos[0])
-	}
-	if utxos[1].Txid != strings.Repeat("bb", 32) || utxos[1].Satoshis != 5000000 || utxos[1].OutputIndex != 1 {
-		t.Errorf("unexpected utxo[1]: %+v", utxos[1])
+	for i, want := range v.Expected {
+		u := utxos[i]
+		if u.Txid != want.Txid || u.Satoshis != want.Satoshis || u.OutputIndex != want.OutputIndex || u.Script != want.Script {
+			t.Errorf("unexpected utxo[%d]: %+v", i, u)
+		}
 	}
 }
 

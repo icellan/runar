@@ -91,6 +91,12 @@ func (s *LocalSigner) Sign(txHex string, inputIndex int, subscript string, satos
 		flag = sighash.Flag(*sigHashType)
 	}
 
+	// F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+	// signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+	if subscript == "" {
+		return "", fmt.Errorf("LocalSigner: refusing to sign input %d with an empty subscript (scriptCode); pass the locking script of the UTXO being spent", inputIndex)
+	}
+
 	tx, err := transaction.NewTransactionFromHex(txHex)
 	if err != nil {
 		return "", fmt.Errorf("LocalSigner: failed to parse transaction: %w", err)

@@ -42,6 +42,9 @@ pub const SignerError = error{
     InvalidEncoding,
     InvalidLength,
     InvalidTransaction,
+    /// F-040: sign was handed an empty subscript (BIP-143 scriptCode). A
+    /// signature over it is one no OP_CHECKSIG accepts, so it is refused.
+    EmptySubscript,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +105,10 @@ pub const LocalSigner = struct {
 
     fn signImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, subscript_hex: []const u8, satoshis: i64, sighash_type: ?u32) SignerError![]u8 {
         const self: *LocalSigner = @ptrCast(@alignCast(ctx));
+        // F-040: the subscript is the BIP-143 scriptCode. An empty one yields a
+        // signature no OP_CHECKSIG accepts, so refuse it instead of signing.
+        if (subscript_hex.len == 0) return error.EmptySubscript;
+
         const scope = sighash_type orelse (bsvz.transaction.sighash.SigHashType.forkid | bsvz.transaction.sighash.SigHashType.all);
 
         // Decode transaction
@@ -286,4 +293,25 @@ test "LocalSigner signs and returns hex sig" {
     try std.testing.expect(sig.len > 0);
     // Signature ends with sighash byte 0x41 (ALL|FORKID)
     try std.testing.expect(std.mem.endsWith(u8, sig, "41"));
+}
+
+// F-040: an empty subscript (what WoC's getUtxos used to return) is the
+// BIP-143 scriptCode of a signature no OP_CHECKSIG accepts, so sign must
+// refuse it with EmptySubscript. Proves the refusal; the Spend.validate harm
+// demo lives in packages/runar-sdk/src/__tests__/f040-woc-utxo-script.test.ts.
+test "F-040 LocalSigner refuses an empty subscript" {
+    const allocator = std.testing.allocator;
+    var key_bytes = [_]u8{0} ** 32;
+    key_bytes[31] = 1;
+    var local = LocalSigner.fromBytes(key_bytes) catch unreachable;
+    var s = local.signer();
+
+    const tx = "01000000" ++ "01" ++ ("11" ** 32) ++ "00000000" ++ "00" ++ "ffffffff" ++
+        "01" ++ "8403000000000000" ++ "01" ++ "51" ++ "00000000";
+    if (s.sign(allocator, tx, 0, "", 1000, null)) |sig| {
+        allocator.free(sig);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
+    }
 }
