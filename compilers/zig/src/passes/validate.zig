@@ -1616,8 +1616,38 @@ fn validateStatement(
                 for (eb) |s| try validateStatement(allocator, contract, s, errors);
             }
         },
+        .assign => |a| try validateIndexAssignmentTarget(allocator, contract, a, errors),
         else => {},
     }
+}
+
+/// N-002 (F-013's rule, shared verbatim by all seven tiers): only a FixedArray
+/// property is index-writable. Any other index target (a ByteString property,
+/// a local, a parameter, a member-chained root) is left alone by
+/// `expand_fixed_arrays` and ANF lowering lowers it as a READ, dropping the
+/// write -- a deployable script whose state never changes. Reject it here with
+/// a location instead. Every surface parser records an index-access LHS on
+/// `index_target`, whatever its root.
+fn validateIndexAssignmentTarget(
+    allocator: Allocator,
+    contract: ContractNode,
+    a: types.Assign,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    const ia = a.index_target orelse return;
+    var root = ia.object;
+    while (root == .index_access) root = root.index_access.object;
+    if (root == .property_access) {
+        for (contract.properties) |p| {
+            if (std.mem.eql(u8, p.name, root.property_access.property) and p.type_info == .fixed_array) return;
+        }
+    }
+    try errors.append(allocator, .{
+        .message = "index assignment is only supported on FixedArray contract properties; " ++
+            "the target here is not a FixedArray property",
+        .severity = .@"error",
+        .location = a.source_loc,
+    });
 }
 
 /// Warn on manual checkPreimage() or getStateScript() usage in StatefulSmartContract methods.

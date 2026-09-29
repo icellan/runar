@@ -902,6 +902,7 @@ public final class Validate {
                 }
                 validateExpression(v.init());
             } else if (s instanceof AssignmentStatement a) {
+                validateIndexAssignmentTarget(a);
                 validateExpression(a.target());
                 validateExpression(a.value());
             } else if (s instanceof IfStatement i) {
@@ -923,6 +924,35 @@ public final class Validate {
                     validateExpression(r.value());
                 }
             }
+        }
+
+        /**
+         * N-002 (F-013's rule, shared verbatim by all seven tiers): only a
+         * FixedArray property is index-writable. Any other index target (a
+         * ByteString property, a local, a parameter, a member-chained root) is
+         * left alone by ExpandFixedArrays and ANF lowering lowers it as a READ,
+         * dropping the write. Reject it here with a location instead.
+         */
+        private void validateIndexAssignmentTarget(AssignmentStatement a) {
+            if (!(a.target() instanceof IndexAccessExpr)) {
+                return;
+            }
+            Expression root = a.target();
+            while (root instanceof IndexAccessExpr ia) {
+                root = ia.object();
+            }
+            if (root instanceof PropertyAccessExpr pa) {
+                for (PropertyNode p : contract.properties()) {
+                    if (p.name().equals(pa.property()) && p.type() instanceof FixedArrayType) {
+                        return;
+                    }
+                }
+            }
+            error(
+                "index assignment is only supported on FixedArray contract properties; "
+                    + "the target here is not a FixedArray property",
+                a.sourceLocation()
+            );
         }
 
         private void validateForStatement(ForStatement f) {

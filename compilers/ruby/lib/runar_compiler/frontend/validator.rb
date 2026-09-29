@@ -677,6 +677,7 @@ module RunarCompiler
           end
           validate_expression(stmt.init)
         when AssignmentStmt
+          validate_index_assignment_target(stmt)
           validate_expression(stmt.target)
           validate_expression(stmt.value)
         when IfStmt
@@ -690,6 +691,28 @@ module RunarCompiler
         when ReturnStmt
           validate_expression(stmt.value) unless stmt.value.nil?
         end
+      end
+
+      # N-002 (F-013's rule, shared verbatim by all seven tiers): only a
+      # FixedArray property is index-writable. Any other index target (a
+      # ByteString property, a local, a parameter, a member-chained root) is
+      # left alone by expand_fixed_arrays and ANF lowering lowers it as a READ,
+      # dropping the write. Reject it here with a location instead.
+      def validate_index_assignment_target(stmt)
+        return unless stmt.target.is_a?(IndexAccessExpr)
+
+        root = stmt.target
+        root = root.object while root.is_a?(IndexAccessExpr)
+        fixed = root.is_a?(PropertyAccessExpr) && @contract.properties.any? do |p|
+          p.name == root.property && p.type.is_a?(FixedArrayType)
+        end
+        return if fixed
+
+        add_error(
+          'index assignment is only supported on FixedArray contract properties; ' \
+          'the target here is not a FixedArray property',
+          loc: stmt.source_location
+        )
       end
 
       def validate_for_statement(stmt)

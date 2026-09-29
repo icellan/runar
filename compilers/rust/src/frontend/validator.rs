@@ -1176,6 +1176,41 @@ fn sub_expressions(expr: &Expression) -> Vec<&Expression> {
     }
 }
 
+/// N-002 (F-013's rule, shared verbatim by all seven tiers): only a FixedArray
+/// property is index-writable. Any other index target (a ByteString property,
+/// a local, a parameter, a member-chained root) is left alone by
+/// expand_fixed_arrays and ANF lowering lowers it as a READ, dropping the write
+/// -- a deployable script whose state never changes. Reject it here with a
+/// location instead.
+fn validate_index_assignment_target(
+    target: &Expression,
+    loc: &SourceLocation,
+    contract: &ContractNode,
+    errors: &mut Vec<Diagnostic>,
+) {
+    if !matches!(target, Expression::IndexAccess { .. }) {
+        return;
+    }
+    let mut root = target;
+    while let Expression::IndexAccess { object, .. } = root {
+        root = object.as_ref();
+    }
+    let is_fixed_array_prop = match root {
+        Expression::PropertyAccess { property } => contract
+            .properties
+            .iter()
+            .any(|p| &p.name == property && matches!(p.prop_type, TypeNode::FixedArray { .. })),
+        _ => false,
+    };
+    if !is_fixed_array_prop {
+        errors.push(Diagnostic::error(
+            "index assignment is only supported on FixedArray contract properties; \
+             the target here is not a FixedArray property",
+            Some(loc.clone()),
+        ));
+    }
+}
+
 fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
     match stmt {
         Statement::VariableDecl { name, var_type, init, .. } => {
@@ -1190,7 +1225,8 @@ fn validate_statement(stmt: &Statement, contract: &ContractNode, errors: &mut Ve
             }
             validate_expression(init, errors);
         }
-        Statement::Assignment { target, value, .. } => {
+        Statement::Assignment { target, value, source_location } => {
+            validate_index_assignment_target(target, source_location, contract, errors);
             validate_expression(target, errors);
             validate_expression(value, errors);
         }

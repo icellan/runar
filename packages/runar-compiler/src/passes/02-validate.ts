@@ -850,6 +850,7 @@ function validateStatement(stmt: Statement, ctx: ValidationContext): void {
       break;
 
     case 'assignment':
+      validateIndexAssignmentTarget(stmt, ctx);
       validateExpression(stmt.target, ctx);
       validateExpression(stmt.value, ctx);
       break;
@@ -875,6 +876,35 @@ function validateStatement(stmt: Statement, ctx: ValidationContext): void {
         validateExpression(stmt.value, ctx);
       }
       break;
+  }
+}
+
+/**
+ * N-002 (F-013's rule, shared verbatim by all seven tiers): only a FixedArray
+ * property is index-writable. Any other index target (a ByteString property,
+ * a local, a parameter, a member-chained root) is left alone by
+ * 03b-expand-fixed-arrays and ANF lowering lowers it as a READ, dropping the
+ * write -- a deployable script whose state never changes. Reject it here with
+ * a location instead.
+ */
+function validateIndexAssignmentTarget(
+  stmt: Extract<Statement, { kind: 'assignment' }>,
+  ctx: ValidationContext,
+): void {
+  if (stmt.target.kind !== 'index_access') return;
+  let root: Expression = stmt.target;
+  while (root.kind === 'index_access') root = root.object;
+  const rootProp = root.kind === 'property_access' ? root.property : undefined;
+  const isFixedArrayProp = ctx.contract.properties.some(
+    (p) => p.name === rootProp && p.type.kind === 'fixed_array_type',
+  );
+  if (!isFixedArrayProp) {
+    ctx.errors.push(makeDiagnostic(
+      'index assignment is only supported on FixedArray contract properties; ' +
+        'the target here is not a FixedArray property',
+      'error',
+      stmt.sourceLocation,
+    ));
   }
 }
 

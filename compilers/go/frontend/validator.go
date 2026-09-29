@@ -921,6 +921,7 @@ func (ctx *validationContext) validateStatement(stmt Statement) {
 		}
 		ctx.validateExpression(s.Init)
 	case AssignmentStmt:
+		ctx.validateIndexAssignmentTarget(s)
 		ctx.validateExpression(s.Target)
 		ctx.validateExpression(s.Value)
 	case IfStmt:
@@ -940,6 +941,43 @@ func (ctx *validationContext) validateStatement(stmt Statement) {
 			ctx.validateExpression(s.Value)
 		}
 	}
+}
+
+// validateIndexAssignmentTarget is N-002 (F-013's rule, shared verbatim by all
+// seven tiers): only a FixedArray property is index-writable. Any other index
+// target (a ByteString property, a local, a parameter, a member-chained root)
+// is left alone by ExpandFixedArrays and ANF lowering lowers it as a READ,
+// dropping the write -- a deployable script whose state never changes. Reject
+// it here with a location instead.
+func (ctx *validationContext) validateIndexAssignmentTarget(s AssignmentStmt) {
+	idx, ok := s.Target.(IndexAccessExpr)
+	if !ok {
+		return
+	}
+	var root Expression = idx
+	for {
+		ia, isIdx := root.(IndexAccessExpr)
+		if !isIdx {
+			break
+		}
+		root = ia.Object
+	}
+	if pa, isProp := root.(PropertyAccessExpr); isProp {
+		for _, p := range ctx.contract.Properties {
+			if p.Name != pa.Property {
+				continue
+			}
+			if _, isFixed := p.Type.(FixedArrayType); isFixed {
+				return
+			}
+		}
+	}
+	loc := s.SourceLocation
+	ctx.addErrorWithLoc(
+		"index assignment is only supported on FixedArray contract properties; "+
+			"the target here is not a FixedArray property",
+		&loc,
+	)
 }
 
 func (ctx *validationContext) validateForStatement(stmt ForStmt) {
