@@ -541,9 +541,22 @@ fn parse_sighash_on_method(
         return None;
     }
 
+    // The marker is present (checked above), so extraction yields a value or
+    // an error — a malformed or duplicated directive is never "no directive"
+    // (F-039). `None` is unreachable here; treat it as malformed, fail-closed.
     match super::sighash_directive::extract_sighash_directive(&text) {
-        None => None,
         Some(Ok(value)) => Some(value),
+        None => {
+            errors.push(Diagnostic::error(
+                format!(
+                    "Method '{}': {}",
+                    name,
+                    super::sighash_directive::SIGHASH_MALFORMED_ERROR
+                ),
+                Some(default_loc(file)),
+            ));
+            None
+        }
         Some(Err(msg)) => {
             errors.push(Diagnostic::error(
                 format!("Method '{}': {}", name, msg),

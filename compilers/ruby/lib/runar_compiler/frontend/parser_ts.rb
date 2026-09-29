@@ -670,7 +670,10 @@ module RunarCompiler
         # source gap immediately before this member (issue #109 / #123).
         member_directives = gather_member_directives(location.line)
         embed_always = member_directives.any? { |d| d[:text].match?(/@embedAlways\b/) }
-        sighash_text = member_directives.map { |d| d[:text] }.find { |t| t.match?(/@sighash\b/) }
+        # Every directive comment is kept (not just the first) so a second
+        # `@sighash` on the same member is seen and refused (F-039).
+        sighash_texts = member_directives.map { |d| d[:text] }.select { |t| t.match?(/@sighash\b/) }
+        sighash_text = sighash_texts.empty? ? nil : sighash_texts.join("\n")
 
         # Collect modifiers: public, private, readonly
         visibility = "private"
@@ -853,8 +856,10 @@ module RunarCompiler
           return nil
         end
 
+        # Non-nil: the caller only passes text carrying a marker. A malformed or
+        # duplicated directive comes back as an error, never as "no directive".
         result = SighashDirective.extract_sighash_directive(sighash_text)
-        return nil if result.nil?
+        result = { error: SighashDirective::SIGHASH_MALFORMED_ERROR } if result.nil?
 
         if result.key?(:error)
           add_error("Method '#{name}': #{result[:error]}")

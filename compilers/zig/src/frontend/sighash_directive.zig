@@ -124,31 +124,66 @@ pub fn parseFlags(allocator: std.mem.Allocator, flags_text: []const u8) ParseRes
     return .{ .value = value };
 }
 
-/// Extract and parse an `@sighash` directive from a block of comment text.
-/// Returns null when no `@sighash` token is present; otherwise the parse
-/// result (which may itself be an error). Mirrors the TS SIGHASH_RE
-/// `@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*\/|\n|\r|$)`.
+/// Shared diagnostics (F-039) — identical text in all seven tiers. A marker
+/// that is present but not followed by a well-formed flag list, or a second
+/// marker on the same method, is a compile error, never a silent fall-back to
+/// the default ALL|FORKID mode.
+pub const SIGHASH_MALFORMED_ERROR = "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)";
+pub const SIGHASH_MULTIPLE_ERROR = "@sighash: more than one @sighash directive on this method; declare exactly one";
+
+fn isWordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+/// Extract and parse an `@sighash` directive from a method's leading-comment
+/// text (all of its leading comments). Returns null only when no `@sighash`
+/// marker is present; otherwise the parse result (which may itself be an
+/// error). Mirrors the TS reference extractSighashDirective.
+///
+/// A marker is `@sighash` followed by an ASCII word boundary, so `@sighashType`
+/// (or `@sighashSINGLE`) is prose, not a directive. Once a marker is present
+/// (fail-closed, F-039):
+///   - more than one marker is an error (SIGHASH_MULTIPLE_ERROR);
+///   - the segment after the marker, up to `*/`, a newline, CR or the end,
+///     must be empty, or start with a space/tab and contain only
+///     `[A-Za-z0-9_|]`, spaces and tabs — anything else is
+///     SIGHASH_MALFORMED_ERROR;
+///   - the flag list itself is then validated by parseFlags.
 pub fn extractDirective(allocator: std.mem.Allocator, comment_text: []const u8) ?ParseResult {
     const marker = "@sighash";
-    const pos = std.mem.indexOf(u8, comment_text, marker) orelse return null;
-    const after = pos + marker.len;
-    // Match the TS `@sighash\s+`: at least one whitespace must follow the
-    // marker, otherwise `@sighashType`-style identifiers are NOT directives.
-    if (after >= comment_text.len or !(comment_text[after] == ' ' or comment_text[after] == '\t' or comment_text[after] == '\n' or comment_text[after] == '\r')) {
-        return null;
+    var first: ?usize = null;
+    var count: usize = 0;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, comment_text, from, marker)) |pos| {
+        const next = pos + marker.len;
+        if (next >= comment_text.len or !isWordByte(comment_text[next])) {
+            if (first == null) first = pos;
+            count += 1;
+        }
+        from = pos + 1;
     }
-    // Collect the flag text up to `*/`, newline, carriage return, EOF, or any
-    // char outside the [A-Za-z0-9_| \t] flag alphabet (so trailing prose ends
-    // the capture). Leading/trailing whitespace is trimmed by parseFlags.
-    const rest = comment_text[after..];
-    var end: usize = 0;
-    while (end < rest.len) : (end += 1) {
-        const c = rest[end];
-        if (c == '\n' or c == '\r') break;
-        if (c == '*' and end + 1 < rest.len and rest[end + 1] == '/') break;
-        if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '|' or c == ' ' or c == '\t')) break;
+    const start = first orelse return null;
+    if (count > 1) return .{ .err = SIGHASH_MULTIPLE_ERROR };
+
+    const rest = comment_text[start + marker.len ..];
+    var end: usize = rest.len;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const c = rest[i];
+        if (c == '\n' or c == '\r' or (c == '*' and i + 1 < rest.len and rest[i + 1] == '/')) {
+            end = i;
+            break;
+        }
     }
-    return parseFlags(allocator, rest[0..end]);
+    const seg = rest[0..end];
+    if (seg.len > 0) {
+        var ok = seg[0] == ' ' or seg[0] == '\t';
+        for (seg) |c| {
+            if (!(isWordByte(c) or c == '|' or c == ' ' or c == '\t')) ok = false;
+        }
+        if (!ok) return .{ .err = SIGHASH_MALFORMED_ERROR };
+    }
+    return parseFlags(allocator, seg);
 }
 
 /// Render a sighash value as a human-readable flag string (for diagnostics).

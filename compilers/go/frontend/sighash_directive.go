@@ -2,7 +2,6 @@ package frontend
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -118,20 +117,74 @@ func parseSighashFlags(flagsText string) sighashParseResult {
 	return sighashParseResult{value: value}
 }
 
-// sighashRE extracts the flag list following an `@sighash` token in a block of
-// comment text, up to the end of the block/line. Mirrors the TS SIGHASH_RE.
-var sighashRE = regexp.MustCompile(`@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*/|\n|\r|$)`)
+// Shared diagnostics (F-039) — identical text in all seven tiers. A marker
+// that is present but not followed by a well-formed flag list, or a second
+// marker on the same method, is a compile error, never a silent fall-back to
+// the default ALL|FORKID mode.
+const (
+	sighashMalformedError = "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)"
+	sighashMultipleError  = "@sighash: more than one @sighash directive on this method; declare exactly one"
+	sighashMarker         = "@sighash"
+)
+
+func sighashIsWordByte(c byte) bool {
+	return c == '_' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
 
 // extractSighashDirective extracts and parses an `@sighash` directive from a
-// block of comment text. Returns (result, true) when an `@sighash` token is
-// present, else (_, false). Used by the parser after collecting a method's
-// comment trivia.
+// method's leading-comment text (all of its leading comments, concatenated).
+// Returns (_, false) only when no `@sighash` marker is present, else
+// (result, true). Mirrors the TS reference extractSighashDirective.
+//
+// A marker is `@sighash` followed by an ASCII word boundary, so `@sighashType`
+// (or `@sighashSINGLE`) is prose, not a directive. Once a marker is present
+// (fail-closed, F-039):
+//   - more than one marker is an error (sighashMultipleError);
+//   - the segment after the marker, up to `*/`, a newline, CR or the end, must
+//     be empty, or start with a space/tab and contain only [A-Za-z0-9_|],
+//     spaces and tabs — anything else is sighashMalformedError;
+//   - the flag list itself is then validated by parseSighashFlags.
 func extractSighashDirective(commentText string) (sighashParseResult, bool) {
-	m := sighashRE.FindStringSubmatch(commentText)
-	if m == nil {
+	var markers []int
+	for i := 0; ; {
+		j := strings.Index(commentText[i:], sighashMarker)
+		if j < 0 {
+			break
+		}
+		pos := i + j
+		next := pos + len(sighashMarker)
+		if next >= len(commentText) || !sighashIsWordByte(commentText[next]) {
+			markers = append(markers, pos)
+		}
+		i = pos + 1
+	}
+	if len(markers) == 0 {
 		return sighashParseResult{}, false
 	}
-	return parseSighashFlags(m[1]), true
+	if len(markers) > 1 {
+		return sighashParseResult{err: sighashMultipleError}, true
+	}
+
+	after := commentText[markers[0]+len(sighashMarker):]
+	end := len(after)
+	for i := 0; i < len(after); i++ {
+		if after[i] == '\n' || after[i] == '\r' || (after[i] == '*' && i+1 < len(after) && after[i+1] == '/') {
+			end = i
+			break
+		}
+	}
+	seg := after[:end]
+	if len(seg) > 0 {
+		ok := seg[0] == ' ' || seg[0] == '\t'
+		for i := 0; ok && i < len(seg); i++ {
+			c := seg[i]
+			ok = sighashIsWordByte(c) || c == '|' || c == ' ' || c == '\t'
+		}
+		if !ok {
+			return sighashParseResult{err: sighashMalformedError}, true
+		}
+	}
+	return parseSighashFlags(seg), true
 }
 
 // describeSighash renders a sighash value as a human-readable flag string (for

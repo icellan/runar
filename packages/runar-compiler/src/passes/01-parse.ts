@@ -452,16 +452,16 @@ function parseSighashOnMethod(
   file: string,
   errors: CompilerDiagnostic[],
 ): number | undefined {
-  let text: string | undefined;
-  for (const jsdoc of method.getJsDocs()) {
-    if (SIGHASH_TOKEN_RE.test(jsdoc.getText())) { text = jsdoc.getText(); break; }
+  // Collect EVERY leading comment (JSDoc blocks and ordinary trivia, deduped
+  // by position — ts-morph reports a JSDoc on both surfaces) so a second
+  // directive is seen and refused rather than silently ignored (F-039).
+  const comments = new Map<number, string>();
+  for (const jsdoc of method.getJsDocs()) comments.set(jsdoc.getStart(), jsdoc.getText());
+  for (const range of method.getLeadingCommentRanges()) {
+    if (!comments.has(range.getPos())) comments.set(range.getPos(), range.getText());
   }
-  if (text === undefined) {
-    for (const range of method.getLeadingCommentRanges()) {
-      if (SIGHASH_TOKEN_RE.test(range.getText())) { text = range.getText(); break; }
-    }
-  }
-  if (text === undefined) return undefined;
+  const text = [...comments.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).join('\n');
+  if (!SIGHASH_TOKEN_RE.test(text)) return undefined;
 
   if (visibility !== 'public') {
     errors.push(makeDiagnostic(
@@ -472,8 +472,9 @@ function parseSighashOnMethod(
     return undefined;
   }
 
-  const result = extractSighashDirective(text);
-  if (result === null) return undefined;
+  // Non-null: the marker is present (checked above). A malformed or
+  // duplicated directive comes back as an error, never as "no directive".
+  const result = extractSighashDirective(text)!;
   if ('error' in result) {
     errors.push(makeDiagnostic(
       `Method '${name}': ${result.error}`,

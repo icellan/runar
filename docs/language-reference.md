@@ -860,6 +860,14 @@ combined value is published on the method's ABI entry as `sigHashType`; the
 default is omitted rather than written out, so a method with no directive has no
 `sigHashType` field.
 
+A method may carry at most one `@sighash` directive, and once the marker is
+present the rest of the line must be a well-formed flag list: whitespace, then
+flag names separated by `|`. Anything else is a compile error in every tier,
+not a silent fall-back to the default. That includes trailing punctuation
+(`@sighash SINGLE|FORKID!`), a missing space (`@sighash:SINGLE`), a `,`
+separator, or an empty flag list. `@sighash` directly followed by a letter,
+digit or `_` (for example `@sighashType`) is prose, not a marker.
+
 `SINGLE|FORKID` commits to only the output at the same index as the input being
 signed, which is what lets one party fix their own output and leave the rest of
 the transaction open for a counterparty to complete.

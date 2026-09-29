@@ -112,16 +112,57 @@ export function parseSighashFlags(flagsText: string): SighashParseResult {
 }
 
 /**
- * Extract and parse an `@sighash` directive from a block of comment text.
- * Returns `null` when no `@sighash` token is present, otherwise the parse
- * result (value or error). Used by the parser after it has collected a
- * method's JSDoc / leading-comment trivia.
+ * Shared diagnostics (F-039). Identical text in all seven tiers: a marker that
+ * is present but not followed by a well-formed flag list, or a second marker on
+ * the same method, is a compile error — never a silent fall-back to the
+ * default ALL|FORKID mode.
  */
-const SIGHASH_RE = /@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*\/|\n|\r|$)/;
+export const SIGHASH_MALFORMED_ERROR =
+  '@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)';
+export const SIGHASH_MULTIPLE_ERROR =
+  '@sighash: more than one @sighash directive on this method; declare exactly one';
+
+const SIGHASH_MARKER = '@sighash';
+
+/** ASCII word character — the reference `\b` boundary (no `u` flag). */
+function isWordChar(c: string): boolean {
+  return /[A-Za-z0-9_]/.test(c);
+}
+
+/**
+ * Extract and parse an `@sighash` directive from a method's leading-comment
+ * text (all of its leading comments, concatenated). Returns `null` only when
+ * no `@sighash` marker is present, otherwise the parse result (value or error).
+ *
+ * A marker is `@sighash` followed by a word boundary, so `@sighashType` (or
+ * `@sighashSINGLE`) is prose, not a directive. Once a marker is present
+ * (fail-closed, F-039):
+ *   - more than one marker is an error (SIGHASH_MULTIPLE_ERROR);
+ *   - the segment after the marker, up to `*` + `/`, a newline, CR or the end,
+ *     must be empty, or start with a space/tab and contain only
+ *     `[A-Za-z0-9_|]`, spaces and tabs — anything else is SIGHASH_MALFORMED_ERROR;
+ *   - the flag list itself is then validated by `parseSighashFlags`.
+ */
 export function extractSighashDirective(commentText: string): SighashParseResult | null {
-  const m = SIGHASH_RE.exec(commentText);
-  if (!m) return null;
-  return parseSighashFlags(m[1] ?? '');
+  const markers: number[] = [];
+  for (let i = commentText.indexOf(SIGHASH_MARKER); i !== -1; i = commentText.indexOf(SIGHASH_MARKER, i + 1)) {
+    const next = commentText[i + SIGHASH_MARKER.length];
+    if (next === undefined || !isWordChar(next)) markers.push(i);
+  }
+  if (markers.length === 0) return null;
+  if (markers.length > 1) return { error: SIGHASH_MULTIPLE_ERROR };
+
+  const after = commentText.slice(markers[0]! + SIGHASH_MARKER.length);
+  let end = after.length;
+  for (let i = 0; i < after.length; i++) {
+    const c = after[i];
+    if (c === '\n' || c === '\r' || (c === '*' && after[i + 1] === '/')) { end = i; break; }
+  }
+  const seg = after.slice(0, end);
+  if (seg.length > 0 && !/^[ \t][A-Za-z0-9_| \t]*$/.test(seg)) {
+    return { error: SIGHASH_MALFORMED_ERROR };
+  }
+  return parseSighashFlags(seg);
 }
 
 /** Human-readable rendering of a sighash value (for diagnostics). */

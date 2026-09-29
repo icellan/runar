@@ -909,8 +909,12 @@ public final class TsParser {
                     + "— only public methods are spending entry points", name));
                 return null;
             }
+            // Non-null: the marker is present (checked above). A malformed or
+            // duplicated directive comes back as an error, never as "no
+            // directive" (F-039).
             SighashDirective.Result result = SighashDirective.extractSighashDirective(leadingComments);
             if (result == null) {
+                addError(String.format("Method '%s': %s", name, SighashDirective.SIGHASH_MALFORMED_ERROR));
                 return null;
             }
             if (result.isError()) {

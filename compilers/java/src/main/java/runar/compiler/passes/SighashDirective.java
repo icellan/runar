@@ -4,8 +4,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * {@code @sighash} directive parsing (issue #123) — Java port of
@@ -128,23 +126,78 @@ public final class SighashDirective {
         return Result.ok(value);
     }
 
-    private static final Pattern SIGHASH_RE =
-        Pattern.compile("@sighash\\s+([A-Za-z0-9_|\\s]*?)(?:\\*/|\\n|\\r|$)");
+    /**
+     * Shared diagnostics (F-039) — identical text in all seven tiers. A marker
+     * that is present but not followed by a well-formed flag list, or a second
+     * marker on the same method, is a compile error, never a silent fall-back
+     * to the default ALL|FORKID mode.
+     */
+    public static final String SIGHASH_MALFORMED_ERROR =
+        "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a "
+        + "|-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)";
+    public static final String SIGHASH_MULTIPLE_ERROR =
+        "@sighash: more than one @sighash directive on this method; declare exactly one";
+
+    private static final String SIGHASH_MARKER = "@sighash";
+
+    private static boolean isAsciiWordChar(char c) {
+        return c == '_' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    }
 
     /**
-     * Extract and parse an {@code @sighash} directive from a block of comment
-     * text. Returns {@code null} when no {@code @sighash} token is present,
-     * otherwise the parse result (value or error).
+     * Extract and parse an {@code @sighash} directive from a method's
+     * leading-comment text (all of its leading comments, concatenated). Returns
+     * {@code null} only when no {@code @sighash} marker is present, otherwise
+     * the parse result (value or error). Mirrors the TS reference.
+     *
+     * <p>A marker is {@code @sighash} followed by an ASCII word boundary, so
+     * {@code @sighashType} (or {@code @sighashSINGLE}) is prose, not a
+     * directive. Once a marker is present (fail-closed, F-039): more than one
+     * marker is {@link #SIGHASH_MULTIPLE_ERROR}; the segment after the marker,
+     * up to the block-comment close, a newline, CR or the end, must be empty,
+     * or start with a space/tab and contain only {@code [A-Za-z0-9_|]}, spaces
+     * and tabs, else {@link #SIGHASH_MALFORMED_ERROR}; the flag list itself is
+     * then validated by {@link #parseSighashFlags}.
      */
     public static Result extractSighashDirective(String commentText) {
         if (commentText == null) {
             return null;
         }
-        Matcher m = SIGHASH_RE.matcher(commentText);
-        if (!m.find()) {
+        java.util.List<Integer> markers = new java.util.ArrayList<>();
+        for (int i = commentText.indexOf(SIGHASH_MARKER); i != -1; i = commentText.indexOf(SIGHASH_MARKER, i + 1)) {
+            int next = i + SIGHASH_MARKER.length();
+            if (next >= commentText.length() || !isAsciiWordChar(commentText.charAt(next))) {
+                markers.add(i);
+            }
+        }
+        if (markers.isEmpty()) {
             return null;
         }
-        return parseSighashFlags(m.group(1) == null ? "" : m.group(1));
+        if (markers.size() > 1) {
+            return Result.err(SIGHASH_MULTIPLE_ERROR);
+        }
+
+        String after = commentText.substring(markers.get(0) + SIGHASH_MARKER.length());
+        int end = after.length();
+        for (int i = 0; i < after.length(); i++) {
+            char c = after.charAt(i);
+            if (c == '\n' || c == '\r' || (c == '*' && i + 1 < after.length() && after.charAt(i + 1) == '/')) {
+                end = i;
+                break;
+            }
+        }
+        String seg = after.substring(0, end);
+        if (!seg.isEmpty()) {
+            boolean ok = seg.charAt(0) == ' ' || seg.charAt(0) == '\t';
+            for (int i = 0; ok && i < seg.length(); i++) {
+                char c = seg.charAt(i);
+                ok = isAsciiWordChar(c) || c == '|' || c == ' ' || c == '\t';
+            }
+            if (!ok) {
+                return Result.err(SIGHASH_MALFORMED_ERROR);
+            }
+        }
+        return parseSighashFlags(seg);
     }
 
     /** Human-readable rendering of a sighash value (for diagnostics). */

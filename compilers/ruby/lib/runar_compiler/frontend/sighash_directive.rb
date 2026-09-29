@@ -45,8 +45,15 @@ module RunarCompiler
       FLAG_FORKID      = 0x40
       FLAG_ANYONECANPAY = 0x80
 
-      # Regex matching an `@sighash` directive's flag list inside a comment.
-      SIGHASH_RE = /@sighash\s+([A-Za-z0-9_|\s]*?)(?:\*\/|\n|\r|$)/
+      # Shared diagnostics (F-039) — identical text in all seven tiers. A marker
+      # that is present but not followed by a well-formed flag list, or a second
+      # marker on the same method, is a compile error, never a silent fall-back
+      # to the default ALL|FORKID mode.
+      SIGHASH_MALFORMED_ERROR = "@sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a " \
+                                "|-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)"
+      SIGHASH_MULTIPLE_ERROR = "@sighash: more than one @sighash directive on this method; declare exactly one"
+
+      SIGHASH_MARKER = "@sighash"
 
       # Parse the flag list of an `@sighash` directive.
       #
@@ -104,14 +111,41 @@ module RunarCompiler
         { value: value }
       end
 
-      # Extract and parse an `@sighash` directive from a block of comment text.
-      # Returns nil when no `@sighash` token is present, otherwise the parse
-      # result ({value:} or {error:}).
+      # Extract and parse an `@sighash` directive from a method's leading-comment
+      # text (all of its leading comments, concatenated). Returns nil only when
+      # no `@sighash` marker is present, otherwise the parse result ({value:} or
+      # {error:}). Mirrors the TS reference.
+      #
+      # A marker is `@sighash` followed by an ASCII word boundary, so
+      # `@sighashType` (or `@sighashSINGLE`) is prose, not a directive. Once a
+      # marker is present (fail-closed, F-039): more than one marker is
+      # SIGHASH_MULTIPLE_ERROR; the segment after the marker, up to `*/`, a
+      # newline, CR or the end, must be empty, or start with a space/tab and
+      # contain only [A-Za-z0-9_|], spaces and tabs, else SIGHASH_MALFORMED_ERROR;
+      # the flag list itself is then validated by parse_sighash_flags.
       def extract_sighash_directive(comment_text)
-        m = SIGHASH_RE.match(comment_text)
-        return nil if m.nil?
+        markers = []
+        i = comment_text.index(SIGHASH_MARKER)
+        until i.nil?
+          nxt = comment_text[i + SIGHASH_MARKER.length]
+          markers << i if nxt.nil? || !nxt.match?(/\A[A-Za-z0-9_]\z/)
+          i = comment_text.index(SIGHASH_MARKER, i + 1)
+        end
+        return nil if markers.empty?
+        return { error: SIGHASH_MULTIPLE_ERROR } if markers.length > 1
 
-        parse_sighash_flags(m[1] || "")
+        after = comment_text[(markers[0] + SIGHASH_MARKER.length)..]
+        end_idx = after.length
+        after.each_char.with_index do |c, j|
+          if c == "\n" || c == "\r" || (c == "*" && after[j + 1] == "/")
+            end_idx = j
+            break
+          end
+        end
+        seg = after[0, end_idx]
+        return { error: SIGHASH_MALFORMED_ERROR } unless seg.empty? || seg.match?(/\A[ \t][A-Za-z0-9_| \t]*\z/)
+
+        parse_sighash_flags(seg)
       end
 
       # Human-readable rendering of a sighash value (for diagnostics).

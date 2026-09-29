@@ -477,3 +477,82 @@ fn ec_armed_embed_always_changes_the_emitted_script() {
         off_hex.len()
     );
 }
+
+// ===========================================================================
+// F-039 — a present-but-malformed `@sighash` marker is a compile error
+// ===========================================================================
+//
+// Before F-039, `/** @sighash SINGLE|FORKID! */` (a one-character typo) made
+// `extract_sighash_directive` return `None`, which `parse_sighash_on_method`
+// read as "no directive": the method compiled, silently, under the default
+// ALL|FORKID. A second directive on one method was silently ignored.
+//
+// Proves: the Rust TS-surface parser refuses each malformed / duplicated shape
+// with the diagnostic shared by all seven tiers, keeps the reference
+// word-boundary rule (`@sighashSINGLE` / `@sighashType` are prose, not
+// markers), and still honours a well-formed multi-line JSDoc directive.
+// Does not prove: cross-tier agreement (conformance/negatives rejection-parity)
+// or the on-chain consequence (conformance/closed-findings F-039 Spend test).
+
+const F039_MALFORMED: &str = "Method 'bump': @sighash: malformed directive; expected `@sighash <FLAGS>` where FLAGS is a |-separated list of ALL, NONE, SINGLE, FORKID, ANYONECANPAY (e.g. `@sighash SINGLE|FORKID`)";
+const F039_MULTIPLE: &str =
+    "Method 'bump': @sighash: more than one @sighash directive on this method; declare exactly one";
+
+fn f039_errors(directive: &str) -> Vec<String> {
+    compile(&counter_out(directive), "Counter.runar.ts")
+        .diagnostics
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn f039_malformed_directive_is_rejected_not_defaulted() {
+    for directive in [
+        "/** @sighash SINGLE|FORKID! */",
+        "/** @sighash:SINGLE|FORKID */",
+        "// @sighash=SINGLE|FORKID",
+        "/** @sighash SINGLE,FORKID */",
+    ] {
+        assert_eq!(f039_errors(directive), vec![F039_MALFORMED.to_string()], "directive {directive:?}");
+    }
+}
+
+#[test]
+fn f039_bare_marker_line_comment_is_rejected() {
+    assert_eq!(
+        f039_errors("// @sighash"),
+        vec!["Method 'bump': @sighash directive requires at least one flag (e.g. `@sighash ALL|FORKID`)".to_string()]
+    );
+}
+
+#[test]
+fn f039_multiple_directives_are_rejected() {
+    for directive in [
+        "/** @sighash SINGLE|FORKID\n   * @sighash ALL|FORKID */",
+        "/** @sighash SINGLE|FORKID */\n    /** @sighash ALL|FORKID */",
+        "/** @sighash SINGLE|FORKID!\n   * @sighash NONE|FORKID */",
+    ] {
+        assert_eq!(f039_errors(directive), vec![F039_MULTIPLE.to_string()], "directive {directive:?}");
+    }
+}
+
+#[test]
+fn f039_word_boundary_prose_is_not_a_marker() {
+    let dflt = compile(&counter_out(""), "Counter.runar.ts").script_hex;
+    for directive in ["/** @sighashSINGLE|FORKID */", "/** see the @sighashType docs */"] {
+        assert!(f039_errors(directive).is_empty(), "directive {directive:?}");
+        assert_eq!(compile(&counter_out(directive), "Counter.runar.ts").script_hex, dflt);
+    }
+}
+
+#[test]
+fn f039_well_formed_multiline_jsdoc_still_honoured() {
+    let r = compile(
+        &counter_out("/**\n   * Bump.\n   * @sighash SINGLE|FORKID\n   */"),
+        "Counter.runar.ts",
+    );
+    let bump = r.artifact.unwrap().abi.methods.into_iter().find(|m| m.name == "bump").unwrap();
+    assert_eq!(bump.sig_hash_type, Some(0x43));
+}
