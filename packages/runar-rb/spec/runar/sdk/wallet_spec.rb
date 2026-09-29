@@ -154,3 +154,128 @@ RSpec.describe Runar::SDK::WalletSigner do
     expect(wallet.calls.last.first).to eq(:create_signature)
   end
 end
+
+
+# F-042: WalletProvider#broadcast used to rescue every error and fall back to a
+# locally computed txid, and ignored non-2xx responses, so a transaction ARC
+# never accepted was reported as broadcast (and RunarContract then tracked an
+# output that does not exist).
+#
+# PROVES: against a real local HTTP server standing in for ARC, broadcast
+# raises on a 5xx, a 4xx with an ARC error body, a 200 whose txStatus is a
+# rejection (REJECTED / DOUBLE_SPEND_ATTEMPTED / SEEN_IN_ORPHAN_MEMPOOL), a 200
+# carrying an ARC error `status`, a 200 without a txid, a 200 whose txid is not
+# this transaction's, a read timeout and a refused connection; only an
+# accepting 200 echoing this transaction's txid returns it, and only then is
+# the raw tx cached.
+# DOES NOT PROVE: behaviour against the live ARC service, or the complete set
+# of ARC txStatus values a deployment may emit (the rejection list mirrors
+# @bsv/sdk's ARC broadcaster).
+RSpec.describe Runar::SDK::WalletProvider, '#broadcast (F-042)' do
+  require 'socket'
+  require 'net/http'
+
+  # version 1, 0 inputs, 0 outputs, locktime 0 — a well-formed byte string
+  # whose double-SHA256 is the txid ARC would report.
+  let(:raw_tx) { '01000000000000000000' }
+  let(:local_txid) do
+    Digest::SHA256.digest(Digest::SHA256.digest([raw_tx].pack('H*'))).reverse.unpack1('H*')
+  end
+  let(:wallet) { MockWalletClient.new }
+  let(:signer) { Runar::SDK::WalletSigner.new(wallet: wallet, protocol_id: [2, 'test'], key_id: '1') }
+
+  def provider_for(url)
+    Runar::SDK::WalletProvider.new(wallet: wallet, signer: signer, basket: 'b', arc_url: url)
+  end
+
+  # One-shot HTTP server answering the first request with `status_line`/`body`.
+  def with_arc(status_line, body)
+    server = TCPServer.new('127.0.0.1', 0)
+    port = server.addr[1]
+    thread = Thread.new do
+      client = server.accept
+      # Drain request headers + body so the client sees a clean exchange.
+      length = 0
+      while (line = client.gets) && line != "\r\n"
+        length = line.split(':', 2)[1].to_i if line.downcase.start_with?('content-length:')
+      end
+      client.read(length) if length.positive?
+      client.write("HTTP/1.1 #{status_line}\r\nContent-Type: application/json\r\n" \
+                   "Content-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
+      client.close
+    end
+    yield "http://127.0.0.1:#{port}"
+  ensure
+    thread&.join(5)
+    server&.close
+  end
+
+  def expect_rejected(provider, pattern)
+    expect { provider.broadcast(raw_tx) }.to raise_error(RuntimeError, pattern)
+    expect { provider.get_raw_transaction(local_txid) }.to raise_error(RuntimeError, /not found/)
+  end
+
+  it 'raises on an HTTP 500' do
+    with_arc('500 Internal Server Error', '{"detail":"boom"}') do |url|
+      expect_rejected(provider_for(url), /HTTP 500.*boom/m)
+    end
+  end
+
+  it 'raises on a 4xx carrying an ARC error body' do
+    body = JSON.generate(type: 'https://bitcoin-sv.github.io/arc/#/errors?id=_461', title: 'Malformed transaction',
+                         status: 461, detail: 'Transaction is malformed', txid: local_txid)
+    with_arc('461 Malformed', body) do |url|
+      expect_rejected(provider_for(url), /HTTP 461.*Malformed/m)
+    end
+  end
+
+  %w[REJECTED DOUBLE_SPEND_ATTEMPTED SEEN_IN_ORPHAN_MEMPOOL].each do |status|
+    it "raises on a 200 whose txStatus is #{status}" do
+      body = JSON.generate(txid: local_txid, txStatus: status, extraInfo: 'nope', status: 200)
+      with_arc('200 OK', body) do |url|
+        expect_rejected(provider_for(url), /#{status}/)
+      end
+    end
+  end
+
+  it 'raises on a 200 carrying an ARC error status field' do
+    body = JSON.generate(txid: local_txid, status: 465, title: 'Fee too low', detail: 'fee too low')
+    with_arc('200 OK', body) do |url|
+      expect_rejected(provider_for(url), /465.*Fee too low/m)
+    end
+  end
+
+  it 'raises on a 200 without a txid' do
+    with_arc('200 OK', '{"txStatus":"SEEN_ON_NETWORK"}') do |url|
+      expect_rejected(provider_for(url), /txid/)
+    end
+  end
+
+  it 'raises on a 200 whose txid is not the transaction it was sent' do
+    body = JSON.generate(txid: 'cc' * 32, txStatus: 'SEEN_ON_NETWORK')
+    with_arc('200 OK', body) do |url|
+      expect_rejected(provider_for(url), /#{'cc' * 32}.*#{local_txid}/m)
+    end
+  end
+
+  it 'raises on a read timeout' do
+    allow_any_instance_of(Net::HTTP).to receive(:request).and_raise(Net::ReadTimeout)
+    expect_rejected(provider_for('http://127.0.0.1:9'), /NOT broadcast.*ReadTimeout/m)
+  end
+
+  it 'raises on a refused connection' do
+    probe = TCPServer.new('127.0.0.1', 0)
+    port = probe.addr[1]
+    probe.close
+    expect_rejected(provider_for("http://127.0.0.1:#{port}"), /NOT broadcast.*ECONNREFUSED|NOT broadcast.*refused/mi)
+  end
+
+  it "returns ARC's txid on an accepting 200 and caches the raw tx" do
+    body = JSON.generate(txid: local_txid, txStatus: 'SEEN_ON_NETWORK', status: 200, title: 'OK')
+    with_arc('200 OK', body) do |url|
+      provider = provider_for(url)
+      expect(provider.broadcast(raw_tx)).to eq(local_txid)
+      expect(provider.get_raw_transaction(local_txid)).to eq(raw_tx)
+    end
+  end
+end

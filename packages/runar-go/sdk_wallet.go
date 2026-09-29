@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -225,13 +226,63 @@ func (p *WalletProvider) Broadcast(tx *transaction.Transaction) (string, error) 
 		return "", fmt.Errorf("WalletProvider.Broadcast: ARC returned %d: %s", resp.StatusCode, string(body))
 	}
 
+	txid, err := checkArcAccepted(body, tx.TxID().String())
+	if err != nil {
+		return "", err
+	}
+
 	// Cache the raw tx for later lookups.
-	txid := tx.TxID().String()
 	p.mu.Lock()
 	p.txCache[txid] = rawHex
 	p.mu.Unlock()
 
 	return txid, nil
+}
+
+// arcRejectedTxStatuses are the ARC txStatus values returned with HTTP 200 for
+// a transaction ARC did not accept. Mirrors @bsv/sdk's ARC broadcaster; any
+// status or extraInfo containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a
+// failure.
+var arcRejectedTxStatuses = map[string]bool{
+	"DOUBLE_SPEND_ATTEMPTED": true,
+	"REJECTED":               true,
+	"INVALID":                true,
+	"MALFORMED":              true,
+	"MINED_IN_STALE_BLOCK":   true,
+}
+
+// checkArcAccepted validates a 2xx ARC /v1/tx body (F-042). It returns ARC's
+// txid only when ARC accepted the transaction and that txid is localTxid.
+func checkArcAccepted(body []byte, localTxid string) (string, error) {
+	var r struct {
+		Txid      *string     `json:"txid"`
+		TxStatus  string      `json:"txStatus"`
+		ExtraInfo string      `json:"extraInfo"`
+		Status    interface{} `json:"status"`
+		Title     string      `json:"title"`
+		Detail    string      `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC returned a non-JSON body: %s", string(body))
+	}
+	if code, ok := r.Status.(float64); ok && (code < 200 || code > 299) {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC broadcast failed (status %v): %s",
+			code, strings.TrimSpace(r.Title+" "+r.Detail))
+	}
+	st := strings.ToUpper(r.TxStatus)
+	if arcRejectedTxStatuses[st] || strings.Contains(st, "ORPHAN") ||
+		strings.Contains(strings.ToUpper(r.ExtraInfo), "ORPHAN") {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC did not accept the transaction (txStatus %s): %s",
+			r.TxStatus, r.ExtraInfo)
+	}
+	if r.Txid == nil || *r.Txid == "" {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC response carries no txid: %s", string(body))
+	}
+	if strings.ToLower(*r.Txid) != localTxid {
+		return "", fmt.Errorf("WalletProvider.Broadcast: ARC reported txid %s but the transaction sent has txid %s",
+			*r.Txid, localTxid)
+	}
+	return localTxid, nil
 }
 
 // GetTransaction fetches transaction data. Checks local cache first, then

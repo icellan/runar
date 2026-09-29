@@ -189,16 +189,23 @@ module Runar
         raise "WalletProvider: raw transaction #{txid} not found in cache or overlay"
       end
 
+      # ARC txStatus values it returns with HTTP 200 for a transaction it did
+      # not accept. Mirrors @bsv/sdk's ARC broadcaster; any status containing
+      # ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a failure.
+      ARC_REJECTED_TX_STATUSES = %w[
+        DOUBLE_SPEND_ATTEMPTED REJECTED INVALID MALFORMED MINED_IN_STALE_BLOCK
+      ].freeze
+
+      # POST the raw tx to ARC. Returns ARC's txid only when ARC accepted the
+      # transaction and that txid is this transaction's; raises otherwise
+      # (F-042 — never report a transaction the network did not accept).
       def broadcast(raw_tx)
         raw_bytes = [raw_tx].pack('H*')
-        # Compute txid locally as fallback
-        txid = Digest::SHA256.hexdigest(Digest::SHA256.digest(raw_bytes))
-        txid = [txid].pack('H*').reverse.unpack1('H*')
+        local_txid = Digest::SHA256.digest(Digest::SHA256.digest(raw_bytes)).reverse.unpack1('H*')
 
-        # POST to ARC as application/octet-stream
+        require 'net/http'
+        uri = URI("#{@arc_url}/v1/tx")
         begin
-          require 'net/http'
-          uri = URI("#{@arc_url}/v1/tx")
           http = Net::HTTP.new(uri.host, uri.port)
           http.use_ssl = uri.scheme == 'https'
           http.open_timeout = 10
@@ -207,16 +214,44 @@ module Runar
           req['Content-Type'] = 'application/octet-stream'
           req.body = raw_bytes
           resp = http.request(req)
-          if resp.is_a?(Net::HTTPSuccess)
-            json = JSON.parse(resp.body) rescue {}
-            txid = json['txid'] if json['txid']
-          end
-        rescue StandardError
-          # ARC unreachable — use locally computed txid
+        rescue StandardError => e
+          raise "WalletProvider: ARC broadcast to #{uri} failed, the transaction was NOT broadcast: " \
+                "#{e.class}: #{e.message}"
         end
 
-        @tx_cache[txid] = raw_tx
-        txid
+        unless resp.is_a?(Net::HTTPSuccess)
+          raise "WalletProvider: ARC broadcast failed (HTTP #{resp.code}): #{resp.body}"
+        end
+
+        json = begin
+          JSON.parse(resp.body.to_s)
+        rescue JSON::ParserError
+          nil
+        end
+        raise "WalletProvider: ARC broadcast returned a non-JSON body: #{resp.body}" unless json.is_a?(Hash)
+
+        status = json['status']
+        if status.is_a?(Integer) && !(200..299).cover?(status)
+          raise "WalletProvider: ARC broadcast failed (status #{status}): #{json['title']} #{json['detail']}".rstrip
+        end
+
+        tx_status = json['txStatus'].to_s.upcase
+        extra_info = json['extraInfo'].to_s
+        if ARC_REJECTED_TX_STATUSES.include?(tx_status) || tx_status.include?('ORPHAN') ||
+           extra_info.upcase.include?('ORPHAN')
+          raise "WalletProvider: ARC did not accept the transaction (txStatus #{json['txStatus']}): #{extra_info}"
+        end
+
+        arc_txid = json['txid']
+        unless arc_txid.is_a?(String) && !arc_txid.empty?
+          raise "WalletProvider: ARC broadcast response carries no txid: #{resp.body}"
+        end
+        unless arc_txid.downcase == local_txid
+          raise "WalletProvider: ARC reported txid #{arc_txid} but the transaction sent has txid #{local_txid}"
+        end
+
+        @tx_cache[local_txid] = raw_tx
+        local_txid
       end
 
       def get_utxos(_address)

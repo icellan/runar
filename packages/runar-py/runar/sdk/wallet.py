@@ -107,6 +107,53 @@ MAINNET_ARC_URL = 'https://arc.gorillapool.io'
 """The default ARC broadcaster. A MAINNET endpoint — see R-179."""
 
 
+#: ARC txStatus values returned with HTTP 200 for a transaction ARC did not
+#: accept. Mirrors @bsv/sdk's ARC broadcaster; any status or extraInfo
+#: containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a failure.
+_ARC_REJECTED_TX_STATUSES = frozenset({
+    'DOUBLE_SPEND_ATTEMPTED', 'REJECTED', 'INVALID', 'MALFORMED', 'MINED_IN_STALE_BLOCK',
+})
+
+
+def _check_arc_accepted(body: bytes, local_txid: str) -> str:
+    """Validate a 2xx ARC ``/v1/tx`` body (F-042).
+
+    Returns ARC's txid only when ARC accepted the transaction and that txid is
+    ``local_txid``; raises RuntimeError otherwise.
+    """
+    text = body.decode('utf-8', errors='replace')
+    try:
+        result = json.loads(text)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        raise RuntimeError(f'WalletProvider: ARC broadcast returned a non-JSON body: {text}')
+
+    status = result.get('status')
+    if isinstance(status, (int, float)) and not isinstance(status, bool) and not 200 <= status <= 299:
+        detail = f"{result.get('title') or ''} {result.get('detail') or ''}".strip()
+        raise RuntimeError(f'WalletProvider: ARC broadcast failed (status {status}): {detail}')
+
+    tx_status = result.get('txStatus')
+    tx_status = tx_status if isinstance(tx_status, str) else ''
+    extra_info = result.get('extraInfo')
+    extra_info = extra_info if isinstance(extra_info, str) else ''
+    if (tx_status.upper() in _ARC_REJECTED_TX_STATUSES or 'ORPHAN' in tx_status.upper()
+            or 'ORPHAN' in extra_info.upper()):
+        raise RuntimeError(
+            f'WalletProvider: ARC did not accept the transaction (txStatus {tx_status}): {extra_info}'
+        )
+
+    arc_txid = result.get('txid')
+    if not isinstance(arc_txid, str) or not arc_txid:
+        raise RuntimeError(f'WalletProvider: ARC broadcast response carries no txid: {text}')
+    if arc_txid.lower() != local_txid:
+        raise RuntimeError(
+            f'WalletProvider: ARC reported txid {arc_txid} but the transaction sent has txid {local_txid}'
+        )
+    return local_txid
+
+
 class WalletProvider(Provider):
     """Provider implementation backed by a BRC-100 wallet.
 
@@ -241,6 +288,7 @@ class WalletProvider(Provider):
             raw_hex = tx.hex()
 
         raw_bytes = bytes.fromhex(raw_hex)
+        local_txid = hashlib.sha256(hashlib.sha256(raw_bytes).digest()).digest()[::-1].hex()
         url = f'{self.arc_url}/v1/tx'
         req = Request(
             url,
@@ -250,16 +298,22 @@ class WalletProvider(Provider):
         )
         try:
             resp = urlopen(req, timeout=30)
-            result = json.loads(resp.read())
-            txid = result.get('txid', '')
-            if txid:
-                self._tx_cache[txid] = raw_hex
-            return txid
+            body = resp.read()
         except HTTPError as e:
             body = e.read().decode('utf-8', errors='replace')
             raise RuntimeError(
                 f'WalletProvider: ARC broadcast failed ({e.code}): {body}'
             ) from e
+        except (OSError, ValueError) as e:
+            # URLError (connection refused, DNS), TimeoutError, etc.
+            raise RuntimeError(
+                f'WalletProvider: ARC broadcast to {url} failed, the transaction '
+                f'was NOT broadcast: {e}'
+            ) from e
+
+        txid = _check_arc_accepted(body, local_txid)
+        self._tx_cache[txid] = raw_hex
+        return txid
 
     def get_contract_utxo(self, script_hash: str) -> Utxo | None:
         """Contract UTXOs are typically managed by overlay services, not the wallet."""

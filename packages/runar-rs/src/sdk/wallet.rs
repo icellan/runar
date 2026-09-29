@@ -380,15 +380,13 @@ impl<W: WalletClient> Provider for WalletProvider<W> {
             .set("Content-Type", "application/octet-stream")
             .send_bytes(&raw_bytes)
         {
-            // 2xx: ARC accepted the transaction.
+            // 2xx: ARC answered; the body still has to say it ACCEPTED this tx
+            // (F-042).
             Ok(resp) => {
-                let body = resp.into_string().unwrap_or_default();
-                if let Ok(json) = serde_json::from_str::<Value>(&body) {
-                    if let Some(arc_txid) = json.get("txid").and_then(|v| v.as_str()) {
-                        self.tx_cache.insert(arc_txid.to_string(), raw_hex);
-                        return Ok(arc_txid.to_string());
-                    }
-                }
+                let body = resp.into_string().map_err(|e| {
+                    format!("WalletProvider broadcast: reading ARC response from {}: {}", arc_endpoint, e)
+                })?;
+                let txid = check_arc_accepted(&body, &txid)?;
                 self.tx_cache.insert(txid.clone(), raw_hex);
                 Ok(txid)
             }
@@ -901,6 +899,55 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 /// Compute the txid (double SHA-256 of raw tx, reversed) from raw tx bytes.
+/// ARC txStatus values returned with HTTP 200 for a transaction ARC did not
+/// accept. Mirrors @bsv/sdk's ARC broadcaster; any status or extraInfo
+/// containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a failure.
+const ARC_REJECTED_TX_STATUSES: [&str; 5] = [
+    "DOUBLE_SPEND_ATTEMPTED", "REJECTED", "INVALID", "MALFORMED", "MINED_IN_STALE_BLOCK",
+];
+
+/// Validate a 2xx ARC `/v1/tx` body (F-042). Returns ARC's txid only when ARC
+/// accepted the transaction and that txid is `local_txid`.
+fn check_arc_accepted(body: &str, local_txid: &str) -> Result<String, String> {
+    let json: Value = serde_json::from_str(body)
+        .ok()
+        .filter(|v: &Value| v.is_object())
+        .ok_or_else(|| format!("WalletProvider broadcast: ARC returned a non-JSON body: {}", body))?;
+    let text = |k: &str| json.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if let Some(code) = json.get("status").and_then(|v| v.as_f64()) {
+        if !(200.0..=299.0).contains(&code) {
+            return Err(format!(
+                "WalletProvider broadcast: ARC broadcast failed (status {}): {}",
+                code,
+                format!("{} {}", text("title"), text("detail")).trim()
+            ));
+        }
+    }
+    let tx_status = text("txStatus");
+    let extra_info = text("extraInfo");
+    let st = tx_status.to_ascii_uppercase();
+    if ARC_REJECTED_TX_STATUSES.contains(&st.as_str())
+        || st.contains("ORPHAN")
+        || extra_info.to_ascii_uppercase().contains("ORPHAN")
+    {
+        return Err(format!(
+            "WalletProvider broadcast: ARC did not accept the transaction (txStatus {}): {}",
+            tx_status, extra_info
+        ));
+    }
+    let arc_txid = text("txid");
+    if arc_txid.is_empty() {
+        return Err(format!("WalletProvider broadcast: ARC response carries no txid: {}", body));
+    }
+    if arc_txid.to_ascii_lowercase() != local_txid {
+        return Err(format!(
+            "WalletProvider broadcast: ARC reported txid {} but the transaction sent has txid {}",
+            arc_txid, local_txid
+        ));
+    }
+    Ok(local_txid.to_string())
+}
+
 fn compute_txid(raw_bytes: &[u8]) -> String {
     let hash = sha256d(raw_bytes);
     // txid is displayed in reversed byte order
@@ -1627,7 +1674,9 @@ mod tests {
     #[test]
     fn r1_broadcast_returns_arc_txid_on_2xx() {
         // Locks the happy path: a 2xx with a txid body still returns Ok(txid).
-        let arc_txid = "aa".repeat(32);
+        // F-042: the body must echo THIS transaction's txid (a foreign one is
+        // now refused — see f042_broadcast_err_on_200_foreign_txid).
+        let arc_txid = f042_local_txid();
         // body is 'static: use a leaked string so the closure can capture it.
         let body: &'static str = Box::leak(format!("{{\"txid\":\"{}\"}}", arc_txid).into_boxed_str());
         let mut provider = provider_with_arc(spawn_mock_arc("200 OK", body));
@@ -1665,6 +1714,110 @@ mod tests {
         assert_eq!(tx.raw.as_deref(), Some("01000000deadbeef"));
         assert!(tx.inputs.is_empty());
         assert!(tx.outputs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // F-042 — the ARC path must fail closed on every non-acceptance
+    // -----------------------------------------------------------------------
+    //
+    // Before F-042, a 2xx returned whatever txid the body carried (or the local
+    // txid when it carried none) without reading ARC's txStatus, so a 200 whose
+    // txStatus was REJECTED / DOUBLE_SPEND_ATTEMPTED / SEEN_IN_ORPHAN_MEMPOOL, or
+    // which carried an ARC error `status`, was reported as broadcast and cached.
+    //
+    // PROVES: against a one-shot local HTTP server standing in for ARC,
+    // broadcast returns Err on a 500, a 4xx with an ARC error body, each
+    // rejecting txStatus, a 200 with an error `status` field, a 200 with no
+    // txid, a 200 whose txid is another transaction's, a connection dropped
+    // without a response, and a refused connection — and caches nothing then.
+    // DOES NOT PROVE: behaviour against the live ARC service; the complete set of
+    // txStatus values a deployment may emit (the list mirrors @bsv/sdk's ARC
+    // broadcaster); or a true read timeout (the ureq call sets none, so a hung
+    // ARC blocks rather than fails open).
+
+    fn f042_local_txid() -> String {
+        compute_txid(&hex_to_bytes(&minimal_raw_tx_hex()).unwrap())
+    }
+
+    fn f042_expect_rejected(arc_url: String, want: &[&str]) {
+        let mut provider = provider_with_arc(arc_url);
+        let tx = BsvTransaction::from_hex(&minimal_raw_tx_hex()).unwrap();
+        let result = provider.broadcast(&tx);
+        let msg = match result {
+            Ok(txid) => panic!("F-042: broadcast must fail, returned txid {}", txid),
+            Err(e) => e,
+        };
+        for w in want {
+            assert!(msg.contains(w), "F-042: error {:?} does not mention {:?}", msg, w);
+        }
+        assert!(
+            provider.tx_cache.is_empty(),
+            "F-042: a transaction ARC did not accept must not be cached as broadcast"
+        );
+    }
+
+    fn f042_leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_http_500() {
+        f042_expect_rejected(spawn_mock_arc("500 Internal Server Error", "{\"detail\":\"boom\"}"), &["500", "boom"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_4xx_error_body() {
+        let body = "{\"type\":\"https://bitcoin-sv.github.io/arc/#/errors?id=_461\",\"title\":\"Malformed transaction\",\"status\":461,\"detail\":\"Transaction is malformed\"}";
+        f042_expect_rejected(spawn_mock_arc("461 Malformed", body), &["461", "Malformed"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_rejected_tx_status() {
+        for st in ["REJECTED", "DOUBLE_SPEND_ATTEMPTED", "SEEN_IN_ORPHAN_MEMPOOL"] {
+            let body = f042_leak(format!(
+                "{{\"txid\":\"{}\",\"txStatus\":\"{}\",\"extraInfo\":\"nope\",\"status\":200}}",
+                f042_local_txid(), st
+            ));
+            f042_expect_rejected(spawn_mock_arc("200 OK", body), &[st]);
+        }
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_error_status_field() {
+        let body = f042_leak(format!(
+            "{{\"txid\":\"{}\",\"status\":465,\"title\":\"Fee too low\",\"detail\":\"fee too low\"}}",
+            f042_local_txid()
+        ));
+        f042_expect_rejected(spawn_mock_arc("200 OK", body), &["465", "Fee too low"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_without_txid() {
+        f042_expect_rejected(spawn_mock_arc("200 OK", "{\"txStatus\":\"SEEN_ON_NETWORK\"}"), &["txid"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_200_foreign_txid() {
+        let foreign = "cc".repeat(32);
+        let body = f042_leak(format!("{{\"txid\":\"{}\",\"txStatus\":\"SEEN_ON_NETWORK\"}}", foreign));
+        f042_expect_rejected(spawn_mock_arc("200 OK", body), &[&foreign, &f042_local_txid()]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_connection_dropped_without_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                drop(stream);
+            }
+        });
+        f042_expect_rejected(format!("http://{}", addr), &["network error"]);
+    }
+
+    #[test]
+    fn f042_broadcast_err_on_connection_refused() {
+        f042_expect_rejected(dead_arc_url(), &["network error"]);
     }
 
     // -----------------------------------------------------------------------
@@ -1744,7 +1897,9 @@ mod tests {
         // No broadcaster injected → the hardcoded ARC path still runs. Against a
         // live mock ARC returning a known txid, broadcast returns THAT txid —
         // proving the default (existing) behavior is unchanged.
-        let arc_txid = "cc".repeat(32);
+        // F-042: the mock ARC echoes THIS transaction's txid (a foreign one is
+        // now refused — see f042_broadcast_err_on_200_foreign_txid).
+        let arc_txid = f042_local_txid();
         let body: &'static str =
             Box::leak(format!("{{\"txid\":\"{}\"}}", arc_txid).into_boxed_str());
         let mut provider = provider_with_arc(spawn_mock_arc("200 OK", body));

@@ -28,6 +28,47 @@ import {
  */
 const MAINNET_ARC_URL = 'https://arc.gorillapool.io';
 
+/**
+ * ARC txStatus values returned with HTTP 200 for a transaction ARC did not
+ * accept. Mirrors @bsv/sdk's ARC broadcaster; any status or extraInfo
+ * containing ORPHAN (e.g. SEEN_IN_ORPHAN_MEMPOOL) is also a failure.
+ */
+const ARC_REJECTED_TX_STATUSES = [
+  'DOUBLE_SPEND_ATTEMPTED', 'REJECTED', 'INVALID', 'MALFORMED', 'MINED_IN_STALE_BLOCK',
+];
+
+/**
+ * F-042: validate a parsed 2xx ARC `/v1/tx` body. Returns ARC's txid only when ARC
+ * accepted the transaction and that txid is `localTxid`; throws otherwise.
+ */
+function checkArcAccepted(json: unknown, localTxid: string): string {
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error('WalletProvider: ARC broadcast returned a non-JSON-object body');
+  }
+  const r = json as Record<string, unknown>;
+  if (typeof r.status === 'number' && (r.status < 200 || r.status > 299)) {
+    throw new Error(
+      `WalletProvider: ARC broadcast failed (status ${r.status}): ${r.title ?? ''} ${r.detail ?? ''}`.trimEnd(),
+    );
+  }
+  const txStatus = typeof r.txStatus === 'string' ? r.txStatus.toUpperCase() : '';
+  const extraInfo = typeof r.extraInfo === 'string' ? r.extraInfo : '';
+  if (
+    ARC_REJECTED_TX_STATUSES.includes(txStatus) ||
+    txStatus.includes('ORPHAN') ||
+    extraInfo.toUpperCase().includes('ORPHAN')
+  ) {
+    throw new Error(`WalletProvider: ARC did not accept the transaction (txStatus ${String(r.txStatus)}): ${extraInfo}`);
+  }
+  if (typeof r.txid !== 'string' || r.txid === '') {
+    throw new Error(`WalletProvider: ARC broadcast response carries no txid: ${JSON.stringify(r)}`);
+  }
+  if (r.txid.toLowerCase() !== localTxid) {
+    throw new Error(`WalletProvider: ARC reported txid ${r.txid} but the transaction sent has txid ${localTxid}`);
+  }
+  return localTxid;
+}
+
 export interface WalletProviderOptions {
   /** BRC-100 WalletClient instance. */
   wallet: WalletClient;
@@ -200,17 +241,24 @@ export class WalletProvider implements Provider {
 
     const efBytes = tx.toEFUint8Array();
 
-    const resp = await fetch(`${this.arcUrl}/v1/tx`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: efBytes.buffer as ArrayBuffer,
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(`${this.arcUrl}/v1/tx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: efBytes.buffer as ArrayBuffer,
+      });
+    } catch (e) {
+      throw new Error(
+        `WalletProvider: ARC broadcast to ${this.arcUrl}/v1/tx failed, the transaction was NOT broadcast: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     if (!resp.ok) {
       const body = await resp.text();
       throw new Error(`WalletProvider: ARC broadcast failed (${resp.status}): ${body}`);
     }
-    const result = (await resp.json()) as { txid: string };
-    const txid = result.txid;
+    const txid = checkArcAccepted(await resp.json().catch(() => undefined), tx.id('hex'));
 
     // Cache for future EF lookups
     this.txCache.set(txid, tx.toHex());

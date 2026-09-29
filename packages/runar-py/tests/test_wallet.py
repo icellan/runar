@@ -621,3 +621,137 @@ class TestWalletProviderIsProvider:
         signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
         provider = WalletProvider(wallet, signer, basket='test')
         assert isinstance(provider, Provider)
+
+
+# ---------------------------------------------------------------------------
+# F-042: WalletProvider.broadcast must fail closed on the ARC path
+# ---------------------------------------------------------------------------
+#
+# Before F-042 a 200 was trusted blindly: its txid was returned (or '' when the
+# body carried none) without reading ARC's txStatus, so a 200 whose txStatus was
+# REJECTED / DOUBLE_SPEND_ATTEMPTED / SEEN_IN_ORPHAN_MEMPOOL, or which carried an
+# ARC error `status`, was reported as broadcast and cached; transport failures
+# escaped as a bare URLError / TimeoutError.
+#
+# PROVES: against a real local HTTP server standing in for ARC, broadcast raises
+# RuntimeError on a 500, a 4xx with an ARC error body, each rejecting txStatus,
+# a 200 with an error `status` field, a 200 with no txid, a 200 whose txid is
+# another transaction's, a timeout and a refused connection, and caches nothing
+# then; only an accepting 200 echoing this transaction's txid returns it.
+# DOES NOT PROVE: behaviour against the live ARC service, or the complete set of
+# txStatus values a deployment may emit (the list mirrors @bsv/sdk's ARC
+# broadcaster).
+
+import json as _json
+import socket as _socket
+import socketserver as _socketserver
+import threading as _threading
+from http.server import BaseHTTPRequestHandler as _BaseHandler, HTTPServer as _HTTPServer
+
+
+class _QuickHTTPServer(_HTTPServer):
+    # HTTPServer.server_bind calls socket.getfqdn(), which can stall for tens
+    # of seconds on macOS; the stub ARC does not need a server name.
+    def server_bind(self):
+        _socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+_F042_RAW_TX = '01000000000000000000'
+_F042_LOCAL_TXID = hashlib.sha256(
+    hashlib.sha256(bytes.fromhex(_F042_RAW_TX)).digest()
+).digest()[::-1].hex()
+
+
+def _f042_provider(url):
+    wallet = MockWalletClient()
+    signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
+    return WalletProvider(wallet, signer, basket='b', arc_url=url)
+
+
+@pytest.fixture
+def f042_arc():
+    servers = []
+
+    def start(status, body):
+        class Handler(_BaseHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                payload = body.encode()
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        srv = _QuickHTTPServer(('127.0.0.1', 0), Handler)
+        _threading.Thread(target=srv.serve_forever, daemon=True).start()
+        servers.append(srv)
+        return f'http://127.0.0.1:{srv.server_address[1]}'
+
+    yield start
+    for srv in servers:
+        srv.shutdown()
+        srv.server_close()
+
+
+def _f042_expect_rejected(provider, pattern):
+    with pytest.raises(RuntimeError, match=pattern):
+        provider.broadcast(_F042_RAW_TX)
+    assert _F042_LOCAL_TXID not in provider._tx_cache
+
+
+class TestF042WalletBroadcastFailsClosed:
+    def test_http_500(self, f042_arc):
+        _f042_expect_rejected(_f042_provider(f042_arc(500, '{"detail":"boom"}')), r'(?s)500.*boom')
+
+    def test_4xx_with_arc_error_body(self, f042_arc):
+        body = _json.dumps({'type': 'https://bitcoin-sv.github.io/arc/#/errors?id=_461',
+                            'title': 'Malformed transaction', 'status': 461,
+                            'detail': 'Transaction is malformed'})
+        _f042_expect_rejected(_f042_provider(f042_arc(461, body)), r'(?s)461.*Malformed')
+
+    @pytest.mark.parametrize('status', ['REJECTED', 'DOUBLE_SPEND_ATTEMPTED', 'SEEN_IN_ORPHAN_MEMPOOL'])
+    def test_200_with_rejecting_tx_status(self, f042_arc, status):
+        body = _json.dumps({'txid': _F042_LOCAL_TXID, 'txStatus': status,
+                            'extraInfo': 'nope', 'status': 200})
+        _f042_expect_rejected(_f042_provider(f042_arc(200, body)), status)
+
+    def test_200_with_arc_error_status_field(self, f042_arc):
+        body = _json.dumps({'txid': _F042_LOCAL_TXID, 'status': 465,
+                            'title': 'Fee too low', 'detail': 'fee too low'})
+        _f042_expect_rejected(_f042_provider(f042_arc(200, body)), r'(?s)465.*Fee too low')
+
+    def test_200_without_txid(self, f042_arc):
+        _f042_expect_rejected(_f042_provider(f042_arc(200, '{"txStatus":"SEEN_ON_NETWORK"}')), 'txid')
+
+    def test_200_with_foreign_txid(self, f042_arc):
+        foreign = 'cc' * 32
+        body = _json.dumps({'txid': foreign, 'txStatus': 'SEEN_ON_NETWORK'})
+        _f042_expect_rejected(_f042_provider(f042_arc(200, body)),
+                              rf'(?s){foreign}.*{_F042_LOCAL_TXID}')
+
+    def test_timeout(self, monkeypatch):
+        import runar.sdk.wallet as wallet_mod
+
+        def hang(*_a, **_k):
+            raise TimeoutError('timed out')
+
+        monkeypatch.setattr(wallet_mod, 'urlopen', hang)
+        _f042_expect_rejected(_f042_provider('http://127.0.0.1:9'), r'(?s)NOT broadcast.*timed out')
+
+    def test_connection_refused(self):
+        probe = _socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        _f042_expect_rejected(_f042_provider(f'http://127.0.0.1:{port}'), r'(?si)NOT broadcast.*refused')
+
+    def test_200_accepted_returns_arc_txid(self, f042_arc):
+        body = _json.dumps({'txid': _F042_LOCAL_TXID, 'txStatus': 'SEEN_ON_NETWORK',
+                            'status': 200, 'title': 'OK'})
+        provider = _f042_provider(f042_arc(200, body))
+        assert provider.broadcast(_F042_RAW_TX) == _F042_LOCAL_TXID
+        assert provider._tx_cache[_F042_LOCAL_TXID] == _F042_RAW_TX
