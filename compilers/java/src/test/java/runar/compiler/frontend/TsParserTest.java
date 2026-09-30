@@ -129,7 +129,7 @@ class TsParserTest {
         String src = "import { SmartContract } from 'runar-lang';\n";
         TsParser.ParseException e = assertThrows(TsParser.ParseException.class,
             () -> TsParser.parse(src, "Empty.runar.ts"));
-        assertTrue(e.getMessage().contains("no class extending SmartContract"));
+        assertTrue(e.getMessage().contains("No class extending SmartContract"));
     }
 
     @Test
@@ -137,7 +137,7 @@ class TsParserTest {
         String src = "class Bad extends Frobulator { constructor() { super(); } }\n";
         TsParser.ParseException e = assertThrows(TsParser.ParseException.class,
             () -> TsParser.parse(src, "Bad.runar.ts"));
-        assertTrue(e.getMessage().contains("no class extending SmartContract"));
+        assertTrue(e.getMessage().contains("No class extending SmartContract"));
     }
 
     @Test

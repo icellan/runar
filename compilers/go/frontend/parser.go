@@ -191,7 +191,11 @@ func Parse(source []byte, fileName string) *ParseResult {
 
 	contract := p.findContract(root)
 	if contract == nil {
-		p.addError("no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found")
+		p.errors = append(p.errors, Diagnostic{
+			Message:  "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found",
+			Severity: SeverityError,
+			Loc:      &SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		})
 		return &ParseResult{Errors: p.errors}
 	}
 
@@ -300,7 +304,7 @@ func (p *parseContext) findContract(root *sitter.Node) *ContractNode {
 			c := p.tryParseContractClass(child)
 			if c != nil {
 				if contract != nil {
-					p.addError("only one SmartContract subclass allowed per file")
+					p.addOnlyOneContractError(child)
 				}
 				contract = c
 			}
@@ -317,7 +321,9 @@ func (p *parseContext) findContract(root *sitter.Node) *ContractNode {
 					c := p.tryParseContractClass(gc)
 					if c != nil {
 						if contract != nil {
-							p.addError("only one SmartContract subclass allowed per file")
+							// Located at `export`, the declaration's first
+							// token, as in the TS reference.
+							p.addOnlyOneContractError(child)
 						}
 						contract = c
 					}
@@ -329,6 +335,17 @@ func (p *parseContext) findContract(root *sitter.Node) *ContractNode {
 	return contract
 }
 
+// addOnlyOneContractError reports an extra valid contract class at the start
+// of its declaration, with the TS reference's diagnostic.
+func (p *parseContext) addOnlyOneContractError(decl *sitter.Node) {
+	loc := p.loc(decl)
+	p.errors = append(p.errors, Diagnostic{
+		Message:  "Only one SmartContract subclass is allowed per file",
+		Severity: SeverityError,
+		Loc:      &loc,
+	})
+}
+
 func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 	// Check if class extends SmartContract
 	heritage := p.findChildByType(node, "class_heritage")
@@ -336,19 +353,21 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 		return nil
 	}
 
-	// The heritage clause should contain "SmartContract",
-	// "StatefulSmartContract", or "UnsafeSmartContract". Order matters:
-	// both "StatefulSmartContract" and "UnsafeSmartContract" contain the
-	// substring "SmartContract", so they must be checked first.
-	heritageText := p.nodeText(heritage)
-	parentClass := ""
-	if strings.Contains(heritageText, "StatefulSmartContract") {
-		parentClass = "StatefulSmartContract"
-	} else if strings.Contains(heritageText, "UnsafeSmartContract") {
-		parentClass = "UnsafeSmartContract"
-	} else if strings.Contains(heritageText, "SmartContract") {
-		parentClass = "SmartContract"
-	} else {
+	// N-011: the `extends` expression must be EXACTLY a valid base, as in
+	// the TS reference (`ext.getExpression().getText()`). A substring match
+	// used to accept `extends NotSmartContract` as a SmartContract.
+	extends := p.findChildByType(heritage, "extends_clause")
+	if extends == nil {
+		return nil
+	}
+	value := extends.ChildByFieldName("value")
+	if value == nil {
+		return nil
+	}
+	parentClass := p.nodeText(value)
+	switch parentClass {
+	case "SmartContract", "StatefulSmartContract", "UnsafeSmartContract":
+	default:
 		return nil
 	}
 

@@ -507,9 +507,14 @@ module RunarCompiler
 
       # -- Top-level parsing ------------------------------------------------
 
+      VALID_BASE_CLASSES = %w[SmartContract StatefulSmartContract UnsafeSmartContract].freeze
+
       def parse_contract
-        # Skip import statements, export keywords, and other top-level noise
-        # until we find a class declaration.
+        # N-011: mirror the TS reference (01-parse.ts). Scan EVERY top-level
+        # class; only one whose `extends` names a valid base is the contract.
+        # Other classes are ignored wherever they sit. Each valid class after
+        # the first is an error, and the LAST valid class is the one parsed.
+        valid = [] # token index of each valid `class` keyword
         until check(TOK_EOF)
           # Skip import statements
           if check_ident("import")
@@ -517,34 +522,56 @@ module RunarCompiler
             next
           end
 
-          # export class ...
+          decl_loc = loc
+          # export class ... / export default class ...
           if check_ident("export")
             advance
-            if check_ident("class")
-              return parse_class
+            advance if check_ident("default")
+            unless check_ident("class")
+              # Other export statements -- skip to next semicolon or brace
+              skip_statement
+              next
             end
-            # export default class, etc.
-            if check_ident("default")
-              advance
-              if check_ident("class")
-                return parse_class
-              end
-            end
-            # Other export statements -- skip to next semicolon or brace
-            skip_statement
-            next
           end
 
-          # class ...
           if check_ident("class")
-            return parse_class
+            class_pos = @pos
+            advance
+            match(TOK_IDENT) # class name
+            base = nil
+            base = peek.value if match_ident("extends") && check(TOK_IDENT)
+            # Skip the rest of the header and the balanced class body.
+            skip_statement
+            if VALID_BASE_CLASSES.include?(base)
+              # The TS reference locates a declaration at its first token
+              # (`export` included).
+              unless valid.empty?
+                @errors << Diagnostic.new(
+                  message: "Only one SmartContract subclass is allowed per file",
+                  severity: Severity::ERROR,
+                  loc: decl_loc
+                )
+              end
+              valid << class_pos
+            end
+            next
           end
 
           # Skip anything else at top level
           skip_statement
         end
 
-        raise "no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
+        if valid.empty?
+          @errors << Diagnostic.new(
+            message: "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found",
+            severity: Severity::ERROR,
+            loc: SourceLocation.new(file: @file_name, line: 1, column: 0)
+          )
+          return nil
+        end
+
+        @pos = valid.last
+        parse_class
       end
 
       # -- Skip helpers -----------------------------------------------------
@@ -603,8 +630,8 @@ module RunarCompiler
           parent_class = parent_tok.value
         end
 
-        unless %w[SmartContract StatefulSmartContract UnsafeSmartContract].include?(parent_class)
-          raise "no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
+        unless VALID_BASE_CLASSES.include?(parent_class)
+          raise "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
         end
 
         lbrace = expect(TOK_LBRACE)

@@ -621,36 +621,66 @@ public final class TsParser {
 
         // -- Top-level ------------------------------------------------
 
+        static final java.util.Set<String> VALID_BASE_CLASSES =
+            java.util.Set.of("SmartContract", "StatefulSmartContract", "UnsafeSmartContract");
+
         ContractNode parseContract() throws ParseException {
+            // N-011: mirror the TS reference (01-parse.ts). Scan EVERY top-level
+            // class; only one whose `extends` names a valid base is the contract.
+            // Other classes are ignored wherever they sit. Each valid class after
+            // the first is an error, and the LAST valid class is the one parsed.
+            List<Integer> valid = new ArrayList<>(); // token index of each valid `class` keyword
             while (!check(TOK_EOF)) {
                 if (checkIdent("import")) {
                     skipImport();
                     continue;
                 }
 
+                Token declTok = peek();
+                // export class ... / export default class ...
                 if (checkIdent("export")) {
                     advance();
-                    if (checkIdent("class")) {
-                        return parseClass();
-                    }
                     if (checkIdent("default")) {
                         advance();
-                        if (checkIdent("class")) {
-                            return parseClass();
-                        }
                     }
-                    skipStatement();
-                    continue;
+                    if (!checkIdent("class")) {
+                        skipStatement();
+                        continue;
+                    }
                 }
 
                 if (checkIdent("class")) {
-                    return parseClass();
+                    int classPos = pos;
+                    advance();
+                    match(TOK_IDENT); // class name
+                    String base = null;
+                    if (matchIdent("extends") && check(TOK_IDENT)) {
+                        base = peek().value;
+                    }
+                    // Skip the rest of the header and the balanced class body.
+                    skipStatement();
+                    if (base != null && VALID_BASE_CLASSES.contains(base)) {
+                        // The TS reference locates a declaration at its first
+                        // token (`export` included).
+                        if (!valid.isEmpty()) {
+                            addError(LexDiag.at(fileName, declTok.line, declTok.col,
+                                "Only one SmartContract subclass is allowed per file"));
+                        }
+                        valid.add(classPos);
+                    }
+                    continue;
                 }
 
                 skipStatement();
             }
 
-            throw new ParseException("no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found");
+            if (valid.isEmpty()) {
+                throw new ParseException(LexDiag.at(fileName, 1, 0,
+                    "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"));
+            }
+
+            pos = valid.get(valid.size() - 1);
+            return parseClass();
         }
 
         void skipImport() {
@@ -706,11 +736,9 @@ public final class TsParser {
                 parentClass = parentTok.value;
             }
 
-            if (!parentClass.equals("SmartContract")
-                && !parentClass.equals("StatefulSmartContract")
-                && !parentClass.equals("UnsafeSmartContract")) {
+            if (!VALID_BASE_CLASSES.contains(parentClass)) {
                 throw new ParseException(
-                    "no class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
+                    "No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found"
                 );
             }
 

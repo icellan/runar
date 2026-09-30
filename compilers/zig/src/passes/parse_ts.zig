@@ -526,34 +526,85 @@ const Parser = struct {
 
     // ---- Top-level ----
 
+    /// N-011: mirror the TS reference (01-parse.ts). Scan EVERY top-level
+    /// class; only one whose `extends` names a valid base is the contract.
+    /// Other classes (no `extends`, or a foreign base) are ignored wherever
+    /// they sit. Each valid class after the first is an error, and the LAST
+    /// valid class is the one parsed.
     fn parse(self: *Parser) ParseResult {
-        self.skipImportsAndPreamble();
-        const contract = self.parseClassDecl();
+        var contract: ?ContractNode = null;
+        var found = false;
+        while (true) {
+            // Leaves `current` at the next `class` keyword and returns the
+            // declaration's first token (`export` included), where the TS
+            // reference locates it.
+            const start_tok = self.skipImportsAndPreamble();
+            if (self.current.kind == .eof) break;
+
+            // Probe the header on a snapshot, then rewind to `class`.
+            const saved_tokenizer = self.tokenizer;
+            const saved_current = self.current;
+            const saved_prev_end = self.prev_token_end;
+            const saved_errors = self.errors.items.len;
+            _ = self.bump(); // 'class'
+            _ = self.match(.ident); // class name
+            var valid = false;
+            if (self.matchIdent("extends") and self.current.kind == .ident) {
+                valid = ParentClass.fromTsString(self.current.text) != null;
+            }
+            if (!valid) {
+                // Skip the rest of the header and the balanced class body.
+                self.skipStatement();
+                continue;
+            }
+            self.tokenizer = saved_tokenizer;
+            self.current = saved_current;
+            self.prev_token_end = saved_prev_end;
+            self.errors.shrinkRetainingCapacity(saved_errors);
+
+            if (found) self.addErrorAt(start_tok, "Only one SmartContract subclass is allowed per file");
+            found = true;
+            contract = self.parseClassDecl();
+            if (contract == null) break; // parseClassDecl reported why
+        }
+        if (!found) {
+            const f = std.fmt.allocPrint(self.allocator, "{s}:1:1: No class extending SmartContract, StatefulSmartContract, or UnsafeSmartContract found", .{self.file_name}) catch
+                return .{ .contract = null, .errors = self.errors.items };
+            self.errors.append(self.allocator, f) catch {};
+        }
         return .{ .contract = contract, .errors = self.errors.items };
     }
 
-    /// Skip import statements and any top-level noise until we find a class declaration.
-    fn skipImportsAndPreamble(self: *Parser) void {
+    fn addErrorAt(self: *Parser, tok: Token, msg: []const u8) void {
+        const f = std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}: {s}", .{ self.file_name, tok.line, tok.col, msg }) catch return;
+        self.errors.append(self.allocator, f) catch {};
+    }
+
+    /// Skip import statements and any top-level noise until we find a class
+    /// declaration. Returns the declaration's first token (`export` included).
+    fn skipImportsAndPreamble(self: *Parser) Token {
         while (self.current.kind != .eof) {
             // import ...
             if (self.checkIdent("import")) {
                 self.skipImport();
                 continue;
             }
+            const start = self.current;
             // export class ... or export default class ...
             if (self.checkIdent("export")) {
                 _ = self.bump();
                 if (self.checkIdent("default")) _ = self.bump();
-                if (self.checkIdent("class")) return; // leave 'class' for parseClassDecl
+                if (self.checkIdent("class")) return start; // leave 'class' for parseClassDecl
                 // Other export — skip to semicolon
                 self.skipStatement();
                 continue;
             }
             // class ...
-            if (self.checkIdent("class")) return;
+            if (self.checkIdent("class")) return start;
             // Unknown top-level statement
             self.skipStatement();
         }
+        return self.current;
     }
 
     fn skipImport(self: *Parser) void {

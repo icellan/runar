@@ -41,6 +41,7 @@ test {
     _ = @import("passes/anf_lower.zig");
     _ = @import("passes/intent_intrinsics_test.zig");
     _ = @import("passes/r065_go_loop_header_test.zig");
+    _ = @import("passes/n011_ts_contract_class_selection_test.zig");
     _ = @import("passes/constant_fold.zig");
     _ = @import("passes/ec_optimizer.zig");
     _ = @import("passes/embed_always_warn.zig");
