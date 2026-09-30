@@ -42,6 +42,10 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 		readonly[p.Name] = p.Readonly
 	}
 
+	if err := checkIRNoRecursion(program); err != nil {
+		return err
+	}
+
 	for i := range program.Methods {
 		m := &program.Methods[i]
 		if m.Name == "constructor" {
@@ -98,4 +102,74 @@ func checkNoReadonlyWrites(bindings []ir.ANFBinding, methodName string, readonly
 		}
 	}
 	return nil
+}
+
+// F-071 (CL-BUG-009): frontend.checkNoRecursion is source-only. Stack
+// lowering inlines every method_call to a private method by lowering its body
+// in place (codegen/stack.go inlineMethodCall) with no cycle or depth guard,
+// so a self- or mutually-recursive method in externally supplied IR recursed
+// until the goroutine stack limit — `fatal error: stack overflow`, which no
+// recover() catches. Refuse any cycle in the method_call graph here, with the
+// frontend's wording. The method named is one that lies ON the cycle.
+func checkIRNoRecursion(program *ir.ANFProgram) error {
+	callees := make(map[string][]string, len(program.Methods))
+	for i := range program.Methods {
+		m := &program.Methods[i]
+		if m.Name == "constructor" {
+			continue
+		}
+		callees[m.Name] = collectIRMethodCalls(m.Body, nil)
+	}
+
+	const (
+		unvisited = iota
+		onStack
+		done
+	)
+	state := make(map[string]int, len(callees))
+	var visit func(name string) string
+	visit = func(name string) string {
+		state[name] = onStack
+		for _, callee := range callees[name] {
+			if _, declared := callees[callee]; !declared {
+				continue
+			}
+			switch state[callee] {
+			case onStack:
+				return callee
+			case unvisited:
+				if hit := visit(callee); hit != "" {
+					return hit
+				}
+			}
+		}
+		state[name] = done
+		return ""
+	}
+
+	for i := range program.Methods {
+		name := program.Methods[i].Name
+		if name == "constructor" || state[name] != unvisited {
+			continue
+		}
+		if hit := visit(name); hit != "" {
+			return fmt.Errorf(
+				"IR validation: recursion detected: method '%s' calls itself directly or indirectly. Private methods are inlined at every call site, so a cyclic call graph has no finite lowering",
+				hit)
+		}
+	}
+	return nil
+}
+
+func collectIRMethodCalls(bindings []ir.ANFBinding, out []string) []string {
+	for i := range bindings {
+		v := &bindings[i].Value
+		if v.Kind == "method_call" {
+			out = append(out, v.Method)
+		}
+		out = collectIRMethodCalls(v.Then, out)
+		out = collectIRMethodCalls(v.Else, out)
+		out = collectIRMethodCalls(v.Body, out)
+	}
+	return out
 }
