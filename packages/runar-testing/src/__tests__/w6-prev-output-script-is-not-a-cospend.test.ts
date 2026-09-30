@@ -34,7 +34,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { compile } from 'runar-compiler';
-import { LockingScript, UnlockingScript, Spend, Hash } from '@bsv/sdk';
+import { LockingScript, UnlockingScript, Hash } from '@bsv/sdk';
 import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
 
 // ---------------------------------------------------------------------------
