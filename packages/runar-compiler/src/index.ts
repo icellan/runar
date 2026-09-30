@@ -625,6 +625,18 @@ export function compileFromANF(
 
   const anf: ANFProgram = program;
 
+  // N-071: IR input skips 02-validate, whose endsWithAssert rule is what makes
+  // a public method's script a covenant. Stack lowering leaves the method's
+  // last binding as the script result, so a body of [] compiled to an EMPTY
+  // (anyone-can-spend) script. Same rule and words as Go's F-004 check.
+  for (const method of anf.methods) {
+    if (method.isPublic && method.name !== 'constructor' && !endsWithTerminalAssert(method.body)) {
+      throw new Error(
+        `IR validation: public method '${method.name}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend`,
+      );
+    }
+  }
+
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.
   if (opts.constructorArgs) {
@@ -673,6 +685,22 @@ export function compileFromANF(
     codeSeparatorIndices: emitResult.codeSeparatorIndices,
     constructorSlots: emitResult.constructorSlots,
   };
+}
+
+/**
+ * ANF form of 02-validate's `endsWithAssert`: the last binding is an `assert`,
+ * or an `if` whose then AND else arms both end that way. A terminal
+ * `raw_script` with out_arity 1 (UnsafeSmartContract's `asm()` terminal) is
+ * also accepted, because ANF carries no parentClass.
+ */
+function endsWithTerminalAssert(bindings: ANFBinding[]): boolean {
+  const last = bindings[bindings.length - 1];
+  if (last === undefined) return false;
+  const v = last.value;
+  if (v.kind === 'assert') return true;
+  if (v.kind === 'if') return endsWithTerminalAssert(v.then) && endsWithTerminalAssert(v.else);
+  if (v.kind === 'raw_script') return v.out_arity === 1;
+  return false;
 }
 
 /**

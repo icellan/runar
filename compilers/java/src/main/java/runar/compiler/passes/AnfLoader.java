@@ -89,6 +89,21 @@ public final class AnfLoader {
             String path = "methods[" + i + "]";
             methods.add(toMethod(asObject(ml.get(i), path), path));
         }
+        // N-071: --ir skips Validate.java, whose ends-with-assert rule is what
+        // makes a public method's script a covenant. Stack lowering leaves the
+        // method's last binding as the script result, so `"body": []`
+        // compiled to an EMPTY (anyone-can-spend) script. Same rule and words
+        // as Go's F-004 check; see endsWithTerminalAssert.
+        for (AnfMethod m : methods) {
+            if (m.isPublic() && !"constructor".equals(m.name()) && !endsWithTerminalAssert(m.body())) {
+                throw new RuntimeException(
+                    "IR validation: public method '" + m.name() + "' must end with an assert() call"
+                    + " (or an if/else whose arms both do, or a terminal raw_script with out_arity 1);"
+                    + " otherwise the value its last binding leaves on the stack decides the spend"
+                );
+            }
+        }
+
         // N-113 / R-081: a contract with no public method has no spending
         // entry point and emits an EMPTY locking script — which is
         // anyone-can-spend, not merely useless. On the real @bsv/sdk `Spend`
@@ -171,6 +186,30 @@ public final class AnfLoader {
             }
         }
         return new AnfProgram(name, props, methods);
+    }
+
+    /**
+     * N-071: ANF form of the source validator's ends-with-assert rule — the
+     * last binding is an {@code assert}, or an {@code if} whose then AND else
+     * arms both end that way. A terminal {@code raw_script} with out_arity 1
+     * (UnsafeSmartContract's {@code asm()} terminal) is also accepted, because
+     * ANF carries no parentClass.
+     */
+    private static boolean endsWithTerminalAssert(List<AnfBinding> bindings) {
+        if (bindings == null || bindings.isEmpty()) {
+            return false;
+        }
+        AnfValue v = bindings.get(bindings.size() - 1).value();
+        if (v instanceof runar.compiler.ir.anf.Assert) {
+            return true;
+        }
+        if (v instanceof runar.compiler.ir.anf.If branch) {
+            return endsWithTerminalAssert(branch.thenBranch()) && endsWithTerminalAssert(branch.elseBranch());
+        }
+        if (v instanceof runar.compiler.ir.anf.RawScript rs) {
+            return rs.outArity() == 1;
+        }
+        return false;
     }
 
     /**

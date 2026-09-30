@@ -58,6 +58,10 @@ const ParseError = error{
     // because Zig's IR loader carries no message payload, so the name is the
     // whole diagnostic.
     InvalidLoopStart,
+    // N-071: a public method whose body does not END with an assert (or an if
+    // whose arms both do, or a terminal raw_script with out_arity 1). The
+    // shared message is in required_fields.lastDiagnostic().
+    PublicMethodMissingTerminalAssert,
 };
 
 const max_parse_depth: u32 = 256;
@@ -264,6 +268,20 @@ pub fn serializeArtifact(allocator: std.mem.Allocator, artifact: types.Artifact)
 // JSON Parsing — ANFProgram from dynamic JSON values
 // ============================================================================
 
+/// N-071: ANF form of the source validator's ends-with-assert rule — the last
+/// binding is an `assert`, or an `if` whose then AND else arms both end that
+/// way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
+/// `asm()` terminal) is also accepted, because ANF carries no parentClass.
+fn endsWithTerminalAssert(bindings: []const types.ANFBinding) bool {
+    if (bindings.len == 0) return false;
+    return switch (bindings[bindings.len - 1].value) {
+        .assert => true,
+        .@"if" => |v| endsWithTerminalAssert(v.then) and endsWithTerminalAssert(v.@"else"),
+        .raw_script => |v| v.out_arity == 1,
+        else => false,
+    };
+}
+
 fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFProgram {
     const obj = root.object;
 
@@ -278,6 +296,21 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
     for (methods_arr.items) |method_val| {
         const method = try parseMethod(allocator, method_val.object);
         try method_list.append(allocator, method);
+    }
+
+    // N-071: --ir skips passes/validate.zig, whose ends-with-assert rule is
+    // what makes a public method's script a covenant. Stack lowering leaves
+    // the method's last binding as the script result, so `"body": []`
+    // compiled to a bare OP_1 (anyone-can-spend). Same rule and words as Go's
+    // F-004 check; see endsWithTerminalAssert.
+    for (method_list.items) |m| {
+        if (m.is_public and !std.mem.eql(u8, m.name, "constructor") and !endsWithTerminalAssert(m.body)) {
+            required_fields.setDiag(
+                "IR validation: public method '{s}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+                .{m.name},
+            );
+            return ParseError.PublicMethodMissingTerminalAssert;
+        }
     }
 
     // N-113 / R-081: a contract with no public method has no spending entry
@@ -2391,6 +2424,7 @@ test "parse if-else ANF IR" {
         \\            ]
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "check",
@@ -2408,7 +2442,7 @@ test "parse if-else ANF IR" {
     try std.testing.expectEqual(@as(usize, 1), program.methods.len);
 
     const method = program.methods[0];
-    try std.testing.expectEqual(@as(usize, 2), method.body.len);
+    try std.testing.expectEqual(@as(usize, 2 + 2), method.body.len); // + N-071 `_ok = true; assert(_ok)`
 
     // First binding: load_const 0
     switch (method.body[0].value) {
@@ -2476,6 +2510,7 @@ test "parse loop ANF IR" {
         \\            "kind": "loop"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "run",
@@ -2491,7 +2526,7 @@ test "parse loop ANF IR" {
 
     try std.testing.expectEqualStrings("Loop", program.contract_name);
     const method = program.methods[0];
-    try std.testing.expectEqual(@as(usize, 1), method.body.len);
+    try std.testing.expectEqual(@as(usize, 1 + 2), method.body.len); // + N-071 `_ok = true; assert(_ok)`
 
     switch (method.body[0].value) {
         .loop => |lp| {
@@ -2522,6 +2557,7 @@ test "parse unary_op ANF IR" {
         \\            "operand": "flag"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "test",
@@ -2596,6 +2632,7 @@ test "parse load_const variants" {
         \\            "value": "@this"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "test",
@@ -2688,6 +2725,7 @@ test "parse stateful contract with check_preimage and get_state_script" {
         \\            "kind": "get_state_script"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "increment",
@@ -2713,7 +2751,7 @@ test "parse stateful contract with check_preimage and get_state_script" {
     defer program.deinit(allocator);
 
     const bindings = program.methods[0].body;
-    try std.testing.expectEqual(@as(usize, 3), bindings.len);
+    try std.testing.expectEqual(@as(usize, 3 + 2), bindings.len); // + N-071 `_ok = true; assert(_ok)`
 
     // check_preimage
     switch (bindings[0].value) {
@@ -2758,6 +2796,7 @@ test "parse add_output ANF IR" {
         \\            "stateValues": ["v1", "v2"]
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "spend",
@@ -2813,6 +2852,7 @@ test "parse method_call ANF IR" {
         \\            "object": "t0"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "run",
@@ -2857,6 +2897,7 @@ test "parse update_prop ANF IR" {
         \\            "value": "t7"
         \\          }
         \\        }
+        \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
         \\      "isPublic": true,
         \\      "name": "inc",

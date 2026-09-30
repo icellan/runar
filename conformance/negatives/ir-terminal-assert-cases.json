@@ -1,0 +1,605 @@
+{
+  "error": "IR validation: public method 'unlock' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+  "accept": [
+    {
+      "name": "p2pk-control",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "if-both-arms-assert",
+      "ir": {
+        "contractName": "IfArms",
+        "methods": [
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pkA"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pkB"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "args": [
+                    "t0",
+                    "t1"
+                  ],
+                  "func": "super",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pkA"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "update_prop",
+                  "name": "pkA",
+                  "value": "t3"
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pkB"
+                }
+              },
+              {
+                "name": "t6",
+                "value": {
+                  "kind": "update_prop",
+                  "name": "pkB",
+                  "value": "t5"
+                }
+              }
+            ],
+            "isPublic": false,
+            "name": "constructor",
+            "params": [
+              {
+                "name": "pkA",
+                "type": "PubKey"
+              },
+              {
+                "name": "pkB",
+                "type": "PubKey"
+              }
+            ]
+          },
+          {
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "useA"
+                }
+              },
+              {
+                "name": "t9",
+                "value": {
+                  "cond": "t0",
+                  "else": [
+                    {
+                      "name": "t5",
+                      "value": {
+                        "kind": "load_param",
+                        "name": "sigB"
+                      }
+                    },
+                    {
+                      "name": "t6",
+                      "value": {
+                        "kind": "load_prop",
+                        "name": "pkB"
+                      }
+                    },
+                    {
+                      "name": "t7",
+                      "value": {
+                        "args": [
+                          "t5",
+                          "t6"
+                        ],
+                        "func": "checkSig",
+                        "kind": "call"
+                      }
+                    },
+                    {
+                      "name": "t8",
+                      "value": {
+                        "kind": "assert",
+                        "value": "t7"
+                      }
+                    }
+                  ],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t1",
+                      "value": {
+                        "kind": "load_param",
+                        "name": "sigA"
+                      }
+                    },
+                    {
+                      "name": "t2",
+                      "value": {
+                        "kind": "load_prop",
+                        "name": "pkA"
+                      }
+                    },
+                    {
+                      "name": "t3",
+                      "value": {
+                        "args": [
+                          "t1",
+                          "t2"
+                        ],
+                        "func": "checkSig",
+                        "kind": "call"
+                      }
+                    },
+                    {
+                      "name": "t4",
+                      "value": {
+                        "kind": "assert",
+                        "value": "t3"
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "isPublic": true,
+            "name": "unlock",
+            "params": [
+              {
+                "name": "sigA",
+                "type": "Sig"
+              },
+              {
+                "name": "sigB",
+                "type": "Sig"
+              },
+              {
+                "name": "useA",
+                "type": "boolean"
+              }
+            ]
+          }
+        ],
+        "properties": [
+          {
+            "name": "pkA",
+            "readonly": true,
+            "type": "PubKey"
+          },
+          {
+            "name": "pkB",
+            "readonly": true,
+            "type": "PubKey"
+          }
+        ]
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "body-empty",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": []
+          }
+        ]
+      },
+      "error": "IR validation: public method 'unlock' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend"
+    },
+    {
+      "name": "body-without-assert",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: public method 'unlock' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend"
+    },
+    {
+      "name": "binding-after-last-assert",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_const",
+                  "value": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: public method 'unlock' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend"
+    },
+    {
+      "name": "if-else-arm-without-assert",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "if",
+                  "cond": "t2",
+                  "then": [
+                    {
+                      "name": "t4",
+                      "value": {
+                        "kind": "assert",
+                        "value": "t2"
+                      }
+                    }
+                  ],
+                  "else": [
+                    {
+                      "name": "t5",
+                      "value": {
+                        "kind": "load_const",
+                        "value": true
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: public method 'unlock' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend"
+    },
+    {
+      "name": "if-empty-else-arm",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "if",
+                  "cond": "t2",
+                  "then": [
+                    {
+                      "name": "t4",
+                      "value": {
+                        "kind": "assert",
+                        "value": "t2"
+                      }
+                    }
+                  ],
+                  "else": []
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: public method 'unlock' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend"
+    },
+    {
+      "name": "terminal-raw-script-out-arity-0",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "raw_script",
+                  "bytes": "61",
+                  "in_arity": 0,
+                  "out_arity": 0
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: public method 'unlock' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend"
+    }
+  ]
+}

@@ -74,12 +74,14 @@ class R086IrIntegerRangeTest {
            {"name":"t8","value":{"kind":"assert","value":"t7"}}]}]}
         """;
 
+    // N-071: a public method must end with an assert, so the shell closes the
+    // body with `_ok = true; assert(_ok)` after the binding under test.
     private static final String SHELL = """
         {
           "contractName":"X",
           "properties":[],
           "methods":[
-            {"name":"m","isPublic":true,"params":[],"body":[%s]}
+            {"name":"m","isPublic":true,"params":[],"body":[%s,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
           ]
         }
         """;

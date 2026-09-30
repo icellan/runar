@@ -95,17 +95,19 @@ const json = @import("json.zig");
 const types = @import("types.zig");
 
 /// A one-method contract whose single binding is supplied verbatim, so each
-/// case differs from its control in exactly one JSON token.
+/// case differs from its control in exactly one JSON token. N-071: the body
+/// closes with `_ok = true; assert(_ok)`, because a public method must end
+/// with an assert.
 fn irWithBinding(allocator: std.mem.Allocator, binding: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator,
-        \\{{"contractName":"Probe","properties":[],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{s}]}}]}}
+        \\{{"contractName":"Probe","properties":[],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{s},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
     , .{binding});
 }
 
 /// Same, with the properties list supplied verbatim instead.
 fn irWithProperties(allocator: std.mem.Allocator, properties: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator,
-        \\{{"contractName":"Probe","properties":[{s}],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"load_const","value":0}}}}]}}]}}
+        \\{{"contractName":"Probe","properties":[{s}],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"load_const","value":0}}}},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
     , .{properties});
 }
 

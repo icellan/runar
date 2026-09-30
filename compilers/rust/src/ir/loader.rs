@@ -226,6 +226,20 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
         validate_bindings(&method.body, &method.name, mutable_count)?;
     }
 
+    // N-071: --ir skips frontend/validator.rs, whose ends-with-assert rule is
+    // what makes a public method's script a covenant. Stack lowering leaves
+    // the method's last binding as the script result, so `"body": []`
+    // compiled to an EMPTY (anyone-can-spend) script. Same rule and words as
+    // Go's F-004 check; see ends_with_terminal_assert.
+    for method in &program.methods {
+        if method.is_public && method.name != "constructor" && !ends_with_terminal_assert(&method.body) {
+            return Err(format!(
+                "IR validation: public method '{}' must end with an assert() call (or an if/else whose arms both do, or a terminal raw_script with out_arity 1); otherwise the value its last binding leaves on the stack decides the spend",
+                method.name
+            ));
+        }
+    }
+
     // N-113 / R-081: a contract with no public method has no spending entry
     // point and emits an EMPTY locking script — which is anyone-can-spend, not
     // merely useless. On the real @bsv/sdk `Spend` engine under full consensus
@@ -260,6 +274,21 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// N-071: ANF form of the source validator's ends-with-assert rule — the last
+/// binding is an `assert`, or an `if` whose then AND else arms both end that
+/// way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
+/// `asm()` terminal) is also accepted, because ANF carries no parentClass.
+fn ends_with_terminal_assert(bindings: &[ANFBinding]) -> bool {
+    match bindings.last().map(|b| &b.value) {
+        Some(ANFValue::Assert { .. }) => true,
+        Some(ANFValue::If { then, else_branch, .. }) => {
+            ends_with_terminal_assert(then) && ends_with_terminal_assert(else_branch)
+        }
+        Some(ANFValue::RawScript { out_arity, .. }) => *out_arity == 1,
+        _ => false,
+    }
 }
 
 fn validate_bindings(
@@ -526,6 +555,23 @@ fn validate_bindings(
 mod tests {
     use super::*;
     use crate::ir::{ANFMethod, ANFParam, ANFProgram, ANFProperty};
+
+    /// N-071: a public method must end with an assert, so fixtures whose
+    /// subject is something else append `_ok = true; assert(_ok)`.
+    fn terminal_assert() -> Vec<ANFBinding> {
+        vec![
+            ANFBinding {
+                name: "_ok".to_string(),
+                value: ANFValue::LoadConst { value: serde_json::json!(true) },
+                source_loc: None,
+            },
+            ANFBinding {
+                name: "_ok_assert".to_string(),
+                value: ANFValue::Assert { value: "_ok".to_string(), is_auto_injected_state_check: false },
+                source_loc: None,
+            },
+        ]
+    }
 
     // -----------------------------------------------------------------------
     // Valid minimal JSON
@@ -871,7 +917,10 @@ mod tests {
                         },
                         source_loc: None,
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
                 is_public: true,
                 sighash_type: None,
             }],
@@ -887,7 +936,7 @@ mod tests {
         assert_eq!(loaded.methods.len(), 1);
         assert_eq!(loaded.methods[0].name, "increment");
         assert_eq!(loaded.methods[0].params.len(), 1);
-        assert_eq!(loaded.methods[0].body.len(), 4);
+        assert_eq!(loaded.methods[0].body.len(), 4 + terminal_assert().len());
 
         // Verify specific binding kinds survived the round-trip
         assert!(matches!(&loaded.methods[0].body[0].value, ANFValue::LoadParam { name } if name == "amount"));
@@ -980,7 +1029,10 @@ mod tests {
                         step: 1,
                     },
                     source_loc: None,
-                }],
+                }]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
                 is_public: true,
                 sighash_type: None,
             }],
@@ -1061,7 +1113,10 @@ mod tests {
                         },
                         source_loc: None,
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(terminal_assert())
+                .collect(),
                 is_public: true,
                 sighash_type: None,
             }],

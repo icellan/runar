@@ -166,6 +166,21 @@ module RunarCompiler
         end
       end
 
+      # N-071: --ir skips frontend/validator.rb, whose ends-with-assert rule
+      # is what makes a public method's script a covenant. Stack lowering
+      # leaves the method's last binding as the script result, so
+      # `"body": []` compiled to an EMPTY (anyone-can-spend) script. Same rule
+      # and words as Go's F-004 check; see _ends_with_terminal_assert.
+      program.methods.each do |m|
+        next unless m.is_public && m.name != "constructor"
+        next if _ends_with_terminal_assert(m.body)
+
+        errors << "public method '#{m.name}' must end with an assert() call " \
+                  "(or an if/else whose arms both do, or a terminal raw_script " \
+                  "with out_arity 1); otherwise the value its last binding " \
+                  "leaves on the stack decides the spend"
+      end
+
       # N-113 / R-081: a contract with no public method has no spending entry
       # point and emits an EMPTY locking script -- which is anyone-can-spend,
       # not merely useless. On the real @bsv/sdk `Spend` engine under full
@@ -196,6 +211,23 @@ module RunarCompiler
       end
 
       errors
+    end
+
+    # N-071: ANF form of the source validator's ends-with-assert rule -- the
+    # last binding is an `assert`, or an `if` whose then AND else arms both end
+    # that way. A terminal `raw_script` with out_arity 1 (UnsafeSmartContract's
+    # asm() terminal) is also accepted, because ANF carries no parentClass.
+    def self._ends_with_terminal_assert(bindings)
+      last = (bindings || []).last
+      return false if last.nil?
+
+      v = last.value
+      case v.kind
+      when "assert" then true
+      when "if" then _ends_with_terminal_assert(v.then) && _ends_with_terminal_assert(v.else_)
+      when "raw_script" then v.out_arity == 1
+      else false
+      end
     end
 
     # Validate a list of ANF bindings, including nested ones.
@@ -389,5 +421,6 @@ module RunarCompiler
       errors
     end
     private_class_method :_validate_bindings
+    private_class_method :_ends_with_terminal_assert
   end
 end

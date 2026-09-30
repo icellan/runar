@@ -44,9 +44,11 @@ const testing = std.testing;
 const json = @import("json.zig");
 
 /// Smallest IR carrying one `loop` whose `start` is the spliced-in text.
+// N-071: the body closes with `_ok = true; assert(_ok)`, because a public
+// method must end with an assert.
 fn irWithStart(allocator: std.mem.Allocator, start: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator,
-        \\{{"contractName":"Probe","properties":[],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"loop","count":2,"start":{s},"step":1,"iterVar":"i","body":[{{"name":"t1","value":{{"kind":"load_const","value":0}}}}]}}}}]}}]}}
+        \\{{"contractName":"Probe","properties":[],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"loop","count":2,"start":{s},"step":1,"iterVar":"i","body":[{{"name":"t1","value":{{"kind":"load_const","value":0}}}}]}}}},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
     , .{start});
 }
 
@@ -146,7 +148,7 @@ test "N-133 control: a loop with no start at all is still a zero-start loop" {
     defer arena.deinit();
     const a = arena.allocator();
     const src =
-        \\{"contractName":"Probe","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[{"name":"t0","value":{"kind":"loop","count":2,"iterVar":"i","body":[{"name":"t1","value":{"kind":"load_const","value":0}}]}}]}]}
+        \\{"contractName":"Probe","properties":[],"methods":[{"name":"unlock","params":[],"isPublic":true,"body":[{"name":"t0","value":{"kind":"loop","count":2,"iterVar":"i","body":[{"name":"t1","value":{"kind":"load_const","value":0}}]}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}]}
     ;
     const program = try json.parseANFProgram(a, src);
     try testing.expectEqual(@as(i64, 0), program.methods[0].body[0].value.loop.start);

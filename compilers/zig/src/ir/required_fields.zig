@@ -32,7 +32,9 @@ pub fn lastDiagnostic() ?[]const u8 {
     return diag_buf[0..diag_len];
 }
 
-fn setDiag(comptime fmt: []const u8, args: anytype) void {
+/// Also used by json.zig for its N-071 terminal-assert rule, whose message
+/// travels on the same channel.
+pub fn setDiag(comptime fmt: []const u8, args: anytype) void {
     const s = std.fmt.bufPrint(&diag_buf, fmt, args) catch diag_buf[0..0];
     diag_len = s.len;
 }

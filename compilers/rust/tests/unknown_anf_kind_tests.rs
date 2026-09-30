@@ -182,10 +182,14 @@ fn r177_unknown_kind_is_reported_in_the_shared_wording() {
 
 #[test]
 fn r177_a_valid_kind_still_loads() {
+    // N-071: a public method must end with an assert, so the control also
+    // appends one after the swapped-in kind.
     let good = BAD_KIND_IR.replace(
-        r#"{ "kind": "not_a_real_kind" }"#,
-        r#"{ "kind": "load_const", "value": 1 }"#,
+        r#"{ "name": "t0", "value": { "kind": "not_a_real_kind" } }"#,
+        r#"{ "name": "t0", "value": { "kind": "load_const", "value": 1 } },
+        { "name": "t1", "value": { "kind": "assert", "value": "t0" } }"#,
     );
+    assert_ne!(good, BAD_KIND_IR, "the control must differ from the probe");
     assert!(
         load_ir_from_str(&good).is_ok(),
         "the control program must still load"

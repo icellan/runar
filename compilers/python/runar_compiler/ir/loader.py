@@ -200,11 +200,12 @@ def validate_ir(program: ANFProgram) -> list[str]:
             and method.name != "constructor"
             and not _ends_with_assert(method.body)
         ):
+            # N-071: the sentence is shared verbatim by all seven tiers.
             errors.append(
                 f"public method '{method.name}' must end with an assert() call "
-                f"(or a terminal raw_script with out_arity 1); without one the "
-                f"method leaves no checked value and the output can be "
-                f"anyone-can-spend"
+                f"(or an if/else whose arms both do, or a terminal raw_script "
+                f"with out_arity 1); otherwise the value its last binding "
+                f"leaves on the stack decides the spend"
             )
 
     # N-113 / R-081: a contract with no public method has no spending entry

@@ -174,12 +174,14 @@ class AnfLoaderTest {
 
     /* ---------------- Per-kind direct deserialization ---------------- */
 
+    // N-071: a public method must end with an assert, so the shell closes the
+    // body with `_ok = true; assert(_ok)` after the binding under test.
     private static final String EMPTY_SHELL = """
         {
           "contractName":"X",
           "properties":[],
           "methods":[
-            {"name":"m","isPublic":true,"params":[],"body":[%s]}
+            {"name":"m","isPublic":true,"params":[],"body":[%s,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
           ]
         }
         """;
@@ -325,7 +327,8 @@ class AnfLoaderTest {
         // "properties":[] while this node names two state values — exactly the
         // mismatch AnfLoader.checkAddOutputArity now refuses, sitting in the
         // loader's own unit test. A two-mutable-property shell makes the
-        // program well-formed; the assertions below are unchanged.
+        // program well-formed; the assertions below are unchanged. N-071: and
+        // the body ends with `_ok = true; assert(_ok)`, as EMPTY_SHELL's does.
         AnfProgram program = AnfLoader.parse("""
             {
               "contractName":"X",
@@ -334,7 +337,7 @@ class AnfLoaderTest {
                 {"name":"b","type":"bigint","readonly":false}
               ],
               "methods":[
-                {"name":"m","isPublic":true,"params":[],"body":[%s]}
+                {"name":"m","isPublic":true,"params":[],"body":[%s,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
               ]
             }
             """.formatted(

@@ -29,7 +29,9 @@ class N115IrLoopCapTest {
 
     /**
      * A one-method contract parameterised on the loop count alone, so every
-     * case below differs from the control in exactly one field.
+     * case below differs from the control in exactly one field. N-071: the
+     * body ends with {@code _ok = true; assert(_ok)}, because a public method
+     * must end with an assert.
      */
     private static String ir(long count) {
         return """
@@ -37,7 +39,7 @@ class N115IrLoopCapTest {
               {"name":"unlock","params":[],"isPublic":true,"body":[
                 {"name":"t0","value":{"kind":"loop","count":%d,"iterVar":"i","body":[
                   {"name":"t1","value":{"kind":"load_const","value":0}}
-                ]}}
+                ]}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
               ]}
             ]}
             """.formatted(count);
