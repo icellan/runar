@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::ast::*;
 use super::diagnostic::Diagnostic;
+use super::side_effect_summary::{compute_side_effect_summary, MethodEffects, SideEffectSummary};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -450,6 +451,8 @@ struct TypeChecker<'a> {
     /// initialized from another affine origin.
     affine_aliases: HashMap<String, String>,
     current_method_loc: Option<SourceLocation>,
+    /// Lazily computed side-effect summary (F-075).
+    side_effects: Option<SideEffectSummary>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -488,6 +491,7 @@ impl<'a> TypeChecker<'a> {
             consumed_values: HashSet::new(),
             affine_aliases: HashMap::new(),
             current_method_loc: None,
+            side_effects: None,
         }
     }
 
@@ -531,6 +535,15 @@ impl<'a> TypeChecker<'a> {
         self.check_statements(&ctor.body, &mut env);
     }
 
+    /// The named method's effects, following private helpers (F-075).
+    fn method_effects(&mut self, name: &str) -> MethodEffects {
+        let contract = self.contract;
+        let summary = self
+            .side_effects
+            .get_or_insert_with(|| compute_side_effect_summary(contract));
+        summary.get(name).copied().unwrap_or_default()
+    }
+
     fn check_method(&mut self, method: &MethodNode) {
         let mut env = TypeEnv::new();
 
@@ -554,8 +567,16 @@ impl<'a> TypeChecker<'a> {
         // silently wrong when an OP_RETURN output (variable length)
         // precedes the indexed P2PKH output. v1 forbids the mix; v2 may
         // relax with a variable-stride decoder.
-        let has_require_p2pkh = body_calls_builtin(&method.body, "requireOutputP2PKH");
-        let has_add_data_output = body_calls_add_data_output(&method.body);
+        //
+        // F-075: all three guards here read the method's effects from
+        // compute_side_effect_summary, which follows the private-helper call
+        // graph — the same analysis ANF lowering injects the continuation
+        // from, and ANF lowering inlines private helpers. A body-local walk
+        // let a developer disable every guard by moving the triggering call
+        // into a helper.
+        let effects = self.method_effects(&method.name);
+        let has_require_p2pkh = effects.calls_require_output_p2pkh;
+        let has_add_data_output = effects.has_data_output;
         if has_require_p2pkh && has_add_data_output {
             self.add_error(format!(
                 "method '{}' mixes requireOutputP2PKH() with addDataOutput() — \
@@ -584,21 +605,13 @@ split the addDataOutput call into a separate method",
         // See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         // Mirrors the TS reference in 03-typecheck.ts.
         if self.contract.parent_class == "StatefulSmartContract" {
-            let mutable_props: HashSet<String> = self
-                .contract
-                .properties
-                .iter()
-                .filter(|p| !p.readonly)
-                .map(|p| p.name.clone())
-                .collect();
-            let sig = analyze_method_output_signals(&method.body, &mutable_props);
-            if has_require_p2pkh && sig.has_state_output {
+            if has_require_p2pkh && effects.has_state_output {
                 self.add_error(format!(
                     "method '{}' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — the intrinsic reads output i at byte offset i*34, which is only correct when every earlier output is exactly 34 bytes, and a state-continuation output never is (codePart plus serialised state). The assertion would read bytes from the middle of the contract's own locking script, so the contract would be permanently unspendable. Assert the payment from a separate method that emits no output of its own",
                     method.name
                 ));
             }
-            if sig.requires_output_p2pkh_zero && sig.mutates_state && !sig.has_state_output {
+            if effects.requires_output_p2pkh_zero && effects.mutates_state && !effects.has_state_output {
                 self.add_error(format!(
                     "method '{}' calls requireOutputP2PKH(0, ...) but also mutates state \
 without this.addOutput()/addRawOutput() — the auto-injected single-output state \
@@ -1963,325 +1976,6 @@ fn type_node_to_ttype(node: &TypeNode) -> TType {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Body-walk helpers for the Crit-3 requireOutputP2PKH / addDataOutput
-// rejection. Recursively scans every statement and expression in a method
-// body looking for a top-level builtin call by identifier name (Identifier
-// callee) or an `obj.addDataOutput(...)` / `this.addDataOutput()` call
-// (MemberExpr / PropertyAccess callee). Mirrors the Go reference impl in
-// compilers/go/frontend/typecheck.go.
-// ---------------------------------------------------------------------------
-
-fn body_calls_builtin(body: &[Statement], name: &str) -> bool {
-    body.iter().any(|s| stmt_contains_call_to(s, name))
-}
-
-fn body_calls_add_data_output(body: &[Statement]) -> bool {
-    body.iter().any(stmt_contains_add_data_output)
-}
-
-fn stmt_contains_call_to(stmt: &Statement, name: &str) -> bool {
-    match stmt {
-        Statement::ExpressionStatement { expression, .. } => {
-            expr_contains_call_to(expression, name)
-        }
-        Statement::VariableDecl { init, .. } => expr_contains_call_to(init, name),
-        Statement::Assignment { target, value, .. } => {
-            expr_contains_call_to(target, name) || expr_contains_call_to(value, name)
-        }
-        Statement::IfStatement { condition, then_branch, else_branch, .. } => {
-            if expr_contains_call_to(condition, name) {
-                return true;
-            }
-            if then_branch.iter().any(|s| stmt_contains_call_to(s, name)) {
-                return true;
-            }
-            if let Some(else_b) = else_branch {
-                if else_b.iter().any(|s| stmt_contains_call_to(s, name)) {
-                    return true;
-                }
-            }
-            false
-        }
-        Statement::ForStatement { body, .. } => {
-            body.iter().any(|s| stmt_contains_call_to(s, name))
-        }
-        Statement::ReturnStatement { value, .. } => {
-            value.as_ref().map_or(false, |e| expr_contains_call_to(e, name))
-        }
-    }
-}
-
-fn expr_contains_call_to(expr: &Expression, name: &str) -> bool {
-    match expr {
-        Expression::CallExpr { callee, args, .. } => {
-            if let Expression::Identifier { name: id_name } = callee.as_ref() {
-                if id_name == name {
-                    return true;
-                }
-            }
-            args.iter().any(|a| expr_contains_call_to(a, name))
-        }
-        Expression::BinaryExpr { left, right, .. } => {
-            expr_contains_call_to(left, name) || expr_contains_call_to(right, name)
-        }
-        Expression::UnaryExpr { operand, .. } => expr_contains_call_to(operand, name),
-        Expression::TernaryExpr { condition, consequent, alternate } => {
-            expr_contains_call_to(condition, name)
-                || expr_contains_call_to(consequent, name)
-                || expr_contains_call_to(alternate, name)
-        }
-        Expression::IndexAccess { object, index } => {
-            expr_contains_call_to(object, name) || expr_contains_call_to(index, name)
-        }
-        Expression::ArrayLiteral { elements } => {
-            elements.iter().any(|e| expr_contains_call_to(e, name))
-        }
-        Expression::IncrementExpr { operand, .. }
-        | Expression::DecrementExpr { operand, .. } => expr_contains_call_to(operand, name),
-        Expression::MemberExpr { object, .. } => expr_contains_call_to(object, name),
-        _ => false,
-    }
-}
-
-fn stmt_contains_add_data_output(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::ExpressionStatement { expression, .. } => {
-            expr_contains_add_data_output(expression)
-        }
-        Statement::VariableDecl { init, .. } => expr_contains_add_data_output(init),
-        Statement::Assignment { target, value, .. } => {
-            expr_contains_add_data_output(target) || expr_contains_add_data_output(value)
-        }
-        Statement::IfStatement { condition, then_branch, else_branch, .. } => {
-            if expr_contains_add_data_output(condition) {
-                return true;
-            }
-            if then_branch.iter().any(stmt_contains_add_data_output) {
-                return true;
-            }
-            if let Some(else_b) = else_branch {
-                if else_b.iter().any(stmt_contains_add_data_output) {
-                    return true;
-                }
-            }
-            false
-        }
-        Statement::ForStatement { body, .. } => {
-            body.iter().any(stmt_contains_add_data_output)
-        }
-        Statement::ReturnStatement { value, .. } => {
-            value.as_ref().map_or(false, expr_contains_add_data_output)
-        }
-    }
-}
-
-fn expr_contains_add_data_output(expr: &Expression) -> bool {
-    match expr {
-        Expression::CallExpr { callee, args, .. } => {
-            match callee.as_ref() {
-                Expression::PropertyAccess { property } if property == "addDataOutput" => {
-                    return true;
-                }
-                Expression::MemberExpr { property, .. } if property == "addDataOutput" => {
-                    return true;
-                }
-                _ => {}
-            }
-            args.iter().any(expr_contains_add_data_output)
-        }
-        Expression::BinaryExpr { left, right, .. } => {
-            expr_contains_add_data_output(left) || expr_contains_add_data_output(right)
-        }
-        Expression::UnaryExpr { operand, .. } => expr_contains_add_data_output(operand),
-        Expression::TernaryExpr { condition, consequent, alternate } => {
-            expr_contains_add_data_output(condition)
-                || expr_contains_add_data_output(consequent)
-                || expr_contains_add_data_output(alternate)
-        }
-        Expression::IndexAccess { object, index } => {
-            expr_contains_add_data_output(object) || expr_contains_add_data_output(index)
-        }
-        Expression::ArrayLiteral { elements } => {
-            elements.iter().any(expr_contains_add_data_output)
-        }
-        Expression::IncrementExpr { operand, .. }
-        | Expression::DecrementExpr { operand, .. } => expr_contains_add_data_output(operand),
-        Expression::MemberExpr { object, .. } => expr_contains_add_data_output(object),
-        _ => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-// ---------------------------------------------------------------------------
-// A StatefulSmartContract method that mutates state but calls no
-// this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-// path: the compiler re-creates the contract's own (large codePart) script at
-// output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-// 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-// permanently unspendable. Detect the three signals in one walk. Mirrors the TS
-// reference `analyzeMethodOutputSignals` in
-// packages/runar-compiler/src/passes/03-typecheck.ts.
-
-const STATE_OUTPUT_METHOD_NAMES: &[&str] = &["addOutput", "addRawOutput"];
-
-#[derive(Default)]
-struct MethodOutputSignals {
-    /// assigns to / ++/-- a non-readonly property
-    mutates_state: bool,
-    /// calls this.addOutput() or this.addRawOutput()
-    has_state_output: bool,
-    /// calls requireOutputP2PKH(0n, ...)
-    requires_output_p2pkh_zero: bool,
-}
-
-fn analyze_method_output_signals(
-    body: &[Statement],
-    mutable_props: &HashSet<String>,
-) -> MethodOutputSignals {
-    let mut sig = MethodOutputSignals::default();
-    for stmt in body {
-        walk_stmt_for_output_signals(stmt, mutable_props, &mut sig);
-    }
-    sig
-}
-
-fn walk_stmt_for_output_signals(
-    stmt: &Statement,
-    mutable_props: &HashSet<String>,
-    sig: &mut MethodOutputSignals,
-) {
-    match stmt {
-        Statement::Assignment { target, value, .. } => {
-            if let Expression::PropertyAccess { property } = target {
-                if mutable_props.contains(property) {
-                    sig.mutates_state = true;
-                }
-            }
-            walk_expr_for_output_signals(target, mutable_props, sig);
-            walk_expr_for_output_signals(value, mutable_props, sig);
-        }
-        Statement::ExpressionStatement { expression, .. } => {
-            walk_expr_for_output_signals(expression, mutable_props, sig);
-        }
-        Statement::VariableDecl { init, .. } => {
-            walk_expr_for_output_signals(init, mutable_props, sig);
-        }
-        Statement::IfStatement {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            walk_expr_for_output_signals(condition, mutable_props, sig);
-            for s in then_branch {
-                walk_stmt_for_output_signals(s, mutable_props, sig);
-            }
-            if let Some(else_b) = else_branch {
-                for s in else_b {
-                    walk_stmt_for_output_signals(s, mutable_props, sig);
-                }
-            }
-        }
-        Statement::ForStatement {
-            init,
-            condition,
-            update,
-            body,
-            ..
-        } => {
-            walk_stmt_for_output_signals(init, mutable_props, sig);
-            walk_expr_for_output_signals(condition, mutable_props, sig);
-            walk_stmt_for_output_signals(update, mutable_props, sig);
-            for s in body {
-                walk_stmt_for_output_signals(s, mutable_props, sig);
-            }
-        }
-        Statement::ReturnStatement { value, .. } => {
-            if let Some(v) = value {
-                walk_expr_for_output_signals(v, mutable_props, sig);
-            }
-        }
-    }
-}
-
-fn walk_expr_for_output_signals(
-    expr: &Expression,
-    mutable_props: &HashSet<String>,
-    sig: &mut MethodOutputSignals,
-) {
-    match expr {
-        Expression::IncrementExpr { operand, .. }
-        | Expression::DecrementExpr { operand, .. } => {
-            if let Expression::PropertyAccess { property } = operand.as_ref() {
-                if mutable_props.contains(property) {
-                    sig.mutates_state = true;
-                }
-            }
-            walk_expr_for_output_signals(operand, mutable_props, sig);
-        }
-        Expression::CallExpr { callee, args, .. } => {
-            match callee.as_ref() {
-                Expression::PropertyAccess { property }
-                    if STATE_OUTPUT_METHOD_NAMES.contains(&property.as_str()) =>
-                {
-                    sig.has_state_output = true;
-                }
-                Expression::MemberExpr { property, .. }
-                    if STATE_OUTPUT_METHOD_NAMES.contains(&property.as_str()) =>
-                {
-                    sig.has_state_output = true;
-                }
-                Expression::Identifier { name } if name == "requireOutputP2PKH" => {
-                    if let Some(Expression::BigIntLiteral { value }) = args.first() {
-                        use num_traits::Zero;
-                        if value.is_zero() {
-                            sig.requires_output_p2pkh_zero = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            for arg in args {
-                walk_expr_for_output_signals(arg, mutable_props, sig);
-            }
-            if !matches!(callee.as_ref(), Expression::Identifier { .. }) {
-                walk_expr_for_output_signals(callee, mutable_props, sig);
-            }
-        }
-        Expression::BinaryExpr { left, right, .. } => {
-            walk_expr_for_output_signals(left, mutable_props, sig);
-            walk_expr_for_output_signals(right, mutable_props, sig);
-        }
-        Expression::UnaryExpr { operand, .. } => {
-            walk_expr_for_output_signals(operand, mutable_props, sig);
-        }
-        Expression::TernaryExpr {
-            condition,
-            consequent,
-            alternate,
-        } => {
-            walk_expr_for_output_signals(condition, mutable_props, sig);
-            walk_expr_for_output_signals(consequent, mutable_props, sig);
-            walk_expr_for_output_signals(alternate, mutable_props, sig);
-        }
-        Expression::IndexAccess { object, index } => {
-            walk_expr_for_output_signals(object, mutable_props, sig);
-            walk_expr_for_output_signals(index, mutable_props, sig);
-        }
-        Expression::MemberExpr { object, .. } => {
-            walk_expr_for_output_signals(object, mutable_props, sig);
-        }
-        Expression::ArrayLiteral { elements } => {
-            for el in elements {
-                walk_expr_for_output_signals(el, mutable_props, sig);
-            }
-        }
-        _ => {}
-    }
-}
 
 #[cfg(test)]
 mod tests {

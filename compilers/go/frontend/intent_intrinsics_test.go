@@ -436,6 +436,109 @@ func (c *Cov) PayBond() {
 	mustLowerGoSource(t, source) // terminal (no mutation) — must not error
 }
 
+// F-075 — the requireOutputP2PKH layout guards follow private helpers --------
+//
+// ANF lowering inlines private helpers and ComputeSideEffectSummary injects the
+// continuation through the private call graph. The guards used to walk only the
+// method's own body, so moving either half of the forbidden pair into a helper
+// compiled a contract the guard itself calls permanently unspendable.
+// Proves: each guard fires with its own diagnostic, naming the public method,
+// when one half sits in a private helper. Does not prove: the helper form would
+// otherwise compile end-to-end (requireOutputP2PKH in a helper also fails later
+// in stack lowering, a separate issue).
+
+const f075Header = `
+package x
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Cov struct {
+	runar.StatefulSmartContract
+	BondPKH runar.ByteString ` + "`runar:\"readonly\"`" + `
+	Bond    runar.Bigint     ` + "`runar:\"readonly\"`" + `
+	Tag     runar.ByteString ` + "`runar:\"readonly\"`" + `
+	Count   runar.Bigint
+}
+`
+
+func TestF075_RequireOutputP2PKHZeroInHelper_MutatingContinuation_Rejects(t *testing.T) {
+	source := f075Header + `
+func (c *Cov) assertBond() {
+	runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+}
+
+func (c *Cov) Go() {
+	c.Count = c.Count + 1
+	c.assertBond()
+}
+`
+	expectIntrinsicTypeError(t, source, "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state")
+}
+
+func TestF075_MutationInHelper_RequireOutputP2PKHZero_Rejects(t *testing.T) {
+	source := f075Header + `
+func (c *Cov) bump() {
+	c.Count = c.Count + 1
+}
+
+func (c *Cov) Go() {
+	c.bump()
+	runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+}
+`
+	expectIntrinsicTypeError(t, source, "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state")
+}
+
+func TestF075_Crit3_RequireOutputP2PKHInHelper_Rejects(t *testing.T) {
+	source := f075Header + `
+func (c *Cov) assertBond() {
+	runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+}
+
+func (c *Cov) Go() {
+	c.AddDataOutput(0, c.Tag)
+	c.assertBond()
+}
+`
+	expectIntrinsicTypeError(t, source, "method 'go' mixes requireOutputP2PKH() with addDataOutput()")
+}
+
+func TestF075_StateOutputInHelper_RequireOutputP2PKH_Rejects(t *testing.T) {
+	source := f075Header + `
+func (c *Cov) emitNext() {
+	c.AddOutput(1000, c.Count+1)
+}
+
+func (c *Cov) Go() {
+	c.emitNext()
+	runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+}
+`
+	expectIntrinsicTypeError(t, source, "method 'go' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput()")
+}
+
+func TestF075_TerminalHelper_NotFlagged(t *testing.T) {
+	source := f075Header + `
+func (c *Cov) assertBond() {
+	runar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)
+}
+
+func (c *Cov) Go() {
+	c.assertBond()
+}
+`
+	result := ParseSource([]byte(source), "Test.runar.go")
+	if len(result.Errors) > 0 {
+		t.Fatalf("unexpected parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	for _, d := range TypeCheck(result.Contract).Errors {
+		m := d.FormatMessage()
+		if strings.Contains(m, "mixes requireOutputP2PKH()") || strings.Contains(m, "permanently unspendable") {
+			t.Fatalf("terminal helper form wrongly flagged: %s", m)
+		}
+	}
+}
+
 // -------------------------------------------------------------------------
 
 func TestExtractPrevOutputScript_NonLiteralIndex_Errors(t *testing.T) {

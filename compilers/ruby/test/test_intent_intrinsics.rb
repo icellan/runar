@@ -444,6 +444,78 @@ class TestIntentIntrinsics < Minitest::Test
   end
 
   # ---------------------------------------------------------------------------
+  # F-075 -- the requireOutputP2PKH layout guards follow private helpers
+  # ---------------------------------------------------------------------------
+  # ANF lowering inlines private helpers and its transitive continuation
+  # predicates (_method_mutates_state / _method_has_add_output /
+  # _method_has_add_data_output) inject the continuation through the private
+  # call graph. The guards used to walk only the method's own body, so moving
+  # either half of the forbidden pair into a helper compiled a contract the
+  # guard itself calls permanently unspendable. Proves: each guard fires with
+  # its own diagnostic, naming the public method, when one half sits in a
+  # private helper. Does not prove: the helper form would otherwise compile
+  # end-to-end (requireOutputP2PKH in a helper also fails later in stack
+  # lowering, a separate issue).
+
+  F075_ASSERT_BOND = "func (c *Cov) assertBond() {\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)\n}"
+
+  def f075_source(helpers, body)
+    "package x\n\n" \
+      "import runar \"github.com/icellan/runar/packages/runar-go\"\n\n" \
+      "type Cov struct {\n" \
+      "\trunar.StatefulSmartContract\n" \
+      "\tBondPKH runar.ByteString `runar:\"readonly\"`\n" \
+      "\tBond    runar.Bigint     `runar:\"readonly\"`\n" \
+      "\tTag     runar.ByteString `runar:\"readonly\"`\n" \
+      "\tCount   runar.Bigint\n" \
+      "}\n\n" \
+      "#{helpers}\n\n" \
+      "func (c *Cov) Go() {\n#{body}\n}\n"
+  end
+
+  def test_f075_require_output_p2pkh_zero_in_helper_with_mutation_errors
+    expect_typecheck_error(
+      f075_source(F075_ASSERT_BOND, "\tc.Count = c.Count + 1\n\tc.assertBond()"),
+      "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state"
+    )
+  end
+
+  def test_f075_mutation_in_helper_with_require_output_p2pkh_zero_errors
+    expect_typecheck_error(
+      f075_source(
+        "func (c *Cov) bump() {\n\tc.Count = c.Count + 1\n}",
+        "\tc.bump()\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)"
+      ),
+      "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state"
+    )
+  end
+
+  def test_f075_crit3_require_output_p2pkh_in_helper_errors
+    expect_typecheck_error(
+      f075_source(F075_ASSERT_BOND, "\tc.AddDataOutput(0, c.Tag)\n\tc.assertBond()"),
+      "method 'go' mixes requireOutputP2PKH() with addDataOutput()"
+    )
+  end
+
+  def test_f075_state_output_in_helper_errors
+    expect_typecheck_error(
+      f075_source(
+        "func (c *Cov) emitNext() {\n\tc.AddOutput(1000, c.Count+1)\n}",
+        "\tc.emitNext()\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)"
+      ),
+      "method 'go' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput()"
+    )
+  end
+
+  def test_f075_terminal_helper_not_flagged
+    parse_result = RunarCompiler::Frontend.parse_go(f075_source(F075_ASSERT_BOND, "\tc.assertBond()"), "Test.runar.go")
+    assert_empty parse_result.errors.map(&:format_message), "unexpected parse errors"
+    msgs = RunarCompiler::Frontend.type_check(parse_result.contract).errors.map(&:format_message)
+    refute msgs.any? { |m| m.include?("mixes requireOutputP2PKH()") || m.include?("permanently unspendable") },
+           "terminal helper form wrongly flagged: #{msgs.inspect}"
+  end
+
+  # ---------------------------------------------------------------------------
   # End-to-end compile test (mirrors Go's intent_intrinsics_compile_test.go)
   # ---------------------------------------------------------------------------
 

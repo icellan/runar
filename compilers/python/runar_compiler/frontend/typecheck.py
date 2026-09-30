@@ -40,6 +40,10 @@ from runar_compiler.frontend.ast_nodes import (
     VariableDeclStmt,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.side_effect_summary import (
+    MethodEffects,
+    compute_side_effect_summary,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +442,8 @@ class _TypeChecker:
         self.affine_aliases: dict[str, str] = {}
         self._current_method_loc: SourceLocation | None = None
         self._current_stmt_loc: SourceLocation | None = None
+        # Lazily computed side-effect summary (F-075).
+        self._side_effects: dict[str, MethodEffects] | None = None
 
         for prop in contract.properties:
             self.prop_types[prop.name] = _type_node_to_string(prop.type)
@@ -483,6 +489,12 @@ class _TypeChecker:
 
         self._check_statements(ctor.body, env)
 
+    def _method_effects(self, name: str) -> MethodEffects:
+        """The named method's effects, following private helpers (F-075)."""
+        if self._side_effects is None:
+            self._side_effects = compute_side_effect_summary(self.contract)
+        return self._side_effects.get(name) or MethodEffects()
+
     def check_method(self, method: MethodNode) -> None:
         env = _TypeEnv()
 
@@ -507,8 +519,16 @@ class _TypeChecker:
         # exercised — attackers could route the bond P2PKH through an
         # unmatched index. v1 forbids the mix; v2 may relax with a
         # variable-stride decoder.
-        has_require_p2pkh = _body_calls_builtin(method.body, "requireOutputP2PKH")
-        has_add_data_output = _body_calls_add_data_output(method.body)
+        #
+        # F-075: all three guards here read the method's effects from
+        # compute_side_effect_summary, which follows the private-helper call
+        # graph — the same analysis ANF lowering injects the continuation from,
+        # and ANF lowering inlines private helpers. A body-local walk let a
+        # developer disable every guard by moving the triggering call into a
+        # helper.
+        effects = self._method_effects(method.name)
+        has_require_p2pkh = effects.calls_require_output_p2pkh
+        has_add_data_output = effects.has_data_output
         if has_require_p2pkh and has_add_data_output:
             self._add_error(
                 f"method '{method.name}' mixes requireOutputP2PKH() with addDataOutput() — "
@@ -536,11 +556,7 @@ class _TypeChecker:
         # proven there either. See
         # conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         if self.contract.parent_class == "StatefulSmartContract":
-            mutable_props = {
-                p.name for p in self.contract.properties if not p.readonly
-            }
-            sig = _analyze_method_output_signals(method.body, mutable_props)
-            if has_require_p2pkh and sig.has_state_output:
+            if has_require_p2pkh and effects.has_state_output:
                 self._add_error(
                     f"method '{method.name}' mixes requireOutputP2PKH() with "
                     "this.addOutput()/addRawOutput() — the intrinsic reads output i at byte "
@@ -552,9 +568,9 @@ class _TypeChecker:
                     "output of its own"
                 )
             if (
-                sig.requires_output_p2pkh_zero
-                and sig.mutates_state
-                and not sig.has_state_output
+                effects.requires_output_p2pkh_zero
+                and effects.mutates_state
+                and not effects.has_state_output
             ):
                 self._add_error(
                     f"method '{method.name}' calls requireOutputP2PKH(0, ...) but also mutates state "
@@ -1568,290 +1584,3 @@ def _stmt_source_location(stmt: Statement) -> SourceLocation | None:
     if loc is not None and (loc.file or loc.line > 0):
         return loc
     return None
-
-
-# ---------------------------------------------------------------------------
-# Recursive call-site walkers (Crit-3: requireOutputP2PKH + addDataOutput mix)
-# ---------------------------------------------------------------------------
-
-def _body_calls_builtin(body: list[Statement], name: str) -> bool:
-    """Return True if any statement in *body* (recursively) contains a
-    top-level call expression to a builtin identifier named *name*."""
-    for stmt in body:
-        if _stmt_contains_call_to(stmt, name):
-            return True
-    return False
-
-
-def _body_calls_add_data_output(body: list[Statement]) -> bool:
-    """Return True if any statement in *body* (recursively) contains a call
-    to ``this.addDataOutput(...)`` or ``c.addDataOutput(...)`` — matched by
-    the ``addDataOutput`` property on a PropertyAccessExpr or MemberExpr
-    callee."""
-    for stmt in body:
-        if _stmt_contains_add_data_output(stmt):
-            return True
-    return False
-
-
-def _stmt_contains_call_to(stmt: Statement, name: str) -> bool:
-    if isinstance(stmt, ExpressionStmt):
-        return _expr_contains_call_to(stmt.expr, name)
-    if isinstance(stmt, VariableDeclStmt):
-        return _expr_contains_call_to(stmt.init, name)
-    if isinstance(stmt, AssignmentStmt):
-        return (
-            _expr_contains_call_to(stmt.value, name)
-            or _expr_contains_call_to(stmt.target, name)
-        )
-    if isinstance(stmt, IfStmt):
-        if _expr_contains_call_to(stmt.condition, name):
-            return True
-        for t in stmt.then:
-            if _stmt_contains_call_to(t, name):
-                return True
-        for e in stmt.else_:
-            if _stmt_contains_call_to(e, name):
-                return True
-        return False
-    if isinstance(stmt, ForStmt):
-        for t in stmt.body:
-            if _stmt_contains_call_to(t, name):
-                return True
-        return False
-    if isinstance(stmt, ReturnStmt):
-        if stmt.value is not None:
-            return _expr_contains_call_to(stmt.value, name)
-    return False
-
-
-def _expr_contains_call_to(expr: Expression | None, name: str) -> bool:
-    if expr is None:
-        return False
-    if isinstance(expr, CallExpr):
-        if isinstance(expr.callee, Identifier) and expr.callee.name == name:
-            return True
-        for a in expr.args:
-            if _expr_contains_call_to(a, name):
-                return True
-        return False
-    if isinstance(expr, BinaryExpr):
-        return (
-            _expr_contains_call_to(expr.left, name)
-            or _expr_contains_call_to(expr.right, name)
-        )
-    if isinstance(expr, UnaryExpr):
-        return _expr_contains_call_to(expr.operand, name)
-    if isinstance(expr, TernaryExpr):
-        return (
-            _expr_contains_call_to(expr.condition, name)
-            or _expr_contains_call_to(expr.consequent, name)
-            or _expr_contains_call_to(expr.alternate, name)
-        )
-    if isinstance(expr, IndexAccessExpr):
-        return (
-            _expr_contains_call_to(expr.object, name)
-            or _expr_contains_call_to(expr.index, name)
-        )
-    if isinstance(expr, ArrayLiteralExpr):
-        for el in expr.elements:
-            if _expr_contains_call_to(el, name):
-                return True
-    return False
-
-
-def _stmt_contains_add_data_output(stmt: Statement) -> bool:
-    if isinstance(stmt, ExpressionStmt):
-        return _expr_contains_add_data_output(stmt.expr)
-    if isinstance(stmt, VariableDeclStmt):
-        return _expr_contains_add_data_output(stmt.init)
-    if isinstance(stmt, AssignmentStmt):
-        return (
-            _expr_contains_add_data_output(stmt.value)
-            or _expr_contains_add_data_output(stmt.target)
-        )
-    if isinstance(stmt, IfStmt):
-        if _expr_contains_add_data_output(stmt.condition):
-            return True
-        for t in stmt.then:
-            if _stmt_contains_add_data_output(t):
-                return True
-        for e in stmt.else_:
-            if _stmt_contains_add_data_output(e):
-                return True
-        return False
-    if isinstance(stmt, ForStmt):
-        for t in stmt.body:
-            if _stmt_contains_add_data_output(t):
-                return True
-        return False
-    if isinstance(stmt, ReturnStmt):
-        if stmt.value is not None:
-            return _expr_contains_add_data_output(stmt.value)
-    return False
-
-
-def _expr_contains_add_data_output(expr: Expression | None) -> bool:
-    if expr is None:
-        return False
-    if isinstance(expr, CallExpr):
-        callee = expr.callee
-        if isinstance(callee, PropertyAccessExpr) and callee.property == "addDataOutput":
-            return True
-        if isinstance(callee, MemberExpr) and callee.property == "addDataOutput":
-            return True
-        for a in expr.args:
-            if _expr_contains_add_data_output(a):
-                return True
-        return False
-    if isinstance(expr, BinaryExpr):
-        return (
-            _expr_contains_add_data_output(expr.left)
-            or _expr_contains_add_data_output(expr.right)
-        )
-    if isinstance(expr, UnaryExpr):
-        return _expr_contains_add_data_output(expr.operand)
-    if isinstance(expr, TernaryExpr):
-        return (
-            _expr_contains_add_data_output(expr.condition)
-            or _expr_contains_add_data_output(expr.consequent)
-            or _expr_contains_add_data_output(expr.alternate)
-        )
-    if isinstance(expr, IndexAccessExpr):
-        return (
-            _expr_contains_add_data_output(expr.object)
-            or _expr_contains_add_data_output(expr.index)
-        )
-    if isinstance(expr, ArrayLiteralExpr):
-        for el in expr.elements:
-            if _expr_contains_add_data_output(el):
-                return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-# ---------------------------------------------------------------------------
-# A StatefulSmartContract method that mutates state but calls no
-# this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-# path: the compiler re-creates the contract's own (large codePart) script at
-# output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-# 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-# permanently unspendable. Detect the three signals in one walk. Mirrors
-# analyzeMethodOutputSignals in
-# packages/runar-compiler/src/passes/03-typecheck.ts.
-
-_STATE_OUTPUT_METHOD_NAMES = frozenset({"addOutput", "addRawOutput"})
-
-
-@dataclass
-class _MethodOutputSignals:
-    """Three signals detected in a single method-body walk."""
-
-    mutates_state: bool = False  # assigns to / ++/-- a non-readonly property
-    has_state_output: bool = False  # calls this.addOutput()/this.addRawOutput()
-    requires_output_p2pkh_zero: bool = False  # calls requireOutputP2PKH(0, ...)
-
-
-def _analyze_method_output_signals(
-    body: list[Statement], mutable_props: set[str]
-) -> _MethodOutputSignals:
-    sig = _MethodOutputSignals()
-    for stmt in body:
-        _walk_stmt_for_output_signals(stmt, mutable_props, sig)
-    return sig
-
-
-def _walk_stmt_for_output_signals(
-    stmt: Statement, mutable_props: set[str], sig: _MethodOutputSignals
-) -> None:
-    if isinstance(stmt, AssignmentStmt):
-        if (
-            isinstance(stmt.target, PropertyAccessExpr)
-            and stmt.target.property in mutable_props
-        ):
-            sig.mutates_state = True
-        _walk_expr_for_output_signals(stmt.target, mutable_props, sig)
-        _walk_expr_for_output_signals(stmt.value, mutable_props, sig)
-        return
-    if isinstance(stmt, ExpressionStmt):
-        _walk_expr_for_output_signals(stmt.expr, mutable_props, sig)
-        return
-    if isinstance(stmt, VariableDeclStmt):
-        _walk_expr_for_output_signals(stmt.init, mutable_props, sig)
-        return
-    if isinstance(stmt, IfStmt):
-        _walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-        for t in stmt.then:
-            _walk_stmt_for_output_signals(t, mutable_props, sig)
-        for e in stmt.else_:
-            _walk_stmt_for_output_signals(e, mutable_props, sig)
-        return
-    if isinstance(stmt, ForStmt):
-        if stmt.init is not None:
-            _walk_stmt_for_output_signals(stmt.init, mutable_props, sig)
-        _walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-        if stmt.update is not None:
-            _walk_stmt_for_output_signals(stmt.update, mutable_props, sig)
-        for b in stmt.body:
-            _walk_stmt_for_output_signals(b, mutable_props, sig)
-        return
-    if isinstance(stmt, ReturnStmt):
-        if stmt.value is not None:
-            _walk_expr_for_output_signals(stmt.value, mutable_props, sig)
-        return
-
-
-def _walk_expr_for_output_signals(
-    expr: Expression | None, mutable_props: set[str], sig: _MethodOutputSignals
-) -> None:
-    if expr is None:
-        return
-    if isinstance(expr, (IncrementExpr, DecrementExpr)):
-        if (
-            isinstance(expr.operand, PropertyAccessExpr)
-            and expr.operand.property in mutable_props
-        ):
-            sig.mutates_state = True
-        _walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        return
-    if isinstance(expr, CallExpr):
-        callee = expr.callee
-        if (
-            isinstance(callee, (PropertyAccessExpr, MemberExpr))
-            and callee.property in _STATE_OUTPUT_METHOD_NAMES
-        ):
-            sig.has_state_output = True
-        if isinstance(callee, Identifier) and callee.name == "requireOutputP2PKH":
-            if expr.args:
-                idx = expr.args[0]
-                if isinstance(idx, BigIntLiteral) and idx.value == 0:
-                    sig.requires_output_p2pkh_zero = True
-        for arg in expr.args:
-            _walk_expr_for_output_signals(arg, mutable_props, sig)
-        if not isinstance(callee, Identifier):
-            _walk_expr_for_output_signals(callee, mutable_props, sig)
-        return
-    if isinstance(expr, BinaryExpr):
-        _walk_expr_for_output_signals(expr.left, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.right, mutable_props, sig)
-        return
-    if isinstance(expr, UnaryExpr):
-        _walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        return
-    if isinstance(expr, TernaryExpr):
-        _walk_expr_for_output_signals(expr.condition, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.consequent, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.alternate, mutable_props, sig)
-        return
-    if isinstance(expr, IndexAccessExpr):
-        _walk_expr_for_output_signals(expr.object, mutable_props, sig)
-        _walk_expr_for_output_signals(expr.index, mutable_props, sig)
-        return
-    if isinstance(expr, MemberExpr):
-        _walk_expr_for_output_signals(expr.object, mutable_props, sig)
-        return
-    if isinstance(expr, ArrayLiteralExpr):
-        for el in expr.elements:
-            _walk_expr_for_output_signals(el, mutable_props, sig)
-        return

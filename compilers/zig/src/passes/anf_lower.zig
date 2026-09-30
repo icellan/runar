@@ -3233,7 +3233,7 @@ fn lookupPrivateMethod(contract: ContractNode, name: []const u8) ?MethodNode {
 // pathological inputs that bypass the validator.
 const MAX_PRIVATE_CALL_DEPTH: u32 = 64;
 
-fn methodMutatesState(method: MethodNode, contract: ContractNode) bool {
+pub fn methodMutatesState(method: MethodNode, contract: ContractNode) bool {
     var has_mutable = false;
     for (contract.properties) |p| {
         if (!p.readonly) {
@@ -3395,12 +3395,12 @@ fn exprMutatesStateRec(expr: Expression, contract: ContractNode, depth: u32) boo
 // method that delegates an addOutput / addDataOutput intrinsic to a
 // private helper is correctly classified.
 
-fn methodHasAddOutput(method: MethodNode, contract: ContractNode) bool {
+pub fn methodHasAddOutput(method: MethodNode, contract: ContractNode) bool {
     return bodyHasIntrinsicCallRec(method.body, method.params, contract, &STATE_OUTPUT_METHODS, 0);
 }
 
 /// Return true when a method body contains at least one this.addDataOutput call.
-fn methodHasAddDataOutput(method: MethodNode, contract: ContractNode) bool {
+pub fn methodHasAddDataOutput(method: MethodNode, contract: ContractNode) bool {
     return bodyHasIntrinsicCallRec(method.body, method.params, contract, &DATA_OUTPUT_METHODS, 0);
 }
 
@@ -3515,6 +3515,110 @@ fn exprHasIntrinsicCallRec(
         .array_literal => |elems| {
             for (elems) |el| {
                 if (exprHasIntrinsicCallRec(el, params, contract, names, depth)) return true;
+            }
+        },
+        else => {},
+    }
+    return false;
+}
+
+// ============================================================================
+// requireOutputP2PKH detection (recursive across private calls)
+// ============================================================================
+//
+// F-075: consumed by typecheck.zig's requireOutputP2PKH output-layout guards
+// (together with the three `pub` predicates above) so the guards see the same
+// transitive effects the continuation is injected from.
+
+/// True if `method` (or a private helper it reaches) calls
+/// `requireOutputP2PKH(...)`; with `zero_only`, only a call whose output index
+/// is the literal 0 counts.
+pub fn methodCallsRequireOutputP2PKH(method: MethodNode, contract: ContractNode, zero_only: bool) bool {
+    return bodyCallsRequireOutputP2PKHRec(method.body, contract, zero_only, 0);
+}
+
+fn bodyCallsRequireOutputP2PKHRec(stmts: []const Statement, contract: ContractNode, zero_only: bool, depth: u32) bool {
+    if (depth > MAX_PRIVATE_CALL_DEPTH) return false;
+    for (stmts) |stmt| {
+        if (stmtCallsRequireOutputP2PKHRec(stmt, contract, zero_only, depth)) return true;
+    }
+    return false;
+}
+
+fn stmtCallsRequireOutputP2PKHRec(stmt: Statement, contract: ContractNode, zero_only: bool, depth: u32) bool {
+    switch (stmt) {
+        .expr_stmt => |expr| return exprCallsRequireOutputP2PKHRec(expr.expr, contract, zero_only, depth),
+        .const_decl => |cd| return exprCallsRequireOutputP2PKHRec(cd.value, contract, zero_only, depth),
+        .let_decl => |ld| {
+            if (ld.value) |v| return exprCallsRequireOutputP2PKHRec(v, contract, zero_only, depth);
+            return false;
+        },
+        .assign => |assign| return exprCallsRequireOutputP2PKHRec(assign.value, contract, zero_only, depth),
+        .assert_stmt => |as_s| return exprCallsRequireOutputP2PKHRec(as_s.condition, contract, zero_only, depth),
+        .if_stmt => |if_s| {
+            if (exprCallsRequireOutputP2PKHRec(if_s.condition, contract, zero_only, depth)) return true;
+            if (bodyCallsRequireOutputP2PKHRec(if_s.then_body, contract, zero_only, depth)) return true;
+            if (if_s.else_body) |eb| {
+                if (bodyCallsRequireOutputP2PKHRec(eb, contract, zero_only, depth)) return true;
+            }
+            return false;
+        },
+        .for_stmt => |for_s| return bodyCallsRequireOutputP2PKHRec(for_s.body, contract, zero_only, depth),
+        .return_stmt => |maybe_expr| {
+            if (maybe_expr) |expr| return exprCallsRequireOutputP2PKHRec(expr, contract, zero_only, depth);
+            return false;
+        },
+    }
+}
+
+fn exprCallsRequireOutputP2PKHRec(expr: Expression, contract: ContractNode, zero_only: bool, depth: u32) bool {
+    switch (expr) {
+        .call => |call| {
+            if (std.mem.eql(u8, call.callee, "requireOutputP2PKH")) {
+                if (!zero_only) return true;
+                if (call.args.len > 0) {
+                    switch (call.args[0]) {
+                        .literal_int => |v| if (v == 0) return true,
+                        else => {},
+                    }
+                }
+            }
+            if (lookupPrivateMethod(contract, call.callee)) |target| {
+                if (bodyCallsRequireOutputP2PKHRec(target.body, contract, zero_only, depth + 1)) return true;
+            }
+            for (call.args) |arg| {
+                if (exprCallsRequireOutputP2PKHRec(arg, contract, zero_only, depth)) return true;
+            }
+        },
+        .method_call => |mc| {
+            if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self")) {
+                if (lookupPrivateMethod(contract, mc.method)) |target| {
+                    if (bodyCallsRequireOutputP2PKHRec(target.body, contract, zero_only, depth + 1)) return true;
+                }
+            }
+            for (mc.args) |arg| {
+                if (exprCallsRequireOutputP2PKHRec(arg, contract, zero_only, depth)) return true;
+            }
+        },
+        .binary_op => |bin| {
+            if (exprCallsRequireOutputP2PKHRec(bin.left, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(bin.right, contract, zero_only, depth)) return true;
+        },
+        .unary_op => |un| {
+            if (exprCallsRequireOutputP2PKHRec(un.operand, contract, zero_only, depth)) return true;
+        },
+        .ternary => |tern| {
+            if (exprCallsRequireOutputP2PKHRec(tern.condition, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(tern.then_expr, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(tern.else_expr, contract, zero_only, depth)) return true;
+        },
+        .index_access => |idx| {
+            if (exprCallsRequireOutputP2PKHRec(idx.object, contract, zero_only, depth)) return true;
+            if (exprCallsRequireOutputP2PKHRec(idx.index, contract, zero_only, depth)) return true;
+        },
+        .array_literal => |elems| {
+            for (elems) |el| {
+                if (exprCallsRequireOutputP2PKHRec(el, contract, zero_only, depth)) return true;
             }
         },
         else => {},

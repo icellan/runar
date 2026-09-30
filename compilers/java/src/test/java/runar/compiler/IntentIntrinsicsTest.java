@@ -455,6 +455,84 @@ class IntentIntrinsicsTest {
     }
 
     // ------------------------------------------------------------------
+    // F-075 — the requireOutputP2PKH layout guards follow private helpers
+    // ------------------------------------------------------------------
+    // ANF lowering inlines private helpers and AnfLower's transitive
+    // continuation predicates inject the continuation through the private
+    // call graph. The guards used to walk only the method's own body, so
+    // moving either half of the forbidden pair into a helper compiled a
+    // contract the guard itself calls permanently unspendable.
+    // Proves: each guard fires with its own diagnostic, naming the public
+    // method, when one half sits in a private helper. Does not prove: the
+    // helper form would otherwise compile end-to-end (requireOutputP2PKH in a
+    // helper also fails later in stack lowering, a separate issue).
+
+    private static String f075Source(String helpers, String body) {
+        return "package x\n\n"
+            + "import runar \"github.com/icellan/runar/packages/runar-go\"\n\n"
+            + "type Cov struct {\n"
+            + "\trunar.StatefulSmartContract\n"
+            + "\tBondPKH runar.ByteString `runar:\"readonly\"`\n"
+            + "\tBond    runar.Bigint     `runar:\"readonly\"`\n"
+            + "\tTag     runar.ByteString `runar:\"readonly\"`\n"
+            + "\tCount   runar.Bigint\n"
+            + "}\n\n"
+            + helpers + "\n\n"
+            + "func (c *Cov) Go() {\n"
+            + body + "\n"
+            + "}\n";
+    }
+
+    private static final String F075_ASSERT_BOND =
+        "func (c *Cov) assertBond() {\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)\n}";
+
+    @Test
+    void f075_requireOutputP2PKHZeroInHelper_withMutation_errors() {
+        expectTypeError(
+            f075Source(F075_ASSERT_BOND, "\tc.Count = c.Count + 1\n\tc.assertBond()"),
+            "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state");
+    }
+
+    @Test
+    void f075_mutationInHelper_withRequireOutputP2PKHZero_errors() {
+        expectTypeError(
+            f075Source(
+                "func (c *Cov) bump() {\n\tc.Count = c.Count + 1\n}",
+                "\tc.bump()\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)"),
+            "method 'go' calls requireOutputP2PKH(0, ...) but also mutates state");
+    }
+
+    @Test
+    void f075_crit3_requireOutputP2PKHInHelper_errors() {
+        expectTypeError(
+            f075Source(F075_ASSERT_BOND, "\tc.AddDataOutput(0, c.Tag)\n\tc.assertBond()"),
+            "method 'go' mixes requireOutputP2PKH() with addDataOutput()");
+    }
+
+    @Test
+    void f075_stateOutputInHelper_errors() {
+        expectTypeError(
+            f075Source(
+                "func (c *Cov) emitNext() {\n\tc.AddOutput(1000, c.Count+1)\n}",
+                "\tc.emitNext()\n\trunar.RequireOutputP2PKH(0, c.BondPKH, c.Bond)"),
+            "method 'go' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput()");
+    }
+
+    @Test
+    void f075_terminalHelper_notFlagged() throws Exception {
+        ContractNode contract = GoParser.parse(f075Source(F075_ASSERT_BOND, "\tc.assertBond()"), "Test.runar.go");
+        try {
+            Typecheck.run(contract);
+        } catch (Typecheck.TypeCheckException ex) {
+            for (String e : ex.errors()) {
+                assertTrue(
+                    !e.contains("mixes requireOutputP2PKH()") && !e.contains("permanently unspendable"),
+                    "terminal helper form wrongly flagged: " + e);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // currentBlockHeight
     // ------------------------------------------------------------------
 

@@ -580,6 +580,8 @@ function extractABI(contract: ContractNode): ABI {
         hasStateOutput: false,
         hasDataOutput: false,
         usesPreimage: false,
+        callsRequireOutputP2PKH: false,
+        requiresOutputP2PKHZero: false,
       };
       const shape = continuationShape(effects);
       needsChange = shape.needsChange;

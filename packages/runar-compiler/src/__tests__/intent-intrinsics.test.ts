@@ -525,3 +525,109 @@ describe('requireOutputP2PKH(0) + single-output state continuation', () => {
     expect(err).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-075 — the three requireOutputP2PKH layout guards follow private helpers
+// ---------------------------------------------------------------------------
+// ANF lowering inlines private helpers and injects the continuation from the
+// side-effect summary, which walks the private call graph. The guards used to
+// walk only the method's own body, so extracting the triggering call into a
+// helper compiled a contract the guard itself calls permanently unspendable.
+//
+// Proves: each guard now fires with its own diagnostic when EITHER half of the
+// forbidden pair sits in a private helper (one or two levels deep), and the
+// terminal helper form is still not flagged. Does not prove: the helper form
+// compiles end-to-end (requireOutputP2PKH inside a helper currently also fails
+// later, in stack lowering, for a separate reason); that is not this guard.
+
+describe('F-075: requireOutputP2PKH guards follow private helpers', () => {
+  const CONTINUATION_MSG = 'calls requireOutputP2PKH(0, ...) but also mutates state';
+  const DATA_MSG = 'mixes requireOutputP2PKH() with addDataOutput()';
+  const STATE_OUTPUT_MSG = 'mixes requireOutputP2PKH() with this.addOutput()/addRawOutput()';
+
+  function bond(body: string, helpers: string): string {
+    return `
+      class Bond extends StatefulSmartContract {
+        readonly bondPKH: ByteString;
+        readonly bond: bigint;
+        count: bigint;
+
+        constructor(bondPKH: ByteString, bond: bigint, count: bigint) {
+          super(bondPKH, bond, count);
+          this.bondPKH = bondPKH;
+          this.bond = bond;
+          this.count = count;
+        }
+
+        ${helpers}
+
+        public go(payload: ByteString) {
+          ${body}
+        }
+      }
+    `;
+  }
+
+  function errorsOf(source: string): string[] {
+    return typecheckSource(source).errors.map(e => e.message);
+  }
+
+  it('rejects requireOutputP2PKH(0) in a helper when the public method mutates state', () => {
+    const errs = errorsOf(bond(
+      `this.count = this.count + 1n; this.assertBond();`,
+      `private assertBond(): void { requireOutputP2PKH(0n, this.bondPKH, this.bond); }`,
+    ));
+    expect(errs.some(m => m.includes(CONTINUATION_MSG) && m.includes(`'go'`)), JSON.stringify(errs)).toBe(true);
+  });
+
+  it('rejects requireOutputP2PKH(0) when the state mutation is in a helper', () => {
+    const errs = errorsOf(bond(
+      `this.bump(); requireOutputP2PKH(0n, this.bondPKH, this.bond);`,
+      `private bump(): void { this.count = this.count + 1n; }`,
+    ));
+    expect(errs.some(m => m.includes(CONTINUATION_MSG) && m.includes(`'go'`)), JSON.stringify(errs)).toBe(true);
+  });
+
+  it('follows a two-level helper chain', () => {
+    const errs = errorsOf(bond(
+      `this.count = this.count + 1n; this.outer();`,
+      `private inner(): void { requireOutputP2PKH(0n, this.bondPKH, this.bond); }
+       private outer(): void { this.inner(); }`,
+    ));
+    expect(errs.some(m => m.includes(CONTINUATION_MSG) && m.includes(`'go'`)), JSON.stringify(errs)).toBe(true);
+  });
+
+  it('Crit-3: rejects requireOutputP2PKH in a helper mixed with addDataOutput', () => {
+    const errs = errorsOf(bond(
+      `this.addDataOutput(0n, payload); this.assertBond();`,
+      `private assertBond(): void { requireOutputP2PKH(0n, this.bondPKH, this.bond); }`,
+    ));
+    expect(errs.some(m => m.includes(DATA_MSG) && m.includes(`'go'`)), JSON.stringify(errs)).toBe(true);
+  });
+
+  it('Crit-3: rejects addDataOutput in a helper mixed with requireOutputP2PKH', () => {
+    const errs = errorsOf(bond(
+      `this.announce(payload); requireOutputP2PKH(0n, this.bondPKH, this.bond);`,
+      `private announce(p: ByteString): void { this.addDataOutput(0n, p); }`,
+    ));
+    expect(errs.some(m => m.includes(DATA_MSG) && m.includes(`'go'`)), JSON.stringify(errs)).toBe(true);
+  });
+
+  it('R-300: rejects addOutput in a helper mixed with requireOutputP2PKH', () => {
+    const errs = errorsOf(bond(
+      `this.emitNext(); requireOutputP2PKH(0n, this.bondPKH, this.bond);`,
+      `private emitNext(): void { this.addOutput(1000n, this.count + 1n); }`,
+    ));
+    expect(errs.some(m => m.includes(STATE_OUTPUT_MSG) && m.includes(`'go'`)), JSON.stringify(errs)).toBe(true);
+  });
+
+  it('does not flag a terminal method whose helper calls requireOutputP2PKH(0)', () => {
+    const errs = errorsOf(bond(
+      `this.assertBond();`,
+      `private assertBond(): void { requireOutputP2PKH(0n, this.bondPKH, this.bond); }`,
+    ));
+    for (const msg of [CONTINUATION_MSG, DATA_MSG, STATE_OUTPUT_MSG]) {
+      expect(errs.some(m => m.includes(msg)), JSON.stringify(errs)).toBe(false);
+    }
+  });
+});

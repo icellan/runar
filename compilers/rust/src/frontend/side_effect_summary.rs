@@ -7,6 +7,10 @@
 //! private-method call graph so effects buried inside private helpers
 //! surface to their public callers.
 //!
+//! Also consumed by `typecheck.rs`'s requireOutputP2PKH output-layout
+//! guards (Crit-3, R-300, index-0 continuation collision) — F-075: those
+//! guards must see the same effects the continuation is injected from.
+//!
 //! Consumed by `anf_lower.rs` for:
 //!   - Auto-injecting continuation parameters (`_changePKH`,
 //!     `_changeAmount`, `_newAmount`, `txPreimage`) on public stateful
@@ -37,6 +41,10 @@ pub struct MethodEffects {
     pub has_data_output: bool,
     /// Calls `checkPreimage(...)` (manually, outside auto-injected one).
     pub uses_preimage: bool,
+    /// Calls `requireOutputP2PKH(...)` with any output index.
+    pub calls_require_output_p2pkh: bool,
+    /// Calls `requireOutputP2PKH(0, ...)` (literal index 0).
+    pub requires_output_p2pkh_zero: bool,
 }
 
 impl MethodEffects {
@@ -45,6 +53,8 @@ impl MethodEffects {
         self.has_state_output |= other.has_state_output;
         self.has_data_output |= other.has_data_output;
         self.uses_preimage |= other.uses_preimage;
+        self.calls_require_output_p2pkh |= other.calls_require_output_p2pkh;
+        self.requires_output_p2pkh_zero |= other.requires_output_p2pkh_zero;
     }
 }
 
@@ -266,6 +276,15 @@ fn collect_expr(
             if let Expression::Identifier { name } = callee.as_ref() {
                 if name == "checkPreimage" {
                     into.uses_preimage = true;
+                }
+                if name == "requireOutputP2PKH" {
+                    into.calls_require_output_p2pkh = true;
+                    if let Some(Expression::BigIntLiteral { value }) = args.first() {
+                        use num_traits::Zero;
+                        if value.is_zero() {
+                            into.requires_output_p2pkh_zero = true;
+                        }
+                    }
                 }
                 if let Some(target) = private_by_name.get(name) {
                     let target_eff = classify(

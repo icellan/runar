@@ -17,6 +17,8 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
+import { computeSideEffectSummary } from './side-effect-summary.js';
+import type { MethodEffects, SideEffectSummary } from './side-effect-summary.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -384,248 +386,6 @@ function flattenAddOutputArgs(args: Expression[]): Expression[] {
 }
 
 // ---------------------------------------------------------------------------
-// Crit-3 body-walk helpers (BSVM Phase 13)
-// ---------------------------------------------------------------------------
-// Recursive AST walkers used by checkMethod to detect whether a method body
-// contains both requireOutputP2PKH() and this.addDataOutput() calls. Walk
-// covers if/else branches and for-loop bodies — anywhere a call expression
-// can syntactically appear. Mirrors compilers/go/frontend/typecheck.go.
-
-function bodyCallsBuiltin(body: Statement[], name: string): boolean {
-  for (const stmt of body) {
-    if (stmtContainsCallTo(stmt, name)) return true;
-  }
-  return false;
-}
-
-function bodyCallsAddDataOutput(body: Statement[]): boolean {
-  for (const stmt of body) {
-    if (stmtContainsAddDataOutput(stmt)) return true;
-  }
-  return false;
-}
-
-function stmtContainsCallTo(stmt: Statement, name: string): boolean {
-  switch (stmt.kind) {
-    case 'expression_statement':
-      return exprContainsCallTo(stmt.expression, name);
-    case 'variable_decl':
-      return exprContainsCallTo(stmt.init, name);
-    case 'assignment':
-      return exprContainsCallTo(stmt.value, name) || exprContainsCallTo(stmt.target, name);
-    case 'if_statement':
-      if (exprContainsCallTo(stmt.condition, name)) return true;
-      for (const t of stmt.then) if (stmtContainsCallTo(t, name)) return true;
-      if (stmt.else) {
-        for (const e of stmt.else) if (stmtContainsCallTo(e, name)) return true;
-      }
-      return false;
-    case 'for_statement':
-      if (stmtContainsCallTo(stmt.init, name)) return true;
-      if (exprContainsCallTo(stmt.condition, name)) return true;
-      if (stmtContainsCallTo(stmt.update, name)) return true;
-      for (const t of stmt.body) if (stmtContainsCallTo(t, name)) return true;
-      return false;
-    case 'return_statement':
-      return stmt.value !== undefined && exprContainsCallTo(stmt.value, name);
-  }
-  return false;
-}
-
-function exprContainsCallTo(expr: Expression, name: string): boolean {
-  if (!expr) return false;
-  switch (expr.kind) {
-    case 'call_expr':
-      if (expr.callee.kind === 'identifier' && expr.callee.name === name) return true;
-      if (exprContainsCallTo(expr.callee, name)) return true;
-      for (const a of expr.args) if (exprContainsCallTo(a, name)) return true;
-      return false;
-    case 'binary_expr':
-      return exprContainsCallTo(expr.left, name) || exprContainsCallTo(expr.right, name);
-    case 'unary_expr':
-      return exprContainsCallTo(expr.operand, name);
-    case 'ternary_expr':
-      return exprContainsCallTo(expr.condition, name) ||
-        exprContainsCallTo(expr.consequent, name) ||
-        exprContainsCallTo(expr.alternate, name);
-    case 'index_access':
-      return exprContainsCallTo(expr.object, name) || exprContainsCallTo(expr.index, name);
-    case 'member_expr':
-      return exprContainsCallTo(expr.object, name);
-    case 'array_literal':
-      for (const el of expr.elements) if (exprContainsCallTo(el, name)) return true;
-      return false;
-    case 'increment_expr':
-    case 'decrement_expr':
-      return exprContainsCallTo(expr.operand, name);
-  }
-  return false;
-}
-
-function stmtContainsAddDataOutput(stmt: Statement): boolean {
-  switch (stmt.kind) {
-    case 'expression_statement':
-      return exprContainsAddDataOutput(stmt.expression);
-    case 'variable_decl':
-      return exprContainsAddDataOutput(stmt.init);
-    case 'assignment':
-      return exprContainsAddDataOutput(stmt.value) || exprContainsAddDataOutput(stmt.target);
-    case 'if_statement':
-      if (exprContainsAddDataOutput(stmt.condition)) return true;
-      for (const t of stmt.then) if (stmtContainsAddDataOutput(t)) return true;
-      if (stmt.else) {
-        for (const e of stmt.else) if (stmtContainsAddDataOutput(e)) return true;
-      }
-      return false;
-    case 'for_statement':
-      if (stmtContainsAddDataOutput(stmt.init)) return true;
-      if (exprContainsAddDataOutput(stmt.condition)) return true;
-      if (stmtContainsAddDataOutput(stmt.update)) return true;
-      for (const t of stmt.body) if (stmtContainsAddDataOutput(t)) return true;
-      return false;
-    case 'return_statement':
-      return stmt.value !== undefined && exprContainsAddDataOutput(stmt.value);
-  }
-  return false;
-}
-
-function exprContainsAddDataOutput(expr: Expression): boolean {
-  if (!expr) return false;
-  switch (expr.kind) {
-    case 'call_expr': {
-      const callee = expr.callee;
-      // Match both `this.addDataOutput(...)` (property_access) and
-      // `c.addDataOutput(...)` (member_expr) callee shapes.
-      if (callee.kind === 'property_access' && callee.property === 'addDataOutput') return true;
-      if (callee.kind === 'member_expr' && callee.property === 'addDataOutput') return true;
-      if (exprContainsAddDataOutput(callee)) return true;
-      for (const a of expr.args) if (exprContainsAddDataOutput(a)) return true;
-      return false;
-    }
-    case 'binary_expr':
-      return exprContainsAddDataOutput(expr.left) || exprContainsAddDataOutput(expr.right);
-    case 'unary_expr':
-      return exprContainsAddDataOutput(expr.operand);
-    case 'ternary_expr':
-      return exprContainsAddDataOutput(expr.condition) ||
-        exprContainsAddDataOutput(expr.consequent) ||
-        exprContainsAddDataOutput(expr.alternate);
-    case 'index_access':
-      return exprContainsAddDataOutput(expr.object) || exprContainsAddDataOutput(expr.index);
-    case 'member_expr':
-      return exprContainsAddDataOutput(expr.object);
-    case 'array_literal':
-      for (const el of expr.elements) if (exprContainsAddDataOutput(el)) return true;
-      return false;
-    case 'increment_expr':
-    case 'decrement_expr':
-      return exprContainsAddDataOutput(expr.operand);
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-// ---------------------------------------------------------------------------
-// A StatefulSmartContract method that mutates state but calls no
-// this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-// path: the compiler re-creates the contract's own (large codePart) script at
-// output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-// 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-// permanently unspendable. Detect the three signals in one walk. Mirrors the
-// state-output intrinsic set in side-effect-summary.ts.
-
-const STATE_OUTPUT_METHOD_NAMES = new Set(['addOutput', 'addRawOutput']);
-
-interface MethodOutputSignals {
-  mutatesState: boolean;      // assigns to / ++/-- a non-readonly property
-  hasStateOutput: boolean;    // calls this.addOutput() or this.addRawOutput()
-  requiresOutputP2PKHZero: boolean; // calls requireOutputP2PKH(0n, ...)
-}
-
-function analyzeMethodOutputSignals(body: Statement[], mutableProps: Set<string>): MethodOutputSignals {
-  const sig: MethodOutputSignals = { mutatesState: false, hasStateOutput: false, requiresOutputP2PKHZero: false };
-  for (const stmt of body) walkStmtForOutputSignals(stmt, mutableProps, sig);
-  return sig;
-}
-
-function walkStmtForOutputSignals(stmt: Statement, mutableProps: Set<string>, sig: MethodOutputSignals): void {
-  switch (stmt.kind) {
-    case 'assignment':
-      if (stmt.target.kind === 'property_access' && mutableProps.has(stmt.target.property)) sig.mutatesState = true;
-      walkExprForOutputSignals(stmt.target, mutableProps, sig);
-      walkExprForOutputSignals(stmt.value, mutableProps, sig);
-      return;
-    case 'expression_statement':
-      walkExprForOutputSignals(stmt.expression, mutableProps, sig);
-      return;
-    case 'variable_decl':
-      walkExprForOutputSignals(stmt.init, mutableProps, sig);
-      return;
-    case 'if_statement':
-      walkExprForOutputSignals(stmt.condition, mutableProps, sig);
-      for (const t of stmt.then) walkStmtForOutputSignals(t, mutableProps, sig);
-      if (stmt.else) for (const e of stmt.else) walkStmtForOutputSignals(e, mutableProps, sig);
-      return;
-    case 'for_statement':
-      walkStmtForOutputSignals(stmt.init, mutableProps, sig);
-      walkExprForOutputSignals(stmt.condition, mutableProps, sig);
-      walkStmtForOutputSignals(stmt.update, mutableProps, sig);
-      for (const b of stmt.body) walkStmtForOutputSignals(b, mutableProps, sig);
-      return;
-    case 'return_statement':
-      if (stmt.value) walkExprForOutputSignals(stmt.value, mutableProps, sig);
-      return;
-  }
-}
-
-function walkExprForOutputSignals(expr: Expression, mutableProps: Set<string>, sig: MethodOutputSignals): void {
-  if (!expr) return;
-  switch (expr.kind) {
-    case 'increment_expr':
-    case 'decrement_expr':
-      if (expr.operand.kind === 'property_access' && mutableProps.has(expr.operand.property)) sig.mutatesState = true;
-      walkExprForOutputSignals(expr.operand, mutableProps, sig);
-      return;
-    case 'call_expr': {
-      const callee = expr.callee;
-      if ((callee.kind === 'property_access' || callee.kind === 'member_expr') && STATE_OUTPUT_METHOD_NAMES.has(callee.property)) {
-        sig.hasStateOutput = true;
-      }
-      if (callee.kind === 'identifier' && callee.name === 'requireOutputP2PKH') {
-        const idx = expr.args[0];
-        if (idx && idx.kind === 'bigint_literal' && idx.value === 0n) sig.requiresOutputP2PKHZero = true;
-      }
-      for (const arg of expr.args) walkExprForOutputSignals(arg, mutableProps, sig);
-      if (callee.kind !== 'identifier') walkExprForOutputSignals(callee, mutableProps, sig);
-      return;
-    }
-    case 'binary_expr':
-      walkExprForOutputSignals(expr.left, mutableProps, sig);
-      walkExprForOutputSignals(expr.right, mutableProps, sig);
-      return;
-    case 'unary_expr':
-      walkExprForOutputSignals(expr.operand, mutableProps, sig);
-      return;
-    case 'ternary_expr':
-      walkExprForOutputSignals(expr.condition, mutableProps, sig);
-      walkExprForOutputSignals(expr.consequent, mutableProps, sig);
-      walkExprForOutputSignals(expr.alternate, mutableProps, sig);
-      return;
-    case 'index_access':
-      walkExprForOutputSignals(expr.object, mutableProps, sig);
-      walkExprForOutputSignals(expr.index, mutableProps, sig);
-      return;
-    case 'member_expr':
-      walkExprForOutputSignals(expr.object, mutableProps, sig);
-      return;
-    case 'array_literal':
-      for (const el of expr.elements) walkExprForOutputSignals(el, mutableProps, sig);
-      return;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Type environment
 // ---------------------------------------------------------------------------
 
@@ -703,6 +463,16 @@ class TypeChecker {
    */
   private affineAliases: Map<string, string> = new Map();
 
+  /** Lazily computed side-effect summary (follows private helpers). */
+  private sideEffects: SideEffectSummary | null = null;
+
+  private methodEffects(name: string): MethodEffects {
+    if (this.sideEffects === null) this.sideEffects = computeSideEffectSummary(this.contract);
+    const effects = this.sideEffects.get(name);
+    if (!effects) throw new Error(`side-effect summary has no entry for method '${name}'`);
+    return effects;
+  }
+
   constructor(contract: ContractNode, errors: CompilerDiagnostic[]) {
     this.contract = contract;
     this.errors = errors;
@@ -763,15 +533,24 @@ class TypeChecker {
 
     this.checkStatements(method.body, env, method.sourceLocation);
 
+    // F-075: every guard below reads the method's effects from the shared
+    // side-effect summary, which follows the private-helper call graph. That is
+    // the same analysis ANF lowering uses to inject the continuation, and ANF
+    // lowering inlines private helpers, so a body-local walk here let a
+    // developer disable all three guards by moving the triggering call into a
+    // helper while the continuation was still injected as if it were inline.
+    const effects = this.methodEffects(method.name);
+
     // Crit-3 (BSVM Phase 13) — reject mixing requireOutputP2PKH() with
-    // this.addDataOutput() in the same method body. The intrinsic's
+    // this.addDataOutput() in the same method (including its private
+    // helpers). The intrinsic's
     // compile-time output-offset assumes a fixed 34-byte stride per output;
     // a preceding variable-length OP_RETURN output silently shifts the
     // OP_EQUALVERIFY target, letting the bond P2PKH route through an
     // unmatched index. v1 forbids the mix; v2 may relax with a
     // variable-stride decoder.
-    const hasRequireP2PKH = bodyCallsBuiltin(method.body, 'requireOutputP2PKH');
-    const hasAddDataOutput = bodyCallsAddDataOutput(method.body);
+    const hasRequireP2PKH = effects.callsRequireOutputP2PKH;
+    const hasAddDataOutput = effects.hasDataOutput;
     if (hasRequireP2PKH && hasAddDataOutput) {
       this.errors.push(makeDiagnostic(
         `method '${method.name}' mixes requireOutputP2PKH() with addDataOutput() — ` +
@@ -804,11 +583,7 @@ class TypeChecker {
     // before this guard existed — ts `success = true`, go `exit = 0` — see
     // conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
     if (this.contract.parentClass === 'StatefulSmartContract') {
-      const mutableProps = new Set(
-        this.contract.properties.filter(p => !p.readonly).map(p => p.name),
-      );
-      const sig = analyzeMethodOutputSignals(method.body, mutableProps);
-      if (hasRequireP2PKH && sig.hasStateOutput) {
+      if (hasRequireP2PKH && effects.hasStateOutput) {
         this.errors.push(makeDiagnostic(
           `method '${method.name}' mixes requireOutputP2PKH() with ` +
             `this.addOutput()/addRawOutput() — the intrinsic reads output i at byte ` +
@@ -823,7 +598,7 @@ class TypeChecker {
         ));
       }
 
-      if (sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput) {
+      if (effects.requiresOutputP2PKHZero && effects.mutatesState && !effects.hasStateOutput) {
         this.errors.push(makeDiagnostic(
           `method '${method.name}' calls requireOutputP2PKH(0, ...) but also mutates state ` +
             `without this.addOutput()/addRawOutput() — the auto-injected single-output state ` +

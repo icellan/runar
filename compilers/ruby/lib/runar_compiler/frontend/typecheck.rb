@@ -377,6 +377,9 @@ module RunarCompiler
       end
 
       def check_method(method)
+        # Lazy: anf_lower.rb requires this file, so a top-level require would be
+        # circular. Needed for the F-075 transitive effect predicates below.
+        require_relative "anf_lower"
         env = TypeEnv.new
 
         # Set current method location for diagnostics
@@ -398,8 +401,16 @@ module RunarCompiler
         # silently wrong when an OP_RETURN output (variable length) precedes
         # the indexed P2PKH output. v1 forbids the mix; v2 may relax with a
         # variable-stride decoder.
-        has_require_p2pkh = TypeChecker.body_calls_builtin?(method.body, "requireOutputP2PKH")
-        has_add_data_output = TypeChecker.body_calls_add_data_output?(method.body)
+        #
+        # F-075: all three guards here read the method's effects through
+        # anf_lower's transitive continuation predicates, which follow the
+        # private-helper call graph -- the same analysis ANF lowering injects
+        # the continuation from, and ANF lowering inlines private helpers. A
+        # body-local walk let a developer disable every guard by moving the
+        # triggering call into a helper.
+        frontend = RunarCompiler::Frontend
+        has_require_p2pkh = frontend.send(:_method_calls_require_output_p2pkh, method, @contract, false)
+        has_add_data_output = frontend.send(:_method_has_add_data_output, method, @contract)
         if has_require_p2pkh && has_add_data_output
           add_error(
             "method '#{method.name}' mixes requireOutputP2PKH() with addDataOutput() -- " \
@@ -429,12 +440,8 @@ module RunarCompiler
         # conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         # Mirrors the TS reference guard in 03-typecheck.ts.
         if @contract.parent_class == "StatefulSmartContract"
-          mutable_props = {}
-          @contract.properties.each do |prop|
-            mutable_props[prop.name] = true unless prop.readonly
-          end
-          sig = TypeChecker.analyze_method_output_signals(method.body, mutable_props)
-          if has_require_p2pkh && sig[:has_state_output]
+          has_state_output = frontend.send(:_method_has_add_output, method, @contract)
+          if has_require_p2pkh && has_state_output
             add_error(
               "method '#{method.name}' mixes requireOutputP2PKH() with " \
               "this.addOutput()/addRawOutput() -- the intrinsic reads output i at byte " \
@@ -446,7 +453,9 @@ module RunarCompiler
               "output of its own"
             )
           end
-          if sig[:requires_output_p2pkh_zero] && sig[:mutates_state] && !sig[:has_state_output]
+          if frontend.send(:_method_calls_require_output_p2pkh, method, @contract, true) &&
+             frontend.send(:_method_mutates_state, method, @contract) &&
+             !has_state_output
             add_error(
               "method '#{method.name}' calls requireOutputP2PKH(0, ...) but also mutates state " \
               "without this.addOutput()/addRawOutput() -- the auto-injected single-output state " \
@@ -456,207 +465,6 @@ module RunarCompiler
               "terminal (no state mutation)"
             )
           end
-        end
-      end
-
-      # -------------------------------------------------------------------
-      # Crit-3 body walkers -- recursive scan for builtin calls and
-      # addDataOutput calls inside a method body. Mirrors the Go
-      # bodyCallsBuiltin / bodyCallsAddDataOutput helpers in
-      # compilers/go/frontend/typecheck.go.
-      # -------------------------------------------------------------------
-
-      def self.body_calls_builtin?(body, name)
-        body.any? { |stmt| stmt_contains_call_to?(stmt, name) }
-      end
-
-      def self.body_calls_add_data_output?(body)
-        body.any? { |stmt| stmt_contains_add_data_output?(stmt) }
-      end
-
-      def self.stmt_contains_call_to?(stmt, name)
-        case stmt
-        when ExpressionStmt
-          expr_contains_call_to?(stmt.expr, name)
-        when VariableDeclStmt
-          expr_contains_call_to?(stmt.init, name)
-        when AssignmentStmt
-          expr_contains_call_to?(stmt.value, name) ||
-            expr_contains_call_to?(stmt.target, name)
-        when IfStmt
-          return true if expr_contains_call_to?(stmt.condition, name)
-          return true if stmt.then.any? { |t| stmt_contains_call_to?(t, name) }
-          return true if !stmt.else_.empty? && stmt.else_.any? { |e| stmt_contains_call_to?(e, name) }
-          false
-        when ForStmt
-          stmt.body.any? { |t| stmt_contains_call_to?(t, name) }
-        when ReturnStmt
-          stmt.value.nil? ? false : expr_contains_call_to?(stmt.value, name)
-        else
-          false
-        end
-      end
-
-      def self.expr_contains_call_to?(expr, name)
-        return false if expr.nil?
-
-        case expr
-        when CallExpr
-          if expr.callee.is_a?(Identifier) && expr.callee.name == name
-            return true
-          end
-          expr.args.any? { |a| expr_contains_call_to?(a, name) }
-        when BinaryExpr
-          expr_contains_call_to?(expr.left, name) || expr_contains_call_to?(expr.right, name)
-        when UnaryExpr
-          expr_contains_call_to?(expr.operand, name)
-        when TernaryExpr
-          expr_contains_call_to?(expr.condition, name) ||
-            expr_contains_call_to?(expr.consequent, name) ||
-            expr_contains_call_to?(expr.alternate, name)
-        when IndexAccessExpr
-          expr_contains_call_to?(expr.object, name) || expr_contains_call_to?(expr.index, name)
-        when ArrayLiteralExpr
-          expr.elements.any? { |el| expr_contains_call_to?(el, name) }
-        else
-          false
-        end
-      end
-
-      def self.stmt_contains_add_data_output?(stmt)
-        case stmt
-        when ExpressionStmt
-          expr_contains_add_data_output?(stmt.expr)
-        when VariableDeclStmt
-          expr_contains_add_data_output?(stmt.init)
-        when AssignmentStmt
-          expr_contains_add_data_output?(stmt.value) ||
-            expr_contains_add_data_output?(stmt.target)
-        when IfStmt
-          return true if expr_contains_add_data_output?(stmt.condition)
-          return true if stmt.then.any? { |t| stmt_contains_add_data_output?(t) }
-          return true if !stmt.else_.empty? && stmt.else_.any? { |e| stmt_contains_add_data_output?(e) }
-          false
-        when ForStmt
-          stmt.body.any? { |t| stmt_contains_add_data_output?(t) }
-        when ReturnStmt
-          stmt.value.nil? ? false : expr_contains_add_data_output?(stmt.value)
-        else
-          false
-        end
-      end
-
-      def self.expr_contains_add_data_output?(expr)
-        return false if expr.nil?
-
-        case expr
-        when CallExpr
-          if expr.callee.is_a?(PropertyAccessExpr) && expr.callee.property == "addDataOutput"
-            return true
-          end
-          if expr.callee.is_a?(MemberExpr) && expr.callee.property == "addDataOutput"
-            return true
-          end
-          expr.args.any? { |a| expr_contains_add_data_output?(a) }
-        when BinaryExpr
-          expr_contains_add_data_output?(expr.left) || expr_contains_add_data_output?(expr.right)
-        when UnaryExpr
-          expr_contains_add_data_output?(expr.operand)
-        when TernaryExpr
-          expr_contains_add_data_output?(expr.condition) ||
-            expr_contains_add_data_output?(expr.consequent) ||
-            expr_contains_add_data_output?(expr.alternate)
-        when IndexAccessExpr
-          expr_contains_add_data_output?(expr.object) || expr_contains_add_data_output?(expr.index)
-        when ArrayLiteralExpr
-          expr.elements.any? { |el| expr_contains_add_data_output?(el) }
-        else
-          false
-        end
-      end
-
-      # -------------------------------------------------------------------
-      # Single-output-continuation vs requireOutputP2PKH(0) collision walk.
-      # Detects the three signals in one pass over a method body:
-      #   * mutates_state           -- assigns to / ++/-- a non-readonly prop
-      #   * has_state_output        -- calls this.addOutput()/addRawOutput()
-      #   * requires_output_p2pkh_zero -- calls requireOutputP2PKH(0, ...)
-      # Mirrors analyzeMethodOutputSignals in TS 03-typecheck.ts.
-      # -------------------------------------------------------------------
-
-      STATE_OUTPUT_METHOD_NAMES = %w[addOutput addRawOutput].freeze
-
-      def self.analyze_method_output_signals(body, mutable_props)
-        sig = { mutates_state: false, has_state_output: false, requires_output_p2pkh_zero: false }
-        body.each { |stmt| walk_stmt_for_output_signals(stmt, mutable_props, sig) }
-        sig
-      end
-
-      def self.walk_stmt_for_output_signals(stmt, mutable_props, sig)
-        case stmt
-        when AssignmentStmt
-          if stmt.target.is_a?(PropertyAccessExpr) && mutable_props.key?(stmt.target.property)
-            sig[:mutates_state] = true
-          end
-          walk_expr_for_output_signals(stmt.target, mutable_props, sig)
-          walk_expr_for_output_signals(stmt.value, mutable_props, sig)
-        when ExpressionStmt
-          walk_expr_for_output_signals(stmt.expr, mutable_props, sig)
-        when VariableDeclStmt
-          walk_expr_for_output_signals(stmt.init, mutable_props, sig)
-        when IfStmt
-          walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-          stmt.then.each { |t| walk_stmt_for_output_signals(t, mutable_props, sig) }
-          stmt.else_.each { |e| walk_stmt_for_output_signals(e, mutable_props, sig) } unless stmt.else_.empty?
-        when ForStmt
-          walk_stmt_for_output_signals(stmt.init, mutable_props, sig) unless stmt.init.nil?
-          walk_expr_for_output_signals(stmt.condition, mutable_props, sig)
-          walk_stmt_for_output_signals(stmt.update, mutable_props, sig) unless stmt.update.nil?
-          stmt.body.each { |b| walk_stmt_for_output_signals(b, mutable_props, sig) }
-        when ReturnStmt
-          walk_expr_for_output_signals(stmt.value, mutable_props, sig) unless stmt.value.nil?
-        end
-      end
-
-      def self.walk_expr_for_output_signals(expr, mutable_props, sig)
-        return if expr.nil?
-
-        case expr
-        when IncrementExpr, DecrementExpr
-          if expr.operand.is_a?(PropertyAccessExpr) && mutable_props.key?(expr.operand.property)
-            sig[:mutates_state] = true
-          end
-          walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        when CallExpr
-          callee = expr.callee
-          if (callee.is_a?(PropertyAccessExpr) || callee.is_a?(MemberExpr)) &&
-             STATE_OUTPUT_METHOD_NAMES.include?(callee.property)
-            sig[:has_state_output] = true
-          end
-          if callee.is_a?(Identifier) && callee.name == "requireOutputP2PKH"
-            idx = expr.args[0]
-            if !idx.nil? && idx.is_a?(BigIntLiteral) && idx.value == 0
-              sig[:requires_output_p2pkh_zero] = true
-            end
-          end
-          expr.args.each { |arg| walk_expr_for_output_signals(arg, mutable_props, sig) }
-          walk_expr_for_output_signals(callee, mutable_props, sig) unless callee.is_a?(Identifier)
-        when BinaryExpr
-          walk_expr_for_output_signals(expr.left, mutable_props, sig)
-          walk_expr_for_output_signals(expr.right, mutable_props, sig)
-        when UnaryExpr
-          walk_expr_for_output_signals(expr.operand, mutable_props, sig)
-        when TernaryExpr
-          walk_expr_for_output_signals(expr.condition, mutable_props, sig)
-          walk_expr_for_output_signals(expr.consequent, mutable_props, sig)
-          walk_expr_for_output_signals(expr.alternate, mutable_props, sig)
-        when IndexAccessExpr
-          walk_expr_for_output_signals(expr.object, mutable_props, sig)
-          walk_expr_for_output_signals(expr.index, mutable_props, sig)
-        when MemberExpr
-          walk_expr_for_output_signals(expr.object, mutable_props, sig)
-        when ArrayLiteralExpr
-          expr.elements.each { |el| walk_expr_for_output_signals(el, mutable_props, sig) }
         end
       end
 

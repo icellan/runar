@@ -128,14 +128,6 @@ public final class Typecheck {
 
     private static final Set<String> AFFINE_TYPES = Set.of("Sig", "SigHashPreimage");
 
-    /**
-     * State-output intrinsics: a call to either signals that the method builds
-     * its own output layout, so the compiler does NOT inject a single-output
-     * state continuation. Mirrors {@code STATE_OUTPUT_METHOD_NAMES} in
-     * {@code packages/runar-compiler/src/passes/03-typecheck.ts}.
-     */
-    private static final Set<String> STATE_OUTPUT_METHOD_NAMES = Set.of("addOutput", "addRawOutput");
-
     private static final Map<String, int[]> CONSUMING_FUNCTIONS = Map.of(
         "checkSig", new int[]{0},
         "checkMultiSig", new int[]{0},
@@ -388,8 +380,15 @@ public final class Typecheck {
             // silently wrong when an OP_RETURN output (variable length)
             // precedes the indexed P2PKH output. v1 forbids the mix; v2 may
             // relax with a variable-stride decoder.
-            boolean hasRequireP2PKH = bodyCallsBuiltin(m.body(), "requireOutputP2PKH");
-            boolean hasAddDataOutput = bodyCallsAddDataOutput(m.body());
+            //
+            // F-075: all three guards here read the method's effects through
+            // AnfLower's transitive continuation predicates, which follow the
+            // private-helper call graph — the same analysis ANF lowering
+            // injects the continuation from, and ANF lowering inlines private
+            // helpers. A body-local walk let a developer disable every guard by
+            // moving the triggering call into a helper.
+            boolean hasRequireP2PKH = AnfLower.methodCallsRequireOutputP2PKH(m, contract, false);
+            boolean hasAddDataOutput = AnfLower.methodHasAddDataOutput(m, contract);
             if (hasRequireP2PKH && hasAddDataOutput) {
                 errors.add(format(
                     "method '" + m.name() + "' mixes requireOutputP2PKH() with "
@@ -422,12 +421,8 @@ public final class Typecheck {
             // Mirrors the guard in
             // packages/runar-compiler/src/passes/03-typecheck.ts.
             if (contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT) {
-                Set<String> mutableProps = new HashSet<>();
-                for (PropertyNode p : contract.properties()) {
-                    if (!p.readonly()) mutableProps.add(p.name());
-                }
-                MethodOutputSignals sig = analyzeMethodOutputSignals(m.body(), mutableProps);
-                if (hasRequireP2PKH && sig.hasStateOutput) {
+                boolean hasStateOutput = AnfLower.methodHasAddOutput(m, contract);
+                if (hasRequireP2PKH && hasStateOutput) {
                     errors.add(format(
                         "method '" + m.name() + "' mixes requireOutputP2PKH() with "
                             + "this.addOutput()/addRawOutput() — the intrinsic reads output i "
@@ -441,7 +436,9 @@ public final class Typecheck {
                         m.sourceLocation()
                     ));
                 }
-                if (sig.requiresOutputP2PKHZero && sig.mutatesState && !sig.hasStateOutput) {
+                if (AnfLower.methodCallsRequireOutputP2PKH(m, contract, true)
+                        && AnfLower.methodMutatesState(m, contract)
+                        && !hasStateOutput) {
                     errors.add(format(
                         "method '" + m.name() + "' calls requireOutputP2PKH(0, ...) but also "
                             + "mutates state without this.addOutput()/addRawOutput() — the "
@@ -454,272 +451,6 @@ public final class Typecheck {
                         m.sourceLocation()
                     ));
                 }
-            }
-        }
-
-        // --------------------------------------------------------------
-        // Body-walk helpers — Crit-3 rejection (requireOutputP2PKH +
-        // addDataOutput mix). Mirrors bodyCallsBuiltin /
-        // bodyCallsAddDataOutput in compilers/go/frontend/typecheck.go.
-        // --------------------------------------------------------------
-
-        private static boolean bodyCallsBuiltin(List<Statement> body, String name) {
-            for (Statement s : body) {
-                if (stmtContainsCallTo(s, name)) return true;
-            }
-            return false;
-        }
-
-        private static boolean bodyCallsAddDataOutput(List<Statement> body) {
-            for (Statement s : body) {
-                if (stmtContainsAddDataOutput(s)) return true;
-            }
-            return false;
-        }
-
-        private static boolean stmtContainsCallTo(Statement s, String name) {
-            if (s instanceof ExpressionStatement e) {
-                return exprContainsCallTo(e.expression(), name);
-            }
-            if (s instanceof VariableDeclStatement v) {
-                return exprContainsCallTo(v.init(), name);
-            }
-            if (s instanceof AssignmentStatement a) {
-                return exprContainsCallTo(a.value(), name)
-                    || exprContainsCallTo(a.target(), name);
-            }
-            if (s instanceof IfStatement i) {
-                if (exprContainsCallTo(i.condition(), name)) return true;
-                for (Statement t : i.thenBody()) {
-                    if (stmtContainsCallTo(t, name)) return true;
-                }
-                if (i.elseBody() != null) {
-                    for (Statement t : i.elseBody()) {
-                        if (stmtContainsCallTo(t, name)) return true;
-                    }
-                }
-                return false;
-            }
-            if (s instanceof ForStatement f) {
-                for (Statement t : f.body()) {
-                    if (stmtContainsCallTo(t, name)) return true;
-                }
-                return false;
-            }
-            if (s instanceof ReturnStatement r) {
-                return r.value() != null && exprContainsCallTo(r.value(), name);
-            }
-            return false;
-        }
-
-        private static boolean exprContainsCallTo(Expression e, String name) {
-            if (e == null) return false;
-            if (e instanceof CallExpr c) {
-                if (c.callee() instanceof Identifier id && name.equals(id.name())) {
-                    return true;
-                }
-                for (Expression a : c.args()) {
-                    if (exprContainsCallTo(a, name)) return true;
-                }
-                return false;
-            }
-            if (e instanceof BinaryExpr b) {
-                return exprContainsCallTo(b.left(), name)
-                    || exprContainsCallTo(b.right(), name);
-            }
-            if (e instanceof UnaryExpr u) {
-                return exprContainsCallTo(u.operand(), name);
-            }
-            if (e instanceof TernaryExpr t) {
-                return exprContainsCallTo(t.condition(), name)
-                    || exprContainsCallTo(t.consequent(), name)
-                    || exprContainsCallTo(t.alternate(), name);
-            }
-            if (e instanceof IndexAccessExpr ia) {
-                return exprContainsCallTo(ia.object(), name)
-                    || exprContainsCallTo(ia.index(), name);
-            }
-            if (e instanceof ArrayLiteralExpr al) {
-                for (Expression el : al.elements()) {
-                    if (exprContainsCallTo(el, name)) return true;
-                }
-            }
-            return false;
-        }
-
-        private static boolean stmtContainsAddDataOutput(Statement s) {
-            if (s instanceof ExpressionStatement e) {
-                return exprContainsAddDataOutput(e.expression());
-            }
-            if (s instanceof VariableDeclStatement v) {
-                return exprContainsAddDataOutput(v.init());
-            }
-            if (s instanceof AssignmentStatement a) {
-                return exprContainsAddDataOutput(a.value())
-                    || exprContainsAddDataOutput(a.target());
-            }
-            if (s instanceof IfStatement i) {
-                if (exprContainsAddDataOutput(i.condition())) return true;
-                for (Statement t : i.thenBody()) {
-                    if (stmtContainsAddDataOutput(t)) return true;
-                }
-                if (i.elseBody() != null) {
-                    for (Statement t : i.elseBody()) {
-                        if (stmtContainsAddDataOutput(t)) return true;
-                    }
-                }
-                return false;
-            }
-            if (s instanceof ForStatement f) {
-                for (Statement t : f.body()) {
-                    if (stmtContainsAddDataOutput(t)) return true;
-                }
-                return false;
-            }
-            if (s instanceof ReturnStatement r) {
-                return r.value() != null && exprContainsAddDataOutput(r.value());
-            }
-            return false;
-        }
-
-        private static boolean exprContainsAddDataOutput(Expression e) {
-            if (e == null) return false;
-            if (e instanceof CallExpr c) {
-                if (c.callee() instanceof PropertyAccessExpr pa
-                        && "addDataOutput".equals(pa.property())) {
-                    return true;
-                }
-                if (c.callee() instanceof MemberExpr me
-                        && "addDataOutput".equals(me.property())) {
-                    return true;
-                }
-                for (Expression a : c.args()) {
-                    if (exprContainsAddDataOutput(a)) return true;
-                }
-                return false;
-            }
-            if (e instanceof BinaryExpr b) {
-                return exprContainsAddDataOutput(b.left())
-                    || exprContainsAddDataOutput(b.right());
-            }
-            if (e instanceof UnaryExpr u) {
-                return exprContainsAddDataOutput(u.operand());
-            }
-            if (e instanceof TernaryExpr t) {
-                return exprContainsAddDataOutput(t.condition())
-                    || exprContainsAddDataOutput(t.consequent())
-                    || exprContainsAddDataOutput(t.alternate());
-            }
-            if (e instanceof IndexAccessExpr ia) {
-                return exprContainsAddDataOutput(ia.object())
-                    || exprContainsAddDataOutput(ia.index());
-            }
-            if (e instanceof ArrayLiteralExpr al) {
-                for (Expression el : al.elements()) {
-                    if (exprContainsAddDataOutput(el)) return true;
-                }
-            }
-            return false;
-        }
-
-        // --------------------------------------------------------------
-        // Single-output-continuation vs requireOutputP2PKH(0) collision.
-        // A StatefulSmartContract method that mutates state but calls no
-        // this.addOutput()/addRawOutput() takes the single-output
-        // continuation path (codePart at output 0); requireOutputP2PKH(0,
-        // ...) additionally asserts output 0 is a 34-byte P2PKH — impossible
-        // for any codePart >= 253 bytes. Detect the three signals in one
-        // walk. Mirrors analyzeMethodOutputSignals in
-        // packages/runar-compiler/src/passes/03-typecheck.ts.
-        // --------------------------------------------------------------
-
-        /** Three output-layout signals gathered from a single method body walk. */
-        private static final class MethodOutputSignals {
-            boolean mutatesState;             // assigns to / ++/-- a non-readonly property
-            boolean hasStateOutput;           // calls this.addOutput() or this.addRawOutput()
-            boolean requiresOutputP2PKHZero;  // calls requireOutputP2PKH(0, ...)
-        }
-
-        private static MethodOutputSignals analyzeMethodOutputSignals(
-                List<Statement> body, Set<String> mutableProps) {
-            MethodOutputSignals sig = new MethodOutputSignals();
-            for (Statement s : body) walkStmtForOutputSignals(s, mutableProps, sig);
-            return sig;
-        }
-
-        private static void walkStmtForOutputSignals(
-                Statement s, Set<String> mutableProps, MethodOutputSignals sig) {
-            if (s instanceof AssignmentStatement a) {
-                if (a.target() instanceof PropertyAccessExpr pa && mutableProps.contains(pa.property())) {
-                    sig.mutatesState = true;
-                }
-                walkExprForOutputSignals(a.target(), mutableProps, sig);
-                walkExprForOutputSignals(a.value(), mutableProps, sig);
-            } else if (s instanceof ExpressionStatement e) {
-                walkExprForOutputSignals(e.expression(), mutableProps, sig);
-            } else if (s instanceof VariableDeclStatement v) {
-                walkExprForOutputSignals(v.init(), mutableProps, sig);
-            } else if (s instanceof IfStatement i) {
-                walkExprForOutputSignals(i.condition(), mutableProps, sig);
-                for (Statement t : i.thenBody()) walkStmtForOutputSignals(t, mutableProps, sig);
-                if (i.elseBody() != null) {
-                    for (Statement t : i.elseBody()) walkStmtForOutputSignals(t, mutableProps, sig);
-                }
-            } else if (s instanceof ForStatement f) {
-                if (f.init() != null) walkStmtForOutputSignals(f.init(), mutableProps, sig);
-                walkExprForOutputSignals(f.condition(), mutableProps, sig);
-                if (f.update() != null) walkStmtForOutputSignals(f.update(), mutableProps, sig);
-                for (Statement b : f.body()) walkStmtForOutputSignals(b, mutableProps, sig);
-            } else if (s instanceof ReturnStatement r) {
-                if (r.value() != null) walkExprForOutputSignals(r.value(), mutableProps, sig);
-            }
-        }
-
-        private static void walkExprForOutputSignals(
-                Expression e, Set<String> mutableProps, MethodOutputSignals sig) {
-            if (e == null) return;
-            if (e instanceof IncrementExpr inc) {
-                if (inc.operand() instanceof PropertyAccessExpr pa && mutableProps.contains(pa.property())) {
-                    sig.mutatesState = true;
-                }
-                walkExprForOutputSignals(inc.operand(), mutableProps, sig);
-            } else if (e instanceof DecrementExpr dec) {
-                if (dec.operand() instanceof PropertyAccessExpr pa && mutableProps.contains(pa.property())) {
-                    sig.mutatesState = true;
-                }
-                walkExprForOutputSignals(dec.operand(), mutableProps, sig);
-            } else if (e instanceof CallExpr c) {
-                Expression callee = c.callee();
-                if (callee instanceof PropertyAccessExpr pa && STATE_OUTPUT_METHOD_NAMES.contains(pa.property())) {
-                    sig.hasStateOutput = true;
-                }
-                if (callee instanceof MemberExpr me && STATE_OUTPUT_METHOD_NAMES.contains(me.property())) {
-                    sig.hasStateOutput = true;
-                }
-                if (callee instanceof Identifier id && "requireOutputP2PKH".equals(id.name())) {
-                    if (!c.args().isEmpty() && c.args().get(0) instanceof BigIntLiteral idx
-                            && idx.value().signum() == 0) {
-                        sig.requiresOutputP2PKHZero = true;
-                    }
-                }
-                for (Expression arg : c.args()) walkExprForOutputSignals(arg, mutableProps, sig);
-                if (!(callee instanceof Identifier)) walkExprForOutputSignals(callee, mutableProps, sig);
-            } else if (e instanceof BinaryExpr b) {
-                walkExprForOutputSignals(b.left(), mutableProps, sig);
-                walkExprForOutputSignals(b.right(), mutableProps, sig);
-            } else if (e instanceof UnaryExpr u) {
-                walkExprForOutputSignals(u.operand(), mutableProps, sig);
-            } else if (e instanceof TernaryExpr t) {
-                walkExprForOutputSignals(t.condition(), mutableProps, sig);
-                walkExprForOutputSignals(t.consequent(), mutableProps, sig);
-                walkExprForOutputSignals(t.alternate(), mutableProps, sig);
-            } else if (e instanceof IndexAccessExpr ia) {
-                walkExprForOutputSignals(ia.object(), mutableProps, sig);
-                walkExprForOutputSignals(ia.index(), mutableProps, sig);
-            } else if (e instanceof MemberExpr me) {
-                walkExprForOutputSignals(me.object(), mutableProps, sig);
-            } else if (e instanceof ArrayLiteralExpr al) {
-                for (Expression el : al.elements()) walkExprForOutputSignals(el, mutableProps, sig);
             }
         }
 

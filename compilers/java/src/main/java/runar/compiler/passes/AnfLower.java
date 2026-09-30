@@ -2812,6 +2812,63 @@ public final class AnfLower {
     }
 
     // ------------------------------------------------------------------
+    // requireOutputP2PKH detection (recursive across private calls)
+    // ------------------------------------------------------------------
+    // F-075: consumed by Typecheck's requireOutputP2PKH output-layout guards so
+    // they see the same transitive effects as the continuation predicates above.
+
+    /**
+     * True if {@code m} (or a private helper it reaches) calls
+     * {@code requireOutputP2PKH(...)}; with {@code zeroOnly}, only a call whose
+     * output index is the literal {@code 0} counts.
+     */
+    static boolean methodCallsRequireOutputP2PKH(MethodNode m, ContractNode contract, boolean zeroOnly) {
+        return bodyCallsRequireOutputP2PKH(m.body(), contract, zeroOnly, new HashSet<>());
+    }
+
+    private static boolean bodyCallsRequireOutputP2PKH(
+            List<Statement> stmts, ContractNode contract, boolean zeroOnly, Set<String> seen) {
+        for (Statement s : stmts) if (stmtCallsRequireOutputP2PKH(s, contract, zeroOnly, seen)) return true;
+        return false;
+    }
+
+    private static boolean stmtCallsRequireOutputP2PKH(
+            Statement s, ContractNode contract, boolean zeroOnly, Set<String> seen) {
+        for (Expression e : statementExpressions(s)) {
+            if (exprCallsRequireOutputP2PKH(e, contract, zeroOnly, seen)) return true;
+        }
+        for (Statement inner : childStatements(s)) {
+            if (stmtCallsRequireOutputP2PKH(inner, contract, zeroOnly, seen)) return true;
+        }
+        return false;
+    }
+
+    private static boolean exprCallsRequireOutputP2PKH(
+            Expression e, ContractNode contract, boolean zeroOnly, Set<String> seen) {
+        if (e == null) return false;
+        if (e instanceof CallExpr c) {
+            if (c.callee() instanceof Identifier id && "requireOutputP2PKH".equals(id.name())) {
+                if (!zeroOnly) return true;
+                if (!c.args().isEmpty() && c.args().get(0) instanceof BigIntLiteral idx
+                        && idx.value().signum() == 0) {
+                    return true;
+                }
+            }
+            String name = calleeName(c.callee());
+            MethodNode target = lookupPrivateMethod(contract, name);
+            if (target != null && !seen.contains(target.name())) {
+                Set<String> nextSeen = new HashSet<>(seen);
+                nextSeen.add(target.name());
+                if (bodyCallsRequireOutputP2PKH(target.body(), contract, zeroOnly, nextSeen)) return true;
+            }
+        }
+        for (Expression child : childExpressions(e)) {
+            if (exprCallsRequireOutputP2PKH(child, contract, zeroOnly, seen)) return true;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------
     // Loop count extraction
     // ------------------------------------------------------------------
 

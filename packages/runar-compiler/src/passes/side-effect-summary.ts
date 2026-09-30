@@ -12,6 +12,9 @@
  *     gating emission of the `hashOutputs` continuation assertion.
  *   - `artifact/assembler.ts` for declaring the matching ABI parameters
  *     and `isTerminal` flag.
+ *   - `03-typecheck.ts` for the `requireOutputP2PKH` output-layout guards
+ *     (Crit-3, R-300, index-0 continuation collision). F-075: those guards
+ *     must see the same effects the continuation is injected from.
  *
  * Both consumers must read from one source of truth so the deployed ABI
  * cannot drift from the locking script's actual parameter expectations.
@@ -35,6 +38,10 @@ export interface MethodEffects {
   hasDataOutput: boolean;
   /** Calls `checkPreimage(...)` (manually, outside the auto-injected one). */
   usesPreimage: boolean;
+  /** Calls `requireOutputP2PKH(...)` with any output index. */
+  callsRequireOutputP2PKH: boolean;
+  /** Calls `requireOutputP2PKH(0n, ...)` (literal index 0). */
+  requiresOutputP2PKHZero: boolean;
 }
 
 /** Map from method name to that method's effects. Includes the constructor under the key 'constructor'. */
@@ -49,6 +56,8 @@ function emptyEffects(): MethodEffects {
     hasStateOutput: false,
     hasDataOutput: false,
     usesPreimage: false,
+    callsRequireOutputP2PKH: false,
+    requiresOutputP2PKHZero: false,
   };
 }
 
@@ -57,6 +66,8 @@ function unionInto(target: MethodEffects, source: MethodEffects): void {
   target.hasStateOutput ||= source.hasStateOutput;
   target.hasDataOutput ||= source.hasDataOutput;
   target.usesPreimage ||= source.usesPreimage;
+  target.callsRequireOutputP2PKH ||= source.callsRequireOutputP2PKH;
+  target.requiresOutputP2PKHZero ||= source.requiresOutputP2PKHZero;
 }
 
 /**
@@ -179,6 +190,13 @@ export function computeSideEffectSummary(contract: ContractNode): SideEffectSumm
         // builtins like `checkPreimage`.
         if (callee.kind === 'identifier') {
           if (callee.name === 'checkPreimage') into.usesPreimage = true;
+          if (callee.name === 'requireOutputP2PKH') {
+            into.callsRequireOutputP2PKH = true;
+            const idx = expr.args[0];
+            if (idx && idx.kind === 'bigint_literal' && idx.value === 0n) {
+              into.requiresOutputP2PKHZero = true;
+            }
+          }
           const target = privateMethodsByName.get(callee.name);
           if (target) {
             unionInto(into, effectsFor(target.name, target.body));

@@ -7,6 +7,10 @@ the contract's continuation requirements. Walks the private-method
 call graph so effects buried inside private helpers surface to their
 public callers.
 
+Also consumed by ``typecheck.py``'s requireOutputP2PKH output-layout
+guards (Crit-3, R-300, index-0 continuation collision) — F-075: those
+guards must see the same effects the continuation is injected from.
+
 Consumed by ``anf_lower.py`` for:
 
   - Auto-injecting continuation parameters (``_changePKH``,
@@ -28,6 +32,7 @@ from dataclasses import dataclass
 from .ast_nodes import (
     ArrayLiteralExpr,
     AssignmentStmt,
+    BigIntLiteral,
     BinaryExpr,
     CallExpr,
     ContractNode,
@@ -63,12 +68,22 @@ class MethodEffects:
     has_state_output: bool = False
     has_data_output: bool = False
     uses_preimage: bool = False
+    # Calls requireOutputP2PKH(...) with any output index.
+    calls_require_output_p2pkh: bool = False
+    # Calls requireOutputP2PKH(0, ...) (literal index 0).
+    requires_output_p2pkh_zero: bool = False
 
     def union(self, other: "MethodEffects") -> None:
         self.mutates_state = self.mutates_state or other.mutates_state
         self.has_state_output = self.has_state_output or other.has_state_output
         self.has_data_output = self.has_data_output or other.has_data_output
         self.uses_preimage = self.uses_preimage or other.uses_preimage
+        self.calls_require_output_p2pkh = (
+            self.calls_require_output_p2pkh or other.calls_require_output_p2pkh
+        )
+        self.requires_output_p2pkh_zero = (
+            self.requires_output_p2pkh_zero or other.requires_output_p2pkh_zero
+        )
 
 
 @dataclass
@@ -221,6 +236,12 @@ def _collect_expr(
         if isinstance(callee, Identifier):
             if callee.name == "checkPreimage":
                 into.uses_preimage = True
+            if callee.name == "requireOutputP2PKH":
+                into.calls_require_output_p2pkh = True
+                if expr.args:
+                    idx = expr.args[0]
+                    if isinstance(idx, BigIntLiteral) and idx.value == 0:
+                        into.requires_output_p2pkh_zero = True
             target = private_by_name.get(callee.name)
             if target is not None:
                 into.union(classify(target.name, target.body))

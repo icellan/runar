@@ -324,7 +324,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // calls a private helper which mutates state or emits an output
       // must therefore inject the same continuation params as if the
       // public body did so directly.
-      const effects = sideEffects.get(method.name) ?? { mutatesState: false, hasStateOutput: false, hasDataOutput: false, usesPreimage: false };
+      const effects = sideEffects.get(method.name) ?? { mutatesState: false, hasStateOutput: false, hasDataOutput: false, usesPreimage: false, callsRequireOutputP2PKH: false, requiresOutputP2PKHZero: false };
       const shape = continuationShape(effects);
       const needsChangeOutput = shape.needsChange;
 

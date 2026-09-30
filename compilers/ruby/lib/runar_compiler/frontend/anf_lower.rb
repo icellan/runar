@@ -2919,6 +2919,56 @@ module RunarCompiler
     private_class_method :_expr_has_add_data_output
 
     # -------------------------------------------------------------------
+    # requireOutputP2PKH detection (recursive across private calls)
+    # -------------------------------------------------------------------
+    # F-075: consumed by typecheck.rb's requireOutputP2PKH output-layout
+    # guards (together with the three predicates above) so the guards see the
+    # same transitive effects the continuation is injected from.
+
+    # True if +method+ (or a private helper it reaches) calls
+    # requireOutputP2PKH(...); with +zero_only+, only a call whose output index
+    # is the literal 0 counts.
+    def self._method_calls_require_output_p2pkh(method, contract, zero_only)
+      _body_calls_require_output_p2pkh(method.body, contract, zero_only, [].to_set)
+    end
+    private_class_method :_method_calls_require_output_p2pkh
+
+    # @return [Boolean]
+    def self._body_calls_require_output_p2pkh(stmts, contract, zero_only, seen)
+      stmts.any? { |stmt| _stmt_calls_require_output_p2pkh(stmt, contract, zero_only, seen) }
+    end
+    private_class_method :_body_calls_require_output_p2pkh
+
+    # @return [Boolean]
+    def self._stmt_calls_require_output_p2pkh(stmt, contract, zero_only, seen)
+      return true if _statement_expressions(stmt).any? { |e|
+        _expr_calls_require_output_p2pkh(e, contract, zero_only, seen)
+      }
+      _child_statements(stmt).any? { |s| _stmt_calls_require_output_p2pkh(s, contract, zero_only, seen) }
+    end
+    private_class_method :_stmt_calls_require_output_p2pkh
+
+    # @return [Boolean]
+    def self._expr_calls_require_output_p2pkh(expr, contract, zero_only, seen)
+      return false if expr.nil?
+      if expr.is_a?(CallExpr)
+        callee = expr.callee
+        if callee.is_a?(Identifier) && callee.name == "requireOutputP2PKH"
+          return true unless zero_only
+          idx = expr.args[0]
+          return true if idx.is_a?(BigIntLiteral) && idx.value == 0
+        end
+        target = _resolve_private_method(callee, contract)
+        if target && !seen.include?(target.name)
+          new_seen = seen.dup.add(target.name)
+          return true if _body_calls_require_output_p2pkh(target.body, contract, zero_only, new_seen)
+        end
+      end
+      _child_expressions(expr).any? { |e| _expr_calls_require_output_p2pkh(e, contract, zero_only, seen) }
+    end
+    private_class_method :_expr_calls_require_output_p2pkh
+
+    # -------------------------------------------------------------------
     # Loop shape extraction (#121)
     # -------------------------------------------------------------------
 

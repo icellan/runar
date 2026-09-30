@@ -9,6 +9,10 @@ package frontend
 // call graph so effects buried inside private helpers surface to their
 // public callers.
 //
+// Also consumed by typecheck.go's requireOutputP2PKH output-layout guards
+// (Crit-3, R-300, index-0 continuation collision) — F-075: those guards must
+// see the same effects the continuation is injected from.
+//
 // Consumed by anf_lower.go for:
 //   - Auto-injecting continuation parameters (_changePKH, _changeAmount,
 //     _newAmount, txPreimage) on public stateful methods.
@@ -29,6 +33,10 @@ type MethodEffects struct {
 	HasStateOutput bool // calls this.addOutput(...) or this.addRawOutput(...)
 	HasDataOutput  bool // calls this.addDataOutput(...)
 	UsesPreimage   bool // calls checkPreimage(...) (manually, outside auto-injected one)
+	// CallsRequireOutputP2PKH: calls requireOutputP2PKH(...) with any index.
+	CallsRequireOutputP2PKH bool
+	// RequiresOutputP2PKHZero: calls requireOutputP2PKH(0, ...) (literal index 0).
+	RequiresOutputP2PKHZero bool
 }
 
 // SideEffectSummary maps method name -> that method's effects. Includes
@@ -101,6 +109,12 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 		}
 		if source.UsesPreimage {
 			target.UsesPreimage = true
+		}
+		if source.CallsRequireOutputP2PKH {
+			target.CallsRequireOutputP2PKH = true
+		}
+		if source.RequiresOutputP2PKHZero {
+			target.RequiresOutputP2PKHZero = true
 		}
 	}
 
@@ -181,6 +195,14 @@ func ComputeSideEffectSummary(contract *ContractNode) SideEffectSummary {
 			if id, ok := e.Callee.(Identifier); ok {
 				if id.Name == "checkPreimage" {
 					into.UsesPreimage = true
+				}
+				if id.Name == "requireOutputP2PKH" {
+					into.CallsRequireOutputP2PKH = true
+					if len(e.Args) > 0 {
+						if lit, ok := e.Args[0].(BigIntLiteral); ok && lit.Value != nil && lit.Value.Sign() == 0 {
+							into.RequiresOutputP2PKHZero = true
+						}
+					}
 				}
 				if target, ok := privateByName[id.Name]; ok {
 					unionInto(into, effectsFor(target.Name, target.Body))

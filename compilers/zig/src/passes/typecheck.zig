@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const types = @import("../ir/types.zig");
+const anf_lower = @import("anf_lower.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -563,8 +564,15 @@ const TypeChecker = struct {
         // addDataOutput in the same method body. v1 of the intrinsic assumes
         // a fixed 34-byte per-output stride; a variable-length OP_RETURN
         // output silently breaks the byte-offset computation.
-        const has_require_p2pkh = bodyCallsBuiltin(method.body, "requireOutputP2PKH");
-        const has_add_data_output = bodyCallsAddDataOutput(method.body);
+        //
+        // F-075: all three guards here read the method's effects through
+        // anf_lower's transitive continuation predicates, which follow the
+        // private-helper call graph — the same analysis ANF lowering injects
+        // the continuation from, and ANF lowering inlines private helpers. A
+        // body-local walk let a developer disable every guard by moving the
+        // triggering call into a helper.
+        const has_require_p2pkh = anf_lower.methodCallsRequireOutputP2PKH(method, self.contract, false);
+        const has_add_data_output = anf_lower.methodHasAddDataOutput(method, self.contract);
         if (has_require_p2pkh and has_add_data_output) {
             self.addError(
                 "method '{s}' mixes requireOutputP2PKH() with addDataOutput() — " ++
@@ -594,8 +602,8 @@ const TypeChecker = struct {
         // See conformance/negatives/N34-p2pkh-index-with-state-output.runar.ts.
         // Mirrors compilers/../03-typecheck.ts analyzeMethodOutputSignals.
         if (self.contract.parent_class == .stateful_smart_contract) {
-            const signals = analyzeMethodOutputSignals(method.body, self.contract.properties);
-            if (has_require_p2pkh and signals.has_state_output) {
+            const has_state_output = anf_lower.methodHasAddOutput(method, self.contract);
+            if (has_require_p2pkh and has_state_output) {
                 self.addError(
                     "method '{s}' mixes requireOutputP2PKH() with this.addOutput()/addRawOutput() — " ++
                         "the intrinsic reads output i at byte offset i*34, which is only correct when " ++
@@ -607,7 +615,10 @@ const TypeChecker = struct {
                     .{method.name},
                 );
             }
-            if (signals.requires_output_p2pkh_zero and signals.mutates_state and !signals.has_state_output) {
+            if (anf_lower.methodCallsRequireOutputP2PKH(method, self.contract, true) and
+                anf_lower.methodMutatesState(method, self.contract) and
+                !has_state_output)
+            {
                 self.addError(
                     "method '{s}' calls requireOutputP2PKH(0, ...) but also mutates state " ++
                         "without this.addOutput()/addRawOutput() — the auto-injected single-output state " ++
@@ -1609,276 +1620,6 @@ const TypeChecker = struct {
         self.affine_aliases.put(self.allocator, name, origin) catch {};
     }
 };
-
-// ============================================================================
-// Body walkers — Crit-3 requireOutputP2PKH + addDataOutput mix detection
-// ============================================================================
-
-/// True if any statement in `body` (recursively) contains a top-level call
-/// expression to a builtin function named `name`.
-fn bodyCallsBuiltin(body: []const Statement, name: []const u8) bool {
-    for (body) |stmt| {
-        if (stmtContainsCallTo(stmt, name)) return true;
-    }
-    return false;
-}
-
-/// True if any statement in `body` (recursively) contains a call to
-/// `this.addDataOutput(...)` or `c.addDataOutput(...)` — matched by the
-/// method name on a MethodCall expression.
-fn bodyCallsAddDataOutput(body: []const Statement) bool {
-    for (body) |stmt| {
-        if (stmtContainsAddDataOutput(stmt)) return true;
-    }
-    return false;
-}
-
-fn stmtContainsCallTo(stmt: Statement, name: []const u8) bool {
-    return switch (stmt) {
-        .const_decl => |d| exprContainsCallTo(d.value, name),
-        .let_decl => |d| if (d.value) |v| exprContainsCallTo(v, name) else false,
-        .assign => |a| exprContainsCallTo(a.value, name),
-        .if_stmt => |s| blk: {
-            if (exprContainsCallTo(s.condition, name)) break :blk true;
-            for (s.then_body) |t| {
-                if (stmtContainsCallTo(t, name)) break :blk true;
-            }
-            if (s.else_body) |eb| {
-                for (eb) |t| {
-                    if (stmtContainsCallTo(t, name)) break :blk true;
-                }
-            }
-            break :blk false;
-        },
-        .for_stmt => |s| blk: {
-            for (s.body) |t| {
-                if (stmtContainsCallTo(t, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        .expr_stmt => |e| exprContainsCallTo(e.expr, name),
-        .assert_stmt => |s| exprContainsCallTo(s.condition, name),
-        .return_stmt => |rv| if (rv) |v| exprContainsCallTo(v, name) else false,
-    };
-}
-
-fn exprContainsCallTo(expr: Expression, name: []const u8) bool {
-    return switch (expr) {
-        .call => |c| blk: {
-            if (std.mem.eql(u8, c.callee, name)) break :blk true;
-            for (c.args) |a| {
-                if (exprContainsCallTo(a, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        .method_call => |mc| blk: {
-            for (mc.args) |a| {
-                if (exprContainsCallTo(a, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        .binary_op => |b| exprContainsCallTo(b.left, name) or exprContainsCallTo(b.right, name),
-        .unary_op => |u| exprContainsCallTo(u.operand, name),
-        .ternary => |t| exprContainsCallTo(t.condition, name) or
-            exprContainsCallTo(t.then_expr, name) or
-            exprContainsCallTo(t.else_expr, name),
-        .index_access => |ia| exprContainsCallTo(ia.object, name) or exprContainsCallTo(ia.index, name),
-        .increment => |i| exprContainsCallTo(i.operand, name),
-        .decrement => |d| exprContainsCallTo(d.operand, name),
-        .array_literal => |elems| blk: {
-            for (elems) |el| {
-                if (exprContainsCallTo(el, name)) break :blk true;
-            }
-            break :blk false;
-        },
-        else => false,
-    };
-}
-
-fn stmtContainsAddDataOutput(stmt: Statement) bool {
-    return switch (stmt) {
-        .const_decl => |d| exprContainsAddDataOutput(d.value),
-        .let_decl => |d| if (d.value) |v| exprContainsAddDataOutput(v) else false,
-        .assign => |a| exprContainsAddDataOutput(a.value),
-        .if_stmt => |s| blk: {
-            if (exprContainsAddDataOutput(s.condition)) break :blk true;
-            for (s.then_body) |t| {
-                if (stmtContainsAddDataOutput(t)) break :blk true;
-            }
-            if (s.else_body) |eb| {
-                for (eb) |t| {
-                    if (stmtContainsAddDataOutput(t)) break :blk true;
-                }
-            }
-            break :blk false;
-        },
-        .for_stmt => |s| blk: {
-            for (s.body) |t| {
-                if (stmtContainsAddDataOutput(t)) break :blk true;
-            }
-            break :blk false;
-        },
-        .expr_stmt => |e| exprContainsAddDataOutput(e.expr),
-        .assert_stmt => |s| exprContainsAddDataOutput(s.condition),
-        .return_stmt => |rv| if (rv) |v| exprContainsAddDataOutput(v) else false,
-    };
-}
-
-fn exprContainsAddDataOutput(expr: Expression) bool {
-    return switch (expr) {
-        .method_call => |mc| blk: {
-            if (std.mem.eql(u8, mc.method, "addDataOutput")) break :blk true;
-            for (mc.args) |a| {
-                if (exprContainsAddDataOutput(a)) break :blk true;
-            }
-            break :blk false;
-        },
-        .call => |c| blk: {
-            for (c.args) |a| {
-                if (exprContainsAddDataOutput(a)) break :blk true;
-            }
-            break :blk false;
-        },
-        .binary_op => |b| exprContainsAddDataOutput(b.left) or exprContainsAddDataOutput(b.right),
-        .unary_op => |u| exprContainsAddDataOutput(u.operand),
-        .ternary => |t| exprContainsAddDataOutput(t.condition) or
-            exprContainsAddDataOutput(t.then_expr) or
-            exprContainsAddDataOutput(t.else_expr),
-        .index_access => |ia| exprContainsAddDataOutput(ia.object) or exprContainsAddDataOutput(ia.index),
-        .increment => |i| exprContainsAddDataOutput(i.operand),
-        .decrement => |d| exprContainsAddDataOutput(d.operand),
-        .array_literal => |elems| blk: {
-            for (elems) |el| {
-                if (exprContainsAddDataOutput(el)) break :blk true;
-            }
-            break :blk false;
-        },
-        else => false,
-    };
-}
-
-// ============================================================================
-// Single-output-continuation vs requireOutputP2PKH(0) collision analysis
-// ============================================================================
-// A StatefulSmartContract method that mutates state but calls no
-// this.addOutput()/this.addRawOutput() takes the "single-output continuation"
-// path: the compiler re-creates the contract's own (large codePart) script at
-// output index 0. requireOutputP2PKH(0, ...) additionally asserts output 0 is a
-// 34-byte P2PKH — impossible for any codePart >= 253 bytes — so the contract is
-// permanently unspendable. Detect the three signals in one walk. Mirrors the
-// TS reference `analyzeMethodOutputSignals` in 03-typecheck.ts.
-
-const MethodOutputSignals = struct {
-    /// assigns to / ++/-- a non-readonly property
-    mutates_state: bool = false,
-    /// calls this.addOutput() or this.addRawOutput()
-    has_state_output: bool = false,
-    /// calls requireOutputP2PKH(0, ...)
-    requires_output_p2pkh_zero: bool = false,
-};
-
-/// True when `name` is a non-readonly (mutable) contract property.
-fn isMutableProperty(properties: []const types.PropertyNode, name: []const u8) bool {
-    for (properties) |prop| {
-        if (!prop.readonly and std.mem.eql(u8, prop.name, name)) return true;
-    }
-    return false;
-}
-
-fn analyzeMethodOutputSignals(body: []const Statement, properties: []const types.PropertyNode) MethodOutputSignals {
-    var signals = MethodOutputSignals{};
-    for (body) |stmt| walkStmtForOutputSignals(stmt, properties, &signals);
-    return signals;
-}
-
-fn walkStmtForOutputSignals(stmt: Statement, properties: []const types.PropertyNode, signals: *MethodOutputSignals) void {
-    switch (stmt) {
-        .assign => |a| {
-            // Scalar property write (`this.count = ...`). Index-target writes
-            // (`this.board[i] = v`) are not scalar state mutation here — they
-            // mirror TS, which only flags a `property_access` assignment target.
-            if (a.index_target == null and isMutableProperty(properties, a.target)) signals.mutates_state = true;
-            walkExprForOutputSignals(a.value, properties, signals);
-        },
-        .const_decl => |d| walkExprForOutputSignals(d.value, properties, signals),
-        .let_decl => |d| {
-            if (d.value) |v| walkExprForOutputSignals(v, properties, signals);
-        },
-        .if_stmt => |s| {
-            walkExprForOutputSignals(s.condition, properties, signals);
-            for (s.then_body) |t| walkStmtForOutputSignals(t, properties, signals);
-            if (s.else_body) |eb| {
-                for (eb) |e| walkStmtForOutputSignals(e, properties, signals);
-            }
-        },
-        .for_stmt => |s| {
-            for (s.body) |b| walkStmtForOutputSignals(b, properties, signals);
-        },
-        .expr_stmt => |e| walkExprForOutputSignals(e.expr, properties, signals),
-        .assert_stmt => |s| walkExprForOutputSignals(s.condition, properties, signals),
-        .return_stmt => |rv| {
-            if (rv) |v| walkExprForOutputSignals(v, properties, signals);
-        },
-    }
-}
-
-fn walkExprForOutputSignals(expr: Expression, properties: []const types.PropertyNode, signals: *MethodOutputSignals) void {
-    switch (expr) {
-        .increment => |i| {
-            switch (i.operand) {
-                .property_access => |pa| {
-                    if (isMutableProperty(properties, pa.property)) signals.mutates_state = true;
-                },
-                else => {},
-            }
-            walkExprForOutputSignals(i.operand, properties, signals);
-        },
-        .decrement => |d| {
-            switch (d.operand) {
-                .property_access => |pa| {
-                    if (isMutableProperty(properties, pa.property)) signals.mutates_state = true;
-                },
-                else => {},
-            }
-            walkExprForOutputSignals(d.operand, properties, signals);
-        },
-        .method_call => |mc| {
-            if (std.mem.eql(u8, mc.method, "addOutput") or std.mem.eql(u8, mc.method, "addRawOutput")) {
-                signals.has_state_output = true;
-            }
-            for (mc.args) |arg| walkExprForOutputSignals(arg, properties, signals);
-        },
-        .call => |c| {
-            if (std.mem.eql(u8, c.callee, "requireOutputP2PKH") and c.args.len > 0) {
-                switch (c.args[0]) {
-                    .literal_int => |v| {
-                        if (v == 0) signals.requires_output_p2pkh_zero = true;
-                    },
-                    else => {},
-                }
-            }
-            for (c.args) |arg| walkExprForOutputSignals(arg, properties, signals);
-        },
-        .binary_op => |b| {
-            walkExprForOutputSignals(b.left, properties, signals);
-            walkExprForOutputSignals(b.right, properties, signals);
-        },
-        .unary_op => |u| walkExprForOutputSignals(u.operand, properties, signals),
-        .ternary => |t| {
-            walkExprForOutputSignals(t.condition, properties, signals);
-            walkExprForOutputSignals(t.then_expr, properties, signals);
-            walkExprForOutputSignals(t.else_expr, properties, signals);
-        },
-        .index_access => |ia| {
-            walkExprForOutputSignals(ia.object, properties, signals);
-            walkExprForOutputSignals(ia.index, properties, signals);
-        },
-        .array_literal => |elems| {
-            for (elems) |el| walkExprForOutputSignals(el, properties, signals);
-        },
-        else => {},
-    }
-}
 
 // ============================================================================
 // Private method return type inference (pre-pass, no type env needed)
