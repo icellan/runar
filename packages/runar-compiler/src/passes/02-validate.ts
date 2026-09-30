@@ -1188,24 +1188,39 @@ function validateNoOutputIntrinsicInLoop(
 ): void {
   const site = findOutputIntrinsic(stmt.body, ctx, new Set<string>());
   if (site === undefined) return;
-  ctx.errors.push(makeDiagnostic(
-    loopOutputIntrinsicMessage(site.intrinsic, site.via),
-    'error',
+  ctx.errors.push(loopOutputIntrinsicDiagnostic(
+    site.intrinsic,
+    site.via,
     site.location ?? stmt.sourceLocation,
   ));
 }
 
 /**
  * The R-127 diagnostic, shared verbatim with the other six tiers and with the
- * pass-4 backstop in `04-anf-lower.ts` (N-006).
+ * pass-4 backstop in `04-anf-lower.ts` (N-006). The message stays an inline
+ * template at this `makeDiagnostic` call so the diagnostic-coverage extractor
+ * (`__tests__/support/diagnostic-sites.ts`) can reduce it to a template.
  */
-export function loopOutputIntrinsicMessage(intrinsic: string, via?: string): string {
+function loopOutputIntrinsicDiagnostic(
+  intrinsic: string,
+  via: string | undefined,
+  loc?: SourceLocation,
+): CompilerDiagnostic {
   const viaClause = via !== undefined ? ` (reached through private method '${via}')` : '';
-  return `Output intrinsic '${intrinsic}'${viaClause} cannot be called inside a loop body. `
+  return makeDiagnostic(
+    `Output intrinsic '${intrinsic}'${viaClause} cannot be called inside a loop body. `
     + `A loop body lowers into its own scope whose declared outputs never reach the method's `
     + `output list, so the continuation hash would commit to fewer outputs than the transaction `
     + `actually creates: the spend is rejected by every shipped SDK and any successor it produces `
-    + `is unspendable. Move the call out of the loop.`;
+    + `is unspendable. Move the call out of the loop.`,
+    'error',
+    loc,
+  );
+}
+
+/** The R-127 message text, for the pass-4 backstop. */
+export function loopOutputIntrinsicMessage(intrinsic: string, via?: string): string {
+  return loopOutputIntrinsicDiagnostic(intrinsic, via).message;
 }
 
 /**
