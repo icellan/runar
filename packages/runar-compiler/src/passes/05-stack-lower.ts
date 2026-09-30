@@ -349,7 +349,10 @@ class StackMap {
 // Use analysis — determine last-use sites for each variable
 // ---------------------------------------------------------------------------
 
-function computeLastUses(bindings: ANFBinding[]): Map<string, number> {
+function computeLastUses(
+  bindings: ANFBinding[],
+  inheritedArrays?: ReadonlyMap<string, string[]>,
+): Map<string, number> {
   const lastUse = new Map<string, number>();
 
   // Pre-scan: map each array_literal binding to its element refs. Used to
@@ -357,10 +360,27 @@ function computeLastUses(bindings: ANFBinding[]): Map<string, number> {
   // pure metadata in the stack-lowerer — see lowerArrayLiteral — so its
   // elements must remain live until the array's consumer, not until the
   // array_literal binding itself).
-  const arrayElems = new Map<string, string[]>();
+  //
+  // F-081: an if-arm or loop body can consume an array declared in an
+  // ENCLOSING scope. Its bindings do not contain that array_literal, so the
+  // enclosing scope's array metadata is seeded first; without it an element
+  // reached only through the outer array had no last-use here and was
+  // consumed at its first read.
+  const arrayElems = new Map<string, string[]>(inheritedArrays ?? []);
   for (const b of bindings) {
     if (b.value.kind === 'array_literal') {
       arrayElems.set(b.name, [...b.value.elements]);
+    } else if (
+      // F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus the
+      // alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS. Without
+      // following it the elements got no last-use at all and were consumed
+      // at the first checkMultiSig, so a second read failed.
+      b.value.kind === 'load_const' &&
+      typeof b.value.value === 'string' &&
+      b.value.value.startsWith('@ref:')
+    ) {
+      const elems = arrayElems.get(b.value.value.slice(5));
+      if (elems) arrayElems.set(b.name, [...elems]);
     }
   }
 
@@ -1347,9 +1367,13 @@ class LoweringContext {
    * OP_VERIFY so its result stays on the stack — required by Bitcoin Script
    * which checks the top-of-stack for truthiness after execution.
    */
-  lowerBindings(bindings: ANFBinding[], terminalAssert = false): void {
+  lowerBindings(
+    bindings: ANFBinding[],
+    terminalAssert = false,
+    inheritedArrays?: ReadonlyMap<string, string[]>,
+  ): void {
     this.localBindings = new Set(bindings.map(b => b.name));
-    const lastUses = computeLastUses(bindings);
+    const lastUses = computeLastUses(bindings, inheritedArrays);
 
     // Protect parent-scope refs that are still needed after this scope
     // (e.g., txPreimage used both inside an if-branch and after the if).
@@ -2123,6 +2147,13 @@ class LoweringContext {
    * analysis for the array's element refs is patched in `computeLastUses` so
    * the elements stay live past this binding through to `checkMultiSig`.
    */
+  /** F-081: copy the enclosing context's array_literal metadata into this
+   *  (branch) context. Copies, so an arm-local array does not leak out. */
+  inheritArrays(parent: LoweringContext): void {
+    for (const [name, elems] of parent.arrayElements) this.arrayElements.set(name, [...elems]);
+    for (const [name, len] of parent.arrayLengths) this.arrayLengths.set(name, len);
+  }
+
   private lowerArrayLiteral(
     bindingName: string,
     elements: string[],
@@ -2542,8 +2573,13 @@ class LoweringContext {
     // PROPERTY slot — the stale on-chain state — in place of the caller's
     // witness argument.
     for (const [param, slot] of this.renamedParams) thenCtx.renamedParams.set(param, slot);
+    // F-081: the same holds for array_literal metadata. An array declared
+    // before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+    // there needs its element refs; a fresh context has none and threw
+    // "array_literal metadata missing".
+    thenCtx.inheritArrays(this);
     thenCtx._insideBranch = true;
-    thenCtx.lowerBindings(thenBindings, terminalAssert);
+    thenCtx.lowerBindings(thenBindings, terminalAssert, this.arrayElements);
 
     thenCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -2579,8 +2615,9 @@ class LoweringContext {
     elseCtx.outerProtectedRefs = protectedRefs;
     elseCtx.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
     for (const [param, slot] of this.renamedParams) elseCtx.renamedParams.set(param, slot); // N-007, see thenCtx
+    elseCtx.inheritArrays(this); // F-081, see thenCtx
     elseCtx._insideBranch = true;
-    elseCtx.lowerBindings(elseBindings, terminalAssert);
+    elseCtx.lowerBindings(elseBindings, terminalAssert, this.arrayElements);
 
     elseCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -3204,6 +3241,16 @@ class LoweringContext {
       if (name !== _iterVar) outerRefs.add(name);
     }
 
+    // F-081: an outer array_literal binding is metadata only — its ELEMENTS
+    // are the stack slots. Protecting the array name protects nothing, so
+    // the first iteration consumed the elements and the second failed with
+    // "Value 't0' not found on stack". Protect the elements themselves.
+    const outerArrays = new Map(this.arrayElements);
+    for (const ref of [...outerRefs]) {
+      const elems = outerArrays.get(ref);
+      if (elems) for (const e of elems) outerRefs.add(e);
+    }
+
     // Temporarily extend localBindings with body binding names so
     // @ref: to body-internal values can consume on last use.
     const prevLocalBindings = this.localBindings;
@@ -3218,7 +3265,7 @@ class LoweringContext {
       this.emitOp({ op: 'push', value: start + BigInt(i) * BigInt(step) });
       this.stackMap.push(_iterVar);
 
-      const lastUses = computeLastUses(body);
+      const lastUses = computeLastUses(body, outerArrays);
 
       // Prevent outer-scope refs from being consumed by setting their
       // last-use beyond any body binding index:

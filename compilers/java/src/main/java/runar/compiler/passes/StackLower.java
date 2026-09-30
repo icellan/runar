@@ -404,15 +404,37 @@ public final class StackLower {
     // ------------------------------------------------------------------
 
     static Map<String, Integer> computeLastUses(List<AnfBinding> bindings) {
+        return computeLastUses(bindings, null);
+    }
+
+    static Map<String, Integer> computeLastUses(List<AnfBinding> bindings,
+                                                Map<String, List<String>> inheritedArrays) {
         Map<String, Integer> lastUse = new HashMap<>();
         // Pre-scan: map each array_literal binding to its element refs. Used to
         // propagate last-use across the array indirection (the array binding is
         // pure metadata in lowerArrayLiteral — its elements must remain live
         // until the array's consumer, not until the array_literal binding itself).
+        //
+        // F-081: an if-arm or loop body can consume an array declared in an
+        // ENCLOSING scope. Its bindings do not contain that array_literal, so
+        // the enclosing scope's array metadata is seeded first; without it an
+        // element reached only through the outer array had no last-use here and
+        // was consumed at its first read.
         Map<String, List<String>> arrayElems = new HashMap<>();
+        if (inheritedArrays != null) arrayElems.putAll(inheritedArrays);
         for (AnfBinding b : bindings) {
             if (b.value() instanceof ArrayLiteral al) {
                 arrayElems.put(b.name(), new ArrayList<>(al.elements()));
+            } else if (b.value() instanceof LoadConst lc
+                && lc.value() instanceof BytesConst bc
+                && bc.hex() != null && bc.hex().startsWith("@ref:")) {
+                // F-081: `const sigs = [a, b]` lowers to `t = array_literal`
+                // plus the alias `sigs = @ref:t`, and checkMultiSig reads the
+                // ALIAS. Without following it the elements got no last-use at
+                // all and were consumed at the first checkMultiSig, so a second
+                // read failed.
+                List<String> elems = arrayElems.get(bc.hex().substring(5));
+                if (elems != null) arrayElems.put(b.name(), new ArrayList<>(elems));
             }
         }
         for (int i = 0; i < bindings.size(); i++) {
@@ -1228,6 +1250,14 @@ public final class StackLower {
             // separator, which executes AFTER the script-level one and
             // re-narrows scriptCode.
             c.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
+            // F-081: an array declared before the `if` is visible in the arm,
+            // and `checkMultiSig(sigs, pks)` there needs its element refs; a
+            // fresh context had none and threw "array_literal metadata
+            // missing". Copies, so an arm-local array does not leak out.
+            for (Map.Entry<String, List<String>> e : this.arrayElements.entrySet()) {
+                c.arrayElements.put(e.getKey(), new ArrayList<>(e.getValue()));
+            }
+            c.arrayLengths.putAll(this.arrayLengths);
             // GAP-002: nested branches keep the outer statement's loc by
             // default; the inner binding loop will override on each step.
             c.currentSourceLoc = this.currentSourceLoc;
@@ -1451,10 +1481,15 @@ public final class StackLower {
         // ---------------- lower_bindings ----------------
 
         void lowerBindings(List<AnfBinding> bindings, boolean terminalAssert) {
+            lowerBindings(bindings, terminalAssert, null);
+        }
+
+        void lowerBindings(List<AnfBinding> bindings, boolean terminalAssert,
+                           Map<String, List<String>> inheritedArrays) {
             localBindings = new HashMap<>();
             for (AnfBinding b : bindings) localBindings.put(b.name(), true);
 
-            Map<String, Integer> lastUses = computeLastUses(bindings);
+            Map<String, Integer> lastUses = computeLastUses(bindings, inheritedArrays);
 
             if (outerProtectedRefs != null) {
                 for (String ref : outerProtectedRefs) {
@@ -2989,7 +3024,7 @@ public final class StackLower {
             LoweringContext thenCtx = subContext();
             thenCtx.outerProtectedRefs = protectedRefs;
             thenCtx.insideBranch = true;
-            thenCtx.lowerBindings(thenB, terminalAssert);
+            thenCtx.lowerBindings(thenB, terminalAssert, arrayElements);
 
             thenCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -3004,7 +3039,7 @@ public final class StackLower {
             LoweringContext elseCtx = subContext();
             elseCtx.outerProtectedRefs = protectedRefs;
             elseCtx.insideBranch = true;
-            elseCtx.lowerBindings(elseB, terminalAssert);
+            elseCtx.lowerBindings(elseB, terminalAssert, arrayElements);
 
             elseCtx.drainBranchPrivateResidue(preIfNames);
 
@@ -3529,6 +3564,17 @@ public final class StackLower {
                 }
             }
 
+            // F-081: an outer array_literal binding is metadata only — its
+            // ELEMENTS are the stack slots. Protecting the array name protects
+            // nothing, so the first iteration consumed the elements and the
+            // second failed with "value 't0' not found on stack". Protect the
+            // elements themselves.
+            Map<String, List<String>> outerArrays = new HashMap<>(arrayElements);
+            for (String ref : new ArrayList<>(outerRefs)) {
+                List<String> elems = outerArrays.get(ref);
+                if (elems != null) outerRefs.addAll(elems);
+            }
+
             Map<String, Boolean> prevLocal = localBindings;
             Map<String, Boolean> newLocal = new HashMap<>(prevLocal);
             newLocal.putAll(bodyNames);
@@ -3543,7 +3589,7 @@ public final class StackLower {
                 emitOp(new PushOp(PushValue.of(
                     start.add(BigInteger.valueOf((long) i * step)))));
                 sm.push(iterVar);
-                Map<String, Integer> lastUses = computeLastUses(body);
+                Map<String, Integer> lastUses = computeLastUses(body, outerArrays);
 
                 // Prevent outer-scope refs from being consumed by setting their
                 // last-use beyond any body binding index:

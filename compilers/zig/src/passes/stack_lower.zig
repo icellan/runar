@@ -816,6 +816,19 @@ const LowerCtx = struct {
     // ========================================================================
 
     fn computeLastUses(self: *LowerCtx, bindings: []const types.ANFBinding) !void {
+        return self.computeLastUsesWithArrays(bindings, null);
+    }
+
+    /// `computeLastUses` seeded with the array_literal metadata of an
+    /// ENCLOSING scope (F-081): an if-arm or loop body can consume an array
+    /// declared before it, and its own bindings do not contain that
+    /// array_literal. Without the seed an element reached only through the
+    /// outer array had no last-use here and was consumed at its first read.
+    fn computeLastUsesWithArrays(
+        self: *LowerCtx,
+        bindings: []const types.ANFBinding,
+        inherited_arrays: ?*const std.StringHashMapUnmanaged([]const []const u8),
+    ) !void {
         self.last_uses.clearRetainingCapacity();
         // Pre-scan: map each array_literal binding to its element refs. Used
         // to propagate last-use across the array indirection (the array
@@ -824,10 +837,31 @@ const LowerCtx = struct {
         // binding itself). Stored on the lowering context for scanValueForRefs.
         var array_elems = std.StringHashMapUnmanaged([]const []const u8){};
         defer array_elems.deinit(self.allocator);
+        if (inherited_arrays) |inh| {
+            var it = inh.iterator();
+            while (it.next()) |entry| {
+                try array_elems.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
         for (bindings) |binding| {
             switch (binding.value) {
                 .array_literal => |al| {
                     try array_elems.put(self.allocator, binding.name, al.elements);
+                },
+                // F-081: `const sigs = [a, b]` lowers to `t = array_literal`
+                // plus the alias `sigs = @ref:t`, and checkMultiSig reads the
+                // ALIAS. Without following it the elements got no last-use at
+                // all and were consumed at the first checkMultiSig, so a
+                // second read failed.
+                .load_const => |lc| switch (lc.value) {
+                    .string => |str| {
+                        if (std.mem.startsWith(u8, str, "@ref:")) {
+                            if (array_elems.get(str[5..])) |elems| {
+                                try array_elems.put(self.allocator, binding.name, elems);
+                            }
+                        }
+                    },
+                    else => {},
                 },
                 else => {},
             }
@@ -977,6 +1011,17 @@ const LowerCtx = struct {
     // ========================================================================
 
     fn lowerBindings(self: *LowerCtx, bindings: []const types.ANFBinding, terminal_assert: bool) LowerError!void {
+        return self.lowerBindingsWithArrays(bindings, terminal_assert, null);
+    }
+
+    /// `lowerBindings` for a branch arm, whose liveness must see the
+    /// enclosing scope's array_literal metadata (F-081).
+    fn lowerBindingsWithArrays(
+        self: *LowerCtx,
+        bindings: []const types.ANFBinding,
+        terminal_assert: bool,
+        inherited_arrays: ?*const std.StringHashMapUnmanaged([]const []const u8),
+    ) LowerError!void {
         const saved_scope_bindings = self.scope_bindings;
         self.scope_bindings = bindings;
         defer self.scope_bindings = saved_scope_bindings;
@@ -985,7 +1030,7 @@ const LowerCtx = struct {
         for (bindings) |binding| {
             try self.local_bindings.put(self.allocator, binding.name, {});
         }
-        try self.computeLastUses(bindings);
+        try self.computeLastUsesWithArrays(bindings, inherited_arrays);
 
         // Protect parent-scope refs from consume inside this scope: extend
         // their last-use index past the end of the bindings, mirroring TS
@@ -1251,6 +1296,21 @@ const LowerCtx = struct {
     /// model one slot per binding, but an array binding spans N runtime
     /// slots). `lowerCheckMultiSig` pulls each element to TOS at the use site.
     /// Mirrors TS `lowerArrayLiteral` in `05-stack-lower.ts`.
+    /// F-081: copy the enclosing context's array_literal metadata into this
+    /// (branch) context. The element slices are duplicated because `deinit`
+    /// frees each one.
+    fn inheritArrays(self: *LowerCtx, parent: *const LowerCtx) !void {
+        var it = parent.array_elements.iterator();
+        while (it.next()) |entry| {
+            const copy = try self.allocator.dupe([]const u8, entry.value_ptr.*);
+            try self.array_elements.put(self.allocator, entry.key_ptr.*, copy);
+        }
+        var it_len = parent.array_lengths.iterator();
+        while (it_len.next()) |entry| {
+            try self.array_lengths.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+
     fn lowerArrayLiteral(self: *LowerCtx, bind_name: []const u8, elements: []const []const u8) !void {
         try self.array_lengths.put(self.allocator, bind_name, elements.len);
         // Duplicate the slice so it survives even if the source ANF buffer
@@ -5070,7 +5130,12 @@ const LowerCtx = struct {
         then_ctx.renamed_params = try self.renamed_params.clone(self.allocator);
         then_ctx.max_depth = self.max_depth;
         then_ctx.outer_protected_refs = &protected_refs;
-        try then_ctx.lowerBindings(ie.then_bindings, terminal_assert);
+        // F-081: the same holds for array_literal metadata. An array declared
+        // before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+        // there needs its element refs; a fresh context has none and failed
+        // with InvalidBuiltin. Copied, so an arm-local array does not leak out.
+        try then_ctx.inheritArrays(self);
+        try then_ctx.lowerBindingsWithArrays(ie.then_bindings, terminal_assert, &self.array_elements);
         try then_ctx.drainBranchPrivateResidue(&pre_if_names);
         if (terminal_assert and then_ctx.stack.depth() > 1) {
             const excess = then_ctx.stack.depth() - 1;
@@ -5093,7 +5158,8 @@ const LowerCtx = struct {
         else_ctx.max_depth = self.max_depth;
         else_ctx.outer_protected_refs = &protected_refs;
         const else_bindings = ie.else_bindings orelse &.{};
-        try else_ctx.lowerBindings(else_bindings, terminal_assert);
+        try else_ctx.inheritArrays(self); // F-081, see then_ctx
+        try else_ctx.lowerBindingsWithArrays(else_bindings, terminal_assert, &self.array_elements);
         try else_ctx.drainBranchPrivateResidue(&pre_if_names);
         if (terminal_assert and else_ctx.stack.depth() > 1) {
             const excess = else_ctx.stack.depth() - 1;
@@ -5926,6 +5992,27 @@ const LowerCtx = struct {
             }
         }
 
+        // F-081: an outer array_literal binding is metadata only — its
+        // ELEMENTS are the stack slots. Protecting the array name protects
+        // nothing, so the first iteration consumed the elements and the
+        // second failed. Protect the elements themselves. The snapshot's
+        // slices are borrowed from `self.array_elements`, which only grows
+        // while the body lowers (an overwrite would free a body-local copy,
+        // never one of these outer entries).
+        var outer_arrays = try self.array_elements.clone(self.allocator);
+        defer outer_arrays.deinit(self.allocator);
+        {
+            var array_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer array_refs.deinit(self.allocator);
+            var or_it = outer_refs.iterator();
+            while (or_it.next()) |entry| try array_refs.append(self.allocator, entry.key_ptr.*);
+            for (array_refs.items) |ref| {
+                if (outer_arrays.get(ref)) |elems| {
+                    for (elems) |e| try outer_refs.put(self.allocator, e, {});
+                }
+            }
+        }
+
         const saved_local_bindings = self.local_bindings;
         const saved_force_copy_bindings = self.force_copy_bindings;
         self.local_bindings = try cloneVoidMap(self.allocator, saved_local_bindings);
@@ -5962,7 +6049,7 @@ const LowerCtx = struct {
 
             const enclosing_last_uses = self.last_uses;
             self.last_uses = .empty;
-            try self.computeLastUses(fl.body_bindings);
+            try self.computeLastUsesWithArrays(fl.body_bindings, &outer_arrays);
 
             // Prevent outer-scope refs from being consumed by pinning their
             // last-use past every body binding index:

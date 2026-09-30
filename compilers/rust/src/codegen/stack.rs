@@ -422,15 +422,39 @@ impl StackMap {
 // ---------------------------------------------------------------------------
 
 fn compute_last_uses(bindings: &[ANFBinding]) -> HashMap<String, usize> {
+    compute_last_uses_with_arrays(bindings, None)
+}
+
+/// `compute_last_uses` seeded with the array_literal metadata of an ENCLOSING
+/// scope (F-081): an if-arm or loop body can consume an array declared before
+/// it, and its own bindings do not contain that array_literal. Without the
+/// seed an element reached only through the outer array had no last-use here
+/// and was consumed at its first read.
+fn compute_last_uses_with_arrays(
+    bindings: &[ANFBinding],
+    inherited_arrays: Option<&HashMap<String, Vec<String>>>,
+) -> HashMap<String, usize> {
     let mut last_use = HashMap::new();
     // Pre-scan: map each array_literal binding to its element refs. Used to
     // propagate last-use across the array indirection (the array binding is
     // pure metadata in lower_array_literal — its elements must remain live
     // until the array's consumer, not until the array_literal binding itself).
-    let mut array_elems: HashMap<String, Vec<String>> = HashMap::new();
+    let mut array_elems: HashMap<String, Vec<String>> =
+        inherited_arrays.cloned().unwrap_or_default();
     for b in bindings {
         if let ANFValue::ArrayLiteral { elements } = &b.value {
             array_elems.insert(b.name.clone(), elements.clone());
+        } else if let Some(ConstValue::Str(ref s)) = b.value.const_value() {
+            // F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus
+            // the alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS.
+            // Without following it the elements got no last-use at all and
+            // were consumed at the first checkMultiSig, so a second read
+            // failed.
+            if s.len() > 5 && &s[..5] == "@ref:" {
+                if let Some(elems) = array_elems.get(&s[5..]).cloned() {
+                    array_elems.insert(b.name.clone(), elems);
+                }
+            }
         }
     }
     for (i, binding) in bindings.iter().enumerate() {
@@ -1354,8 +1378,19 @@ impl LoweringContext {
     // -----------------------------------------------------------------------
 
     fn lower_bindings(&mut self, bindings: &[ANFBinding], terminal_assert: bool) {
+        self.lower_bindings_with_arrays(bindings, terminal_assert, None);
+    }
+
+    /// `lower_bindings` for a branch arm, whose liveness must see the
+    /// enclosing scope's array_literal metadata (F-081).
+    fn lower_bindings_with_arrays(
+        &mut self,
+        bindings: &[ANFBinding],
+        terminal_assert: bool,
+        inherited_arrays: Option<&HashMap<String, Vec<String>>>,
+    ) {
         self.local_bindings = bindings.iter().map(|b| b.name.clone()).collect();
-        let mut last_uses = compute_last_uses(bindings);
+        let mut last_uses = compute_last_uses_with_arrays(bindings, inherited_arrays);
 
         // Protect parent-scope refs that are still needed after this scope
         if let Some(ref protected) = self.outer_protected_refs {
@@ -2427,8 +2462,15 @@ impl LoweringContext {
         // the same-named deserialized PROPERTY slot — the stale on-chain state
         // — in place of the caller's witness argument.
         then_ctx.renamed_params = self.renamed_params.clone();
+        // F-081: the same holds for array_literal metadata. An array declared
+        // before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+        // there needs its element refs; a fresh context has none and failed
+        // with "array_literal metadata missing". Cloned, so an arm-local array
+        // does not leak out.
+        then_ctx.array_elements = self.array_elements.clone();
+        then_ctx.array_lengths = self.array_lengths.clone();
         then_ctx.inside_branch = true;
-        then_ctx.lower_bindings(then_bindings, terminal_assert);
+        then_ctx.lower_bindings_with_arrays(then_bindings, terminal_assert, Some(&self.array_elements));
 
         then_ctx.drain_branch_private_residue(&pre_if_names);
 
@@ -2447,8 +2489,10 @@ impl LoweringContext {
         else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.private_methods = self.private_methods.clone(); // N-051, see then_ctx above
         else_ctx.renamed_params = self.renamed_params.clone(); // N-007, see then_ctx above
+        else_ctx.array_elements = self.array_elements.clone(); // F-081, see then_ctx above
+        else_ctx.array_lengths = self.array_lengths.clone();
         else_ctx.inside_branch = true;
-        else_ctx.lower_bindings(else_bindings, terminal_assert);
+        else_ctx.lower_bindings_with_arrays(else_bindings, terminal_assert, Some(&self.array_elements));
 
         else_ctx.drain_branch_private_residue(&pre_if_names);
 
@@ -3038,6 +3082,21 @@ impl LoweringContext {
             }
         }
 
+        // F-081: an outer array_literal binding is metadata only — its
+        // ELEMENTS are the stack slots. Protecting the array name protects
+        // nothing, so the first iteration consumed the elements and the second
+        // failed with "value 't0' not found on stack". Protect the elements
+        // themselves.
+        let outer_arrays = self.array_elements.clone();
+        let array_refs: Vec<String> = outer_refs.iter().cloned().collect();
+        for r in array_refs {
+            if let Some(elems) = outer_arrays.get(&r) {
+                for e in elems {
+                    outer_refs.insert(e.clone());
+                }
+            }
+        }
+
         // Temporarily extend localBindings with body binding names so
         // @ref: to body-internal values can consume on last use.
         let prev_local_bindings = self.local_bindings.clone();
@@ -3049,7 +3108,7 @@ impl LoweringContext {
             self.emit_op(StackOp::Push(PushValue::Int(iter_val)));
             self.sm.push(iter_var);
 
-            let mut last_uses = compute_last_uses(body);
+            let mut last_uses = compute_last_uses_with_arrays(body, Some(&outer_arrays));
 
             // Prevent outer-scope refs from being consumed by setting their
             // last-use beyond any body binding index:

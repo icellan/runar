@@ -268,15 +268,31 @@ module RunarCompiler::Codegen
 
   # @param bindings [Array<IR::ANFBinding>]
   # @return [Hash{String => Integer}]
-  def self.compute_last_uses(bindings)
+  def self.compute_last_uses(bindings, inherited_arrays = nil)
     last_use = {}
     # Pre-scan: map each array_literal binding to its element refs. Used to
     # propagate last-use across the array indirection (the array binding is
     # pure metadata in _lower_array_literal -- its elements must remain live
     # until the array's consumer, not until the array_literal binding itself).
-    array_elems = {}
+    #
+    # F-081: an if-arm or loop body can consume an array declared in an
+    # ENCLOSING scope. Its bindings do not contain that array_literal, so the
+    # enclosing scope's array metadata is seeded first; without it an element
+    # reached only through the outer array had no last-use here and was
+    # consumed at its first read.
+    array_elems = (inherited_arrays || {}).dup
     bindings.each do |b|
-      array_elems[b.name] = Array(b.value.elements).dup if b.value.kind == "array_literal"
+      if b.value.kind == "array_literal"
+        array_elems[b.name] = Array(b.value.elements).dup
+      elsif b.value.kind == "load_const" && b.value.const_string &&
+            b.value.const_string.length > 5 && b.value.const_string[0, 5] == "@ref:"
+        # F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus the
+        # alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS. Without
+        # following it the elements got no last-use at all and were consumed
+        # at the first checkMultiSig, so a second read failed.
+        target = b.value.const_string[5..]
+        array_elems[b.name] = array_elems[target].dup if array_elems.key?(target)
+      end
     end
     bindings.each_with_index do |binding, i|
       # array_literal is metadata-only -- do NOT advance its elements'
@@ -756,7 +772,9 @@ module RunarCompiler::Codegen
                   # its own.
                   :script_level_code_separator,
                   # N-007: copied into each if-arm context (see _lower_if).
-                  :renamed_params
+                  :renamed_params,
+                  # F-081: copied into each if-arm context (see _lower_if).
+                  :array_elements, :array_lengths
 
     # OP_PUSH_TX on-chain signature derivation (BUG-100 fix).
     #
@@ -1453,10 +1471,10 @@ module RunarCompiler::Codegen
     #
     # @param bindings [Array<IR::ANFBinding>]
     # @param terminal_assert [Boolean]
-    def lower_bindings(bindings, terminal_assert)
+    def lower_bindings(bindings, terminal_assert, inherited_arrays = nil)
       @local_bindings = {}
       bindings.each { |b| @local_bindings[b.name] = true }
-      last_uses = RunarCompiler::Codegen.compute_last_uses(bindings)
+      last_uses = RunarCompiler::Codegen.compute_last_uses(bindings, inherited_arrays)
 
       # Protect parent-scope refs that are still needed after this scope
       if @outer_protected_refs
@@ -2372,7 +2390,14 @@ module RunarCompiler::Codegen
       # slot -- the stale on-chain state -- in place of the caller's witness
       # argument.
       then_ctx.renamed_params = @renamed_params.dup
-      then_ctx.lower_bindings(then_bindings, terminal_assert)
+      # F-081: the same holds for array_literal metadata. An array declared
+      # before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+      # there needs its element refs; a fresh context has none and failed with
+      # "array_literal metadata missing". Copied, so an arm-local array does
+      # not leak out.
+      then_ctx.array_elements = @array_elements.transform_values(&:dup)
+      then_ctx.array_lengths = @array_lengths.dup
+      then_ctx.lower_bindings(then_bindings, terminal_assert, @array_elements)
 
       then_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2392,7 +2417,9 @@ module RunarCompiler::Codegen
       else_ctx.private_methods = @private_methods
       else_ctx.script_level_code_separator = @script_level_code_separator
       else_ctx.renamed_params = @renamed_params.dup # N-007, see then_ctx above
-      else_ctx.lower_bindings(else_bindings, terminal_assert)
+      else_ctx.array_elements = @array_elements.transform_values(&:dup) # F-081, see then_ctx above
+      else_ctx.array_lengths = @array_lengths.dup
+      else_ctx.lower_bindings(else_bindings, terminal_assert, @array_elements)
 
       else_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2903,6 +2930,15 @@ module RunarCompiler::Codegen
         outer_refs.add(ref) if ref != iter_var
       end
 
+      # F-081: an outer array_literal binding is metadata only -- its ELEMENTS
+      # are the stack slots. Protecting the array name protects nothing, so
+      # the first iteration consumed the elements and the second failed with
+      # "value 't0' not found on stack". Protect the elements themselves.
+      outer_arrays = @array_elements.transform_values(&:dup)
+      outer_refs.to_a.each do |ref|
+        outer_arrays.fetch(ref, []).each { |e| outer_refs.add(e) }
+      end
+
       # Temporarily extend localBindings with body binding names
       prev_local_bindings = @local_bindings
       new_local_bindings = prev_local_bindings.dup
@@ -2916,7 +2952,7 @@ module RunarCompiler::Codegen
         emit_push_int(start + i * step)
         @sm.push(iter_var)
 
-        lu = RunarCompiler::Codegen.compute_last_uses(body)
+        lu = RunarCompiler::Codegen.compute_last_uses(body, outer_arrays)
 
         # Prevent outer-scope refs from being consumed by setting their
         # last-use beyond any body binding index:

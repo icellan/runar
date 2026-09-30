@@ -350,17 +350,38 @@ func (s *stackMap) namedSlots() map[string]bool {
 // ---------------------------------------------------------------------------
 
 func computeLastUses(bindings []ir.ANFBinding) map[string]int {
+	return computeLastUsesWithArrays(bindings, nil)
+}
+
+// computeLastUsesWithArrays is computeLastUses seeded with the array_literal
+// metadata of an ENCLOSING scope (F-081): an if-arm or loop body can consume
+// an array declared before it, and its own bindings do not contain that
+// array_literal. Without the seed an element reached only through the outer
+// array had no last-use here and was consumed at its first read.
+func computeLastUsesWithArrays(bindings []ir.ANFBinding, inheritedArrays map[string][]string) map[string]int {
 	lastUse := make(map[string]int)
 	// Pre-scan: map each array_literal binding to its element refs. Used to
 	// propagate last-use across the array indirection (the array binding is
 	// pure metadata in lowerArrayLiteral, so its elements must remain live
 	// until the array's consumer, not until the array_literal binding itself).
-	arrayElems := make(map[string][]string)
+	arrayElems := make(map[string][]string, len(inheritedArrays))
+	for name, elems := range inheritedArrays {
+		arrayElems[name] = elems
+	}
 	for _, b := range bindings {
 		if b.Value.Kind == "array_literal" {
 			elems := make([]string, len(b.Value.Elements))
 			copy(elems, b.Value.Elements)
 			arrayElems[b.Name] = elems
+		} else if b.Value.Kind == "load_const" && b.Value.ConstString != nil &&
+			len(*b.Value.ConstString) > 5 && (*b.Value.ConstString)[:5] == "@ref:" {
+			// F-081: `const sigs = [a, b]` lowers to `t = array_literal` plus
+			// the alias `sigs = @ref:t`, and checkMultiSig reads the ALIAS.
+			// Without following it the elements got no last-use at all and
+			// were consumed at the first checkMultiSig, so a second read failed.
+			if elems, ok := arrayElems[(*b.Value.ConstString)[5:]]; ok {
+				arrayElems[b.Name] = append([]string(nil), elems...)
+			}
 		}
 	}
 	for i, binding := range bindings {
@@ -1311,11 +1332,17 @@ func (ctx *loweringContext) operandConsume(ref string, operands []string, curren
 // ---------------------------------------------------------------------------
 
 func (ctx *loweringContext) lowerBindings(bindings []ir.ANFBinding, terminalAssert bool) {
+	ctx.lowerBindingsWithArrays(bindings, terminalAssert, nil)
+}
+
+// lowerBindingsWithArrays is lowerBindings for a branch arm, whose liveness
+// must see the enclosing scope's array_literal metadata (F-081).
+func (ctx *loweringContext) lowerBindingsWithArrays(bindings []ir.ANFBinding, terminalAssert bool, inheritedArrays map[string][]string) {
 	ctx.localBindings = make(map[string]bool, len(bindings))
 	for _, b := range bindings {
 		ctx.localBindings[b.Name] = true
 	}
-	lastUses := computeLastUses(bindings)
+	lastUses := computeLastUsesWithArrays(bindings, inheritedArrays)
 
 	// Protect parent-scope refs that are still needed after this scope
 	if ctx.outerProtectedRefs != nil {
@@ -2320,8 +2347,13 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	for param, slot := range ctx.renamedParams {
 		thenCtx.renamedParams[param] = slot
 	}
+	// F-081: the same holds for array_literal metadata. An array declared
+	// before the `if` is visible in the arm, and `checkMultiSig(sigs, pks)`
+	// there needs its element refs; a fresh context has none and failed with
+	// "array_literal metadata missing".
+	thenCtx.inheritArrays(ctx)
 	thenCtx.insideBranch = true
-	thenCtx.lowerBindings(thenBindings, ta)
+	thenCtx.lowerBindingsWithArrays(thenBindings, ta, ctx.arrayElements)
 
 	thenCtx.drainBranchPrivateResidue(preIfNames)
 
@@ -2343,8 +2375,9 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	for param, slot := range ctx.renamedParams {
 		elseCtx.renamedParams[param] = slot
 	}
+	elseCtx.inheritArrays(ctx) // F-081, see thenCtx above
 	elseCtx.insideBranch = true
-	elseCtx.lowerBindings(elseBindings, ta)
+	elseCtx.lowerBindingsWithArrays(elseBindings, ta, ctx.arrayElements)
 
 	elseCtx.drainBranchPrivateResidue(preIfNames)
 
@@ -2939,6 +2972,20 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 		}
 	}
 
+	// F-081: an outer array_literal binding is metadata only — its ELEMENTS
+	// are the stack slots. Protecting the array name protects nothing, so the
+	// first iteration consumed the elements and the second failed with
+	// "value 't0' not found on stack". Protect the elements themselves.
+	outerArrays := make(map[string][]string, len(ctx.arrayElements))
+	for name, elems := range ctx.arrayElements {
+		outerArrays[name] = elems
+	}
+	for ref := range outerRefs {
+		for _, e := range outerArrays[ref] {
+			outerRefs[e] = true
+		}
+	}
+
 	// Temporarily extend localBindings with body binding names so
 	// @ref: to body-internal values can consume on last use.
 	prevLocalBindings := ctx.localBindings
@@ -2959,7 +3006,7 @@ func (ctx *loweringContext) lowerLoop(bindingName string, count int, body []ir.A
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: iterVal}})
 		ctx.sm.push(iterVar)
 
-		lastUses := computeLastUses(body)
+		lastUses := computeLastUsesWithArrays(body, outerArrays)
 
 		// Prevent outer-scope refs from being consumed by setting their
 		// last-use beyond any body binding index:
@@ -3820,6 +3867,18 @@ func (ctx *loweringContext) lowerAddRawOutput(bindingName, satoshis, scriptBytes
 	ctx.sm.pop()
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
+}
+
+// inheritArrays copies the enclosing context's array_literal metadata into
+// this (branch) context (F-081). Copies, so an arm-local array does not leak
+// out.
+func (ctx *loweringContext) inheritArrays(parent *loweringContext) {
+	for name, elems := range parent.arrayElements {
+		ctx.arrayElements[name] = append([]string(nil), elems...)
+	}
+	for name, n := range parent.arrayLengths {
+		ctx.arrayLengths[name] = n
+	}
 }
 
 func (ctx *loweringContext) lowerArrayLiteral(bindingName string, elements []string, bindingIndex int, lastUses map[string]int) {

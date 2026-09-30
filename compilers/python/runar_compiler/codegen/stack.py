@@ -396,16 +396,37 @@ class StackMap:
 # Use analysis -- determine last-use sites for each variable
 # ---------------------------------------------------------------------------
 
-def compute_last_uses(bindings: list[ANFBinding]) -> dict[str, int]:
+def compute_last_uses(
+    bindings: list[ANFBinding],
+    inherited_arrays: dict[str, list[str]] | None = None,
+) -> dict[str, int]:
     last_use: dict[str, int] = {}
     # Pre-scan: map each array_literal binding to its element refs. Used to
     # propagate last-use across the array indirection (the array binding is
     # pure metadata in _lower_array_literal -- its elements must remain live
     # until the array's consumer, not until the array_literal binding itself).
-    array_elems: dict[str, list[str]] = {}
+    #
+    # F-081: an if-arm or loop body can consume an array declared in an
+    # ENCLOSING scope. Its bindings do not contain that array_literal, so the
+    # enclosing scope's array metadata is seeded first; without it an element
+    # reached only through the outer array had no last-use here and was
+    # consumed at its first read.
+    array_elems: dict[str, list[str]] = dict(inherited_arrays or {})
     for b in bindings:
         if b.value.kind == "array_literal":
             array_elems[b.name] = list(b.value.elements)
+        elif (b.value.kind == "load_const"
+                and b.value.const_string is not None
+                and len(b.value.const_string) > 5
+                and b.value.const_string[:5] == "@ref:"):
+            # F-081: ``const sigs = [a, b]`` lowers to ``t = array_literal``
+            # plus the alias ``sigs = @ref:t``, and checkMultiSig reads the
+            # ALIAS. Without following it the elements got no last-use at all
+            # and were consumed at the first checkMultiSig, so a second read
+            # failed.
+            target = b.value.const_string[5:]
+            if target in array_elems:
+                array_elems[b.name] = list(array_elems[target])
     for i, binding in enumerate(bindings):
         # array_literal is metadata-only -- do NOT advance its elements'
         # last-use to here; defer to the array's consumer.
@@ -1201,9 +1222,14 @@ class _LoweringContext:
     # lower_bindings
     # -----------------------------------------------------------------
 
-    def lower_bindings(self, bindings: list[ANFBinding], terminal_assert: bool) -> None:
+    def lower_bindings(
+        self,
+        bindings: list[ANFBinding],
+        terminal_assert: bool,
+        inherited_arrays: dict[str, list[str]] | None = None,
+    ) -> None:
         self.local_bindings = {b.name: True for b in bindings}
-        last_uses = compute_last_uses(bindings)
+        last_uses = compute_last_uses(bindings, inherited_arrays)
 
         # Protect parent-scope refs that are still needed after this scope
         if self.outer_protected_refs is not None:
@@ -2034,8 +2060,15 @@ class _LoweringContext:
         # same-named deserialized PROPERTY slot -- the stale on-chain state --
         # in place of the caller's witness argument.
         then_ctx.renamed_params = self.renamed_params
+        # F-081: the same holds for array_literal metadata. An array declared
+        # before the ``if`` is visible in the arm, and ``checkMultiSig(sigs,
+        # pks)`` there needs its element refs; a fresh context has none and
+        # failed with "array_literal metadata missing". Copied, so an arm-local
+        # array does not leak out.
+        then_ctx.array_elements = {k: list(v) for k, v in self.array_elements.items()}
+        then_ctx.array_lengths = dict(self.array_lengths)
         then_ctx.inside_branch = True
-        then_ctx.lower_bindings(then_bindings, terminal_assert)
+        then_ctx.lower_bindings(then_bindings, terminal_assert, self.array_elements)
 
         then_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2052,8 +2085,11 @@ class _LoweringContext:
         else_ctx.script_level_code_separator = self.script_level_code_separator
         else_ctx.private_methods = self.private_methods  # N-051, see then_ctx above
         else_ctx.renamed_params = self.renamed_params  # F-015, see then_ctx above
+        # F-081, see then_ctx above
+        else_ctx.array_elements = {k: list(v) for k, v in self.array_elements.items()}
+        else_ctx.array_lengths = dict(self.array_lengths)
         else_ctx.inside_branch = True
-        else_ctx.lower_bindings(else_bindings, terminal_assert)
+        else_ctx.lower_bindings(else_bindings, terminal_assert, self.array_elements)
 
         else_ctx.drain_branch_private_residue(pre_if_names)
 
@@ -2572,6 +2608,15 @@ class _LoweringContext:
             if ref != iter_var:
                 outer_refs.add(ref)
 
+        # F-081: an outer array_literal binding is metadata only -- its
+        # ELEMENTS are the stack slots. Protecting the array name protects
+        # nothing, so the first iteration consumed the elements and the second
+        # failed with "value 't0' not found on stack". Protect the elements
+        # themselves.
+        outer_arrays = {k: list(v) for k, v in self.array_elements.items()}
+        for ref in list(outer_refs):
+            outer_refs.update(outer_arrays.get(ref, []))
+
         # Temporarily extend localBindings with body binding names
         prev_local_bindings = self.local_bindings
         new_local_bindings = dict(prev_local_bindings)
@@ -2586,7 +2631,7 @@ class _LoweringContext:
             self.emit_op(StackOp(op="push", value=big_int_push(start_val + i * step_val)))
             self.sm.push(iter_var)
 
-            last_uses = compute_last_uses(body)
+            last_uses = compute_last_uses(body, outer_arrays)
 
             # Prevent outer-scope refs from being consumed by setting their
             # last-use beyond any body binding index:
