@@ -43,7 +43,15 @@ pub fn build_p2pkh_script(address_or_pub_key: &str) -> String {
                 decoded.len(), address_or_pub_key
             );
         }
-        // Skip version byte (0x00 for mainnet, 0x6f for testnet), take 20-byte hash
+        // Only P2PKH version bytes: 0x00 mainnet, 0x6f testnet/regtest. A P2SH
+        // address (0x05 / 0xc4) carries a SCRIPT hash; wrapping it in a P2PKH
+        // script would burn the output.
+        if decoded[0] != 0x00 && decoded[0] != 0x6f {
+            panic!(
+                "build_p2pkh_script: unsupported address version byte 0x{:02x} for {:?} (expected 0x00 or 0x6f P2PKH)",
+                decoded[0], address_or_pub_key
+            );
+        }
         bytes_to_hex(&decoded[1..])
     };
 
@@ -444,6 +452,49 @@ mod tests {
         assert!(script.starts_with("76a914"));
         assert!(script.ends_with("88ac"));
         assert_eq!(script.len(), 50);
+    }
+
+    // F-043: every SDK must accept the same inputs with the same result, using
+    // a real key (the secp256k1 generator G).
+    //
+    // PROVES: the pubkey hash, compressed / uncompressed pubkeys and the
+    // mainnet / testnet addresses of G map to the P2PKH of HASH160(G) (values
+    // match Go BuildP2PKHScript and TS buildP2PKHScript); the Genesis address
+    // with its last character flipped (bad checksum) and a P2SH address
+    // (version 0x05) panic.
+    // DOES NOT PROVE: that a pubkey is a valid curve point (no SDK checks it).
+    const G_PKH: &str = "751e76e8199196d454941c45d1b3a323f1433bd6";
+
+    #[test]
+    fn build_p2pkh_f043_accepts_g_in_every_form() {
+        let want = format!("76a914{}88ac", G_PKH);
+        assert_eq!(build_p2pkh_script(G_PKH), want);
+        assert_eq!(build_p2pkh_script("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"), want);
+        assert_eq!(
+            build_p2pkh_script(concat!(
+                "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+            )),
+            "76a91491b24bf9f5288532960ac687abb035127b1d28a588ac"
+        );
+        assert_eq!(build_p2pkh_script("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"), want);
+        assert_eq!(build_p2pkh_script("mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r"), want);
+        assert_eq!(
+            build_p2pkh_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"),
+            "76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid address")]
+    fn build_p2pkh_f043_rejects_flipped_checksum() {
+        build_p2pkh_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb");
+    }
+
+    #[test]
+    #[should_panic(expected = "version byte")]
+    fn build_p2pkh_f043_rejects_p2sh_version() {
+        build_p2pkh_script("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy");
     }
 
     // -----------------------------------------------------------------------

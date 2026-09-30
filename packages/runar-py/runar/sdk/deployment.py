@@ -137,7 +137,10 @@ def _base58_decode(encoded: str) -> bytes:
     """Decode a Base58-encoded string to bytes."""
     num = 0
     for char in encoded:
-        num = num * 58 + _BASE58_ALPHABET.index(char)
+        digit = _BASE58_ALPHABET.find(char)
+        if digit < 0:
+            raise ValueError(f"invalid Base58 character {char!r} in {encoded!r}")
+        num = num * 58 + digit
     # Convert to bytes
     result = []
     while num > 0:
@@ -155,12 +158,26 @@ def _base58_decode(encoded: str) -> bytes:
 
 
 def _address_to_pubkey_hash(address: str) -> str:
-    """Extract the 20-byte pubkey hash from a Base58Check P2PKH address."""
+    """Extract the 20-byte pubkey hash from a Base58Check P2PKH address.
+
+    Verifies the SHA256d checksum and the version byte (0x00 mainnet,
+    0x6f testnet/regtest).
+    """
+    import hashlib
     decoded = _base58_decode(address)
     # Format: version_byte(1) + pubkey_hash(20) + checksum(4)
     if len(decoded) != 25:
         raise ValueError(f"invalid address length: {len(decoded)}")
-    return decoded[1:21].hex()
+    payload = decoded[:21]
+    checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    if checksum != decoded[21:]:
+        raise ValueError(f"invalid address checksum: {address!r}")
+    if payload[0] not in (0x00, 0x6F):
+        raise ValueError(
+            f"unsupported address version byte 0x{payload[0]:02x} "
+            f"(expected 0x00 or 0x6f P2PKH): {address}"
+        )
+    return payload[1:].hex()
 
 
 def build_p2pkh_script(address_or_pub_key: str) -> str:

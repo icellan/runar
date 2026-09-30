@@ -216,36 +216,13 @@ fn varint_byte_size(n: usize) -> i64 {
     else { 9 }
 }
 
-/// Build a P2PKH locking script from an address.
+/// Build a P2PKH locking script from an address, pubkey hash, or public key.
 ///
-///   OP_DUP OP_HASH160 OP_PUSH20 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
-///   76      a9         14        <20 bytes>    88              ac
-///
-/// If the address is 40-char hex, treat as raw pubkey hash.
-/// Otherwise, decode the Base58Check address to extract the 20-byte pubkey hash.
+/// Delegates to [`super::script_utils::build_p2pkh_script`] so the change-address
+/// path accepts exactly the same inputs (40-char hash, 66/130-char pubkey,
+/// checksum- and version-checked Base58Check address).
 pub(crate) fn build_p2pkh_script_from_address(address: &str) -> String {
-    let pub_key_hash = if is_hex_40(address) {
-        address.to_string()
-    } else {
-        // Decode Base58Check address: version(1) + pubKeyHash(20) + checksum(4)
-        let decoded = bs58::decode(address)
-            .with_check(None)
-            .into_vec()
-            .unwrap_or_else(|e| panic!("build_p2pkh_script_from_address: invalid address {:?}: {}", address, e));
-        if decoded.len() != 21 {
-            panic!(
-                "build_p2pkh_script_from_address: unexpected decoded length {} for address {:?}",
-                decoded.len(), address
-            );
-        }
-        // Skip version byte (0x00 for mainnet, 0x6f for testnet), take 20-byte hash
-        decoded[1..].iter().map(|b| format!("{:02x}", b)).collect()
-    };
-    format!("76a914{}88ac", pub_key_hash)
-}
-
-fn is_hex_40(s: &str) -> bool {
-    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+    super::script_utils::build_p2pkh_script(address)
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +232,28 @@ fn is_hex_40(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // F-043: the change-address path must accept exactly what
+    // script_utils::build_p2pkh_script accepts (a 66-char pubkey was decoded as
+    // Base58 and panicked on '0'), and must refuse a P2SH address instead of
+    // wrapping its script hash in a P2PKH script.
+    // PROVES: pubkey + address forms of G agree; P2SH panics.
+    // DOES NOT PROVE: anything about curve-point validity.
+    #[test]
+    fn build_p2pkh_script_from_address_f043_matches_build_p2pkh_script() {
+        let want = "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac";
+        assert_eq!(
+            build_p2pkh_script_from_address("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+            want
+        );
+        assert_eq!(build_p2pkh_script_from_address("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"), want);
+    }
+
+    #[test]
+    #[should_panic(expected = "version byte")]
+    fn build_p2pkh_script_from_address_f043_rejects_p2sh() {
+        build_p2pkh_script_from_address("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy");
+    }
 
     fn make_utxo(satoshis: i64, index: u32) -> Utxo {
         Utxo {

@@ -1,11 +1,13 @@
 package runar
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
 
+	base58 "github.com/bsv-blockchain/go-sdk/compat/base58"
 	sdkscript "github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	"golang.org/x/crypto/ripemd160"
@@ -273,10 +275,18 @@ func BuildP2PKHScript(address string) string {
 		}
 		pubKeyHash = computeHash160Hex(pubKeyBytes)
 	} else {
-		// Decode Base58Check address to extract the 20-byte pubkey hash
+		// Decode Base58Check address to extract the 20-byte pubkey hash.
+		// NewAddressFromString checks the length and version byte but NOT the
+		// checksum, so verify the SHA256d checksum here.
 		addr, err := sdkscript.NewAddressFromString(address)
 		if err != nil {
 			panic(fmt.Sprintf("BuildP2PKHScript: invalid address %q: %v", address, err))
+		}
+		decoded, _ := base58.Decode(address) // cannot fail: NewAddressFromString decoded it
+		first := sha256.Sum256(decoded[:21])
+		second := sha256.Sum256(first[:])
+		if !bytes.Equal(second[:4], decoded[21:]) {
+			panic(fmt.Sprintf("BuildP2PKHScript: invalid address %q: bad checksum", address))
 		}
 		pubKeyHash = hex.EncodeToString(addr.PublicKeyHash)
 	}

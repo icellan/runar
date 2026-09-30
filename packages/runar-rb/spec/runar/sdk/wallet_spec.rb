@@ -279,3 +279,43 @@ RSpec.describe Runar::SDK::WalletProvider, '#broadcast (F-042)' do
     end
   end
 end
+
+
+# F-043: get_utxos passes the signer's 66-char compressed pubkey to
+# build_p2pkh_script, which had no pubkey branch and fell through to the Base58
+# decoder, where '0' is not in the alphabet — a TypeError on every call.
+#
+# PROVES: with a WalletSigner whose key is the secp256k1 generator G
+# (0279be667e…), get_utxos returns, keeps the spendable outputs whose script is
+# 76a914 HASH160(G) 88ac, and drops an output locked to another key's P2PKH
+# (the Genesis address) and an unspendable one.
+# DOES NOT PROVE: behaviour against a real BRC-100 wallet, or the policy for an
+# output reported with an empty locking script (kept as-is, like Go/Python).
+RSpec.describe Runar::SDK::WalletProvider, '#get_utxos (F-043)' do
+  g_script       = '76a914751e76e8199196d454941c45d1b3a323f1433bd688ac'
+  genesis_script = '76a91462e907b15cbf27d5425399ebf6f0fb50ebb88f1888ac'
+
+  let(:outputs) do
+    [
+      { outpoint: "#{'aa' * 32}.0", satoshis: 1000, locking_script: g_script, spendable: true },
+      { outpoint: "#{'bb' * 32}.1", satoshis: 2000, locking_script: genesis_script, spendable: true },
+      { outpoint: "#{'cc' * 32}.2", satoshis: 3000, locking_script: g_script, spendable: false },
+      { outpoint: "#{'dd' * 32}.3", satoshis: 4000, locking_script: g_script, spendable: true }
+    ]
+  end
+  let(:wallet) do
+    w = MockWalletClient.new
+    outs = outputs
+    w.define_singleton_method(:list_outputs) { |basket:, tags: [], limit: 100| outs }
+    w
+  end
+  let(:signer) { Runar::SDK::WalletSigner.new(wallet: wallet, protocol_id: [2, 'test'], key_id: '1') }
+
+  it 'keeps only spendable outputs locked to the P2PKH of the signer pubkey' do
+    wp = described_class.new(wallet: wallet, signer: signer, basket: 'b')
+    utxos = wp.get_utxos('ignored')
+    expect(utxos.map { |u| [u.txid, u.output_index, u.satoshis, u.script] }).to eq(
+      [['aa' * 32, 0, 1000, g_script], ['dd' * 32, 3, 4000, g_script]]
+    )
+  end
+end
