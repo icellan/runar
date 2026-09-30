@@ -78,7 +78,7 @@ public final class Dce {
         List<AnfMethod> newMethods = new ArrayList<>(program.methods().size());
         for (AnfMethod m : program.methods()) {
             List<AnfBinding> cleaned = eliminateDead(m.body());
-            newMethods.add(new AnfMethod(m.name(), m.params(), cleaned, m.isPublic()));
+            newMethods.add(m.withBody(cleaned));
         }
         return new AnfProgram(program.contractName(), program.properties(), newMethods);
     }

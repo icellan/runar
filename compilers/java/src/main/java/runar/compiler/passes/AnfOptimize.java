@@ -207,7 +207,7 @@ public final class AnfOptimize {
         }
         // Dead-binding elimination after fixed-point.
         body = eliminateDead(body);
-        return new AnfMethod(method.name(), method.params(), body, method.isPublic());
+        return method.withBody(body);
     }
 
     /**

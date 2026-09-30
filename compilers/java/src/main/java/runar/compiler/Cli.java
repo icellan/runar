@@ -23,6 +23,7 @@ import runar.compiler.passes.AnfOptimize;
 import runar.compiler.passes.ConstantFold;
 import runar.compiler.passes.Emit;
 import runar.compiler.passes.ExpandFixedArrays;
+import runar.compiler.passes.SighashDirective;
 import runar.compiler.passes.Peephole;
 import runar.compiler.passes.PassLocation;
 import runar.compiler.passes.StackLower;
@@ -417,9 +418,6 @@ public final class Cli {
      *   <li>{@code asm} — the Java emitter keeps no disassembly column. The SDK
      *       uses it only for the {@code isLikelyOrChecksig} NULLFAIL warning,
      *       which therefore stays silent for Java-built artifacts.</li>
-     *   <li>{@code sigHashType} — Java's {@code AnfMethod} carries no
-     *       {@code @sighash} directive field (Go keeps it in-memory only), so a
-     *       non-default sighash mode is not published to the ABI.</li>
      *   <li>{@code fixedArray} regrouping — Java's {@code AnfProperty} carries
      *       no synthetic-array chain, so expanded FixedArray siblings appear as
      *       individual ABI params / state fields rather than one logical entry.</li>
@@ -481,6 +479,14 @@ public final class Cli {
                 if (m.isPublic()
                     && StackLower.methodRequiresCodePart(m, anf.properties(), privateMethods)) {
                     mb.append(", \"usesCodePart\": true");
+                }
+                // F-079 / issue #123: publish a non-default @sighash mode so the
+                // SDK builds the BIP-143 preimage under the flags the covenant
+                // asserts. Omitted for the default (0x41), after usesCodePart —
+                // Go's ABIMethod key order.
+                if (m.isPublic() && m.sighashType() != null
+                    && m.sighashType() != SighashDirective.SIGHASH_DEFAULT) {
+                    mb.append(", \"sigHashType\": ").append(m.sighashType());
                 }
                 mb.append('}');
                 methodJson.add(mb.toString());

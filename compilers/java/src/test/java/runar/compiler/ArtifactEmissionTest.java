@@ -51,8 +51,8 @@ import org.junit.jupiter.api.Test;
  *
  * <h2>What these tests do NOT prove</h2>
  * <ul>
- *   <li>They do not prove the Java artifact is complete. {@code asm},
- *       {@code sigHashType} and fixed-array ABI regrouping are still absent
+ *   <li>They do not prove the Java artifact is complete. {@code asm}
+ *       and fixed-array ABI regrouping are still absent
  *       from the Java tier (see the class comment on the artifact writer in
  *       {@link Cli}); {@code RunarArtifact} tolerates their absence but the
  *       SDK loses the corresponding behaviour.</li>
@@ -232,17 +232,93 @@ class ArtifactEmissionTest {
     }
 
     // ------------------------------------------------------------------
+    // 5. F-079: a non-default @sighash mode reaches abi.methods[].sigHashType
+    // ------------------------------------------------------------------
+
+    /**
+     * F-079 (GK-BUG-015). The SDKs read {@code abi.methods[].sigHashType} to
+     * pick the BIP-143 scope of the OP_PUSH_TX preimage; when it is absent they
+     * fall back to ALL|FORKID (0x41). The covenant compiled for a
+     * {@code @sighash SINGLE|FORKID} method asserts
+     * {@code extractSigHashType(txPreimage) == 0x43}, so an artifact that drops
+     * the field produces a spend the script rejects.
+     *
+     * <p>The expected method entries are the TS reference's and the Go tier's
+     * ABI for this exact source (captured by running both): {@code bump}
+     * carries {@code "sigHashType": 67} after {@code usesCodePart} (Go's key
+     * order — TS orders sigHashType before usesCodePart, the same JSON value);
+     * the default-mode method {@code plain} carries NO sigHashType key; the
+     * constructor ABI never carries one.
+     *
+     * <p>Proves: the directive survives AST → ANF → ConstantFold/AnfOptimize/DCE
+     * into the artifact writer, under both fold modes, with the reference's
+     * omission rule for the default. Does NOT prove the resulting spend is
+     * accepted — that is
+     * {@code packages/runar-testing/src/__tests__/f079-java-sighash-abi.test.ts},
+     * which runs the Java artifact through the TS SDK and {@code @bsv/sdk}
+     * {@code Spend}.
+     */
+    @Test
+    void nonDefaultSighashDirectiveIsPublishedToTheAbi() throws IOException {
+        String src = String.join("\n",
+            "class Pair extends StatefulSmartContract {",
+            "  n: bigint;",
+            "  constructor(n: bigint) { super(n); this.n = n; }",
+            "  /** @sighash SINGLE|FORKID */",
+            "  public bump(amount: bigint): void {",
+            "    this.addOutput(amount, this.n + 1n);",
+            "  }",
+            "  public plain(): void {",
+            "    this.n = this.n + 1n;",
+            "  }",
+            "}",
+            "");
+        Path dir = Files.createTempDirectory("runar-f079");
+        Path source = dir.resolve("Pair.runar.ts");
+        Files.writeString(source, src);
+        String bump = "{\"name\": \"bump\", \"params\": [{\"name\": \"amount\", \"type\": \"bigint\"}, "
+            + "{\"name\": \"_changePKH\", \"type\": \"Ripemd160\"}, "
+            + "{\"name\": \"_changeAmount\", \"type\": \"bigint\"}, "
+            + "{\"name\": \"txPreimage\", \"type\": \"SigHashPreimage\"}], "
+            + "\"isPublic\": true, \"usesCodePart\": true, \"sigHashType\": 67}";
+        String plain = "{\"name\": \"plain\", \"params\": [{\"name\": \"_changePKH\", \"type\": \"Ripemd160\"}, "
+            + "{\"name\": \"_changeAmount\", \"type\": \"bigint\"}, "
+            + "{\"name\": \"_newAmount\", \"type\": \"bigint\"}, "
+            + "{\"name\": \"txPreimage\", \"type\": \"SigHashPreimage\"}], "
+            + "\"isPublic\": true, \"usesCodePart\": true}";
+        try {
+            for (boolean fold : List.of(false, true)) {
+                String artifact = compileArtifact(source, fold);
+                assertTrue(artifact.contains("\"methods\": [" + bump + ", " + plain + "]"),
+                    "abi.methods (fold " + (fold ? "ON" : "OFF") + ") must equal the TS/Go reference; got:\n"
+                        + artifact.substring(artifact.indexOf("\"abi\""), artifact.indexOf("\"script\"")));
+                assertEquals(1, artifact.split("\"sigHashType\"", -1).length - 1,
+                    "exactly one sigHashType key (bump only; none on the default method or constructor)");
+            }
+        } finally {
+            Files.deleteIfExists(source);
+            Files.deleteIfExists(dir);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
     /** Compile {@code source} to an artifact JSON via the CLI and return it. */
     private static String compileArtifact(Path source) throws IOException {
+        return compileArtifact(source, false);
+    }
+
+    /** As {@link #compileArtifact(Path)}, optionally with constant folding ON (the shipped default). */
+    private static String compileArtifact(Path source, boolean fold) throws IOException {
         Path out = Files.createTempFile("runar-artifact", ".json");
         try {
-            Result r = runCli(
+            List<String> args = new ArrayList<>(List.of(
                 "--source", source.toString(),
-                "--emit-artifact", out.toString(),
-                "--disable-constant-folding");
+                "--emit-artifact", out.toString()));
+            if (!fold) args.add("--disable-constant-folding");
+            Result r = runCli(args.toArray(new String[0]));
             assertEquals(0, r.exit, "--emit-artifact failed: " + r.stderr);
             String body = Files.readString(out);
             assertFalse(body.isBlank(), "artifact JSON is empty");

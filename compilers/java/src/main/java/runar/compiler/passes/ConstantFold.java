@@ -71,7 +71,7 @@ public final class ConstantFold {
     private static AnfMethod foldMethod(AnfMethod method) {
         Map<String, ConstSlot> env = new HashMap<>();
         List<AnfBinding> body = foldBindings(method.body(), env);
-        return new AnfMethod(method.name(), method.params(), body, method.isPublic());
+        return method.withBody(body);
     }
 
     // ---------------------------------------------------------------

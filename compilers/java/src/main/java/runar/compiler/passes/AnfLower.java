@@ -167,7 +167,7 @@ public final class AnfLower {
         List<AnfMethod> lifted = new ArrayList<>(methods.size());
         for (AnfMethod m : methods) {
             List<AnfBinding> newBody = liftBranchUpdateProps(m.body());
-            lifted.add(new AnfMethod(m.name(), m.params(), newBody, m.isPublic()));
+            lifted.add(m.withBody(newBody));
         }
 
         return new AnfProgram(contract.name(), properties, lifted);
@@ -563,7 +563,7 @@ public final class AnfLower {
                 // adjacent to the preimage. Mirrors Go reference compiler.
                 augmented.addAll(ctx.methodScope.autoInjectedParams);
 
-                out.add(new AnfMethod(method.name(), augmented, ctx.bindings, true));
+                out.add(new AnfMethod(method.name(), augmented, ctx.bindings, true, method.sighashType()));
             } else {
                 // Issue #109: stateless public methods (and non-stateful
                 // spending entry points) are lowered here — inject @embedAlways
@@ -588,7 +588,8 @@ public final class AnfLower {
                     method.name(),
                     privAugmented,
                     ctx.bindings,
-                    method.visibility() == Visibility.PUBLIC
+                    method.visibility() == Visibility.PUBLIC,
+                    method.sighashType()
                 ));
             }
         }
