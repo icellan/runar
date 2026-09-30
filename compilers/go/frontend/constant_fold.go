@@ -59,6 +59,26 @@ func (e *constEnv) get(name string) *constValue {
 	return e.m[name]
 }
 
+func (e *constEnv) remove(name string) {
+	delete(e.m, name)
+}
+
+// boundNames collects every name bound in bindings, including inside nested
+// if arms and loop bodies.
+func boundNames(bindings []ir.ANFBinding, out map[string]struct{}) map[string]struct{} {
+	for i := range bindings {
+		out[bindings[i].Name] = struct{}{}
+		switch bindings[i].Value.Kind {
+		case "if":
+			boundNames(bindings[i].Value.Then, out)
+			boundNames(bindings[i].Value.Else, out)
+		case "loop":
+			boundNames(bindings[i].Value.Body, out)
+		}
+	}
+	return out
+}
+
 func (e *constEnv) clone() *constEnv {
 	c := newConstEnv()
 	for k, v := range e.m {
@@ -384,11 +404,20 @@ func foldBindings(bindings []ir.ANFBinding, env *constEnv) []ir.ANFBinding {
 func foldBinding(binding ir.ANFBinding, env *constEnv) ir.ANFBinding {
 	foldedValue := foldValue(&binding.Value, env)
 
-	// If the folded value is a load_const, register in the environment
+	// If the folded value is a load_const, register in the environment.
+	//
+	// A name may be bound more than once (reassignment, or a user local that
+	// shares a compiler temp's name). The env must track the LATEST binding:
+	// a rebinding to a non-constant drops the old constant, or later uses
+	// would fold with a value the name no longer holds (N-064).
+	var cv *constValue
 	if foldedValue.Kind == "load_const" {
-		if cv := anfValueToConst(foldedValue); cv != nil {
-			env.set(binding.Name, cv)
-		}
+		cv = anfValueToConst(foldedValue)
+	}
+	if cv != nil {
+		env.set(binding.Name, cv)
+	} else {
+		env.remove(binding.Name)
 	}
 
 	result := ir.ANFBinding{Name: binding.Name, Value: *foldedValue}
@@ -527,6 +556,12 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		elseEnv := env.clone()
 		foldedThen := foldBindings(value.Then, thenEnv)
 		foldedElse := foldBindings(value.Else, elseEnv)
+		// N-064: a name either arm rebinds may hold the arm's value after the
+		// if (that is how a branch reassigns a local), so the enclosing env's
+		// constant for it is stale past this point.
+		for n := range boundNames(value.Else, boundNames(value.Then, map[string]struct{}{})) {
+			env.remove(n)
+		}
 		return &ir.ANFValue{
 			Kind: "if",
 			Cond: value.Cond,
@@ -550,8 +585,19 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 		// it. The reference tier has always used a spread here
 		// (`{ ...value, body: foldedBody }`), which is the same thing this now
 		// does: every field survives by construction, including any added later.
+		//
+		// N-064: the body runs once per iteration, so a name it rebinds holds
+		// the entry constant only in iteration 0 — it is not a constant inside
+		// the body, nor after the loop.
+		rebound := boundNames(value.Body, map[string]struct{}{})
 		bodyEnv := env.clone()
+		for n := range rebound {
+			bodyEnv.remove(n)
+		}
 		foldedBody := foldBindings(value.Body, bodyEnv)
+		for n := range rebound {
+			env.remove(n)
+		}
 		folded := *value
 		folded.Body = foldedBody
 		return &folded

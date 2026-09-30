@@ -359,12 +359,38 @@ module RunarCompiler
       end
       private_class_method :fold_bindings
 
+      # Every name bound in +bindings+, including inside nested if arms and
+      # loop bodies.
+      def self.bound_names(bindings, out = [])
+        bindings.each do |b|
+          out << b.name
+          case b.value.kind
+          when "if"
+            bound_names(b.value.then || [], out)
+            bound_names(b.value.else_ || [], out)
+          when "loop"
+            bound_names(b.value.body || [], out)
+          end
+        end
+        out
+      end
+      private_class_method :bound_names
+
       def self.fold_binding(binding, env)
         folded_value = fold_value(binding.value, env)
 
-        # If the folded value is a load_const, register in the environment
+        # If the folded value is a load_const, register in the environment.
+        #
+        # A name may be bound more than once (reassignment, or a user local
+        # that shares a compiler temp's name). The env must track the LATEST
+        # binding: a rebinding to a non-constant drops the old constant, or
+        # later uses would fold with a value the name no longer holds (N-064).
         cv = anf_value_to_const(folded_value)
-        env[binding.name] = cv unless cv.nil?
+        if cv.nil?
+          env.delete(binding.name)
+        else
+          env[binding.name] = cv
+        end
 
         IR::ANFBinding.new(
           name: binding.name,
@@ -464,6 +490,10 @@ module RunarCompiler
           else_env = env.dup
           folded_then = fold_bindings(value.then || [], then_env)
           folded_else = fold_bindings(value.else_ || [], else_env)
+          # N-064: a name either arm rebinds may hold the arm's value after
+          # the if (that is how a branch reassigns a local), so the enclosing
+          # env's constant for it is stale past this point.
+          bound_names(value.else_ || [], bound_names(value.then || [])).each { |n| env.delete(n) }
           new_v = IR::ANFValue.new(kind: "if")
           new_v.cond = value.cond
           new_v.then = folded_then
@@ -477,8 +507,14 @@ module RunarCompiler
         end
 
         if kind == "loop"
+          # N-064: the body runs once per iteration, so a name it rebinds
+          # holds the entry constant only in iteration 0 -- it is not a
+          # constant inside the body, nor after the loop.
+          rebound = bound_names(value.body || [])
           body_env = env.dup
+          rebound.each { |n| body_env.delete(n) }
           folded_body = fold_bindings(value.body || [], body_env)
+          rebound.each { |n| env.delete(n) }
           new_v = IR::ANFValue.new(kind: "loop")
           new_v.count = value.count
           new_v.body = folded_body

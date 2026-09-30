@@ -99,6 +99,19 @@ public final class ConstantFold {
         return out;
     }
 
+    /** Drop from {@code env} every name bound in {@code bindings}, including inside nested if arms and loop bodies. */
+    private static void removeBoundNames(Map<String, ConstSlot> env, List<AnfBinding> bindings) {
+        for (AnfBinding b : bindings) {
+            env.remove(b.name());
+            if (b.value() instanceof If ifv) {
+                removeBoundNames(env, orEmpty(ifv.thenBranch()));
+                removeBoundNames(env, orEmpty(ifv.elseBranch()));
+            } else if (b.value() instanceof Loop lp) {
+                removeBoundNames(env, orEmpty(lp.body()));
+            }
+        }
+    }
+
     private static AnfBinding foldBinding(AnfBinding binding, Map<String, ConstSlot> env) {
         AnfValue folded = foldValue(binding.value(), env);
         ConstSlot slot = anfValueToConst(folded);
@@ -203,6 +216,11 @@ public final class ConstantFold {
             Map<String, ConstSlot> elseEnv = new HashMap<>(env);
             List<AnfBinding> foldedThen = foldBindings(orEmpty(ifv.thenBranch()), thenEnv);
             List<AnfBinding> foldedElse = foldBindings(orEmpty(ifv.elseBranch()), elseEnv);
+            // N-064: a name either arm rebinds may hold the arm's value after the
+            // if (that is how a branch reassigns a local), so the enclosing env's
+            // constant for it is stale past this point.
+            removeBoundNames(env, orEmpty(ifv.thenBranch()));
+            removeBoundNames(env, orEmpty(ifv.elseBranch()));
             // The declared result list survives folding untouched: folding an
             // arm's bindings cannot change WHICH slots the arm leaves, and
             // dropping the list would silently return the `if` to the
@@ -211,8 +229,13 @@ public final class ConstantFold {
         }
 
         if (value instanceof Loop lp) {
+            // N-064: the body runs once per iteration, so a name it rebinds holds
+            // the entry constant only in iteration 0 — it is not a constant inside
+            // the body, nor after the loop.
             Map<String, ConstSlot> bodyEnv = new HashMap<>(env);
+            removeBoundNames(bodyEnv, orEmpty(lp.body()));
             List<AnfBinding> foldedBody = foldBindings(orEmpty(lp.body()), bodyEnv);
+            removeBoundNames(env, orEmpty(lp.body()));
             return new Loop(lp.count(), foldedBody, lp.iterVar(), lp.start(), lp.step());
         }
 

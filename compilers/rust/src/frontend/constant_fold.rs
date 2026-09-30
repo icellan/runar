@@ -27,6 +27,22 @@ fn env_clone(env: &ConstEnv) -> ConstEnv {
     env.clone()
 }
 
+/// Every name bound in `bindings`, including inside nested if arms and loop
+/// bodies.
+fn bound_names(bindings: &[ANFBinding], out: &mut Vec<String>) {
+    for b in bindings {
+        out.push(b.name.clone());
+        match &b.value {
+            ANFValue::If { then, else_branch, .. } => {
+                bound_names(then, out);
+                bound_names(else_branch, out);
+            }
+            ANFValue::Loop { body, .. } => bound_names(body, out),
+            _ => {}
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Binary operation evaluation
 // ---------------------------------------------------------------------------
@@ -360,9 +376,16 @@ fn fold_bindings(bindings: &[ANFBinding], env: &mut ConstEnv) -> Vec<ANFBinding>
 fn fold_binding(binding: &ANFBinding, env: &mut ConstEnv) -> ANFBinding {
     let folded_value = fold_value(&binding.value, env);
 
-    // If the folded value is a load_const, register in the environment
+    // If the folded value is a load_const, register in the environment.
+    //
+    // A name may be bound more than once (reassignment, or a user local that
+    // shares a compiler temp's name). The env must track the LATEST binding:
+    // a rebinding to a non-constant drops the old constant, or later uses
+    // would fold with a value the name no longer holds (N-064).
     if let Some(cv) = anf_value_to_const(&folded_value) {
         env.insert(binding.name.clone(), cv);
+    } else {
+        env.remove(&binding.name);
     }
 
     ANFBinding {
@@ -464,6 +487,15 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
             let mut else_env = env_clone(env);
             let folded_then = fold_bindings(then, &mut then_env);
             let folded_else = fold_bindings(else_branch, &mut else_env);
+            // N-064: a name either arm rebinds may hold the arm's value after
+            // the if (that is how a branch reassigns a local), so the enclosing
+            // env's constant for it is stale past this point.
+            let mut rebound = Vec::new();
+            bound_names(then, &mut rebound);
+            bound_names(else_branch, &mut rebound);
+            for n in &rebound {
+                env.remove(n);
+            }
             ANFValue::If {
                 cond: cond.clone(),
                 then: folded_then,
@@ -483,8 +515,19 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
             start,
             step,
         } => {
+            // N-064: the body runs once per iteration, so a name it rebinds
+            // holds the entry constant only in iteration 0 — it is not a
+            // constant inside the body, nor after the loop.
+            let mut rebound = Vec::new();
+            bound_names(body, &mut rebound);
             let mut body_env = env_clone(env);
+            for n in &rebound {
+                body_env.remove(n);
+            }
             let folded_body = fold_bindings(body, &mut body_env);
+            for n in &rebound {
+                env.remove(n);
+            }
             ANFValue::Loop {
                 count: *count,
                 body: folded_body,

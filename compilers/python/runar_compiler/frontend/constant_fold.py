@@ -418,13 +418,32 @@ def _fold_bindings(bindings: list[ANFBinding], env: ConstEnv) -> list[ANFBinding
     return [_fold_binding(b, env) for b in bindings]
 
 
+def _bound_names(bindings: list[ANFBinding], out: set[str]) -> set[str]:
+    """Every name bound in ``bindings``, including inside nested if arms and loop bodies."""
+    for b in bindings:
+        out.add(b.name)
+        if b.value.kind == "if":
+            _bound_names(b.value.then or [], out)
+            _bound_names(b.value.else_ or [], out)
+        elif b.value.kind == "loop":
+            _bound_names(b.value.body or [], out)
+    return out
+
+
 def _fold_binding(binding: ANFBinding, env: ConstEnv) -> ANFBinding:
     folded_value = _fold_value(binding.value, env)
 
-    # If the folded value is a load_const, register in the environment
+    # If the folded value is a load_const, register in the environment.
+    #
+    # A name may be bound more than once (reassignment, or a user local that
+    # shares a compiler temp's name). The env must track the LATEST binding:
+    # a rebinding to a non-constant drops the old constant, or later uses
+    # would fold with a value the name no longer holds (N-064).
     cv = _anf_value_to_const(folded_value)
     if cv is not None:
         env[binding.name] = cv
+    else:
+        env.pop(binding.name, None)
 
     return ANFBinding(name=binding.name, value=folded_value, source_loc=binding.source_loc)
 
@@ -502,6 +521,11 @@ def _fold_value(value: ANFValue, env: ConstEnv) -> ANFValue:
         else_env = dict(env)
         folded_then = _fold_bindings(value.then or [], then_env)
         folded_else = _fold_bindings(value.else_ or [], else_env)
+        # N-064: a name either arm rebinds may hold the arm's value after the
+        # if (that is how a branch reassigns a local), so the enclosing env's
+        # constant for it is stale past this point.
+        for n in _bound_names(value.else_ or [], _bound_names(value.then or [], set())):
+            env.pop(n, None)
         return ANFValue(
             kind="if",
             cond=value.cond,
@@ -515,8 +539,14 @@ def _fold_value(value: ANFValue, env: ConstEnv) -> ANFValue:
         )
 
     if kind == "loop":
-        body_env = dict(env)
+        # N-064: the body runs once per iteration, so a name it rebinds holds
+        # the entry constant only in iteration 0 -- it is not a constant
+        # inside the body, nor after the loop.
+        rebound = _bound_names(value.body or [], set())
+        body_env = {k: v for k, v in env.items() if k not in rebound}
         folded_body = _fold_bindings(value.body or [], body_env)
+        for n in rebound:
+            env.pop(n, None)
         return ANFValue(
             kind="loop",
             count=value.count,

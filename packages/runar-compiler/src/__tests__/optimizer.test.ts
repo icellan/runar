@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { foldConstants, eliminateDeadBindings } from '../optimizer/constant-fold.js';
 import { optimizeStackIR } from '../optimizer/peephole.js';
+import { compile } from '../index.js';
 import type { ANFProgram, ANFBinding, ANFMethod, ANFValue, StackOp } from '../ir/index.js';
 
 // ---------------------------------------------------------------------------
@@ -382,6 +383,61 @@ describe('Optimizer: Constant Folding', () => {
       const folded = foldConstants(program);
       expect(folded.methods[0]!.body[2]!.value.kind).toBe('bin_op');
     });
+
+    // N-064: a name can be bound more than once (a reassignment, or a user
+    // local that shares an earlier compiler temp's name). The env must track
+    // the LATEST binding, so a rebinding to a non-constant drops the old
+    // constant. Proves: after x = 1, rebinding x to a param or to an @ref
+    // alias leaves `x + 1` unfolded. Does not prove anything about if/loop
+    // arms (see the if-branch / loop tests) or the emitted script (the
+    // end-to-end Spend proof is runar-testing's n064 test).
+    it('drops a stale constant when the name is rebound to a load_param (N-064)', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 1n }),
+          b('x', { kind: 'load_param', name: 'p' }),
+          b('t1', { kind: 'load_const', value: 1n }),
+          b('t2', { kind: 'bin_op', op: '+', left: 'x', right: 't1' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[3]!.value.kind).toBe('bin_op');
+    });
+
+    it('drops a stale constant when the name is rebound to an @ref alias (N-064)', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 1n }),
+          b('p0', { kind: 'load_param', name: 'p' }),
+          b('x', { kind: 'load_const', value: '@ref:p0' }),
+          b('t1', { kind: 'load_const', value: 1n }),
+          b('t2', { kind: 'bin_op', op: '+', left: 'x', right: 't1' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[4]!.value.kind).toBe('bin_op');
+    });
+
+    it('a user local named like an earlier temp does not fold with the temp\'s constant (N-064)', () => {
+      // `assert(p > 0n); let t1: bigint = p; assert(t1 + 1n === 1n);` — the
+      // `0n` lowers to temp t1, then the user local rebinds t1. Folded with
+      // the stale t1 = 0 the guard became OP_TRUE and accepted any p > 0.
+      const src = `import { SmartContract, assert } from 'runar-lang';
+class Rebind extends SmartContract {
+  constructor() { super(); }
+  public unlock(p: bigint) {
+    assert(p > 0n);
+    let t1: bigint = p;
+    assert(t1 + 1n === 1n);
+  }
+}
+`;
+      const off = compile(src, { fileName: 'Rebind.runar.ts', disableConstantFolding: true });
+      const on = compile(src, { fileName: 'Rebind.runar.ts' });
+      expect(off.success && on.success, JSON.stringify([off.diagnostics, on.diagnostics])).toBe(true);
+      expect(off.artifact!.script).toBe('76007c78a0697c8b519c77');
+      expect(on.artifact!.script).toBe(off.artifact!.script);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -461,6 +517,32 @@ describe('Optimizer: Constant Folding', () => {
       expect(folded.methods[0]!.body[2]!.value.kind).toBe('bin_op');
     });
 
+    // N-064: an arm that rebinds a name the enclosing env holds as a constant
+    // changes that name's value after the if (it is how a branch reassigns a
+    // local), so the pre-if constant must not survive the if. Proves: the
+    // fold of `x + 1` after the if is not done with the stale x = 0.
+    it('drops a constant the if rebinds in an arm (N-064)', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 0n }),
+          b('c', { kind: 'load_param', name: 'c' }),
+          b('t1', {
+            kind: 'if',
+            cond: 'c',
+            then: [
+              b('t2', { kind: 'load_param', name: 'p' }),
+              b('x', { kind: 'load_const', value: '@ref:t2' }),
+            ],
+            else: [],
+          }),
+          b('t3', { kind: 'load_const', value: 1n }),
+          b('t4', { kind: 'bin_op', op: '+', left: 'x', right: 't3' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[4]!.value.kind).toBe('bin_op');
+    });
+
     it('folds constants inside both branches when condition is unknown', () => {
       const program = makeProgram([
         makeMethod('m', [
@@ -509,6 +591,42 @@ describe('Optimizer: Constant Folding', () => {
       if (loopValue.kind === 'loop') {
         expect(loopValue.body[0]!.value).toEqual({ kind: 'load_const', value: 30n });
       }
+    });
+  });
+
+  describe('loop folding: names the body rebinds (N-064)', () => {
+    // The body is emitted once per iteration, so a read before the body's own
+    // rebinding sees the ENTRY value only in iteration 0. A name the body
+    // rebinds is not a constant inside the body, nor after the loop. Proves:
+    // neither the in-body nor the post-loop `x + 1` folds with x = 0.
+    it('does not fold a body-rebound name inside the body or after the loop', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('x', { kind: 'load_const', value: 0n }),
+          b('t0', {
+            kind: 'loop',
+            count: 2,
+            iterVar: 'i',
+            start: 0n,
+            step: 1,
+            body: [
+              b('t1', { kind: 'load_const', value: 1n }),
+              b('t2', { kind: 'bin_op', op: '+', left: 'x', right: 't1' }),
+              b('t3', { kind: 'load_param', name: 'p' }),
+              b('x', { kind: 'load_const', value: '@ref:t3' }),
+            ],
+          }),
+          b('t4', { kind: 'load_const', value: 1n }),
+          b('t5', { kind: 'bin_op', op: '+', left: 'x', right: 't4' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      const loopValue = folded.methods[0]!.body[1]!.value;
+      expect(loopValue.kind).toBe('loop');
+      if (loopValue.kind === 'loop') {
+        expect(loopValue.body[1]!.value.kind).toBe('bin_op');
+      }
+      expect(folded.methods[0]!.body[3]!.value.kind).toBe('bin_op');
     });
   });
 

@@ -261,6 +261,10 @@ class ConstEnv {
     return this.constants.has(name);
   }
 
+  delete(name: string): void {
+    this.constants.delete(name);
+  }
+
   /** Clone the environment (for if-branch isolation). */
   clone(): ConstEnv {
     const env = new ConstEnv();
@@ -292,16 +296,35 @@ function foldBinding(binding: ANFBinding, env: ConstEnv): ANFBinding {
 
   // If the folded value is a load_const, register in the environment.
   // Skip @ref: prefixed strings — they are binding aliases, not real constants.
-  if (foldedValue.kind === 'load_const') {
-    const v = foldedValue.value;
-    if (!(typeof v === 'string' && v.startsWith('@ref:'))) {
-      env.set(name, v);
-    }
+  //
+  // A name may be bound more than once (reassignment, or a user local that
+  // shares a compiler temp's name). The env must track the LATEST binding:
+  // a rebinding to a non-constant drops the old constant, or later uses
+  // would fold with a value the name no longer holds (N-064).
+  const v = foldedValue.kind === 'load_const' ? foldedValue.value : undefined;
+  if (v !== undefined && !(typeof v === 'string' && v.startsWith('@ref:'))) {
+    env.set(name, v);
+  } else {
+    env.delete(name);
   }
 
   const result: ANFBinding = { name, value: foldedValue };
   if (binding.sourceLoc) result.sourceLoc = binding.sourceLoc;
   return result;
+}
+
+/** Every name bound in `bindings`, including inside nested if arms and loop bodies. */
+function boundNames(bindings: ANFBinding[], out: Set<string> = new Set()): Set<string> {
+  for (const b of bindings) {
+    out.add(b.name);
+    if (b.value.kind === 'if') {
+      boundNames(b.value.then, out);
+      boundNames(b.value.else, out);
+    } else if (b.value.kind === 'loop') {
+      boundNames(b.value.body, out);
+    }
+  }
+  return out;
 }
 
 function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
@@ -395,13 +418,24 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
       const foldedThen = foldBindings(value.then, thenEnv);
       const foldedElse = foldBindings(value.else, elseEnv);
 
+      // N-064: a name either arm rebinds may hold the arm's value after the
+      // if (that is how a branch reassigns a local), so the enclosing env's
+      // constant for it is stale past this point.
+      for (const n of boundNames(value.then)) env.delete(n);
+      for (const n of boundNames(value.else)) env.delete(n);
+
       return { ...value, then: foldedThen, else: foldedElse };
     }
 
     case 'loop': {
-      // Fold loop body
+      // Fold loop body. N-064: the body runs once per iteration, so a name it
+      // rebinds holds the entry constant only in iteration 0 — it is not a
+      // constant inside the body, nor after the loop.
+      const rebound = boundNames(value.body);
       const bodyEnv = env.clone();
+      for (const n of rebound) bodyEnv.delete(n);
       const foldedBody = foldBindings(value.body, bodyEnv);
+      for (const n of rebound) env.delete(n);
       return { ...value, body: foldedBody };
     }
 

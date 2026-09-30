@@ -544,4 +544,68 @@ class ConstantFoldTest {
             "constant folding must not change this program's bytes (stale-constant fold)");
     }
 
+
+    // ---------------------------------------------------------------
+    // If-arm / loop-body rebinding (N-064)
+    // ---------------------------------------------------------------
+    //
+    // F-082 made a top-level rebinding drop the stale constant. An if arm or a
+    // loop body that rebinds a name the enclosing env holds as a constant leaks
+    // the same way: the arm's value is what the name holds after the if (that is
+    // how a branch reassigns a local), and a loop body runs once per iteration,
+    // so from iteration 1 on — and after the loop — the name holds the body's
+    // value, not the entry constant.
+    //
+    // Proves: both source-reachable shapes (a user local named like an earlier
+    // compiler temp, reassigned in an if arm / a loop body) compile the same
+    // bytes with folding ON as with folding OFF, pinned to the fold-OFF bytes
+    // every tier emits. Does not prove on-chain behaviour — the Spend-engine
+    // proof for all seven tiers is
+    // packages/runar-testing/src/__tests__/n064-rebind-fold-spend.test.ts.
+
+    @Test
+    void ifArmRebindingDoesNotFoldStaleConstant() throws Exception {
+        String src = String.join("\n",
+            "import { SmartContract, assert } from 'runar-lang';",
+            "class IfStale extends SmartContract {",
+            "  constructor() { super(); }",
+            "  public unlock(p: bigint, c: boolean) {",
+            "    let t2: bigint = p;",
+            "    assert(p > 0n);",
+            "    if (c) {",
+            "      t2 = p;",
+            "    }",
+            "    assert(t2 + 1n === 1n);",
+            "  }",
+            "}",
+            "");
+        String want = "767600877c51879b69785279007c78a0697b637b677b757668778b519c77";
+        assertEquals(want, PipelineTestSupport.hex(src, "IfStale.runar.ts", true));
+        assertEquals(want, PipelineTestSupport.hex(src, "IfStale.runar.ts", false),
+            "folding must not use the pre-if constant of a name an arm rebinds");
+    }
+
+    @Test
+    void loopBodyRebindingDoesNotFoldStaleConstant() throws Exception {
+        String src = String.join("\n",
+            "import { SmartContract, assert } from 'runar-lang';",
+            "class LoopStale extends SmartContract {",
+            "  constructor() { super(); }",
+            "  public unlock(p: bigint) {",
+            "    let t2: bigint = p;",
+            "    assert(p > 0n);",
+            "    for (let i: bigint = 0n; i < 2n; i++) {",
+            "      assert(t2 + 1n === 1n);",
+            "      t2 = p;",
+            "    }",
+            "    assert(t2 + 1n === 1n);",
+            "  }",
+            "}",
+            "");
+        String want = "7678007c78a06900517b7c93519d52797751517b7c93519d7b778b519c77";
+        assertEquals(want, PipelineTestSupport.hex(src, "LoopStale.runar.ts", true));
+        assertEquals(want, PipelineTestSupport.hex(src, "LoopStale.runar.ts", false),
+            "folding must not use the loop-entry constant of a name the body rebinds");
+    }
+
 }

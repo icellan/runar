@@ -91,6 +91,7 @@ test {
     _ = @import("passes/int_literal.zig");
     _ = @import("tests/n098_bytestring_satoshis.zig");
     _ = @import("tests/n005_assert_then_asm.zig");
+    _ = @import("tests/n064_rebind_fold.zig");
     _ = @import("tests/f039_sighash_malformed.zig");
     _ = @import("tests/f064_ts_unsupported_statement.zig");
     _ = @import("tests/n105_scriptbytes.zig");

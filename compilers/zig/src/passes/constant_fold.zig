@@ -478,6 +478,12 @@ fn foldBinding(allocator: Allocator, binding: ANFBinding, env: *ConstEnv) anyerr
 
     // If the folded value is a load_const, register in the environment.
     // Skip @ref: values — they are symbolic references to runtime bindings, not foldable constants.
+    //
+    // A name may be bound more than once (reassignment, or a user local that
+    // shares a compiler temp's name). The env must track the LATEST binding:
+    // a rebinding to a non-constant drops the old constant, or later uses
+    // would fold with a value the name no longer holds (N-064).
+    var registered = false;
     if (anfValueToConst(folded_value)) |cv| {
         const skip = switch (cv) {
             .string => |s| std.mem.startsWith(u8, s, "@ref:"),
@@ -485,8 +491,10 @@ fn foldBinding(allocator: Allocator, binding: ANFBinding, env: *ConstEnv) anyerr
         };
         if (!skip) {
             try env.put(binding.name, cv);
+            registered = true;
         }
     }
+    if (!registered) _ = env.remove(binding.name);
 
     return .{ .name = binding.name, .value = folded_value, .source_loc = binding.source_loc };
 }
@@ -567,6 +575,11 @@ fn foldValue(allocator: Allocator, value: ANFValue, env: *ConstEnv) anyerror!ANF
             defer else_env.deinit();
             const folded_then = try foldBindings(allocator, if_node.then, &then_env);
             const folded_else = try foldBindings(allocator, if_node.@"else", &else_env);
+            // N-064: a name either arm rebinds may hold the arm's value after
+            // the if (that is how a branch reassigns a local), so the enclosing
+            // env's constant for it is stale past this point.
+            removeBoundNames(env, if_node.then);
+            removeBoundNames(env, if_node.@"else");
 
             const new_if = try allocator.create(types.ANFIf);
             new_if.* = .{
@@ -583,9 +596,14 @@ fn foldValue(allocator: Allocator, value: ANFValue, env: *ConstEnv) anyerror!ANF
         },
 
         .loop => |loop_node| {
+            // N-064: the body runs once per iteration, so a name it rebinds
+            // holds the entry constant only in iteration 0 -- it is not a
+            // constant inside the body, nor after the loop.
             var body_env = try cloneEnv(allocator, env);
             defer body_env.deinit();
+            removeBoundNames(&body_env, loop_node.body);
             const folded_body = try foldBindings(allocator, loop_node.body, &body_env);
+            removeBoundNames(env, loop_node.body);
 
             const new_loop = try allocator.create(types.ANFLoop);
             new_loop.* = .{
@@ -630,6 +648,22 @@ fn cloneEnv(allocator: Allocator, env: *const ConstEnv) !ConstEnv {
         try new_env.put(entry.key_ptr.*, entry.value_ptr.*);
     }
     return new_env;
+}
+
+/// Drop from `env` every name bound in `bindings`, including inside nested if
+/// arms and loop bodies.
+fn removeBoundNames(env: *ConstEnv, bindings: []const ANFBinding) void {
+    for (bindings) |b| {
+        _ = env.remove(b.name);
+        switch (b.value) {
+            .@"if" => |n| {
+                removeBoundNames(env, n.then);
+                removeBoundNames(env, n.@"else");
+            },
+            .loop => |n| removeBoundNames(env, n.body),
+            else => {},
+        }
+    }
 }
 
 /// Merge constants from a branch environment into the parent. Only adds new entries.
