@@ -7,6 +7,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const unknown_anf_kind = @import("unknown_anf_kind.zig");
+pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
     MissingField,
@@ -228,6 +229,9 @@ pub fn parseANFProgram(allocator: std.mem.Allocator, json_source: []const u8) !t
     // N-131: refuse float syntax at the door, before any field-specific
     // decoding. See assertNoJSONFloats.
     try assertNoJSONFloats(root);
+    // N-069: required fields present and correctly typed before any `.array`
+    // / `.object` access below; the message is in required_fields.lastDiagnostic().
+    try required_fields.assertRequiredIrFields(allocator, root);
     return try parseProgram(allocator, root);
 }
 

@@ -14,6 +14,7 @@ require_relative "types"
 require_relative "../frontend/typecheck"
 require_relative "unknown_anf_kind_error"
 require_relative "input_limits"
+require_relative "required_fields"
 
 module RunarCompiler
   module IR
@@ -86,6 +87,10 @@ module RunarCompiler
       rescue InputLimits::IRFloatValueError => e
         raise ArgumentError, e.message
       end
+
+      # N-069: required fields present and correctly typed, with the field
+      # path in the diagnostic, before anf_program_from_hash defaults anything.
+      RequiredFields.assert!(d)
 
       program = anf_program_from_hash(d)
 

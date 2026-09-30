@@ -300,9 +300,11 @@ func TestLoadIRFromBytes_RoundTrip(t *testing.T) {
 		},
 		Methods: []ANFMethod{
 			{
-				Name:     "constructor",
-				Params:   []ANFParam{{Name: "target", Type: "bigint"}},
-				Body:     nil,
+				Name:   "constructor",
+				Params: []ANFParam{{Name: "target", Type: "bigint"}},
+				// N-069: an empty body, not nil — json.Marshal writes a nil
+				// slice as `null`, and `body` is a required array.
+				Body:     []ANFBinding{},
 				IsPublic: false,
 			},
 			{

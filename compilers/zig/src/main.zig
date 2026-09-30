@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         };
         compileFromIR(allocator, io, args[2], opts) catch |err| {
-            std.debug.print("error: {s}\n", .{@errorName(err)});
+            printIrError(err);
             std.process.exit(1);
         };
         return;
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         else
             compileFromSource(allocator, io, file_path, opts);
         result catch |err| {
-            std.debug.print("error: {s}\n", .{@errorName(err)});
+            printIrError(err);
             std.process.exit(1);
         };
         return;
@@ -228,6 +228,18 @@ fn writeStdoutLn(io: std.Io, data: []const u8) !void {
 }
 
 /// Compile from ANF IR JSON (passes 5-6 only)
+/// N-069: the required-field check leaves its field-path message beside the
+/// error name, because Zig errors carry no payload.
+fn printIrError(err: anyerror) void {
+    if (err == error.IRRequiredFieldMissing or err == error.IRFieldWrongType) {
+        if (json_parser.required_fields.lastDiagnostic()) |msg| {
+            std.debug.print("error: {s}\n", .{msg});
+            return;
+        }
+    }
+    std.debug.print("error: {s}\n", .{@errorName(err)});
+}
+
 fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opts: CompileOptions) !void {
     // N-119: run the whole IR pipeline in one arena, exactly as
     // `compileFromSource` below already does.

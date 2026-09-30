@@ -127,6 +127,7 @@ import { eliminateDeadBindings } from './optimizer/dce.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact } from './ir/index.js';
+import { assertRequiredIrFields } from './ir/anf-required-fields.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -722,15 +723,9 @@ export function loadANFFromJSON(json: string): ANFProgram {
     throw new Error('loadANFFromJSON: top-level value is not an object');
   }
   const program = parsed as Partial<ANFProgram>;
-  if (typeof program.contractName !== 'string') {
-    throw new Error('loadANFFromJSON: missing string field "contractName"');
-  }
-  if (!Array.isArray(program.properties)) {
-    throw new Error('loadANFFromJSON: missing array field "properties"');
-  }
-  if (!Array.isArray(program.methods)) {
-    throw new Error('loadANFFromJSON: missing array field "methods"');
-  }
+  // N-069: every required field, present and of the right JSON type, with the
+  // field path in the diagnostic (shared verbatim with the other six tiers).
+  assertRequiredIrFields(program);
   coerceNumericBigInts(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);

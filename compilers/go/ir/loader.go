@@ -39,6 +39,12 @@ func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
 		return nil, err
 	}
 
+	// N-069: required fields present and correctly typed, with the field path
+	// in the diagnostic, before encoding/json zero-fills anything missing.
+	if err := assertRequiredIRFields(data); err != nil {
+		return nil, err
+	}
+
 	var program ANFProgram
 	if err := json.Unmarshal(data, &program); err != nil {
 		return nil, fmt.Errorf("invalid IR JSON: %w", err)

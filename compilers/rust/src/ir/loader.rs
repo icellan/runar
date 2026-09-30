@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use super::{ANFBinding, ANFProgram, ANFValue};
+use super::required_fields::assert_required_ir_fields;
 use super::input_limits::{
     assert_ir_bytes_under_limit, assert_ir_nesting_under_limit, assert_no_json_floats,
 };
@@ -39,6 +40,8 @@ pub fn load_ir_from_str(json_str: &str) -> Result<ANFProgram, String> {
     if let Some(e) = assert_no_json_floats(json_str.as_bytes()) {
         return Err(e.to_string());
     }
+    // N-069: required fields present and correctly typed, named by path.
+    assert_required_ir_fields(json_str)?;
     let program: ANFProgram = serde_json::from_str(json_str)
         .map_err(|e| describe_ir_parse_error(&e))?;
     validate_ir(&program)?;
@@ -63,6 +66,8 @@ pub fn load_ir_from_str_typed(
     if let Some(e) = assert_no_json_floats(json_str.as_bytes()) {
         return Err(IRLoaderError::Float(e));
     }
+    // N-069 — see load_ir_from_str.
+    assert_required_ir_fields(json_str).map_err(IRLoaderError::Other)?;
     serde_json::from_str::<ANFProgram>(json_str)
         .map_err(|e| IRLoaderError::Other(describe_ir_parse_error(&e)))
         .and_then(|p| {

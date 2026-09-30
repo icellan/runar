@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .required_fields import assert_required_ir_fields
 from .types import (
     ANFBinding,
     ANFProgram,
@@ -107,6 +108,10 @@ def load_ir(source: str) -> ANFProgram:
         raise ValueError(str(exc)) from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid IR JSON: {exc}") from exc
+
+    # N-069: required fields present and correctly typed, with the field path
+    # in the diagnostic, before anf_program_from_dict defaults anything.
+    assert_required_ir_fields(d)
 
     program = anf_program_from_dict(d)
 

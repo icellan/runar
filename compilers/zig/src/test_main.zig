@@ -5,6 +5,7 @@ test {
     _ = @import("ir/unknown_anf_kind_test.zig");
     _ = @import("ir/json_size_guard_test.zig");
     _ = @import("ir/n113_ir_trust_boundary_test.zig");
+    _ = @import("ir/n069_required_fields_test.zig");
     _ = @import("ir/n115_ir_loop_cap_test.zig");
     _ = @import("ir/n115_ir_float_narrowing_test.zig");
     _ = @import("ir/n133_loop_start_test.zig");

@@ -1,0 +1,1484 @@
+{
+  "_comment": [
+    "N-069: shared corpus for the --ir loader's required-field presence/type check.",
+    "Each case is `control` with ONE field removed or retyped; `error` is the exact diagnostic",
+    "every tier must print (the F-084 stem). Required set = anf-ir.schema.json required keys,",
+    "minus the ones the loaders deliberately default (loop start/step, add_output preimage)."
+  ],
+  "control": {
+    "contractName": "X",
+    "properties": [
+      {
+        "name": "pk",
+        "type": "PubKey",
+        "readonly": true
+      }
+    ],
+    "methods": [
+      {
+        "name": "unlock",
+        "isPublic": true,
+        "params": [
+          {
+            "name": "sig",
+            "type": "Sig"
+          }
+        ],
+        "body": [
+          {
+            "name": "t0",
+            "value": {
+              "kind": "load_param",
+              "name": "sig"
+            }
+          },
+          {
+            "name": "t1",
+            "value": {
+              "kind": "load_prop",
+              "name": "pk"
+            }
+          },
+          {
+            "name": "t2",
+            "value": {
+              "kind": "call",
+              "func": "checkSig",
+              "args": [
+                "t0",
+                "t1"
+              ]
+            }
+          },
+          {
+            "name": "t3",
+            "value": {
+              "kind": "assert",
+              "value": "t2"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "body-omitted",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body is missing"
+    },
+    {
+      "name": "body-string",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": "not-an-array"
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].body must be an array, got string"
+    },
+    {
+      "name": "body-null",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": null
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body is missing"
+    },
+    {
+      "name": "params-object",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": {
+              "name": "sig",
+              "type": "Sig"
+            },
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].params must be an array, got object"
+    },
+    {
+      "name": "method-name-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].name is missing"
+    },
+    {
+      "name": "is-public-string",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": "true",
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].isPublic must be a boolean, got string"
+    },
+    {
+      "name": "is-public-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].isPublic is missing"
+    },
+    {
+      "name": "method-not-object",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          "unlock"
+        ]
+      },
+      "error": "IR validation: methods[0] must be an object, got string"
+    },
+    {
+      "name": "contract-name-number",
+      "ir": {
+        "contractName": 7,
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: contractName must be a string, got number"
+    },
+    {
+      "name": "properties-missing",
+      "ir": {
+        "contractName": "X",
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field properties is missing"
+    },
+    {
+      "name": "methods-object",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": {}
+      },
+      "error": "IR validation: methods must be an array, got object"
+    },
+    {
+      "name": "property-readonly-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey"
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field properties[0].readonly is missing"
+    },
+    {
+      "name": "property-type-array",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": [],
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: properties[0].type must be a string, got array"
+    },
+    {
+      "name": "param-type-number",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": 1
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].params[0].type must be a string, got number"
+    },
+    {
+      "name": "binding-not-object",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              "t0",
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].body[0] must be an object, got string"
+    },
+    {
+      "name": "binding-name-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body[0].name is missing"
+    },
+    {
+      "name": "binding-value-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0"
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].body[0].value must be an object, got null"
+    },
+    {
+      "name": "value-kind-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body[0].value.kind is missing"
+    },
+    {
+      "name": "value-kind-boolean",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": true,
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].body[0].value.kind must be a string, got boolean"
+    },
+    {
+      "name": "load-param-name-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body[0].value.name is missing"
+    },
+    {
+      "name": "call-args-object",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": {}
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].body[2].value.args must be an array, got object"
+    },
+    {
+      "name": "call-arg-number",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    1
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].body[2].value.args[1] must be a string, got number"
+    },
+    {
+      "name": "assert-value-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body[3].value.value is missing"
+    },
+    {
+      "name": "if-then-string",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "if",
+                  "cond": "t2",
+                  "then": "x",
+                  "else": []
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].body[3].value.then must be an array, got string"
+    },
+    {
+      "name": "if-else-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "if",
+                  "cond": "t2",
+                  "then": []
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body[3].value.else is missing"
+    },
+    {
+      "name": "if-nested-binding",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "if",
+                  "cond": "t2",
+                  "then": [
+                    {
+                      "name": "u0",
+                      "value": {
+                        "kind": "load_param"
+                      }
+                    }
+                  ],
+                  "else": []
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body[3].value.then[0].value.name is missing"
+    },
+    {
+      "name": "loop-body-missing",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "loop",
+                  "count": 1,
+                  "iterVar": "i",
+                  "start": 0,
+                  "step": 1
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "error": "IR validation: required field methods[0].body[3].value.body is missing"
+    }
+  ]
+}
