@@ -203,11 +203,6 @@ function artifact(tier: string, file: string, src: string): RunarArtifact {
   }
   const { cmd, pre, cwd } = NATIVE[tier]!();
   const art = JSON.parse(run(cmd, [...pre, '--source', writeTmp(file, src)], cwd));
-  // The Go CLI serializes a zero-parameter constructor as `"params": null`,
-  // which the TS SDK cannot load. That is a separate artifact-shape defect
-  // (reported with N-064), not what this test is about: the script bytes are
-  // untouched by this normalization.
-  art.abi.constructor.params ??= [];
   return art;
 }
 

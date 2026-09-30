@@ -336,7 +336,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 	if err != nil {
 		return nil, err
 	}
-	var constructorParams []ABIParam
+	constructorParams := []ABIParam{}
 	for _, e := range regroupedCtor {
 		p := ABIParam{Name: e.name, Type: e.typ}
 		if e.fixedArray != nil {

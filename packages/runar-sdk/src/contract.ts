@@ -391,6 +391,18 @@ export class RunarContract {
     this.artifact = artifact;
     this.constructorArgs = constructorArgs;
 
+    // Fail closed on a malformed artifact rather than crash a few lines down
+    // with a generic "Cannot read properties of null" TypeError. A conforming
+    // producer always emits an array here (possibly empty); a non-array
+    // (e.g. a pre-fix Go artifact that serialized a zero-parameter
+    // constructor as `null` — see N-067) means the wire data itself is not
+    // trustworthy, so this refuses rather than silently normalizing to [].
+    if (!Array.isArray(artifact.abi.constructor.params)) {
+      throw new Error(
+        `RunarContract: malformed artifact for ${artifact.contractName}: abi.constructor.params must be an array, got ${JSON.stringify(artifact.abi.constructor.params)}`,
+      );
+    }
+
     // Validate constructor args match ABI
     const expected = artifact.abi.constructor.params.length;
     if (constructorArgs.length !== expected) {
