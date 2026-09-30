@@ -777,8 +777,17 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 	case *ast.BinaryExpr:
 		left := p.convertExpression(e.X)
 		right := p.convertExpression(e.Y)
-		op := mapGoOp(e.Op)
 		if left == nil || right == nil {
+			return nil
+		}
+		// F-074: `a &^ b` (bit clear) is `a & ~b`, which is what the TS
+		// reference's lexer produces for it (`&` then prefix `^`).
+		if e.Op == token.AND_NOT {
+			return BinaryExpr{Op: "&", Left: left, Right: UnaryExpr{Op: "~", Operand: right}}
+		}
+		op, ok := mapGoOp(e.Op)
+		if !ok {
+			p.addError(fmt.Sprintf("Unsupported binary operator: '%s'", e.Op))
 			return nil
 		}
 		return BinaryExpr{Op: op, Left: left, Right: right}
@@ -839,46 +848,48 @@ var goCompoundAssignOps = map[token.Token]string{
 	token.REM_ASSIGN: "%",
 }
 
-func mapGoOp(op token.Token) string {
+// mapGoOp maps a Go binary token to its Rúnar operator; false for a token it
+// has no mapping for, which the caller refuses (F-074: it used to return "+").
+func mapGoOp(op token.Token) (string, bool) {
 	switch op {
 	case token.ADD:
-		return "+"
+		return "+", true
 	case token.SUB:
-		return "-"
+		return "-", true
 	case token.MUL:
-		return "*"
+		return "*", true
 	case token.QUO:
-		return "/"
+		return "/", true
 	case token.REM:
-		return "%"
+		return "%", true
 	case token.EQL:
-		return "==="
+		return "===", true
 	case token.NEQ:
-		return "!=="
+		return "!==", true
 	case token.LSS:
-		return "<"
+		return "<", true
 	case token.LEQ:
-		return "<="
+		return "<=", true
 	case token.GTR:
-		return ">"
+		return ">", true
 	case token.GEQ:
-		return ">="
+		return ">=", true
 	case token.LAND:
-		return "&&"
+		return "&&", true
 	case token.LOR:
-		return "||"
+		return "||", true
 	case token.AND:
-		return "&"
+		return "&", true
 	case token.OR:
-		return "|"
+		return "|", true
 	case token.XOR:
-		return "^"
+		return "^", true
 	case token.SHL:
-		return "<<"
+		return "<<", true
 	case token.SHR:
-		return ">>"
+		return ">>", true
 	}
-	return "+"
+	return "", false
 }
 
 // bigintBigOpFor returns the Rúnar binary-operator string that the named
