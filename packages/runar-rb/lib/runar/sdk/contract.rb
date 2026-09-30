@@ -640,8 +640,13 @@ module Runar
         fee_rate          = provider.get_fee_rate
         change_script     = SDK.build_p2pkh_script(change_address)
         all_funding_utxos = provider.get_utxos(address)
+        # Never fund with an outpoint this tx already spends as a contract input
+        # (the primary, or any additional_contract_inputs -- F-045: a merge's
+        # second token UTXO listed at the same address was picked as a P2PKH
+        # funding input too, spending one outpoint twice).
         candidate_funding_utxos = all_funding_utxos.reject do |u|
-          u.txid == @current_utxo.txid && u.output_index == @current_utxo.output_index
+          (u.txid == @current_utxo.txid && u.output_index == @current_utxo.output_index) ||
+            extra_contract_utxos.any? { |x| x.txid == u.txid && x.output_index == u.output_index }
         end
 
         # Coin selection for funding inputs (#133): don't sweep the whole

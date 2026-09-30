@@ -5,7 +5,6 @@ use super::provider::Provider;
 use super::signer::Signer;
 use super::contract::RunarContract;
 use super::script_utils::build_p2pkh_script;
-use super::calling::build_call_transaction;
 
 /// Manages token UTXOs for a fungible token contract.
 ///
@@ -80,36 +79,19 @@ impl TokenWallet {
 
             if balance >= amount {
                 // FungibleToken.transfer(sig: Sig, to: Addr)
-                // Build a preliminary unlocking script with a placeholder sig
-                let placeholder_sig = "00".repeat(72);
-                let prelim_unlock = contract.build_unlocking_script(
-                    "transfer",
-                    &[SdkValue::Bytes(placeholder_sig), SdkValue::Bytes(recipient_addr.to_string())],
-                )?;
-
+                // F-045: pass Auto for the Sig so `call` auto-signs the
+                // transaction it actually builds and broadcasts. Signing a
+                // locally built preliminary tx covers a different tx and is
+                // rejected on-chain.
+                // An Addr is a 20-byte hash160: accept a Base58 address (as
+                // documented), a raw hash160, or a public key.
+                let to_pkh = build_p2pkh_script(recipient_addr)[6..46].to_string();
                 let change_address = self.signer.get_address()?;
-                let fee_rate = self.provider.get_fee_rate()?;
-                let additional_utxos = self.provider.get_utxos(&change_address)?;
-                let change_script = build_p2pkh_script(&change_address);
-
-                let (prelim_tx, _, _) = build_call_transaction(
-                    utxo,
-                    &prelim_unlock,
-                    None, // FungibleToken is stateless
-                    None,
-                    Some(&change_address),
-                    Some(&change_script),
-                    if additional_utxos.is_empty() { None } else { Some(&additional_utxos) },
-                    Some(fee_rate),
-                )?;
-
-                // Sign input 0 against the contract UTXO's locking script
-                let sig = self.signer.sign(&prelim_tx, 0, &utxo.script, utxo.satoshis, None)?;
 
                 let mut contract_mut = contract;
                 let (txid, _) = contract_mut.call(
                     "transfer",
-                    &[SdkValue::Bytes(sig), SdkValue::Bytes(recipient_addr.to_string())],
+                    &[SdkValue::Auto, SdkValue::Bytes(to_pkh)],
                     &mut *self.provider,
                     &*self.signer,
                     Some(&CallOptions {
@@ -166,40 +148,25 @@ impl TokenWallet {
             .unwrap_or_default();
 
         // FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-        let placeholder_sig = "00".repeat(72);
-        let prelim_unlock = contract.build_unlocking_script(
-            "merge",
-            &[
-                SdkValue::Bytes(placeholder_sig),
-                SdkValue::Int(other_supply),
-                SdkValue::Bytes(other_holder.clone()),
-            ],
-        )?;
+        // F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+        // the OTHER input's supply/holder, and every Sig is Auto so `call`
+        // signs each input over the transaction it actually broadcasts.
+        let first_state = contract.state();
+        let first_supply = get_balance_from_state(first_state);
+        let first_holder = first_state.get("holder")
+            .map(|v| match v {
+                SdkValue::Bytes(s) => s.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
 
         let change_address = self.signer.get_address()?;
-        let fee_rate = self.provider.get_fee_rate()?;
-        let additional_utxos = self.provider.get_utxos(&change_address)?;
-        let change_script = build_p2pkh_script(&change_address);
-
-        let (prelim_tx, _, _) = build_call_transaction(
-            first_utxo,
-            &prelim_unlock,
-            None,
-            None,
-            Some(&change_address),
-            Some(&change_script),
-            if additional_utxos.is_empty() { None } else { Some(&additional_utxos) },
-            Some(fee_rate),
-        )?;
-
-        // Sign input 0 against the first contract UTXO's locking script
-        let sig = self.signer.sign(&prelim_tx, 0, &first_utxo.script, first_utxo.satoshis, None)?;
 
         let mut contract_mut = contract;
         let (txid, _) = contract_mut.call(
             "merge",
             &[
-                SdkValue::Bytes(sig),
+                SdkValue::Auto,
                 SdkValue::Int(other_supply),
                 SdkValue::Bytes(other_holder),
             ],
@@ -207,6 +174,12 @@ impl TokenWallet {
             &*self.signer,
             Some(&CallOptions {
                 change_address: Some(change_address),
+                additional_contract_inputs: Some(vec![second_utxo.clone()]),
+                additional_contract_input_args: Some(vec![vec![
+                    SdkValue::Auto,
+                    SdkValue::Int(first_supply),
+                    SdkValue::Bytes(first_holder),
+                ]]),
                 ..Default::default()
             }),
         )?;

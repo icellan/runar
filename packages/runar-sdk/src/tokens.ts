@@ -7,7 +7,6 @@ import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { UTXO } from './types.js';
 import { RunarContract } from './contract.js';
-import { buildCallTransaction } from './calling.js';
 import { buildP2PKHScript } from './script-utils.js';
 
 /**
@@ -80,34 +79,18 @@ export class TokenWallet {
 
       if (balance >= amount) {
         // FungibleToken.transfer(sig: Sig, to: Addr)
-        // Build a preliminary unlocking script with a placeholder sig so we
-        // can construct the transaction, then BIP-143 sign input 0.
-        const placeholderSig = '00'.repeat(72); // DER sig placeholder
-        const prelimUnlock = contract.buildUnlockingScript('transfer', [placeholderSig, recipientAddr]);
-
-        // Build the preliminary transaction to obtain a signable tx hex
+        // F-045: pass `null` for the Sig so contract.call auto-signs the
+        // transaction it actually builds and broadcasts. Signing a locally
+        // built preliminary tx and passing that signature in covers a
+        // different tx (coin selection, unlock size, change, subscript) and
+        // is rejected on-chain.
+        // An Addr is a 20-byte hash160: accept a Base58 address (as
+        // documented), a raw hash160, or a public key.
+        const toPKH = buildP2PKHScript(recipientAddr).slice(6, 46);
         const changeAddress = await this.signer.getAddress();
-        const feeRate = await this.provider.getFeeRate();
-        const additionalUtxos = await this.provider.getUtxos(changeAddress);
-        const changeScript = buildP2PKHScript(changeAddress);
-
-        const { tx: prelimTx } = buildCallTransaction(
-          utxo,
-          prelimUnlock,
-          undefined, // FungibleToken is stateless (SmartContract base)
-          undefined,
-          changeAddress,
-          changeScript,
-          additionalUtxos.length > 0 ? additionalUtxos : undefined,
-          feeRate,
-        );
-
-        // Sign input 0 against the contract UTXO's locking script
-        const sig = await this.signer.sign(prelimTx.toHex(), 0, utxo.script, utxo.satoshis);
-
         const result = await contract.call(
           'transfer',
-          [sig, recipientAddr],
+          [null, toPKH],
           this.provider,
           this.signer,
           { changeAddress },
@@ -158,35 +141,24 @@ export class TokenWallet {
     const otherHolder = (secondState['holder'] ?? '') as string;
 
     // FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-    // Build a preliminary transaction with a placeholder sig for BIP-143 signing.
-    const placeholderSig = '00'.repeat(72);
-    const prelimUnlock = contract.buildUnlockingScript('merge', [placeholderSig, otherSupply, otherHolder]);
+    // F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries the
+    // OTHER input's supply/holder, and every Sig is `null` so contract.call
+    // signs each input over the transaction it actually broadcasts.
+    const firstState = contract.state;
+    const firstSupply = BigInt((firstState['supply'] ?? firstState['balance'] ?? firstState['amount'] ?? 0) as number | bigint);
+    const firstHolder = (firstState['holder'] ?? '') as string;
 
     const changeAddress = await this.signer.getAddress();
-    const feeRate = await this.provider.getFeeRate();
-    const additionalUtxos = await this.provider.getUtxos(changeAddress);
-    const changeScript = buildP2PKHScript(changeAddress);
-
-    const { tx: prelimTx } = buildCallTransaction(
-      firstUtxo,
-      prelimUnlock,
-      undefined,
-      undefined,
-      changeAddress,
-      changeScript,
-      additionalUtxos.length > 0 ? additionalUtxos : undefined,
-      feeRate,
-    );
-
-    // Sign input 0 against the first contract UTXO's locking script
-    const sig = await this.signer.sign(prelimTx.toHex(), 0, firstUtxo.script, firstUtxo.satoshis);
-
     const result = await contract.call(
       'merge',
-      [sig, otherSupply, otherHolder],
+      [null, otherSupply, otherHolder],
       this.provider,
       this.signer,
-      { changeAddress },
+      {
+        changeAddress,
+        additionalContractInputs: [secondUtxo],
+        additionalContractInputArgs: [[null, firstSupply, firstHolder]],
+      },
     );
 
     return result.txid;

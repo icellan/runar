@@ -71,30 +71,14 @@ module Runar
           next unless balance >= amount
 
           # FungibleToken.transfer(sig: Sig, to: Addr)
-          # Build a preliminary unlocking script with a placeholder sig.
-          placeholder_sig = '00' * 72
-          prelim_unlock = contract.build_unlocking_script('transfer', [placeholder_sig, recipient_addr])
-
-          change_address = @signer.get_address
-          fee_rate = @provider.get_fee_rate
-          additional_utxos = @provider.get_utxos(change_address)
-          change_script = SDK.build_p2pkh_script(change_address)
-
-          _tx_hex, _input_count, _change = SDK.build_call_transaction(
-            utxo,
-            prelim_unlock,
-            '', # FungibleToken is stateless (SmartContract base)
-            0,
-            change_address,
-            change_script,
-            additional_utxos.empty? ? nil : additional_utxos,
-            fee_rate: fee_rate
-          )
-
-          # Call the contract method via the RunarContract API.
+          # F-045: pass nil for the Sig so +call+ auto-signs the transaction it
+          # actually builds and broadcasts. Signing a locally built preliminary
+          # tx covers a different tx and is rejected on-chain.
+          # An Addr is a 20-byte hash160: accept a Base58 address (as
+          # documented), a raw hash160, or a public key.
+          to_pkh = SDK.build_p2pkh_script(recipient_addr)[6, 40]
           contract.connect(@provider, @signer)
-          sig = @signer.sign(_tx_hex, 0, utxo.script, utxo.satoshis)
-          txid, _tx = contract.call('transfer', [sig, recipient_addr])
+          txid, _tx = contract.call('transfer', [nil, to_pkh])
           return txid
         end
 
@@ -123,29 +107,20 @@ module Runar
         other_holder = (second_state['holder'] || '').to_s
 
         # FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-        placeholder_sig = '00' * 72
-        prelim_unlock = contract.build_unlocking_script('merge', [placeholder_sig, other_supply, other_holder])
+        # F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+        # the OTHER input's supply/holder, and every Sig is nil so +call+ signs
+        # each input over the transaction it actually broadcasts.
+        first_state = contract.get_state
+        first_supply = (first_state['supply'] || first_state['balance'] || first_state['amount'] || 0).to_i
+        first_holder = (first_state['holder'] || '').to_s
 
-        change_address = @signer.get_address
-        fee_rate = @provider.get_fee_rate
-        additional_utxos = @provider.get_utxos(change_address)
-        change_script = SDK.build_p2pkh_script(change_address)
-
-        _tx_hex, _input_count, _change = SDK.build_call_transaction(
-          first_utxo,
-          prelim_unlock,
-          '',
-          0,
-          change_address,
-          change_script,
-          additional_utxos.empty? ? nil : additional_utxos,
-          fee_rate: fee_rate
-        )
-
-        # Sign and call via the RunarContract API.
         contract.connect(@provider, @signer)
-        sig = @signer.sign(_tx_hex, 0, first_utxo.script, first_utxo.satoshis)
-        txid, _tx = contract.call('merge', [sig, other_supply, other_holder])
+        opts = CallOptions.new(
+          change_address: @signer.get_address,
+          additional_contract_inputs: [second_utxo],
+          additional_contract_input_args: [[nil, first_supply, first_holder]]
+        )
+        txid, _tx = contract.call('merge', [nil, other_supply, other_holder], nil, nil, opts)
         txid
       end
 

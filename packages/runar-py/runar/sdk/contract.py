@@ -947,10 +947,14 @@ class RunarContract:
         fee_rate = provider.get_fee_rate()
         change_script = build_p2pkh_script(change_address)
         all_funding_utxos = provider.get_utxos(address)
-        # Filter out the contract UTXO to avoid duplicate inputs
+        # Filter out every contract UTXO this tx spends (the primary and any
+        # additional_contract_inputs) to avoid duplicate inputs (F-045: a
+        # merge's second token UTXO listed at the same address was picked as a
+        # P2PKH funding input too).
         candidate_funding_utxos: list[Utxo] = [
             u for u in all_funding_utxos
             if not (u.txid == self._current_utxo.txid and u.output_index == self._current_utxo.output_index)
+            and not any(x.txid == u.txid and x.output_index == u.output_index for x in extra_contract_utxos)
         ]
 
         # Resolve per-input args for additional contract inputs (same

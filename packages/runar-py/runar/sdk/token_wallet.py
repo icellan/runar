@@ -15,7 +15,6 @@ from runar.sdk.types import RunarArtifact, Utxo
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.contract import RunarContract
-from runar.sdk.calling import build_call_transaction
 from runar.sdk.deployment import build_p2pkh_script
 
 
@@ -91,33 +90,15 @@ class TokenWallet:
 
             if balance >= amount:
                 # FungibleToken.transfer(sig: Sig, to: Addr)
-                # Build a preliminary unlocking script with a placeholder sig
-                placeholder_sig = '00' * 72
-                prelim_unlock = contract.build_unlocking_script(
-                    'transfer', [placeholder_sig, recipient_addr]
-                )
-
-                change_address = self.signer.get_address()
-                fee_rate = self.provider.get_fee_rate()
-                additional_utxos = self.provider.get_utxos(change_address)
-                change_script = build_p2pkh_script(change_address)
-
-                build_call_transaction(
-                    utxo,
-                    prelim_unlock,
-                    '',  # FungibleToken is stateless (SmartContract base)
-                    0,
-                    change_address,
-                    change_script,
-                    additional_utxos if additional_utxos else None,
-                    fee_rate,
-                )
-
-                # Sign input 0 against the contract UTXO's locking script
+                # F-045: pass None for the Sig so contract.call auto-signs the
+                # transaction it actually builds and broadcasts.
+                # An Addr is a 20-byte hash160: accept a Base58 address (as
+                # documented), a raw hash160, or a public key.
+                to_pkh = build_p2pkh_script(recipient_addr)[6:46]
                 contract.connect(self.provider, self.signer)
                 txid, _ = contract.call(
                     'transfer',
-                    [None, recipient_addr],
+                    [None, to_pkh],
                     options=None,
                 )
                 return txid
@@ -166,6 +147,18 @@ class TokenWallet:
         other_holder = second_state.get('holder', '')
 
         # FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
+        # F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+        # the OTHER input's supply/holder, and every Sig is None so
+        # contract.call signs each input over the tx it actually broadcasts.
+        first_state = contract.get_state()
+        first_supply = int(
+            first_state.get('supply')
+            or first_state.get('balance')
+            or first_state.get('amount')
+            or 0
+        )
+        first_holder = first_state.get('holder', '')
+
         contract.connect(self.provider, self.signer)
         change_address = self.signer.get_address()
 
@@ -173,7 +166,11 @@ class TokenWallet:
         txid, _ = contract.call(
             'merge',
             [None, other_supply, other_holder],
-            options=CallOptions(change_address=change_address),
+            options=CallOptions(
+                change_address=change_address,
+                additional_contract_inputs=[second_utxo],
+                additional_contract_input_args=[[None, first_supply, first_holder]],
+            ),
         )
 
         return txid

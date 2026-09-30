@@ -1433,8 +1433,13 @@ export class RunarContract {
     const feeRate = await provider.getFeeRate();
     const changeScript = buildP2PKHScript(changeAddress);
     const allFundingUtxos = await provider.getUtxos(address);
+    // Never fund with an outpoint this tx already spends as a contract input
+    // (the primary, or any additionalContractInputs — F-045: a merge's second
+    // token UTXO listed at the same address was picked as a P2PKH funding
+    // input too, spending one outpoint twice).
     const candidateFundingUtxos = allFundingUtxos.filter(
-      (u) => !(u.txid === this.currentUtxo!.txid && u.outputIndex === this.currentUtxo!.outputIndex),
+      (u) => !(u.txid === this.currentUtxo!.txid && u.outputIndex === this.currentUtxo!.outputIndex)
+        && !extraContractUtxos.some((c) => c.txid === u.txid && c.outputIndex === u.outputIndex),
     );
 
     // Resolve per-input args for additional contract inputs. Hoisted ABOVE the

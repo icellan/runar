@@ -1110,10 +1110,14 @@ impl RunarContract {
         let fee_rate = provider.get_fee_rate()?;
         let change_script_str = build_p2pkh_script_from_address(change_address);
         let all_funding_utxos = provider.get_utxos(&address).unwrap_or_default();
-        // Filter out the contract UTXO from funding UTXOs to avoid duplicate inputs
+        // Filter out every contract UTXO this tx spends (the primary and any
+        // additional_contract_inputs) from funding UTXOs to avoid duplicate
+        // inputs (F-045: a merge's second token UTXO listed at the same
+        // address was picked as a P2PKH funding input too).
         let candidate_funding_utxos: Vec<Utxo> = all_funding_utxos
             .into_iter()
             .filter(|u| !(u.txid == current_utxo.txid && u.output_index == current_utxo.output_index))
+            .filter(|u| !extra_contract_utxos.iter().any(|x| x.txid == u.txid && x.output_index == u.output_index))
             .collect();
 
         // Resolve per-input args for additional contract inputs (same Sig/PubKey/ByteString handling as primary args)

@@ -82,47 +82,23 @@ func (tw *TokenWallet) Transfer(recipientAddr string, amount int64) (string, err
 
 		if balance >= amount {
 			// FungibleToken.transfer(sig: Sig, to: Addr)
-			// Build a preliminary unlocking script with a placeholder sig
-			placeholderSig := strings.Repeat("00", 72)
-			prelimUnlock := contract.BuildUnlockingScript("transfer", []interface{}{placeholderSig, recipientAddr})
-
+			// F-045: pass nil for the Sig so Call auto-signs the transaction
+			// it actually builds and broadcasts. Signing a locally built
+			// preliminary tx covers a different tx and is rejected on-chain.
+			// An Addr is a 20-byte hash160: accept a Base58 address (as
+			// documented), a raw hash160, or a public key.
+			toPKH, err := addrToPKH(recipientAddr)
+			if err != nil {
+				return "", fmt.Errorf("TokenWallet.transfer: %w", err)
+			}
 			changeAddress, err := tw.signer.GetAddress()
 			if err != nil {
 				return "", fmt.Errorf("TokenWallet.transfer: getting address: %w", err)
 			}
-			feeRate, err := tw.provider.GetFeeRate()
-			if err != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: getting fee rate: %w", err)
-			}
-			additionalUtxos, err := tw.provider.GetUtxos(changeAddress)
-			if err != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: getting UTXOs: %w", err)
-			}
-			changeScript := BuildP2PKHScript(changeAddress)
-
-			prelimTx, _, _, prelimErr := BuildCallTransaction(
-				utxo,
-				prelimUnlock,
-				"",  // FungibleToken is stateless (SmartContract base)
-				0,
-				changeAddress,
-				changeScript,
-				additionalUtxos,
-				feeRate,
-			)
-			if prelimErr != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: %w", prelimErr)
-			}
-
-			// Sign input 0 against the contract UTXO's locking script
-			sig, err := tw.signer.Sign(prelimTx.Hex(), 0, utxo.Script, utxo.Satoshis, nil)
-			if err != nil {
-				return "", fmt.Errorf("TokenWallet.transfer: signing: %w", err)
-			}
 
 			txid, _, err := contract.Call(
 				"transfer",
-				[]interface{}{sig, recipientAddr},
+				[]interface{}{nil, toPKH},
 				tw.provider,
 				tw.signer,
 				&CallOptions{ChangeAddress: changeAddress},
@@ -173,49 +149,31 @@ func (tw *TokenWallet) Merge() (string, error) {
 	}
 
 	// FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
-	placeholderSig := strings.Repeat("00", 72)
-	prelimUnlock := contract.BuildUnlockingScript("merge", []interface{}{placeholderSig, int64(otherSupply), otherHolder})
+	// F-045: spend BOTH token UTXOs in one tx. Each input's unlock carries
+	// the OTHER input's supply/holder, and every Sig is nil so Call signs
+	// each input over the transaction it actually broadcasts.
+	firstState := contract.GetState()
+	firstSupply := toInt64(getBalanceField(firstState))
+	firstHolder := ""
+	if h, ok := firstState["holder"]; ok {
+		firstHolder = fmt.Sprintf("%v", h)
+	}
 
 	changeAddress, err := tw.signer.GetAddress()
 	if err != nil {
 		return "", fmt.Errorf("TokenWallet.merge: getting address: %w", err)
 	}
-	feeRate, err := tw.provider.GetFeeRate()
-	if err != nil {
-		return "", fmt.Errorf("TokenWallet.merge: getting fee rate: %w", err)
-	}
-	additionalUtxos, err := tw.provider.GetUtxos(changeAddress)
-	if err != nil {
-		return "", fmt.Errorf("TokenWallet.merge: getting UTXOs: %w", err)
-	}
-	changeScript := BuildP2PKHScript(changeAddress)
-
-	prelimTx, _, _, prelimErr := BuildCallTransaction(
-		firstUtxo,
-		prelimUnlock,
-		"",
-		0,
-		changeAddress,
-		changeScript,
-		additionalUtxos,
-		feeRate,
-	)
-	if prelimErr != nil {
-		return "", fmt.Errorf("TokenWallet.merge: %w", prelimErr)
-	}
-
-	// Sign input 0 against the first contract UTXO's locking script
-	sig, err := tw.signer.Sign(prelimTx.Hex(), 0, firstUtxo.Script, firstUtxo.Satoshis, nil)
-	if err != nil {
-		return "", fmt.Errorf("TokenWallet.merge: signing: %w", err)
-	}
 
 	txid, _, err := contract.Call(
 		"merge",
-		[]interface{}{sig, int64(otherSupply), otherHolder},
+		[]interface{}{nil, int64(otherSupply), otherHolder},
 		tw.provider,
 		tw.signer,
-		&CallOptions{ChangeAddress: changeAddress},
+		&CallOptions{
+			ChangeAddress:               changeAddress,
+			AdditionalContractInputs:    []*UTXO{&secondUtxo},
+			AdditionalContractInputArgs: [][]interface{}{{nil, int64(firstSupply), firstHolder}},
+		},
 	)
 	if err != nil {
 		return "", fmt.Errorf("TokenWallet.merge: %w", err)
@@ -247,6 +205,18 @@ func (tw *TokenWallet) GetUtxos() ([]UTXO, error) {
 		}
 	}
 	return filtered, nil
+}
+
+// addrToPKH returns the 20-byte hash160 (hex) an Addr argument carries, from a
+// Base58 address, a raw hash160, or a public key. BuildP2PKHScript panics on
+// malformed input; surface that as an error instead.
+func addrToPKH(addr string) (pkh string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid recipient address %q: %v", addr, r)
+		}
+	}()
+	return BuildP2PKHScript(addr)[6:46], nil
 }
 
 // getBalanceField extracts the balance/supply/amount field from state.

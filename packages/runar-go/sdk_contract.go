@@ -1137,9 +1137,23 @@ func (c *RunarContract) PrepareCall(
 	if err != nil {
 		return nil, fmt.Errorf("RunarContract.PrepareCall: getting UTXOs: %w", err)
 	}
+	// Never fund with an outpoint this tx already spends as a contract input
+	// (the primary, or any AdditionalContractInputs — F-045: a merge's second
+	// token UTXO listed at the same address was picked as a P2PKH funding
+	// input too, spending one outpoint twice).
 	var candidateFundingUtxos []UTXO
 	for _, u := range allFundingUtxos {
-		if !(u.Txid == c.currentUtxo.Txid && u.OutputIndex == c.currentUtxo.OutputIndex) {
+		if u.Txid == c.currentUtxo.Txid && u.OutputIndex == c.currentUtxo.OutputIndex {
+			continue
+		}
+		isExtra := false
+		for _, x := range extraContractUtxos {
+			if x != nil && x.Txid == u.Txid && x.OutputIndex == u.OutputIndex {
+				isExtra = true
+				break
+			}
+		}
+		if !isExtra {
 			candidateFundingUtxos = append(candidateFundingUtxos, u)
 		}
 	}
