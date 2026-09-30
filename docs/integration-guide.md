@@ -25,20 +25,22 @@ A stateless contract (like P2PKH) has only `readonly` properties. Spending is a 
 
 ```typescript
 import { readFileSync } from 'node:fs';
-import { TestContract } from 'runar-testing';
+import { TestContract, TEST_KEYS, signTestMessage } from 'runar-testing';
 
 // Load the contract source
 const source = readFileSync('P2PKH.runar.ts', 'utf8');
 
 // Create with constructor args (property values baked into the locking script)
+const alice = TEST_KEYS[0];
 const contract = TestContract.fromSource(source, {
-  pubKeyHash: 'ab'.repeat(20),  // hex-encoded 20-byte address
+  pubKeyHash: alice.pubKeyHash,  // hex-encoded 20-byte address
 });
 
-// Call the unlock method — checkSig is mocked to return true
+// Call the unlock method. The interpreter's checkSig is real ECDSA over a
+// fixed test message (not a transaction sighash), so sign that message.
 const result = contract.call('unlock', {
-  sig: '30' + 'ff'.repeat(35),
-  pubKey: '02' + 'ab'.repeat(32),
+  sig: signTestMessage(alice.privKey),
+  pubKey: alice.pubKey,
 });
 
 console.log(result.success);  // true or false
