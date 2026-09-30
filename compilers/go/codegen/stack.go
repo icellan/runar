@@ -1327,19 +1327,18 @@ func (ctx *loweringContext) lowerBindings(bindings []ir.ANFBinding, terminalAsse
 	// Find the terminal binding index (if terminalAssert is set).
 	// If the last binding is an 'if' whose branches end in asserts,
 	// that 'if' is the terminal point (not an earlier standalone assert).
+	// Only an assert that IS the last binding may leave its value as the
+	// result (N-005): any later binding (e.g. a terminal asm() raw_script with
+	// out_arity 1) pushes its own result, the cleanup NIPs the assert's value
+	// away, and the check is never enforced. Such an assert gets OP_VERIFY.
 	lastAssertIdx := -1
 	terminalIfIdx := -1
 	if terminalAssert {
 		lastBinding := bindings[len(bindings)-1]
 		if lastBinding.Value.Kind == "if" {
 			terminalIfIdx = len(bindings) - 1
-		} else {
-			for i := len(bindings) - 1; i >= 0; i-- {
-				if bindings[i].Value.Kind == "assert" {
-					lastAssertIdx = i
-					break
-				}
-			}
+		} else if lastBinding.Value.Kind == "assert" {
+			lastAssertIdx = len(bindings) - 1
 		}
 	}
 

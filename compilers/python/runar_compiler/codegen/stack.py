@@ -1210,18 +1210,20 @@ class _LoweringContext:
             for ref in self.outer_protected_refs:
                 last_uses[ref] = len(bindings)
 
-        # Find terminal binding index
+        # Find terminal binding index.
+        # Only an assert that IS the last binding may leave its value as the
+        # result (N-005): any later binding (e.g. a terminal asm() raw_script
+        # with out_arity 1) pushes its own result, the cleanup NIPs the
+        # assert's value away, and the check is never enforced. Such an
+        # assert gets OP_VERIFY.
         last_assert_idx = -1
         terminal_if_idx = -1
         if terminal_assert:
             last_binding = bindings[-1]
             if last_binding.value.kind == "if":
                 terminal_if_idx = len(bindings) - 1
-            else:
-                for i in range(len(bindings) - 1, -1, -1):
-                    if bindings[i].value.kind == "assert":
-                        last_assert_idx = i
-                        break
+            elif last_binding.value.kind == "assert":
+                last_assert_idx = len(bindings) - 1
 
         for i, binding in enumerate(bindings):
             # Propagate source location from ANF binding to StackOps

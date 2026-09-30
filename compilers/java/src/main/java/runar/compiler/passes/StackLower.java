@@ -1462,19 +1462,19 @@ public final class StackLower {
                 }
             }
 
+            // Only an assert that IS the last binding may leave its value as
+            // the result (N-005): any later binding (e.g. a terminal asm()
+            // raw_script with out_arity 1) pushes its own result, the cleanup
+            // NIPs the assert's value away, and the check is never enforced.
+            // Such an assert gets OP_VERIFY.
             int lastAssertIdx = -1;
             int terminalIfIdx = -1;
             if (terminalAssert && !bindings.isEmpty()) {
                 AnfBinding last = bindings.get(bindings.size() - 1);
                 if (last.value() instanceof If) {
                     terminalIfIdx = bindings.size() - 1;
-                } else {
-                    for (int i = bindings.size() - 1; i >= 0; i--) {
-                        if (bindings.get(i).value() instanceof Assert) {
-                            lastAssertIdx = i;
-                            break;
-                        }
-                    }
+                } else if (last.value() instanceof Assert) {
+                    lastAssertIdx = bindings.size() - 1;
                 }
             }
 

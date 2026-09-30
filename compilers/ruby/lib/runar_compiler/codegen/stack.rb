@@ -1465,20 +1465,20 @@ module RunarCompiler::Codegen
         end
       end
 
-      # Find terminal binding index
+      # Find terminal binding index.
+      # Only an assert that IS the last binding may leave its value as the
+      # result (N-005): any later binding (e.g. a terminal asm() raw_script
+      # with out_arity 1) pushes its own result, the cleanup NIPs the assert's
+      # value away, and the check is never enforced. Such an assert gets
+      # OP_VERIFY.
       last_assert_idx = -1
       terminal_if_idx = -1
       if terminal_assert
         last_binding = bindings.last
         if last_binding && last_binding.value.kind == "if"
           terminal_if_idx = bindings.length - 1
-        else
-          (bindings.length - 1).downto(0) do |i|
-            if bindings[i].value.kind == "assert"
-              last_assert_idx = i
-              break
-            end
-          end
+        elsif last_binding && last_binding.value.kind == "assert"
+          last_assert_idx = bindings.length - 1
         end
       end
 

@@ -1362,19 +1362,18 @@ class LoweringContext {
     // Find the terminal binding index (if terminalAssert is set).
     // If the last binding is an 'if' whose branches end in asserts,
     // that 'if' is the terminal point (not an earlier standalone assert).
+    // Only an assert that IS the last binding may leave its value as the
+    // result (N-005): any later binding (e.g. a terminal asm() raw_script with
+    // out_arity 1) pushes its own result, the cleanup NIPs the assert's value
+    // away, and the check is never enforced. Such an assert gets OP_VERIFY.
     let lastAssertIdx = -1;
     let terminalIfIdx = -1;
     if (terminalAssert) {
       const lastBinding = bindings[bindings.length - 1];
       if (lastBinding && lastBinding.value.kind === 'if') {
         terminalIfIdx = bindings.length - 1;
-      } else {
-        for (let i = bindings.length - 1; i >= 0; i--) {
-          if (bindings[i]!.value.kind === 'assert') {
-            lastAssertIdx = i;
-            break;
-          }
-        }
+      } else if (lastBinding && lastBinding.value.kind === 'assert') {
+        lastAssertIdx = bindings.length - 1;
       }
     }
 

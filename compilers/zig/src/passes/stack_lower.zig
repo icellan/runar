@@ -998,29 +998,22 @@ const LowerCtx = struct {
         }
 
         // Terminal-assert propagation mirrors TS reference compiler
-        // (`05-stack-lower.ts` lines 819-832): if the last binding is an
+        // (`05-stack-lower.ts` lowerBindings): if the last binding is an
         // `if`, mark it as the terminal-if point so its branches can
         // propagate `terminalAssert=true` to their last assert. Otherwise
-        // scan backwards for the last plain assert.
+        // only an assert that IS the last binding may leave its value as the
+        // result (N-005): any later binding (e.g. a terminal asm() raw_script
+        // with out_arity 1) pushes its own result, the cleanup NIPs the
+        // assert's value away, and the check is never enforced. Such an
+        // assert gets OP_VERIFY.
         var terminal_assert_idx: ?usize = null;
         var terminal_if_idx: ?usize = null;
         if (terminal_assert and bindings.len > 0) {
             const last_idx = bindings.len - 1;
             switch (bindings[last_idx].value) {
                 .@"if" => terminal_if_idx = last_idx,
-                else => {
-                    var i: usize = bindings.len;
-                    while (i > 0) {
-                        i -= 1;
-                        switch (bindings[i].value) {
-                            .assert => {
-                                terminal_assert_idx = i;
-                                break;
-                            },
-                            else => {},
-                        }
-                    }
-                },
+                .assert => terminal_assert_idx = last_idx,
+                else => {},
             }
         }
 

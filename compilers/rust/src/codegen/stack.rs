@@ -1367,6 +1367,11 @@ impl LoweringContext {
         // Find the terminal binding index (if terminal_assert is set).
         // If the last binding is an 'if' whose branches end in asserts,
         // that 'if' is the terminal point (not an earlier standalone assert).
+        // Only an assert that IS the last binding may leave its value as the
+        // result (N-005): any later binding (e.g. a terminal asm() raw_script
+        // with out_arity 1) pushes its own result, the cleanup NIPs the
+        // assert's value away, and the check is never enforced. Such an
+        // assert gets OP_VERIFY.
         let mut last_assert_idx: isize = -1;
         let mut terminal_if_idx: isize = -1;
         if terminal_assert {
@@ -1374,13 +1379,8 @@ impl LoweringContext {
             if let Some(b) = last_binding {
                 if matches!(&b.value, ANFValue::If { .. }) {
                     terminal_if_idx = (bindings.len() - 1) as isize;
-                } else {
-                    for i in (0..bindings.len()).rev() {
-                        if matches!(&bindings[i].value, ANFValue::Assert { .. }) {
-                            last_assert_idx = i as isize;
-                            break;
-                        }
-                    }
+                } else if matches!(&b.value, ANFValue::Assert { .. }) {
+                    last_assert_idx = (bindings.len() - 1) as isize;
                 }
             }
         }
