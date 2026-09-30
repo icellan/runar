@@ -230,6 +230,51 @@ describe('stateful — artifact-driven recovery', () => {
     expect(recompiled.success).toBe(true);
     expect(recompiled.scriptHex).toBe(r.scriptHex);
   });
+
+  it('F-024 — the injected value-conservation check is stripped with the continuation, not rendered as user code', () => {
+    // F-024 (R14) injects `assert(_newAmount >= extractAmount(txPreimage))`
+    // as a standalone assert right before the default continuation's change
+    // output. It is compiler-generated, so the lifter must drop it with the
+    // continuation: rendering it leaks the implicit `_newAmount` /
+    // `txPreimage` params into the surface, the recompile fails, and the
+    // decompiler silently falls back to raw_script.
+    //
+    // Proves: the check is present in the ANF, is absent from the recovered
+    // source, and the recovered source recompiles byte-identically (so the
+    // compiler re-injects exactly the one copy that was stripped).
+    // Does NOT prove: anything about a user-written `continuationAmount()`
+    // rule, which the renderer does not recover today.
+    const source = `
+      import { StatefulSmartContract } from 'runar-lang';
+      export class Counter extends StatefulSmartContract {
+        count: bigint;
+        constructor(count: bigint) { super(count); this.count = count; }
+        public increment() { this.count = this.count + 1n; }
+      }
+    `;
+    const r = compileSource(source, 'Counter.runar.ts');
+    const body = r.artifact!.anf!.methods.find((m) => m.name === 'increment')!.body;
+    expect(body.some((b) => b.value.kind === 'call' && b.value.func === 'extractAmount')).toBe(true);
+
+    const dec = decompile(hexToBytes(r.scriptHex!), {
+      stateFields: r.artifact!.stateFields,
+      codeSeparatorIndex: r.artifact!.codeSeparatorIndex,
+      codeSeparatorIndices: r.artifact!.codeSeparatorIndices,
+      parentClass: 'StatefulSmartContract',
+      anf: r.artifact!.anf,
+      className: 'Counter',
+    });
+    expect(dec.ok).toBe(true);
+    expect(dec.recoveryPath).toBe('symexec');
+    expect(dec.source).not.toContain('_newAmount');
+    expect(dec.source).not.toContain('extractAmount');
+    expect(dec.source).not.toContain('txPreimage');
+    expect(dec.source).not.toContain('_changePKH');
+
+    const recompiled = compile(dec.source, { fileName: 'Counter.runar.ts' });
+    expect(recompiled.success).toBe(true);
+    expect(recompiled.scriptHex).toBe(r.scriptHex);
+  });
 });
 
 describe('stateful — without artifact info, behavior is unchanged', () => {
