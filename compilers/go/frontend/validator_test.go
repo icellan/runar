@@ -2011,3 +2011,94 @@ export class BadAsm extends UnsafeSmartContract {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-063: array-literal elements are walked by every validator walker
+// ---------------------------------------------------------------------------
+//
+// ArrayLiteralExpr was missing from collectMethodCallsInExpr, validateExpression,
+// walkExpr and subExpressions, so anything written inside `[...]` — the only
+// place checkMultiSig's arguments can be written — escaped the rule those
+// walkers enforce. Before the fix the recursion shape escaped checkNoRecursion
+// and the compiler then spun forever inlining the self-call.
+//
+// Proves: Validate refuses each shape with the diagnostic it already gives the
+// un-nested form. Does not prove: CLI exit status or cross-tier parity (that is
+// conformance/negatives N99+).
+
+func validateTSSourceF063(t *testing.T, source string) *ValidationResult {
+	t.Helper()
+	return Validate(mustParseTS(t, source))
+}
+
+func requireValidationError(t *testing.T, result *ValidationResult, substr string) {
+	t.Helper()
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, substr) {
+			return
+		}
+	}
+	t.Fatalf("expected a validation error containing %q, got: %v", substr, result.ErrorStrings())
+}
+
+func TestValidate_F063_RecursionInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  private h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }
+}
+`)
+	requireValidationError(t, result, "recursion detected: method 'h'")
+}
+
+func TestValidate_F063_OddLengthHexInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }
+}
+`)
+	requireValidationError(t, result, "ByteString literal 'abc' has odd length (3)")
+}
+
+func TestValidate_F063_NonHexInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('zz')])); }
+}
+`)
+	requireValidationError(t, result, "ByteString literal 'zz' contains non-hex characters")
+}
+
+func TestValidate_F063_ReadonlyIncrementInsideArrayLiteral(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends SmartContract {
+  readonly n: bigint;
+  readonly pk: PubKey;
+  constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+  public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }
+}
+`)
+	requireValidationError(t, result, "cannot assign to readonly property 'n'")
+}
+
+func TestValidate_F063_OutputIntrinsicInsideArrayLiteralInLoop(t *testing.T) {
+	result := validateTSSourceF063(t, `
+class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  public step() {
+    for (let i = 0n; i < 2n; i++) {
+      const a = [this.addOutput(1000n, this.count)];
+    }
+    assert(true);
+  }
+}
+`)
+	requireValidationError(t, result, "Output intrinsic 'addOutput'")
+}

@@ -3446,3 +3446,113 @@ class Counter extends StatefulSmartContract {
             f"expected no '_newAmount' param when addOutput is used explicitly, "
             f"got params: {list(param_names)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F-063: array-literal elements are walked by every validator / typecheck walker
+# ---------------------------------------------------------------------------
+#
+# ArrayLiteralExpr was missing from _validate_expression, _walk_expr,
+# _collect_method_calls_in_expr, _sub_expressions and _infer_expr_type, so a
+# construct written inside ``[...]`` -- the only place checkMultiSig's
+# arguments can be written -- escaped the rule those walkers enforce. Pre-fix
+# the recursion shape died with "maximum recursion depth exceeded" in ANF
+# inlining, and the type-mismatch shapes compiled to a locking script.
+#
+# Proves: validate()/type_check() refuse each shape with the diagnostic the
+# un-nested form gets (the TS reference's wording for the element mismatch).
+# Does not prove: CLI exit status or cross-tier parity (conformance/negatives).
+
+_F063_HEADER = """
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+"""
+
+
+def _f063_validate(body: str, header: str = _F063_HEADER) -> list[str]:
+    result = parse_source(header + body + "\n}\n", "C.runar.ts")
+    assert result.contract is not None, result.errors
+    return [e.message for e in validate(result.contract).errors]
+
+
+def _f063_type_errors(body: str) -> list[str]:
+    result = parse_source(_F063_HEADER + body + "\n}\n", "C.runar.ts")
+    assert result.contract is not None, result.errors
+    v = validate(result.contract)
+    assert not v.errors, v.errors
+    return [e.message for e in type_check(result.contract).errors]
+
+
+class TestF063ArrayLiteralWalkers:
+    def test_recursion_inside_array_literal_detected(self):
+        errs = _f063_validate(
+            "  private h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }\n"
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }"
+        )
+        assert any("recursion detected: method 'h'" in m for m in errs), errs
+
+    def test_odd_length_hex_inside_array_literal_rejected(self):
+        errs = _f063_validate(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }"
+        )
+        assert any("ByteString literal 'abc' has odd length (3)" in m for m in errs), errs
+
+    def test_non_hex_inside_array_literal_rejected(self):
+        errs = _f063_validate(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('zz')])); }"
+        )
+        assert any("ByteString literal 'zz' contains non-hex characters" in m for m in errs), errs
+
+    def test_readonly_increment_inside_array_literal_rejected(self):
+        errs = _f063_validate(
+            "  public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }",
+            header="""
+class C extends SmartContract {
+  readonly n: bigint;
+  readonly pk: PubKey;
+  constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+""",
+        )
+        assert any("cannot assign to readonly property 'n'" in m for m in errs), errs
+
+    def test_output_intrinsic_inside_array_literal_in_loop_rejected(self):
+        errs = _f063_validate(
+            "  public step() {\n"
+            "    for (let i = 0n; i < 2n; i++) { const a = [this.addOutput(1000n, this.count)]; }\n"
+            "    assert(true);\n"
+            "  }",
+            header="""
+class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+""",
+        )
+        assert any("Output intrinsic 'addOutput'" in m for m in errs), errs
+
+    def test_unknown_function_inside_array_literal_rejected(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }"
+        )
+        assert any("unknown function 'totallyBogusFunction'" in m for m in errs), errs
+
+    def test_array_element_type_mismatch_rejected(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }"
+        )
+        assert any(
+            "Array element type mismatch: expected 'PubKey', got 'bigint'" in m for m in errs
+        ), errs
+
+    def test_check_multisig_wrong_array_types_rejected(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([1n], [2n, 3n])); }"
+        )
+        assert any("expected 'Sig[]', got 'bigint[]'" in m for m in errs), errs
+        assert any("expected 'PubKey[]', got 'bigint[]'" in m for m in errs), errs
+
+    def test_well_typed_check_multisig_accepted(self):
+        errs = _f063_type_errors(
+            "  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk])); }"
+        )
+        assert errs == [], errs

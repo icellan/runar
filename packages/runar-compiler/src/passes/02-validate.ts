@@ -1175,6 +1175,8 @@ function subExpressions(expr: Expression): Expression[] {
       return [expr.condition, expr.consequent, expr.alternate];
     case 'index_access':
       return [expr.object, expr.index];
+    case 'array_literal':
+      return [...expr.elements];
     default:
       return [];
   }
@@ -1458,6 +1460,10 @@ function validateExpression(expr: Expression, ctx: ValidationContext): void {
       validateExpression(expr.operand, ctx);
       break;
 
+    case 'array_literal':
+      for (const el of expr.elements) validateExpression(el, ctx);
+      break;
+
     // Leaf nodes -- nothing to validate
     case 'identifier':
     case 'bigint_literal':
@@ -1607,6 +1613,9 @@ function collectMethodCallsInExpr(
     case 'increment_expr':
     case 'decrement_expr':
       collectMethodCallsInExpr(expr.operand, calls);
+      break;
+    case 'array_literal':
+      for (const el of expr.elements) collectMethodCallsInExpr(el, calls);
       break;
     default:
       // Leaf nodes
@@ -1886,6 +1895,9 @@ function walkExpr(expr: Expression, visitor: (expr: Expression) => void): void {
     case 'increment_expr':
     case 'decrement_expr':
       walkExpr(expr.operand, visitor);
+      break;
+    case 'array_literal':
+      for (const el of expr.elements) walkExpr(el, visitor);
       break;
   }
 }

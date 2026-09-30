@@ -741,6 +741,8 @@ module RunarCompiler
           infer_expr_type_static(expr.alternate)
         when IncrementExpr, DecrementExpr
           "bigint"
+        when ArrayLiteralExpr
+          "<unknown>[]"
         else
           "<unknown>"
         end
@@ -1179,6 +1181,23 @@ module RunarCompiler
             add_error("-- operator requires bigint, got '#{operand_type}'")
           end
           "bigint"
+
+        when ArrayLiteralExpr
+          # F-063: without this arm every array literal typed as "<unknown>" --
+          # which subtype? accepts against anything, making checkMultiSig's
+          # argument check vacuous -- and its elements were never visited, so a
+          # call nested in one never reached the unknown-function rule. Ported
+          # from the TS reference, wording included.
+          return "<unknown>[]" if expr.elements.empty?
+
+          elem_type = infer_expr_type(expr.elements[0], env)
+          expr.elements[1..].each do |el|
+            et = infer_expr_type(el, env)
+            if !Frontend.subtype?(et, elem_type) && et != "<unknown>"
+              add_error("Array element type mismatch: expected '#{elem_type}', got '#{et}'")
+            end
+          end
+          "#{elem_type}[]"
 
         else
           "<unknown>"

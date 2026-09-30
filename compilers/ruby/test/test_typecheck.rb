@@ -707,4 +707,48 @@ class TestTypecheck < Minitest::Test
 
     assert_typecheck_error(source, "assert")
   end
+
+  # ---------------------------------------------------------------------------
+  # F-063: infer_expr_type walks array-literal elements
+  # ---------------------------------------------------------------------------
+  #
+  # infer_expr_type had no ArrayLiteralExpr arm, so every array literal typed
+  # as "<unknown>" (accepted by subtype? against anything) and its elements
+  # were never visited: checkMultiSig's argument check was vacuous and a call
+  # nested in an element never reached the unknown-function rule. Pre-fix the
+  # mismatch shapes compiled to a locking script.
+  #
+  # Proves: type_check refuses each shape (TS reference wording for the
+  # element mismatch). Does not prove: CLI exit status or cross-tier parity.
+
+  F063_TC_HEADER = <<~TS
+    class C extends SmartContract {
+      readonly pk: PubKey;
+      constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  TS
+
+  def f063_type_errors(body)
+    typecheck_source(F063_TC_HEADER + body + "\n}\n").errors.map(&:message)
+  end
+
+  def test_f063_unknown_function_inside_array_literal_rejected
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }")
+    assert errs.any? { |m| m.include?("unknown function 'totallyBogusFunction'") }, errs.inspect
+  end
+
+  def test_f063_array_element_type_mismatch_rejected
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }")
+    assert errs.any? { |m| m.include?("Array element type mismatch: expected 'PubKey', got 'bigint'") }, errs.inspect
+  end
+
+  def test_f063_check_multisig_wrong_array_types_rejected
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([1n], [2n, 3n])); }")
+    assert errs.any? { |m| m.include?("expected 'Sig[]', got 'bigint[]'") }, errs.inspect
+    assert errs.any? { |m| m.include?("expected 'PubKey[]', got 'bigint[]'") }, errs.inspect
+  end
+
+  def test_f063_well_typed_check_multisig_accepted
+    errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk])); }")
+    assert_empty errs
+  end
 end

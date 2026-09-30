@@ -126,7 +126,7 @@ const POSITIVE_CONTROL = join(DIR, 'positive-control.runar.ts');
  * which is how a one-tier acceptance survived on `.sol` unnoticed.
  */
 const fixtures = readdirSync(DIR)
-  .filter((f) => /^N\d{2}-.*\.runar\.(ts|sol|move|go|rs|py|zig|rb|java)$/.test(f))
+  .filter((f) => /^N\d{2,}-.*\.runar\.(ts|sol|move|go|rs|py|zig|rb|java)$/.test(f))
   .sort();
 
 const available = TIERS.filter((t) => t.cmd !== null);

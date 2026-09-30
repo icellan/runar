@@ -764,3 +764,81 @@ describe('Validator: contract name validation', () => {
     expect(result.errors.some(e => e.message.toLowerCase().includes('name'))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-063: array-literal elements are walked by every validator walker
+// ---------------------------------------------------------------------------
+//
+// `array_literal` was missing from validateExpression, collectMethodCallsInExpr,
+// walkExpr and subExpressions, so anything written INSIDE `[...]` (the only
+// place checkMultiSig's arguments can be written) escaped every rule those
+// walkers enforce. Each test puts the offending construct in an array element
+// and asserts the rule the validator already enforces outside one.
+//
+// Proves: the validator itself refuses these shapes (with the same diagnostic
+// it gives the un-nested form). Does not prove: anything about typecheck or
+// codegen — the cross-tier CLI verdicts live in conformance/negatives N99+.
+
+describe('Validator: array-literal elements are walked (F-063)', () => {
+  it('detects recursion through a self-call inside an array literal', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly pk: PubKey;
+        constructor(pk: PubKey) { super(pk); this.pk = pk; }
+        h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }
+        public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }
+      }
+    `);
+    expect(hasError(result, 'Recursion detected')).toBe(true);
+  });
+
+  it('rejects an odd-length ByteString literal inside an array literal', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly pk: PubKey;
+        constructor(pk: PubKey) { super(pk); this.pk = pk; }
+        public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'abc' has odd length (3)")).toBe(true);
+  });
+
+  it('rejects a non-hex ByteString literal inside an array literal', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly pk: PubKey;
+        constructor(pk: PubKey) { super(pk); this.pk = pk; }
+        public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('zz')])); }
+      }
+    `);
+    expect(hasError(result, "ByteString literal 'zz' contains non-hex characters")).toBe(true);
+  });
+
+  it('rejects a readonly-property increment inside an array literal (walkExpr)', () => {
+    const result = validateSource(`
+      class C extends SmartContract {
+        readonly n: bigint;
+        readonly pk: PubKey;
+        constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+        public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }
+      }
+    `);
+    expect(hasError(result, "Cannot assign to readonly property 'n'")).toBe(true);
+  });
+
+  it('rejects an output intrinsic inside an array literal in a loop body (subExpressions)', () => {
+    const result = validateSource(`
+      class C extends StatefulSmartContract {
+        count: bigint;
+        constructor(count: bigint) { super(count); this.count = count; }
+        public step() {
+          for (let i = 0n; i < 2n; i++) {
+            const a = [this.addOutput(1000n, this.count)];
+          }
+          assert(true);
+        }
+      }
+    `);
+    expect(hasError(result, "Output intrinsic 'addOutput'")).toBe(true);
+  });
+});

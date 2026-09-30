@@ -1172,6 +1172,7 @@ fn sub_expressions(expr: &Expression) -> Vec<&Expression> {
             vec![condition.as_ref(), consequent.as_ref(), alternate.as_ref()]
         }
         Expression::IndexAccess { object, index } => vec![object.as_ref(), index.as_ref()],
+        Expression::ArrayLiteral { elements } => elements.iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -1693,6 +1694,11 @@ fn collect_method_calls_in_expr(expr: &Expression, calls: &mut HashSet<String>) 
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
             collect_method_calls_in_expr(operand, calls);
         }
+        Expression::ArrayLiteral { elements } => {
+            for el in elements {
+                collect_method_calls_in_expr(el, calls);
+            }
+        }
         // Leaf nodes
         _ => {}
     }
@@ -1991,6 +1997,11 @@ fn walk_expression(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {
         }
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
             walk_expression(operand, visitor);
+        }
+        Expression::ArrayLiteral { elements } => {
+            for el in elements {
+                walk_expression(el, visitor);
+            }
         }
         _ => {}
     }
@@ -2483,5 +2494,99 @@ class ZeroStart extends SmartContract {
             "zero-start counting-up loop should not trigger loop-shape errors, got: {:?}",
             result.errors
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // F-063: array-literal elements are walked by every validator walker.
+    //
+    // Expression::ArrayLiteral was missing from collect_method_calls_in_expr,
+    // walk_expression and sub_expressions, so a construct written inside
+    // `[...]` (the only place checkMultiSig's arguments can be written)
+    // escaped the rule those walkers enforce. Pre-fix the recursion shape
+    // overflowed the stack in ANF inlining instead of being refused.
+    //
+    // Proves: validate() refuses each shape with the diagnostic it gives the
+    // un-nested form. Does not prove: CLI exit status or cross-tier parity
+    // (conformance/negatives N99+).
+    // -----------------------------------------------------------------------
+
+    fn f063_errors(source: &str) -> Vec<String> {
+        validate(&parse_contract(source))
+            .errors
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    fn f063_require(errors: &[String], needle: &str) {
+        assert!(
+            errors.iter().any(|m| m.contains(needle)),
+            "expected an error containing {:?}, got: {:?}",
+            needle,
+            errors
+        );
+    }
+
+    #[test]
+    fn f063_recursion_inside_array_literal_detected() {
+        let errs = f063_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  private h(s: Sig): PubKey { assert(checkMultiSig([s], [this.h(s)])); return this.pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.h(s)])); }
+}
+"#,
+        );
+        f063_require(&errs, "Recursion detected: method 'h'");
+    }
+
+    #[test]
+    fn f063_odd_length_hex_inside_array_literal_rejected() {
+        let errs = f063_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, toByteString('abc')])); }
+}
+"#,
+        );
+        f063_require(&errs, "ByteString literal 'abc' has odd length (3)");
+    }
+
+    #[test]
+    fn f063_readonly_increment_inside_array_literal_rejected() {
+        let errs = f063_errors(
+            r#"
+class C extends SmartContract {
+  readonly n: bigint;
+  readonly pk: PubKey;
+  constructor(n: bigint, pk: PubKey) { super(n, pk); this.n = n; this.pk = pk; }
+  public unlock(s: Sig) { const a = [this.n++]; assert(checkSig(s, this.pk)); }
+}
+"#,
+        );
+        f063_require(&errs, "cannot assign to readonly property 'n'");
+    }
+
+    #[test]
+    fn f063_output_intrinsic_inside_array_literal_in_loop_rejected() {
+        let errs = f063_errors(
+            r#"
+class C extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) { super(count); this.count = count; }
+  public step() {
+    for (let i = 0n; i < 2n; i++) {
+      const a = [this.addOutput(1000n, this.count)];
+    }
+    assert(true);
+  }
+}
+"#,
+        );
+        f063_require(&errs, "Output intrinsic 'addOutput'");
     }
 }

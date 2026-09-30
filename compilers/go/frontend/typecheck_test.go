@@ -2150,3 +2150,107 @@ class EcOnCurveTest extends SmartContract {
 		t.Errorf("expected no type errors for Point-typed property, got: %s", strings.Join(tcResult.ErrorStrings(), "; "))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-063: inferExprType walks array-literal elements
+// ---------------------------------------------------------------------------
+//
+// inferExprType had no ArrayLiteralExpr case, so every array literal typed as
+// "<unknown>" — which isSubtype accepts against anything — and its elements
+// were never visited. checkMultiSig's per-argument subtype check was therefore
+// vacuous, and a call nested in an element never reached checkCallExpr, so the
+// "only Rúnar built-ins" rule did not fire for it.
+//
+// Proves: TypeCheck refuses each shape with the TS reference's diagnostic (or
+// the tier's existing unknown-function diagnostic). Does not prove: CLI exit
+// status or cross-tier parity (conformance/negatives N99+).
+
+func typeCheckSourceF063(t *testing.T, source, fileName string) *TypeCheckResult {
+	t.Helper()
+	pr := ParseSource([]byte(source), fileName)
+	if len(pr.Errors) > 0 || pr.Contract == nil {
+		t.Fatalf("parse failed: %v", pr.ErrorStrings())
+	}
+	if v := Validate(pr.Contract); len(v.Errors) > 0 {
+		t.Fatalf("validation failed: %v", v.ErrorStrings())
+	}
+	return TypeCheck(pr.Contract)
+}
+
+func requireTypeError(t *testing.T, result *TypeCheckResult, substr string) {
+	t.Helper()
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, substr) {
+			return
+		}
+	}
+	t.Fatalf("expected a type error containing %q, got: %v", substr, result.ErrorStrings())
+}
+
+// The brief's testable assertion, on the Go DSL surface.
+func TestTypeCheck_F063_UnknownFunctionInsideArrayLiteral_GoSurface(t *testing.T) {
+	result := typeCheckSourceF063(t, `package contract
+
+import "runar"
+
+type C struct {
+	runar.SmartContract
+	Pk runar.PubKey `+"`runar:\"readonly\"`"+`
+}
+
+func (c *C) Unlock(sig runar.Sig) {
+	runar.Assert(runar.CheckMultiSig([1]runar.Sig{sig}, [2]runar.PubKey{c.Pk, totallyBogusFunction(1)}))
+}
+`, "C.runar.go")
+	requireTypeError(t, result, "unknown function 'totallyBogusFunction'")
+}
+
+func TestTypeCheck_F063_UnknownFunctionInsideArrayLiteral(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }
+}
+`, "C.runar.ts")
+	requireTypeError(t, result, "unknown function 'totallyBogusFunction'")
+}
+
+func TestTypeCheck_F063_ArrayElementTypeMismatch(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }
+}
+`, "C.runar.ts")
+	requireTypeError(t, result, "Array element type mismatch: expected 'PubKey', got 'bigint'")
+}
+
+func TestTypeCheck_F063_CheckMultiSigWrongArrayTypes(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([1n], [2n, 3n])); }
+}
+`, "C.runar.ts")
+	requireTypeError(t, result, "expected 'Sig[]', got 'bigint[]'")
+	requireTypeError(t, result, "expected 'PubKey[]', got 'bigint[]'")
+}
+
+// Positive control: a well-typed checkMultiSig still typechecks cleanly, so the
+// refusals above are discrimination, not a blanket rejection of array literals.
+func TestTypeCheck_F063_WellTypedCheckMultiSigAccepted(t *testing.T) {
+	result := typeCheckSourceF063(t, `
+class C extends SmartContract {
+  readonly pk: PubKey;
+  readonly pk2: PubKey;
+  constructor(pk: PubKey, pk2: PubKey) { super(pk, pk2); this.pk = pk; this.pk2 = pk2; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk2])); }
+}
+`, "C.runar.ts")
+	if len(result.Errors) > 0 {
+		t.Fatalf("expected no type errors, got: %v", result.ErrorStrings())
+	}
+}

@@ -1200,6 +1200,9 @@ public final class Validate {
             if (expr instanceof IndexAccessExpr ia) {
                 return List.of(ia.object(), ia.index());
             }
+            if (expr instanceof ArrayLiteralExpr al) {
+                return al.elements();
+            }
             return List.of();
         }
 

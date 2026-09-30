@@ -1060,6 +1060,9 @@ class _ValidationContext:
             self._validate_expression(expr.operand)
         elif isinstance(expr, DecrementExpr):
             self._validate_expression(expr.operand)
+        elif isinstance(expr, ArrayLiteralExpr):
+            for el in expr.elements:
+                self._validate_expression(el)
         elif isinstance(expr, ByteStringLiteral):
             val = expr.value
             if len(val) > 0:
@@ -1599,6 +1602,9 @@ def _walk_expr(expr: Expression | None, visitor) -> None:
         _walk_expr(expr.operand, visitor)
     elif isinstance(expr, DecrementExpr):
         _walk_expr(expr.operand, visitor)
+    elif isinstance(expr, ArrayLiteralExpr):
+        for el in expr.elements:
+            _walk_expr(el, visitor)
 
 
 # ---------------------------------------------------------------------------
@@ -1660,6 +1666,9 @@ def _collect_method_calls_in_expr(expr: Expression | None, calls: set[str]) -> N
         _collect_method_calls_in_expr(expr.operand, calls)
     elif isinstance(expr, DecrementExpr):
         _collect_method_calls_in_expr(expr.operand, calls)
+    elif isinstance(expr, ArrayLiteralExpr):
+        for el in expr.elements:
+            _collect_method_calls_in_expr(el, calls)
 
 
 def _has_cycle(
@@ -1701,4 +1710,6 @@ def _sub_expressions(expr):
         return [expr.condition, expr.consequent, expr.alternate]
     if isinstance(expr, IndexAccessExpr):
         return [expr.object, expr.index]
+    if isinstance(expr, ArrayLiteralExpr):
+        return list(expr.elements)
     return []

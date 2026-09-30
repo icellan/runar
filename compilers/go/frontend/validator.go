@@ -1219,6 +1219,8 @@ func subExpressions(expr Expression) []Expression {
 		return []Expression{e.Condition, e.Consequent, e.Alternate}
 	case IndexAccessExpr:
 		return []Expression{e.Object, e.Index}
+	case ArrayLiteralExpr:
+		return e.Elements
 	}
 	return nil
 }
@@ -1406,6 +1408,10 @@ func (ctx *validationContext) validateExpression(expr Expression) {
 		ctx.validateExpression(e.Operand)
 	case DecrementExpr:
 		ctx.validateExpression(e.Operand)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			ctx.validateExpression(el)
+		}
 	case ByteStringLiteral:
 		val := e.Value
 		if len(val) > 0 {
@@ -1702,6 +1708,10 @@ func walkExpr(expr Expression, visitor func(Expression)) {
 		walkExpr(e.Operand, visitor)
 	case DecrementExpr:
 		walkExpr(e.Operand, visitor)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			walkExpr(el, visitor)
+		}
 	}
 }
 
@@ -1792,6 +1802,10 @@ func collectMethodCallsInExpr(expr Expression, calls map[string]bool) {
 		collectMethodCallsInExpr(e.Operand, calls)
 	case DecrementExpr:
 		collectMethodCallsInExpr(e.Operand, calls)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			collectMethodCallsInExpr(el, calls)
+		}
 	}
 }
 

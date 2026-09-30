@@ -1729,6 +1729,7 @@ public final class Typecheck {
             return staticInferType(te.alternate());
         }
         if (e instanceof IncrementExpr || e instanceof DecrementExpr) return "bigint";
+        if (e instanceof ArrayLiteralExpr) return "<unknown>[]";
         return "<unknown>";
     }
 

@@ -1208,7 +1208,9 @@ fn validateNoOutputIntrinsicInLoop(
         try std.fmt.allocPrint(allocator, " (reached through private method '{s}')", .{v})
     else
         try allocator.dupe(u8, "");
+    defer allocator.free(via_clause);
     try errors.append(allocator, .{
+        .owned_message = true,
         .message = try std.fmt.allocPrint(
             allocator,
             "Output intrinsic '{s}'{s} cannot be called inside a loop body. A loop body " ++
@@ -1336,6 +1338,9 @@ fn findOutputIntrinsicInExpr(
         .index_access => |ia| {
             if (try findOutputIntrinsicInExpr(allocator, contract, ia.object, loc, seen)) |site| return site;
             if (try findOutputIntrinsicInExpr(allocator, contract, ia.index, loc, seen)) |site| return site;
+        },
+        .array_literal => |els| for (els) |el| {
+            if (try findOutputIntrinsicInExpr(allocator, contract, el, loc, seen)) |site| return site;
         },
         else => {},
     }
@@ -1738,8 +1743,9 @@ fn walkExprForPreimage(
         },
         .increment => |inc| try walkExprForPreimage(allocator, inc.operand, method_name, warnings),
         .decrement => |dec| try walkExprForPreimage(allocator, dec.operand, method_name, warnings),
+        .array_literal => |els| for (els) |el| try walkExprForPreimage(allocator, el, method_name, warnings),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
-        .property_access, .array_literal,
+        .property_access,
         => {},
     }
 }
@@ -1864,8 +1870,9 @@ fn scanExprForLocktime(expr: Expression, reads_locktime: *bool, has_guard: *bool
         },
         .increment => |inc| scanExprForLocktime(inc.operand, reads_locktime, has_guard, count_guard),
         .decrement => |dec| scanExprForLocktime(dec.operand, reads_locktime, has_guard, count_guard),
+        .array_literal => |els| for (els) |el| scanExprForLocktime(el, reads_locktime, has_guard, count_guard),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
-        .property_access, .array_literal,
+        .property_access,
         => {},
     }
 }
@@ -2100,8 +2107,9 @@ fn collectMethodCallsInExpr(allocator: Allocator, expr: Expression, calls: *Stri
         },
         .increment => |inc| try collectMethodCallsInExpr(allocator, inc.operand, calls),
         .decrement => |dec| try collectMethodCallsInExpr(allocator, dec.operand, calls),
+        .array_literal => |els| for (els) |el| try collectMethodCallsInExpr(allocator, el, calls),
         .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .identifier,
-        .property_access, .array_literal,
+        .property_access,
         => {},
     }
 }
@@ -3369,4 +3377,146 @@ test "H2: negated sequence comparison still warns" {
     defer freeLocktimeResult(allocator, result);
 
     try testing.expect(hasLocktimeWarning(result));
+}
+
+// -- F-063: array-literal elements are walked by every validator walker --
+//
+// `.array_literal` was listed as a LEAF in collectMethodCallsInExpr,
+// walkExprForPreimage and scanExprForLocktime, and fell to `else` in
+// findOutputIntrinsicInExpr, so a construct written inside `[...]` (the only
+// place checkMultiSig's arguments can be written) escaped the rule those
+// walkers enforce. Pre-fix the recursion shape segfaulted in stack lowering
+// instead of being refused.
+//
+// Proves: validate() reports each shape exactly as it does the un-nested form.
+// Does not prove: CLI exit status or cross-tier parity (conformance/negatives).
+
+test "F-063: recursion through a self-call inside an array literal is detected" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("x", .bigint, true)};
+    var self_call = types.MethodCall{ .object = "this", .method = "foo", .args = &.{} };
+    const elems = [_]Expression{.{ .method_call = &self_call }};
+    var body = [_]Statement{.{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } }};
+    var assert_body = [_]Statement{.{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } }};
+    var methods = [_]MethodNode{
+        .{ .name = "foo", .is_public = false, .params = &.{}, .body = &body },
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &assert_body },
+    };
+    var assignments = [_]types.AssignmentNode{makeAssignment("x")};
+    var super_args = [_]Expression{.{ .identifier = "x" }};
+    var params = [_]types.ParamNode{makeParam("x")};
+    const contract = ContractNode{
+        .name = "Recursive",
+        .parent_class = .smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var found = false;
+    for (result.errors) |err| {
+        if (std.mem.indexOf(u8, err.message, "recursion detected") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "F-063: manual checkPreimage inside an array literal still warns" {
+    const allocator = testing.allocator;
+    const props = [_]PropertyNode{makeProperty("counter", .bigint, false)};
+    var check_call = types.CallExpr{ .callee = "checkPreimage", .args = &.{} };
+    const elems = [_]Expression{.{ .call = &check_call }};
+    var body = [_]Statement{.{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } }};
+    var methods = [_]MethodNode{
+        .{ .name = "increment", .is_public = true, .params = &.{}, .body = &body },
+    };
+    var assignments = [_]types.AssignmentNode{makeAssignment("counter")};
+    var super_args = [_]Expression{.{ .identifier = "counter" }};
+    var params = [_]types.ParamNode{makeParam("counter")};
+    const contract = ContractNode{
+        .name = "Counter",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var found = false;
+    for (result.warnings) |w| {
+        if (std.mem.indexOf(u8, w.message, "checkPreimage") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "F-063: an extractLocktime read inside an array literal is seen by the locktime check" {
+    const allocator = testing.allocator;
+    var lt_args = [_]Expression{.{ .property_access = .{ .object = "this", .property = "txPreimage" } }};
+    var lt_call = types.CallExpr{ .callee = "extractLocktime", .args = &lt_args };
+    const elems = [_]Expression{.{ .call = &lt_call }};
+    var inc = types.IncrementExpr{ .operand = .{ .property_access = .{ .object = "this", .property = "count" } }, .prefix = false };
+    var body = [_]Statement{
+        .{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } },
+        .{ .expr_stmt = .{ .expr = .{ .increment = &inc } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "unlock", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{makeProperty("count", .bigint, false)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("count")};
+    var super_args = [_]Expression{.{ .identifier = "count" }};
+    var params = [_]types.ParamNode{makeParam("count")};
+    const contract = ContractNode{
+        .name = "TimeLock",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeLocktimeResult(allocator, result);
+
+    try testing.expect(hasLocktimeWarning(result));
+}
+
+test "F-063: an output intrinsic inside an array literal in a loop body is rejected" {
+    const allocator = testing.allocator;
+    var ao_args = [_]Expression{ .{ .literal_int = 1000 }, .{ .property_access = .{ .object = "this", .property = "count" } } };
+    var ao_call = types.MethodCall{ .object = "this", .method = "addOutput", .args = &ao_args };
+    const elems = [_]Expression{.{ .method_call = &ao_call }};
+    var loop_body = [_]Statement{.{ .expr_stmt = .{ .expr = .{ .array_literal = &elems } } }};
+    var body = [_]Statement{
+        .{ .for_stmt = .{
+            .var_name = "i",
+            .init_value = 0,
+            .bound = 2,
+            .bound_is_const = true,
+            .body = &loop_body,
+        } },
+        .{ .assert_stmt = .{ .condition = .{ .literal_bool = true } } },
+    };
+    var methods = [_]MethodNode{
+        .{ .name = "step", .is_public = true, .params = &.{}, .body = &body },
+    };
+    const props = [_]PropertyNode{makeProperty("count", .bigint, false)};
+    var assignments = [_]types.AssignmentNode{makeAssignment("count")};
+    var super_args = [_]Expression{.{ .identifier = "count" }};
+    var params = [_]types.ParamNode{makeParam("count")};
+    const contract = ContractNode{
+        .name = "Looper",
+        .parent_class = .stateful_smart_contract,
+        .properties = @constCast(&props),
+        .constructor = .{ .params = &params, .super_args = &super_args, .assignments = &assignments },
+        .methods = &methods,
+    };
+    const result = try validate(allocator, contract);
+    defer freeResult(allocator, result);
+
+    var found = false;
+    for (result.errors) |err| {
+        if (std.mem.indexOf(u8, err.message, "Output intrinsic 'addOutput'") != null) found = true;
+    }
+    try testing.expect(found);
 }

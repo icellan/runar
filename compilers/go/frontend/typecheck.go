@@ -1184,6 +1184,24 @@ func (tc *typeChecker) inferExprType(expr Expression, env *typeEnv) string {
 			tc.addError(fmt.Sprintf("-- operator requires bigint, got '%s'", operandType))
 		}
 		return "bigint"
+
+	case ArrayLiteralExpr:
+		// F-063: without this arm every array literal typed as "<unknown>" —
+		// which isSubtype accepts against anything, making checkMultiSig's
+		// argument check vacuous — and its elements were never visited, so a
+		// call nested in one never reached checkCallExpr's unknown-function
+		// rule. Ported from the TS reference, wording included.
+		if len(e.Elements) == 0 {
+			return "<unknown>[]"
+		}
+		elemType := tc.inferExprType(e.Elements[0], env)
+		for _, el := range e.Elements[1:] {
+			et := tc.inferExprType(el, env)
+			if !isSubtype(et, elemType) && et != "<unknown>" {
+				tc.addError(fmt.Sprintf("Array element type mismatch: expected '%s', got '%s'", elemType, et))
+			}
+		}
+		return elemType + "[]"
 	}
 
 	return "<unknown>"
@@ -1975,6 +1993,8 @@ func inferExprTypeStatic(expr Expression) string {
 		return inferExprTypeStatic(e.Alternate)
 	case IncrementExpr, DecrementExpr:
 		return "bigint"
+	case ArrayLiteralExpr:
+		return "<unknown>[]"
 	}
 	return "<unknown>"
 }

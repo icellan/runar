@@ -908,6 +908,7 @@ module RunarCompiler
         when UnaryExpr then [expr.operand]
         when TernaryExpr then [expr.condition, expr.consequent, expr.alternate]
         when IndexAccessExpr then [expr.object, expr.index]
+        when ArrayLiteralExpr then expr.elements || []
         else []
         end
       end
@@ -1054,6 +1055,8 @@ module RunarCompiler
           validate_expression(expr.operand)
         when DecrementExpr
           validate_expression(expr.operand)
+        when ArrayLiteralExpr
+          expr.elements.each { |el| validate_expression(el) }
         when ByteStringLiteral
           val = expr.value
           if val.length > 0
@@ -1552,6 +1555,8 @@ module RunarCompiler
           walk_expr(expr.operand, visitor)
         when DecrementExpr
           walk_expr(expr.operand, visitor)
+        when ArrayLiteralExpr
+          expr.elements.each { |el| walk_expr(el, visitor) }
         end
       end
 
@@ -1617,6 +1622,8 @@ module RunarCompiler
           collect_method_calls_in_expr(expr.operand, calls)
         when DecrementExpr
           collect_method_calls_in_expr(expr.operand, calls)
+        when ArrayLiteralExpr
+          expr.elements.each { |el| collect_method_calls_in_expr(el, calls) }
         end
       end
 

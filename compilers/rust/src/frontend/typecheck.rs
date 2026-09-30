@@ -934,13 +934,24 @@ terminal (no state mutation)",
             }
 
             Expression::ArrayLiteral { elements } => {
-                // Infer element type from the first element; treat as element-type array.
-                if let Some(first) = elements.first() {
-                    let elem_type = self.infer_expr_type(first, env);
-                    format!("{}[]", elem_type)
-                } else {
-                    "<unknown>[]".to_string()
+                // F-063: infer EVERY element, not just the first — a call nested
+                // in a later element must reach the unknown-function rule, and a
+                // mistyped later element must be compared. Ported from the TS
+                // reference, wording included.
+                let Some(first) = elements.first() else {
+                    return "<unknown>[]".to_string();
+                };
+                let elem_type = self.infer_expr_type(first, env);
+                for el in &elements[1..] {
+                    let et = self.infer_expr_type(el, env);
+                    if !is_subtype(&et, &elem_type) && et != "<unknown>" {
+                        self.add_error(format!(
+                            "Array element type mismatch: expected '{}', got '{}'",
+                            elem_type, et
+                        ));
+                    }
                 }
+                format!("{}[]", elem_type)
             }
         }
     }
@@ -1934,6 +1945,7 @@ fn infer_expr_type_static(expr: &Expression) -> TType {
         Expression::IncrementExpr { .. } | Expression::DecrementExpr { .. } => {
             BIGINT.to_string()
         }
+        Expression::ArrayLiteral { .. } => "<unknown>[]".to_string(),
         _ => "<unknown>".to_string(),
     }
 }
@@ -2614,5 +2626,76 @@ class Bad extends SmartContract {
         }
         // If parse itself fails (e.g. because the parser rejects member calls on unknown objects),
         // that also counts as rejection — just not at the typecheck level
+    }
+
+    // -----------------------------------------------------------------------
+    // F-063: infer_expr_type walks EVERY array-literal element.
+    //
+    // The ArrayLiteral arm inferred only the first element, so a call nested
+    // in any later element never reached the unknown-function rule and a
+    // mistyped later element was never compared. Ported from the TS reference.
+    //
+    // Proves: typecheck() refuses each shape with the TS reference's
+    // diagnostic (or this tier's existing unknown-function diagnostic). Does
+    // not prove: CLI exit status or cross-tier parity (conformance/negatives).
+    // -----------------------------------------------------------------------
+
+    fn f063_type_errors(source: &str) -> Vec<String> {
+        typecheck(&parse_and_validate(source))
+            .errors
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    #[test]
+    fn f063_unknown_function_inside_array_literal_rejected() {
+        let errs = f063_type_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, totallyBogusFunction(1n)])); }
+}
+"#,
+        );
+        assert!(
+            errs.iter().any(|m| m.contains("unknown function 'totallyBogusFunction'")),
+            "got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn f063_array_element_type_mismatch_rejected() {
+        let errs = f063_type_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, 1n])); }
+}
+"#,
+        );
+        assert!(
+            errs.iter().any(|m| m.contains("Array element type mismatch: expected 'PubKey', got 'bigint'")),
+            "got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn f063_well_typed_check_multisig_accepted() {
+        let errs = f063_type_errors(
+            r#"
+class C extends SmartContract {
+  readonly pk: PubKey;
+  readonly pk2: PubKey;
+  constructor(pk: PubKey, pk2: PubKey) { super(pk, pk2); this.pk = pk; this.pk2 = pk2; }
+  public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk2])); }
+}
+"#,
+        );
+        assert!(errs.is_empty(), "got: {:?}", errs);
     }
 }

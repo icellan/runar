@@ -801,6 +801,24 @@ class _TypeChecker:
                 self._add_error(f"-- operator requires bigint, got '{operand_type}'")
             return "bigint"
 
+        if isinstance(expr, ArrayLiteralExpr):
+            # F-063: without this arm every array literal typed as "<unknown>"
+            # -- which is_subtype accepts against anything, making
+            # checkMultiSig's argument check vacuous -- and its elements were
+            # never visited, so a call nested in one never reached the
+            # unknown-function rule. Ported from the TS reference, wording
+            # included.
+            if not expr.elements:
+                return "<unknown>[]"
+            elem_type = self._infer_expr_type(expr.elements[0], env)
+            for el in expr.elements[1:]:
+                et = self._infer_expr_type(el, env)
+                if not is_subtype(et, elem_type) and et != "<unknown>":
+                    self._add_error(
+                        f"Array element type mismatch: expected '{elem_type}', got '{et}'"
+                    )
+            return elem_type + "[]"
+
         return "<unknown>"
 
     # -------------------------------------------------------------------
@@ -1520,6 +1538,9 @@ def _infer_expr_type_static(expr: Expression | None) -> str:
 
     if isinstance(expr, (IncrementExpr, DecrementExpr)):
         return "bigint"
+
+    if isinstance(expr, ArrayLiteralExpr):
+        return "<unknown>[]"
 
     return "<unknown>"
 
