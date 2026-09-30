@@ -102,8 +102,14 @@ public final class ConstantFold {
     private static AnfBinding foldBinding(AnfBinding binding, Map<String, ConstSlot> env) {
         AnfValue folded = foldValue(binding.value(), env);
         ConstSlot slot = anfValueToConst(folded);
+        // A name may be bound more than once (reassignment, or a user local that
+        // shares a compiler temp's name). The env must track the LATEST binding:
+        // a rebinding to a non-constant drops the old constant, or later uses
+        // would fold with a value the name no longer holds.
         if (slot != null) {
             env.put(binding.name(), slot);
+        } else {
+            env.remove(binding.name());
         }
         return new AnfBinding(binding.name(), folded, binding.sourceLoc());
     }

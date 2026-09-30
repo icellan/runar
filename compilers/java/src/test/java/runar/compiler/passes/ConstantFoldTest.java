@@ -467,4 +467,81 @@ class ConstantFoldTest {
             "the post-if bin_op must survive unfolded, got " + v.getClass().getSimpleName());
     }
 
+    // ---------------------------------------------------------------
+    // Same-name rebinding (F-082)
+    // ---------------------------------------------------------------
+    //
+    // ANF allows a name to be bound more than once in a method body (AnfLower's
+    // emitNamed reassignment idiom; a user local whose name collides with a
+    // compiler temp). The env entry must track the LATEST binding: when a name
+    // is rebound to a non-constant value, the old constant must be dropped, or
+    // every later use folds with a value the name no longer holds.
+    //
+    // Proves: the pass drops a stale constant on rebinding to a load_param and to
+    // an `@ref:` alias, and the source-reachable form of the bug (a user local
+    // named like an earlier compiler temp) compiles the same bytes with folding
+    // ON as with folding OFF — i.e. folding no longer turns an unsatisfiable
+    // guard into an unconditional `OP_TRUE`.
+    // Does not prove: anything about the other six tiers (they carry the same
+    // defect and are fixed separately), nor on-chain acceptance (see the item
+    // log for the Spend-based probe).
+
+    @Test
+    void rebindingToParamDropsStaleConstant() {
+        List<AnfBinding> body = List.of(
+            bigIntConst("x", 1),
+            bind("x", new LoadParam("p")),
+            bigIntConst("c", 1),
+            bind("y", new BinOp("+", "x", "c", null))
+        );
+        AnfMethod m = soleMethod(ConstantFold.run(singleMethodProgram(body)));
+        AnfValue y = m.body().get(3).value();
+        assertTrue(y instanceof BinOp,
+            "y = x + 1 after x was rebound to load_param must stay a bin_op, got " + y);
+    }
+
+    @Test
+    void rebindingToRefAliasDropsStaleConstant() {
+        List<AnfBinding> body = List.of(
+            bigIntConst("x", 1),
+            bind("t0", new LoadParam("p")),
+            bytesConst("x", "@ref:t0"),
+            bigIntConst("c", 1),
+            bind("y", new BinOp("+", "x", "c", null))
+        );
+        AnfMethod m = soleMethod(ConstantFold.run(singleMethodProgram(body)));
+        AnfValue y = m.body().get(4).value();
+        assertTrue(y instanceof BinOp,
+            "y = x + 1 after x was rebound to an @ref alias must stay a bin_op, got " + y);
+    }
+
+    @Test
+    void userLocalCollidingWithTempDoesNotFoldStaleConstant() throws Exception {
+        // `0n` in the first assert lowers to temp t1 = 0; `let t1 = p` then
+        // rebinds t1 to @ref:<load_param p>. Source semantics: p > 0 && p + 1 == 1
+        // is unsatisfiable. Pre-fix, folding used the stale t1 = 0, folded the
+        // second assert to assert(true), and the script accepted every p > 0.
+        String src = String.join("\n",
+            "import { SmartContract, assert } from 'runar-lang';",
+            "",
+            "class C extends SmartContract {",
+            "  constructor() {",
+            "    super();",
+            "  }",
+            "",
+            "  public unlock(p: bigint) {",
+            "    assert(p > 0n);",
+            "    let t1: bigint = p;",
+            "    assert(t1 + 1n === 1n);",
+            "  }",
+            "}",
+            "");
+        String foldOff = PipelineTestSupport.hex(src, "C.runar.ts", true);
+        String foldOn = PipelineTestSupport.hex(src, "C.runar.ts", false);
+        // fold-OFF bytes, identical across all 7 tiers.
+        assertEquals("76007c78a0697c8b519c77", foldOff);
+        assertEquals(foldOff, foldOn,
+            "constant folding must not change this program's bytes (stale-constant fold)");
+    }
+
 }
