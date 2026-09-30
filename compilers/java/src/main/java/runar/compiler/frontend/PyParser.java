@@ -707,9 +707,32 @@ public final class PyParser {
         final List<String> errors = new ArrayList<>();
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
+        /**
+         * N-046: the locals already bound in the current method, so a later
+         * {@code name = expr} of one of them is emitted as an
+         * AssignmentStatement, not a fresh VariableDeclStatement. Python is
+         * function-scoped, so rebinding an existing local inside a loop body
+         * or an if-arm IS an assignment; ANF lowering alpha-renames a
+         * declaration that reuses an enclosing binding's name.
+         * Snapshot/restored around if-branches and loop bodies exactly as the
+         * Ruby parser's declaredLocals.
+         */
+        Set<String> declaredLocals = new HashSet<>();
 
         PyParserImpl(String fileName) {
             this.fileName = fileName;
+        }
+
+        /**
+         * N-046: {@code name = init} is an assignment when the method already
+         * bound {@code name}, otherwise a declaration.
+         */
+        Statement bindLocal(String name, TypeNode type, Expression init, SourceLocation location) {
+            if (declaredLocals.contains(name)) {
+                return new AssignmentStatement(new Identifier(name), init, location);
+            }
+            declaredLocals.add(name);
+            return new VariableDeclStatement(name, type, init, location);
         }
 
         // -- Token helpers ----------------------------------------------------
@@ -998,6 +1021,9 @@ public final class PyParser {
             expectIdent("def");
             expectIdent("__init__");
 
+            // N-046: reset local tracking for this method's scope.
+            declaredLocals = new HashSet<>();
+
             List<ParamNode> params = parseParams();
 
             if (match(TokKind.ARROW)) {
@@ -1049,6 +1075,9 @@ public final class PyParser {
             expectIdent("def");
             Token nameTok = expect(TokKind.IDENT);
             String name = idents.declare(nameTok.value, pyConvertName(nameTok.value));
+
+            // N-046: reset local tracking for this method's scope.
+            declaredLocals = new HashSet<>();
 
             List<ParamNode> params = parseParams();
 
@@ -1198,7 +1227,10 @@ public final class PyParser {
         Statement parseIfBody(SourceLocation location) {
             Expression condition = parseExpression();
             expect(TokKind.COLON);
+            // N-046: a name first bound inside a branch stays branch-local.
+            Set<String> localsBefore = new HashSet<>(declaredLocals);
             List<Statement> thenBlock = parseBlock();
+            declaredLocals = new HashSet<>(localsBefore);
 
             List<Statement> elseBlock = null;
             skipNewlines();
@@ -1206,11 +1238,13 @@ public final class PyParser {
                 SourceLocation elifLoc = loc();
                 advance();
                 Statement elif = parseIfBody(elifLoc);
+                declaredLocals = new HashSet<>(localsBefore);
                 elseBlock = new ArrayList<>();
                 elseBlock.add(elif);
             } else if (matchIdent("else")) {
                 expect(TokKind.COLON);
                 elseBlock = parseBlock();
+                declaredLocals = new HashSet<>(localsBefore);
             }
             return new IfStatement(condition, thenBlock, elseBlock, location);
         }
@@ -1278,7 +1312,13 @@ public final class PyParser {
             expect(TokKind.RPAREN);
             expect(TokKind.COLON);
 
+            // N-046: the loop variable and the body's first bindings are
+            // body-local; a rebinding of the loop variable inside the body is
+            // an assignment.
+            Set<String> localsBeforeBody = new HashSet<>(declaredLocals);
+            declaredLocals.add(varName);
             List<Statement> body = parseBlock();
+            declaredLocals = localsBeforeBody;
 
             VariableDeclStatement init = new VariableDeclStatement(
                 varName,
@@ -1330,7 +1370,8 @@ public final class PyParser {
                     init = new BigIntLiteral(BigInteger.ZERO);
                 }
                 skipNewlines();
-                return new VariableDeclStatement(varName, typeNode, init, location);
+                // N-046: rebinding a local of this method is an assignment in Python.
+                return bindLocal(varName, typeNode, init, location);
             }
 
             Token targetTok = peek();
@@ -1347,7 +1388,9 @@ public final class PyParser {
                 skipNewlines();
                 if (expr instanceof Identifier id) {
                     if (targetTok.kind == TokKind.IDENT) idents.declare(targetTok.value, id.name());
-                    return new VariableDeclStatement(id.name(), null, value, location);
+                    // N-046: rebinding a local of this method is an assignment
+                    // in Python (function-scoped).
+                    return bindLocal(id.name(), null, value, location);
                 }
                 return new AssignmentStatement(expr, value, location);
             }

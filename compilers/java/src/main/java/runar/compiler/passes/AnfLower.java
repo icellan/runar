@@ -600,11 +600,13 @@ public final class AnfLower {
     /** N-016: suffix of the binding name of a local that shadows a property. */
     private static final String SHADOW_LOCAL_SUFFIX = "@local";
 
-    /** N-016: the source spelling of a local's binding name (undoes localName). */
+    /**
+     * N-016 / N-046: the source spelling of a local's binding name (undoes
+     * localName and declareLocal: everything before the first {@code @}).
+     */
     private static String sourceLocalName(String bindingName) {
-        return bindingName.endsWith(SHADOW_LOCAL_SUFFIX)
-            ? bindingName.substring(0, bindingName.length() - SHADOW_LOCAL_SUFFIX.length())
-            : bindingName;
+        int at = bindingName.indexOf('@');
+        return at < 0 ? bindingName : bindingName.substring(0, at);
     }
 
     private static List<AnfParam> lowerParams(List<ParamNode> params) {
@@ -640,6 +642,18 @@ public final class AnfLower {
                 autoInjectedParams.add(new AnfParam(name, type));
             }
         }
+
+        /**
+         * N-046 / N-047: the last {@code <name>@<n>} suffix handed out in this
+         * method, shared by every sub-context and inlined helper body.
+         */
+        int shadowSeq = 0;
+
+        /** N-046: a method-unique {@code <name>@<n>} binding name. */
+        String nextShadowName(String name) {
+            shadowSeq += 1;
+            return name + "@" + shadowSeq;
+        }
     }
 
     private static final class LowerCtx {
@@ -655,6 +669,14 @@ public final class AnfLower {
         // and loop variables in scope whose name is a property's.
         final Map<String, String> renamedPrivateParams = new HashMap<>();
         final Set<String> shadowingLoopVars = new HashSet<>();
+        // N-046 / N-047: source name -> binding name of a declaration that
+        // reused a name already bound in an enclosing scope (an outer local, a
+        // parameter, a loop variable, or, inside an inlined helper, a caller
+        // local). Copied by value into sub-contexts, so the rename ends with
+        // the declaring block.
+        Map<String, String> scopeRenames = new HashMap<>();
+        // N-046: source names of the loop variables in scope.
+        final Set<String> loopVars = new HashSet<>();
         final Set<String> localByteVars = new HashSet<>();
         // GAP-002: source location of the AST statement currently being
         // lowered. Stamped onto every AnfBinding the helpers below emit so
@@ -829,7 +851,12 @@ public final class AnfLower {
             }
 
             int startIndex = bindings.size();
+            // N-047: the helper body is its own lexical scope. Its locals are
+            // declared against the caller's (a collision is alpha-renamed by
+            // declareLocal) and go out of scope when it returns.
+            InlinedScopeState callerScope = enterInlinedScope();
             lowerStatements(method.body());
+            leaveInlinedScope(callerScope);
             int endIndex = bindings.size();
 
             for (int i = aliasedParams.size() - 1; i >= 0; i--) {
@@ -910,7 +937,69 @@ public final class AnfLower {
          * non-shadowing ANF byte-identical.
          */
         String localName(String name) {
+            String renamed = scopeRenames.get(name);
+            if (renamed != null) return renamed;
             return isProperty(name) ? name + SHADOW_LOCAL_SUFFIX : name;
+        }
+
+        /**
+         * N-046 / N-047: the binding name of a block-scoped declaration of
+         * {@code name}. A declaration that reuses a name already bound in an
+         * enclosing scope (an outer local, a parameter, a loop variable, an
+         * inlined helper's parameter) is bound under the fresh
+         * {@code <name>@<n>} and recorded in this scope, so it can never be
+         * mistaken for a reassignment of the outer binding (if-arm
+         * reconciliation matches arm bindings to outer locals BY NAME). A
+         * declaration that collides with nothing keeps {@code localName(name)},
+         * which keeps non-shadowing ANF byte-identical.
+         */
+        String declareLocal(String name) {
+            boolean inScope = scopeRenames.containsKey(name)
+                || isLocal(localName(name))
+                || isParam(name)
+                || getParamAlias(name) != null
+                || loopVars.contains(name);
+            if (!inScope) return localName(name);
+            String fresh = methodScope.nextShadowName(name);
+            scopeRenames.put(name, fresh);
+            return fresh;
+        }
+
+        /** N-047: the caller scope saved around an inlined helper body. */
+        private record InlinedScopeState(
+            Map<String, String> scopeRenames,
+            Set<String> localNames,
+            Set<String> localByteVars,
+            Map<String, String> localAliases,
+            Set<String> loopVars
+        ) {}
+
+        /**
+         * N-047: an inlined private helper's body is its own lexical scope:
+         * none of the caller's renames apply inside it, and none of its locals
+         * outlive it. Returns the state {@link #leaveInlinedScope} restores.
+         */
+        InlinedScopeState enterInlinedScope() {
+            InlinedScopeState saved = new InlinedScopeState(
+                scopeRenames,
+                new HashSet<>(localNames),
+                new HashSet<>(localByteVars),
+                new HashMap<>(localAliases),
+                new HashSet<>(loopVars));
+            scopeRenames = new HashMap<>();
+            return saved;
+        }
+
+        void leaveInlinedScope(InlinedScopeState saved) {
+            scopeRenames = saved.scopeRenames();
+            localNames.clear();
+            localNames.addAll(saved.localNames());
+            localByteVars.clear();
+            localByteVars.addAll(saved.localByteVars());
+            localAliases.clear();
+            localAliases.putAll(saved.localAliases());
+            loopVars.clear();
+            loopVars.addAll(saved.loopVars());
         }
 
         /**
@@ -959,6 +1048,10 @@ public final class AnfLower {
             sub.localAliases.putAll(this.localAliases);
             sub.renamedPrivateParams.putAll(this.renamedPrivateParams);
             sub.shadowingLoopVars.addAll(this.shadowingLoopVars);
+            // N-046: the block inherits the enclosing renames and loop
+            // variables by value, so a rename made inside it ends with it.
+            sub.scopeRenames = new HashMap<>(this.scopeRenames);
+            sub.loopVars.addAll(this.loopVars);
             sub.localByteVars.addAll(this.localByteVars);
             // Deep-copy the inlined-param alias stack. inlinePrivateMethodCall
             // pushes the caller's argument refs onto the CURRENT context before
@@ -1196,10 +1289,15 @@ public final class AnfLower {
 
         void lowerVariableDecl(VariableDeclStatement stmt) {
             String valueRef = lowerExprToRef(stmt.init());
-            String bindingName = localName(stmt.name());
+            // Byte-typedness of the initialiser is judged before the new name
+            // is in scope (the initialiser reads the OUTER binding).
+            boolean isBytes = isByteTypedExpr(stmt.init());
+            // N-046 / N-047: a declaration reusing an enclosing binding's name
+            // is alpha-renamed (see declareLocal).
+            String bindingName = declareLocal(stmt.name());
             addLocal(bindingName);
-            if (isByteTypedExpr(stmt.init())) {
-                localByteVars.add(stmt.name());
+            if (isBytes) {
+                localByteVars.add(bindingName);
             }
             emitNamed(bindingName, makeLoadConstString("@ref:" + valueRef));
         }
@@ -1654,10 +1752,16 @@ public final class AnfLower {
             if (stmt.init() != null && isProperty(stmt.init().name())) {
                 bodyCtx.shadowingLoopVars.add(stmt.init().name());
             }
+            // N-046: a loop variable reusing an enclosing binding's name is
+            // alpha-renamed in the body's scope (see declareLocal).
+            String iterVar = "";
+            if (stmt.init() != null) {
+                iterVar = bodyCtx.declareLocal(stmt.init().name());
+                bodyCtx.loopVars.add(stmt.init().name());
+            }
             bodyCtx.lowerStatements(stmt.body(), bodyReads);
             syncCounter(bodyCtx);
 
-            String iterVar = stmt.init() != null ? localName(stmt.init().name()) : "";
             emit(new Loop(shape.count, bodyCtx.bindings, iterVar, shape.start, shape.step));
         }
 
@@ -1800,6 +1904,19 @@ public final class AnfLower {
 
             if ("this".equals(name)) {
                 return emit(makeLoadConstString("@this"));
+            }
+
+            // N-046 / N-047: a declaration that shadowed an enclosing binding is
+            // the innermost binding of its name, ahead of params and param
+            // aliases. A renamed loop variable is not a local; it is read with
+            // load_param like every loop variable.
+            String renamed = scopeRenames.get(name);
+            if (renamed != null) {
+                if (isLocal(renamed)) {
+                    String alias = getLocalAlias(renamed);
+                    return alias != null ? alias : renamed;
+                }
+                return emit(new LoadParam(renamed));
             }
 
             // Param alias takes precedence over normal param lookup. Set when a
@@ -2297,11 +2414,15 @@ public final class AnfLower {
             if (expr == null) return false;
             if (expr instanceof ByteStringLiteral) return true;
             if (expr instanceof Identifier id) {
+                // N-046 / N-047: a renamed (shadowing) declaration is judged by
+                // its own binding, never by the parameter or property it shadows.
+                String renamed = scopeRenames.get(id.name());
+                if (renamed != null) return localByteVars.contains(renamed);
                 String t = getParamType(id.name());
                 if (t != null && isByteType(t)) return true;
                 t = getPropertyType(id.name());
                 if (t != null && isByteType(t)) return true;
-                if (localByteVars.contains(id.name())) return true;
+                if (localByteVars.contains(localName(id.name()))) return true;
                 return false;
             }
             if (expr instanceof PropertyAccessExpr pa) {

@@ -109,6 +109,45 @@ type pyParser struct {
 
 	// F-017: declared (spelling, Rúnar name) pairs.
 	idents declaredIdents
+
+	// N-046: the locals already bound in the current method, so a later
+	// `name = expr` of one of them is emitted as an AssignmentStmt, not a
+	// fresh VariableDeclStmt. Python is function-scoped, so rebinding an
+	// existing local inside a loop body or an if-arm IS an assignment; ANF
+	// lowering alpha-renames a VariableDeclStmt that reuses an enclosing
+	// binding's name. Snapshot/restored around if-branches and loop bodies
+	// exactly as the Ruby parser's declaredLocals.
+	declaredLocals map[string]bool
+}
+
+func (p *pyParser) snapshotLocals() map[string]bool {
+	out := make(map[string]bool, len(p.declaredLocals))
+	for k := range p.declaredLocals {
+		out[k] = true
+	}
+	return out
+}
+
+// restoreLocals (N-046) resets the tracked locals to a COPY of saved, so a
+// later branch cannot mutate the snapshot.
+func (p *pyParser) restoreLocals(saved map[string]bool) {
+	p.declaredLocals = make(map[string]bool, len(saved))
+	for k := range saved {
+		p.declaredLocals[k] = true
+	}
+}
+
+// bindLocal (N-046) returns the statement for `name = init`: an assignment
+// when the method already bound name, otherwise a declaration.
+func (p *pyParser) bindLocal(name string, typ TypeNode, init Expression, loc SourceLocation) Statement {
+	if p.declaredLocals[name] {
+		return AssignmentStmt{Target: Identifier{Name: name}, Value: init, SourceLocation: loc}
+	}
+	if p.declaredLocals == nil {
+		p.declaredLocals = make(map[string]bool)
+	}
+	p.declaredLocals[name] = true
+	return VariableDeclStmt{Name: name, Type: typ, Mutable: true, Init: init, SourceLocation: loc}
 }
 
 func (p *pyParser) addError(msg string) {
@@ -1106,6 +1145,9 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 	p.expectIdent("def")
 	p.expectIdent("__init__")
 
+	// N-046: reset local tracking for this method's scope.
+	p.declaredLocals = make(map[string]bool)
+
 	params := p.parsePyParams()
 
 	// Parse optional return type annotation
@@ -1184,6 +1226,9 @@ func (p *pyParser) parsePyMethod(visibility string) MethodNode {
 
 	nameTok := p.expect(pyTokIdent)
 	name := p.idents.declare(nameTok.value, pyConvertName(nameTok.value))
+
+	// N-046: reset local tracking for this method's scope.
+	p.declaredLocals = make(map[string]bool)
 
 	params := p.parsePyParams()
 
@@ -1373,7 +1418,10 @@ func (p *pyParser) parsePyIfBody(loc SourceLocation) Statement {
 	condition := p.parsePyExpression()
 	p.expect(pyTokColon)
 
+	// N-046: a name first bound inside a branch stays branch-local.
+	localsBefore := p.snapshotLocals()
 	thenBlock := p.parsePyBlock()
+	p.restoreLocals(localsBefore)
 
 	var elseBlock []Statement
 	p.skipNewlines()
@@ -1383,9 +1431,11 @@ func (p *pyParser) parsePyIfBody(loc SourceLocation) Statement {
 		// Recurse using parsePyIfBody which handles the rest identically
 		elifStmt := p.parsePyIfBody(elifLoc)
 		elseBlock = []Statement{elifStmt}
+		p.restoreLocals(localsBefore)
 	} else if p.matchIdent("else") {
 		p.expect(pyTokColon)
 		elseBlock = p.parsePyBlock()
+		p.restoreLocals(localsBefore)
 	}
 
 	return IfStmt{
@@ -1448,7 +1498,13 @@ func (p *pyParser) parsePyFor(loc SourceLocation) Statement {
 	p.expect(pyTokRParen)
 	p.expect(pyTokColon)
 
+	// N-046: the loop variable and the body's first bindings are body-local;
+	// a rebinding of the loop variable inside the body is an assignment.
+	localsBeforeBody := p.snapshotLocals()
+	p.restoreLocals(localsBeforeBody)
+	p.declaredLocals[varName] = true
 	body := p.parsePyBlock()
+	p.restoreLocals(localsBeforeBody)
 
 	// Build: for (let varName = initExpr; varName < limitExpr; varName++)
 	initStmt := VariableDeclStmt{
@@ -1521,13 +1577,8 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 			init = BigIntLiteral{Value: big.NewInt(0)}
 		}
 		p.skipNewlines()
-		return VariableDeclStmt{
-			Name:           varName,
-			Type:           typNode,
-			Mutable:        true,
-			Init:           init,
-			SourceLocation: loc,
-		}
+		// N-046: rebinding a local of this method is an assignment in Python.
+		return p.bindLocal(varName, typNode, init, loc)
 	}
 
 	targetTok := p.peek()
@@ -1548,13 +1599,10 @@ func (p *pyParser) parsePyExprOrAssignStatement(loc SourceLocation) Statement {
 			if targetTok.kind == pyTokIdent {
 				p.idents.declare(targetTok.value, ident.Name)
 			}
-			// Treat bare "name = expr" as a variable declaration for simple identifiers
-			return VariableDeclStmt{
-				Name:           ident.Name,
-				Mutable:        true,
-				Init:           value,
-				SourceLocation: loc,
-			}
+			// Treat bare "name = expr" as a variable declaration for simple
+			// identifiers — or, N-046, an assignment when the method already
+			// bound the name (Python is function-scoped).
+			return p.bindLocal(ident.Name, nil, value, loc)
 		}
 		return AssignmentStmt{Target: expr, Value: value, SourceLocation: loc}
 	}

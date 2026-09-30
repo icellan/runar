@@ -632,6 +632,32 @@ class MethodScope {
     this.autoInjectedSet.add(name);
     this.autoInjectedParams.push({ name, type });
   }
+
+  /**
+   * N-046 / N-047: the last `<name>@<n>` suffix handed out in this method.
+   * Shared by every sub-context and inlined helper body, so each shadowing
+   * declaration of the method gets a distinct binding name.
+   */
+  private shadowSeq = 0;
+
+  nextShadowName(name: string): string {
+    this.shadowSeq += 1;
+    return `${name}@${this.shadowSeq}`;
+  }
+}
+
+/** N-047: the caller scope saved around an inlined helper body. */
+interface InlinedScopeState {
+  scopeRenames: Map<string, string>;
+  localNames: Set<string>;
+  localByteVars: Set<string>;
+  localAliases: Map<string, string>;
+  loopVars: Set<string>;
+}
+
+function replaceSet(target: Set<string>, source: Set<string>): void {
+  target.clear();
+  for (const v of source) target.add(v);
 }
 
 class LoweringContext {
@@ -670,6 +696,15 @@ class LoweringContext {
   private readonly renamedPrivateParams: Map<string, string> = new Map();
   /** N-016: loop variables in scope whose name is a property's. */
   private readonly shadowingLoopVars: Set<string> = new Set();
+  /**
+   * N-046 / N-047: source name -> binding name of a declaration that reused a
+   * name already bound in an enclosing scope (an outer local, a parameter, a
+   * loop variable, or, inside an inlined helper, a caller local). Copied by
+   * value into sub-contexts, so the rename ends with the declaring block.
+   */
+  private scopeRenames: Map<string, string> = new Map();
+  /** N-046: source names of the loop variables in scope. */
+  private readonly loopVars: Set<string> = new Set();
   /**
    * Param substitution stack used when inlining a private method's body
    * directly into this context. Entry on top is the active alias for
@@ -815,7 +850,69 @@ class LoweringContext {
    * unchanged, which keeps the ANF of non-shadowing contracts byte-identical.
    */
   localName(name: string): string {
+    const renamed = this.scopeRenames.get(name);
+    if (renamed !== undefined) return renamed;
     return this.isProperty(name) ? `${name}${SHADOW_LOCAL_SUFFIX}` : name;
+  }
+
+  /**
+   * N-046 / N-047: the binding name of a block-scoped declaration of `name`.
+   *
+   * A declaration that reuses a name already bound in an enclosing scope (an
+   * outer local, a parameter, a loop variable, an inlined helper's parameter)
+   * is bound under the fresh `<name>@<n>` and recorded in this scope, so it can
+   * never be mistaken for a reassignment of the outer binding (if-arm
+   * reconciliation matches arm bindings to outer locals BY NAME). `@` appears
+   * in no surface's identifiers. A declaration that collides with nothing
+   * keeps `localName(name)`, which keeps non-shadowing ANF byte-identical.
+   */
+  declareLocal(name: string): string {
+    const inScope =
+      this.scopeRenames.has(name) ||
+      this.isLocal(this.localName(name)) ||
+      this.isParam(name) ||
+      this.getParamAlias(name) !== undefined ||
+      this.loopVars.has(name);
+    if (!inScope) return this.localName(name);
+    const fresh = this.methodScope.nextShadowName(name);
+    this.scopeRenames.set(name, fresh);
+    return fresh;
+  }
+
+  /** N-046: the renamed binding of `name` in this scope, if any. */
+  scopeRename(name: string): string | undefined {
+    return this.scopeRenames.get(name);
+  }
+
+  /** N-046: register a loop variable (source name) as in scope. */
+  addLoopVar(name: string): void {
+    this.loopVars.add(name);
+  }
+
+  /**
+   * N-047: enter an inlined private helper's body. The helper is its own
+   * lexical scope: none of the caller's renames apply inside it, and none of
+   * its locals outlive it. Returns the state `leaveInlinedScope` restores.
+   */
+  enterInlinedScope(): InlinedScopeState {
+    const saved: InlinedScopeState = {
+      scopeRenames: this.scopeRenames,
+      localNames: new Set(this.localNames),
+      localByteVars: new Set(this.localByteVars),
+      localAliases: new Map(this.localAliases),
+      loopVars: new Set(this.loopVars),
+    };
+    this.scopeRenames = new Map();
+    return saved;
+  }
+
+  leaveInlinedScope(saved: InlinedScopeState): void {
+    this.scopeRenames = saved.scopeRenames;
+    replaceSet(this.localNames, saved.localNames);
+    replaceSet(this.localByteVars, saved.localByteVars);
+    replaceSet(this.loopVars, saved.loopVars);
+    this.localAliases.clear();
+    for (const [k, v] of saved.localAliases) this.localAliases.set(k, v);
   }
 
   /** N-016: record a private helper's parameter that shadows a property. */
@@ -1001,6 +1098,8 @@ class LoweringContext {
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
     for (const [k, v] of this.renamedPrivateParams) sub.renamedPrivateParams.set(k, v);
     for (const v of this.shadowingLoopVars) sub.shadowingLoopVars.add(v);
+    sub.scopeRenames = new Map(this.scopeRenames);
+    for (const v of this.loopVars) sub.loopVars.add(v);
     // Deep-copy the inlined-param alias stack. `inlinePrivateMethodCall`
     // pushes the caller's argument refs onto the CURRENT context before
     // lowering the private body; without this, an if arm / loop body /
@@ -1246,12 +1345,17 @@ function lowerVariableDecl(
   ctx: LoweringContext,
 ): void {
   const valueRef = lowerExprToRef(stmt.init, ctx);
-  const bindingName = ctx.localName(stmt.name);
+  // Byte-typedness of the initialiser is judged before the new name is in
+  // scope (the initialiser reads the OUTER binding of a shadowed name).
+  const isBytes = isByteTypedExpr(stmt.init, ctx);
+  // N-046 / N-047: a declaration reusing an enclosing binding's name is
+  // alpha-renamed (see `declareLocal`).
+  const bindingName = ctx.declareLocal(stmt.name);
   ctx.addLocal(bindingName);
 
   // Track byte-typed locals so equality comparisons use OP_EQUAL
-  if (isByteTypedExpr(stmt.init, ctx)) {
-    ctx.addLocalByteVar(stmt.name);
+  if (isBytes) {
+    ctx.addLocalByteVar(bindingName);
   }
 
   // Emit a binding that aliases the variable name to the computed value.
@@ -1269,11 +1373,13 @@ function localTarget(name: string, ctx: LoweringContext): string {
   return ctx.isLocal(local) ? local : name;
 }
 
-/** N-016: the source spelling of a local's binding name (undoes `localName`). */
+/**
+ * N-016 / N-046: the source spelling of a local's binding name (undoes
+ * `localName` and `declareLocal`: everything from the first `@`).
+ */
 function sourceLocalName(bindingName: string): string {
-  return bindingName.endsWith(SHADOW_LOCAL_SUFFIX)
-    ? bindingName.slice(0, -SHADOW_LOCAL_SUFFIX.length)
-    : bindingName;
+  const at = bindingName.indexOf('@');
+  return at < 0 ? bindingName : bindingName.slice(0, at);
 }
 
 function lowerAssignment(
@@ -1783,6 +1889,10 @@ function lowerForStatement(
 
   const bodyCtx = ctx.subContext();
   if (ctx.isProperty(stmt.init.name)) bodyCtx.addShadowingLoopVar(stmt.init.name);
+  // N-046: a loop variable reusing an enclosing binding's name is
+  // alpha-renamed in the body's scope (see `declareLocal`).
+  const iterVar = bodyCtx.declareLocal(stmt.init.name);
+  bodyCtx.addLoopVar(stmt.init.name);
   lowerStatements(stmt.body, bodyCtx, bodyReads);
   ctx.syncCounter(bodyCtx);
 
@@ -1790,7 +1900,7 @@ function lowerForStatement(
     kind: 'loop',
     count,
     body: bodyCtx.bindings,
-    iterVar: ctx.localName(stmt.init.name),
+    iterVar,
     start,
     step,
   });
@@ -2016,6 +2126,16 @@ function lowerIdentifier(
   // 'this' is not a value in ANF -- it's handled at the member level
   if (name === 'this') {
     return ctx.emit({ kind: 'load_const', value: '@this' });
+  }
+
+  // N-046 / N-047: a declaration that shadowed an enclosing binding is the
+  // innermost binding of its name, ahead of params and param aliases. A
+  // renamed loop variable is not a local; it is read with `load_param` like
+  // every loop variable.
+  const renamed = ctx.scopeRename(name);
+  if (renamed !== undefined) {
+    if (ctx.isLocal(renamed)) return ctx.getLocalAlias(renamed) ?? renamed;
+    return ctx.emit({ kind: 'load_param', name: renamed });
   }
 
   // Param alias takes precedence over normal param lookup. Set when a
@@ -2609,7 +2729,12 @@ function inlinePrivateMethodCall(
   }
 
   const startIndex = ctx.bindings.length;
+  // N-047: the helper body is its own lexical scope. Its locals are declared
+  // against the caller's (a collision is alpha-renamed by `declareLocal`) and
+  // go out of scope when it returns.
+  const callerScope = ctx.enterInlinedScope();
   lowerStatements(method.body, ctx);
+  ctx.leaveInlinedScope(callerScope);
   const endIndex = ctx.bindings.length;
 
   // Pop aliases in reverse order so nested inlines compose correctly.
@@ -2860,13 +2985,17 @@ function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
       return true;
 
     case 'identifier': {
+      // N-046 / N-047: a renamed (shadowing) declaration is judged by its own
+      // binding, never by the parameter or property it shadows.
+      const renamed = ctx.scopeRename(expr.name);
+      if (renamed !== undefined) return ctx.isLocalByteVar(renamed);
       // Check if it's a parameter or property with a byte type
       const paramType = ctx.getParamType(expr.name);
       if (paramType && isByteStringFamilyType(paramType)) return true;
       const propType = ctx.getPropertyType(expr.name);
       if (propType && isByteStringFamilyType(propType)) return true;
       // Check if it's a local variable known to be byte-typed
-      if (ctx.isLocalByteVar(expr.name)) return true;
+      if (ctx.isLocalByteVar(ctx.localName(expr.name))) return true;
       return false;
     }
 

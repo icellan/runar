@@ -581,6 +581,24 @@ module RunarCompiler
         @tokens = []
         @pos = 0
         @errors = []
+        # N-046: the locals already bound in the current method, so a later
+        # `name = expr` of one of them is emitted as an AssignmentStmt, not a
+        # fresh VariableDeclStmt. Python is function-scoped, so rebinding an
+        # existing local inside a loop body or an if-arm IS an assignment; ANF
+        # lowering alpha-renames a VariableDeclStmt that reuses an enclosing
+        # binding's name. Snapshot/restored around if-branches and loop bodies
+        # exactly as the Ruby parser's @declared_locals.
+        @declared_locals = Set.new
+      end
+
+      # N-046: `name = init` is an assignment when the method already bound
+      # +name+, otherwise a declaration.
+      def bind_local(name, type, init, location)
+        if @declared_locals.include?(name)
+          return AssignmentStmt.new(target: Identifier.new(name: name), value: init, source_location: location)
+        end
+        @declared_locals.add(name)
+        VariableDeclStmt.new(name: name, type: type, mutable: true, init: init, source_location: location)
       end
 
       attr_accessor :tokens, :pos, :errors
@@ -875,6 +893,9 @@ module RunarCompiler
                                     severity: Severity::ERROR, loc: location)
         end
 
+        # N-046: reset local tracking for this method's scope.
+        @declared_locals = Set.new
+
         expect(TOK_LPAREN)
         params = parse_params
         expect(TOK_RPAREN)
@@ -1085,7 +1106,10 @@ module RunarCompiler
         expect(TOK_COLON)
         skip_newlines
         expect(TOK_INDENT)
+        # N-046: a name first bound inside a branch stays branch-local.
+        locals_before = @declared_locals.dup
         then_block = parse_statements
+        @declared_locals = locals_before.dup
         match_tok(TOK_DEDENT)
         skip_newlines
 
@@ -1094,12 +1118,14 @@ module RunarCompiler
         if check_ident("elif")
           elif_loc = loc
           else_block = [parse_elif_statement(elif_loc)]
+          @declared_locals = locals_before.dup
         elsif check_ident("else")
           advance # 'else'
           expect(TOK_COLON)
           skip_newlines
           expect(TOK_INDENT)
           else_block = parse_statements
+          @declared_locals = locals_before.dup
           match_tok(TOK_DEDENT)
         end
 
@@ -1117,7 +1143,10 @@ module RunarCompiler
         expect(TOK_COLON)
         skip_newlines
         expect(TOK_INDENT)
+        # N-046: a name first bound inside a branch stays branch-local.
+        locals_before = @declared_locals.dup
         then_block = parse_statements
+        @declared_locals = locals_before.dup
         match_tok(TOK_DEDENT)
         skip_newlines
 
@@ -1126,12 +1155,14 @@ module RunarCompiler
         if check_ident("elif")
           elif_loc = loc
           else_block = [parse_elif_statement(elif_loc)]
+          @declared_locals = locals_before.dup
         elsif check_ident("else")
           advance
           expect(TOK_COLON)
           skip_newlines
           expect(TOK_INDENT)
           else_block = parse_statements
+          @declared_locals = locals_before.dup
           match_tok(TOK_DEDENT)
         end
 
@@ -1212,7 +1243,12 @@ module RunarCompiler
         expect(TOK_COLON)
         skip_newlines
         expect(TOK_INDENT)
+        # N-046: the loop variable and the body's first bindings are body-local;
+        # a rebinding of the loop variable inside the body is an assignment.
+        locals_before_body = @declared_locals.dup
+        @declared_locals.add(var_name)
         body = parse_statements
+        @declared_locals = locals_before_body
         match_tok(TOK_DEDENT)
 
         init = VariableDeclStmt.new(
@@ -1328,13 +1364,8 @@ module RunarCompiler
                  else
                    BigIntLiteral.new(value: 0)
                  end
-          return VariableDeclStmt.new(
-            name: declare(raw_name),
-            type: type_node,
-            mutable: true,
-            init: init,
-            source_location: location
-          )
+          # N-046: rebinding a local of this method is an assignment in Python.
+          return bind_local(declare(raw_name), type_node, init, location)
         end
 
         # Simple name = expr (variable declaration without type)
@@ -1342,12 +1373,8 @@ module RunarCompiler
           advance # ident
           advance # '='
           value = parse_expression
-          return VariableDeclStmt.new(
-            name: declare(raw_name),
-            mutable: true,
-            init: value,
-            source_location: location
-          )
+          # N-046: rebinding a local of this method is an assignment in Python.
+          return bind_local(declare(raw_name), nil, value, location)
         end
 
         # Parse as expression first

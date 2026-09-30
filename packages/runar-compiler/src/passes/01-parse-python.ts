@@ -569,6 +569,17 @@ class PyParser {
   private errors: CompilerDiagnostic[];
   /** F-017: (source spelling, Rúnar name) of every declared identifier. */
   private declared: Array<[string, string]> = [];
+  /**
+   * N-046: the locals already bound in the current method, so a later
+   * `name = expr` of one of them is emitted as an `assignment`, not a fresh
+   * `variable_decl`. Python is function-scoped, so rebinding an existing local
+   * inside a loop body or an if-arm IS an assignment; ANF lowering alpha-renames
+   * a `variable_decl` that reuses an enclosing binding's name (block-scoped
+   * shadowing in every other surface). Snapshot/restored around if-branches
+   * and loop bodies exactly as the Ruby parser's `declaredLocals`, so a name
+   * first bound inside a branch stays branch-local as before.
+   */
+  private declaredLocals: Set<string> = new Set();
 
   constructor(tokens: Token[], file: string, errors: CompilerDiagnostic[] = []) {
     this.tokens = tokens;
@@ -863,6 +874,9 @@ class PyParser {
       this.errors.push(makeDiagnostic(staticMethodMessage(rawName), 'error', loc));
     }
 
+    // N-046: reset local tracking for this method's scope.
+    this.declaredLocals = new Set();
+
     this.expect('(');
     const params = this.parseParams();
     this.expect(')');
@@ -1082,7 +1096,10 @@ class PyParser {
     this.expect(':');
     this.skipNewlines();
     this.expect('INDENT');
+    // N-046: a name first bound inside a branch stays branch-local.
+    const localsBefore = new Set(this.declaredLocals);
     const thenBranch = this.parseStatements();
+    this.declaredLocals = new Set(localsBefore);
     this.match('DEDENT');
     this.skipNewlines();
 
@@ -1092,12 +1109,14 @@ class PyParser {
       // elif -> else { if ... }
       const elifLoc = this.loc();
       elseBranch = [this.parseElifStatement(elifLoc)];
+      this.declaredLocals = new Set(localsBefore);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
       this.expect(':');
       this.skipNewlines();
       this.expect('INDENT');
       elseBranch = this.parseStatements();
+      this.declaredLocals = new Set(localsBefore);
       this.match('DEDENT');
     }
 
@@ -1116,7 +1135,10 @@ class PyParser {
     this.expect(':');
     this.skipNewlines();
     this.expect('INDENT');
+    // N-046: see parseIfStatement.
+    const localsBefore = new Set(this.declaredLocals);
     const thenBranch = this.parseStatements();
+    this.declaredLocals = new Set(localsBefore);
     this.match('DEDENT');
     this.skipNewlines();
 
@@ -1125,12 +1147,14 @@ class PyParser {
     if (this.peek().type === 'elif') {
       const elifLoc = this.loc();
       elseBranch = [this.parseElifStatement(elifLoc)];
+      this.declaredLocals = new Set(localsBefore);
     } else if (this.peek().type === 'else') {
       this.advance();
       this.expect(':');
       this.skipNewlines();
       this.expect('INDENT');
       elseBranch = this.parseStatements();
+      this.declaredLocals = new Set(localsBefore);
       this.match('DEDENT');
     }
 
@@ -1197,7 +1221,12 @@ class PyParser {
     this.expect(':');
     this.skipNewlines();
     this.expect('INDENT');
+    // N-046: the loop variable and the body's first bindings are body-local;
+    // a rebinding of the loop variable inside the body is an assignment.
+    const localsBeforeBody = new Set(this.declaredLocals);
+    this.declaredLocals.add(varName);
     const body = this.parseStatements();
+    this.declaredLocals = new Set(localsBeforeBody);
     this.match('DEDENT');
 
     // Construct a C-style for loop AST node:
@@ -1333,9 +1362,15 @@ class PyParser {
       } else {
         init = { kind: 'bigint_literal', value: 0n };
       }
+      const name = this.declare(rawName);
+      // N-046: rebinding a local of this method is an assignment in Python.
+      if (this.declaredLocals.has(name)) {
+        return { kind: 'assignment', target: { kind: 'identifier', name }, value: init, sourceLocation: loc };
+      }
+      this.declaredLocals.add(name);
       return {
         kind: 'variable_decl',
-        name: this.declare(rawName),
+        name,
         type: typeNode,
         mutable: true,
         init,
@@ -1350,9 +1385,15 @@ class PyParser {
       this.advance(); // consume ident
       this.advance(); // consume '='
       const value = this.parseExpression();
+      const name = this.declare(rawName);
+      // N-046: rebinding a local of this method is an assignment in Python.
+      if (this.declaredLocals.has(name)) {
+        return { kind: 'assignment', target: { kind: 'identifier', name }, value, sourceLocation: loc };
+      }
+      this.declaredLocals.add(name);
       return {
         kind: 'variable_decl',
-        name: this.declare(rawName),
+        name,
         mutable: true,
         init: value,
         sourceLocation: loc,

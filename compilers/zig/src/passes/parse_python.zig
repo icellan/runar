@@ -713,8 +713,38 @@ const Parser = struct {
     depth: u32,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: identifier_collision.DeclaredIdents = .{},
+    /// N-046: the locals already bound in the current method, so a later
+    /// `name = expr` of one of them is emitted as an `.assign`, not a fresh
+    /// `.let_decl`. Python is function-scoped, so rebinding an existing local
+    /// inside a loop body or an if-arm IS an assignment; ANF lowering
+    /// alpha-renames a declaration that reuses an enclosing binding's name.
+    /// Snapshot/restored around if-branches and loop bodies exactly as the
+    /// Ruby parser's `declared_locals`.
+    declared_locals: std.StringHashMapUnmanaged(void) = .empty,
 
     const max_depth: u32 = 256;
+
+    /// N-046: a copy of the tracked locals (restored after a branch / body).
+    fn snapshotLocals(self: *Parser) std.StringHashMapUnmanaged(void) {
+        return self.declared_locals.clone(self.allocator) catch .empty;
+    }
+
+    fn restoreLocals(self: *Parser, saved: *const std.StringHashMapUnmanaged(void)) void {
+        self.declared_locals = saved.clone(self.allocator) catch .empty;
+    }
+
+    /// N-046: `name = value` is an assignment when the method already bound
+    /// `name`, otherwise a declaration.
+    fn bindLocal(self: *Parser, name: []const u8, type_info: ?RunarType, value: Expression, loc: types.SourceLocation) Statement {
+        if (self.declared_locals.contains(name)) {
+            return .{ .assign = .{ .target = name, .value = value, .source_loc = loc, .target_is_property = false } };
+        }
+        self.declared_locals.put(self.allocator, name, {}) catch {};
+        if (type_info) |ti| {
+            return .{ .let_decl = .{ .name = name, .type_info = ti, .value = value, .source_loc = loc } };
+        }
+        return .{ .let_decl = .{ .name = name, .value = value, .source_loc = loc } };
+    }
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         // Two-phase tokenization
@@ -1087,6 +1117,9 @@ const Parser = struct {
         const method_loc = self.currentSourceLoc();
         _ = self.bump(); // consume '__init__'
 
+        // N-046: reset local tracking for this method's scope.
+        self.declared_locals = .empty;
+
         const params = self.parsePyParams();
 
         // Optional return type: -> Type
@@ -1233,6 +1266,9 @@ const Parser = struct {
         const name_tok = self.bump();
         const method_loc = self.tokenSourceLoc(name_tok);
         const name = self.declare(name_tok.text);
+
+        // N-046: reset local tracking for this method's scope.
+        self.declared_locals = .empty;
 
         const params = self.parsePyParams();
 
@@ -1403,7 +1439,10 @@ const Parser = struct {
     fn parsePyIfBody(self: *Parser, loc: types.SourceLocation) ?Statement {
         const cond = self.parseExpression() orelse return null;
         _ = self.expect(.colon);
+        // N-046: a name first bound inside a branch stays branch-local.
+        const locals_before = self.snapshotLocals();
         const then_body = self.parsePyBlock();
+        self.restoreLocals(&locals_before);
 
         var else_body: ?[]Statement = null;
         self.skipNewlines();
@@ -1411,12 +1450,14 @@ const Parser = struct {
             const elif_loc = self.currentSourceLoc();
             _ = self.bump(); // consume 'elif'
             const nested = self.parsePyIfBody(elif_loc) orelse return null;
+            self.restoreLocals(&locals_before);
             const a = self.allocator.alloc(Statement, 1) catch return null;
             a[0] = nested;
             else_body = a;
         } else if (self.matchIdent("else")) {
             _ = self.expect(.colon);
             else_body = self.parsePyBlock();
+            self.restoreLocals(&locals_before);
         }
 
         return .{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body, .source_loc = loc } };
@@ -1518,7 +1559,13 @@ const Parser = struct {
 
         _ = self.expect(.rparen);
         _ = self.expect(.colon);
+        // N-046: the loop variable and the body's first bindings are
+        // body-local; a rebinding of the loop variable inside the body is an
+        // assignment.
+        const locals_before_body = self.snapshotLocals();
+        self.declared_locals.put(self.allocator, var_name, {}) catch {};
         const body = self.parsePyBlock();
+        self.restoreLocals(&locals_before_body);
 
         // `range` is half-open at BOTH ends: `range(5, 1, -1)` yields
         // 5, 4, 3, 2, so the descending guard is `i > stop`, exactly as `<` is
@@ -1563,13 +1610,15 @@ const Parser = struct {
                 const tn = self.parsePyTypeAnnotation();
                 const ti = typeNodeToRunarType(tn);
 
+                // N-046: rebinding a local of this method is an assignment in
+                // Python.
                 if (self.match(.assign)) {
                     const val = self.parseExpression() orelse return null;
                     self.skipNewlines();
-                    return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = val, .source_loc = loc } };
+                    return self.bindLocal(var_name, ti, val, loc);
                 } else {
                     self.skipNewlines();
-                    return .{ .let_decl = .{ .name = var_name, .type_info = ti, .value = .{ .literal_int = 0 }, .source_loc = loc } };
+                    return self.bindLocal(var_name, ti, .{ .literal_int = 0 }, loc);
                 }
             }
         }
@@ -1607,15 +1656,16 @@ const Parser = struct {
     }
 
     fn buildAssignment(self: *Parser, target: Expression, value: Expression, loc: types.SourceLocation) ?Statement {
-        _ = self;
         const is_prop = types.targetIsProperty(target);
         switch (target) {
             .property_access => |pa| {
                 return .{ .assign = .{ .target = pa.property, .value = value, .source_loc = loc, .target_is_property = is_prop } };
             },
             .identifier => |id| {
-                // In Python, bare `name = expr` in method body is a variable declaration
-                return .{ .let_decl = .{ .name = id, .value = value, .source_loc = loc } };
+                // In Python, bare `name = expr` in method body is a variable
+                // declaration -- or, N-046, an assignment when the method
+                // already bound the name (Python is function-scoped).
+                return self.bindLocal(id, null, value, loc);
             },
             .index_access => |ia| {
                 // self.arr[idx] = value — carry the full target so

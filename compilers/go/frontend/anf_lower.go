@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/icellan/runar/compilers/go/ir"
@@ -125,13 +126,18 @@ func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
 		return true
 
 	case Identifier:
+		// N-046 / N-047: a renamed (shadowing) declaration is judged by its own
+		// binding, never by the parameter or property it shadows.
+		if renamed, ok := ctx.scopeRenames[e.Name]; ok {
+			return ctx.localByteVars[renamed]
+		}
 		if t, ok := ctx.getParamType(e.Name); ok && isByteType(t) {
 			return true
 		}
 		if t, ok := ctx.getPropertyType(e.Name); ok && isByteType(t) {
 			return true
 		}
-		if ctx.localByteVars[e.Name] {
+		if ctx.localByteVars[ctx.localName(e.Name)] {
 			return true
 		}
 		return false
@@ -727,6 +733,13 @@ type lowerCtx struct {
 	// and loop variables in scope whose name is a property's. Nil until used.
 	renamedPrivateParams map[string]string
 	shadowingLoopVars    map[string]bool
+	// N-046 / N-047: source name -> binding name of a declaration that reused
+	// a name already bound in an enclosing scope (an outer local, a parameter,
+	// a loop variable, or, inside an inlined helper, a caller local). Copied by
+	// value into sub-contexts, so the rename ends with the declaring block.
+	scopeRenames map[string]string
+	// N-046: source names of the loop variables in scope.
+	loopVars map[string]bool
 	localByteVars     map[string]bool    // tracks local variables known to be byte-typed
 	currentSourceLoc  *ir.SourceLocation // Debug: source location to attach to emitted ANF bindings
 	// Param substitution stack used when inlining a private method's body
@@ -784,6 +797,15 @@ type lowerCtx struct {
 type methodScopeT struct {
 	autoInjectedParams []ir.ANFParam   // append-only, insertion order
 	autoInjectedSet    map[string]bool // dedup
+	// N-046 / N-047: the last `<name>@<n>` suffix handed out in this method,
+	// shared by every sub-context and inlined helper body.
+	shadowSeq int
+}
+
+// nextShadowName (N-046) returns a method-unique `<name>@<n>` binding name.
+func (ms *methodScopeT) nextShadowName(name string) string {
+	ms.shadowSeq++
+	return name + "@" + strconv.Itoa(ms.shadowSeq)
 }
 
 func newMethodScope() *methodScopeT {
@@ -1048,6 +1070,9 @@ const shadowLocalSuffix = "@local"
 // — so a local bound as `x` next to a property `x` made `this.x` read the
 // local. Non-shadowing names are returned unchanged (byte-identical ANF).
 func (ctx *lowerCtx) localName(name string) string {
+	if renamed, ok := ctx.scopeRenames[name]; ok {
+		return renamed
+	}
 	if ctx.isProperty(name) {
 		return name + shadowLocalSuffix
 	}
@@ -1086,9 +1111,89 @@ func (ctx *lowerCtx) addShadowingLoopVar(name string) {
 	ctx.shadowingLoopVars[name] = true
 }
 
-// sourceLocalName (N-016) undoes localName.
+// sourceLocalName (N-016 / N-046) undoes localName and declareLocal: the
+// source spelling is everything before the first `@`.
 func sourceLocalName(bindingName string) string {
-	return strings.TrimSuffix(bindingName, shadowLocalSuffix)
+	if at := strings.IndexByte(bindingName, '@'); at >= 0 {
+		return bindingName[:at]
+	}
+	return bindingName
+}
+
+// declareLocal (N-046 / N-047) returns the binding name of a block-scoped
+// declaration of name. A declaration that reuses a name already bound in an
+// enclosing scope (an outer local, a parameter, a loop variable, an inlined
+// helper's parameter) is bound under the fresh `<name>@<n>` and recorded in
+// this scope, so it can never be mistaken for a reassignment of the outer
+// binding (if-arm reconciliation matches arm bindings to outer locals BY
+// NAME). A declaration that collides with nothing keeps localName(name), which
+// keeps non-shadowing ANF byte-identical.
+func (ctx *lowerCtx) declareLocal(name string) string {
+	_, renamed := ctx.scopeRenames[name]
+	_, aliased := ctx.getParamAlias(name)
+	inScope := renamed || ctx.isLocal(ctx.localName(name)) || ctx.isParam(name) || aliased || ctx.loopVars[name]
+	if !inScope {
+		return ctx.localName(name)
+	}
+	fresh := ctx.methodScope.nextShadowName(name)
+	if ctx.scopeRenames == nil {
+		ctx.scopeRenames = make(map[string]string)
+	}
+	ctx.scopeRenames[name] = fresh
+	return fresh
+}
+
+// addLoopVar (N-046) registers a loop variable (source name) as in scope.
+func (ctx *lowerCtx) addLoopVar(name string) {
+	if ctx.loopVars == nil {
+		ctx.loopVars = make(map[string]bool)
+	}
+	ctx.loopVars[name] = true
+}
+
+// inlinedScopeState (N-047) is the caller scope saved around an inlined
+// helper body.
+type inlinedScopeState struct {
+	scopeRenames  map[string]string
+	localNames    map[string]bool
+	localByteVars map[string]bool
+	localAliases  map[string]string
+	loopVars      map[string]bool
+}
+
+func copyBoolMap(m map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// enterInlinedScope (N-047): an inlined private helper's body is its own
+// lexical scope. None of the caller's renames apply inside it, and none of its
+// locals outlive it.
+func (ctx *lowerCtx) enterInlinedScope() inlinedScopeState {
+	aliases := make(map[string]string, len(ctx.localAliases))
+	for k, v := range ctx.localAliases {
+		aliases[k] = v
+	}
+	saved := inlinedScopeState{
+		scopeRenames:  ctx.scopeRenames,
+		localNames:    copyBoolMap(ctx.localNames),
+		localByteVars: copyBoolMap(ctx.localByteVars),
+		localAliases:  aliases,
+		loopVars:      copyBoolMap(ctx.loopVars),
+	}
+	ctx.scopeRenames = nil
+	return saved
+}
+
+func (ctx *lowerCtx) leaveInlinedScope(saved inlinedScopeState) {
+	ctx.scopeRenames = saved.scopeRenames
+	ctx.localNames = saved.localNames
+	ctx.localByteVars = saved.localByteVars
+	ctx.localAliases = saved.localAliases
+	ctx.loopVars = saved.loopVars
 }
 
 func (ctx *lowerCtx) getParamType(name string) (string, bool) {
@@ -1157,6 +1262,17 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 	}
 	for k := range ctx.shadowingLoopVars {
 		sub.addShadowingLoopVar(k)
+	}
+	// N-046: the block inherits the enclosing renames and loop variables by
+	// value, so a rename made inside it ends with it.
+	if len(ctx.scopeRenames) > 0 {
+		sub.scopeRenames = make(map[string]string, len(ctx.scopeRenames))
+		for k, v := range ctx.scopeRenames {
+			sub.scopeRenames[k] = v
+		}
+	}
+	for k := range ctx.loopVars {
+		sub.addLoopVar(k)
 	}
 	// Deep-copy the inlined-param alias stack. inlinePrivateMethodCall pushes
 	// the caller's arg refs on the CURRENT context before lowering the private
@@ -1399,10 +1515,15 @@ func stmtSourceLoc(stmt Statement) *ir.SourceLocation {
 // a named binding that aliases the variable to the computed value via @ref.
 func (ctx *lowerCtx) lowerVariableDecl(stmt VariableDeclStmt) {
 	valueRef := ctx.lowerExprToRef(stmt.Init)
-	bindingName := ctx.localName(stmt.Name)
+	// Byte-typedness of the initialiser is judged before the new name is in
+	// scope (the initialiser reads the OUTER binding of a shadowed name).
+	isBytes := isByteTypedExpr(stmt.Init, ctx)
+	// N-046 / N-047: a declaration reusing an enclosing binding's name is
+	// alpha-renamed (see declareLocal).
+	bindingName := ctx.declareLocal(stmt.Name)
 	ctx.addLocal(bindingName)
-	if isByteTypedExpr(stmt.Init, ctx) {
-		ctx.localByteVars[stmt.Name] = true
+	if isBytes {
+		ctx.localByteVars[bindingName] = true
 	}
 	ctx.emitNamed(bindingName, makeLoadConstString("@ref:"+valueRef))
 }
@@ -1859,6 +1980,10 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 	if ctx.isProperty(stmt.Init.Name) {
 		bodyCtx.addShadowingLoopVar(stmt.Init.Name)
 	}
+	// N-046: a loop variable reusing an enclosing binding's name is
+	// alpha-renamed in the body's scope (see declareLocal).
+	iterVar := bodyCtx.declareLocal(stmt.Init.Name)
+	bodyCtx.addLoopVar(stmt.Init.Name)
 	bodyCtx.lowerStatementsWithReads(stmt.Body, bodyReads)
 	ctx.syncCounter(bodyCtx)
 
@@ -1876,7 +2001,7 @@ func (ctx *lowerCtx) lowerForStatement(stmt ForStmt, readsAfter map[string]bool)
 		Kind:     "loop",
 		Count:    count,
 		Body:     bodyCtx.bindings,
-		IterVar:  ctx.localName(stmt.Init.Name),
+		IterVar:  iterVar,
 		Start:    start,
 		StartRaw: bigIntStartRaw(start),
 		Step:     step,
@@ -2187,6 +2312,20 @@ func (ctx *lowerCtx) lowerIdentifier(id Identifier) string {
 	// 'this' is not a value in ANF
 	if name == "this" {
 		return ctx.emit(makeLoadConstString("@this"))
+	}
+
+	// N-046 / N-047: a declaration that shadowed an enclosing binding is the
+	// innermost binding of its name, ahead of params and param aliases. A
+	// renamed loop variable is not a local; it is read with load_param like
+	// every loop variable.
+	if renamed, ok := ctx.scopeRenames[name]; ok {
+		if ctx.isLocal(renamed) {
+			if alias := ctx.getLocalAlias(renamed); alias != "" {
+				return alias
+			}
+			return renamed
+		}
+		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: renamed})
 	}
 
 	// Param alias takes precedence over normal param lookup. Set when a
@@ -2853,7 +2992,12 @@ func (ctx *lowerCtx) inlinePrivateMethodCall(methodName string, argRefs []string
 	}
 
 	startIndex := len(ctx.bindings)
+	// N-047: the helper body is its own lexical scope. Its locals are declared
+	// against the caller's (a collision is alpha-renamed by declareLocal) and
+	// go out of scope when it returns.
+	callerScope := ctx.enterInlinedScope()
 	ctx.lowerStatements(method.Body)
+	ctx.leaveInlinedScope(callerScope)
 	endIndex := len(ctx.bindings)
 
 	// Pop aliases in reverse order so nested inlines compose correctly.

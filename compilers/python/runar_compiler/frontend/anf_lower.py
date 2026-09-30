@@ -188,13 +188,18 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
         return True
 
     if isinstance(expr, Identifier):
+        # N-046 / N-047: a renamed (shadowing) declaration is judged by its own
+        # binding, never by the parameter or property it shadows.
+        renamed = ctx._scope_renames.get(expr.name)
+        if renamed is not None:
+            return renamed in ctx._local_byte_vars
         t = ctx.get_param_type(expr.name)
         if t is not None and t in _BYTE_TYPES:
             return True
         t = ctx.get_property_type(expr.name)
         if t is not None and t in _BYTE_TYPES:
             return True
-        if expr.name in ctx._local_byte_vars:
+        if ctx.local_name(expr.name) in ctx._local_byte_vars:
             return True
         return False
 
@@ -683,10 +688,9 @@ SHADOW_LOCAL_SUFFIX = "@local"
 
 
 def _source_local_name(binding_name: str) -> str:
-    """N-016: the source spelling of a local's binding name."""
-    if binding_name.endswith(SHADOW_LOCAL_SUFFIX):
-        return binding_name[: -len(SHADOW_LOCAL_SUFFIX)]
-    return binding_name
+    """N-016 / N-046: the source spelling of a local's binding name (undoes
+    ``local_name`` and ``declare_local``: everything before the first ``@``)."""
+    return binding_name.split("@", 1)[0]
 
 
 def _lower_params(params: list) -> list[ANFParam]:
@@ -737,6 +741,14 @@ class _MethodScope:
         self.auto_injected_params: list[ANFParam] = []
         # Set of names already recorded (dedup).
         self.auto_injected_set: set[str] = set()
+        # N-046 / N-047: the last ``<name>@<n>`` suffix handed out.
+        self.shadow_seq: int = 0
+
+    def next_shadow_name(self, name: str) -> str:
+        """N-046 / N-047: a method-unique ``<name>@<n>`` binding name, shared
+        by every sub-context and inlined helper body of the method."""
+        self.shadow_seq += 1
+        return f"{name}@{self.shadow_seq}"
 
     def record_auto_injected_param(self, name: str, typ: str) -> None:
         """Idempotent: second call with the same name is a no-op."""
@@ -788,6 +800,14 @@ class _LowerCtx:
         # and loop variables in scope whose name is a property's.
         self._renamed_private_params: dict[str, str] = {}
         self._shadowing_loop_vars: set[str] = set()
+        # N-046 / N-047: source name -> binding name of a declaration that
+        # reused a name already bound in an enclosing scope (an outer local, a
+        # parameter, a loop variable, or, inside an inlined helper, a caller
+        # local). Copied by value into sub-contexts, so the rename ends with the
+        # declaring block.
+        self._scope_renames: dict[str, str] = {}
+        # N-046: source names of the loop variables in scope.
+        self._loop_vars: set[str] = set()
         self._local_byte_vars: set[str] = set()
         self.current_source_loc: SourceLocation | None = None
         # Param substitution stack used when inlining a private method's
@@ -969,7 +989,55 @@ class _LowerCtx:
         local or a temp); every other name is unchanged, keeping non-shadowing
         ANF byte-identical.
         """
+        renamed = self._scope_renames.get(name)
+        if renamed is not None:
+            return renamed
         return name + SHADOW_LOCAL_SUFFIX if self.is_property(name) else name
+
+    def declare_local(self, name: str) -> str:
+        """N-046 / N-047: the binding name of a block-scoped declaration of
+        ``name``. A declaration that reuses a name already bound in an
+        enclosing scope (an outer local, a parameter, a loop variable, an
+        inlined helper's parameter) is bound under the fresh ``<name>@<n>`` and
+        recorded in this scope, so it can never be mistaken for a reassignment
+        of the outer binding (if-arm reconciliation matches arm bindings to
+        outer locals BY NAME). A declaration that collides with nothing keeps
+        ``local_name(name)``, which keeps non-shadowing ANF byte-identical."""
+        in_scope = (
+            name in self._scope_renames
+            or self.is_local(self.local_name(name))
+            or self.is_param(name)
+            or self.get_param_alias(name) is not None
+            or name in self._loop_vars
+        )
+        if not in_scope:
+            return self.local_name(name)
+        fresh = self.method_scope.next_shadow_name(name)
+        self._scope_renames[name] = fresh
+        return fresh
+
+    def enter_inlined_scope(self) -> tuple:
+        """N-047: an inlined private helper's body is its own lexical scope:
+        none of the caller's renames apply inside it, and none of its locals
+        outlive it. Returns the state ``leave_inlined_scope`` restores."""
+        saved = (
+            self._scope_renames,
+            set(self._local_names),
+            set(self._local_byte_vars),
+            dict(self._local_aliases),
+            set(self._loop_vars),
+        )
+        self._scope_renames = {}
+        return saved
+
+    def leave_inlined_scope(self, saved: tuple) -> None:
+        (
+            self._scope_renames,
+            self._local_names,
+            self._local_byte_vars,
+            self._local_aliases,
+            self._loop_vars,
+        ) = saved
 
     def local_target(self, name: str) -> str:
         """N-016: the binding a write to the bare identifier ``name`` rebinds --
@@ -1030,6 +1098,10 @@ class _LowerCtx:
         sub._local_aliases = dict(self._local_aliases)
         sub._renamed_private_params = dict(self._renamed_private_params)
         sub._shadowing_loop_vars = set(self._shadowing_loop_vars)
+        # N-046: the block inherits the enclosing renames and loop variables by
+        # value, so a rename made inside it ends with it.
+        sub._scope_renames = dict(self._scope_renames)
+        sub._loop_vars = set(self._loop_vars)
         sub._local_byte_vars = set(self._local_byte_vars)
         # Deep-copy the inlined-param alias stack. ``_inline_private_method_call``
         # pushes the caller's argument refs onto the CURRENT context before
@@ -1129,10 +1201,15 @@ class _LowerCtx:
 
     def _lower_variable_decl(self, stmt: VariableDeclStmt) -> None:
         value_ref = self.lower_expr_to_ref(stmt.init)
-        binding_name = self.local_name(stmt.name)
+        # Byte-typedness of the initialiser is judged before the new name is in
+        # scope (the initialiser reads the OUTER binding of a shadowed name).
+        is_bytes = _is_byte_typed_expr(stmt.init, self)
+        # N-046 / N-047: a declaration reusing an enclosing binding's name is
+        # alpha-renamed (see ``declare_local``).
+        binding_name = self.declare_local(stmt.name)
         self.add_local(binding_name)
-        if _is_byte_typed_expr(stmt.init, self):
-            self._local_byte_vars.add(stmt.name)
+        if is_bytes:
+            self._local_byte_vars.add(binding_name)
         self.emit_named(binding_name, _make_load_const_string("@ref:" + value_ref))
 
     def _lower_assignment(self, stmt: AssignmentStmt) -> None:
@@ -1386,6 +1463,12 @@ class _LowerCtx:
         body_ctx = self.sub_context()
         if stmt.init and self.is_property(stmt.init.name):
             body_ctx._shadowing_loop_vars.add(stmt.init.name)
+        # N-046: a loop variable reusing an enclosing binding's name is
+        # alpha-renamed in the body's scope (see ``declare_local``).
+        iter_var = ""
+        if stmt.init:
+            iter_var = body_ctx.declare_local(stmt.init.name)
+            body_ctx._loop_vars.add(stmt.init.name)
         body_ctx.lower_statements(stmt.body, frozenset(body_reads))
         self.sync_counter(body_ctx)
 
@@ -1393,7 +1476,7 @@ class _LowerCtx:
             kind="loop",
             count=count,
             body=body_ctx.bindings,
-            iter_var=self.local_name(stmt.init.name) if stmt.init else "",
+            iter_var=iter_var,
             start=start,
             step=step,
         ))
@@ -1538,6 +1621,16 @@ class _LowerCtx:
         # 'this' is not a value in ANF
         if name == "this":
             return self.emit(_make_load_const_string("@this"))
+
+        # N-046 / N-047: a declaration that shadowed an enclosing binding is
+        # the innermost binding of its name, ahead of params and param aliases.
+        # A renamed loop variable is not a local; it is read with load_param
+        # like every loop variable.
+        renamed = self._scope_renames.get(name)
+        if renamed is not None:
+            if self.is_local(renamed):
+                return self.get_local_alias(renamed) or renamed
+            return self.emit(ANFValue(kind="load_param", name=renamed))
 
         # Param alias takes precedence over normal param lookup. Set
         # when a private method's body is being inlined into this
@@ -1998,7 +2091,12 @@ class _LowerCtx:
             aliased.append(param.name)
 
         start_index = len(self.bindings)
+        # N-047: the helper body is its own lexical scope. Its locals are
+        # declared against the caller's (a collision is alpha-renamed by
+        # ``declare_local``) and go out of scope when it returns.
+        caller_scope = self.enter_inlined_scope()
         self.lower_statements(method.body)
+        self.leave_inlined_scope(caller_scope)
         end_index = len(self.bindings)
 
         for name in reversed(aliased):

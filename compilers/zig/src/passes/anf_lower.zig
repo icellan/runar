@@ -241,10 +241,26 @@ fn isByteReturningExtractor(name: []const u8) bool {
 }
 
 /// Check if an expression is known to produce byte-typed values.
+/// N-046: the `local_byte_vars` key of a byte-typed local. A renamed
+/// (shadowing) declaration is keyed by its binding, so it cannot answer for the
+/// outer name; every other local keeps its source-name key exactly as before
+/// (the map also carries the method's parameters by source name).
+fn byteVarKey(ctx: *const LowerCtx, source_name: []const u8, binding_name: []const u8) []const u8 {
+    if (ctx.scope_renames.get(source_name)) |renamed| {
+        if (std.mem.eql(u8, renamed, binding_name)) return binding_name;
+    }
+    return source_name;
+}
+
 fn isByteTypedExpr(expr: Expression, ctx: *const LowerCtx) bool {
     switch (expr) {
         .literal_bytes => return true,
         .identifier => |name| {
+            // N-046 / N-047: a renamed (shadowing) declaration is judged by its
+            // own binding, never by the parameter or property it shadows.
+            if (ctx.scope_renames.get(name)) |renamed| {
+                return ctx.local_byte_vars.get(renamed) != null;
+            }
             // Check property types
             for (ctx.contract.properties) |p| {
                 if (std.mem.eql(u8, p.name, name) and isByteType(p.type_info)) return true;
@@ -979,6 +995,15 @@ const MethodScope = struct {
     /// dedup set; appended to the method's ABI params list AFTER txPreimage.
     auto_injected_params: std.ArrayListUnmanaged(ParamNode) = .empty,
     auto_injected_set: std.StringHashMapUnmanaged(void) = .empty,
+    /// N-046 / N-047: the last `<name>@<n>` suffix handed out in this method,
+    /// shared by every sub-context and inlined helper body.
+    shadow_seq: u32 = 0,
+
+    /// N-046: a method-unique `<name>@<n>` binding name.
+    fn nextShadowName(self: *MethodScope, allocator: Allocator, name: []const u8) Allocator.Error![]const u8 {
+        self.shadow_seq += 1;
+        return std.fmt.allocPrint(allocator, "{s}@{d}", .{ name, self.shadow_seq });
+    }
 
     /// Record an intent-intrinsic-injected witness param. Idempotent — a
     /// repeat call with the same name is a no-op. Insertion order is
@@ -1012,13 +1037,23 @@ const MethodScope = struct {
 /// N-016: suffix of the binding name of a local that shadows a property.
 const SHADOW_LOCAL_SUFFIX = "@local";
 
-/// N-016: the source spelling of a local's binding name (undoes `localName`).
+/// N-016 / N-046: the source spelling of a local's binding name (undoes
+/// `localName` and `declareLocal`: everything before the first `@`).
 fn sourceLocalName(binding_name: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, binding_name, SHADOW_LOCAL_SUFFIX)) {
-        return binding_name[0 .. binding_name.len - SHADOW_LOCAL_SUFFIX.len];
+    if (std.mem.indexOfScalar(u8, binding_name, '@')) |at| {
+        return binding_name[0..at];
     }
     return binding_name;
 }
+
+/// N-047: the caller scope saved around an inlined helper body.
+const InlinedScopeState = struct {
+    scope_renames: std.StringHashMapUnmanaged([]const u8),
+    local_names: std.StringHashMapUnmanaged(void),
+    local_byte_vars: std.StringHashMapUnmanaged(void),
+    local_aliases: std.StringHashMapUnmanaged([]const u8),
+    loop_vars: std.StringHashMapUnmanaged(void),
+};
 
 const LowerCtx = struct {
     allocator: Allocator,
@@ -1032,6 +1067,13 @@ const LowerCtx = struct {
     renamed_private_params: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// N-016: loop variables in scope whose name is a property's.
     shadowing_loop_vars: std.StringHashMapUnmanaged(void) = .empty,
+    /// N-046 / N-047: source name -> binding name of a declaration that reused
+    /// a name already bound in an enclosing scope (an outer local, a parameter,
+    /// a loop variable, or, inside an inlined helper, a caller local). Copied
+    /// by value into sub-contexts, so the rename ends with the declaring block.
+    scope_renames: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// N-046: source names of the loop variables in scope.
+    loop_vars: std.StringHashMapUnmanaged(void) = .empty,
     local_byte_vars: std.StringHashMapUnmanaged(void),
     add_output_refs: std.ArrayListUnmanaged([]const u8),
     /// Tracks addDataOutput binding refs — data outputs are included in the
@@ -1256,6 +1298,7 @@ const LowerCtx = struct {
     /// with a property, another local or a temp); every other name is returned
     /// unchanged, keeping non-shadowing ANF byte-identical.
     fn localName(self: *const LowerCtx, name: []const u8) Allocator.Error![]const u8 {
+        if (self.scope_renames.get(name)) |renamed| return renamed;
         if (!self.isProperty(name)) return name;
         return std.fmt.allocPrint(self.allocator, "{s}" ++ SHADOW_LOCAL_SUFFIX, .{name});
     }
@@ -1278,7 +1321,56 @@ const LowerCtx = struct {
     /// resolves to when it names a local — the renamed binding of a local that
     /// shadows a property, otherwise the name itself, exactly as before.
     fn localTarget(self: *const LowerCtx, name: []const u8) []const u8 {
+        if (self.scope_renames.get(name)) |renamed| return renamed;
         return self.shadowLocalBinding(name) orelse name;
+    }
+
+    /// N-046 / N-047: the binding name of a block-scoped declaration of `name`.
+    /// A declaration that reuses a name already bound in an enclosing scope (an
+    /// outer local, a parameter, a loop variable, an inlined helper's
+    /// parameter) is bound under the fresh `<name>@<n>` and recorded in this
+    /// scope, so it can never be mistaken for a reassignment of the outer
+    /// binding (if-arm reconciliation matches arm bindings to outer locals BY
+    /// NAME). A declaration that collides with nothing keeps `localName(name)`,
+    /// which keeps non-shadowing ANF byte-identical.
+    fn declareLocal(self: *LowerCtx, name: []const u8) Allocator.Error![]const u8 {
+        const in_scope = self.scope_renames.contains(name) or
+            self.isLocal(self.localTarget(name)) or
+            self.isParam(name) or
+            self.getParamAlias(name) != null or
+            self.loop_vars.contains(name);
+        if (!in_scope) return self.localName(name);
+        const fresh = try self.methodScope().nextShadowName(self.allocator, name);
+        try self.scope_renames.put(self.allocator, name, fresh);
+        return fresh;
+    }
+
+    /// N-047: enter an inlined private helper's body. The helper is its own
+    /// lexical scope: none of the caller's renames apply inside it, and none of
+    /// its locals outlive it. Returns the state `leaveInlinedScope` restores.
+    fn enterInlinedScope(self: *LowerCtx) Allocator.Error!InlinedScopeState {
+        const saved = InlinedScopeState{
+            .scope_renames = self.scope_renames,
+            .local_names = try self.local_names.clone(self.allocator),
+            .local_byte_vars = try self.local_byte_vars.clone(self.allocator),
+            .local_aliases = try self.local_aliases.clone(self.allocator),
+            .loop_vars = try self.loop_vars.clone(self.allocator),
+        };
+        self.scope_renames = .empty;
+        return saved;
+    }
+
+    fn leaveInlinedScope(self: *LowerCtx, saved: InlinedScopeState) void {
+        self.scope_renames.deinit(self.allocator);
+        self.local_names.deinit(self.allocator);
+        self.local_byte_vars.deinit(self.allocator);
+        self.local_aliases.deinit(self.allocator);
+        self.loop_vars.deinit(self.allocator);
+        self.scope_renames = saved.scope_renames;
+        self.local_names = saved.local_names;
+        self.local_byte_vars = saved.local_byte_vars;
+        self.local_aliases = saved.local_aliases;
+        self.loop_vars = saved.loop_vars;
     }
 
     /// N-016: the `load_param` name a source parameter resolves to.
@@ -1325,6 +1417,16 @@ const LowerCtx = struct {
         var lv_it = self.shadowing_loop_vars.iterator();
         while (lv_it.next()) |entry| {
             try sub.shadowing_loop_vars.put(self.allocator, entry.key_ptr.*, {});
+        }
+        // N-046: the block inherits the enclosing renames and loop variables
+        // by value, so a rename made inside it ends with it.
+        var sr_it = self.scope_renames.iterator();
+        while (sr_it.next()) |entry| {
+            try sub.scope_renames.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+        var loop_it = self.loop_vars.iterator();
+        while (loop_it.next()) |entry| {
+            try sub.loop_vars.put(self.allocator, entry.key_ptr.*, {});
         }
         // Copy local byte vars
         var byte_it = self.local_byte_vars.iterator();
@@ -1383,6 +1485,8 @@ const LowerCtx = struct {
         self.local_aliases.deinit(self.allocator);
         self.renamed_private_params.deinit(self.allocator);
         self.shadowing_loop_vars.deinit(self.allocator);
+        self.scope_renames.deinit(self.allocator);
+        self.loop_vars.deinit(self.allocator);
         self.local_byte_vars.deinit(self.allocator);
         self.add_output_refs.deinit(self.allocator);
         self.add_data_output_refs.deinit(self.allocator);
@@ -1561,20 +1665,27 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
     switch (stmt) {
         .const_decl => |decl| {
             const value_ref = try lowerExprToRef(ctx, decl.value);
-            const binding_name = try ctx.localName(decl.name);
+            // Byte-typedness of the initialiser is judged before the new name
+            // is in scope (the initialiser reads the OUTER binding).
+            const is_bytes = isByteTypedExpr(decl.value, ctx);
+            // N-046 / N-047: a declaration reusing an enclosing binding's name
+            // is alpha-renamed (see `declareLocal`).
+            const binding_name = try ctx.declareLocal(decl.name);
             try ctx.addLocal(binding_name);
-            if (isByteTypedExpr(decl.value, ctx)) {
-                try ctx.local_byte_vars.put(ctx.allocator, decl.name, {});
+            if (is_bytes) {
+                try ctx.local_byte_vars.put(ctx.allocator, byteVarKey(ctx, decl.name, binding_name), {});
             }
             try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
         },
         .let_decl => |decl| {
             if (decl.value) |val| {
                 const value_ref = try lowerExprToRef(ctx, val);
-                const binding_name = try ctx.localName(decl.name);
+                const is_bytes = isByteTypedExpr(val, ctx);
+                // N-046 / N-047: see `.const_decl`.
+                const binding_name = try ctx.declareLocal(decl.name);
                 try ctx.addLocal(binding_name);
-                if (isByteTypedExpr(val, ctx)) {
-                    try ctx.local_byte_vars.put(ctx.allocator, decl.name, {});
+                if (is_bytes) {
+                    try ctx.local_byte_vars.put(ctx.allocator, byteVarKey(ctx, decl.name, binding_name), {});
                 }
                 try ctx.emitNamed(binding_name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, value_ref)));
             } else {
@@ -2041,6 +2152,10 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     if (ctx.isProperty(for_s.var_name)) {
         try body_ctx.shadowing_loop_vars.put(ctx.allocator, for_s.var_name, {});
     }
+    // N-046: a loop variable reusing an enclosing binding's name is
+    // alpha-renamed in the body's scope (see `declareLocal`).
+    const iter_binding = try body_ctx.declareLocal(for_s.var_name);
+    try body_ctx.loop_vars.put(ctx.allocator, for_s.var_name, {});
     try lowerStatementsWithReads(&body_ctx, for_s.body, &body_reads);
     ctx.syncCounter(&body_ctx);
 
@@ -2048,7 +2163,7 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     loop_val.* = .{
         .count = count,
         .body = try body_ctx.bindings.toOwnedSlice(ctx.allocator),
-        .iter_var = try ctx.localName(for_s.var_name),
+        .iter_var = iter_binding,
         .start = start,
         .step = step,
     };
@@ -2223,6 +2338,18 @@ fn lowerIdentifier(ctx: *LowerCtx, name: []const u8) LowerError![]const u8 {
     // 'this' and 'self' are not first-class runtime values in ANF.
     if (std.mem.eql(u8, name, "this") or std.mem.eql(u8, name, "self")) {
         return try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
+    }
+
+    // N-046 / N-047: a declaration that shadowed an enclosing binding is the
+    // innermost binding of its name, ahead of params and param aliases. A
+    // renamed loop variable is not a local; it is read with load_param like
+    // every loop variable.
+    if (ctx.scope_renames.get(name)) |renamed| {
+        if (ctx.isLocal(renamed)) {
+            if (ctx.getLocalAlias(renamed)) |alias| return alias;
+            return renamed;
+        }
+        return try ctx.emit(.{ .load_param = .{ .name = renamed } });
     }
 
     // Param alias takes precedence over normal param lookup. Set when a
@@ -2690,7 +2817,12 @@ fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []
     }
 
     const start_index = ctx.bindings.items.len;
+    // N-047: the helper body is its own lexical scope. Its locals are declared
+    // against the caller's (a collision is alpha-renamed by `declareLocal`)
+    // and go out of scope when it returns.
+    const caller_scope = try ctx.enterInlinedScope();
     try lowerStatements(ctx, method.body);
+    ctx.leaveInlinedScope(caller_scope);
     const end_index = ctx.bindings.items.len;
 
     // Pop aliases in reverse order so nested inlines compose correctly.

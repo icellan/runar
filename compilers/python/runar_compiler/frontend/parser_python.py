@@ -575,6 +575,22 @@ class _PyParser:
         self.errors: list[Diagnostic] = []
         # F-017: (source spelling, Rúnar name) of every declared identifier.
         self.declared: list[tuple[str, str]] = []
+        # N-046: the locals already bound in the current method, so a later
+        # ``name = expr`` of one of them is emitted as an AssignmentStmt, not a
+        # fresh VariableDeclStmt. Python is function-scoped, so rebinding an
+        # existing local inside a loop body or an if-arm IS an assignment; ANF
+        # lowering alpha-renames a VariableDeclStmt that reuses an enclosing
+        # binding's name. Snapshot/restored around if-branches and loop bodies
+        # exactly as the Ruby parser's ``declared_locals``.
+        self.declared_locals: set[str] = set()
+
+    def _bind_local(self, name: str, typ, init: Expression, loc: SourceLocation) -> Statement:
+        """N-046: ``name = init`` is an assignment when the method already
+        bound ``name``, otherwise a declaration."""
+        if name in self.declared_locals:
+            return AssignmentStmt(target=Identifier(name=name), value=init, source_location=loc)
+        self.declared_locals.add(name)
+        return VariableDeclStmt(name=name, type=typ, mutable=True, init=init, source_location=loc)
 
     def declare(self, raw: str) -> str:
         """Convert a DECLARED identifier and record it for the F-017
@@ -843,6 +859,9 @@ class _PyParser:
         self.expect_ident("def")
         self.expect_ident("__init__")
 
+        # N-046: reset local tracking for this method's scope.
+        self.declared_locals = set()
+
         params = self.parse_params()
 
         if self.match(TOK_ARROW):
@@ -900,6 +919,9 @@ class _PyParser:
         self.expect_ident("def")
         name_tok = self.expect(TOK_IDENT)
         name = self.declare(name_tok.value)
+
+        # N-046: reset local tracking for this method's scope.
+        self.declared_locals = set()
 
         params = self.parse_params()
 
@@ -1050,7 +1072,10 @@ class _PyParser:
         condition = self.parse_expression()
         self.expect(TOK_COLON)
 
+        # N-046: a name first bound inside a branch stays branch-local.
+        locals_before = set(self.declared_locals)
         then_block = self.parse_block()
+        self.declared_locals = set(locals_before)
 
         else_block: list[Statement] = []
         self.skip_newlines()
@@ -1059,9 +1084,11 @@ class _PyParser:
             self.advance()
             elif_stmt = self._parse_if_body(elif_loc)
             else_block = [elif_stmt]
+            self.declared_locals = set(locals_before)
         elif self.match_ident("else"):
             self.expect(TOK_COLON)
             else_block = self.parse_block()
+            self.declared_locals = set(locals_before)
 
         return IfStmt(
             condition=condition,
@@ -1110,7 +1137,12 @@ class _PyParser:
         self.expect(TOK_RPAREN)
         self.expect(TOK_COLON)
 
+        # N-046: the loop variable and the body's first bindings are body-local;
+        # a rebinding of the loop variable inside the body is an assignment.
+        locals_before_body = set(self.declared_locals)
+        self.declared_locals.add(var_name)
         body = self.parse_block()
+        self.declared_locals = locals_before_body
 
         init_stmt = VariableDeclStmt(
             name=var_name,
@@ -1173,13 +1205,8 @@ class _PyParser:
             else:
                 init = BigIntLiteral(value=0)
             self.skip_newlines()
-            return VariableDeclStmt(
-                name=var_name,
-                type=typ_node,
-                mutable=True,
-                init=init,
-                source_location=loc,
-            )
+            # N-046: rebinding a local of this method is an assignment in Python.
+            return self._bind_local(var_name, typ_node, init, loc)
 
         target_tok = self.peek()
         expr = self.parse_expression()
@@ -1195,13 +1222,9 @@ class _PyParser:
             if isinstance(expr, Identifier):
                 if target_tok.kind == TOK_IDENT:
                     self.declared.append((target_tok.value, expr.name))
-                return VariableDeclStmt(
-                    name=expr.name,
-                    type=None,
-                    mutable=True,
-                    init=value,
-                    source_location=loc,
-                )
+                # N-046: rebinding a local of this method is an assignment in
+                # Python (function-scoped).
+                return self._bind_local(expr.name, None, value, loc)
             return AssignmentStmt(target=expr, value=value, source_location=loc)
 
         # Compound assignments

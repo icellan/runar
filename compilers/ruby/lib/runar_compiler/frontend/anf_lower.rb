@@ -118,11 +118,15 @@ module RunarCompiler
       return true if expr.is_a?(ByteStringLiteral)
 
       if expr.is_a?(Identifier)
+        # N-046 / N-047: a renamed (shadowing) declaration is judged by its own
+        # binding, never by the parameter or property it shadows.
+        renamed = ctx.scope_rename(expr.name)
+        return ctx.local_byte_var?(renamed) unless renamed.nil?
         t = ctx.get_param_type(expr.name)
         return true if t && BYTE_TYPES.include?(t)
         t = ctx.get_property_type(expr.name)
         return true if t && BYTE_TYPES.include?(t)
-        return true if ctx.local_byte_var?(expr.name)
+        return true if ctx.local_byte_var?(ctx.local_name(expr.name))
         return false
       end
 
@@ -695,6 +699,15 @@ module RunarCompiler
       def initialize
         @auto_injected_params = []
         @auto_injected_set = {}
+        # N-046 / N-047: the last `<name>@<n>` suffix handed out in this
+        # method, shared by every sub-context and inlined helper body.
+        @shadow_seq = 0
+      end
+
+      # N-046: a method-unique `<name>@<n>` binding name.
+      def next_shadow_name(name)
+        @shadow_seq += 1
+        "#{name}@#{@shadow_seq}"
       end
 
       # Idempotent: second call with the same name is a no-op.
@@ -734,6 +747,14 @@ module RunarCompiler
         # and loop variables in scope whose name is a property's.
         @renamed_private_params = {}
         @shadowing_loop_vars = Set.new
+        # N-046 / N-047: source name -> binding name of a declaration that
+        # reused a name already bound in an enclosing scope (an outer local, a
+        # parameter, a loop variable, or, inside an inlined helper, a caller
+        # local). Copied by value into sub-contexts, so the rename ends with the
+        # declaring block.
+        @scope_renames = {}
+        # N-046: source names of the loop variables in scope.
+        @loop_vars = Set.new
         @local_byte_vars = Set.new
         @current_source_loc = nil
         # Param substitution stack used when inlining a private method's body
@@ -881,7 +902,12 @@ module RunarCompiler
         end
 
         start_index = @bindings.size
+        # N-047: the helper body is its own lexical scope. Its locals are
+        # declared against the caller's (a collision is alpha-renamed by
+        # declare_local) and go out of scope when it returns.
+        caller_scope = enter_inlined_scope
         lower_statements(method.body)
+        leave_inlined_scope(caller_scope)
         end_index = @bindings.size
 
         aliased_params.reverse_each { |p| pop_param_alias(p) }
@@ -1024,7 +1050,53 @@ module RunarCompiler
       # keeping non-shadowing ANF byte-identical.
       # @return [String]
       def local_name(name)
+        renamed = @scope_renames[name]
+        return renamed unless renamed.nil?
         property?(name) ? "#{name}#{Frontend::SHADOW_LOCAL_SUFFIX}" : name
+      end
+
+      # N-046: the renamed binding of +name+ in this scope, or nil.
+      def scope_rename(name)
+        @scope_renames[name]
+      end
+
+      # N-046 / N-047: the binding name of a block-scoped declaration of +name+.
+      # A declaration that reuses a name already bound in an enclosing scope (an
+      # outer local, a parameter, a loop variable, an inlined helper's
+      # parameter) is bound under the fresh `<name>@<n>` and recorded in this
+      # scope, so it can never be mistaken for a reassignment of the outer
+      # binding (if-arm reconciliation matches arm bindings to outer locals BY
+      # NAME). A declaration that collides with nothing keeps local_name(name),
+      # which keeps non-shadowing ANF byte-identical.
+      # @return [String]
+      def declare_local(name)
+        in_scope = @scope_renames.key?(name) ||
+                   local?(local_name(name)) ||
+                   param?(name) ||
+                   !get_param_alias(name).nil? ||
+                   @loop_vars.include?(name)
+        return local_name(name) unless in_scope
+        fresh = @method_scope.next_shadow_name(name)
+        @scope_renames[name] = fresh
+        fresh
+      end
+
+      # N-046: register a loop variable (source name) as in scope.
+      def add_loop_var(name)
+        @loop_vars.add(name)
+      end
+
+      # N-047: an inlined private helper's body is its own lexical scope: none
+      # of the caller's renames apply inside it, and none of its locals outlive
+      # it. Returns the state leave_inlined_scope restores.
+      def enter_inlined_scope
+        saved = [@scope_renames, @local_names.dup, @local_byte_vars.dup, @local_aliases.dup, @loop_vars.dup]
+        @scope_renames = {}
+        saved
+      end
+
+      def leave_inlined_scope(saved)
+        @scope_renames, @local_names, @local_byte_vars, @local_aliases, @loop_vars = saved
       end
 
       # N-016: the binding a write to the bare identifier +name+ rebinds -- the
@@ -1099,6 +1171,10 @@ module RunarCompiler
         sub.instance_variable_set(:@local_aliases, @local_aliases.dup)
         sub.instance_variable_set(:@renamed_private_params, @renamed_private_params.dup)
         sub.instance_variable_set(:@shadowing_loop_vars, @shadowing_loop_vars.dup)
+        # N-046: the block inherits the enclosing renames and loop variables by
+        # value, so a rename made inside it ends with it.
+        sub.instance_variable_set(:@scope_renames, @scope_renames.dup)
+        sub.instance_variable_set(:@loop_vars, @loop_vars.dup)
         sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
         # Deep-copy the inlined-param alias stack. +_inline_private_method_call+
         # pushes the caller's argument refs onto the CURRENT context before
@@ -1354,11 +1430,14 @@ module RunarCompiler
       # @param stmt [VariableDeclStmt]
       def _lower_variable_decl(stmt)
         value_ref = lower_expr_to_ref(stmt.init)
-        binding_name = local_name(stmt.name)
+        # Byte-typedness of the initialiser is judged before the new name is in
+        # scope (the initialiser reads the OUTER binding of a shadowed name).
+        is_bytes = Frontend._is_byte_typed_expr(stmt.init, self)
+        # N-046 / N-047: a declaration reusing an enclosing binding's name is
+        # alpha-renamed (see declare_local).
+        binding_name = declare_local(stmt.name)
         add_local(binding_name)
-        if Frontend._is_byte_typed_expr(stmt.init, self)
-          @local_byte_vars.add(stmt.name)
-        end
+        @local_byte_vars.add(binding_name) if is_bytes
         emit_named(binding_name, Frontend._make_load_const_string("@ref:#{value_ref}"))
       end
 
@@ -1613,13 +1692,20 @@ module RunarCompiler
 
         body_ctx = sub_context
         body_ctx.add_shadowing_loop_var(stmt.init.name) if stmt.init && property?(stmt.init.name)
+        # N-046: a loop variable reusing an enclosing binding's name is
+        # alpha-renamed in the body's scope (see declare_local).
+        iter_var = ""
+        if stmt.init
+          iter_var = body_ctx.declare_local(stmt.init.name)
+          body_ctx.add_loop_var(stmt.init.name)
+        end
         body_ctx.lower_statements(stmt.body, body_reads)
         sync_counter(body_ctx)
 
         emit(IR::ANFValue.new(kind: "loop").tap do |v|
           v.count = shape[:count]
           v.body = body_ctx.bindings
-          v.iter_var = stmt.init ? local_name(stmt.init.name) : ""
+          v.iter_var = iter_var
           v.start = shape[:start]
           v.step = shape[:step]
         end)
@@ -1632,6 +1718,19 @@ module RunarCompiler
 
         # 'this' is not a value in ANF
         return emit(Frontend._make_load_const_string("@this")) if name == "this"
+
+        # N-046 / N-047: a declaration that shadowed an enclosing binding is
+        # the innermost binding of its name, ahead of params and param aliases.
+        # A renamed loop variable is not a local; it is read with load_param
+        # like every loop variable.
+        renamed = @scope_renames[name]
+        unless renamed.nil?
+          if local?(renamed)
+            a = get_local_alias(renamed)
+            return a.empty? ? renamed : a
+          end
+          return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = renamed })
+        end
 
         # Param alias takes precedence over normal param lookup. Set when a
         # private method's body is being inlined into this context — the
@@ -2466,7 +2565,8 @@ module RunarCompiler
       # 4. INV-B: a rebound local that survives the +if+ is protected from being
       #    rolled away, so the arm ends one slot deeper than lowerIf accounts
       #    for.
-      live_merged = merged_locals.select { |name| reads_after.include?(name.delete_suffix(SHADOW_LOCAL_SUFFIX)) }
+      # N-016 / N-046: the source spelling is everything before the first `@`.
+      live_merged = merged_locals.select { |name| reads_after.include?(name.split("@", 2).first) }
       unless live_merged.empty?
         return "reassigns local variables read after it (#{live_merged.join(', ')})"
       end

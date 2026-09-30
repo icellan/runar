@@ -839,9 +839,18 @@ struct MethodScope {
     auto_injected_params: Vec<ANFParam>,
     /// Dedup set for `auto_injected_params`.
     auto_injected_set: HashSet<String>,
+    /// N-046 / N-047: the last `<name>@<n>` suffix handed out in this method,
+    /// shared by every sub-context and inlined helper body.
+    shadow_seq: usize,
 }
 
 impl MethodScope {
+    /// N-046: a method-unique `<name>@<n>` binding name.
+    fn next_shadow_name(&mut self, name: &str) -> String {
+        self.shadow_seq += 1;
+        format!("{}@{}", name, self.shadow_seq)
+    }
+
     /// Record a witness param needed by an intrinsic call. Idempotent —
     /// the second call with the same name is a no-op.
     fn record_auto_injected_param(&mut self, name: &str, ty: &str) {
@@ -854,6 +863,15 @@ impl MethodScope {
             param_type: ty.to_string(),
         });
     }
+}
+
+/// N-047: the caller scope saved around an inlined helper body.
+struct InlinedScopeState {
+    scope_renames: HashMap<String, String>,
+    local_names: HashSet<String>,
+    local_byte_vars: HashSet<String>,
+    local_aliases: HashMap<String, String>,
+    loop_vars: HashSet<String>,
 }
 
 struct LoweringContext<'a> {
@@ -876,6 +894,13 @@ struct LoweringContext<'a> {
     renamed_private_params: HashMap<String, String>,
     /// N-016: loop variables in scope whose name is a property's.
     shadowing_loop_vars: HashSet<String>,
+    /// N-046 / N-047: source name -> binding name of a declaration that reused
+    /// a name already bound in an enclosing scope (an outer local, a parameter,
+    /// a loop variable, or, inside an inlined helper, a caller local). Copied
+    /// by value into sub-contexts, so the rename ends with the declaring block.
+    scope_renames: HashMap<String, String>,
+    /// N-046: source names of the loop variables in scope.
+    loop_vars: HashSet<String>,
     /// Tracks local variables known to be byte-typed.
     local_byte_vars: HashSet<String>,
     /// Maps the CURRENT method's (or constructor's) parameter names to their
@@ -949,6 +974,8 @@ impl<'a> LoweringContext<'a> {
             local_aliases: HashMap::new(),
             renamed_private_params: HashMap::new(),
             shadowing_loop_vars: HashSet::new(),
+            scope_renames: HashMap::new(),
+            loop_vars: HashSet::new(),
             local_byte_vars: HashSet::new(),
             param_types: HashMap::new(),
             current_source_loc: None,
@@ -1137,11 +1164,57 @@ impl<'a> LoweringContext<'a> {
     /// with a property, another local or a temp); every other name is
     /// unchanged, keeping non-shadowing ANF byte-identical.
     fn local_name(&self, name: &str) -> String {
+        if let Some(renamed) = self.scope_renames.get(name) {
+            return renamed.clone();
+        }
         if self.is_property(name) {
             format!("{}{}", name, SHADOW_LOCAL_SUFFIX)
         } else {
             name.to_string()
         }
+    }
+
+    /// N-046 / N-047: the binding name of a block-scoped declaration of `name`.
+    /// A declaration that reuses a name already bound in an enclosing scope (an
+    /// outer local, a parameter, a loop variable, an inlined helper's
+    /// parameter) is bound under the fresh `<name>@<n>` and recorded in this
+    /// scope, so it can never be mistaken for a reassignment of the outer
+    /// binding (if-arm reconciliation matches arm bindings to outer locals BY
+    /// NAME). A declaration that collides with nothing keeps `local_name(name)`,
+    /// which keeps non-shadowing ANF byte-identical.
+    fn declare_local(&mut self, name: &str) -> String {
+        let in_scope = self.scope_renames.contains_key(name)
+            || self.is_local(&self.local_name(name))
+            || self.is_param(name)
+            || self.get_param_alias(name).is_some()
+            || self.loop_vars.contains(name);
+        if !in_scope {
+            return self.local_name(name);
+        }
+        let fresh = self.method_scope.borrow_mut().next_shadow_name(name);
+        self.scope_renames.insert(name.to_string(), fresh.clone());
+        fresh
+    }
+
+    /// N-047: enter an inlined private helper's body. The helper is its own
+    /// lexical scope: none of the caller's renames apply inside it, and none of
+    /// its locals outlive it. Returns the state `leave_inlined_scope` restores.
+    fn enter_inlined_scope(&mut self) -> InlinedScopeState {
+        InlinedScopeState {
+            scope_renames: std::mem::take(&mut self.scope_renames),
+            local_names: self.local_names.clone(),
+            local_byte_vars: self.local_byte_vars.clone(),
+            local_aliases: self.local_aliases.clone(),
+            loop_vars: self.loop_vars.clone(),
+        }
+    }
+
+    fn leave_inlined_scope(&mut self, saved: InlinedScopeState) {
+        self.scope_renames = saved.scope_renames;
+        self.local_names = saved.local_names;
+        self.local_byte_vars = saved.local_byte_vars;
+        self.local_aliases = saved.local_aliases;
+        self.loop_vars = saved.loop_vars;
     }
 
     /// N-016: the binding a write to the bare identifier `name` rebinds — the
@@ -1185,6 +1258,10 @@ impl<'a> LoweringContext<'a> {
         sub.local_aliases = self.local_aliases.clone();
         sub.renamed_private_params = self.renamed_private_params.clone();
         sub.shadowing_loop_vars = self.shadowing_loop_vars.clone();
+        // N-046: the block inherits the enclosing renames and loop variables
+        // by value, so a rename made inside it ends with it.
+        sub.scope_renames = self.scope_renames.clone();
+        sub.loop_vars = self.loop_vars.clone();
         sub.local_byte_vars = self.local_byte_vars.clone();
         // Share the current method's parameter types so byte-type analysis
         // inside nested blocks resolves params against the SAME method scope
@@ -1495,11 +1572,13 @@ fn lower_statement_with_reads(
 /// N-016: suffix of the binding name of a local that shadows a property.
 const SHADOW_LOCAL_SUFFIX: &str = "@local";
 
-/// N-016: the source spelling of a local's binding name (undoes `local_name`).
+/// N-016 / N-046: the source spelling of a local's binding name (undoes
+/// `local_name` and `declare_local`: everything before the first `@`).
 fn source_local_name(binding_name: &str) -> &str {
-    binding_name
-        .strip_suffix(SHADOW_LOCAL_SUFFIX)
-        .unwrap_or(binding_name)
+    match binding_name.find('@') {
+        Some(at) => &binding_name[..at],
+        None => binding_name,
+    }
 }
 
 /// Lower a variable declaration. Matches the TS reference:
@@ -1507,10 +1586,15 @@ fn source_local_name(binding_name: &str) -> &str {
 /// a named binding that aliases the variable to the computed value via @ref.
 fn lower_variable_decl(name: &str, init: &Expression, ctx: &mut LoweringContext) {
     let value_ref = lower_expr_to_ref(init, ctx);
-    let binding_name = ctx.local_name(name);
+    // Byte-typedness of the initialiser is judged before the new name is in
+    // scope (the initialiser reads the OUTER binding of a shadowed name).
+    let is_bytes = is_byte_typed_expr(init, ctx);
+    // N-046 / N-047: a declaration reusing an enclosing binding's name is
+    // alpha-renamed (see `declare_local`).
+    let binding_name = ctx.declare_local(name);
     ctx.add_local(&binding_name);
-    if is_byte_typed_expr(init, ctx) {
-        ctx.local_byte_vars.insert(name.to_string());
+    if is_bytes {
+        ctx.local_byte_vars.insert(binding_name.clone());
     }
     ctx.emit_named(
         &binding_name,
@@ -2031,10 +2115,14 @@ fn lower_for_statement(
     if ctx.is_property(&iter_var) {
         body_ctx.shadowing_loop_vars.insert(iter_var.clone());
     }
+    // N-046: a loop variable reusing an enclosing binding's name is
+    // alpha-renamed in the body's scope (see `declare_local`).
+    let iter_binding = body_ctx.declare_local(&iter_var);
+    body_ctx.loop_vars.insert(iter_var.clone());
     lower_statements_with_reads(body, &mut body_ctx, &body_reads);
     ctx.sync_counter(&body_ctx);
 
-    let iter_var = ctx.local_name(&iter_var);
+    let iter_var = iter_binding;
     ctx.emit(ANFValue::Loop {
         count,
         body: body_ctx.bindings,
@@ -2288,6 +2376,17 @@ fn lower_identifier(name: &str, ctx: &mut LoweringContext) -> String {
         return ctx.emit(ANFValue::LoadConst {
             value: serde_json::Value::String("@this".to_string()),
         });
+    }
+
+    // N-046 / N-047: a declaration that shadowed an enclosing binding is the
+    // innermost binding of its name, ahead of params and param aliases. A
+    // renamed loop variable is not a local; it is read with load_param like
+    // every loop variable.
+    if let Some(renamed) = ctx.scope_renames.get(name).cloned() {
+        if ctx.is_local(&renamed) {
+            return ctx.get_local_alias(&renamed).cloned().unwrap_or(renamed);
+        }
+        return ctx.emit(ANFValue::LoadParam { name: renamed });
     }
 
     // Param alias takes precedence over normal param lookup. Set when
@@ -3253,6 +3352,11 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
         Expression::ByteStringLiteral { .. } => true,
 
         Expression::Identifier { name } => {
+            // N-046 / N-047: a renamed (shadowing) declaration is judged by its
+            // own binding, never by the parameter or property it shadows.
+            if let Some(renamed) = ctx.scope_renames.get(name.as_str()) {
+                return ctx.local_byte_vars.contains(renamed.as_str());
+            }
             // Check if it's a parameter or property with a byte type
             if let Some(t) = get_param_type(name, ctx) {
                 if is_byte_type(&t) {
@@ -3264,7 +3368,7 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
                     return true;
                 }
             }
-            if ctx.local_byte_vars.contains(name.as_str()) {
+            if ctx.local_byte_vars.contains(ctx.local_name(name).as_str()) {
                 return true;
             }
             false
@@ -3404,7 +3508,12 @@ fn inline_private_method_call(
     }
 
     let start_index = ctx.bindings.len();
+    // N-047: the helper body is its own lexical scope. Its locals are declared
+    // against the caller's (a collision is alpha-renamed by `declare_local`)
+    // and go out of scope when it returns.
+    let caller_scope = ctx.enter_inlined_scope();
     lower_statements(&body, ctx);
+    ctx.leave_inlined_scope(caller_scope);
     let end_index = ctx.bindings.len();
 
     // Pop aliases in reverse order so nested inlines compose

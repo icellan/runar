@@ -804,6 +804,14 @@ struct PyParser<'a> {
     errors: &'a mut Vec<Diagnostic>,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: DeclaredIdents,
+    /// N-046: the locals already bound in the current method, so a later
+    /// `name = expr` of one of them is emitted as an `Assignment`, not a fresh
+    /// `VariableDecl`. Python is function-scoped, so rebinding an existing
+    /// local inside a loop body or an if-arm IS an assignment; ANF lowering
+    /// alpha-renames a `VariableDecl` that reuses an enclosing binding's name.
+    /// Snapshot/restored around if-branches and loop bodies exactly as the
+    /// Ruby parser's `declared_locals`.
+    declared_locals: std::collections::HashSet<String>,
 }
 
 impl<'a> PyParser<'a> {
@@ -814,6 +822,27 @@ impl<'a> PyParser<'a> {
             file,
             errors,
             idents: DeclaredIdents::default(),
+            declared_locals: std::collections::HashSet::new(),
+        }
+    }
+
+    /// N-046: the statement for `name = init` — an assignment when the method
+    /// already bound `name`, otherwise a declaration.
+    fn bind_local(&mut self, name: String, var_type: Option<TypeNode>, init: Expression) -> Statement {
+        if self.declared_locals.contains(&name) {
+            return Statement::Assignment {
+                target: Expression::Identifier { name },
+                value: init,
+                source_location: self.loc(),
+            };
+        }
+        self.declared_locals.insert(name.clone());
+        Statement::VariableDecl {
+            name,
+            var_type,
+            mutable: true,
+            init,
+            source_location: self.loc(),
         }
     }
 
@@ -1132,6 +1161,9 @@ impl<'a> PyParser<'a> {
             self.errors.push(Diagnostic::error(static_method_message(&raw_name), Some(def_loc)));
         }
 
+        // N-046: reset local tracking for this method's scope.
+        self.declared_locals.clear();
+
         self.expect(&Token::LParen);
         let params = self.parse_params();
         self.expect(&Token::RParen);
@@ -1308,19 +1340,25 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::Colon);
         self.skip_newlines();
         self.expect(&Token::Indent);
+        // N-046: a name first bound inside a branch stays branch-local.
+        let locals_before = self.declared_locals.clone();
         let then_branch = self.parse_statements();
+        self.declared_locals = locals_before.clone();
         self.match_tok(&Token::Dedent);
         self.skip_newlines();
 
         let else_branch = if *self.peek() == Token::Elif {
             // elif -> else { if ... }
-            Some(vec![self.parse_elif_statement()])
+            let elif = self.parse_elif_statement();
+            self.declared_locals = locals_before.clone();
+            Some(vec![elif])
         } else if *self.peek() == Token::Else {
             self.advance(); // 'else'
             self.expect(&Token::Colon);
             self.skip_newlines();
             self.expect(&Token::Indent);
             let stmts = self.parse_statements();
+            self.declared_locals = locals_before.clone();
             self.match_tok(&Token::Dedent);
             Some(stmts)
         } else {
@@ -1341,18 +1379,24 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::Colon);
         self.skip_newlines();
         self.expect(&Token::Indent);
+        // N-046: a name first bound inside a branch stays branch-local.
+        let locals_before = self.declared_locals.clone();
         let then_branch = self.parse_statements();
+        self.declared_locals = locals_before.clone();
         self.match_tok(&Token::Dedent);
         self.skip_newlines();
 
         let else_branch = if *self.peek() == Token::Elif {
-            Some(vec![self.parse_elif_statement()])
+            let elif = self.parse_elif_statement();
+            self.declared_locals = locals_before.clone();
+            Some(vec![elif])
         } else if *self.peek() == Token::Else {
             self.advance();
             self.expect(&Token::Colon);
             self.skip_newlines();
             self.expect(&Token::Indent);
             let stmts = self.parse_statements();
+            self.declared_locals = locals_before.clone();
             self.match_tok(&Token::Dedent);
             Some(stmts)
         } else {
@@ -1415,7 +1459,13 @@ impl<'a> PyParser<'a> {
         self.expect(&Token::Colon);
         self.skip_newlines();
         self.expect(&Token::Indent);
+        // N-046: the loop variable and the body's first bindings are
+        // body-local; a rebinding of the loop variable inside the body is an
+        // assignment.
+        let locals_before_body = self.declared_locals.clone();
+        self.declared_locals.insert(var_name.clone());
         let body = self.parse_statements();
+        self.declared_locals = locals_before_body;
         self.match_tok(&Token::Dedent);
 
         // Construct a C-style for loop AST node:
@@ -1632,13 +1682,9 @@ impl<'a> PyParser<'a> {
                 Expression::BigIntLiteral { value: BigInt::from(0) }
             };
 
-            return Statement::VariableDecl {
-                name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
-                var_type: Some(type_node),
-                mutable: true,
-                init,
-                source_location: self.loc(),
-            };
+            // N-046: rebinding a local of this method is an assignment in Python.
+            let name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
+            return self.bind_local(name, Some(type_node), init);
         }
 
         // Check for simple name = expr pattern (no type annotation)
@@ -1646,13 +1692,9 @@ impl<'a> PyParser<'a> {
             self.advance(); // consume ident
             self.advance(); // consume '='
             let value = self.parse_expression();
-            return Statement::VariableDecl {
-                name: self.idents.declare(&raw_name, snake_to_camel(&raw_name)),
-                var_type: None,
-                mutable: true,
-                init: value,
-                source_location: self.loc(),
-            };
+            // N-046: rebinding a local of this method is an assignment in Python.
+            let name = self.idents.declare(&raw_name, snake_to_camel(&raw_name));
+            return self.bind_local(name, None, value);
         }
 
         // Parse as expression first
