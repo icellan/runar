@@ -5,12 +5,12 @@
 //!
 //! Mirrors the TypeScript optimizer in `packages/runar-compiler/src/optimizer/anf-ec.ts`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use num_bigint::BigInt;
 use num_traits::Num;
 
-use crate::ir::{parse_const_value, ANFBinding, ANFMethod, ANFProgram, ANFValue, ConstValue};
+use crate::ir::{parse_const_value, ANFBinding, ANFMethod, ANFProgram, ANFProperty, ANFValue, ConstValue};
 
 // ---------------------------------------------------------------------------
 // EC constants
@@ -185,12 +185,59 @@ fn make_alias(target: &str) -> ANFValue {
 // Rewrite engine
 // ---------------------------------------------------------------------------
 
+/// F-086: every name the method already uses — binding names at any depth
+/// (if/loop arms included), loop iteration variables, params, and the
+/// contract's properties. A scalar-fusing rewrite mints a new binding; ANF is
+/// single-assignment and stack lowering resolves a name to its shallowest
+/// slot, so a minted name that is already in use silently aliases the two
+/// values. `--ir` input chooses these names freely.
+fn collect_used_names(method: &ANFMethod, properties: &[ANFProperty]) -> HashSet<String> {
+    fn walk(bindings: &[ANFBinding], used: &mut HashSet<String>) {
+        for b in bindings {
+            used.insert(b.name.clone());
+            match &b.value {
+                ANFValue::LoadParam { name } | ANFValue::LoadProp { name, .. } => {
+                    used.insert(name.clone());
+                }
+                ANFValue::If { then, else_branch, .. } => {
+                    walk(then, used);
+                    walk(else_branch, used);
+                }
+                ANFValue::Loop { body, iter_var, .. } => {
+                    used.insert(iter_var.clone());
+                    walk(body, used);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut used: HashSet<String> = properties.iter().map(|p| p.name.clone()).collect();
+    used.extend(method.params.iter().map(|p| p.name.clone()));
+    walk(&method.body, &mut used);
+    used
+}
+
+/// F-086: `base` when the method does not use it (every non-colliding program
+/// keeps its historical name), else the first unused `base_<i>`. Reserves the
+/// returned name.
+fn fresh_name(base: String, used_names: &mut HashSet<String>) -> String {
+    let mut name = base.clone();
+    let mut i = 1;
+    while used_names.contains(&name) {
+        name = format!("{}_{}", base, i);
+        i += 1;
+    }
+    used_names.insert(name.clone());
+    name
+}
+
 /// Try to rewrite a single binding. Returns Some(new_value) if rewritten.
 /// May push extra bindings (e.g., computed scalars) into `extra_bindings`.
 fn try_rewrite(
     binding: &ANFBinding,
     value_map: &ValueMap,
     extra_bindings: &mut Vec<ANFBinding>,
+    used_names: &mut HashSet<String>,
 ) -> Option<ANFValue> {
     let value = &binding.value;
 
@@ -256,7 +303,7 @@ fn try_rewrite(
                             let k2 = get_const_int(scalar_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
                                 let product = reduce_mod_n(k1 * k2);
-                                let new_scalar_name = format!("{}_k", binding.name);
+                                let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
                                     name: new_scalar_name.clone(),
                                     value: make_load_const_int(&product),
@@ -340,7 +387,7 @@ fn try_rewrite(
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
                                 let sum = reduce_mod_n(k1 + k2);
-                                let new_scalar_name = format!("{}_k", binding.name);
+                                let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
                                     name: new_scalar_name.clone(),
                                     value: make_load_const_int(&sum),
@@ -374,7 +421,7 @@ fn try_rewrite(
                             let k2 = get_const_int(k2_val);
                             if let (Some(k1), Some(k2)) = (k1, k2) {
                                 let sum = reduce_mod_n(k1 + k2);
-                                let new_scalar_name = format!("{}_k", binding.name);
+                                let new_scalar_name = fresh_name(format!("{}_k", binding.name), used_names);
                                 extra_bindings.push(ANFBinding {
                                     name: new_scalar_name.clone(),
                                     value: make_load_const_int(&sum),
@@ -448,15 +495,16 @@ use super::dce::eliminate_dead_bindings_method;
 /// A cross-tier byte divergence in the default mode, which is exactly what the
 /// fold-ON parity gate exists to prevent; no conformance fixture happened to
 /// carry a scalar pair that summed to 0 mod N.
-fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
+fn optimize_method_ec(method: &ANFMethod, properties: &[ANFProperty]) -> (ANFMethod, bool) {
     let mut body = method.body.clone();
     let mut changed = false;
+    let mut used_names = collect_used_names(method, properties);
 
     // Same cap-free shape as the Go tier: every rule strictly reduces the
     // number of EC calls or replaces a call with a constant, so the loop
     // terminates.
     loop {
-        let (next, pass_changed) = optimize_method_ec_once(&body);
+        let (next, pass_changed) = optimize_method_ec_once(&body, &mut used_names);
         body = next;
         if !pass_changed {
             break;
@@ -478,7 +526,7 @@ fn optimize_method_ec(method: &ANFMethod) -> (ANFMethod, bool) {
 }
 
 /// One rewrite pass over `body`. Returns the new body and whether it changed.
-fn optimize_method_ec_once(body: &[ANFBinding]) -> (Vec<ANFBinding>, bool) {
+fn optimize_method_ec_once(body: &[ANFBinding], used_names: &mut HashSet<String>) -> (Vec<ANFBinding>, bool) {
     let mut value_map: ValueMap = HashMap::new();
     let mut result: Vec<ANFBinding> = Vec::new();
     let mut changed = false;
@@ -488,7 +536,7 @@ fn optimize_method_ec_once(body: &[ANFBinding]) -> (Vec<ANFBinding>, bool) {
         value_map.insert(binding.name.clone(), binding.value.clone());
 
         let mut extra_bindings = Vec::new();
-        let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings);
+        let rewritten = try_rewrite(binding, &value_map, &mut extra_bindings, used_names);
 
         if let Some(new_value) = rewritten {
             // Add any new helper bindings (e.g., computed scalars)
@@ -526,7 +574,7 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
         .methods
         .iter()
         .map(|m| {
-            let (opt, changed) = optimize_method_ec(m);
+            let (opt, changed) = optimize_method_ec(m, &program.properties);
             if changed {
                 any_changed = true;
             }

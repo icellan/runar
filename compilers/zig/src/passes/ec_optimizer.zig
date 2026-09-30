@@ -65,7 +65,7 @@ pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgr
 
     const new_methods = try allocator.alloc(types.ANFMethod, program.methods.len);
     for (program.methods, 0..) |method, i| {
-        new_methods[i] = try optimizeMethod(allocator, method);
+        new_methods[i] = try optimizeMethod(allocator, method, program.properties);
     }
 
     return .{
@@ -81,12 +81,51 @@ pub fn optimize(allocator: Allocator, program: types.ANFProgram) !types.ANFProgr
 // Per-method optimization
 // ============================================================================
 
-fn optimizeMethod(allocator: Allocator, method: types.ANFMethod) !types.ANFMethod {
+/// F-086: every name the method already uses — binding names at any depth
+/// (if/loop arms included), loop iteration variables, params, and the
+/// contract's properties. A scalar-fusing rewrite mints a new binding; ANF is
+/// single-assignment and stack lowering resolves a name to its shallowest
+/// slot, so a minted name that is already in use silently aliases the two
+/// values. `compile-ir` input chooses these names freely.
+fn collectUsedNames(
+    used: *std.StringHashMap(void),
+    method: types.ANFMethod,
+    properties: []const types.ANFProperty,
+) !void {
+    for (properties) |p| try used.put(p.name, {});
+    for (method.params) |p| try used.put(p.name, {});
+    try collectBindingNames(used, method.body);
+}
+
+fn collectBindingNames(used: *std.StringHashMap(void), bindings: []const types.ANFBinding) !void {
+    for (bindings) |b| {
+        try used.put(b.name, {});
+        switch (b.value) {
+            .load_param => |lp| try used.put(lp.name, {}),
+            .load_prop => |lp| try used.put(lp.name, {}),
+            .@"if" => |iv| {
+                try collectBindingNames(used, iv.then);
+                try collectBindingNames(used, iv.@"else");
+            },
+            .loop => |lv| {
+                try used.put(lv.iter_var, {});
+                try collectBindingNames(used, lv.body);
+            },
+            else => {},
+        }
+    }
+}
+
+fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []const types.ANFProperty) !types.ANFMethod {
     var body = try allocator.alloc(types.ANFBinding, method.body.len);
     @memcpy(body, method.body);
 
     // Fresh name counter, local to this method optimization.
     var fresh_counter: u32 = 0;
+    // F-086: names a minted binding must avoid; minted names are added too.
+    var used_names = std.StringHashMap(void).init(allocator);
+    defer used_names.deinit();
+    try collectUsedNames(&used_names, method, properties);
 
     // Fixed-point iteration: keep applying rules until nothing changes.
     var changed = true;
@@ -103,7 +142,7 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod) !types.ANFMetho
             // `new_body` doubles as the prelude list: a rule that folds a new
             // constant appends its binding here, i.e. immediately BEFORE the
             // binding being rewritten (see `freshConstName`).
-            if (tryOptimize(allocator, current.value, &value_map, &fresh_counter, &new_body)) |optimized| {
+            if (tryOptimize(allocator, current.value, &value_map, &fresh_counter, &used_names, &new_body)) |optimized| {
                 current = .{ .name = binding.name, .value = optimized, .source_loc = binding.source_loc };
                 changed = true;
             }
@@ -151,6 +190,7 @@ fn tryOptimize(
     v: types.ANFValue,
     vm: *std.StringHashMap(types.ANFValue),
     counter: *u32,
+    used: *std.StringHashMap(void),
     prelude: *std.ArrayListUnmanaged(types.ANFBinding),
 ) ?types.ANFValue {
     const c = switch (v) {
@@ -229,7 +269,7 @@ fn tryOptimize(
                         var k1 = k1_loaded;
                         defer k1.deinit();
                         const combined = combineModN(allocator, k1, k2, .mul) catch return null;
-                        const fresh = freshConstName(allocator, combined, vm, counter, prelude) orelse return null;
+                        const fresh = freshConstName(allocator, combined, vm, counter, used, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ ic.args[0], fresh });
                     }
                 }
@@ -251,7 +291,7 @@ fn tryOptimize(
                 defer if (k2) |*m| m.deinit();
                 if (k1 != null and k2 != null) {
                     const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
-                    const fresh = freshConstName(allocator, combined, vm, counter, prelude) orelse return null;
+                    const fresh = freshConstName(allocator, combined, vm, counter, used, prelude) orelse return null;
                     return makeCall(allocator, "ecMulGen", &.{fresh});
                 }
             }
@@ -273,7 +313,7 @@ fn tryOptimize(
                     defer if (k2) |*m| m.deinit();
                     if (k1 != null and k2 != null) {
                         const combined = combineModN(allocator, k1.?, k2.?, .add) catch return null;
-                        const fresh = freshConstName(allocator, combined, vm, counter, prelude) orelse return null;
+                        const fresh = freshConstName(allocator, combined, vm, counter, used, prelude) orelse return null;
                         return makeCall(allocator, "ecMul", &.{ lc.?.args[0], fresh });
                     }
                 }
@@ -396,16 +436,25 @@ fn makeCall(allocator: Allocator, func: []const u8, args: []const []const u8) ?t
 ///
 /// Returns null when the binding could not be allocated, so the caller
 /// declines the rewrite rather than emitting a dangling reference.
+///
+/// F-086: the name skips every `__ec_opt_N` the method already uses (`used`,
+/// see `collectUsedNames`) and is reserved there.
 fn freshConstName(
     allocator: Allocator,
     value: types.ConstValue,
     vm: *std.StringHashMap(types.ANFValue),
     counter: *u32,
+    used: *std.StringHashMap(void),
     prelude: *std.ArrayListUnmanaged(types.ANFBinding),
 ) ?[]const u8 {
-    counter.* += 1;
     const buf = allocator.alloc(u8, 24) catch return null;
-    const name = std.fmt.bufPrint(buf, "__ec_opt_{d}", .{counter.*}) catch return null;
+    var name: []const u8 = undefined;
+    while (true) {
+        counter.* += 1;
+        name = std.fmt.bufPrint(buf, "__ec_opt_{d}", .{counter.*}) catch return null;
+        if (!used.contains(name)) break;
+    }
+    used.put(name, {}) catch return null;
     const binding_value = types.ANFValue{ .load_const = .{ .value = value } };
     vm.put(name, binding_value) catch return null;
     prelude.append(allocator, .{ .name = name, .value = binding_value, .source_loc = null }) catch return null;

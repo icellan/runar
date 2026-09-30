@@ -490,7 +490,7 @@ func opOperandsAreConst(rule ecRule, binds ecBindings, lookup map[string]*ir.ANF
 
 // applyReplace mutates b.Value according to the rule's replace template.
 // Returns any extra bindings to insert before b.
-func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[string]*ir.ANFValue) []ir.ANFBinding {
+func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool) []ir.ANFBinding {
 	r := rule.Replace
 	switch {
 	case r.Var != "":
@@ -514,7 +514,7 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 			case a.Var != "":
 				callArgs = append(callArgs, binds[a.Var])
 			case a.Op != nil:
-				helperName, helperBinding := buildOpHelper(b, rule, a.Op, binds, lookup)
+				helperName, helperBinding := buildOpHelper(b, rule, a.Op, binds, lookup, used)
 				extra = append(extra, helperBinding)
 				callArgs = append(callArgs, helperName)
 				// Register immediately so subsequent helpers (if any) see it
@@ -539,10 +539,10 @@ func applyReplace(rule ecRule, b *ir.ANFBinding, binds ecBindings, lookup map[st
 // the fold — and therefore the mod-n reduction — unconditional here, and what
 // keeps this engine byte-compatible with the six hand-written tiers, none of
 // which fires a scalar-fusing rule on runtime operands.
-func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue) (string, ir.ANFBinding) {
+func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings, lookup map[string]*ir.ANFValue, used map[string]bool) (string, ir.ANFBinding) {
 	lhsName := binds[op.Lhs]
 	rhsName := binds[op.Rhs]
-	helperName := nextTempName(b.Name+"_sum", lookup)
+	helperName := nextTempName(b.Name+"_sum", lookup, used)
 
 	lhsVal := resolveConstBigInt(lhsName, lookup)
 	rhsVal := resolveConstBigInt(rhsName, lookup)
@@ -576,7 +576,7 @@ func buildOpHelper(b *ir.ANFBinding, rule ecRule, op *ecOpArg, binds ecBindings,
 
 // applyECRules tries each rule in order on binding b. Returns any extra
 // bindings and whether a rewrite occurred.
-func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
+func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool) ([]ir.ANFBinding, bool) {
 	for _, rule := range ecRules {
 		if !ruleAppliesToGo(rule) {
 			continue
@@ -591,7 +591,7 @@ func applyECRules(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBin
 		if !opOperandsAreConst(rule, binds, lookup) {
 			continue
 		}
-		extra := applyReplace(rule, b, binds, lookup)
+		extra := applyReplace(rule, b, binds, lookup, used)
 		return extra, true
 	}
 	return nil, false

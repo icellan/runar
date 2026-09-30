@@ -109,6 +109,7 @@ test {
     _ = @import("tests/loop_update_clause.zig");
     _ = @import("tests/library_cli_parity.zig");
     _ = @import("tests/n034_ec_fusing_rules.zig");
+    _ = @import("tests/f086_ec_fresh_name_collision.zig");
     _ = @import("tests/cl_bug_095_point_length_gate.zig");
     _ = @import("tests/py_builtin_alias_parity.zig");
     _ = @import("tests/constructor_body_statements.zig");

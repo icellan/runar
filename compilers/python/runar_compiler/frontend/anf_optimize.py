@@ -59,7 +59,7 @@ def optimize_ec(program: ANFProgram) -> ANFProgram:
 
     result = deepcopy(program)
     for method in result.methods:
-        _optimize_method(method)
+        _optimize_method(method, result.properties)
     return result
 
 
@@ -77,8 +77,38 @@ def _has_ec_calls(method: ANFMethod) -> bool:
 # Per-method optimization
 # ---------------------------------------------------------------------------
 
-def _optimize_method(method: ANFMethod) -> None:
+def _collect_used_names(method: ANFMethod, properties) -> set[str]:
+    """F-086: every name the method already uses -- binding names at any
+    depth (if/loop arms included), loop iteration variables, params, and the
+    contract's properties. A scalar-fusing rewrite mints a new binding; ANF is
+    single-assignment and stack lowering resolves a name to its shallowest
+    slot, so a minted name that is already in use silently aliases the two
+    values. ``--ir`` input chooses these names freely.
+    """
+    used: set[str] = {p.name for p in properties}
+    used.update(p.name for p in method.params)
+
+    def walk(bindings) -> None:
+        for b in bindings or ():
+            used.add(b.name)
+            v = b.value
+            if v.kind in ("load_param", "load_prop") and v.name is not None:
+                used.add(v.name)
+            elif v.kind == "if":
+                walk(v.then)
+                walk(v.else_)
+            elif v.kind == "loop":
+                if v.iter_var is not None:
+                    used.add(v.iter_var)
+                walk(v.body)
+
+    walk(method.body)
+    return used
+
+
+def _optimize_method(method: ANFMethod, properties) -> None:
     value_map: dict[str, ANFValue] = {}
+    used_names = _collect_used_names(method, properties)
     changed = True
     while changed:
         changed = False
@@ -87,7 +117,7 @@ def _optimize_method(method: ANFMethod) -> None:
             # `new_body` doubles as the prelude list: a rule that folds a new
             # constant appends its binding here, i.e. immediately BEFORE the
             # binding being rewritten (see _fresh_const_name).
-            optimized = _try_optimize(binding.value, value_map, new_body)
+            optimized = _try_optimize(binding.value, value_map, new_body, used_names)
             if optimized is not None:
                 binding = ANFBinding(name=binding.name, value=optimized, source_loc=binding.source_loc)
                 changed = True
@@ -104,7 +134,8 @@ def _optimize_method(method: ANFMethod) -> None:
 # ---------------------------------------------------------------------------
 
 def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
-                  prelude: list[ANFBinding]) -> Optional[ANFValue]:
+                  prelude: list[ANFBinding],
+                  used_names: set[str]) -> Optional[ANFValue]:
     if v.kind != "call" or v.func is None or v.args is None:
         return None
 
@@ -178,7 +209,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
             k1 = _get_const_int(inner.args[1], vm)
             if k1 is not None:
                 combined = (k1 * k2) % CURVE_N
-                return _make_call("ecMul", [inner.args[0], _fresh_const_name(combined, vm, prelude)])
+                return _make_call("ecMul", [inner.args[0], _fresh_const_name(combined, vm, prelude, used_names)])
 
     # Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2 mod N)
     if func == "ecAdd" and len(args) == 2:
@@ -191,7 +222,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
             k2 = _get_const_int(right.args[0], vm)
             if k1 is not None and k2 is not None:
                 combined = (k1 + k2) % CURVE_N
-                return _make_call("ecMulGen", [_fresh_const_name(combined, vm, prelude)])
+                return _make_call("ecMulGen", [_fresh_const_name(combined, vm, prelude, used_names)])
 
     # Rule 11: ecAdd(ecMul(k1,p), ecMul(k2,p)) -> ecMul(k1+k2, p) when same p
     if func == "ecAdd" and len(args) == 2:
@@ -205,7 +236,7 @@ def _try_optimize(v: ANFValue, vm: dict[str, ANFValue],
                 k2 = _get_const_int(right.args[1], vm)
                 if k1 is not None and k2 is not None:
                     combined = (k1 + k2) % CURVE_N
-                    return _make_call("ecMul", [left.args[0], _fresh_const_name(combined, vm, prelude)])
+                    return _make_call("ecMul", [left.args[0], _fresh_const_name(combined, vm, prelude, used_names)])
 
     # Rule 12: ecMul(k, G) -> ecMulGen(k)
     if func == "ecMul" and len(args) == 2:
@@ -321,7 +352,7 @@ _fresh_counter = 0
 
 
 def _fresh_const_name(value: int, vm: dict[str, ANFValue],
-                      prelude: list[ANFBinding]) -> str:
+                      prelude: list[ANFBinding], used_names: set[str]) -> str:
     """Bind a freshly folded constant and return its name.
 
     This is needed when optimization produces a new constant (e.g. k1*k2)
@@ -334,10 +365,17 @@ def _fresh_const_name(value: int, vm: dict[str, ANFValue],
     never got a binding dies with "value '__ec_opt_N' not found on stack".
     Mirrors AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
     `newBindings` list in anf-ec.ts (TypeScript).
+
+    F-086: the name skips every ``__ec_opt_N`` the method already uses
+    (*used_names*, see _collect_used_names) and is reserved there.
     """
     global _fresh_counter
     _fresh_counter += 1
     name = f"__ec_opt_{_fresh_counter}"
+    while name in used_names:
+        _fresh_counter += 1
+        name = f"__ec_opt_{_fresh_counter}"
+    used_names.add(name)
     const = _make_const_int(value)
     vm[name] = const
     prelude.append(ANFBinding(name=name, value=const))

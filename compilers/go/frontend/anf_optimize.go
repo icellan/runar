@@ -33,12 +33,16 @@ var infinityHex = strings.Repeat("0", 128)
 // It mutates the program in-place and returns it.
 func OptimizeEC(program *ir.ANFProgram) *ir.ANFProgram {
 	for mi := range program.Methods {
-		optimizeMethodEC(&program.Methods[mi])
+		optimizeMethodEC(&program.Methods[mi], program.Properties)
 	}
 	return program
 }
 
-func optimizeMethodEC(method *ir.ANFMethod) {
+func optimizeMethodEC(method *ir.ANFMethod, properties []ir.ANFProperty) {
+	// F-086: names a minted helper binding must avoid (params, properties,
+	// nested bindings — the lookup below only covers top-level bindings).
+	used := collectUsedNames(method, properties)
+
 	// Build a lookup map from binding name to its value.
 	lookup := make(map[string]*ir.ANFValue)
 	for i := range method.Body {
@@ -54,7 +58,7 @@ func optimizeMethodEC(method *ir.ANFMethod) {
 
 		for i := range method.Body {
 			b := &method.Body[i]
-			extra, ok := optimizeBindingECWithInserts(b, lookup)
+			extra, ok := optimizeBindingECWithInserts(b, lookup, used)
 			if ok {
 				changed = true
 				anyChanged = true
@@ -102,31 +106,68 @@ func optimizeMethodEC(method *ir.ANFMethod) {
 // generic rule engine. Adding a new rule to the JSON file makes it active
 // without any changes here, provided it's tagged "go" (or untagged) and
 // fits the engine's match/replace grammar.
-func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
+func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool) ([]ir.ANFBinding, bool) {
 	v := &b.Value
 	if v.Kind != "call" {
 		return nil, false
 	}
-	return applyECRules(b, lookup)
+	return applyECRules(b, lookup, used)
 }
 
-func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) bool {
-	_, ok := optimizeBindingECWithInserts(b, lookup)
+func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue, used map[string]bool) bool {
+	_, ok := optimizeBindingECWithInserts(b, lookup, used)
 	return ok
 }
 
-// nextTempName generates a unique temp binding name not already in lookup.
-// Used by the rule engine when emitting synthetic helper bindings.
-func nextTempName(base string, lookup map[string]*ir.ANFValue) string {
-	if _, exists := lookup[base]; !exists {
-		return base
+// collectUsedNames returns every name the method already uses — binding names
+// at any depth (if/loop arms included), loop iteration variables, params, and
+// the contract's properties (F-086). A scalar-fusing rewrite mints a new
+// binding; ANF is single-assignment and stack lowering resolves a name to its
+// shallowest slot, so a minted name that is already in use silently aliases
+// the two values. `--ir` input chooses these names freely.
+func collectUsedNames(method *ir.ANFMethod, properties []ir.ANFProperty) map[string]bool {
+	used := make(map[string]bool)
+	for _, p := range properties {
+		used[p.Name] = true
 	}
-	for i := 0; ; i++ {
-		candidate := fmt.Sprintf("%s_r10_%d", base, i)
-		if _, exists := lookup[candidate]; !exists {
-			return candidate
+	for _, p := range method.Params {
+		used[p.Name] = true
+	}
+	var walk func(bindings []ir.ANFBinding)
+	walk = func(bindings []ir.ANFBinding) {
+		for i := range bindings {
+			b := &bindings[i]
+			used[b.Name] = true
+			switch b.Value.Kind {
+			case "load_param", "load_prop":
+				used[b.Value.Name] = true
+			case "if":
+				walk(b.Value.Then)
+				walk(b.Value.Else)
+			case "loop":
+				used[b.Value.IterVar] = true
+				walk(b.Value.Body)
+			}
 		}
 	}
+	walk(method.Body)
+	return used
+}
+
+// nextTempName generates a unique temp binding name not already in lookup nor
+// in used (F-086), and reserves it in used. Used by the rule engine when
+// emitting synthetic helper bindings.
+func nextTempName(base string, lookup map[string]*ir.ANFValue, used map[string]bool) string {
+	taken := func(name string) bool {
+		_, exists := lookup[name]
+		return exists || used[name]
+	}
+	name := base
+	for i := 0; taken(name); i++ {
+		name = fmt.Sprintf("%s_r10_%d", base, i)
+	}
+	used[name] = true
+	return name
 }
 
 // ---------------------------------------------------------------------------

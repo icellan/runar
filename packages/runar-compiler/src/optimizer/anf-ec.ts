@@ -111,12 +111,50 @@ function makeLoadConst(value: string | bigint | boolean): LoadConst {
 }
 
 /**
+ * F-086: every name the method already uses — binding names at any depth
+ * (if/loop arms included), loop iteration variables, params, and the
+ * contract's properties. A scalar-fusing rewrite mints a new binding; ANF is
+ * single-assignment and stack lowering resolves a name to its shallowest
+ * slot, so a minted name that is already in use silently aliases the two
+ * values. `--ir` input chooses these names freely.
+ */
+function collectUsedNames(method: ANFMethod, properties: readonly { name: string }[]): Set<string> {
+  const used = new Set<string>();
+  for (const p of properties) used.add(p.name);
+  for (const p of method.params) used.add(p.name);
+  const walk = (bindings: readonly ANFBinding[]): void => {
+    for (const bnd of bindings) {
+      used.add(bnd.name);
+      const v = bnd.value;
+      if (v.kind === 'load_param' || v.kind === 'load_prop') used.add(v.name);
+      if (v.kind === 'if') { walk(v.then); walk(v.else); }
+      if (v.kind === 'loop') { used.add(v.iterVar); walk(v.body); }
+    }
+  };
+  walk(method.body);
+  return used;
+}
+
+/**
+ * F-086: `base` when the method does not use it (every non-colliding program
+ * keeps its historical name), else the first unused `base_<i>`. Reserves the
+ * returned name.
+ */
+function freshName(base: string, usedNames: Set<string>): string {
+  let name = base;
+  for (let i = 1; usedNames.has(name); i++) name = `${base}_${i}`;
+  usedNames.add(name);
+  return name;
+}
+
+/**
  * Try to rewrite a single binding. Returns the new value if rewritten, or null.
  */
 function tryRewrite(
   binding: ANFBinding,
   valueMap: ValueMap,
   newBindings: ANFBinding[],
+  usedNames: Set<string>,
 ): ANFValue | null {
   const { value } = binding;
   if (value.kind !== 'call') return null;
@@ -181,7 +219,7 @@ function tryRewrite(
           // Euclidean-style — a cross-tier hex divergence. Rules 10 and 11
           // below use the same normalisation.
           const product = ((k1 * k2) % CURVE_N + CURVE_N) % CURVE_N;
-          const newScalarName = `${binding.name}_k`;
+          const newScalarName = freshName(`${binding.name}_k`, usedNames);
           newBindings.push({ name: newScalarName, value: makeLoadConst(product) });
           return { kind: 'call', func: 'ecMul', args: [innerPoint, newScalarName] };
         }
@@ -245,7 +283,7 @@ function tryRewrite(
         const k2 = k2Val ? getConstInt(k2Val) : undefined;
         if (k1 !== undefined && k2 !== undefined) {
           const sum = ((k1 + k2) % CURVE_N + CURVE_N) % CURVE_N;
-          const newScalarName = `${binding.name}_k`;
+          const newScalarName = freshName(`${binding.name}_k`, usedNames);
           newBindings.push({ name: newScalarName, value: makeLoadConst(sum) });
           return { kind: 'call', func: 'ecMulGen', args: [newScalarName] };
         }
@@ -262,7 +300,7 @@ function tryRewrite(
           const k2 = k2Val ? getConstInt(k2Val) : undefined;
           if (k1 !== undefined && k2 !== undefined) {
             const sum = ((k1 + k2) % CURVE_N + CURVE_N) % CURVE_N;
-            const newScalarName = `${binding.name}_k`;
+            const newScalarName = freshName(`${binding.name}_k`, usedNames);
             newBindings.push({ name: newScalarName, value: makeLoadConst(sum) });
             return { kind: 'call', func: 'ecMul', args: [leftVal.args[0]!, newScalarName] };
           }
@@ -293,8 +331,9 @@ function tryRewrite(
 // Method optimizer
 // ---------------------------------------------------------------------------
 
-function optimizeMethodEC(method: ANFMethod): ANFMethod {
+function optimizeMethodEC(method: ANFMethod, properties: readonly { name: string }[]): ANFMethod {
   const valueMap: ValueMap = new Map();
+  const usedNames = collectUsedNames(method, properties);
   const result: ANFBinding[] = [];
   let changed = false;
 
@@ -303,7 +342,7 @@ function optimizeMethodEC(method: ANFMethod): ANFMethod {
     valueMap.set(binding.name, binding.value);
 
     const extraBindings: ANFBinding[] = [];
-    const rewritten = tryRewrite(binding, valueMap, extraBindings);
+    const rewritten = tryRewrite(binding, valueMap, extraBindings, usedNames);
 
     if (rewritten !== null) {
       // Add any new helper bindings (e.g., computed scalars)
@@ -335,7 +374,7 @@ function optimizeMethodEC(method: ANFMethod): ANFMethod {
  * then eliminates dead bindings. Always-on, runs before stack lowering.
  */
 export function optimizeEC(program: ANFProgram): ANFProgram {
-  const optimizedMethods = program.methods.map(optimizeMethodEC);
+  const optimizedMethods = program.methods.map(m => optimizeMethodEC(m, program.properties));
 
   // Check if anything changed
   const anyChanged = optimizedMethods.some(

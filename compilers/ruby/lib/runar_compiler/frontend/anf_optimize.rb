@@ -58,7 +58,7 @@ module RunarCompiler
         return program unless any_changed
 
         result = deep_copy_program(program)
-        result.methods.each { |m| optimize_method(m) }
+        result.methods.each { |m| optimize_method(m, result.properties) }
         result
       end
 
@@ -143,8 +143,41 @@ module RunarCompiler
       # Per-method optimization
       # -----------------------------------------------------------------
 
-      def self.optimize_method(method)
+      # F-086: every name the method already uses -- binding names at any
+      # depth (if/loop arms included), loop iteration variables, params, and
+      # the contract's properties. A scalar-fusing rewrite mints a new
+      # binding; ANF is single-assignment and stack lowering resolves a name
+      # to its shallowest slot, so a minted name that is already in use
+      # silently aliases the two values. +--ir+ input chooses these names
+      # freely.
+      def self.collect_used_names(method, properties)
+        used = Set.new
+        properties.each { |p| used << p.name }
+        method.params.each { |p| used << p.name }
+        walk = lambda do |bindings|
+          (bindings || []).each do |b|
+            used << b.name
+            v = b.value
+            case v.kind
+            when "load_param", "load_prop"
+              used << v.name if v.name
+            when "if"
+              walk.call(v.then)
+              walk.call(v.else_)
+            when "loop"
+              used << v.iter_var if v.iter_var
+              walk.call(v.body)
+            end
+          end
+        end
+        walk.call(method.body)
+        used
+      end
+      private_class_method :collect_used_names
+
+      def self.optimize_method(method, properties)
         value_map = {}
+        used_names = collect_used_names(method, properties)
         changed = true
         while changed
           changed = false
@@ -153,7 +186,7 @@ module RunarCompiler
             # +new_body+ doubles as the prelude list: a rule that folds a new
             # constant appends its binding here, i.e. immediately BEFORE the
             # binding being rewritten (see fresh_const_name).
-            optimized = try_optimize(binding.value, value_map, new_body)
+            optimized = try_optimize(binding.value, value_map, new_body, used_names)
             if optimized
               binding = IR::ANFBinding.new(
                 name: binding.name,
@@ -177,7 +210,7 @@ module RunarCompiler
       # Optimization rules
       # -----------------------------------------------------------------
 
-      def self.try_optimize(v, vm, prelude)
+      def self.try_optimize(v, vm, prelude, used_names)
         return nil unless v.kind == "call" && v.func && v.args
 
         func = v.func
@@ -254,7 +287,7 @@ module RunarCompiler
             k1 = get_const_int(inner.args[1], vm)
             if k1
               combined = (k1 * k2) % CURVE_N
-              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm, prelude)])
+              return make_call("ecMul", [inner.args[0], fresh_const_name(combined, vm, prelude, used_names)])
             end
           end
         end
@@ -270,7 +303,7 @@ module RunarCompiler
             k2 = get_const_int(right_v.args[0], vm)
             if k1 && k2
               combined = (k1 + k2) % CURVE_N
-              return make_call("ecMulGen", [fresh_const_name(combined, vm, prelude)])
+              return make_call("ecMulGen", [fresh_const_name(combined, vm, prelude, used_names)])
             end
           end
         end
@@ -287,7 +320,7 @@ module RunarCompiler
               k2 = get_const_int(right_v.args[1], vm)
               if k1 && k2
                 combined = (k1 + k2) % CURVE_N
-                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm, prelude)])
+                return make_call("ecMul", [left_v.args[0], fresh_const_name(combined, vm, prelude, used_names)])
               end
             end
           end
@@ -429,9 +462,17 @@ module RunarCompiler
       # <tt>value "__ec_opt_N" not found on stack</tt>. Mirrors
       # AnfOptimize.freshConstName (Java), buildOpHelper (Go) and the
       # +newBindings+ list in anf-ec.ts (TypeScript).
-      def self.fresh_const_name(value, vm, prelude)
+      #
+      # F-086: the name skips every +__ec_opt_N+ the method already uses
+      # (+used_names+, see collect_used_names) and is reserved there.
+      def self.fresh_const_name(value, vm, prelude, used_names)
         self.fresh_counter += 1
         name = "__ec_opt_#{fresh_counter}"
+        while used_names.include?(name)
+          self.fresh_counter += 1
+          name = "__ec_opt_#{fresh_counter}"
+        end
+        used_names << name
         const = make_const_int(value)
         vm[name] = const
         prelude << IR::ANFBinding.new(name: name, value: const)

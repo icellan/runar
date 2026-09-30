@@ -14,7 +14,9 @@ import runar.compiler.ir.anf.AddOutput;
 import runar.compiler.ir.anf.AddRawOutput;
 import runar.compiler.ir.anf.AnfBinding;
 import runar.compiler.ir.anf.AnfMethod;
+import runar.compiler.ir.anf.AnfParam;
 import runar.compiler.ir.anf.AnfProgram;
+import runar.compiler.ir.anf.AnfProperty;
 import runar.compiler.ir.anf.AnfValue;
 import runar.compiler.ir.anf.ArrayLiteral;
 import runar.compiler.ir.anf.Assert;
@@ -93,7 +95,7 @@ public final class AnfOptimize {
 
         List<AnfMethod> opts = new ArrayList<>(program.methods().size());
         for (AnfMethod m : program.methods()) {
-            opts.add(optimizeEcMethod(m));
+            opts.add(optimizeEcMethod(m, program.properties()));
         }
         return new AnfProgram(program.contractName(), program.properties(), opts);
     }
@@ -154,7 +156,7 @@ public final class AnfOptimize {
      */
     private static final int EC_FIXED_POINT_LIMIT = 64;
 
-    private static AnfMethod optimizeEcMethod(AnfMethod method) {
+    private static AnfMethod optimizeEcMethod(AnfMethod method, List<AnfProperty> properties) {
         // Fixed-point: each pass may unblock further optimizations (e.g. one
         // rule produces an aliased value that matches another rule).
         // R-264: the seven tiers do not agree on how many times to iterate.
@@ -172,6 +174,7 @@ public final class AnfOptimize {
         // non-converging rule set is its own failure) and exhausting it is now
         // a refusal.
         List<AnfBinding> body = new ArrayList<>(method.body());
+        Set<String> usedNames = collectUsedNames(method, properties);
         boolean converged = false;
         for (int iter = 0; iter < EC_FIXED_POINT_LIMIT; iter++) {
             // value_map maps binding name → its current ANFValue. We rebuild
@@ -181,7 +184,7 @@ public final class AnfOptimize {
             List<AnfBinding> next = new ArrayList<>(body.size());
             boolean changed = false;
             for (AnfBinding b : body) {
-                AnfValue optimized = tryOptimize(b.value(), valueMap, next);
+                AnfValue optimized = tryOptimize(b.value(), valueMap, next, usedNames);
                 AnfBinding rebound = b;
                 if (optimized != null) {
                     rebound = new AnfBinding(b.name(), optimized, b.sourceLoc());
@@ -211,6 +214,39 @@ public final class AnfOptimize {
     }
 
     /**
+     * F-086: every name the method already uses — binding names at any depth
+     * (if/loop arms included), loop iteration variables, params, and the
+     * contract's properties. A scalar-fusing rewrite mints a new binding; ANF
+     * is single-assignment and stack lowering resolves a name to its
+     * shallowest slot, so a minted name that is already in use silently
+     * aliases the two values. {@code --ir} input chooses these names freely.
+     */
+    private static Set<String> collectUsedNames(AnfMethod method, List<AnfProperty> properties) {
+        Set<String> used = new HashSet<>();
+        for (AnfProperty p : orEmpty(properties)) used.add(p.name());
+        for (AnfParam p : orEmpty(method.params())) used.add(p.name());
+        collectBindingNames(orEmpty(method.body()), used);
+        return used;
+    }
+
+    private static void collectBindingNames(List<AnfBinding> bindings, Set<String> used) {
+        for (AnfBinding b : bindings) {
+            used.add(b.name());
+            AnfValue v = b.value();
+            if (v instanceof LoadParam lp && lp.name() != null) used.add(lp.name());
+            if (v instanceof LoadProp lp && lp.name() != null) used.add(lp.name());
+            if (v instanceof If ifv) {
+                collectBindingNames(orEmpty(ifv.thenBranch()), used);
+                collectBindingNames(orEmpty(ifv.elseBranch()), used);
+            }
+            if (v instanceof Loop lp) {
+                if (lp.iterVar() != null) used.add(lp.iterVar());
+                collectBindingNames(orEmpty(lp.body()), used);
+            }
+        }
+    }
+
+    /**
      * Apply the 12 EC simplification rules. Returns the new value for the
      * binding's RHS or {@code null} if no rule fired.
      *
@@ -218,7 +254,7 @@ public final class AnfOptimize {
      * combining two scalars into one). Those are appended to {@code prelude}
      * so the rewritten call can reference them.
      */
-    private static AnfValue tryOptimize(AnfValue v, Map<String, AnfValue> vm, List<AnfBinding> prelude) {
+    private static AnfValue tryOptimize(AnfValue v, Map<String, AnfValue> vm, List<AnfBinding> prelude, Set<String> usedNames) {
         if (!(v instanceof Call call)) return null;
         String func = call.func();
         List<String> args = call.args();
@@ -291,7 +327,7 @@ public final class AnfOptimize {
                 BigInteger k1 = getConstInt(ic.args().get(1), vm);
                 if (k1 != null) {
                     BigInteger combined = k1.multiply(k2).mod(CURVE_N);
-                    String fresh = freshConstName(combined, vm, prelude);
+                    String fresh = freshConstName(combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(ic.args().get(0), fresh));
                 }
             }
@@ -306,7 +342,7 @@ public final class AnfOptimize {
                 BigInteger k2 = getConstInt(rc.args().get(0), vm);
                 if (k1 != null && k2 != null) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
-                    String fresh = freshConstName(combined, vm, prelude);
+                    String fresh = freshConstName(combined, vm, prelude, usedNames);
                     return new Call("ecMulGen", List.of(fresh));
                 }
             }
@@ -322,7 +358,7 @@ public final class AnfOptimize {
                 BigInteger k2 = getConstInt(rc.args().get(1), vm);
                 if (k1 != null && k2 != null) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
-                    String fresh = freshConstName(combined, vm, prelude);
+                    String fresh = freshConstName(combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(lc.args().get(0), fresh));
                 }
             }
@@ -412,10 +448,18 @@ public final class AnfOptimize {
      *
      * <p>The counter is module-level (matches Python's global counter) so
      * names are stable across method boundaries.
+     *
+     * <p>F-086: the name skips every {@code __ec_opt_N} the method already
+     * uses ({@code usedNames}, see {@link #collectUsedNames}) and is reserved
+     * there.
      */
-    private static String freshConstName(BigInteger value, Map<String, AnfValue> vm, List<AnfBinding> prelude) {
-        int idx = FRESH_COUNTER.incrementAndGet();
-        String name = "__ec_opt_" + idx;
+    private static String freshConstName(BigInteger value, Map<String, AnfValue> vm, List<AnfBinding> prelude,
+                                         Set<String> usedNames) {
+        String name = "__ec_opt_" + FRESH_COUNTER.incrementAndGet();
+        while (usedNames.contains(name)) {
+            name = "__ec_opt_" + FRESH_COUNTER.incrementAndGet();
+        }
+        usedNames.add(name);
         AnfValue v = new LoadConst(new BigIntConst(value));
         vm.put(name, v);
         prelude.add(new AnfBinding(name, v, null));
