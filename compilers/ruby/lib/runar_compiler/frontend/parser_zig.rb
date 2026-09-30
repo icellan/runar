@@ -750,6 +750,14 @@ module RunarCompiler
         name = name_tok.value
         param_result = parse_param_list
 
+        # N-050: a `pub fn` without a receiver of the contract type is a
+        # namespace (static) function, not a contract method. A private one
+        # stays a helper (the multi-method golden's computeThreshold), like R9.
+        if is_public && param_result[:receiver_name].nil? && name != "init"
+          @errors << Diagnostic.new(message: Frontend.static_method_message(name),
+                                    severity: Severity::ERROR, loc: source_location)
+        end
+
         # Skip return type if present (not a `{`)
         unless check(TOK_LBRACE)
           parse_type

@@ -24,7 +24,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
@@ -845,6 +845,7 @@ class _RustParser:
 
         self.expect(TOK_LPAREN)
         params: list[ParamNode] = []
+        has_self = False
 
         while not self.check(TOK_RPAREN) and not self.check(TOK_EOF):
             # Skip &self, &mut self
@@ -853,10 +854,12 @@ class _RustParser:
                 if self.check(TOK_MUT):
                     self.advance()
                 if self.check(TOK_SELF):
+                    has_self = True
                     self.advance()
                     self.match_tok(TOK_COMMA)
                     continue
             if self.check(TOK_SELF):
+                has_self = True
                 self.advance()
                 self.match_tok(TOK_COMMA)
                 continue
@@ -881,6 +884,13 @@ class _RustParser:
             self.match_tok(TOK_COMMA)
 
         self.expect(TOK_RPAREN)
+
+        # N-050: a `pub fn` without a self receiver is an associated (static)
+        # function, not a contract method. A private one stays a helper (R9).
+        if visibility == "public" and not has_self:
+            self.errors.append(Diagnostic(
+                message=static_method_message(raw_name),
+                severity=Severity.ERROR, loc=func_loc))
 
         # Optional return type
         has_return_type = False

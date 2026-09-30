@@ -755,11 +755,17 @@ const Parser = struct {
     fn parseMethod(self: *Parser, name: []const u8, is_public: bool) ?MethodNode {
         const method_loc = self.currentSourceLoc();
         if (self.expect(.lparen) == null) return null;
-        if (self.current.kind == .kw_self) {
+        const has_receiver = self.current.kind == .kw_self;
+        if (has_receiver) {
             _ = self.bump();
             if (self.current.kind == .colon) { _ = self.bump(); self.skipTypeAnnotation(); }
             if (self.current.kind == .comma) _ = self.bump();
         }
+        // N-050: a `pub fn` without a receiver is a namespace (static)
+        // function, not a contract method. A private one stays a helper (the
+        // multi-method golden's computeThreshold), like R9. (`init` never
+        // reaches here.)
+        if (is_public and !has_receiver) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{name});
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             if (self.parseParam()) |p| params.append(self.allocator, p) catch {};

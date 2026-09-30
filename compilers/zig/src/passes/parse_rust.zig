@@ -962,6 +962,7 @@ const Parser = struct {
         }
 
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
+        var has_self = false;
 
         while (self.current.kind != .rparen and self.current.kind != .eof) {
             // Skip &self, &mut self, self
@@ -969,12 +970,14 @@ const Parser = struct {
                 _ = self.bump();
                 _ = self.matchIdent("mut");
                 if (self.checkIdent("self")) {
+                    has_self = true;
                     _ = self.bump();
                     _ = self.match(.comma);
                     continue;
                 }
             }
             if (self.checkIdent("self")) {
+                has_self = true;
                 _ = self.bump();
                 _ = self.match(.comma);
                 continue;
@@ -996,6 +999,10 @@ const Parser = struct {
             _ = self.match(.comma);
         }
         _ = self.expect(.rparen);
+
+        // N-050: a `pub fn` without a self receiver is an associated (static)
+        // function, not a contract method. A private one stays a helper (R9).
+        if (is_public and !has_self) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{raw_name});
 
         // Optional return type: -> Type
         if (self.current.kind == .arrow) {

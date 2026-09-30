@@ -46,7 +46,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, Diagnostic, JAVA_CHAR_LITERAL, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, static_method_message, Diagnostic, JAVA_CHAR_LITERAL, UNTERMINATED_STRING_LITERAL};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 
@@ -757,7 +757,9 @@ impl<'a> JavaParser<'a> {
             annotations.push(name);
         }
 
-        // Visibility / modifier keywords. We tolerate them but don't rely on them.
+        // Visibility / modifier keywords. We tolerate them but don't rely on
+        // them, except `static` (N-050).
+        let mut is_static = false;
         while matches!(
             self.current().typ,
             TokenType::Public
@@ -767,6 +769,9 @@ impl<'a> JavaParser<'a> {
                 | TokenType::Final
                 | TokenType::Abstract
         ) {
+            if matches!(self.current().typ, TokenType::Static) {
+                is_static = true;
+            }
             self.advance();
         }
 
@@ -829,6 +834,11 @@ impl<'a> JavaParser<'a> {
 
         if matches!(self.current().typ, TokenType::LParen) {
             // Method declaration.
+            // N-050: a static method is not a contract method (`@Public static`
+            // used to become a spending entry point).
+            if is_static {
+                self.errors.push(Diagnostic::error(static_method_message(&member_name), Some(member_loc.clone())));
+            }
             let params = self.parse_param_list();
             while !matches!(self.current().typ, TokenType::LBrace | TokenType::Eof) {
                 self.advance();

@@ -836,6 +836,7 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 
 	p.expect(rustTokLParen)
 	var params []ParamNode
+	hasSelf := false
 
 	for p.current().kind != rustTokRParen && p.current().kind != rustTokEOF {
 		// Skip &self, &mut self, self
@@ -843,12 +844,14 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 			p.advance()
 			p.match(rustTokMut)
 			if p.current().kind == rustTokSelf {
+				hasSelf = true
 				p.advance()
 				p.match(rustTokComma)
 				continue
 			}
 		}
 		if p.current().kind == rustTokSelf {
+			hasSelf = true
 			p.advance()
 			p.match(rustTokComma)
 			continue
@@ -869,6 +872,12 @@ func (p *rustMacroParser) parseFunction(visibility string) MethodNode {
 		p.match(rustTokComma)
 	}
 	p.expect(rustTokRParen)
+
+	// N-050: a `pub fn` without a self receiver is an associated (static)
+	// function, not a contract method. A private one stays a helper (R9).
+	if visibility == "public" && !hasSelf {
+		p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(rawName), Severity: SeverityError, Loc: &loc})
+	}
 
 	// Optional return type: -> Type
 	if p.current().kind == rustTokArrow {

@@ -84,6 +84,17 @@ export const ZIG_LIST_COMMA = "expected ',' between list elements";
  */
 export const PY_STATEMENT_LINE_BREAK = 'expected a line break between statements';
 
+/**
+ * N-050: a static or class-level method is not a contract method, and must
+ * never become a spending entry point. Every tier refuses each surface's
+ * spelling of one (`static`, `@staticmethod` / `@classmethod`, `def self.m`,
+ * a `.rs` / `.zig` `pub fn` without a self receiver) with this diagnostic.
+ * `name` is the method name as written in the source.
+ */
+export function staticMethodMessage(name: string): string {
+  return `static methods are not allowed in Rúnar contracts; method '${name}' is declared static`;
+}
+
 /** F-026: prefix of a TypeScript syntactic diagnostic surfaced on .runar.ts. */
 export const TS_SYNTAX_ERROR_PREFIX = 'TypeScript syntax error: ';
 

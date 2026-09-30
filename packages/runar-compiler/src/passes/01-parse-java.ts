@@ -42,7 +42,7 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
@@ -532,7 +532,11 @@ class JavaParser {
     }
 
     // modifiers
-    while (isMemberModifier(this.current().type)) this.advance();
+    let isStatic = false;
+    while (isMemberModifier(this.current().type)) {
+      if (this.current().type === 'static') isStatic = true;
+      this.advance();
+    }
 
     // A member is either:
     //   (1) constructor:  ClassName ( params ) { ... }
@@ -564,6 +568,11 @@ class JavaParser {
 
     if (this.current().type === '(') {
       // method
+      // N-050: a static method is not a contract method (it used to become a
+      // spending entry point when annotated @Public).
+      if (isStatic) {
+        this.errors.push(makeDiagnostic(staticMethodMessage(memberName), 'error', loc));
+      }
       const method = this.parseMethodBody(memberName, type, publicAnn, loc);
       return { kind: 'method', method, isConstructor: false };
     }

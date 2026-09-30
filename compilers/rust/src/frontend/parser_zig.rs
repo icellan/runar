@@ -49,7 +49,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error_at_index, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA};
+use super::diagnostic::{lex_error_at_index, static_method_message, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 use std::collections::HashSet;
@@ -824,6 +824,13 @@ impl<'a> ZigParser<'a> {
         let method_name = self.expect_ident();
 
         let (params, receiver_name, stateful_ctx_names) = self.parse_param_list();
+
+        // N-050: a `pub fn` without a receiver of the contract type is a
+        // namespace (static) function, not a contract method. A private one
+        // stays a helper (the multi-method golden's computeThreshold), like R9.
+        if is_public && receiver_name.is_none() && method_name != "init" {
+            self.errors.push(static_method_message(&method_name));
+        }
 
         // Skip return type (everything before '{')
         if *self.peek() != Token::LBrace {

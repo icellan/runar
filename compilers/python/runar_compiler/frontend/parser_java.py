@@ -44,7 +44,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
 
 
 # ---------------------------------------------------------------------------
@@ -646,10 +646,14 @@ class _JavaParser:
         readonly = any(a == "Readonly" for a in anns)
         is_public_ann = any(a == "Public" for a in anns)
 
-        # Skip Java modifiers — they don't affect the AST.
+        # Skip Java modifiers — they don't affect the AST, except `static`
+        # (N-050).
+        is_static = False
         while self.check(TOK_PUBLIC) or self.check(TOK_PRIVATE) or \
                 self.check(TOK_PROTECTED) or self.check(TOK_STATIC) or \
                 self.check(TOK_FINAL):
+            if self.check(TOK_STATIC):
+                is_static = True
             self.advance()
         # Annotations can also appear between modifiers.
         more_anns = self._skip_annotations()
@@ -689,6 +693,12 @@ class _JavaParser:
         self.advance()
 
         if self.check(TOK_LPAREN):
+            if is_static:
+                # N-050: a static method is not a contract method (`@Public
+                # static` used to become a spending entry point).
+                self.errors.append(Diagnostic(
+                    message=static_method_message(member_name),
+                    severity=Severity.ERROR, loc=loc))
             return self._parse_method(
                 member_name, type_node, is_public_ann, loc
             )

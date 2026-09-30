@@ -478,6 +478,13 @@ const Parser = struct {
         return .{ .file = self.file_name, .line = tok.line, .column = tok.col };
     }
 
+    /// True when the token after `current` is an identifier (one-token
+    /// lookahead on a copy of the tokenizer).
+    fn nextIsIdent(self: *Parser) bool {
+        var probe = self.tokenizer;
+        return probe.next().kind == .ident;
+    }
+
     fn bump(self: *Parser) Token {
         const prev = self.current;
         self.prev_token_end = prev.end;
@@ -695,9 +702,15 @@ const Parser = struct {
         // Collect modifiers: public, private, protected, readonly
         var is_public = false;
         var is_readonly = false;
+        var is_static = false;
 
         while (true) {
-            if (self.checkIdent("public")) {
+            if (!is_static and self.checkIdent("static") and self.nextIsIdent()) {
+                // N-050: `static` used to be read as the member NAME, which
+                // skipped the member and refused the contract by accident.
+                is_static = true;
+                _ = self.bump();
+            } else if (self.checkIdent("public")) {
                 is_public = true;
                 _ = self.bump();
             } else if (self.checkIdent("private") or self.checkIdent("protected")) {
@@ -725,12 +738,20 @@ const Parser = struct {
 
         // Method: name(...)
         if (self.current.kind == .lparen) {
+            // N-050: a static method is not a contract method.
+            if (is_static) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{member_name});
             var m = self.parseMethod(member_name, is_public, self.tokenSourceLoc(name_tok));
             // Issue #123: honour a `/** @sighash <FLAGS> */` directive in the
             // method's leading comment trivia. Only public methods are spending
             // entry points, so a directive on a private helper is meaningless.
             m.sighash_type = self.parseSighashDirective(member_trivia, member_name, is_public);
             return .{ .method = m };
+        }
+
+        if (is_static) {
+            // Not a method: keep the pre-N-050 handling of a static member.
+            self.skipToNextMember();
+            return .none;
         }
 
         // Property: name: Type

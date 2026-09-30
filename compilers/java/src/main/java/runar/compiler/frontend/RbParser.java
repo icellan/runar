@@ -965,6 +965,13 @@ public final class RbParser {
             expect(TK.DEF, "def");
 
             Token nameTok = advance();
+            // N-050: `def self.m` / `def Vault.m` declares a singleton
+            // (class-level) method, not a contract method.
+            if (peek().kind == TK.DOT) {
+                advance(); // '.'
+                nameTok = advance();
+                errors.add(file + ":" + nameTok.line + ":" + nameTok.col + ": " + LexDiag.staticMethod(nameTok.value));
+            }
             String rawName = nameTok.value;
             declaredLocals = new HashSet<>();
 

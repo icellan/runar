@@ -19,6 +19,13 @@ pub const PY_STATEMENT_LINE_BREAK = "expected a line break between statements";
 /// A Java char literal, which Rúnar does not support.
 pub const JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts";
 
+/// N-050: a static or class-level method (the TS reference's
+/// staticMethodMessage): `static` on .runar.ts / .runar.java, `@staticmethod` /
+/// `@classmethod` on .runar.py, `def self.m` on .runar.rb, and a `pub fn`
+/// without a self receiver on .runar.rs / .runar.zig. The argument is the
+/// method name as written in the source.
+pub const STATIC_METHOD_FMT = "static methods are not allowed in Rúnar contracts; method '{s}' is declared static";
+
 /// 1-based line / 1-based column of an opening quote.
 pub const Pos = struct { line: u32, col: u32 };
 

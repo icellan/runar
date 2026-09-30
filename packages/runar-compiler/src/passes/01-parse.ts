@@ -46,7 +46,7 @@ import type {
   ReturnStatement,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, TS_SYNTAX_ERROR_PREFIX, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral } from './int-literal.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 import { parseSolSource } from './01-parse-sol.js';
@@ -412,6 +412,13 @@ function parseMethod(
   errors: CompilerDiagnostic[],
 ): MethodNode {
   const name = method.getName();
+
+  // N-050: a static method is not a contract method. It used to get a
+  // dispatch selector like any `public` one — an unsigned spend path.
+  if (method.isStatic()) {
+    errors.push(makeDiagnostic(staticMethodMessage(name), 'error', locFromNode(method, file)));
+  }
+
   const params = parseParams(method.getParameters(), file, errors);
 
   let visibility: 'public' | 'private' = 'private';

@@ -1056,6 +1056,13 @@ module RunarCompiler
         expect(TOK_DEF, "def")
 
         name_tok = advance
+        # N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+        # method, not a contract method.
+        if peek.kind == TOK_DOT
+          advance # '.'
+          name_tok = advance
+          @errors << "#{@file}:#{name_tok.line}:#{name_tok.col}: #{Frontend.static_method_message(name_tok.value)}"
+        end
         raw_name = name_tok.value
 
         # Reset local variable tracking for this method scope

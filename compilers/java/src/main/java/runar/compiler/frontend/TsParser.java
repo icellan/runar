@@ -757,9 +757,16 @@ public final class TsParser {
 
             String visibility = "private";
             boolean isReadonly = false;
+            boolean isStatic = false;
 
             while (true) {
-                if (checkIdent("public")) {
+                if (!isStatic && checkIdent("static") && pos + 1 < tokens.size()
+                        && tokens.get(pos + 1).kind == TOK_IDENT) {
+                    // N-050: `static` used to be read as the member NAME, which
+                    // skipped the member and refused the contract by accident.
+                    isStatic = true;
+                    advance();
+                } else if (checkIdent("public")) {
                     visibility = "public";
                     advance();
                 } else if (checkIdent("private")) {
@@ -790,7 +797,17 @@ public final class TsParser {
 
             // Method: name(...)
             if (check(TOK_LPAREN)) {
+                if (isStatic) {
+                    // N-050: a static method is not a contract method.
+                    addError(LexDiag.staticMethod(memberName));
+                }
                 return parseMethod(memberName, visibility, location, leadingComments);
+            }
+
+            if (isStatic) {
+                // Not a method: keep the pre-N-050 handling of a static member.
+                skipToNextMember();
+                return null;
             }
 
             // Property: name: Type

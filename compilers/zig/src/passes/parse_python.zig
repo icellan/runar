@@ -875,14 +875,26 @@ const Parser = struct {
             self.skipNewlines();
             if (self.current.kind == .dedent or self.current.kind == .eof) break;
 
-            // Decorator: @public or @private
+            // Decorators: @public (any others make a private method). N-050: a
+            // method may carry several (`@public @staticmethod`), so read them all.
             if (self.current.kind == .at_sign) {
-                _ = self.bump(); // consume '@'
-                const decorator = if (self.current.kind == .ident) self.bump().text else "";
-                self.skipNewlines();
+                var decorator: []const u8 = "";
+                var any_public = false;
+                var any_static = false;
+                while (self.current.kind == .at_sign) {
+                    _ = self.bump(); // consume '@'
+                    decorator = if (self.current.kind == .ident) self.bump().text else "";
+                    if (std.mem.eql(u8, decorator, "public")) any_public = true;
+                    if (std.mem.eql(u8, decorator, "staticmethod") or std.mem.eql(u8, decorator, "classmethod")) any_static = true;
+                    self.skipNewlines();
+                }
                 // The next thing should be a def
                 if (self.checkIdent("def")) {
-                    const method = self.parsePyMethod(decorator);
+                    if (any_static) {
+                        // N-050: a class-level function is not a contract method.
+                        self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{self.tokenizer.peek().text});
+                    }
+                    const method = self.parsePyMethod(if (any_public) "public" else "private");
                     methods.append(self.allocator, method) catch {};
                 } else {
                     self.addErrorFmt("expected 'def' after @{s} decorator", .{decorator});

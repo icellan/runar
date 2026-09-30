@@ -516,6 +516,12 @@ func (p *parseContext) parseMethod(node *sitter.Node) MethodNode {
 				visibility = "public"
 			}
 		}
+		// N-050: a static method is not a contract method; `public static`
+		// used to get a dispatch selector (an unsigned spend path).
+		if child.Type() == "static" {
+			loc := p.loc(node)
+			p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
+		}
 	}
 
 	// Issue #123: `/** @sighash <FLAGS> */` directive → per-method sighash type.

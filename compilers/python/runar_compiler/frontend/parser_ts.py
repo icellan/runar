@@ -24,6 +24,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
+    static_method_message,
     with_lex_errors,
 )
 from runar_compiler.frontend.diagnostic import Diagnostic, Severity
@@ -638,9 +639,17 @@ class _TsParser:
         # Collect modifiers: public, private, readonly
         visibility = "private"
         is_readonly = False
+        is_static = False
 
         while True:
-            if self.check_ident("public"):
+            if self.check_ident("static") and not is_static \
+                    and self.pos + 1 < len(self.tokens) \
+                    and self.tokens[self.pos + 1].kind == TOK_IDENT:
+                # N-050: `static` used to be read as the member NAME, which
+                # skipped the member and refused the contract by accident.
+                is_static = True
+                self.advance()
+            elif self.check_ident("public"):
                 visibility = "public"
                 self.advance()
             elif self.check_ident("private"):
@@ -671,7 +680,17 @@ class _TsParser:
 
         # Method: name(...)
         if self.check(TOK_LPAREN):
+            if is_static:
+                # N-050: a static method is not a contract method.
+                self.errors.append(Diagnostic(
+                    message=static_method_message(member_name),
+                    severity=Severity.ERROR, loc=location))
             return self._parse_method(member_name, visibility, location, leading)
+
+        if is_static:
+            # Not a method: keep the pre-N-050 handling of a static member.
+            self._skip_to_next_member()
+            return None
 
         # Issue #109: `/** @embedAlways */` (or `// @embedAlways`) directive
         # immediately preceding the field opts it out of DCE elimination.

@@ -25,7 +25,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
@@ -730,15 +730,24 @@ class _PyParser:
             if self.check(TOK_DEDENT) or self.check(TOK_EOF):
                 break
 
-            # Decorator
+            # Decorators: @public (any others make a private method). N-050: a
+            # method may carry several (`@public @staticmethod`), so read them all.
             if self.check(TOK_AT):
-                self.advance()
-                decorator_tok = self.expect(TOK_IDENT)
-                decorator = decorator_tok.value
-                self.skip_newlines()
+                decorators: list[str] = []
+                while self.check(TOK_AT):
+                    self.advance()
+                    decorators.append(self.expect(TOK_IDENT).value)
+                    self.skip_newlines()
+                decorator = decorators[-1]
 
                 if self.check_ident("def"):
-                    method = self.parse_method(decorator)
+                    if "staticmethod" in decorators or "classmethod" in decorators:
+                        # N-050: a class-level function is not a contract method.
+                        name = self.tokens[self.pos + 1].value if self.pos + 1 < len(self.tokens) else ""
+                        self.errors.append(Diagnostic(
+                            message=static_method_message(name),
+                            severity=Severity.ERROR, loc=self.loc()))
+                    method = self.parse_method("public" if "public" in decorators else "private")
                     methods.append(method)
                 else:
                     self.add_error(f"line {self.peek().line}: expected 'def' after @{decorator}")

@@ -1065,6 +1065,13 @@ func (p *rbParser) parseMethod(pendingVisibility string, pendingParamTypes map[s
 	p.expect(rbTokDef)
 
 	nameTok := p.advance()
+	// N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+	// method, not a contract method.
+	if p.check(rbTokDot) {
+		p.advance() // '.'
+		nameTok = p.advance()
+		p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(nameTok.value), Severity: SeverityError, Loc: &loc})
+	}
 	rawName := nameTok.value
 
 	// Reset local variable tracking for this method scope

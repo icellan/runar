@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -979,7 +979,14 @@ class RbParser {
     const loc = this.loc();
     this.expect('def');
 
-    const nameTok = this.advance();
+    let nameTok = this.advance();
+    // N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+    // method, not a contract method.
+    if (this.peek().type === '.') {
+      this.advance(); // '.'
+      nameTok = this.advance();
+      this.errors.push(makeDiagnostic(staticMethodMessage(nameTok.value), 'error', loc));
+    }
     const rawName = nameTok.value;
 
     // Reset local variable tracking for this method scope

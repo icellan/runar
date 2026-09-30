@@ -234,6 +234,11 @@ public final class JavaParser {
                     }
                     constructorTree = m;
                 } else {
+                    // N-050: a static method is not a contract method
+                    // (`@Public static` used to become a spending entry point).
+                    if (m.getModifiers().getFlags().contains(javax.lang.model.element.Modifier.STATIC)) {
+                        throw new ParseException(LexDiag.staticMethod(m.getName().toString()));
+                    }
                     methodTrees.add(m);
                 }
             } else {

@@ -1214,7 +1214,14 @@ const Parser = struct {
     fn parseMethod(self: *Parser, is_public: bool, param_types: ?ParamTypeMap) MethodNode {
         _ = self.expect(.kw_def); // 'def'
 
-        const name_tok = self.bump();
+        var name_tok = self.bump();
+        // N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+        // method, not a contract method.
+        if (self.check(.dot)) {
+            _ = self.bump(); // '.'
+            name_tok = self.bump();
+            self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{name_tok.text});
+        }
         const raw_name = name_tok.text;
         const method_loc = self.tokenSourceLoc(name_tok);
 

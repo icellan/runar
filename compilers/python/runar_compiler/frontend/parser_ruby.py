@@ -35,6 +35,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
+    static_method_message,
     with_lex_errors,
 )
 
@@ -1044,6 +1045,12 @@ class _RbParser:
         self._expect(TOK_DEF, "def")
 
         name_tok = self._advance()
+        # N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+        # method, not a contract method.
+        if self._peek().kind == TOK_DOT:
+            self._advance()  # '.'
+            name_tok = self._advance()
+            self._errors.append(static_method_message(name_tok.value))
         raw_name = name_tok.value
 
         # Reset local variable tracking for this method scope

@@ -36,7 +36,7 @@ import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.j
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
@@ -731,6 +731,7 @@ class RustParser extends ParserCore<RustToken> {
     // Parameters
     this.expect('(');
     const params: ParamNode[] = [];
+    let hasSelf = false;
 
     while (this.current().type !== ')' && this.current().type !== 'eof') {
       // Handle &self, &mut self, self
@@ -738,6 +739,7 @@ class RustParser extends ParserCore<RustToken> {
         this.advance();
         if (this.current().type === 'mut') this.advance();
         if (this.current().type === 'self') {
+          hasSelf = true;
           this.advance();
           if (this.current().type === ',') this.advance();
           continue;
@@ -746,12 +748,14 @@ class RustParser extends ParserCore<RustToken> {
         // shouldn't happen in method signature, but handle gracefully
       }
       if (this.current().type === 'self') {
+        hasSelf = true;
         this.advance();
         if (this.current().type === ',') this.advance();
         continue;
       }
       if (this.current().type === 'mut' &&
           this.tokens[this.pos + 1]?.type === 'self' as string) {
+        hasSelf = true;
         this.advance(); // skip mut
         this.advance(); // skip self
         if (this.current().type === ',') this.advance();
@@ -772,6 +776,13 @@ class RustParser extends ParserCore<RustToken> {
       if (this.current().type === ',') this.advance();
     }
     this.expect(')');
+
+    // N-050: a `pub fn` without a self receiver is an associated (static)
+    // function, not a contract method; it used to become an entry point. A
+    // private receiver-less `fn` stays a helper, like a Go free function (R9).
+    if (isPublic && !hasSelf) {
+      this.errors.push(makeDiagnostic(staticMethodMessage(rawName), 'error', location));
+    }
 
     // Optional return type: -> Type
     let hasReturnType = false;

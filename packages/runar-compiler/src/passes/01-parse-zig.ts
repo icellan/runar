@@ -30,7 +30,7 @@ import type { ParseResult } from './01-parse.js';
 import { ParserCore } from './parser-core.js';
 import type { Token } from './parser-core.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL, ZIG_LIST_COMMA } from '../errors.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 import { invalidIntegerLiteral, isNumberContinue, parseIntLiteral, scanNumberEnd } from './int-literal.js';
 
@@ -514,6 +514,14 @@ class ZigParser extends ParserCore<ZigToken> {
     const previousStatefulContextNames = this.statefulContextNames;
     this.selfNames = receiverName ? new Set([receiverName]) : new Set();
     this.statefulContextNames = new Set(statefulContextNames);
+
+    // N-050: a `pub fn` without a receiver of the contract type is a
+    // namespace (static) function, not a contract method; it used to become
+    // an entry point. A private receiver-less `fn` stays a helper (the
+    // multi-method golden's `computeThreshold`), like a Go free function (R9).
+    if (isPublic && receiverName === null && name !== 'init') {
+      this.errors.push(makeDiagnostic(staticMethodMessage(name), 'error', sourceLocation));
+    }
 
     if (name === 'init') {
       this.constructorNode = this.parseConstructor(sourceLocation, params);

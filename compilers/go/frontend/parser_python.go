@@ -917,16 +917,39 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 			break
 		}
 
-		// Decorator: @public or @private
+		// Decorators: @public (any others make a private method). N-050: a
+		// method may carry several (`@public @staticmethod`), so read them all.
 		if p.check(pyTokAt) {
-			p.advance()
-			decoratorTok := p.expect(pyTokIdent)
-			decorator := decoratorTok.value
-			p.skipNewlines()
+			var decorators []string
+			for p.check(pyTokAt) {
+				p.advance()
+				decoratorTok := p.expect(pyTokIdent)
+				decorators = append(decorators, decoratorTok.value)
+				p.skipNewlines()
+			}
+			decorator := decorators[len(decorators)-1]
 
 			// The next thing should be a def
 			if p.checkIdent("def") {
-				method := p.parsePyMethod(decorator)
+				visibility := "private"
+				for _, d := range decorators {
+					if d == "public" {
+						visibility = "public"
+					}
+				}
+				for _, d := range decorators {
+					if d == "staticmethod" || d == "classmethod" {
+						// N-050: a class-level function is not a contract method.
+						loc := p.loc()
+						name := ""
+						if p.pos+1 < len(p.tokens) {
+							name = p.tokens[p.pos+1].value
+						}
+						p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
+						break
+					}
+				}
+				method := p.parsePyMethod(visibility)
 				methods = append(methods, method)
 			} else {
 				p.addError(fmt.Sprintf("line %d: expected 'def' after @%s decorator", p.peek().line, decorator))

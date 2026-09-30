@@ -9,7 +9,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, Diagnostic, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, static_method_message, Diagnostic, UNTERMINATED_STRING_LITERAL};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
@@ -592,6 +592,7 @@ impl RustDslParser {
 
         self.expect(&TokenType::LParen);
         let mut params: Vec<ParamNode> = Vec::new();
+        let mut has_self = false;
 
         while !matches!(self.current().typ, TokenType::RParen | TokenType::Eof) {
             // Skip &self, &mut self
@@ -599,12 +600,14 @@ impl RustDslParser {
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Mut) { self.advance_clone(); }
                 if matches!(self.current().typ, TokenType::Self_) {
+                    has_self = true;
                     self.advance_clone();
                     if matches!(self.current().typ, TokenType::Comma) { self.advance_clone(); }
                     continue;
                 }
             }
             if matches!(self.current().typ, TokenType::Self_) {
+                has_self = true;
                 self.advance_clone();
                 if matches!(self.current().typ, TokenType::Comma) { self.advance_clone(); }
                 continue;
@@ -629,6 +632,12 @@ impl RustDslParser {
             if matches!(self.current().typ, TokenType::Comma) { self.advance_clone(); }
         }
         self.expect(&TokenType::RParen);
+
+        // N-050: a `pub fn` without a self receiver is an associated (static)
+        // function, not a contract method. A private one stays a helper (R9).
+        if visibility == Visibility::Public && !has_self {
+            self.errors.push(Diagnostic::error(static_method_message(&raw_name), Some(loc.clone())));
+        }
 
         // Optional return type
         if matches!(self.current().typ, TokenType::Arrow) {

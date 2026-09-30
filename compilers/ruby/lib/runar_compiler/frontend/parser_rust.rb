@@ -878,6 +878,7 @@ module RunarCompiler
 
         expect(TOK_LPAREN)
         params = []
+        has_self = false
 
         while !check(TOK_RPAREN) && !check(TOK_EOF)
           # Handle &self, &mut self, self
@@ -885,17 +886,20 @@ module RunarCompiler
             advance
             advance if check(TOK_MUT)
             if check(TOK_SELF)
+              has_self = true
               advance
               match_tok(TOK_COMMA)
               next
             end
           end
           if check(TOK_SELF)
+            has_self = true
             advance
             match_tok(TOK_COMMA)
             next
           end
           if check(TOK_MUT) && peek_next.kind == TOK_SELF
+            has_self = true
             advance # mut
             advance # self
             match_tok(TOK_COMMA)
@@ -915,6 +919,13 @@ module RunarCompiler
           match_tok(TOK_COMMA)
         end
         expect(TOK_RPAREN)
+
+        # N-050: a `pub fn` without a self receiver is an associated (static)
+        # function, not a contract method. A private one stays a helper (R9).
+        if is_public && !has_self
+          @errors << Diagnostic.new(message: Frontend.static_method_message(raw_name),
+                                    severity: Severity::ERROR, loc: location)
+        end
 
         # Optional return type: -> Type
         has_return_type = false

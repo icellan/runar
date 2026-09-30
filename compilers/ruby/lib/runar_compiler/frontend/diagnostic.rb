@@ -59,6 +59,15 @@ module RunarCompiler
     # The TS reference's refusal of a Java char literal.
     JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts"
 
+    # N-050's refusal of a static or class-level method (the TS reference's
+    # staticMethodMessage): `static` on .runar.ts / .runar.java,
+    # `@staticmethod` / `@classmethod` on .runar.py, `def self.m` on
+    # .runar.rb, and a `pub fn` without a self receiver on .runar.rs /
+    # .runar.zig. `name` is the method name as written in the source.
+    def self.static_method_message(name)
+      "static methods are not allowed in Rúnar contracts; method '#{name}' is declared static"
+    end
+
     # A tokenizer diagnostic located at line:column of file.
     def self.lex_error(message, file, line, column)
       Diagnostic.new(message: message, severity: Severity::ERROR,

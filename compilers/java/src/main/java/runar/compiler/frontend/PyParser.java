@@ -890,14 +890,23 @@ public final class PyParser {
                 skipNewlines();
                 if (check(TokKind.DEDENT) || check(TokKind.EOF)) break;
 
-                // Decorator: @public def foo(...)
+                // Decorators: @public (any others make a private method). N-050:
+                // a method may carry several (`@public @staticmethod`), so read
+                // them all.
                 if (check(TokKind.AT)) {
-                    advance();
-                    Token decoratorTok = expect(TokKind.IDENT);
-                    String decorator = decoratorTok.value;
-                    skipNewlines();
+                    List<String> decorators = new ArrayList<>();
+                    while (check(TokKind.AT)) {
+                        advance();
+                        decorators.add(expect(TokKind.IDENT).value);
+                        skipNewlines();
+                    }
+                    String decorator = decorators.get(decorators.size() - 1);
                     if (checkIdent("def")) {
-                        methods.add(parseMethod(decorator));
+                        if (decorators.contains("staticmethod") || decorators.contains("classmethod")) {
+                            // N-050: a class-level function is not a contract method.
+                            addError(LexDiag.staticMethod(pos + 1 < tokens.size() ? tokens.get(pos + 1).value : ""));
+                        }
+                        methods.add(parseMethod(decorators.contains("public") ? "public" : "private"));
                     } else {
                         addError("line " + peek().line + ": expected 'def' after @" + decorator);
                     }

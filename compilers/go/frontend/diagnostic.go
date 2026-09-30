@@ -52,6 +52,15 @@ const PyStatementLineBreakMsg = "expected a line break between statements"
 // JavaCharLiteralMsg is the TS reference's refusal of a Java char literal.
 const JavaCharLiteralMsg = "char literals are unsupported in Rúnar Java contracts"
 
+// StaticMethodMsg is N-050's refusal of a static or class-level method (the
+// TS reference's staticMethodMessage): `static` on .runar.ts / .runar.java,
+// `@staticmethod` / `@classmethod` on .runar.py, `def self.m` on .runar.rb,
+// and a `pub fn` without a self receiver on .runar.rs / .runar.zig. `name` is
+// the method name as written in the source.
+func StaticMethodMsg(name string) string {
+	return "static methods are not allowed in Rúnar contracts; method '" + name + "' is declared static"
+}
+
 // lexDiag builds a tokenizer diagnostic located at line:col of file.
 func lexDiag(msg, file string, line, col int) Diagnostic {
 	return Diagnostic{Message: msg, Severity: SeverityError, Loc: &SourceLocation{File: file, Line: line, Column: col}}

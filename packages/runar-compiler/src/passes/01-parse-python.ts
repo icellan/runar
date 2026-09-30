@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -856,6 +856,12 @@ class PyParser {
 
     const nameTok = this.advance();
     const rawName = nameTok.value;
+
+    // N-050: @staticmethod / @classmethod declare a class-level function, not
+    // a contract method; `@public @staticmethod` used to become an entry point.
+    if (decorators.includes('staticmethod') || decorators.includes('classmethod')) {
+      this.errors.push(makeDiagnostic(staticMethodMessage(rawName), 'error', loc));
+    }
 
     this.expect('(');
     const params = this.parseParams();

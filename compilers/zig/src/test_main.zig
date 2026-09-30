@@ -27,6 +27,7 @@ test {
     _ = @import("passes/parse_ruby.zig");
     _ = @import("passes/identifier_collision.zig");
     _ = @import("tests/f017_identifier_collision.zig");
+    _ = @import("tests/n050_static_methods.zig");
     _ = @import("tests/f011_unterminated_literal.zig");
     _ = @import("tests/f026_int_literal.zig");
     _ = @import("tests/n021_ruby_block_comment.zig");

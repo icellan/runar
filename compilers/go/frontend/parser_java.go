@@ -753,7 +753,15 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 	}
 
 	// Collect modifiers (public/private/protected/static/final/etc)
-	for p.current().kind == javaTokIdent {
+	isStatic := false
+	for p.current().kind == javaTokIdent || p.current().kind == javaTokStatic {
+		if p.current().kind == javaTokStatic {
+			// N-050: `static` lexes as its own token (for `import static`), so
+			// it used to stop this loop and surface as an unrelated parse error.
+			isStatic = true
+			p.advance()
+			continue
+		}
 		v := p.current().value
 		if v == "public" || v == "private" || v == "protected" ||
 			v == "final" || v == "static" || v == "abstract" {
@@ -796,6 +804,10 @@ func (p *javaParser) parseClassMember(className string) interface{} {
 
 	// Method: `name(...)`
 	if p.current().kind == javaTokLParen {
+		// N-050: a static method is not a contract method.
+		if isStatic {
+			p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
+		}
 		method := p.parseMethod(name, typ, annotations, loc)
 		return method
 	}

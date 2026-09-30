@@ -30,6 +30,18 @@ final class LexDiag {
     /** A Java char literal, which Rúnar does not support. */
     static final String JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts";
 
+    /**
+     * N-050: a static or class-level method (the TS reference's
+     * staticMethodMessage): {@code static} on .runar.ts / .runar.java,
+     * {@code @staticmethod} / {@code @classmethod} on .runar.py,
+     * {@code def self.m} on .runar.rb, and a {@code pub fn} without a self
+     * receiver on .runar.rs / .runar.zig. {@code name} is the method name as
+     * written in the source.
+     */
+    static String staticMethod(String name) {
+        return "static methods are not allowed in Rúnar contracts; method '" + name + "' is declared static";
+    }
+
     /** {@code file:line:col: message}. */
     static String at(String file, int line, int col, String message) {
         return file + ":" + line + ":" + col + ": " + message;

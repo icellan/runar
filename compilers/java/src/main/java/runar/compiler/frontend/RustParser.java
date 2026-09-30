@@ -995,6 +995,7 @@ public final class RustParser {
 
         s.expect(TOK_LPAREN);
         List<ParamNode> params = new ArrayList<>();
+        boolean hasSelf = false;
 
         while (!s.check(TOK_RPAREN) && !s.check(TOK_EOF)) {
             // &self / &mut self
@@ -1002,12 +1003,14 @@ public final class RustParser {
                 s.advance();
                 if (s.check(TOK_MUT)) s.advance();
                 if (s.check(TOK_SELF)) {
+                    hasSelf = true;
                     s.advance();
                     s.matchTok(TOK_COMMA);
                     continue;
                 }
             }
             if (s.check(TOK_SELF)) {
+                hasSelf = true;
                 s.advance();
                 s.matchTok(TOK_COMMA);
                 continue;
@@ -1031,6 +1034,12 @@ public final class RustParser {
         }
 
         s.expect(TOK_RPAREN);
+
+        // N-050: a `pub fn` without a self receiver is an associated (static)
+        // function, not a contract method. A private one stays a helper (R9).
+        if (visibility == Visibility.PUBLIC && !hasSelf) {
+            s.addError(LexDiag.staticMethod(rawName));
+        }
 
         boolean hasReturnType = false;
         if (s.check(TOK_ARROW)) {

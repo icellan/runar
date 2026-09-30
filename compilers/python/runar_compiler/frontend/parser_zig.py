@@ -38,6 +38,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
+    static_method_message,
     with_lex_errors,
 )
 
@@ -763,6 +764,12 @@ class _ZigParser:
         name = self._expect(TOK_IDENT, "method name").value
 
         params, receiver_name, stateful_ctx_names = self._parse_param_list()
+
+        # N-050: a `pub fn` without a receiver of the contract type is a
+        # namespace (static) function, not a contract method. A private one
+        # stays a helper (the multi-method golden's computeThreshold), like R9.
+        if is_public and receiver_name is None and name != "init":
+            self._errors.append(static_method_message(name))
 
         # Parse optional return type (before the body block)
         if self._current().kind != TOK_LBRACE:

@@ -22,7 +22,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, Diagnostic};
+use super::diagnostic::{lex_error, static_method_message, Diagnostic};
 use super::int_literal::{invalid_integer_literal, parse_int_literal};
 
 // ---------------------------------------------------------------------------
@@ -407,6 +407,12 @@ fn parse_methods(
                     continue;
                 }
             };
+
+            // N-050: a static method is not a contract method; `public static`
+            // used to get a dispatch selector (an unsigned spend path).
+            if method.is_static {
+                errors.push(Diagnostic::error(static_method_message(&name), Some(default_loc(file))));
+            }
 
             let params = parse_method_params(&method.function.params, file, errors);
 

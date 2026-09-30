@@ -674,6 +674,7 @@ const Parser = struct {
         // Runar are @Readonly (field) and @Public (method).
         var is_readonly = false;
         var is_public_annotation = false;
+        var is_static = false;
 
         while (true) {
             if (self.current.kind == .at) {
@@ -706,6 +707,7 @@ const Parser = struct {
                 self.checkIdent("strictfp") or self.checkIdent("transient") or
                 self.checkIdent("volatile"))
             {
+                if (self.checkIdent("static")) is_static = true;
                 _ = self.bump();
                 continue;
             }
@@ -753,6 +755,9 @@ const Parser = struct {
 
         if (self.current.kind == .lparen) {
             // Method declaration
+            // N-050: a static method is not a contract method (`@Public static`
+            // used to become a spending entry point).
+            if (is_static) self.addErrorFmt(lex_diag.STATIC_METHOD_FMT, .{member_name});
             const method = self.parseMethodAfterName(member_name, is_public_annotation, self.tokenSourceLoc(name_tok));
             methods.append(self.allocator, method) catch {};
             return;

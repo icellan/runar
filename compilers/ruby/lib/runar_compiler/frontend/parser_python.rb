@@ -868,6 +868,13 @@ module RunarCompiler
         name_tok = advance
         raw_name = name_tok.value
 
+        # N-050: @staticmethod / @classmethod declare a class-level function,
+        # not a contract method; `@public @staticmethod` used to be an entry point.
+        if decorators.include?("staticmethod") || decorators.include?("classmethod")
+          @errors << Diagnostic.new(message: Frontend.static_method_message(raw_name),
+                                    severity: Severity::ERROR, loc: location)
+        end
+
         expect(TOK_LPAREN)
         params = parse_params
         expect(TOK_RPAREN)

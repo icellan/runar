@@ -79,6 +79,15 @@ pub const PY_STATEMENT_LINE_BREAK: &str = "expected a line break between stateme
 /// The TS reference's refusal of a Java char literal.
 pub const JAVA_CHAR_LITERAL: &str = "char literals are unsupported in Rúnar Java contracts";
 
+/// N-050's refusal of a static or class-level method (the TS reference's
+/// `staticMethodMessage`): `static` on .runar.ts / .runar.java,
+/// `@staticmethod` / `@classmethod` on .runar.py, `def self.m` on .runar.rb,
+/// and a `pub fn` without a self receiver on .runar.rs / .runar.zig. `name` is
+/// the method name as written in the source.
+pub fn static_method_message(name: &str) -> String {
+    format!("static methods are not allowed in Rúnar contracts; method '{}' is declared static", name)
+}
+
 /// A tokenizer diagnostic at 1-based `line` / 0-based `column` of `file`.
 pub fn lex_error(message: &str, file: &str, line: usize, column: usize) -> Diagnostic {
     Diagnostic::error(

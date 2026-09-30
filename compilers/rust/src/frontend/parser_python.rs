@@ -40,7 +40,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, Diagnostic, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, static_method_message, Diagnostic, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
@@ -1114,6 +1114,7 @@ impl<'a> PyParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_method_def(&mut self, decorators: &[String]) -> MethodNode {
+        let def_loc = self.loc();
         self.expect(&Token::Def);
 
         let raw_name = match self.advance() {
@@ -1124,6 +1125,12 @@ impl<'a> PyParser<'a> {
                 "_error".to_string()
             }
         };
+
+        // N-050: @staticmethod / @classmethod declare a class-level function,
+        // not a contract method; `@public @staticmethod` used to be an entry point.
+        if decorators.iter().any(|d| d == "staticmethod" || d == "classmethod") {
+            self.errors.push(Diagnostic::error(static_method_message(&raw_name), Some(def_loc)));
+        }
 
         self.expect(&Token::LParen);
         let params = self.parse_params();

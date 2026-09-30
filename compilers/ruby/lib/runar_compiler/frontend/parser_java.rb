@@ -685,7 +685,9 @@ module RunarCompiler
         end
 
         # Modifiers (public/private/protected/static/final/abstract)
+        is_static = false
         while JAVA_MODIFIER_KINDS.include?(peek.kind)
+          is_static = true if peek.kind == TOK_STATIC
           advance
         end
 
@@ -712,6 +714,12 @@ module RunarCompiler
 
         if check(TOK_LPAREN)
           # Method
+          if is_static
+            # N-050: a static method is not a contract method (`@Public
+            # static` used to become a spending entry point).
+            @errors << Diagnostic.new(message: Frontend.static_method_message(name),
+                                      severity: Severity::ERROR, loc: member_loc)
+          end
           visibility = is_public_annotated ? "public" : "private"
           method = parse_method_body(
             is_constructor: false,

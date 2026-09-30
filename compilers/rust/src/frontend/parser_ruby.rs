@@ -46,7 +46,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{lex_error, static_method_message, UNTERMINATED_STRING_LITERAL};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 use std::collections::HashMap;
@@ -1219,7 +1219,7 @@ impl<'a> RbParser<'a> {
     ) -> MethodNode {
         self.expect(&Token::Def);
 
-        let raw_name = match self.advance() {
+        let mut raw_name = match self.advance() {
             Token::Ident(name) => name,
             other => {
                 self.errors
@@ -1227,6 +1227,16 @@ impl<'a> RbParser<'a> {
                 "_error".to_string()
             }
         };
+
+        // N-050: `def self.m` / `def Vault.m` declares a singleton (class-level)
+        // method, not a contract method.
+        if *self.peek() == Token::Dot {
+            self.advance(); // '.'
+            if let Token::Ident(name) = self.advance() {
+                raw_name = name;
+            }
+            self.errors.push(static_method_message(&raw_name));
+        }
 
         // Reset local variable tracking for this method scope
         self.declared_locals.clear();

@@ -712,6 +712,13 @@ public final class ZigParser {
 
             ParamListResult plr = parseParamList();
 
+            // N-050: a `pub fn` without a receiver of the contract type is a
+            // namespace (static) function, not a contract method. A private one
+            // stays a helper (the multi-method golden's computeThreshold), like R9.
+            if (isPublic && plr.receiverName == null && !"init".equals(name)) {
+                errors.add(file + ":" + l.line() + ":" + l.column() + ": " + LexDiag.staticMethod(name));
+            }
+
             // Parse and discard the return type if present.
             if (current().kind != Kind.LBRACE) {
                 parseType();

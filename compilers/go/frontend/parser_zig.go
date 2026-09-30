@@ -829,6 +829,13 @@ func (p *zigParser) parseMethod(isPublic bool, properties *[]PropertyNode) *Meth
 
 	params, receiverName, statefulCtxNames := p.parseParamList()
 
+	// N-050: a `pub fn` without a receiver of the contract type is a
+	// namespace (static) function, not a contract method. A private one stays
+	// a helper (the multi-method golden's computeThreshold), like R9.
+	if isPublic && receiverName == "" && name != "init" {
+		p.errors = append(p.errors, Diagnostic{Message: StaticMethodMsg(name), Severity: SeverityError, Loc: &loc})
+	}
+
 	// Skip return type if present (anything before '{')
 	if !p.check(zigTokLBrace) {
 		p.parseType()

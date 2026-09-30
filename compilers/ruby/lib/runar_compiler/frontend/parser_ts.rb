@@ -678,9 +678,16 @@ module RunarCompiler
         # Collect modifiers: public, private, readonly
         visibility = "private"
         is_readonly = false
+        is_static = false
 
         loop do
-          if check_ident("public")
+          if !is_static && check_ident("static") && @pos + 1 < @tokens.length &&
+             @tokens[@pos + 1].kind == TOK_IDENT
+            # N-050: `static` used to be read as the member NAME, which
+            # skipped the member and refused the contract by accident.
+            is_static = true
+            advance
+          elsif check_ident("public")
             visibility = "public"
             advance
           elsif check_ident("private")
@@ -715,7 +722,18 @@ module RunarCompiler
 
         # Method: name(...)
         if check(TOK_LPAREN)
+          if is_static
+            # N-050: a static method is not a contract method.
+            @errors << Diagnostic.new(message: Frontend.static_method_message(member_name),
+                                      severity: Severity::ERROR, loc: location)
+          end
           return parse_method(member_name, visibility, location, sighash_text)
+        end
+
+        if is_static
+          # Not a method: keep the pre-N-050 handling of a static member.
+          skip_to_next_member
+          return nil
         end
 
         # Property: name: Type (possibly with ; at end)
