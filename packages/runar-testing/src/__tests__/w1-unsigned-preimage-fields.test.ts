@@ -35,11 +35,11 @@ import { compile } from 'runar-compiler';
 import {
   LockingScript,
   UnlockingScript,
-  Spend,
   PrivateKey,
   Hash,
   TransactionSignature,
 } from '@bsv/sdk';
+import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
 import { ScriptExecutionContract } from '../script-execution.js';
 
 // ---------------------------------------------------------------------------
@@ -238,7 +238,8 @@ describe('W1 — FinalCountdown vault PoC (@bsv/sdk Spend.validate)', () => {
       sourceTXID: '00'.repeat(32),
       sourceOutputIndex: 0,
       sourceSatoshis: 100000,
-      transactionVersion: 2,
+      // F-055: version 1, as every SDK-built tx; version 2 puts Spend in relaxed mode.
+      transactionVersion: CONSENSUS_TX_VERSION,
       otherInputs: [] as never[],
       outputs: [] as never[],
       inputIndex: 0,
@@ -259,7 +260,7 @@ describe('W1 — FinalCountdown vault PoC (@bsv/sdk Spend.validate)', () => {
     // claim(sig, p) — declared parameter order.
     const unlockingHex = pushDataHex(Buffer.from(sigHex, 'hex')) + pushDataHex(preimage);
 
-    const spend = new Spend({
+    const spend = newConsensusSpend({
       ...ctx,
       lockingScript,
       unlockingScript: UnlockingScript.fromHex(unlockingHex),

@@ -157,8 +157,11 @@ const { Spend, LockingScript, UnlockingScript } = req('@bsv/sdk');
 function spends(lock: string, unlock: string): boolean {
   const spend = new Spend({
     sourceTXID: '00'.repeat(32), sourceOutputIndex: 0, sourceSatoshis: 100000,
-    lockingScript: LockingScript.fromHex(lock), transactionVersion: 2, otherInputs: [], outputs: [],
+    // F-055: version 1 + isRelaxed false, the strict rule set an SDK-built (v1)
+    // tx faces; version 2 put Spend in relaxed mode.
+    lockingScript: LockingScript.fromHex(lock), transactionVersion: 1, otherInputs: [], outputs: [],
     unlockingScript: UnlockingScript.fromHex(unlock), inputIndex: 0, inputSequence: 0xffffffff, lockTime: 0,
+    isRelaxed: false,
   });
   try {
     return spend.validate();

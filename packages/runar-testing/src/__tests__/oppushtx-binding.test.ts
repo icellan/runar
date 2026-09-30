@@ -17,16 +17,18 @@ import { emitMethod, emitCheckPreimageBinding, CHECK_PREIMAGE_BINDING_HEX } from
 import {
   LockingScript,
   UnlockingScript,
-  Spend,
   TransactionSignature,
 } from '@bsv/sdk';
+import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
 
 // tx context shared by the preimage builder and the Spend interpreter
 const CTX = {
   sourceTXID: '00'.repeat(32),
   sourceOutputIndex: 0,
   sourceSatoshis: 100000,
-  transactionVersion: 2,
+  // F-055: version 1, as every SDK-built tx. At version 2 Spend is relaxed and
+  // never checked that the derived signature is low-S.
+  transactionVersion: CONSENSUS_TX_VERSION,
   otherInputs: [] as never[],
   outputs: [] as never[],
   inputIndex: 0,
@@ -59,7 +61,7 @@ function buildConstructionHex(): string {
 function runWith(preimage: Uint8Array, lockingHex: string): { ok: boolean; err?: string } {
   const lockingScript = LockingScript.fromHex(lockingHex);
   const unlockingScript = UnlockingScript.fromHex(pushDataHex(preimage));
-  const spend = new Spend({ ...CTX, lockingScript, unlockingScript });
+  const spend = newConsensusSpend({ ...CTX, lockingScript, unlockingScript });
   try {
     return { ok: spend.validate() };
   } catch (e) {
@@ -109,18 +111,21 @@ describe('BUG-100 fix: on-chain OP_PUSH_TX preimage binding', () => {
   // Any-S construction (found by mirroring s = lowS((z + 2^248) mod n) off-chain
   // against this exact locking script — they stay valid while the blob's bytes
   // are stable, which the drift-guard test above already enforces):
-  //   lockTime 1   → s ≤ n/2 (no malleation)
-  //   lockTime 2   → s > n/2 (n−s malleation)
-  //   lockTime 32  → s is 31 bytes (one leading zero stripped from DER)
-  //   lockTime 275 → s is 30 bytes (two leading zeros stripped, ~2⁻¹⁶ case)
-  it.each([[1], [2], [32], [275]])(
+  //   lockTime 2    → s ≤ n/2 (no malleation)
+  //   lockTime 1    → s > n/2 (n−s malleation)
+  //   lockTime 234  → s is 31 bytes (one leading zero stripped from DER)
+  //   lockTime 8963 → s is 30 bytes (two leading zeros stripped, ~2⁻¹⁶ case)
+  // (F-055: re-derived for the version-1 CTX. The version-2 values were 1, 2,
+  // 32 and 275; a version change moves every sighash, so the old lockTimes no
+  // longer land on these edges.)
+  it.each([[2], [1], [234], [8963]])(
     'ACCEPTS the genuine preimage at DER/low-S edge context lockTime=%i',
     (lockTime) => {
       const ctx = { ...CTX, lockTime };
       const pre = Uint8Array.from(
         TransactionSignature.formatBytes({ ...ctx, subscript: LockingScript.fromHex(lockingHex), scope: SCOPE }) as unknown as number[],
       );
-      const spend = new Spend({
+      const spend = newConsensusSpend({
         ...ctx,
         lockingScript: LockingScript.fromHex(lockingHex),
         unlockingScript: UnlockingScript.fromHex(pushDataHex(pre)),
@@ -141,7 +146,7 @@ describe('BUG-100 fix: on-chain OP_PUSH_TX preimage binding', () => {
       );
       const lock = LockingScript.fromHex(lockingHex);
       const unlock = UnlockingScript.fromHex(pushDataHex(pre));
-      const spend = new Spend({ ...ctx, lockingScript: lock, unlockingScript: unlock });
+      const spend = newConsensusSpend({ ...ctx, lockingScript: lock, unlockingScript: unlock });
       let ok = false;
       try { ok = spend.validate(); } catch { ok = false; }
       if (ok) accepted++;

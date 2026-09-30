@@ -122,10 +122,10 @@ const SYNTHETIC_TX_VERSION = 1;
 /**
  * The synthetic spend context, exported so anything that needs to SIGN for this
  * VM derives the BIP-143 preimage from the same values the VM verifies against
- * instead of copying them. The version differs from
- * `oracle/real-crypto-execution.ts` (1 here, 2 there) and version is part of the
- * preimage, so a signature built against the wrong one silently fails to verify
- * — a copy that drifts would look like a codegen defect.
+ * instead of copying them. Version is part of the preimage, so a signature built
+ * against a drifted copy silently fails to verify — and would look like a codegen
+ * defect. (The acceptance oracles use the same values via `consensus-spend.ts`'s
+ * `CONSENSUS_SPEND_CONTEXT`; they were at version 2 until F-055.)
  */
 export const SYNTHETIC_SPEND_CONTEXT = {
   sourceTXID: SYNTHETIC_SOURCE_TXID,

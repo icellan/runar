@@ -43,7 +43,6 @@ import {
   PrivateKey,
   LockingScript,
   UnlockingScript,
-  Spend,
   Transaction,
   Hash,
   TransactionSignature,
@@ -61,6 +60,7 @@ import type { RunarArtifact, ABIMethod, ABIParam } from 'runar-ir-schema';
 import { TestContract } from '../test-contract.js';
 import { TEST_KEYS } from '../test-keys.js';
 import { encodeScriptNumber, hexToBytes, bytesToHex } from '../vm/utils.js';
+import { newConsensusSpend, CONSENSUS_SPEND_CONTEXT } from '../consensus-spend.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -134,6 +134,11 @@ function privateKeyOf(name: string): PrivateKey {
 
 function encodePushData(data: Uint8Array): Uint8Array {
   if (data.length === 0) return new Uint8Array([0x00]);
+  // Minimal push (consensus MINIMALDATA): a single byte 0x01..0x10 is OP_1..OP_16
+  // and 0x81 is OP_1NEGATE. Same stack item as the 1-byte data push, which the
+  // strict Spend rejects (F-055).
+  if (data.length === 1 && data[0]! >= 0x01 && data[0]! <= 0x10) return new Uint8Array([0x50 + data[0]!]);
+  if (data.length === 1 && data[0] === 0x81) return new Uint8Array([0x4f]);
   if (data.length <= 75) {
     const r = new Uint8Array(1 + data.length);
     r[0] = data.length;
@@ -207,6 +212,13 @@ export interface StatelessSignedOptions {
   constructorArgs: Record<string, bigint | boolean | string>;
   /** Run the ANF interpreter too (source-vs-script agreement). Default true. */
   checkInterpreter?: boolean;
+  /**
+   * Near-miss knob: rebuild the unlocking script from the encoded pushes (one
+   * hex push per arg, then the method selector when there is one). Used to
+   * hand the engine a deliberately malformed witness (non-push-only,
+   * non-minimal push, high-S, extra stack item) of an otherwise valid spend.
+   */
+  tamperUnlocking?: (pushesHex: string[]) => string;
 }
 
 function findPublicMethod(artifact: RunarArtifact, name: string): ABIMethod {
@@ -244,17 +256,13 @@ export function runStatelessSigned(opts: StatelessSignedOptions): RealExecResult
   // subscript is the whole script). All checkSig / checkMultiSig ops in a
   // single-input spend sign this same digest.
   const scope = TransactionSignature.SIGHASH_ALL | TransactionSignature.SIGHASH_FORKID;
+  // F-055: version 1 (CONSENSUS_SPEND_CONTEXT), the version every SDK-built
+  // transaction carries; version 2 would put the Spend below in relaxed mode.
   const preimageBytes = TransactionSignature.formatBytes({
-    sourceTXID: '00'.repeat(32),
-    sourceOutputIndex: 0,
-    sourceSatoshis: 100000,
-    transactionVersion: 2,
+    ...CONSENSUS_SPEND_CONTEXT,
     otherInputs: [],
     outputs: [],
-    inputIndex: 0,
     subscript: lockingScript,
-    inputSequence: 0xffffffff,
-    lockTime: 0,
     scope,
   });
   // OP_CHECKSIG computes hash256(preimage) = sha256(sha256(preimage)); sign()
@@ -284,25 +292,21 @@ export function runStatelessSigned(opts: StatelessSignedOptions): RealExecResult
   if (publicIdx !== -1 && publicMethods.length > 1) {
     pushes.push(encodePushData(encodeScriptNumber(BigInt(publicIdx))));
   }
-  const unlockingHex = bytesToHex(concat(pushes));
+  const unlockingHex = opts.tamperUnlocking
+    ? opts.tamperUnlocking(pushes.map(bytesToHex))
+    : bytesToHex(concat(pushes));
 
   // Execute on the real @bsv/sdk Spend interpreter.
   let vmAccepted = false;
   let vmError: string | undefined;
   let reachedEngine = false;
   try {
-    const spend = new Spend({
-      sourceTXID: '00'.repeat(32),
-      sourceOutputIndex: 0,
-      sourceSatoshis: 100000,
+    const spend = newConsensusSpend({
+      ...CONSENSUS_SPEND_CONTEXT,
       lockingScript,
-      transactionVersion: 2,
       otherInputs: [],
       outputs: [],
       unlockingScript: UnlockingScript.fromHex(unlockingHex),
-      inputIndex: 0,
-      inputSequence: 0xffffffff,
-      lockTime: 0,
     });
     // The engine is now running: a subsequent false/throw is a genuine script
     // rejection, not a harness error before the guard ran.
@@ -415,7 +419,10 @@ function validateSpend(
         : o.lockingScript;
     return { lockingScript: script, satoshis: o.satoshis ?? 0 };
   });
-  const spend = new Spend({
+  // F-055: `newConsensusSpend` refuses a version > 1 transaction rather than
+  // judge it under @bsv/sdk's relaxed rule set. The version cannot simply be
+  // overridden to 1 here: it is part of the BIP-143 preimage the spend signed.
+  const spend = newConsensusSpend({
     sourceTXID: input.sourceTXID!,
     sourceOutputIndex: input.sourceOutputIndex,
     sourceSatoshis: sourceOutput.satoshis!,

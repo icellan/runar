@@ -41,10 +41,10 @@ import { tmpdir } from 'node:os';
 import {
   LockingScript,
   UnlockingScript,
-  Spend,
   Script,
   TransactionSignature,
 } from '@bsv/sdk';
+import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
 import { serializeState } from 'runar-sdk';
 import type { RunarArtifact } from 'runar-ir-schema';
 
@@ -163,7 +163,8 @@ const TX_CONTEXT = {
   sourceTXID: '11'.repeat(32),
   sourceOutputIndex: 0,
   sourceSatoshis: INPUT_SATS,
-  transactionVersion: 2,
+  // F-055: version 1, as every SDK-built tx; version 2 puts Spend in relaxed mode.
+  transactionVersion: CONSENSUS_TX_VERSION,
   otherInputs: [] as never[],
   inputIndex: 0,
   inputSequence: 0xffffffff,
@@ -215,7 +216,7 @@ function spend(
     pushData(PKH_CHANGE) + pushData(scriptNumber(changeSats)) + pushData(preimageHex);
 
   try {
-    const s = new Spend({
+    const s = newConsensusSpend({
       ...TX_CONTEXT,
       lockingScript: LockingScript.fromHex(lockingHex),
       outputs: txOutputs as never,
