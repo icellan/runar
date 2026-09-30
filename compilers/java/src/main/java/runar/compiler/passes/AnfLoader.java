@@ -69,16 +69,25 @@ public final class AnfLoader {
     // ------------------------------------------------------------------
 
     private static AnfProgram toProgram(Map<?, ?> obj) {
-        String name = asString(obj.get("contractName"));
+        // F-084 (CX-BUG-046): every required field is checked for presence
+        // AND JSON type. A missing or non-array `properties` / `methods` /
+        // `params` / `body` used to load as an EMPTY list and a missing name as
+        // null — so a public method whose `body` was "not-an-array" loaded with
+        // zero bindings, passed every check below (each walks the bindings and
+        // finds nothing), and `--ir --hex` exited 0 with an EMPTY locking
+        // script. Each diagnostic names the malformed field's path.
+        String name = reqString(obj, "contractName", "");
         List<AnfProperty> props = new ArrayList<>();
-        Object pl = obj.get("properties");
-        if (pl instanceof List<?> lst) {
-            for (Object p : lst) props.add(toProperty(asObject(p)));
+        List<?> pl = reqList(obj, "properties", "");
+        for (int i = 0; i < pl.size(); i++) {
+            String path = "properties[" + i + "]";
+            props.add(toProperty(asObject(pl.get(i), path), path));
         }
         List<AnfMethod> methods = new ArrayList<>();
-        Object ml = obj.get("methods");
-        if (ml instanceof List<?> lst) {
-            for (Object m : lst) methods.add(toMethod(asObject(m)));
+        List<?> ml = reqList(obj, "methods", "");
+        for (int i = 0; i < ml.size(); i++) {
+            String path = "methods[" + i + "]";
+            methods.add(toMethod(asObject(ml.get(i), path), path));
         }
         // N-113 / R-081: a contract with no public method has no spending
         // entry point and emits an EMPTY locking script — which is
@@ -249,10 +258,10 @@ public final class AnfLoader {
         return null;
     }
 
-    private static AnfProperty toProperty(Map<?, ?> obj) {
-        String name = asString(obj.get("name"));
-        String type = asString(obj.get("type"));
-        boolean readonly = Boolean.TRUE.equals(obj.get("readonly"));
+    private static AnfProperty toProperty(Map<?, ?> obj, String path) {
+        String name = reqString(obj, "name", path);
+        String type = reqString(obj, "type", path);
+        boolean readonly = reqBool(obj, "readonly", path);
         ConstValue initial = null;
         Object iv = obj.get("initialValue");
         if (iv != null) initial = toConst(iv);
@@ -358,22 +367,17 @@ public final class AnfLoader {
         return count;
     }
 
-    private static AnfMethod toMethod(Map<?, ?> obj) {
-        String name = asString(obj.get("name"));
-        boolean isPublic = Boolean.TRUE.equals(obj.get("isPublic"));
+    private static AnfMethod toMethod(Map<?, ?> obj, String path) {
+        String name = reqString(obj, "name", path);
+        boolean isPublic = reqBool(obj, "isPublic", path);
         List<AnfParam> params = new ArrayList<>();
-        Object pl = obj.get("params");
-        if (pl instanceof List<?> lst) {
-            for (Object p : lst) {
-                Map<?, ?> po = asObject(p);
-                params.add(new AnfParam(asString(po.get("name")), asString(po.get("type"))));
-            }
+        List<?> pl = reqList(obj, "params", path);
+        for (int i = 0; i < pl.size(); i++) {
+            String pp = path + ".params[" + i + "]";
+            Map<?, ?> po = asObject(pl.get(i), pp);
+            params.add(new AnfParam(reqString(po, "name", pp), reqString(po, "type", pp)));
         }
-        List<AnfBinding> body = new ArrayList<>();
-        Object bl = obj.get("body");
-        if (bl instanceof List<?> lst) {
-            for (Object b : lst) body.add(toBinding(asObject(b)));
-        }
+        List<AnfBinding> body = toBindingList(obj, "body", path);
         return new AnfMethod(name, params, body, isPublic);
     }
 
@@ -409,9 +413,9 @@ public final class AnfLoader {
         return null;
     }
 
-    private static AnfBinding toBinding(Map<?, ?> obj) {
-        String name = asString(obj.get("name"));
-        AnfValue v = toValue(asObject(obj.get("value")));
+    private static AnfBinding toBinding(Map<?, ?> obj, String path) {
+        String name = reqString(obj, "name", path);
+        AnfValue v = toValue(asObject(obj.get("value"), path + ".value"), path + ".value");
         // GAP-002: round-trip the optional `sourceLoc` field. Used for
         // source-map plumbing; omitted (null) for legacy / hand-written
         // ANF inputs.
@@ -427,72 +431,72 @@ public final class AnfLoader {
     }
 
 
-    private static AnfValue toValue(Map<?, ?> obj) {
-        String kind = asString(obj.get("kind"));
+    private static AnfValue toValue(Map<?, ?> obj, String path) {
+        String kind = reqString(obj, "kind", path);
         return switch (kind) {
-            case "load_param" -> new LoadParam(asString(obj.get("name")));
-            case "load_prop" -> new LoadProp(asString(obj.get("name")));
+            case "load_param" -> new LoadParam(reqString(obj, "name", path));
+            case "load_prop" -> new LoadProp(reqString(obj, "name", path));
             case "load_const" -> new LoadConst(toConst(obj.get("value")));
             case "bin_op" -> new BinOp(
-                asString(obj.get("op")),
-                asString(obj.get("left")),
-                asString(obj.get("right")),
+                reqString(obj, "op", path),
+                reqString(obj, "left", path),
+                reqString(obj, "right", path),
                 asOptString(obj.get("result_type"))
             );
             case "unary_op" -> new UnaryOp(
-                asString(obj.get("op")),
-                asString(obj.get("operand")),
+                reqString(obj, "op", path),
+                reqString(obj, "operand", path),
                 asOptString(obj.get("result_type"))
             );
-            case "call" -> new Call(asString(obj.get("func")), toStringList(obj.get("args")));
+            case "call" -> new Call(reqString(obj, "func", path), toStringList(obj, "args", path));
             case "method_call" -> new MethodCall(
-                asString(obj.get("object")),
-                asString(obj.get("method")),
-                toStringList(obj.get("args"))
+                reqString(obj, "object", path),
+                reqString(obj, "method", path),
+                toStringList(obj, "args", path)
             );
             case "if" -> new If(
-                asString(obj.get("cond")),
-                toBindingList(obj.get("then")),
-                toBindingList(obj.get("else")),
-                obj.containsKey("results") ? toStringList(obj.get("results")) : null
+                reqString(obj, "cond", path),
+                toBindingList(obj, "then", path),
+                toBindingList(obj, "else", path),
+                obj.containsKey("results") ? toStringList(obj, "results", path) : null
             );
             case "loop" -> new Loop(
                 loopCount(obj.get("count")),
-                toBindingList(obj.get("body")),
-                asString(obj.get("iterVar")),
+                toBindingList(obj, "body", path),
+                reqString(obj, "iterVar", path),
                 // Iterator start / step (issue #121). Older payloads without
                 // these describe zero-start counting-up loops.
                 obj.containsKey("start") ? loopStart(obj.get("start")) : BigInteger.ZERO,
                 obj.containsKey("step") ? asInt(obj.get("step"), "loop step") : 1
             );
             case "assert" -> new Assert(
-                asString(obj.get("value")),
+                reqString(obj, "value", path),
                 obj.containsKey("isAutoInjectedStateCheck")
                     && Boolean.TRUE.equals(obj.get("isAutoInjectedStateCheck"))
             );
-            case "update_prop" -> new UpdateProp(asString(obj.get("name")), asString(obj.get("value")));
+            case "update_prop" -> new UpdateProp(reqString(obj, "name", path), reqString(obj, "value", path));
             case "get_state_script" -> new GetStateScript();
             case "check_preimage" -> new CheckPreimage(
-                asString(obj.get("preimage")),
+                reqString(obj, "preimage", path),
                 obj.containsKey("sighashFlag") && obj.get("sighashFlag") != null
                     ? asInt(obj.get("sighashFlag"), "check_preimage sighashFlag") : null
             );
-            case "deserialize_state" -> new DeserializeState(asString(obj.get("preimage")));
+            case "deserialize_state" -> new DeserializeState(reqString(obj, "preimage", path));
             case "add_output" -> {
-                String sat = asString(obj.get("satoshis"));
-                List<String> sv = toStringList(obj.get("stateValues"));
+                String sat = reqString(obj, "satoshis", path);
+                List<String> sv = toStringList(obj, "stateValues", path);
                 String preimage = obj.containsKey("preimage") ? asString(obj.get("preimage")) : "";
                 yield new AddOutput(sat, sv, preimage == null ? "" : preimage);
             }
             case "add_raw_output" -> new AddRawOutput(
-                asString(obj.get("satoshis")),
-                asString(obj.get("scriptBytes"))
+                reqString(obj, "satoshis", path),
+                reqString(obj, "scriptBytes", path)
             );
             case "add_data_output" -> new AddDataOutput(
-                asString(obj.get("satoshis")),
-                asString(obj.get("scriptBytes"))
+                reqString(obj, "satoshis", path),
+                reqString(obj, "scriptBytes", path)
             );
-            case "array_literal" -> new ArrayLiteral(toStringList(obj.get("elements")));
+            case "array_literal" -> new ArrayLiteral(toStringList(obj, "elements", path));
             case "raw_script" -> toRawScript(obj);
             default -> throw new UnknownAnfKindError(kind, "anf-loader.parseValue");
         };
@@ -613,20 +617,81 @@ public final class AnfLoader {
         return true;
     }
 
-    private static List<AnfBinding> toBindingList(Object v) {
-        List<AnfBinding> out = new ArrayList<>();
-        if (v instanceof List<?> lst) {
-            for (Object b : lst) out.add(toBinding(asObject(b)));
+    /** Required binding array {@code obj[key]}; each element decoded at its own path. */
+    private static List<AnfBinding> toBindingList(Map<?, ?> obj, String key, String path) {
+        String lp = fieldPath(path, key);
+        List<?> lst = reqList(obj, key, path);
+        List<AnfBinding> out = new ArrayList<>(lst.size());
+        for (int i = 0; i < lst.size(); i++) {
+            String bp = lp + "[" + i + "]";
+            out.add(toBinding(asObject(lst.get(i), bp), bp));
         }
         return out;
     }
 
-    private static List<String> toStringList(Object v) {
-        List<String> out = new ArrayList<>();
-        if (v instanceof List<?> lst) {
-            for (Object e : lst) out.add(asString(e));
+    /** Required array of strings {@code obj[key]}; a null element is refused. */
+    private static List<String> toStringList(Map<?, ?> obj, String key, String path) {
+        String lp = fieldPath(path, key);
+        List<?> lst = reqList(obj, key, path);
+        List<String> out = new ArrayList<>(lst.size());
+        for (int i = 0; i < lst.size(); i++) {
+            Object e = lst.get(i);
+            if (!(e instanceof String str)) {
+                throw malformed(lp + "[" + i + "]", "a string", e);
+            }
+            out.add(str);
         }
         return out;
+    }
+
+    private static String fieldPath(String path, String key) {
+        return path.isEmpty() ? key : path + "." + key;
+    }
+
+    private static String jsonType(Object v) {
+        if (v == null) return "null";
+        if (v instanceof String) return "string";
+        if (v instanceof Boolean) return "boolean";
+        if (v instanceof List<?>) return "array";
+        if (v instanceof Map<?, ?>) return "object";
+        return "number";
+    }
+
+    private static RuntimeException malformed(String fieldPath, String expected, Object got) {
+        return new RuntimeException(
+            "IR validation: " + fieldPath + " must be " + expected + ", got " + jsonType(got));
+    }
+
+    /** Present-and-typed accessors: absence and a JSON null are both refused. */
+    private static Object req(Map<?, ?> obj, String key, String path) {
+        if (!obj.containsKey(key) || obj.get(key) == null) {
+            throw new RuntimeException(
+                "IR validation: required field " + fieldPath(path, key) + " is missing");
+        }
+        return obj.get(key);
+    }
+
+    private static String reqString(Map<?, ?> obj, String key, String path) {
+        Object v = req(obj, key, path);
+        if (v instanceof String s) return s;
+        throw malformed(fieldPath(path, key), "a string", v);
+    }
+
+    private static List<?> reqList(Map<?, ?> obj, String key, String path) {
+        Object v = req(obj, key, path);
+        if (v instanceof List<?> l) return l;
+        throw malformed(fieldPath(path, key), "an array", v);
+    }
+
+    private static boolean reqBool(Map<?, ?> obj, String key, String path) {
+        Object v = req(obj, key, path);
+        if (v instanceof Boolean b) return b;
+        throw malformed(fieldPath(path, key), "a boolean", v);
+    }
+
+    private static Map<?, ?> asObject(Object v, String path) {
+        if (v instanceof Map<?, ?> m) return m;
+        throw malformed(path, "an object", v);
     }
 
     private static Map<?, ?> asObject(Object v) {
