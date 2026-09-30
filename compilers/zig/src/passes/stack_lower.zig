@@ -2185,10 +2185,8 @@ const LowerCtx = struct {
             .p384OnCurve => try self.lowerNistEcBuiltin(bind_name, args, .p384_on_curve),
             .p384EncodeCompressed => try self.lowerNistEcBuiltin(bind_name, args, .p384_encode_compressed),
             // super() is the constructor superclass call — no-op in Bitcoin Script
-            .super_call => {
-                try self.stack.push(self.allocator, bind_name);
-                self.trackDepth();
-            },
+            // No opcode, so no stack slot either (F-072).
+            .super_call => {},
         }
     }
 
@@ -2792,21 +2790,20 @@ const LowerCtx = struct {
         _ = bind_name;
     }
 
-    /// `exit(cond)` — the same OP_VERIFY as `assert`, but the binding stays in
-    /// the stack map as a dummy result.
+    /// `exit(cond)` — the same OP_VERIFY as `assert`, and the same stack model:
+    /// OP_VERIFY leaves nothing behind, so no result slot is recorded.
     ///
-    /// This is NOT `lowerAssertBuiltin` with a different name: every peer tier
-    /// (`05-stack-lower.ts` `func === 'exit'`, and the Go / Rust / Python /
-    /// Ruby ports) records a result slot for the call, and dropping it here
-    /// cost the tier the trailing OP_NIP the peers emit. Byte parity, not the
-    /// tidier stack model, is the contract.
+    /// It used to record a dummy result slot for byte parity with the peer
+    /// tiers, which all did the same. That slot has no physical counterpart,
+    /// so every later PICK/ROLL addressed the item one below the one it meant
+    /// and the trailing OP_NIP removed a real item (F-072). All seven tiers
+    /// now drop it together.
     fn lowerExitBuiltin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
         if (args.len < 1) return LowerError.InvalidBuiltin;
         try self.bringToTopAuto(args[0]);
         try self.emitOp(.op_verify);
         _ = self.stack.pop();
-        try self.stack.push(self.allocator, bind_name);
-        self.trackDepth();
+        _ = bind_name;
     }
 
     fn lowerSplit(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {

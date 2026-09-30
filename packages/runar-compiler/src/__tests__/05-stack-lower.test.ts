@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
+import { compile } from '../index.js';
 import type { ContractNode } from '../ir/index.js';
 import type { StackProgram, StackMethod, StackOp } from '../ir/index.js';
 
@@ -338,6 +339,34 @@ describe('Pass 5: Stack Lower', () => {
       const allOps = flattenOps(method.ops);
       const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
       expect(opcodes).toContain('OP_VERIFY');
+    });
+
+    // F-072: exit()'s OP_VERIFY leaves nothing on the stack, so the lowering
+    // must not record a result slot for it. It used to, and every later read
+    // was addressed one item too deep. Proves the stack model after exit()
+    // (the ops that read b, a, y); the spend-level proof is
+    // packages/runar-testing/src/__tests__/f072-exit-phantom-slot-spend.test.ts.
+    it('exit() followed by more code reads the right stack slots (F-072)', () => {
+      const source = `
+        class C extends SmartContract {
+          constructor() { super(); }
+          public check(b: bigint, a: bigint, x: bigint, y: bigint) {
+            exit(x > 0n);
+            assert(y === 1n);
+            assert(a > 5n);
+            assert(b === 0n);
+          }
+        }
+      `;
+      const r = compile(source, { fileName: 'C.runar.ts', disableConstantFolding: true });
+      expect(r.success, JSON.stringify(r.diagnostics)).toBe(true);
+      // [b a x y]: SWAP brings x up; after the verify y is ALREADY on top, then
+      // a, then b — no SWAP between the guards and no trailing NIP.
+      // Pre-fix (one-too-deep reads): 7c00a0697c519d7c55a0697c9177.
+      expect(r.artifact!.asm).toBe(
+        'OP_SWAP OP_0 OP_GREATERTHAN OP_VERIFY OP_1 OP_NUMEQUALVERIFY OP_5 OP_GREATERTHAN OP_VERIFY OP_NOT',
+      );
+      expect(r.scriptHex).toBe('7c00a069519d55a06991');
     });
 
     it('unpack() compiles to OP_BIN2NUM', () => {

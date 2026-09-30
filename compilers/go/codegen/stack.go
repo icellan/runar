@@ -1770,7 +1770,9 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 			ctx.bringToTop(args[0], isLast)
 			ctx.sm.pop()
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-			ctx.sm.push(bindingName)
+			// No result slot: OP_VERIFY leaves nothing behind, and a
+			// model-only slot puts every later PICK/ROLL one item too
+			// deep (F-072). Same model as lowerAssert.
 		}
 		return
 	}
@@ -1782,7 +1784,9 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 			ctx.bringToTop(args[0], isLast)
 			ctx.sm.pop()
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})
-			ctx.sm.push(bindingName)
+			// No result slot: OP_VERIFY leaves nothing behind, and a
+			// model-only slot puts every later PICK/ROLL one item too
+			// deep (F-072). Same model as lowerAssert.
 		}
 		return
 	}
@@ -1790,7 +1794,7 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 	// super() in constructor — no opcode emission needed.
 	// Constructor args are already on the stack.
 	if funcName == "super" {
-		ctx.sm.push(bindingName)
+		// No opcode, so no stack slot either (F-072).
 		return
 	}
 

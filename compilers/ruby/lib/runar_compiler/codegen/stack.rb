@@ -1858,7 +1858,9 @@ module RunarCompiler::Codegen
           bring_to_top(args[0], is_last)
           @sm.pop
           emit_opcode("OP_VERIFY")
-          @sm.push(binding_name)
+          # No result slot: OP_VERIFY leaves nothing behind, and a
+          # model-only slot puts every later PICK/ROLL one item too
+          # deep (F-072). Same model as the dedicated assert lowering.
         end
         return
       end
@@ -1870,14 +1872,16 @@ module RunarCompiler::Codegen
           bring_to_top(args[0], is_last)
           @sm.pop
           emit_opcode("OP_VERIFY")
-          @sm.push(binding_name)
+          # No result slot: OP_VERIFY leaves nothing behind, and a
+          # model-only slot puts every later PICK/ROLL one item too
+          # deep (F-072). Same model as the dedicated assert lowering.
         end
         return
       end
 
       # super() in constructor
       if func_name == "super"
-        @sm.push(binding_name)
+        # No opcode, so no stack slot either (F-072).
         return
       end
 

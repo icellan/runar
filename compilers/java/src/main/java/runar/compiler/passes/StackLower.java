@@ -1786,12 +1786,14 @@ public final class StackLower {
                     bringToTop(args.get(0), isLastUse(args.get(0), idx, lastUses));
                     sm.pop();
                     emitOp(new OpcodeOp("OP_VERIFY"));
-                    sm.push(bindingName);
+                    // No result slot: OP_VERIFY leaves nothing behind, and a
+                    // model-only slot puts every later PICK/ROLL one item too
+                    // deep (F-072). Same model as the dedicated assert lowering.
                 }
                 return;
             }
             if ("super".equals(funcName)) {
-                sm.push(bindingName);
+                // No opcode, so no stack slot either (F-072).
                 return;
             }
             if ("checkMultiSig".equals(funcName) && args.size() == 2) {

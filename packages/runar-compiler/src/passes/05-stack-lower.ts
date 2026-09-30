@@ -1804,8 +1804,7 @@ class LoweringContext {
     if (func === 'assert') {
       // assert(value) => value OP_VERIFY
       // A zero-argument call would emit no OP_VERIFY at all — silently deleting
-      // the check the contract relies on — and would skip the stackMap.push
-      // below, desyncing every later binding. Rejected here rather than
+      // the check the contract relies on. Rejected here rather than
       // defended against with extra opcodes (which would move bytes for every
       // valid contract). Checking in the lowerer as well as the typechecker
       // covers the `--ir` input path, which never runs a typecheck.
@@ -1818,15 +1817,16 @@ class LoweringContext {
         this.bringToTop(arg, isLast);
         this.stackMap.pop();
         this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });
-        // assert produces no result value, push a dummy
-        this.stackMap.push(bindingName);
+        // OP_VERIFY leaves nothing behind, so no stack slot is recorded for
+        // the (void) result — a model-only slot would put every later
+        // PICK/ROLL one item too deep (F-072). Same model as lowerAssert.
       }
       return;
     }
 
     if (func === 'exit') {
       // exit(condition) => condition OP_VERIFY — same as assert, and the same
-      // zero-argument hazard: no OP_VERIFY emitted, no stack slot registered.
+      // zero-argument hazard: no OP_VERIFY emitted.
       if (args.length < 1) {
         throw new Error(`exit requires 1 argument, got ${args.length}`);
       }
@@ -1836,7 +1836,7 @@ class LoweringContext {
         this.bringToTop(arg, isLast);
         this.stackMap.pop();
         this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });
-        this.stackMap.push(bindingName);
+        // No result slot: OP_VERIFY produces nothing (F-072).
       }
       return;
     }
@@ -1863,7 +1863,7 @@ class LoweringContext {
     if (func === 'super') {
       // super() in constructor — no opcode emission needed, it's a
       // no-op at the script level. Constructor args are already on the stack.
-      this.stackMap.push(bindingName);
+      // No opcode, so no stack slot either (F-072).
       return;
     }
 

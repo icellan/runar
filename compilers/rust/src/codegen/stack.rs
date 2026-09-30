@@ -1856,7 +1856,9 @@ impl LoweringContext {
                 self.bring_to_top(&args[0], is_last);
                 self.sm.pop();
                 self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
-                self.sm.push(binding_name);
+                // No result slot: OP_VERIFY leaves nothing behind, and a
+                // model-only slot puts every later PICK/ROLL one item too
+                // deep (F-072). Same model as lower_assert.
             }
             return;
         }
@@ -1868,7 +1870,9 @@ impl LoweringContext {
                 self.bring_to_top(&args[0], is_last);
                 self.sm.pop();
                 self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
-                self.sm.push(binding_name);
+                // No result slot: OP_VERIFY leaves nothing behind, and a
+                // model-only slot puts every later PICK/ROLL one item too
+                // deep (F-072). Same model as lower_assert.
             }
             return;
         }
@@ -1876,7 +1880,7 @@ impl LoweringContext {
         // super() in constructor -- no opcode emission needed.
         // Constructor args are already on the stack.
         if func_name == "super" {
-            self.sm.push(binding_name);
+            // No opcode, so no stack slot either (F-072).
             return;
         }
 
