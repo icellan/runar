@@ -162,6 +162,13 @@ var knownKinds = map[string]bool{
 	"raw_script":        true,
 }
 
+// validSighashFlags is every sighash byte the @sighash directive grammar
+// (frontend/sighash_directive.go, TS passes/sighash-directive.ts) can produce.
+var validSighashFlags = map[int]bool{
+	0x41: true, 0x42: true, 0x43: true,
+	0xC1: true, 0xC2: true, 0xC3: true,
+}
+
 func validateBindings(bindings []ANFBinding, methodName string, mutableCount int) error {
 	for i, binding := range bindings {
 		if binding.Name == "" {
@@ -250,6 +257,21 @@ func validateBindings(bindings []ANFBinding, methodName string, mutableCount int
 			return fmt.Errorf(
 				"IR validation: add_output in method '%s' carries %d state values, but the contract declares %d mutable properties. The output's OP_RETURN payload is serialized from this list while deserialize_state slices the declared properties at fixed offsets, so any other count commits to a state payload no SDK-built transaction can produce and a successor that cannot be spent.",
 				methodName, len(binding.Value.StateValues), mutableCount)
+		}
+
+		// F-068 / CL-BUG-218: check_preimage sighashFlag.
+		//
+		// The flag is appended as `sighashFlag & 0xff` to the on-chain
+		// OP_PUSH_TX binding (codegen.checkPreimageBindingBytesWithFlag), so an
+		// unchecked --ir value was truncated to its low byte: 999999 -> 0x3F,
+		// FORKID absent, a covenant no BSV spend can satisfy. Accept exactly
+		// the set the source-level @sighash grammar can produce (one base type,
+		// FORKID mandatory, ANYONECANPAY optional). 0 is the decoded form of an
+		// absent field and means the default ALL|FORKID.
+		if kind == "check_preimage" && binding.Value.SighashFlag != 0 && !validSighashFlags[binding.Value.SighashFlag] {
+			return fmt.Errorf(
+				"IR validation: method %s binding %s check_preimage has sighashFlag %d; sighashFlag must be one of {0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3} (ALL/NONE/SINGLE with FORKID, optionally ANYONECANPAY). Any other value is truncated to a sighash byte no BSV spend can satisfy.",
+				methodName, binding.Name, binding.Value.SighashFlag)
 		}
 
 		// Validate nested bindings
