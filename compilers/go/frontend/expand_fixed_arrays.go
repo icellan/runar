@@ -115,6 +115,23 @@ type expandContext struct {
 	// tempCounter is a monotonic counter used to mint fresh hoisted temp
 	// names (`__idx_0`, `__val_0`, …). Matches the TS pass exactly.
 	tempCounter int
+
+	// N-048: evaluation-order state for the statement being rewritten. A
+	// computed index is hoisted to a `const __idx_K` in front of its whole
+	// statement, which is only sound when nothing the statement evaluates
+	// earlier can observe or be observed by the move. orderEffect: a side
+	// effect (`++`/`--`, a non-builtin call) was already evaluated; orderRead:
+	// a non-literal value was already read; orderCond: inside an operand that
+	// is only conditionally evaluated (right of &&/||, a ternary arm).
+	orderEffect bool
+	orderRead   bool
+	orderCond   int
+}
+
+func (ctx *expandContext) resetOrder() {
+	ctx.orderEffect = false
+	ctx.orderRead = false
+	ctx.orderCond = 0
 }
 
 func newExpandContext(contract *ContractNode) *expandContext {
@@ -414,6 +431,7 @@ func (ctx *expandContext) rewriteStatements(stmts []Statement) []Statement {
 // prelude of hoisted `const __idx_K = ...` variable_decls ahead of the
 // rewritten statement.
 func (ctx *expandContext) rewriteStatement(stmt Statement) []Statement {
+	ctx.resetOrder()
 	switch s := stmt.(type) {
 	case VariableDeclStmt:
 		return ctx.rewriteVariableDecl(s)
@@ -553,6 +571,7 @@ func (ctx *expandContext) rewriteForStmt(stmt ForStmt) []Statement {
 	var prelude []Statement
 	newCond := ctx.rewriteExpression(stmt.Condition, &prelude)
 
+	ctx.resetOrder()
 	var initPrelude []Statement
 	newInitInit := ctx.rewriteExpression(stmt.Init.Init, &initPrelude)
 	if len(initPrelude) > 0 {
@@ -694,7 +713,15 @@ func (ctx *expandContext) rewriteExpression(expr Expression, prelude *[]Statemen
 		return ctx.rewriteIndexAccess(e, prelude)
 	case BinaryExpr:
 		left := ctx.rewriteExpression(e.Left, prelude)
+		// spec §3.7: the right operand of && / || is conditional.
+		shortCircuit := e.Op == "&&" || e.Op == "||"
+		if shortCircuit {
+			ctx.orderCond++
+		}
 		right := ctx.rewriteExpression(e.Right, prelude)
+		if shortCircuit {
+			ctx.orderCond--
+		}
 		e.Left = left
 		e.Right = right
 		return e
@@ -703,10 +730,16 @@ func (ctx *expandContext) rewriteExpression(expr Expression, prelude *[]Statemen
 		e.Operand = operand
 		return e
 	case CallExpr:
+		// The callee names a function; it is not a value read.
+		readBeforeCallee := ctx.orderRead
 		callee := ctx.rewriteExpression(e.Callee, prelude)
+		ctx.orderRead = readBeforeCallee
 		args := make([]Expression, len(e.Args))
 		for i, a := range e.Args {
 			args[i] = ctx.rewriteExpression(a, prelude)
+		}
+		if isEffectfulCall(e) {
+			ctx.orderEffect = true
 		}
 		e.Callee = callee
 		e.Args = args
@@ -717,8 +750,10 @@ func (ctx *expandContext) rewriteExpression(expr Expression, prelude *[]Statemen
 		return e
 	case TernaryExpr:
 		cond := ctx.rewriteExpression(e.Condition, prelude)
+		ctx.orderCond++
 		cons := ctx.rewriteExpression(e.Consequent, prelude)
 		alt := ctx.rewriteExpression(e.Alternate, prelude)
+		ctx.orderCond--
 		e.Condition = cond
 		e.Consequent = cons
 		e.Alternate = alt
@@ -726,11 +761,13 @@ func (ctx *expandContext) rewriteExpression(expr Expression, prelude *[]Statemen
 	case IncrementExpr:
 		ctx.rejectArrayElementMutationInExpression(e.Operand, "++")
 		operand := ctx.rewriteExpression(e.Operand, prelude)
+		ctx.orderEffect = true
 		e.Operand = operand
 		return e
 	case DecrementExpr:
 		ctx.rejectArrayElementMutationInExpression(e.Operand, "--")
 		operand := ctx.rewriteExpression(e.Operand, prelude)
+		ctx.orderEffect = true
 		e.Operand = operand
 		return e
 	case ArrayLiteralExpr:
@@ -740,8 +777,30 @@ func (ctx *expandContext) rewriteExpression(expr Expression, prelude *[]Statemen
 		}
 		e.Elements = elems
 		return e
+	case Identifier, PropertyAccessExpr:
+		ctx.orderRead = true
 	}
 	return expr
+}
+
+// rewriteAndHoistIndex rewrites a runtime FixedArray index and hoists it if
+// impure, refusing the hoist when it would change evaluation order (N-048).
+// The binding lands in front of the whole statement, so it is refused when
+// the read sits in a conditionally-evaluated operand, when an earlier part of
+// the statement already had a side effect, or when the index's own side
+// effect would move ahead of an earlier read. The AST has no let-expression,
+// so binding the index at the read's own position is not expressible here.
+func (ctx *expandContext) rewriteAndHoistIndex(index Expression, prelude *[]Statement, loc SourceLocation) Expression {
+	effectBefore := ctx.orderEffect
+	readBefore := ctx.orderRead
+	rewritten := ctx.rewriteExpression(index, prelude)
+	if !isPureReference(rewritten) {
+		effectInIndex := ctx.orderEffect && !effectBefore
+		if ctx.orderCond > 0 || effectBefore || (effectInIndex && readBefore) {
+			ctx.pushError(hoistOrderDiagnostic, loc)
+		}
+	}
+	return ctx.hoistIfImpure(rewritten, prelude, loc, "idx")
 }
 
 // rewriteIndexAccess rewrites `this.board[idx]` (as a read).
@@ -752,6 +811,7 @@ func (ctx *expandContext) rewriteIndexAccess(expr IndexAccessExpr, prelude *[]St
 		return BigIntLiteral{Value: big.NewInt(0)}
 	}
 	if status == resolveOK {
+		ctx.orderRead = true
 		return PropertyAccessExpr{Property: nested}
 	}
 
@@ -782,6 +842,7 @@ func (ctx *expandContext) rewriteIndexAccess(expr IndexAccessExpr, prelude *[]St
 	loc := SourceLocation{}
 	literal, hasLiteral := ctx.asLiteralIndex(expr.Index)
 	if hasLiteral {
+		ctx.orderRead = true
 		if literal.Sign() < 0 || literal.Cmp(big.NewInt(int64(meta.typ.Length))) >= 0 {
 			ctx.pushError(
 				fmt.Sprintf("Index %s is out of range for FixedArray of length %d", literal.String(), meta.typ.Length),
@@ -794,8 +855,8 @@ func (ctx *expandContext) rewriteIndexAccess(expr IndexAccessExpr, prelude *[]St
 	}
 
 	// Runtime index — hoist if impure, build the ternary dispatch chain.
-	rewrittenIndex := ctx.rewriteExpression(expr.Index, prelude)
-	indexRef := ctx.hoistIfImpure(rewrittenIndex, prelude, loc, "idx")
+	indexRef := ctx.rewriteAndHoistIndex(expr.Index, prelude, loc)
+	ctx.orderRead = true
 
 	if meta.slotIsArray {
 		ctx.pushError("Runtime index access on a nested FixedArray is not supported in the v1 spike", loc)
@@ -848,8 +909,7 @@ func (ctx *expandContext) tryRewriteReadAsStatements(
 	}
 
 	var prelude []Statement
-	rewrittenIndex := ctx.rewriteExpression(idxAccess.Index, &prelude)
-	indexRef := ctx.hoistIfImpure(rewrittenIndex, &prelude, loc, "idx")
+	indexRef := ctx.rewriteAndHoistIndex(idxAccess.Index, &prelude, loc)
 
 	N := len(meta.slotNames)
 	if N < 2 {
@@ -933,7 +993,14 @@ func (ctx *expandContext) rewriteArrayWrite(stmt AssignmentStmt, prelude *[]Stat
 		return []Statement{stmt}
 	}
 
+	// Source order is index THEN value, but the value is rewritten first so
+	// hoisted names are allocated as before; for the N-048 order checks the
+	// value's nested reads are judged as if the target index had already
+	// been evaluated. The target index itself is evaluated first.
+	ctx.orderEffect = exprHasEffect(idxAccess.Index)
+	ctx.orderRead = exprHasRead(idxAccess.Index)
 	rewrittenValue := ctx.rewriteExpression(stmt.Value, prelude)
+	ctx.resetOrder()
 	rewrittenIndex := ctx.rewriteExpression(idxAccess.Index, prelude)
 	loc := stmt.SourceLocation
 
@@ -962,6 +1029,13 @@ func (ctx *expandContext) rewriteArrayWrite(stmt AssignmentStmt, prelude *[]Stat
 	if meta.slotIsArray {
 		ctx.pushError("Runtime index assignment on a nested FixedArray is not supported in the v1 spike", loc)
 		return *prelude
+	}
+
+	// A side-effecting value is hoisted to `__val_K` in front of the
+	// dispatch, which reads a pure (unhoisted) index only afterwards: that
+	// would move the value's effect ahead of the index read (N-048).
+	if isPureReference(rewrittenIndex) && exprHasEffect(stmt.Value) {
+		ctx.pushError(hoistOrderDiagnostic, loc)
 	}
 
 	indexRef := ctx.hoistIfImpure(rewrittenIndex, prelude, loc, "idx")
@@ -1146,6 +1220,98 @@ func (ctx *expandContext) hoistIfImpure(
 	}
 	*prelude = append(*prelude, decl)
 	return Identifier{Name: name}
+}
+
+// hoistOrderDiagnostic is the one diagnostic every tier emits when hoisting a
+// computed FixedArray index would reorder evaluation (N-048). Shared verbatim
+// with the TS reference.
+const hoistOrderDiagnostic = "FixedArray index would be evaluated out of source order: hoisting it " +
+	"would move it past an earlier side effect in the same statement, move " +
+	"its own side effect past an earlier read, or lift it out of a " +
+	"conditionally-evaluated operand of &&, || or ?:. Compute the index into " +
+	"a local variable in a separate statement first"
+
+// isEffectfulCall treats a call as side-effecting unless its callee is a bare
+// identifier (a built-in function). Method calls — output intrinsics and
+// inlined private methods, which may write state — count as effects.
+func isEffectfulCall(e CallExpr) bool {
+	_, isIdent := e.Callee.(Identifier)
+	return !isIdent
+}
+
+// exprHasEffect reports, syntactically, whether evaluating expr performs a
+// side effect.
+func exprHasEffect(expr Expression) bool {
+	switch e := expr.(type) {
+	case IncrementExpr, DecrementExpr:
+		return true
+	case CallExpr:
+		if isEffectfulCall(e) {
+			return true
+		}
+		for _, a := range e.Args {
+			if exprHasEffect(a) {
+				return true
+			}
+		}
+		return false
+	case BinaryExpr:
+		return exprHasEffect(e.Left) || exprHasEffect(e.Right)
+	case UnaryExpr:
+		return exprHasEffect(e.Operand)
+	case MemberExpr:
+		return exprHasEffect(e.Object)
+	case TernaryExpr:
+		return exprHasEffect(e.Condition) || exprHasEffect(e.Consequent) || exprHasEffect(e.Alternate)
+	case IndexAccessExpr:
+		return exprHasEffect(e.Object) || exprHasEffect(e.Index)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			if exprHasEffect(el) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// exprHasRead reports, syntactically, whether evaluating expr reads a
+// non-literal value.
+func exprHasRead(expr Expression) bool {
+	switch e := expr.(type) {
+	case Identifier, PropertyAccessExpr:
+		return true
+	case CallExpr:
+		for _, a := range e.Args {
+			if exprHasRead(a) {
+				return true
+			}
+		}
+		return false
+	case BinaryExpr:
+		return exprHasRead(e.Left) || exprHasRead(e.Right)
+	case UnaryExpr:
+		return exprHasRead(e.Operand)
+	case IncrementExpr:
+		return exprHasRead(e.Operand)
+	case DecrementExpr:
+		return exprHasRead(e.Operand)
+	case MemberExpr:
+		return exprHasRead(e.Object)
+	case TernaryExpr:
+		return exprHasRead(e.Condition) || exprHasRead(e.Consequent) || exprHasRead(e.Alternate)
+	case IndexAccessExpr:
+		return exprHasRead(e.Object) || exprHasRead(e.Index)
+	case ArrayLiteralExpr:
+		for _, el := range e.Elements {
+			if exprHasRead(el) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func isPureReference(expr Expression) bool {

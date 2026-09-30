@@ -208,6 +208,22 @@ class _ExpandContext:
     synthetic_scalars: dict[str, TypeNode] = field(default_factory=dict)
     synthetic_arrays: dict[str, _ArrayMeta] = field(default_factory=dict)
     _temp_counter: int = 0
+    # N-048: evaluation-order state for the statement being rewritten. A
+    # computed index is hoisted to a ``const __idx_K`` in front of its whole
+    # statement, which is only sound when nothing the statement evaluates
+    # earlier can observe or be observed by the move. _order_effect: a side
+    # effect (``++``/``--``, a non-builtin call) was already evaluated;
+    # _order_read: a non-literal value was already read; _order_cond: inside an
+    # operand that is only conditionally evaluated (right of &&/||, a ternary
+    # arm).
+    _order_effect: bool = False
+    _order_read: bool = False
+    _order_cond: int = 0
+
+    def _reset_order(self) -> None:
+        self._order_effect = False
+        self._order_read = False
+        self._order_cond = 0
 
     def _add_error(self, msg: str, loc: SourceLocation) -> None:
         self.errors.append(
@@ -421,6 +437,7 @@ class _ExpandContext:
         return out
 
     def _rewrite_statement(self, stmt: Statement) -> list[Statement]:
+        self._reset_order()
         if isinstance(stmt, VariableDeclStmt):
             return self._rewrite_variable_decl(stmt)
         if isinstance(stmt, AssignmentStmt):
@@ -524,6 +541,7 @@ class _ExpandContext:
         prelude: list[Statement] = []
         new_cond = self._rewrite_expression(stmt.condition, prelude)
 
+        self._reset_order()
         init_prelude: list[Statement] = []
         new_init_init = None
         if stmt.init is not None:
@@ -656,30 +674,45 @@ class _ExpandContext:
             return self._rewrite_index_access(expr, prelude)
         if isinstance(expr, BinaryExpr):
             left = self._rewrite_expression(expr.left, prelude)
+            # spec §3.7: the right operand of && / || is conditional.
+            short_circuit = expr.op in ("&&", "||")
+            if short_circuit:
+                self._order_cond += 1
             right = self._rewrite_expression(expr.right, prelude)
+            if short_circuit:
+                self._order_cond -= 1
             return replace(expr, left=left, right=right)
         if isinstance(expr, UnaryExpr):
             operand = self._rewrite_expression(expr.operand, prelude)
             return replace(expr, operand=operand)
         if isinstance(expr, CallExpr):
+            # The callee names a function; it is not a value read.
+            read_before_callee = self._order_read
             callee = self._rewrite_expression(expr.callee, prelude)
+            self._order_read = read_before_callee
             args = [self._rewrite_expression(a, prelude) for a in expr.args]
+            if _is_effectful_call(expr):
+                self._order_effect = True
             return replace(expr, callee=callee, args=args)
         if isinstance(expr, MemberExpr):
             obj = self._rewrite_expression(expr.object, prelude)
             return replace(expr, object=obj)
         if isinstance(expr, TernaryExpr):
             cond = self._rewrite_expression(expr.condition, prelude)
+            self._order_cond += 1
             cons = self._rewrite_expression(expr.consequent, prelude)
             alt = self._rewrite_expression(expr.alternate, prelude)
+            self._order_cond -= 1
             return replace(expr, condition=cond, consequent=cons, alternate=alt)
         if isinstance(expr, IncrementExpr):
             self._reject_array_element_mutation_in_expression(expr.operand, "++")
             operand = self._rewrite_expression(expr.operand, prelude)
+            self._order_effect = True
             return replace(expr, operand=operand)
         if isinstance(expr, DecrementExpr):
             self._reject_array_element_mutation_in_expression(expr.operand, "--")
             operand = self._rewrite_expression(expr.operand, prelude)
+            self._order_effect = True
             return replace(expr, operand=operand)
         if isinstance(expr, ArrayLiteralExpr):
             elements = [
@@ -688,7 +721,31 @@ class _ExpandContext:
             return replace(expr, elements=elements)
         # Leaf expressions: Identifier, BigIntLiteral, BoolLiteral,
         # ByteStringLiteral, PropertyAccessExpr — no rewriting needed.
+        if isinstance(expr, (Identifier, PropertyAccessExpr)):
+            self._order_read = True
         return expr
+
+    def _rewrite_and_hoist_index(
+        self, index: Expression, prelude: list[Statement], loc: SourceLocation
+    ) -> Expression:
+        """Rewrite a runtime FixedArray index and hoist it if impure, refusing
+        the hoist when it would change evaluation order (N-048).
+
+        The binding lands in front of the whole statement, so it is refused
+        when the read sits in a conditionally-evaluated operand, when an
+        earlier part of the statement already had a side effect, or when the
+        index's own side effect would move ahead of an earlier read. The AST
+        has no let-expression, so binding the index at the read's own position
+        is not expressible here.
+        """
+        effect_before = self._order_effect
+        read_before = self._order_read
+        rewritten = self._rewrite_expression(index, prelude)
+        if not _is_pure_reference(rewritten):
+            effect_in_index = self._order_effect and not effect_before
+            if self._order_cond > 0 or effect_before or (effect_in_index and read_before):
+                self._add_error(HOIST_ORDER_DIAGNOSTIC, loc)
+        return self._hoist_if_impure(rewritten, prelude, loc, "idx")
 
     def _rewrite_index_access(
         self, expr: IndexAccessExpr, prelude: list[Statement]
@@ -698,6 +755,7 @@ class _ExpandContext:
         if nested == "error":
             return BigIntLiteral(value=0)
         if nested is not None:
+            self._order_read = True
             return PropertyAccessExpr(property=nested)
 
         base_name = self._try_resolve_array_base(expr.object)
@@ -716,6 +774,7 @@ class _ExpandContext:
         loc = SourceLocation()  # expression source loc unavailable in Python AST
         literal = self._as_literal_index(expr.index)
         if literal is not None:
+            self._order_read = True
             if literal < 0 or literal >= meta.type.length:
                 self._add_error(
                     f"Index {literal} is out of range for FixedArray of length {meta.type.length}",
@@ -733,10 +792,8 @@ class _ExpandContext:
             )
             return BigIntLiteral(value=0)
 
-        rewritten_index = self._rewrite_expression(expr.index, prelude)
-        index_ref = self._hoist_if_impure(
-            rewritten_index, prelude, loc, "idx"
-        )
+        index_ref = self._rewrite_and_hoist_index(expr.index, prelude, loc)
+        self._order_read = True
         return self._build_read_dispatch_ternary(meta, index_ref, loc)
 
     # ------------------------------------------------------------------
@@ -769,8 +826,7 @@ class _ExpandContext:
             return None
 
         prelude: list[Statement] = []
-        rewritten_index = self._rewrite_expression(init_expr.index, prelude)
-        index_ref = self._hoist_if_impure(rewritten_index, prelude, loc, "idx")
+        index_ref = self._rewrite_and_hoist_index(init_expr.index, prelude, loc)
 
         n = len(meta.slot_names)
         if n < 2:
@@ -845,7 +901,14 @@ class _ExpandContext:
         if meta is None:
             return [stmt]
 
+        # Source order is index THEN value, but the value is rewritten first
+        # so hoisted names are allocated as before; for the N-048 order checks
+        # the value's nested reads are judged as if the target index had
+        # already been evaluated. The target index itself is evaluated first.
+        self._order_effect = _expr_has_effect(index_access.index)
+        self._order_read = _expr_has_read(index_access.index)
         rewritten_value = self._rewrite_expression(stmt.value, prelude)
+        self._reset_order()
         rewritten_index = self._rewrite_expression(index_access.index, prelude)
         loc = stmt.source_location
 
@@ -879,6 +942,12 @@ class _ExpandContext:
                 loc,
             )
             return list(prelude)
+
+        # A side-effecting value is hoisted to ``__val_K`` in front of the
+        # dispatch, which reads a pure (unhoisted) index only afterwards: that
+        # would move the value's effect ahead of the index read (N-048).
+        if _is_pure_reference(rewritten_index) and _expr_has_effect(stmt.value):
+            self._add_error(HOIST_ORDER_DIAGNOSTIC, loc)
 
         index_ref = self._hoist_if_impure(rewritten_index, prelude, loc, "idx")
         value_ref = self._hoist_if_impure(rewritten_value, prelude, loc, "val")
@@ -1010,6 +1079,69 @@ class _ExpandContext:
 # ---------------------------------------------------------------------------
 # Stateless helpers
 # ---------------------------------------------------------------------------
+
+
+# N-048: the one diagnostic every tier emits when hoisting a computed
+# FixedArray index would reorder evaluation. Shared verbatim with the TS
+# reference.
+HOIST_ORDER_DIAGNOSTIC = (
+    "FixedArray index would be evaluated out of source order: hoisting it "
+    "would move it past an earlier side effect in the same statement, move "
+    "its own side effect past an earlier read, or lift it out of a "
+    "conditionally-evaluated operand of &&, || or ?:. Compute the index into "
+    "a local variable in a separate statement first"
+)
+
+
+def _is_effectful_call(expr: CallExpr) -> bool:
+    """A call is side-effecting unless its callee is a bare identifier (a
+    built-in function). Method calls — output intrinsics and inlined private
+    methods, which may write state — count as effects."""
+    return not isinstance(expr.callee, Identifier)
+
+
+def _expr_has_effect(expr: Expression) -> bool:
+    """Syntactic: does evaluating ``expr`` perform a side effect?"""
+    if isinstance(expr, (IncrementExpr, DecrementExpr)):
+        return True
+    if isinstance(expr, CallExpr):
+        return _is_effectful_call(expr) or any(_expr_has_effect(a) for a in expr.args)
+    if isinstance(expr, BinaryExpr):
+        return _expr_has_effect(expr.left) or _expr_has_effect(expr.right)
+    if isinstance(expr, UnaryExpr):
+        return _expr_has_effect(expr.operand)
+    if isinstance(expr, MemberExpr):
+        return _expr_has_effect(expr.object)
+    if isinstance(expr, TernaryExpr):
+        return (_expr_has_effect(expr.condition) or _expr_has_effect(expr.consequent)
+                or _expr_has_effect(expr.alternate))
+    if isinstance(expr, IndexAccessExpr):
+        return _expr_has_effect(expr.object) or _expr_has_effect(expr.index)
+    if isinstance(expr, ArrayLiteralExpr):
+        return any(_expr_has_effect(e) for e in expr.elements)
+    return False
+
+
+def _expr_has_read(expr: Expression) -> bool:
+    """Syntactic: does evaluating ``expr`` read a non-literal value?"""
+    if isinstance(expr, (Identifier, PropertyAccessExpr)):
+        return True
+    if isinstance(expr, CallExpr):
+        return any(_expr_has_read(a) for a in expr.args)
+    if isinstance(expr, BinaryExpr):
+        return _expr_has_read(expr.left) or _expr_has_read(expr.right)
+    if isinstance(expr, (UnaryExpr, IncrementExpr, DecrementExpr)):
+        return _expr_has_read(expr.operand)
+    if isinstance(expr, MemberExpr):
+        return _expr_has_read(expr.object)
+    if isinstance(expr, TernaryExpr):
+        return (_expr_has_read(expr.condition) or _expr_has_read(expr.consequent)
+                or _expr_has_read(expr.alternate))
+    if isinstance(expr, IndexAccessExpr):
+        return _expr_has_read(expr.object) or _expr_has_read(expr.index)
+    if isinstance(expr, ArrayLiteralExpr):
+        return any(_expr_has_read(e) for e in expr.elements)
+    return False
 
 
 def _is_pure_reference(expr: Expression) -> bool:

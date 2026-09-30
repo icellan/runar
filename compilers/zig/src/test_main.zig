@@ -36,6 +36,7 @@ test {
     _ = @import("passes/sighash_validate.zig");
     _ = @import("passes/typecheck.zig");
     _ = @import("passes/expand_fixed_arrays.zig");
+    _ = @import("tests/n048_fixed_array_index_order.zig");
     _ = @import("passes/anf_lower.zig");
     _ = @import("passes/intent_intrinsics_test.zig");
     _ = @import("passes/r065_go_loop_header_test.zig");

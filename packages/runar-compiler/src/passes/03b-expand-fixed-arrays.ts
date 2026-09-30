@@ -227,6 +227,26 @@ class ExpandContext {
   /** Monotonic counter for fresh hoisted temp names. */
   private tempCounter = 0;
 
+  /**
+   * N-048: evaluation-order state for the statement being rewritten. A
+   * computed index is hoisted to a `const __idx_K` in front of its whole
+   * statement, which is only sound when nothing the statement evaluates
+   * earlier can observe or be observed by the move. `orderEffect` records
+   * that a side effect (`++`/`--`, a non-builtin call) has already been
+   * evaluated, `orderRead` that a non-literal value has been read, and
+   * `orderCond` that the rewriter is inside an operand that is only
+   * conditionally evaluated (right of `&&`/`||`, a ternary arm).
+   */
+  private orderEffect = false;
+  private orderRead = false;
+  private orderCond = 0;
+
+  private resetOrder(): void {
+    this.orderEffect = false;
+    this.orderRead = false;
+    this.orderCond = 0;
+  }
+
   constructor(contract: ContractNode) {
     this.contract = contract;
   }
@@ -511,6 +531,7 @@ class ExpandContext {
    * rewritten statement).
    */
   private rewriteStatement(stmt: Statement): Statement[] {
+    this.resetOrder();
     switch (stmt.kind) {
       case 'variable_decl':
         return this.rewriteVariableDecl(stmt);
@@ -662,6 +683,7 @@ class ExpandContext {
     // cleanly, so just rewrite the init expression; hoisting for array
     // accesses inside `for` init/update is an unlikely case and can be
     // revisited if needed.
+    this.resetOrder();
     const initPrelude: Statement[] = [];
     const newInitInit = this.rewriteExpression(stmt.init.init, initPrelude);
     if (initPrelude.length > 0) {
@@ -815,7 +837,11 @@ class ExpandContext {
 
       case 'binary_expr': {
         const left = this.rewriteExpression(expr.left, prelude);
+        // spec §3.7: the right operand of `&&` / `||` is conditional.
+        const shortCircuit = expr.op === '&&' || expr.op === '||';
+        if (shortCircuit) this.orderCond++;
         const right = this.rewriteExpression(expr.right, prelude);
+        if (shortCircuit) this.orderCond--;
         return { ...expr, left, right };
       }
 
@@ -825,8 +851,12 @@ class ExpandContext {
       }
 
       case 'call_expr': {
+        // The callee names a function; it is not a value read.
+        const readBeforeCallee = this.orderRead;
         const callee = this.rewriteExpression(expr.callee, prelude);
+        this.orderRead = readBeforeCallee;
         const args = expr.args.map(a => this.rewriteExpression(a, prelude));
+        if (isEffectfulCall(expr)) this.orderEffect = true;
         return { ...expr, callee, args };
       }
 
@@ -837,8 +867,10 @@ class ExpandContext {
 
       case 'ternary_expr': {
         const condition = this.rewriteExpression(expr.condition, prelude);
+        this.orderCond++;
         const consequent = this.rewriteExpression(expr.consequent, prelude);
         const alternate = this.rewriteExpression(expr.alternate, prelude);
+        this.orderCond--;
         return { ...expr, condition, consequent, alternate };
       }
 
@@ -850,6 +882,7 @@ class ExpandContext {
           expr.sourceLocation,
         );
         const operand = this.rewriteExpression(expr.operand, prelude);
+        this.orderEffect = true;
         return { ...expr, operand };
       }
 
@@ -859,12 +892,41 @@ class ExpandContext {
       }
 
       case 'identifier':
+      case 'property_access':
+        this.orderRead = true;
+        return expr;
+
       case 'bigint_literal':
       case 'bool_literal':
       case 'bytestring_literal':
-      case 'property_access':
         return expr;
     }
+  }
+
+  /**
+   * Rewrite a runtime FixedArray index and hoist it if impure, refusing the
+   * hoist when it would change evaluation order (N-048). The binding lands
+   * in front of the whole statement, so it is refused when the read sits in
+   * a conditionally-evaluated operand, when an earlier part of the statement
+   * already had a side effect, or when the index's own side effect would move
+   * ahead of an earlier read. The AST has no let-expression, so binding the
+   * index at the read's own position is not expressible here.
+   */
+  private rewriteAndHoistIndex(
+    index: Expression,
+    prelude: Statement[],
+    loc: SourceLocation | undefined,
+  ): Expression {
+    const effectBefore = this.orderEffect;
+    const readBefore = this.orderRead;
+    const rewritten = this.rewriteExpression(index, prelude);
+    if (!isPureReference(rewritten)) {
+      const effectInIndex = this.orderEffect && !effectBefore;
+      if (this.orderCond > 0 || effectBefore || (effectInIndex && readBefore)) {
+        this.errors.push(makeDiagnostic(HOIST_ORDER_DIAGNOSTIC, 'error', loc));
+      }
+    }
+    return this.hoistIfImpure(rewritten, prelude, loc, 'idx');
   }
 
   /**
@@ -881,6 +943,7 @@ class ExpandContext {
       return { kind: 'bigint_literal', value: 0n, sourceLocation: expr.sourceLocation };
     }
     if (nested !== null) {
+      this.orderRead = true;
       return {
         kind: 'property_access',
         property: nested,
@@ -910,6 +973,7 @@ class ExpandContext {
     const loc = expr.sourceLocation;
     const literal = this.asLiteralIndex(expr.index);
     if (literal !== null) {
+      this.orderRead = true;
       if (literal < 0n || literal >= BigInt(meta.type.length)) {
         this.errors.push(makeDiagnostic(
           `Index ${literal} is out of range for FixedArray of length ${meta.type.length}`,
@@ -931,8 +995,8 @@ class ExpandContext {
 
     // Runtime index — hoist the index expression if impure and build the
     // ternary dispatch chain.
-    const rewrittenIndex = this.rewriteExpression(expr.index, prelude);
-    const indexRef = this.hoistIfImpure(rewrittenIndex, prelude, loc, 'idx');
+    const indexRef = this.rewriteAndHoistIndex(expr.index, prelude, loc);
+    this.orderRead = true;
 
     // Nested arrays are not supported for runtime index yet — it requires
     // N ternary branches, each containing an inner dispatch. Emit an
@@ -1007,8 +1071,7 @@ class ExpandContext {
     // Hoist the index if impure — any sub-expressions inside `initExpr.index`
     // are also rewritten (for chained array accesses inside the index).
     const prelude: Statement[] = [];
-    const rewrittenIndex = this.rewriteExpression(initExpr.index, prelude);
-    const indexRef = this.hoistIfImpure(rewrittenIndex, prelude, loc, 'idx');
+    const indexRef = this.rewriteAndHoistIndex(initExpr.index, prelude, loc);
 
     const N = meta.slotNames.length;
     if (N < 2) {
@@ -1146,9 +1209,15 @@ class ExpandContext {
       return [stmt];
     }
 
-    // Runtime value rewrite (may have nested array reads).
+    // Runtime value rewrite (may have nested array reads). Source order is
+    // index THEN value, but the value is rewritten first so hoisted names are
+    // allocated as before; for the N-048 order checks the value's nested
+    // reads are judged as if the target index had already been evaluated.
+    this.orderEffect = exprHasEffect(indexAccess.index);
+    this.orderRead = exprHasRead(indexAccess.index);
     const rewrittenValue = this.rewriteExpression(stmt.value, prelude);
-    // Index rewrite.
+    // Index rewrite. The target index is the first thing evaluated.
+    this.resetOrder();
     const rewrittenIndex = this.rewriteExpression(indexAccess.index, prelude);
     const loc = stmt.sourceLocation;
 
@@ -1189,6 +1258,13 @@ class ExpandContext {
         loc,
       ));
       return [...prelude];
+    }
+
+    // A side-effecting value is hoisted to `__val_K` in front of the dispatch,
+    // which reads a pure (unhoisted) index only afterwards: that would move
+    // the value's effect ahead of the index read (N-048).
+    if (isPureReference(rewrittenIndex) && exprHasEffect(stmt.value)) {
+      this.errors.push(makeDiagnostic(HOIST_ORDER_DIAGNOSTIC, 'error', loc));
     }
 
     // Hoist index and value if impure.
@@ -1387,6 +1463,81 @@ class ExpandContext {
 // ---------------------------------------------------------------------------
 // Stateless helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * N-048: the one diagnostic every tier emits when hoisting a computed
+ * FixedArray index would reorder evaluation. Shared verbatim across tiers.
+ */
+const HOIST_ORDER_DIAGNOSTIC =
+  'FixedArray index would be evaluated out of source order: hoisting it ' +
+  'would move it past an earlier side effect in the same statement, move ' +
+  'its own side effect past an earlier read, or lift it out of a ' +
+  'conditionally-evaluated operand of &&, || or ?:. Compute the index into ' +
+  'a local variable in a separate statement first';
+
+/**
+ * A call is treated as side-effecting unless its callee is a bare
+ * identifier (a built-in function). Method calls — output intrinsics and
+ * inlined private methods, which may write state — count as effects.
+ */
+function isEffectfulCall(expr: Extract<Expression, { kind: 'call_expr' }>): boolean {
+  return expr.callee.kind !== 'identifier';
+}
+
+/** Syntactic: does evaluating `expr` perform a side effect? */
+function exprHasEffect(expr: Expression): boolean {
+  switch (expr.kind) {
+    case 'increment_expr':
+    case 'decrement_expr':
+      return true;
+    case 'call_expr':
+      return isEffectfulCall(expr) || expr.args.some(exprHasEffect);
+    case 'binary_expr':
+      return exprHasEffect(expr.left) || exprHasEffect(expr.right);
+    case 'unary_expr':
+      return exprHasEffect(expr.operand);
+    case 'member_expr':
+      return exprHasEffect(expr.object);
+    case 'ternary_expr':
+      return exprHasEffect(expr.condition) || exprHasEffect(expr.consequent) ||
+        exprHasEffect(expr.alternate);
+    case 'index_access':
+      return exprHasEffect(expr.object) || exprHasEffect(expr.index);
+    case 'array_literal':
+      return expr.elements.some(exprHasEffect);
+    default:
+      return false;
+  }
+}
+
+/** Syntactic: does evaluating `expr` read a non-literal value? */
+function exprHasRead(expr: Expression): boolean {
+  switch (expr.kind) {
+    case 'identifier':
+    case 'property_access':
+      return true;
+    case 'call_expr':
+      return expr.args.some(exprHasRead);
+    case 'binary_expr':
+      return exprHasRead(expr.left) || exprHasRead(expr.right);
+    case 'unary_expr':
+      return exprHasRead(expr.operand);
+    case 'increment_expr':
+    case 'decrement_expr':
+      return exprHasRead(expr.operand);
+    case 'member_expr':
+      return exprHasRead(expr.object);
+    case 'ternary_expr':
+      return exprHasRead(expr.condition) || exprHasRead(expr.consequent) ||
+        exprHasRead(expr.alternate);
+    case 'index_access':
+      return exprHasRead(expr.object) || exprHasRead(expr.index);
+    case 'array_literal':
+      return expr.elements.some(exprHasRead);
+    default:
+      return false;
+  }
+}
 
 function isPureReference(expr: Expression): boolean {
   switch (expr.kind) {

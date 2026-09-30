@@ -185,6 +185,17 @@ struct ExpandContext<'a> {
     /// sibling check in this file passes `Some(loc)`. The enclosing STATEMENT
     /// always has one, and `rewrite_statement` sets it here before dispatching.
     current_stmt_loc: Option<SourceLocation>,
+    /// N-048: evaluation-order state for the statement being rewritten. A
+    /// computed index is hoisted to a `const __idx_K` in front of its whole
+    /// statement, which is only sound when nothing the statement evaluates
+    /// earlier can observe or be observed by the move. `order_effect`: a side
+    /// effect (`++`/`--`, a non-builtin call) was already evaluated;
+    /// `order_read`: a non-literal value was already read; `order_cond`:
+    /// inside an operand that is only conditionally evaluated (right of
+    /// `&&`/`||`, a ternary arm).
+    order_effect: bool,
+    order_read: bool,
+    order_cond: usize,
 }
 
 impl<'a> ExpandContext<'a> {
@@ -196,7 +207,16 @@ impl<'a> ExpandContext<'a> {
             synthetic_arrays: HashMap::new(),
             temp_counter: 0,
             current_stmt_loc: None,
+            order_effect: false,
+            order_read: false,
+            order_cond: 0,
         }
+    }
+
+    fn reset_order(&mut self) {
+        self.order_effect = false;
+        self.order_read = false;
+        self.order_cond = 0;
     }
 
     fn fresh_idx_name(&mut self) -> String {
@@ -481,6 +501,7 @@ impl<'a> ExpandContext<'a> {
         if let Some(loc) = statement_location(stmt) {
             self.current_stmt_loc = Some(loc);
         }
+        self.reset_order();
         match stmt {
             Statement::VariableDecl { .. } => self.rewrite_variable_decl(stmt),
             Statement::Assignment { .. } => self.rewrite_assignment(stmt),
@@ -678,6 +699,7 @@ impl<'a> ExpandContext<'a> {
         let mut prelude: Vec<Statement> = Vec::new();
         let new_cond = self.rewrite_expression(&condition, &mut prelude);
 
+        self.reset_order();
         let mut init_prelude: Vec<Statement> = Vec::new();
         let new_init_stmt = match init.as_ref() {
             Statement::VariableDecl {
@@ -872,7 +894,15 @@ impl<'a> ExpandContext<'a> {
             }
             Expression::BinaryExpr { op, left, right } => {
                 let l = self.rewrite_expression(left, prelude);
+                // spec §3.7: the right operand of && / || is conditional.
+                let short_circuit = matches!(op, BinaryOp::And | BinaryOp::Or);
+                if short_circuit {
+                    self.order_cond += 1;
+                }
                 let r = self.rewrite_expression(right, prelude);
+                if short_circuit {
+                    self.order_cond -= 1;
+                }
                 Expression::BinaryExpr {
                     op: op.clone(),
                     left: Box::new(l),
@@ -891,11 +921,17 @@ impl<'a> ExpandContext<'a> {
                 args,
                 asm_return_type,
             } => {
+                // The callee names a function; it is not a value read.
+                let read_before_callee = self.order_read;
                 let c = self.rewrite_expression(callee, prelude);
+                self.order_read = read_before_callee;
                 let new_args: Vec<Expression> = args
                     .iter()
                     .map(|a| self.rewrite_expression(a, prelude))
                     .collect();
+                if is_effectful_callee(callee) {
+                    self.order_effect = true;
+                }
                 Expression::CallExpr {
                     callee: Box::new(c),
                     args: new_args,
@@ -920,8 +956,10 @@ impl<'a> ExpandContext<'a> {
                 alternate,
             } => {
                 let c = self.rewrite_expression(condition, prelude);
+                self.order_cond += 1;
                 let t = self.rewrite_expression(consequent, prelude);
                 let e = self.rewrite_expression(alternate, prelude);
+                self.order_cond -= 1;
                 Expression::TernaryExpr {
                     condition: Box::new(c),
                     consequent: Box::new(t),
@@ -931,6 +969,7 @@ impl<'a> ExpandContext<'a> {
             Expression::IncrementExpr { operand, prefix } => {
                 self.reject_array_element_mutation_in_expression(operand, "++");
                 let o = self.rewrite_expression(operand, prelude);
+                self.order_effect = true;
                 Expression::IncrementExpr {
                     operand: Box::new(o),
                     prefix: *prefix,
@@ -939,6 +978,7 @@ impl<'a> ExpandContext<'a> {
             Expression::DecrementExpr { operand, prefix } => {
                 self.reject_array_element_mutation_in_expression(operand, "--");
                 let o = self.rewrite_expression(operand, prelude);
+                self.order_effect = true;
                 Expression::DecrementExpr {
                     operand: Box::new(o),
                     prefix: *prefix,
@@ -953,12 +993,42 @@ impl<'a> ExpandContext<'a> {
                     elements: new_elements,
                 }
             }
-            Expression::Identifier { .. }
-            | Expression::BigIntLiteral { .. }
+            Expression::Identifier { .. } | Expression::PropertyAccess { .. } => {
+                self.order_read = true;
+                expr.clone()
+            }
+            Expression::BigIntLiteral { .. }
             | Expression::BoolLiteral { .. }
-            | Expression::ByteStringLiteral { .. }
-            | Expression::PropertyAccess { .. } => expr.clone(),
+            | Expression::ByteStringLiteral { .. } => expr.clone(),
         }
+    }
+
+    /// Rewrite a runtime FixedArray index and hoist it if impure, refusing
+    /// the hoist when it would change evaluation order (N-048). The binding
+    /// lands in front of the whole statement, so it is refused when the read
+    /// sits in a conditionally-evaluated operand, when an earlier part of the
+    /// statement already had a side effect, or when the index's own side
+    /// effect would move ahead of an earlier read. The AST has no
+    /// let-expression, so binding the index at the read's own position is not
+    /// expressible here.
+    fn rewrite_and_hoist_index(
+        &mut self,
+        index: &Expression,
+        prelude: &mut Vec<Statement>,
+    ) -> Expression {
+        let effect_before = self.order_effect;
+        let read_before = self.order_read;
+        let rewritten = self.rewrite_expression(index, prelude);
+        if !is_pure_reference(&rewritten) {
+            let effect_in_index = self.order_effect && !effect_before;
+            if self.order_cond > 0 || effect_before || (effect_in_index && read_before) {
+                self.errors.push(Diagnostic::error(
+                    HOIST_ORDER_DIAGNOSTIC,
+                    self.current_stmt_loc.clone(),
+                ));
+            }
+        }
+        self.hoist_if_impure(rewritten, prelude, HoistTag::Idx)
     }
 
     fn rewrite_index_access(
@@ -975,6 +1045,7 @@ impl<'a> ExpandContext<'a> {
         match self.try_resolve_literal_index_chain(&whole) {
             ChainResolve::Error => return Expression::BigIntLiteral { value: BigInt::from(0) },
             ChainResolve::Leaf(name) => {
+                self.order_read = true;
                 return Expression::PropertyAccess { property: name };
             }
             ChainResolve::None => {}
@@ -1033,6 +1104,7 @@ impl<'a> ExpandContext<'a> {
 
         // Literal index?
         if let Some(literal) = as_literal_index(index) {
+            self.order_read = true;
             if literal < 0 || literal >= meta.length as i128 {
                 self.errors.push(Diagnostic::error(
                     format!(
@@ -1049,8 +1121,8 @@ impl<'a> ExpandContext<'a> {
 
         // Runtime index — rewrite sub-expressions, hoist if impure, build
         // nested ternary chain.
-        let rewritten_index = self.rewrite_expression(index, prelude);
-        let index_ref = self.hoist_if_impure(rewritten_index, prelude, HoistTag::Idx);
+        let index_ref = self.rewrite_and_hoist_index(index, prelude);
+        self.order_read = true;
 
         if meta.slot_is_array {
             self.errors.push(Diagnostic::error(
@@ -1088,8 +1160,7 @@ impl<'a> ExpandContext<'a> {
         }
 
         let mut prelude: Vec<Statement> = Vec::new();
-        let rewritten_index = self.rewrite_expression(index, &mut prelude);
-        let index_ref = self.hoist_if_impure(rewritten_index, &mut prelude, HoistTag::Idx);
+        let index_ref = self.rewrite_and_hoist_index(index, &mut prelude);
 
         let n = meta.length;
         if n < 2 {
@@ -1184,7 +1255,14 @@ impl<'a> ExpandContext<'a> {
             None => return Vec::new(),
         };
 
+        // Source order is index THEN value, but the value is rewritten first
+        // so hoisted names are allocated as before; for the N-048 order checks
+        // the value's nested reads are judged as if the target index had
+        // already been evaluated. The target index itself is evaluated first.
+        self.order_effect = expr_has_effect(&index);
+        self.order_read = expr_has_read(&index);
         let rewritten_value = self.rewrite_expression(&value, &mut prelude);
+        self.reset_order();
         let rewritten_index = self.rewrite_expression(&index, &mut prelude);
 
         if let Some(literal) = as_literal_index(&rewritten_index) {
@@ -1221,6 +1299,13 @@ impl<'a> ExpandContext<'a> {
                 Some(loc),
             ));
             return prelude;
+        }
+
+        // A side-effecting value is hoisted to `__val_K` in front of the
+        // dispatch, which reads a pure (unhoisted) index only afterwards: that
+        // would move the value's effect ahead of the index read (N-048).
+        if is_pure_reference(&rewritten_index) && expr_has_effect(&value) {
+            self.errors.push(Diagnostic::error(HOIST_ORDER_DIAGNOSTIC, Some(loc.clone())));
         }
 
         let index_ref = self.hoist_if_impure(rewritten_index, &mut prelude, HoistTag::Idx);
@@ -1421,6 +1506,68 @@ fn as_literal_index(expr: &Expression) -> Option<i128> {
             }
         }
         _ => None,
+    }
+}
+
+/// N-048: the one diagnostic every tier emits when hoisting a computed
+/// FixedArray index would reorder evaluation. Shared verbatim with the TS
+/// reference.
+const HOIST_ORDER_DIAGNOSTIC: &str = "FixedArray index would be evaluated out of source order: hoisting it \
+would move it past an earlier side effect in the same statement, move \
+its own side effect past an earlier read, or lift it out of a \
+conditionally-evaluated operand of &&, || or ?:. Compute the index into \
+a local variable in a separate statement first";
+
+/// A call is treated as side-effecting unless its callee is a bare
+/// identifier (a built-in function). Method calls — output intrinsics and
+/// inlined private methods, which may write state — count as effects.
+fn is_effectful_callee(callee: &Expression) -> bool {
+    !matches!(callee, Expression::Identifier { .. })
+}
+
+/// Syntactic: does evaluating `expr` perform a side effect?
+fn expr_has_effect(expr: &Expression) -> bool {
+    match expr {
+        Expression::IncrementExpr { .. } | Expression::DecrementExpr { .. } => true,
+        Expression::CallExpr { callee, args, .. } => {
+            is_effectful_callee(callee) || args.iter().any(expr_has_effect)
+        }
+        Expression::BinaryExpr { left, right, .. } => {
+            expr_has_effect(left) || expr_has_effect(right)
+        }
+        Expression::UnaryExpr { operand, .. } => expr_has_effect(operand),
+        Expression::MemberExpr { object, .. } => expr_has_effect(object),
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => expr_has_effect(condition) || expr_has_effect(consequent) || expr_has_effect(alternate),
+        Expression::IndexAccess { object, index } => {
+            expr_has_effect(object) || expr_has_effect(index)
+        }
+        Expression::ArrayLiteral { elements } => elements.iter().any(expr_has_effect),
+        _ => false,
+    }
+}
+
+/// Syntactic: does evaluating `expr` read a non-literal value?
+fn expr_has_read(expr: &Expression) -> bool {
+    match expr {
+        Expression::Identifier { .. } | Expression::PropertyAccess { .. } => true,
+        Expression::CallExpr { args, .. } => args.iter().any(expr_has_read),
+        Expression::BinaryExpr { left, right, .. } => expr_has_read(left) || expr_has_read(right),
+        Expression::UnaryExpr { operand, .. }
+        | Expression::IncrementExpr { operand, .. }
+        | Expression::DecrementExpr { operand, .. } => expr_has_read(operand),
+        Expression::MemberExpr { object, .. } => expr_has_read(object),
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => expr_has_read(condition) || expr_has_read(consequent) || expr_has_read(alternate),
+        Expression::IndexAccess { object, index } => expr_has_read(object) || expr_has_read(index),
+        Expression::ArrayLiteral { elements } => elements.iter().any(expr_has_read),
+        _ => false,
     }
 }
 

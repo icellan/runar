@@ -85,6 +85,9 @@ pub fn expand(allocator: Allocator, contract: ContractNode) ExpandError!Result {
         .array_map = .empty,
         .synthetic_arrays = .empty,
         .temp_counter = 0,
+        .order_effect = false,
+        .order_read = false,
+        .order_cond = 0,
     };
     defer ctx.array_map.deinit(allocator);
     defer ctx.synthetic_arrays.deinit(allocator);
@@ -174,6 +177,22 @@ const Ctx = struct {
     array_map: std.StringHashMapUnmanaged(*ArrayMeta),
     synthetic_arrays: std.StringHashMapUnmanaged(*ArrayMeta),
     temp_counter: u32,
+    /// N-048: evaluation-order state for the statement being rewritten. A
+    /// computed index is hoisted to a `const __idx_K` in front of its whole
+    /// statement, which is only sound when nothing the statement evaluates
+    /// earlier can observe or be observed by the move. `order_effect`: a side
+    /// effect (`++`/`--`, a method call) was already evaluated; `order_read`:
+    /// a non-literal value was already read; `order_cond`: inside an operand
+    /// that is only conditionally evaluated (right of &&/||, a ternary arm).
+    order_effect: bool,
+    order_read: bool,
+    order_cond: u32,
+
+    fn resetOrder(self: *Ctx) void {
+        self.order_effect = false;
+        self.order_read = false;
+        self.order_cond = 0;
+    }
 
     fn pushError(self: *Ctx, msg: []const u8) !void {
         const dup = try self.allocator.dupe(u8, msg);
@@ -428,6 +447,7 @@ const Ctx = struct {
     }
 
     fn rewriteStatementInto(self: *Ctx, out: *std.ArrayListUnmanaged(Statement), stmt: Statement) ExpandError!void {
+        self.resetOrder();
         switch (stmt) {
             .const_decl => |d| {
                 if (try self.tryRewriteReadAsStatements(out, d.value, .{ .identifier = d.name }, true, d.type_info)) {
@@ -688,7 +708,14 @@ const Ctx = struct {
         const meta = self.array_map.get(base_name) orelse self.synthetic_arrays.get(base_name).?;
 
         var prelude: std.ArrayListUnmanaged(Statement) = .empty;
+        // Source order is index THEN value, but the value is rewritten first
+        // so hoisted names are allocated as before; for the N-048 order checks
+        // the value's nested reads are judged as if the target index had
+        // already been evaluated. The target index itself is evaluated first.
+        self.order_effect = exprHasEffect(ia.index);
+        self.order_read = exprHasRead(ia.index);
         const new_val = try self.rewriteExpression(&prelude, value);
+        self.resetOrder();
         const new_idx = try self.rewriteExpression(&prelude, ia.index);
 
         // Literal index — direct assignment.
@@ -720,6 +747,13 @@ const Ctx = struct {
             return;
         }
 
+        // A side-effecting value is hoisted to `__val_K` in front of the
+        // dispatch, which reads a pure (unhoisted) index only afterwards: that
+        // would move the value's effect ahead of the index read (N-048).
+        if (isPureReference(new_idx) and exprHasEffect(value)) {
+            try self.pushError(HOIST_ORDER_DIAGNOSTIC);
+        }
+
         // Runtime index — dispatch if-chain with assert(false) terminator.
         const idx_ref = try self.hoistIfImpure(&prelude, new_idx, "idx");
         const val_ref = try self.hoistIfImpure(&prelude, new_val, "val");
@@ -735,6 +769,7 @@ const Ctx = struct {
     /// Simpler form used outside of statement contexts — no statement-form
     /// hoisting. Mostly used for constructor args and super-call args.
     fn rewriteExpressionSimple(self: *Ctx, expr: Expression) ExpandError!Expression {
+        self.resetOrder();
         var prelude: std.ArrayListUnmanaged(Statement) = .empty;
         return try self.rewriteExpression(&prelude, expr);
     }
@@ -753,7 +788,11 @@ const Ctx = struct {
                 const new_bo = try self.allocator.create(BinaryOp);
                 new_bo.* = bo.*;
                 new_bo.left = try self.rewriteExpression(prelude, bo.left);
+                // spec §3.7: the right operand of && / || is conditional.
+                const short_circuit = bo.op == .and_op or bo.op == .or_op;
+                if (short_circuit) self.order_cond += 1;
                 new_bo.right = try self.rewriteExpression(prelude, bo.right);
+                if (short_circuit) self.order_cond -= 1;
                 return .{ .binary_op = new_bo };
             },
             .unary_op => |uo| {
@@ -777,6 +816,10 @@ const Ctx = struct {
             .method_call => |mc| {
                 var new_args = try self.allocator.alloc(Expression, mc.args.len);
                 for (mc.args, 0..) |arg, i| new_args[i] = try self.rewriteExpression(prelude, arg);
+                // A method call (output intrinsic, inlined private method that
+                // may write state) is a side effect; a `.call` names a
+                // built-in function and is not.
+                self.order_effect = true;
                 const new_mc = try self.allocator.create(MethodCall);
                 new_mc.* = mc.*;
                 new_mc.args = new_args;
@@ -786,8 +829,10 @@ const Ctx = struct {
                 const new_t = try self.allocator.create(Ternary);
                 new_t.* = t.*;
                 new_t.condition = try self.rewriteExpression(prelude, t.condition);
+                self.order_cond += 1;
                 new_t.then_expr = try self.rewriteExpression(prelude, t.then_expr);
                 new_t.else_expr = try self.rewriteExpression(prelude, t.else_expr);
+                self.order_cond -= 1;
                 return .{ .ternary = new_t };
             },
             .array_literal => |elems| {
@@ -800,6 +845,7 @@ const Ctx = struct {
                 const new_iv = try self.allocator.create(IncrementExpr);
                 new_iv.* = iv.*;
                 new_iv.operand = try self.rewriteExpression(prelude, iv.operand);
+                self.order_effect = true;
                 return .{ .increment = new_iv };
             },
             .decrement => |dv| {
@@ -807,10 +853,39 @@ const Ctx = struct {
                 const new_dv = try self.allocator.create(DecrementExpr);
                 new_dv.* = dv.*;
                 new_dv.operand = try self.rewriteExpression(prelude, dv.operand);
+                self.order_effect = true;
                 return .{ .decrement = new_dv };
+            },
+            .identifier, .property_access => {
+                self.order_read = true;
+                return expr;
             },
             else => return expr,
         }
+    }
+
+    /// Rewrite a runtime FixedArray index and hoist it if impure, refusing the
+    /// hoist when it would change evaluation order (N-048). The binding lands
+    /// in front of the whole statement, so it is refused when the read sits in
+    /// a conditionally-evaluated operand, when an earlier part of the statement
+    /// already had a side effect, or when the index's own side effect would
+    /// move ahead of an earlier read. The AST has no let-expression, so
+    /// binding the index at the read's own position is not expressible here.
+    fn rewriteAndHoistIndex(
+        self: *Ctx,
+        prelude: *std.ArrayListUnmanaged(Statement),
+        index: Expression,
+    ) ExpandError!Expression {
+        const effect_before = self.order_effect;
+        const read_before = self.order_read;
+        const rewritten = try self.rewriteExpression(prelude, index);
+        if (!isPureReference(rewritten)) {
+            const effect_in_index = self.order_effect and !effect_before;
+            if (self.order_cond > 0 or effect_before or (effect_in_index and read_before)) {
+                try self.pushError(HOIST_ORDER_DIAGNOSTIC);
+            }
+        }
+        return try self.hoistIfImpure(prelude, rewritten, "idx");
     }
 
     /// Reject `this.arr[idx]++` used for its VALUE rather than as a statement.
@@ -856,7 +931,10 @@ const Ctx = struct {
         // the flat synthetic leaf name `grid__0__1`.
         const literal_chain = try self.tryResolveLiteralIndexChain(ia);
         switch (literal_chain) {
-            .ok => |name| return .{ .property_access = .{ .object = "this", .property = name } },
+            .ok => |name| {
+                self.order_read = true;
+                return .{ .property_access = .{ .object = "this", .property = name } };
+            },
             .out_of_range => return .{ .literal_int = 0 },
             .not_applicable => {},
         }
@@ -877,6 +955,7 @@ const Ctx = struct {
         const meta = self.array_map.get(base_name.?) orelse self.synthetic_arrays.get(base_name.?).?;
 
         if (asLiteralIndex(ia.index)) |lit| {
+            self.order_read = true;
             if (lit < 0 or lit >= meta.length) {
                 try self.pushErrorFmt(
                     "Index {d} is out of range for FixedArray of length {d}",
@@ -893,8 +972,8 @@ const Ctx = struct {
             return .{ .literal_int = 0 };
         }
 
-        const rewritten_idx = try self.rewriteExpression(prelude, ia.index);
-        const idx_ref = try self.hoistIfImpure(prelude, rewritten_idx, "idx");
+        const idx_ref = try self.rewriteAndHoistIndex(prelude, ia.index);
+        self.order_read = true;
         return try self.buildReadDispatchTernary(meta, idx_ref);
     }
 
@@ -918,8 +997,7 @@ const Ctx = struct {
         if (meta.slot_is_array) return false;
 
         var prelude: std.ArrayListUnmanaged(Statement) = .empty;
-        const rewritten_idx = try self.rewriteExpression(&prelude, ia.index);
-        const idx_ref = try self.hoistIfImpure(&prelude, rewritten_idx, "idx");
+        const idx_ref = try self.rewriteAndHoistIndex(&prelude, ia.index);
 
         try out.appendSlice(self.allocator, prelude.items);
 
@@ -1240,6 +1318,63 @@ fn asLiteralIndex(expr: Expression) ?i64 {
         else => {},
     }
     return null;
+}
+
+/// N-048: the one diagnostic every tier emits when hoisting a computed
+/// FixedArray index would reorder evaluation. Shared verbatim with the TS
+/// reference.
+const HOIST_ORDER_DIAGNOSTIC = "FixedArray index would be evaluated out of source order: hoisting it " ++
+    "would move it past an earlier side effect in the same statement, move " ++
+    "its own side effect past an earlier read, or lift it out of a " ++
+    "conditionally-evaluated operand of &&, || or ?:. Compute the index into " ++
+    "a local variable in a separate statement first";
+
+/// Syntactic: does evaluating `expr` perform a side effect? A method call
+/// (output intrinsic, inlined private method) counts; a `.call` names a
+/// built-in function and does not.
+fn exprHasEffect(expr: Expression) bool {
+    return switch (expr) {
+        .increment, .decrement, .method_call => true,
+        .call => |ce| blk: {
+            for (ce.args) |a| if (exprHasEffect(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_op => |bo| exprHasEffect(bo.left) or exprHasEffect(bo.right),
+        .unary_op => |uo| exprHasEffect(uo.operand),
+        .ternary => |t| exprHasEffect(t.condition) or exprHasEffect(t.then_expr) or exprHasEffect(t.else_expr),
+        .index_access => |ia| exprHasEffect(ia.object) or exprHasEffect(ia.index),
+        .array_literal => |elems| blk: {
+            for (elems) |e| if (exprHasEffect(e)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// Syntactic: does evaluating `expr` read a non-literal value?
+fn exprHasRead(expr: Expression) bool {
+    return switch (expr) {
+        .identifier, .property_access => true,
+        .call => |ce| blk: {
+            for (ce.args) |a| if (exprHasRead(a)) break :blk true;
+            break :blk false;
+        },
+        .method_call => |mc| blk: {
+            for (mc.args) |a| if (exprHasRead(a)) break :blk true;
+            break :blk false;
+        },
+        .binary_op => |bo| exprHasRead(bo.left) or exprHasRead(bo.right),
+        .unary_op => |uo| exprHasRead(uo.operand),
+        .increment => |iv| exprHasRead(iv.operand),
+        .decrement => |dv| exprHasRead(dv.operand),
+        .ternary => |t| exprHasRead(t.condition) or exprHasRead(t.then_expr) or exprHasRead(t.else_expr),
+        .index_access => |ia| exprHasRead(ia.object) or exprHasRead(ia.index),
+        .array_literal => |elems| blk: {
+            for (elems) |e| if (exprHasRead(e)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
 }
 
 fn isPureReference(expr: Expression) bool {
