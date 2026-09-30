@@ -16,6 +16,7 @@
 const std = @import("std");
 const types = @import("../ir/types.zig");
 const sighash_validate = @import("sighash_validate.zig");
+const reserved_names = @import("reserved_names.zig");
 
 const Allocator = std.mem.Allocator;
 const ContractNode = types.ContractNode;
@@ -72,6 +73,7 @@ fn validateWithMode(
     try validateConstructor(allocator, contract, mode, &errors);
     try validateMethods(allocator, contract, &errors, &warnings);
     try checkNoRecursion(allocator, contract, &errors);
+    try checkReservedNames(allocator, contract, &errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
     // unsound under a method's declared @sighash mode (security core). The pass
@@ -95,6 +97,57 @@ fn validateWithMode(
         .errors = try errors.toOwnedSlice(allocator),
         .warnings = try warnings.toOwnedSlice(allocator),
     };
+}
+
+/// N-065 / N-060: refuse a declared identifier spelled like a name a compiler
+/// pass mints (see reserved_names.zig). Checks properties, method names,
+/// constructor and method parameters, locals and loop variables. A stateful
+/// `txPreimage` PROPERTY keeps its older, dedicated diagnostic (V27).
+fn checkReservedNames(
+    allocator: Allocator,
+    contract: ContractNode,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) !void {
+    const Checker = struct {
+        a: Allocator,
+        errs: *std.ArrayListUnmanaged(CompilerDiagnostic),
+        stateful: bool,
+
+        fn check(self: @This(), name: []const u8, loc: ?SourceLocation) !void {
+            if (!reserved_names.isReservedSourceName(name, self.stateful)) return;
+            const msg = try reserved_names.message(self.a, name);
+            try self.errs.append(self.a, .{ .message = msg, .location = loc, .severity = .@"error", .owned_message = true });
+        }
+
+        fn walk(self: @This(), stmts: []const Statement, loc: ?SourceLocation) !void {
+            for (stmts) |stmt| switch (stmt) {
+                .const_decl => |d| try self.check(d.name, d.source_loc orelse loc),
+                .let_decl => |d| try self.check(d.name, d.source_loc orelse loc),
+                .if_stmt => |i| {
+                    try self.walk(i.then_body, loc);
+                    if (i.else_body) |e| try self.walk(e, loc);
+                },
+                .for_stmt => |f| {
+                    try self.check(f.var_name, f.source_loc orelse loc);
+                    try self.walk(f.body, loc);
+                },
+                else => {},
+            };
+        }
+    };
+    const c = Checker{ .a = allocator, .errs = errors, .stateful = contract.parent_class == .stateful_smart_contract };
+
+    for (contract.properties) |prop| {
+        if (c.stateful and std.mem.eql(u8, prop.name, "txPreimage")) continue;
+        try c.check(prop.name, prop.source_loc);
+    }
+    for (contract.constructor.params) |p| try c.check(p.name, null);
+    try c.walk(contract.constructor.body, null);
+    for (contract.methods) |m| {
+        if (!std.mem.eql(u8, m.name, "constructor")) try c.check(m.name, m.source_loc);
+        for (m.params) |p| try c.check(p.name, m.source_loc);
+        try c.walk(m.body, m.source_loc);
+    }
 }
 
 /// Free a ValidationResult previously returned by validate().

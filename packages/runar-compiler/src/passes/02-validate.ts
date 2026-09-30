@@ -16,6 +16,7 @@ import type {
 import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { validateSighashUsage } from './sighash-validate.js';
+import { isReservedSourceName } from './reserved-names.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -44,6 +45,7 @@ export function validate(contract: ContractNode): ValidationResult {
   validateConstructor(ctx);
   validateMethods(ctx);
   checkNoRecursion(ctx);
+  checkReservedNames(ctx);
 
   // Issue #123: reject preimage-field reads / output bindings that are unsound
   // under a method's declared @sighash mode (security core). This pass emits
@@ -55,6 +57,49 @@ export function validate(contract: ContractNode): ValidationResult {
   }
 
   return { errors, warnings };
+}
+
+/**
+ * N-065 / N-060: refuse a declared identifier spelled like a name a compiler
+ * pass mints (see `reserved-names.ts` for the families). Checks properties,
+ * method names, constructor and method parameters, locals and loop variables.
+ * A stateful `txPreimage` PROPERTY keeps its older, dedicated diagnostic.
+ */
+function checkReservedNames(ctx: ValidationContext): void {
+  const stateful = ctx.contract.parentClass === 'StatefulSmartContract';
+  const check = (name: string, loc: SourceLocation): void => {
+    if (isReservedSourceName(name, stateful)) {
+      // Same sentence as `reservedNameMessage` (the --ir loader's), spelled out
+      // here so the diagnostic-coverage extractor can read the template.
+      ctx.errors.push(makeDiagnostic(
+        `'${name}' is reserved for compiler-generated names and cannot be used as an identifier`,
+        'error',
+        loc,
+      ));
+    }
+  };
+  const walk = (stmts: readonly Statement[]): void => {
+    for (const s of stmts) {
+      if (s.kind === 'variable_decl') check(s.name, s.sourceLocation);
+      else if (s.kind === 'if_statement') {
+        walk(s.then);
+        if (s.else) walk(s.else);
+      } else if (s.kind === 'for_statement') {
+        check(s.init.name, s.init.sourceLocation);
+        walk(s.body);
+      }
+    }
+  };
+
+  for (const prop of ctx.contract.properties) {
+    if (stateful && prop.name === 'txPreimage') continue;
+    check(prop.name, prop.sourceLocation);
+  }
+  for (const method of [ctx.contract.constructor, ...ctx.contract.methods]) {
+    if (method.name !== 'constructor') check(method.name, method.sourceLocation);
+    for (const p of method.params) check(p.name, method.sourceLocation);
+    walk(method.body);
+  }
 }
 
 // ---------------------------------------------------------------------------

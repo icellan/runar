@@ -128,6 +128,7 @@ import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
+import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
 import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -754,10 +755,80 @@ export function loadANFFromJSON(json: string): ANFProgram {
   // N-069: every required field, present and of the right JSON type, with the
   // field path in the diagnostic (shared verbatim with the other six tiers).
   assertRequiredIrFields(program);
+  // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+  assertNoReservedIrNames(program as ANFProgram);
   coerceNumericBigInts(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);
   return program as ANFProgram;
+}
+
+/**
+ * N-060 / N-065 — `--ir` names that alias a name the compiler mints.
+ *
+ * Stack lowering keeps its own slots (`_codePart`, `__param_<name>`,
+ * `__shadowed_<n>_<name>`, `_pub_<n>`) in the same name map as the program's
+ * parameters and bindings, and resolves every reference by name, so an IR
+ * that declares or references one of those names aliases a compiler slot. A
+ * parameter, property, method or loop variable named like an ANF temp
+ * (`t<digits>`, `__merge$<digits>`) aliases the bindings that ARE spelled
+ * that way. Binding names in those two ANF families are the normal IR
+ * spelling and stay legal. See `passes/reserved-names.ts`.
+ *
+ * Checked: property names; method names; parameter names; binding names and
+ * loop `iterVar`s; the name a `load_param` / `load_prop` / `update_prop`
+ * addresses; every binding reference (operands, arguments, `@ref:` aliases).
+ * The message is the source validator's, shared verbatim with the six native
+ * loaders.
+ */
+function assertNoReservedIrNames(program: ANFProgram): void {
+  const check = (name: unknown, declaration: boolean): void => {
+    if (typeof name === 'string' && isReservedIrName(name, declaration)) {
+      throw new Error(reservedNameMessage(name));
+    }
+  };
+  const walk = (bindings: readonly ANFBinding[]): void => {
+    for (const binding of bindings) {
+      check(binding.name, false);
+      const v = binding.value as unknown as Record<string, unknown> & { kind: string };
+      switch (v.kind) {
+        case 'load_param':
+        case 'load_prop':
+          check(v.name, true);
+          break;
+        case 'update_prop':
+          check(v.name, true);
+          check(v.value, false);
+          break;
+        case 'load_const':
+          if (typeof v.value === 'string' && v.value.startsWith('@ref:')) check(v.value.slice(5), false);
+          break;
+        case 'loop':
+          check(v.iterVar, true);
+          break;
+        default:
+          for (const key of ['left', 'right', 'operand', 'cond', 'object', 'preimage', 'satoshis', 'scriptBytes']) {
+            check(v[key], false);
+          }
+          if (v.kind === 'assert') check(v.value, false);
+          for (const key of ['args', 'stateValues', 'elements']) {
+            const list = v[key];
+            if (Array.isArray(list)) for (const r of list) check(r, false);
+          }
+      }
+      for (const key of ['body', 'then', 'else'] as const) {
+        const nested = v[key];
+        if (Array.isArray(nested)) walk(nested as ANFBinding[]);
+      }
+    }
+  };
+
+  for (const property of program.properties) check(property.name, true);
+  for (const method of program.methods) {
+    check(method.name, true);
+    for (const param of method.params) check(param.name, true);
+    walk(method.body);
+  }
 }
 
 /**

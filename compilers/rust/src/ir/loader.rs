@@ -42,10 +42,109 @@ pub fn load_ir_from_str(json_str: &str) -> Result<ANFProgram, String> {
     }
     // N-069: required fields present and correctly typed, named by path.
     assert_required_ir_fields(json_str)?;
+    // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+    assert_no_reserved_ir_names(json_str)?;
     let program: ANFProgram = serde_json::from_str(json_str)
         .map_err(|e| describe_ir_parse_error(&e))?;
     validate_ir(&program)?;
     Ok(program)
+}
+
+/// N-060 / N-065 — `--ir` names that alias a name the compiler mints.
+///
+/// Stack lowering keeps its own slots (`_codePart`, `__param_<name>`,
+/// `__shadowed_<n>_<name>`, `_pub_<n>`) in the same name map as the program's
+/// parameters and bindings and resolves every reference by name, so an IR that
+/// declares or references one aliases a compiler slot. A parameter, property,
+/// method or loop variable named like an ANF temp (`t<digits>`,
+/// `__merge$<digits>`) aliases the bindings that ARE spelled that way; binding
+/// names in those families are the normal IR spelling and stay legal.
+///
+/// Same walk as the reference tier's `assertNoReservedIrNames`
+/// (packages/runar-compiler/src/index.ts), over the raw JSON so it runs before
+/// any other structural check, as there. Runs after the N-069 field check, so
+/// every array / string it reads has the right JSON type.
+fn assert_no_reserved_ir_names(json_str: &str) -> Result<(), String> {
+    use crate::frontend::reserved_names::{is_reserved_ir_name, reserved_name_message};
+    use serde_json::Value;
+
+    fn check(name: Option<&Value>, declaration: bool) -> Result<(), String> {
+        if let Some(Value::String(n)) = name {
+            if is_reserved_ir_name(n, declaration) {
+                return Err(reserved_name_message(n));
+            }
+        }
+        Ok(())
+    }
+
+    fn walk(bindings: &[Value]) -> Result<(), String> {
+        for binding in bindings {
+            check(binding.get("name"), false)?;
+            let v = match binding.get("value") {
+                Some(v) => v,
+                None => continue,
+            };
+            match v.get("kind").and_then(Value::as_str).unwrap_or("") {
+                "load_param" | "load_prop" => check(v.get("name"), true)?,
+                "update_prop" => {
+                    check(v.get("name"), true)?;
+                    check(v.get("value"), false)?;
+                }
+                "load_const" => {
+                    if let Some(r) = v.get("value").and_then(Value::as_str).and_then(|s| s.strip_prefix("@ref:")) {
+                        check(Some(&Value::String(r.to_string())), false)?;
+                    }
+                }
+                "loop" => check(v.get("iterVar"), true)?,
+                kind => {
+                    for key in ["left", "right", "operand", "cond", "object", "preimage", "satoshis", "scriptBytes"] {
+                        check(v.get(key), false)?;
+                    }
+                    if kind == "assert" {
+                        check(v.get("value"), false)?;
+                    }
+                    for key in ["args", "stateValues", "elements"] {
+                        if let Some(Value::Array(list)) = v.get(key) {
+                            for r in list {
+                                check(Some(r), false)?;
+                            }
+                        }
+                    }
+                }
+            }
+            for key in ["body", "then", "else"] {
+                if let Some(Value::Array(nested)) = v.get(key) {
+                    walk(nested)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let program: Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        // Malformed JSON is reported by the typed parse that follows.
+        Err(_) => return Ok(()),
+    };
+    if let Some(Value::Array(props)) = program.get("properties") {
+        for p in props {
+            check(p.get("name"), true)?;
+        }
+    }
+    if let Some(Value::Array(methods)) = program.get("methods") {
+        for m in methods {
+            check(m.get("name"), true)?;
+            if let Some(Value::Array(params)) = m.get("params") {
+                for p in params {
+                    check(p.get("name"), true)?;
+                }
+            }
+            if let Some(Value::Array(body)) = m.get("body") {
+                walk(body)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Load an ANF IR program from a JSON string, returning typed errors on
@@ -68,6 +167,8 @@ pub fn load_ir_from_str_typed(
     }
     // N-069 — see load_ir_from_str.
     assert_required_ir_fields(json_str).map_err(IRLoaderError::Other)?;
+    // N-060 / N-065 — see load_ir_from_str.
+    assert_no_reserved_ir_names(json_str).map_err(IRLoaderError::Other)?;
     serde_json::from_str::<ANFProgram>(json_str)
         .map_err(|e| IRLoaderError::Other(describe_ir_parse_error(&e)))
         .and_then(|p| {

@@ -4,88 +4,93 @@ package compiler
 // holds.
 //
 // The folder recorded a name's constant when a binding produced one and never
-// dropped it. A name can be bound more than once (a reassignment, or a user
-// local that shares an earlier compiler temp's name — that collision is N-065
-// and is not changed here), so with folding ON (the default) later uses folded
-// with a stale value: Rebind's guard became OP_TRUE (7600a0695151515177777777,
-// spendable with any p > 0), RebindEq's became OP_FALSE, and a rebinding
-// inside an if arm or a loop body leaked the same way past the if / into later
-// iterations.
+// dropped it. A name can be bound more than once, and the probes that showed
+// it named a user local like an earlier compiler temp, so with folding ON (the
+// default) later uses folded with a stale value: Rebind's guard became OP_TRUE
+// (7600a0695151515177777777, spendable with any p > 0), RebindEq's became
+// OP_FALSE, and a rebinding inside an if arm or a loop body leaked the same
+// way past the if / into later iterations.
 //
-// Proves: this tier compiles each probe to the same bytes in both fold modes,
-// pinned to the fold-OFF bytes every tier emits. Does NOT prove on-chain
-// behaviour — the Spend-engine proof for all seven tiers is
+// N-065 changed how this is tested: the collision is now itself refused, so
+// the four probe SOURCES no longer compile (asserted below). The fold must
+// still be right for the ANF shape, so each probe's exact ANF — generated from
+// the source with parse -> lowerToANF and no validator, in
+// conformance/negatives/n064-collision-anf.json — is loaded through the IR
+// loader and compiled with folding ON via CompileFromProgram. The pre-N-064
+// folder turns that ANF into the probe's `staleFoldOn` script (verified on the
+// TS reference folder); the current one must give `foldOff`.
+//
+// Proves: this tier's folder, on each probe's collision ANF, emits the same
+// bytes as with folding OFF, pinned to the fold-OFF bytes every tier emits,
+// and the probe sources are refused with the N-065 diagnostic. Does NOT prove
+// on-chain behaviour — the Spend-engine proof is
 // packages/runar-testing/src/__tests__/n064-rebind-fold-spend.test.ts.
 
 import (
-	"strings"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
-var n064Probes = []struct{ file, src, want string }{
-	{"Rebind.runar.ts", `import { SmartContract, assert } from 'runar-lang';
-class Rebind extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint) {
-    assert(p > 0n);
-    let t1: bigint = p;
-    assert(t1 + 1n === 1n);
-  }
-}
-`, "76007c78a0697c8b519c77"},
-	{"RebindEq.runar.ts", `import { SmartContract, assert } from 'runar-lang';
-class RebindEq extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint) {
-    assert(p > 0n);
-    let t1: bigint = p;
-    assert(t1 === 5n);
-  }
-}
-`, "76007c78a0697c559c77"},
-	{"IfStale.runar.ts", `import { SmartContract, assert } from 'runar-lang';
-class IfStale extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint, c: boolean) {
-    let t2: bigint = p;
-    assert(p > 0n);
-    if (c) {
-      t2 = p;
-    }
-    assert(t2 + 1n === 1n);
-  }
-}
-`, "767600877c51879b69785279007c78a0697b637b677b757668778b519c77"},
-	{"LoopStale.runar.ts", `import { SmartContract, assert } from 'runar-lang';
-class LoopStale extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint) {
-    let t2: bigint = p;
-    assert(p > 0n);
-    for (let i: bigint = 0n; i < 2n; i++) {
-      assert(t2 + 1n === 1n);
-      t2 = p;
-    }
-    assert(t2 + 1n === 1n);
-  }
-}
-`, "7678007c78a06900517b7c93519d52797751517b7c93519d7b778b519c77"},
+// n064CollidingLocal is the local each probe spells like a temp.
+var n064CollidingLocal = map[string]string{
+	"Rebind": "t1", "RebindEq": "t1", "IfStale": "t2", "LoopStale": "t2",
 }
 
 func TestN064_FoldOnDoesNotUseAStaleConstant(t *testing.T) {
-	for _, pr := range n064Probes {
-		for _, disableFold := range []bool{true, false} {
-			r := CompileFromSourceStrWithResult(pr.src, pr.file, CompileOptions{DisableConstantFolding: disableFold})
-			if !r.Success || r.Artifact == nil {
-				var msgs []string
-				for _, d := range r.Diagnostics {
-					msgs = append(msgs, d.Message)
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "conformance", "negatives", "n064-collision-anf.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corpus struct {
+		Probes []struct {
+			Name        string          `json:"name"`
+			Source      string          `json:"source"`
+			IR          json.RawMessage `json:"ir"`
+			FoldOff     string          `json:"foldOff"`
+			StaleFoldOn string          `json:"staleFoldOn"`
+		} `json:"probes"`
+	}
+	if err := json.Unmarshal(raw, &corpus); err != nil {
+		t.Fatal(err)
+	}
+	if len(corpus.Probes) != 4 {
+		t.Fatalf("want 4 probes, got %d", len(corpus.Probes))
+	}
+	for _, pr := range corpus.Probes {
+		t.Run(pr.Name, func(t *testing.T) {
+			// N-065: the source form is refused.
+			want := ir.ReservedNameMessage(n064CollidingLocal[pr.Name])
+			r := CompileFromSourceStrWithResult(pr.Source, pr.Name+".runar.ts")
+			refused := false
+			for _, d := range r.Diagnostics {
+				if d.Message == want {
+					refused = true
 				}
-				t.Fatalf("%s fold-off=%v: compile failed: %s", pr.file, disableFold, strings.Join(msgs, "; "))
 			}
-			if r.Artifact.Script != pr.want {
-				t.Errorf("%s fold-off=%v: want %s, got %s", pr.file, disableFold, pr.want, r.Artifact.Script)
+			if r.Success || !refused {
+				t.Fatalf("source not refused with %q: %v", want, r.Diagnostics)
 			}
-		}
+
+			if pr.FoldOff == pr.StaleFoldOn {
+				t.Fatal("corpus: foldOff equals staleFoldOn")
+			}
+			for _, disableFold := range []bool{true, false} {
+				program, err := ir.LoadIRFromBytes(pr.IR)
+				if err != nil {
+					t.Fatalf("load: %v", err)
+				}
+				art, err := CompileFromProgram(program, CompileOptions{DisableConstantFolding: disableFold})
+				if err != nil {
+					t.Fatalf("fold-off=%v: %v", disableFold, err)
+				}
+				if art.Script != pr.FoldOff {
+					t.Errorf("fold-off=%v: want %s, got %s (stale fold gives %s)", disableFold, pr.FoldOff, art.Script, pr.StaleFoldOn)
+				}
+			}
+		})
 	}
 }

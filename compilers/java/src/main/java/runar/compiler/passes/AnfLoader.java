@@ -64,6 +64,18 @@ public final class AnfLoader {
         return toProgram(map);
     }
 
+    /**
+     * The loader's JSON reader, for tests that read shared JSON corpora
+     * (objects are {@code Map}, arrays {@code List}, numbers as parsed here).
+     */
+    static Object parseJsonTree(String json) {
+        JsonParser p = new JsonParser(json);
+        Object root = p.parseValue();
+        p.skipWs();
+        if (p.pos != p.src.length()) throw new RuntimeException("trailing garbage in JSON");
+        return root;
+    }
+
     // ------------------------------------------------------------------
     // Tree → ANF
     // ------------------------------------------------------------------
@@ -89,6 +101,9 @@ public final class AnfLoader {
             String path = "methods[" + i + "]";
             methods.add(toMethod(asObject(ml.get(i), path), path));
         }
+        // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+        checkReservedIrNames(props, methods);
+
         // N-071: --ir skips Validate.java, whose ends-with-assert rule is what
         // makes a public method's script a covenant. Stack lowering leaves the
         // method's last binding as the script result, so `"body": []`
@@ -186,6 +201,91 @@ public final class AnfLoader {
             }
         }
         return new AnfProgram(name, props, methods);
+    }
+
+    /**
+     * N-060 / N-065 — {@code --ir} names that alias a name the compiler mints.
+     * Mirrors {@code assertNoReservedIrNames} in
+     * packages/runar-compiler/src/index.ts: property, method and parameter
+     * names, loop iterVars and the name a load_param / load_prop / update_prop
+     * addresses are declarations (stack-lowering families plus the ANF binding
+     * families {@code t<digits>} / {@code __merge$<digits>}); binding names and
+     * every binding reference, {@code @ref:} aliases included, refuse the
+     * stack-lowering families only. See {@link ReservedNames}.
+     */
+    private static void checkReservedIrNames(List<AnfProperty> props, List<AnfMethod> methods) {
+        for (AnfProperty p : props) reservedIr(p.name(), true);
+        for (AnfMethod m : methods) {
+            reservedIr(m.name(), true);
+            for (AnfParam p : m.params()) reservedIr(p.name(), true);
+            reservedIrBody(m.body());
+        }
+    }
+
+    private static void reservedIrBody(List<AnfBinding> bindings) {
+        if (bindings == null) return;
+        for (AnfBinding b : bindings) {
+            reservedIr(b.name(), false);
+            AnfValue v = b.value();
+            if (v instanceof LoadParam lp) {
+                reservedIr(lp.name(), true);
+            } else if (v instanceof LoadProp lp) {
+                reservedIr(lp.name(), true);
+            } else if (v instanceof UpdateProp up) {
+                reservedIr(up.name(), true);
+                reservedIr(up.value(), false);
+            } else if (v instanceof LoadConst lc) {
+                if (lc.value() instanceof BytesConst bc && bc.hex() != null && bc.hex().startsWith("@ref:")) {
+                    reservedIr(bc.hex().substring(5), false);
+                }
+            } else if (v instanceof Loop lo) {
+                reservedIr(lo.iterVar(), true);
+                reservedIrBody(lo.body());
+            } else if (v instanceof If i) {
+                reservedIr(i.cond(), false);
+                reservedIrBody(i.thenBranch());
+                reservedIrBody(i.elseBranch());
+            } else if (v instanceof BinOp bo) {
+                reservedIr(bo.left(), false);
+                reservedIr(bo.right(), false);
+            } else if (v instanceof UnaryOp uo) {
+                reservedIr(uo.operand(), false);
+            } else if (v instanceof Assert a) {
+                reservedIr(a.value(), false);
+            } else if (v instanceof Call c) {
+                reservedIrAll(c.args());
+            } else if (v instanceof MethodCall mc) {
+                reservedIr(mc.object(), false);
+                reservedIrAll(mc.args());
+            } else if (v instanceof CheckPreimage cp) {
+                reservedIr(cp.preimage(), false);
+            } else if (v instanceof DeserializeState ds) {
+                reservedIr(ds.preimage(), false);
+            } else if (v instanceof AddOutput ao) {
+                reservedIr(ao.satoshis(), false);
+                reservedIrAll(ao.stateValues());
+                reservedIr(ao.preimage(), false);
+            } else if (v instanceof AddRawOutput ar) {
+                reservedIr(ar.satoshis(), false);
+                reservedIr(ar.scriptBytes(), false);
+            } else if (v instanceof AddDataOutput ad) {
+                reservedIr(ad.satoshis(), false);
+                reservedIr(ad.scriptBytes(), false);
+            } else if (v instanceof ArrayLiteral al) {
+                reservedIrAll(al.elements());
+            }
+        }
+    }
+
+    private static void reservedIrAll(List<String> names) {
+        if (names == null) return;
+        for (String n : names) reservedIr(n, false);
+    }
+
+    private static void reservedIr(String name, boolean declaration) {
+        if (name != null && ReservedNames.isReservedIrName(name, declaration)) {
+            throw new RuntimeException(ReservedNames.message(name));
+        }
     }
 
     /**

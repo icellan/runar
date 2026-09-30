@@ -9,6 +9,7 @@ require "set"
 require_relative "ast_nodes"
 require_relative "diagnostic"
 require_relative "sighash_validate"
+require_relative "reserved_names"
 
 module RunarCompiler
   module Frontend
@@ -78,6 +79,7 @@ module RunarCompiler
       ctx.validate_constructor
       ctx.validate_methods
       ctx.check_no_recursion
+      ctx.check_reserved_names
 
       # Issue #123: reject preimage-field reads / output bindings that are
       # unsound under a method's declared @sighash mode (security core). This
@@ -417,6 +419,49 @@ module RunarCompiler
               loc: method.source_location
             )
           end
+        end
+      end
+
+      # N-065 / N-060: refuse a declared identifier spelled like a name a
+      # compiler pass mints (see reserved_names.rb). Checks properties, method
+      # names, constructor and method parameters, locals and loop variables.
+      # A stateful `txPreimage` PROPERTY keeps its older V27 diagnostic.
+      def check_reserved_names
+        stateful = @contract.parent_class == "StatefulSmartContract"
+        check = lambda do |name, loc|
+          if ReservedNames.reserved_source_name?(name, stateful)
+            add_error(ReservedNames.message(name), loc: loc)
+          end
+        end
+        walk = lambda do |stmts|
+          (stmts || []).each do |st|
+            case st
+            when VariableDeclStmt
+              check.call(st.name, st.source_location)
+            when IfStmt
+              walk.call(st.then)
+              walk.call(st.else_)
+            when ForStmt
+              check.call(st.init.name, st.init.source_location) if st.init.is_a?(VariableDeclStmt)
+              walk.call(st.body)
+            end
+          end
+        end
+
+        @contract.properties.each do |prop|
+          next if stateful && prop.name == "txPreimage"
+
+          check.call(prop.name, prop.source_location)
+        end
+        ctor = @contract.constructor
+        if ctor
+          (ctor.params || []).each { |pr| check.call(pr.name, ctor.source_location) }
+          walk.call(ctor.body)
+        end
+        @contract.methods.each do |m|
+          check.call(m.name, m.source_location) unless m.name == "constructor"
+          (m.params || []).each { |pr| check.call(pr.name, m.source_location) }
+          walk.call(m.body)
         end
       end
 

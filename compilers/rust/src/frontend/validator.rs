@@ -38,6 +38,7 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     validate_constructor(contract, &mut errors);
     validate_methods(contract, &mut errors, &mut warnings);
     check_no_recursion(contract, &mut errors);
+    check_reserved_names(contract, &mut errors);
 
     // Issue #123: reject preimage-field reads / output bindings that are
     // unsound under a method's declared @sighash mode (security core). This
@@ -52,6 +53,57 @@ pub fn validate(contract: &ContractNode) -> ValidationResult {
     }
 
     ValidationResult { errors, warnings }
+}
+
+/// N-065 / N-060: refuse a declared identifier spelled like a name a compiler
+/// pass mints (see `reserved_names.rs`). Checks properties, method names,
+/// constructor and method parameters, locals and loop variables. A stateful
+/// `txPreimage` PROPERTY keeps its older, dedicated diagnostic (V27).
+fn check_reserved_names(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    use super::reserved_names::{is_reserved_source_name, reserved_name_message};
+    let stateful = contract.parent_class == "StatefulSmartContract";
+    fn walk(stmts: &[Statement], stateful: bool, errors: &mut Vec<Diagnostic>) {
+        for s in stmts {
+            match s {
+                Statement::VariableDecl { name, source_location, .. } => {
+                    if is_reserved_source_name(name, stateful) {
+                        errors.push(Diagnostic::error(reserved_name_message(name), Some(source_location.clone())));
+                    }
+                }
+                Statement::IfStatement { then_branch, else_branch, .. } => {
+                    walk(then_branch, stateful, errors);
+                    if let Some(e) = else_branch {
+                        walk(e, stateful, errors);
+                    }
+                }
+                Statement::ForStatement { init, body, .. } => {
+                    walk(std::slice::from_ref(init.as_ref()), stateful, errors);
+                    walk(body, stateful, errors);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for prop in &contract.properties {
+        if stateful && prop.name == "txPreimage" {
+            continue;
+        }
+        if is_reserved_source_name(&prop.name, stateful) {
+            errors.push(Diagnostic::error(reserved_name_message(&prop.name), Some(prop.source_location.clone())));
+        }
+    }
+    for method in std::iter::once(&contract.constructor).chain(contract.methods.iter()) {
+        if method.name != "constructor" && is_reserved_source_name(&method.name, stateful) {
+            errors.push(Diagnostic::error(reserved_name_message(&method.name), Some(method.source_location.clone())));
+        }
+        for p in &method.params {
+            if is_reserved_source_name(&p.name, stateful) {
+                errors.push(Diagnostic::error(reserved_name_message(&p.name), Some(method.source_location.clone())));
+            }
+        }
+        walk(&method.body, stateful, errors);
+    }
 }
 
 // ---------------------------------------------------------------------------

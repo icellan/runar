@@ -75,6 +75,7 @@ def validate(contract: ContractNode) -> ValidationResult:
     ctx.validate_constructor()
     ctx.validate_methods()
     ctx.check_no_recursion()
+    ctx.check_reserved_names()
 
     # Issue #123: reject preimage-field reads / output bindings that are unsound
     # under a method's declared @sighash mode (security core). This pass emits
@@ -154,6 +155,50 @@ class _ValidationContext:
         self.errors.append(
             Diagnostic(message=msg, severity=Severity.ERROR, loc=loc or self.current_stmt_loc)
         )
+
+    # -------------------------------------------------------------------
+    # N-065 / N-060: compiler-reserved names
+    # -------------------------------------------------------------------
+
+    def check_reserved_names(self) -> None:
+        """Refuse a declared identifier spelled like a name a compiler pass
+        mints (see reserved_names.py). Checks properties, method names,
+        constructor and method parameters, locals and loop variables. A
+        stateful ``txPreimage`` PROPERTY keeps its older, dedicated diagnostic.
+        """
+        from runar_compiler.frontend.reserved_names import (
+            is_reserved_source_name,
+            reserved_name_message,
+        )
+
+        stateful = self.contract.parent_class == "StatefulSmartContract"
+
+        def check(name: str, loc: SourceLocation | None) -> None:
+            if is_reserved_source_name(name, stateful):
+                self._add_error(reserved_name_message(name), loc=loc)
+
+        def walk(stmts: list[Statement]) -> None:
+            for s in stmts:
+                if isinstance(s, VariableDeclStmt):
+                    check(s.name, s.source_location)
+                elif isinstance(s, IfStmt):
+                    walk(s.then)
+                    walk(s.else_ or [])
+                elif isinstance(s, ForStmt):
+                    if s.init is not None:
+                        check(s.init.name, s.init.source_location)
+                    walk(s.body)
+
+        for prop in self.contract.properties:
+            if stateful and prop.name == "txPreimage":
+                continue
+            check(prop.name, prop.source_location)
+        for method in [self.contract.constructor, *self.contract.methods]:
+            if method.name != "constructor":
+                check(method.name, method.source_location)
+            for p in method.params:
+                check(p.name, method.source_location)
+            walk(method.body)
 
     # -------------------------------------------------------------------
     # Property validation

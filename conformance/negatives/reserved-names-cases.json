@@ -1,0 +1,1214 @@
+{
+ "source": {
+  "accept": [
+   {
+    "name": "ts-stateless-param-txPreimage",
+    "file": "RStatelessTxPreimage.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RStatelessTxPreimage extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(txPreimage: bigint) {\n    assert(txPreimage > 0n);\n  }\n}\n"
+   }
+  ],
+  "cases": [
+   {
+    "name": "ts-local-t2-ifstale",
+    "file": "RTsLocalT2Ifstale.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsLocalT2Ifstale extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let t2: bigint = p;\n    assert(p > 0n);\n    if (c) {\n      t2 = p;\n    }\n    assert(t2 + 1n === 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsLocalT2Ifstale extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint, c: boolean) {\n    let u2: bigint = p;\n    assert(p > 0n);\n    if (c) {\n      u2 = p;\n    }\n    assert(u2 + 1n === 1n);\n  }\n}\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-t1-rebind",
+    "file": "RTsLocalT1Rebind.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsLocalT1Rebind extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    assert(p > 0n);\n    let t1: bigint = p;\n    assert(t1 + 1n === 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsLocalT1Rebind extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    assert(p > 0n);\n    let u1: bigint = p;\n    assert(u1 + 1n === 1n);\n  }\n}\n",
+    "error": "'t1' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-param-t0",
+    "file": "RTsParamT0.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsParamT0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(t0: bigint) {\n    assert(t0 > 0n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsParamT0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(u0: bigint) {\n    assert(u0 > 0n);\n  }\n}\n",
+    "error": "'t0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-property-t3",
+    "file": "RTsPropertyT3.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsPropertyT3 extends SmartContract {\n  readonly t3: bigint;\n\n  constructor(v: bigint) {\n    super(v);\n    this.t3 = v;\n  }\n\n  public unlock(p: bigint) {\n    assert(p === this.t3);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsPropertyT3 extends SmartContract {\n  readonly u3: bigint;\n\n  constructor(v: bigint) {\n    super(v);\n    this.u3 = v;\n  }\n\n  public unlock(p: bigint) {\n    assert(p === this.u3);\n  }\n}\n",
+    "error": "'t3' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-method-t4",
+    "file": "RTsMethodT4.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsMethodT4 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  private t4(a: bigint): bigint {\n    return a + 1n;\n  }\n\n  public unlock(p: bigint) {\n    assert(this.t4(p) > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsMethodT4 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  private u4(a: bigint): bigint {\n    return a + 1n;\n  }\n\n  public unlock(p: bigint) {\n    assert(this.u4(p) > 1n);\n  }\n}\n",
+    "error": "'t4' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-loopvar-t5",
+    "file": "RTsLoopvarT5.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsLoopvarT5 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let acc: bigint = 0n;\n    for (let t5: bigint = 0n; t5 < 2n; t5++) {\n      acc = acc + p;\n    }\n    assert(acc > 0n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RTsLoopvarT5 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let acc: bigint = 0n;\n    for (let u5: bigint = 0n; u5 < 2n; u5++) {\n      acc = acc + p;\n    }\n    assert(acc > 0n);\n  }\n}\n",
+    "error": "'t5' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-_codePart",
+    "file": "RLocalCodepart.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalCodepart extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let _codePart: bigint = p + 1n;\n    assert(_codePart > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalCodepart extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let codePart: bigint = p + 1n;\n    assert(codePart > 1n);\n  }\n}\n",
+    "error": "'_codePart' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-__param_p",
+    "file": "RLocalParamP.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalParamP extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let __param_p: bigint = p + 1n;\n    assert(__param_p > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalParamP extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let paramP: bigint = p + 1n;\n    assert(paramP > 1n);\n  }\n}\n",
+    "error": "'__param_p' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-__shadowed_0_p",
+    "file": "RLocalShadowed0P.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalShadowed0P extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let __shadowed_0_p: bigint = p + 1n;\n    assert(__shadowed_0_p > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalShadowed0P extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let shadowedP: bigint = p + 1n;\n    assert(shadowedP > 1n);\n  }\n}\n",
+    "error": "'__shadowed_0_p' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-__merge$0",
+    "file": "RLocalMerge0.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalMerge0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let __merge$0: bigint = p + 1n;\n    assert(__merge$0 > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalMerge0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let merge0: bigint = p + 1n;\n    assert(merge0 > 1n);\n  }\n}\n",
+    "error": "'__merge$0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-__idx_0",
+    "file": "RLocalIdx0.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalIdx0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let __idx_0: bigint = p + 1n;\n    assert(__idx_0 > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalIdx0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let idx0: bigint = p + 1n;\n    assert(idx0 > 1n);\n  }\n}\n",
+    "error": "'__idx_0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-__val_0",
+    "file": "RLocalVal0.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalVal0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let __val_0: bigint = p + 1n;\n    assert(__val_0 > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalVal0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let val0: bigint = p + 1n;\n    assert(val0 > 1n);\n  }\n}\n",
+    "error": "'__val_0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-x__0",
+    "file": "RLocalX0.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalX0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let x__0: bigint = p + 1n;\n    assert(x__0 > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalX0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let x0: bigint = p + 1n;\n    assert(x0 > 1n);\n  }\n}\n",
+    "error": "'x__0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-_pub_0",
+    "file": "RLocalPub0.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalPub0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let _pub_0: bigint = p + 1n;\n    assert(_pub_0 > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalPub0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let pub0: bigint = p + 1n;\n    assert(pub0 > 1n);\n  }\n}\n",
+    "error": "'_pub_0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-_changePKH",
+    "file": "RLocalChangepkh.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalChangepkh extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let _changePKH: bigint = p + 1n;\n    assert(_changePKH > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalChangepkh extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let changePKH: bigint = p + 1n;\n    assert(changePKH > 1n);\n  }\n}\n",
+    "error": "'_changePKH' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-_changeAmount",
+    "file": "RLocalChangeamount.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalChangeamount extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let _changeAmount: bigint = p + 1n;\n    assert(_changeAmount > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalChangeamount extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let changeAmount: bigint = p + 1n;\n    assert(changeAmount > 1n);\n  }\n}\n",
+    "error": "'_changeAmount' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-_newAmount",
+    "file": "RLocalNewamount.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalNewamount extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let _newAmount: bigint = p + 1n;\n    assert(_newAmount > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalNewamount extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let newAmount: bigint = p + 1n;\n    assert(newAmount > 1n);\n  }\n}\n",
+    "error": "'_newAmount' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-_serialisedOutputs",
+    "file": "RLocalSerialisedoutputs.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalSerialisedoutputs extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let _serialisedOutputs: bigint = p + 1n;\n    assert(_serialisedOutputs > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalSerialisedoutputs extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let serialisedOutputs: bigint = p + 1n;\n    assert(serialisedOutputs > 1n);\n  }\n}\n",
+    "error": "'_serialisedOutputs' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-local-_prevOutScript_0",
+    "file": "RLocalPrevoutscript0.runar.ts",
+    "src": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalPrevoutscript0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let _prevOutScript_0: bigint = p + 1n;\n    assert(_prevOutScript_0 > 1n);\n  }\n}\n",
+    "twin": "import { SmartContract, assert } from 'runar-lang';\n\nclass RLocalPrevoutscript0 extends SmartContract {\n  constructor() {\n    super();\n  }\n\n  public unlock(p: bigint) {\n    let prevOutScript0: bigint = p + 1n;\n    assert(prevOutScript0 > 1n);\n  }\n}\n",
+    "error": "'_prevOutScript_0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-stateful-param-txPreimage",
+    "file": "RTsStatefulParamTxpreimage.runar.ts",
+    "src": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulParamTxpreimage extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(txPreimage: bigint) {\n    assert(txPreimage > 0n);\n    this.count = this.count + txPreimage;\n  }\n}\n",
+    "twin": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulParamTxpreimage extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(preimageArg: bigint) {\n    assert(preimageArg > 0n);\n    this.count = this.count + preimageArg;\n  }\n}\n",
+    "error": "'txPreimage' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-stateful-param-_newAmount",
+    "file": "RTsStatefulParamnewamount.runar.ts",
+    "src": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulParamnewamount extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(_newAmount: bigint) {\n    assert(_newAmount > 0n);\n    this.count = this.count + _newAmount;\n  }\n}\n",
+    "twin": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulParamnewamount extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(newAmountArg: bigint) {\n    assert(newAmountArg > 0n);\n    this.count = this.count + newAmountArg;\n  }\n}\n",
+    "error": "'_newAmount' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-stateful-param-_changePKH",
+    "file": "RTsStatefulParamchangepkh.runar.ts",
+    "src": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulParamchangepkh extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(_changePKH: bigint) {\n    assert(_changePKH > 0n);\n    this.count = this.count + _changePKH;\n  }\n}\n",
+    "twin": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulParamchangepkh extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(changePKHArg: bigint) {\n    assert(changePKHArg > 0n);\n    this.count = this.count + changePKHArg;\n  }\n}\n",
+    "error": "'_changePKH' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ts-stateful-local-txPreimage",
+    "file": "RTsStatefulLocalTxpreimage.runar.ts",
+    "src": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulLocalTxpreimage extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(p: bigint) {\n    let txPreimage: bigint = p + 1n;\n    assert(txPreimage > 1n);\n    this.count = this.count + txPreimage;\n  }\n}\n",
+    "twin": "import { StatefulSmartContract, assert } from 'runar-lang';\n\nclass RTsStatefulLocalTxpreimage extends StatefulSmartContract {\n  count: bigint;\n\n  constructor(count: bigint) {\n    super(count);\n    this.count = count;\n  }\n\n  public inc(p: bigint) {\n    let preimageLocal: bigint = p + 1n;\n    assert(preimageLocal > 1n);\n    this.count = this.count + preimageLocal;\n  }\n}\n",
+    "error": "'txPreimage' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "sol-local-t2",
+    "file": "RSolLocalT2.runar.sol",
+    "src": "pragma runar ^0.1.0;\n\ncontract RSolLocalT2 is SmartContract {\n    int immutable target;\n\n    constructor(int _target) {\n        target = _target;\n    }\n\n    function verify(int a, int b) public {\n        int t2 = a + b;\n        require(t2 == target);\n    }\n}\n",
+    "twin": "pragma runar ^0.1.0;\n\ncontract RSolLocalT2 is SmartContract {\n    int immutable target;\n\n    constructor(int _target) {\n        target = _target;\n    }\n\n    function verify(int a, int b) public {\n        int u2 = a + b;\n        require(u2 == target);\n    }\n}\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "move-local-t2",
+    "file": "RMoveLocalT2.runar.move",
+    "src": "module RMoveLocalT2 {\n    use runar::types::{Int};\n\n    struct RMoveLocalT2 {\n        target: Int,\n    }\n\n    public fun verify(contract: &RMoveLocalT2, a: Int, b: Int) {\n        let t2 = a + b;\n        assert_eq!(t2, contract.target);\n    }\n}\n",
+    "twin": "module RMoveLocalT2 {\n    use runar::types::{Int};\n\n    struct RMoveLocalT2 {\n        target: Int,\n    }\n\n    public fun verify(contract: &RMoveLocalT2, a: Int, b: Int) {\n        let u2 = a + b;\n        assert_eq!(u2, contract.target);\n    }\n}\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "go-local-t2",
+    "file": "RGoLocalT2.runar.go",
+    "src": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype RGoLocalT2 struct {\n\trunar.SmartContract\n\tTarget runar.Int `runar:\"readonly\"`\n}\n\nfunc (c *RGoLocalT2) Verify(a runar.Int, b runar.Int) {\n\tt2 := a + b\n\trunar.Assert(t2 == c.Target)\n}\n",
+    "twin": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype RGoLocalT2 struct {\n\trunar.SmartContract\n\tTarget runar.Int `runar:\"readonly\"`\n}\n\nfunc (c *RGoLocalT2) Verify(a runar.Int, b runar.Int) {\n\tu2 := a + b\n\trunar.Assert(u2 == c.Target)\n}\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "rs-local-t2",
+    "file": "RRsLocalT2.runar.rs",
+    "src": "use runar::prelude::*;\n\n#[runar::contract]\nstruct RRsLocalT2 {\n    #[readonly]\n    target: Int,\n}\n\nimpl RRsLocalT2 {\n    pub fn verify(&self, a: Int, b: Int) {\n        let t2 = a + b;\n        assert!(t2 == self.target);\n    }\n}\n",
+    "twin": "use runar::prelude::*;\n\n#[runar::contract]\nstruct RRsLocalT2 {\n    #[readonly]\n    target: Int,\n}\n\nimpl RRsLocalT2 {\n    pub fn verify(&self, a: Int, b: Int) {\n        let u2 = a + b;\n        assert!(u2 == self.target);\n    }\n}\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "py-local-t2",
+    "file": "RPyLocalT2.runar.py",
+    "src": "from runar import SmartContract, Bigint, public, assert_\n\nclass RPyLocalT2(SmartContract):\n    target: Bigint\n\n    def __init__(self, target: Bigint):\n        super().__init__(target)\n        self.target = target\n\n    @public\n    def verify(self, a: Bigint, b: Bigint):\n        t2: Bigint = a + b\n        assert_(t2 == self.target)\n",
+    "twin": "from runar import SmartContract, Bigint, public, assert_\n\nclass RPyLocalT2(SmartContract):\n    target: Bigint\n\n    def __init__(self, target: Bigint):\n        super().__init__(target)\n        self.target = target\n\n    @public\n    def verify(self, a: Bigint, b: Bigint):\n        u2: Bigint = a + b\n        assert_(u2 == self.target)\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "zig-local-t2",
+    "file": "RZigLocalT2.runar.zig",
+    "src": "const runar = @import(\"runar\");\n\npub const RZigLocalT2 = struct {\n    pub const Contract = runar.SmartContract;\n\n    target: i64,\n\n    pub fn init(target: i64) RZigLocalT2 {\n        return .{ .target = target };\n    }\n\n    pub fn verify(self: *const RZigLocalT2, a: i64, b: i64) void {\n        const t2 = a + b;\n        runar.assert(t2 == self.target);\n    }\n};\n",
+    "twin": "const runar = @import(\"runar\");\n\npub const RZigLocalT2 = struct {\n    pub const Contract = runar.SmartContract;\n\n    target: i64,\n\n    pub fn init(target: i64) RZigLocalT2 {\n        return .{ .target = target };\n    }\n\n    pub fn verify(self: *const RZigLocalT2, a: i64, b: i64) void {\n        const u2 = a + b;\n        runar.assert(u2 == self.target);\n    }\n};\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "rb-local-t2",
+    "file": "RRbLocalT2.runar.rb",
+    "src": "require 'runar'\n\nclass RRbLocalT2 < Runar::SmartContract\n  prop :target, Bigint\n\n  def initialize(target)\n    super(target)\n    @target = target\n  end\n\n  runar_public a: Bigint, b: Bigint\n  def verify(a, b)\n    t2 = a + b\n    assert t2 == @target\n  end\nend\n",
+    "twin": "require 'runar'\n\nclass RRbLocalT2 < Runar::SmartContract\n  prop :target, Bigint\n\n  def initialize(target)\n    super(target)\n    @target = target\n  end\n\n  runar_public a: Bigint, b: Bigint\n  def verify(a, b)\n    u2 = a + b\n    assert u2 == @target\n  end\nend\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "java-local-t2",
+    "file": "RJavaLocalT2.runar.java",
+    "src": "package runar.examples.reserved;\n\nimport runar.lang.SmartContract;\nimport runar.lang.annotations.Public;\nimport runar.lang.annotations.Readonly;\nimport runar.lang.types.Bigint;\n\nimport static runar.lang.Builtins.assertThat;\n\nclass RJavaLocalT2 extends SmartContract {\n\n    @Readonly Bigint target;\n\n    RJavaLocalT2(Bigint target) {\n        super(target);\n        this.target = target;\n    }\n\n    @Public\n    void verify(Bigint a, Bigint b) {\n        Bigint t2 = a.plus(b);\n        assertThat(t2.eq(this.target));\n    }\n}\n",
+    "twin": "package runar.examples.reserved;\n\nimport runar.lang.SmartContract;\nimport runar.lang.annotations.Public;\nimport runar.lang.annotations.Readonly;\nimport runar.lang.types.Bigint;\n\nimport static runar.lang.Builtins.assertThat;\n\nclass RJavaLocalT2 extends SmartContract {\n\n    @Readonly Bigint target;\n\n    RJavaLocalT2(Bigint target) {\n        super(target);\n        this.target = target;\n    }\n\n    @Public\n    void verify(Bigint a, Bigint b) {\n        Bigint u2 = a.plus(b);\n        assertThat(u2.eq(this.target));\n    }\n}\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "py-local-t_2-maps-to-t2",
+    "file": "RPyLocalT2MapsToT2.runar.py",
+    "src": "from runar import SmartContract, Bigint, public, assert_\n\nclass RPyLocalT2MapsToT2(SmartContract):\n    target: Bigint\n\n    def __init__(self, target: Bigint):\n        super().__init__(target)\n        self.target = target\n\n    @public\n    def verify(self, a: Bigint, b: Bigint):\n        t_2: Bigint = a + b\n        assert_(t_2 == self.target)\n",
+    "twin": "from runar import SmartContract, Bigint, public, assert_\n\nclass RPyLocalT2MapsToT2(SmartContract):\n    target: Bigint\n\n    def __init__(self, target: Bigint):\n        super().__init__(target)\n        self.target = target\n\n    @public\n    def verify(self, a: Bigint, b: Bigint):\n        u_2: Bigint = a + b\n        assert_(u_2 == self.target)\n",
+    "error": "'t2' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "go-property-T1-maps-to-t1",
+    "file": "RGoPropertyT1MapsToT1.runar.go",
+    "src": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype RGoPropertyT1MapsToT1 struct {\n\trunar.SmartContract\n\tT1 runar.Int `runar:\"readonly\"`\n}\n\nfunc (c *RGoPropertyT1MapsToT1) Verify(a runar.Int) {\n\trunar.Assert(a == c.T1)\n}\n",
+    "twin": "package contract\n\nimport runar \"github.com/icellan/runar/packages/runar-go\"\n\ntype RGoPropertyT1MapsToT1 struct {\n\trunar.SmartContract\n\tU1 runar.Int `runar:\"readonly\"`\n}\n\nfunc (c *RGoPropertyT1MapsToT1) Verify(a runar.Int) {\n\trunar.Assert(a == c.U1)\n}\n",
+    "error": "'t1' is reserved for compiler-generated names and cannot be used as an identifier"
+   }
+  ]
+ },
+ "ir": {
+  "accept": [
+   {
+    "name": "p2pk-control",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   {
+    "name": "binding-merge-temp",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "__merge$0",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "__merge$0"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   {
+    "name": "param-txPreimage",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "txPreimage",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "txPreimage"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "cases": [
+   {
+    "name": "param-t0",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "t9",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "t9"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'t9' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "property-t8",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "t8",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "t8"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'t8' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "method-t7",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "t7",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'t7' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "param-merge-temp",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "__merge$0",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "__merge$0"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'__merge$0' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "param-codePart",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "_codePart",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "_codePart"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'_codePart' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "property-codePart",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "_codePart",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "_codePart"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'_codePart' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "binding-codePart",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "_codePart",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "_codePart"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'_codePart' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "ref-codePart",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "_codePart"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'_codePart' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "alias-ref-codePart",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t4",
+         "value": {
+          "kind": "load_const",
+          "value": "@ref:_codePart"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'_codePart' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "param-param-prefix",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "__param_sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "__param_sig"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'__param_sig' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "binding-param-prefix",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "__param_pk",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "__param_pk"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'__param_pk' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "binding-shadowed-prefix",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "sig",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "sig"
+         }
+        },
+        {
+         "name": "__shadowed_2_pk",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "__shadowed_2_pk"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'__shadowed_2_pk' is reserved for compiler-generated names and cannot be used as an identifier"
+   },
+   {
+    "name": "param-pub-slot",
+    "ir": {
+     "contractName": "X",
+     "properties": [
+      {
+       "name": "pk",
+       "type": "PubKey",
+       "readonly": true
+      }
+     ],
+     "methods": [
+      {
+       "name": "unlock",
+       "isPublic": true,
+       "params": [
+        {
+         "name": "_pub_0",
+         "type": "Sig"
+        }
+       ],
+       "body": [
+        {
+         "name": "t0",
+         "value": {
+          "kind": "load_param",
+          "name": "_pub_0"
+         }
+        },
+        {
+         "name": "t1",
+         "value": {
+          "kind": "load_prop",
+          "name": "pk"
+         }
+        },
+        {
+         "name": "t2",
+         "value": {
+          "kind": "call",
+          "func": "checkSig",
+          "args": [
+           "t0",
+           "t1"
+          ]
+         }
+        },
+        {
+         "name": "t3",
+         "value": {
+          "kind": "assert",
+          "value": "t2"
+         }
+        }
+       ]
+      }
+     ]
+    },
+    "error": "'_pub_0' is reserved for compiler-generated names and cannot be used as an identifier"
+   }
+  ]
+ }
+}

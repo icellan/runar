@@ -7,6 +7,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const unknown_anf_kind = @import("unknown_anf_kind.zig");
+const reserved_names = @import("../passes/reserved_names.zig");
 pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
@@ -62,6 +63,10 @@ const ParseError = error{
     // whose arms both do, or a terminal raw_script with out_arity 1). The
     // shared message is in required_fields.lastDiagnostic().
     PublicMethodMissingTerminalAssert,
+    // N-060 / N-065: a name the compiler mints (stack lowering's slots in any
+    // position; an ANF temp spelling as a parameter / property / method / loop
+    // variable). Message in required_fields.lastDiagnostic().
+    ReservedName,
 };
 
 const max_parse_depth: u32 = 256;
@@ -282,6 +287,84 @@ fn endsWithTerminalAssert(bindings: []const types.ANFBinding) bool {
     };
 }
 
+/// N-060 / N-065 — `--ir` names that alias a name the compiler mints. Port of
+/// `assertNoReservedIrNames` (packages/runar-compiler/src/index.ts): stack
+/// lowering keeps its own slots (`_codePart`, `__param_*`, `__shadowed_*`,
+/// `_pub_<n>`) in the same name map as the program's parameters and bindings,
+/// so declaring or referencing one aliases a compiler slot; a parameter,
+/// property, method or loop variable spelled like an ANF temp (`t<digits>`,
+/// `__merge$<digits>`) aliases the bindings that ARE spelled that way. Binding
+/// names in those ANF families stay legal. See passes/reserved_names.zig.
+fn checkReservedIrName(name: []const u8, declaration: bool) ParseError!void {
+    if (!reserved_names.isReservedIrName(name, declaration)) return;
+    required_fields.setDiag("'{s}' is reserved for compiler-generated names and cannot be used as an identifier", .{name});
+    return ParseError.ReservedName;
+}
+
+fn checkReservedIrBindings(bindings: []const types.ANFBinding) ParseError!void {
+    for (bindings) |b| {
+        try checkReservedIrName(b.name, false);
+        switch (b.value) {
+            .load_param => |v| try checkReservedIrName(v.name, true),
+            .load_prop => |v| try checkReservedIrName(v.name, true),
+            .update_prop => |v| {
+                try checkReservedIrName(v.name, true);
+                try checkReservedIrName(v.value, false);
+            },
+            .load_const => |v| switch (v.value) {
+                .string => |s| if (std.mem.startsWith(u8, s, "@ref:")) try checkReservedIrName(s[5..], false),
+                else => {},
+            },
+            .bin_op => |v| {
+                try checkReservedIrName(v.left, false);
+                try checkReservedIrName(v.right, false);
+            },
+            .unary_op => |v| try checkReservedIrName(v.operand, false),
+            .call => |v| for (v.args) |r| try checkReservedIrName(r, false),
+            .method_call => |v| {
+                try checkReservedIrName(v.object, false);
+                for (v.args) |r| try checkReservedIrName(r, false);
+            },
+            .@"if" => |v| {
+                try checkReservedIrName(v.cond, false);
+                try checkReservedIrBindings(v.then);
+                try checkReservedIrBindings(v.@"else");
+            },
+            .loop => |v| {
+                try checkReservedIrName(v.iter_var, true);
+                try checkReservedIrBindings(v.body);
+            },
+            .assert => |v| try checkReservedIrName(v.value, false),
+            .check_preimage => |v| try checkReservedIrName(v.preimage, false),
+            .deserialize_state => |v| try checkReservedIrName(v.preimage, false),
+            .add_output => |v| {
+                try checkReservedIrName(v.satoshis, false);
+                for (v.state_values) |r| try checkReservedIrName(r, false);
+                try checkReservedIrName(v.preimage, false);
+            },
+            .add_raw_output => |v| {
+                try checkReservedIrName(v.satoshis, false);
+                try checkReservedIrName(v.script_bytes, false);
+            },
+            .add_data_output => |v| {
+                try checkReservedIrName(v.satoshis, false);
+                try checkReservedIrName(v.script_bytes, false);
+            },
+            .array_literal => |v| for (v.elements) |r| try checkReservedIrName(r, false),
+            .get_state_script, .raw_script => {},
+        }
+    }
+}
+
+fn checkReservedIrNames(properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!void {
+    for (properties) |p| try checkReservedIrName(p.name, true);
+    for (methods) |m| {
+        try checkReservedIrName(m.name, true);
+        for (m.params) |p| try checkReservedIrName(p.name, true);
+        try checkReservedIrBindings(m.body);
+    }
+}
+
 fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFProgram {
     const obj = root.object;
 
@@ -297,6 +380,9 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         const method = try parseMethod(allocator, method_val.object);
         try method_list.append(allocator, method);
     }
+
+    // N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+    try checkReservedIrNames(properties, method_list.items);
 
     // N-071: --ir skips passes/validate.zig, whose ends-with-assert rule is
     // what makes a public method's script a covenant. Stack lowering leaves

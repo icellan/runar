@@ -515,97 +515,72 @@ class ConstantFoldTest {
             "y = x + 1 after x was rebound to an @ref alias must stay a bin_op, got " + y);
     }
 
+    // ---------------------------------------------------------------
+    // Collision probes (N-064), replayed as ANF since N-065
+    // ---------------------------------------------------------------
+    //
+    // F-082 made a top-level rebinding drop the stale constant; N-064 did the
+    // same for an if arm or a loop body that rebinds a name the enclosing env
+    // holds as a constant. The source-reachable shapes were user locals named
+    // like an earlier compiler temp (`let t1 = p` after `0n` lowered to t1).
+    // N-065 now refuses those sources (a local may not be spelled like an ANF
+    // temp), so each probe's EXACT fold-OFF ANF — parse -> lowerToANF with no
+    // validator, conformance/negatives/n064-collision-anf.json — is loaded
+    // through AnfLoader (t<N> binding names are legal IR) and folded here. The
+    // pre-N-064 reference folder turns that ANF into `staleFoldOn`.
+    //
+    // Proves: the probe source is refused with the N-065 diagnostic, and on
+    // its ANF this tier gives the same bytes with folding ON as OFF, pinned to
+    // the fold-OFF bytes every tier emits and differing from the stale script.
+    // Does not prove on-chain behaviour — the Spend-engine proof is
+    // packages/runar-testing/src/__tests__/n064-rebind-fold-spend.test.ts.
+
+    @SuppressWarnings("unchecked")
+    private static java.util.Map<String, Object> n064Probe(String name) throws Exception {
+        java.nio.file.Path p = java.nio.file.Path.of("..", "..", "conformance", "negatives", "n064-collision-anf.json");
+        java.util.Map<String, Object> root =
+            (java.util.Map<String, Object>) AnfLoader.parseJsonTree(java.nio.file.Files.readString(p));
+        for (Object o : (List<Object>) root.get("probes")) {
+            java.util.Map<String, Object> m = (java.util.Map<String, Object>) o;
+            if (name.equals(m.get("name"))) return m;
+        }
+        throw new AssertionError("no probe " + name);
+    }
+
+    private static void assertCollisionProbeFoldsClean(String name, String collidingLocal) throws Exception {
+        java.util.Map<String, Object> probe = n064Probe(name);
+        String message = "'" + collidingLocal + "' is reserved for compiler-generated names and cannot be used as an identifier";
+        List<String> errors = Validate.runCollecting(
+            runar.compiler.frontend.ParserDispatch.parse((String) probe.get("source"), name + ".runar.ts")).errors();
+        assertTrue(errors.stream().anyMatch(e -> e.endsWith(message)), "N-065 must refuse the source: " + errors);
+
+        String irJson = runar.compiler.canonical.Jcs.stringify(probe.get("ir"));
+        String foldOff = (String) probe.get("foldOff");
+        String off = Emit.run(Peephole.run(StackLower.run(runar.compiler.Cli.optimizeAnf(AnfLoader.parse(irJson), true))));
+        String on = Emit.run(Peephole.run(StackLower.run(runar.compiler.Cli.optimizeAnf(AnfLoader.parse(irJson), false))));
+        assertEquals(foldOff, off);
+        assertTrue(!on.equals(probe.get("staleFoldOn")), name + ": folded with a stale constant");
+        assertEquals(foldOff, on, name + ": constant folding must not change this program's bytes");
+    }
+
     @Test
     void userLocalCollidingWithTempDoesNotFoldStaleConstant() throws Exception {
         // `0n` in the first assert lowers to temp t1 = 0; `let t1 = p` then
         // rebinds t1 to @ref:<load_param p>. Source semantics: p > 0 && p + 1 == 1
         // is unsatisfiable. Pre-fix, folding used the stale t1 = 0, folded the
         // second assert to assert(true), and the script accepted every p > 0.
-        String src = String.join("\n",
-            "import { SmartContract, assert } from 'runar-lang';",
-            "",
-            "class C extends SmartContract {",
-            "  constructor() {",
-            "    super();",
-            "  }",
-            "",
-            "  public unlock(p: bigint) {",
-            "    assert(p > 0n);",
-            "    let t1: bigint = p;",
-            "    assert(t1 + 1n === 1n);",
-            "  }",
-            "}",
-            "");
-        String foldOff = PipelineTestSupport.hex(src, "C.runar.ts", true);
-        String foldOn = PipelineTestSupport.hex(src, "C.runar.ts", false);
-        // fold-OFF bytes, identical across all 7 tiers.
-        assertEquals("76007c78a0697c8b519c77", foldOff);
-        assertEquals(foldOff, foldOn,
-            "constant folding must not change this program's bytes (stale-constant fold)");
+        assertCollisionProbeFoldsClean("Rebind", "t1");
+        assertCollisionProbeFoldsClean("RebindEq", "t1");
     }
-
-
-    // ---------------------------------------------------------------
-    // If-arm / loop-body rebinding (N-064)
-    // ---------------------------------------------------------------
-    //
-    // F-082 made a top-level rebinding drop the stale constant. An if arm or a
-    // loop body that rebinds a name the enclosing env holds as a constant leaks
-    // the same way: the arm's value is what the name holds after the if (that is
-    // how a branch reassigns a local), and a loop body runs once per iteration,
-    // so from iteration 1 on — and after the loop — the name holds the body's
-    // value, not the entry constant.
-    //
-    // Proves: both source-reachable shapes (a user local named like an earlier
-    // compiler temp, reassigned in an if arm / a loop body) compile the same
-    // bytes with folding ON as with folding OFF, pinned to the fold-OFF bytes
-    // every tier emits. Does not prove on-chain behaviour — the Spend-engine
-    // proof for all seven tiers is
-    // packages/runar-testing/src/__tests__/n064-rebind-fold-spend.test.ts.
 
     @Test
     void ifArmRebindingDoesNotFoldStaleConstant() throws Exception {
-        String src = String.join("\n",
-            "import { SmartContract, assert } from 'runar-lang';",
-            "class IfStale extends SmartContract {",
-            "  constructor() { super(); }",
-            "  public unlock(p: bigint, c: boolean) {",
-            "    let t2: bigint = p;",
-            "    assert(p > 0n);",
-            "    if (c) {",
-            "      t2 = p;",
-            "    }",
-            "    assert(t2 + 1n === 1n);",
-            "  }",
-            "}",
-            "");
-        String want = "767600877c51879b69785279007c78a0697b637b677b757668778b519c77";
-        assertEquals(want, PipelineTestSupport.hex(src, "IfStale.runar.ts", true));
-        assertEquals(want, PipelineTestSupport.hex(src, "IfStale.runar.ts", false),
-            "folding must not use the pre-if constant of a name an arm rebinds");
+        assertCollisionProbeFoldsClean("IfStale", "t2");
     }
 
     @Test
     void loopBodyRebindingDoesNotFoldStaleConstant() throws Exception {
-        String src = String.join("\n",
-            "import { SmartContract, assert } from 'runar-lang';",
-            "class LoopStale extends SmartContract {",
-            "  constructor() { super(); }",
-            "  public unlock(p: bigint) {",
-            "    let t2: bigint = p;",
-            "    assert(p > 0n);",
-            "    for (let i: bigint = 0n; i < 2n; i++) {",
-            "      assert(t2 + 1n === 1n);",
-            "      t2 = p;",
-            "    }",
-            "    assert(t2 + 1n === 1n);",
-            "  }",
-            "}",
-            "");
-        String want = "7678007c78a06900517b7c93519d52797751517b7c93519d7b778b519c77";
-        assertEquals(want, PipelineTestSupport.hex(src, "LoopStale.runar.ts", true));
-        assertEquals(want, PipelineTestSupport.hex(src, "LoopStale.runar.ts", false),
-            "folding must not use the loop-entry constant of a name the body rebinds");
+        assertCollisionProbeFoldsClean("LoopStale", "t2");
     }
 
 }

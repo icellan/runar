@@ -1,8 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { foldConstants, eliminateDeadBindings } from '../optimizer/constant-fold.js';
 import { optimizeStackIR } from '../optimizer/peephole.js';
-import { compile } from '../index.js';
+import { compile, compileFromANF, loadANFFromJSON } from '../index.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ANFProgram, ANFBinding, ANFMethod, ANFValue, StackOp } from '../ir/index.js';
+
+/** N-065: the ANF the (now refused) N-064 collision probes lowered to. */
+const N064_COLLISION_ANF = JSON.parse(
+  readFileSync(join(__dirname, '../../../../conformance/negatives/n064-collision-anf.json'), 'utf8'),
+) as { probes: Array<{ name: string; source: string; ir: unknown }> };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -422,21 +429,18 @@ describe('Optimizer: Constant Folding', () => {
       // `assert(p > 0n); let t1: bigint = p; assert(t1 + 1n === 1n);` — the
       // `0n` lowers to temp t1, then the user local rebinds t1. Folded with
       // the stale t1 = 0 the guard became OP_TRUE and accepted any p > 0.
-      const src = `import { SmartContract, assert } from 'runar-lang';
-class Rebind extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint) {
-    assert(p > 0n);
-    let t1: bigint = p;
-    assert(t1 + 1n === 1n);
-  }
-}
-`;
-      const off = compile(src, { fileName: 'Rebind.runar.ts', disableConstantFolding: true });
-      const on = compile(src, { fileName: 'Rebind.runar.ts' });
-      expect(off.success && on.success, JSON.stringify([off.diagnostics, on.diagnostics])).toBe(true);
-      expect(off.artifact!.script).toBe('76007c78a0697c8b519c77');
-      expect(on.artifact!.script).toBe(off.artifact!.script);
+      //
+      // N-065: that source is now refused (a local may not be spelled like an
+      // ANF temp), so the collision ANF it lowered to is replayed directly
+      // from the shared corpus. It is the exact binding list the source
+      // produced; before N-064 folding it gave `7600a0695151515177777777`.
+      const probe = N064_COLLISION_ANF.probes.find((p) => p.name === 'Rebind')!;
+      expect(compile(probe.source, { fileName: 'Rebind.runar.ts' }).success).toBe(false);
+      const load = () => loadANFFromJSON(JSON.stringify(probe.ir));
+      const off = compileFromANF(load()).scriptHex;
+      const on = compileFromANF(foldConstants(load())).scriptHex;
+      expect(off).toBe('76007c78a0697c8b519c77');
+      expect(on).toBe(off);
     });
   });
 

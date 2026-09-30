@@ -103,6 +103,7 @@ public final class Validate {
         ctx.validateConstructor();
         ctx.validateMethods();
         ctx.checkNoRecursion();
+        ctx.checkReservedNames();
         ctx.warnStrippedReadonlyFields();
 
         // Issue #123: reject preimage-field reads / output bindings that are
@@ -1384,6 +1385,50 @@ public final class Validate {
         // --------------------------------------------------------------
         // Recursion detection
         // --------------------------------------------------------------
+
+        /**
+         * N-065 / N-060: refuse a declared identifier spelled like a name a
+         * compiler pass mints (see {@link ReservedNames}). Checks properties,
+         * method names, constructor and method parameters, locals and loop
+         * variables. A stateful {@code txPreimage} PROPERTY keeps its older,
+         * dedicated diagnostic.
+         */
+        void checkReservedNames() {
+            boolean stateful = contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT;
+            for (PropertyNode prop : contract.properties()) {
+                if (stateful && "txPreimage".equals(prop.name())) continue;
+                checkReserved(prop.name(), stateful, prop.sourceLocation());
+            }
+            List<MethodNode> all = new ArrayList<>();
+            if (contract.constructor() != null) all.add(contract.constructor());
+            all.addAll(contract.methods());
+            for (MethodNode m : all) {
+                if (m != contract.constructor()) checkReserved(m.name(), stateful, m.sourceLocation());
+                for (ParamNode p : m.params()) checkReserved(p.name(), stateful, m.sourceLocation());
+                checkReservedInBody(m.body(), stateful);
+            }
+        }
+
+        private void checkReservedInBody(List<Statement> body, boolean stateful) {
+            if (body == null) return;
+            for (Statement s : body) {
+                if (s instanceof VariableDeclStatement v) {
+                    checkReserved(v.name(), stateful, v.sourceLocation());
+                } else if (s instanceof IfStatement i) {
+                    checkReservedInBody(i.thenBody(), stateful);
+                    checkReservedInBody(i.elseBody(), stateful);
+                } else if (s instanceof ForStatement f) {
+                    if (f.init() != null) checkReserved(f.init().name(), stateful, f.init().sourceLocation());
+                    checkReservedInBody(f.body(), stateful);
+                }
+            }
+        }
+
+        private void checkReserved(String name, boolean stateful, SourceLocation loc) {
+            if (name != null && ReservedNames.isReservedSourceName(name, stateful)) {
+                error(ReservedNames.message(name), loc);
+            }
+        }
 
         void checkNoRecursion() {
             Set<String> methodNames = new HashSet<>();

@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------
@@ -50,6 +52,7 @@ func Validate(contract *ContractNode) *ValidationResult {
 	ctx.validateConstructor()
 	ctx.validateMethods()
 	ctx.checkNoRecursion()
+	ctx.checkReservedNames()
 
 	// Issue #123: reject preimage-field reads / output bindings that are
 	// unsound under a method's declared @sighash mode (security core). This
@@ -82,6 +85,61 @@ func (ctx *validationContext) addWarning(msg string) {
 
 func (ctx *validationContext) addWarningWithLoc(msg string, loc *SourceLocation) {
 	ctx.warnings = append(ctx.warnings, Diagnostic{Message: msg, Severity: SeverityWarning, Loc: loc})
+}
+
+// checkReservedNames is N-065 / N-060: refuse a declared identifier spelled
+// like a name a compiler pass mints (see ir/reserved_names.go). Checks
+// properties, method names, constructor and method parameters, locals and loop
+// variables. A stateful `txPreimage` PROPERTY keeps its older diagnostic.
+// Runs before fixed-array expansion, which mints __idx_/__val_/<root>__<i>.
+func (ctx *validationContext) checkReservedNames() {
+	stateful := ctx.contract.ParentClass == "StatefulSmartContract"
+	check := func(name string, loc SourceLocation) {
+		if ir.IsReservedSourceName(name, stateful) {
+			l := loc
+			ctx.addErrorWithLoc(ir.ReservedNameMessage(name), &l)
+		}
+	}
+	var walk func(stmts []Statement)
+	walk = func(stmts []Statement) {
+		for _, s := range stmts {
+			switch st := s.(type) {
+			case VariableDeclStmt:
+				check(st.Name, st.SourceLocation)
+			case *VariableDeclStmt:
+				check(st.Name, st.SourceLocation)
+			case IfStmt:
+				walk(st.Then)
+				walk(st.Else)
+			case *IfStmt:
+				walk(st.Then)
+				walk(st.Else)
+			case ForStmt:
+				check(st.Init.Name, st.Init.SourceLocation)
+				walk(st.Body)
+			case *ForStmt:
+				check(st.Init.Name, st.Init.SourceLocation)
+				walk(st.Body)
+			}
+		}
+	}
+
+	for _, prop := range ctx.contract.Properties {
+		if stateful && prop.Name == "txPreimage" {
+			continue
+		}
+		check(prop.Name, prop.SourceLocation)
+	}
+	methods := append([]MethodNode{ctx.contract.Constructor}, ctx.contract.Methods...)
+	for _, m := range methods {
+		if m.Name != "constructor" {
+			check(m.Name, m.SourceLocation)
+		}
+		for _, p := range m.Params {
+			check(p.Name, m.SourceLocation)
+		}
+		walk(m.Body)
+	}
 }
 
 // ---------------------------------------------------------------------------

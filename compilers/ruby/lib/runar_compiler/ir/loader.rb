@@ -15,6 +15,7 @@ require_relative "../frontend/typecheck"
 require_relative "unknown_anf_kind_error"
 require_relative "input_limits"
 require_relative "required_fields"
+require_relative "../frontend/reserved_names"
 
 module RunarCompiler
   module IR
@@ -91,6 +92,9 @@ module RunarCompiler
       # N-069: required fields present and correctly typed, with the field
       # path in the diagnostic, before anf_program_from_hash defaults anything.
       RequiredFields.assert!(d)
+
+      # N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+      Frontend::ReservedNames.assert_no_reserved_ir_names!(d)
 
       program = anf_program_from_hash(d)
 

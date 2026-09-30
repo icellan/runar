@@ -1,12 +1,10 @@
 /**
- * N-064 — execution proof, all seven tiers: constant folding (ON by default)
- * no longer folds with a constant a name no longer holds.
+ * N-064 — execution proof: constant folding (ON by default) no longer folds
+ * with a constant a name no longer holds.
  *
  * Every tier's folder recorded a name's constant when a binding produced one
- * and never dropped it. A name can be bound more than once — a reassignment,
- * or a user local that shares an earlier compiler temp's name (the naming
- * collision itself is N-065 and is NOT changed here) — so later uses folded
- * with a stale value:
+ * and never dropped it. A name can be bound more than once, and the probes
+ * that showed it bound a user local to the name of an earlier compiler temp:
  *
  *     Rebind:    assert(p > 0n); let t1: bigint = p; assert(t1 + 1n === 1n);
  *                (`0n` lowers to temp t1; the local rebinds t1 to p)
@@ -21,29 +19,28 @@
  *                (the body rebinds t2; the entry constant was used in every
  *                iteration and after the loop)
  *
- * With folding ON every tier folded the Rebind / IfStale / LoopStale final
- * guard to OP_TRUE (Rebind: `7600a0695151515177777777`), so the deployed
- * script accepted any p > 0, and folded the RebindEq guard to OP_FALSE.
- * The expected verdicts below are derived BY HAND from the source, and only
- * for inputs where the source and the compiler's fold-OFF reading of a
- * colliding `tN` agree (IfStale with c = false does not, which is N-065, so
- * it is deliberately not asserted): Rebind and LoopStale reject every p
- * (p > 0 and p + 1 == 1 cannot both hold); IfStale with c = true rejects
- * p = 5; RebindEq accepts p = 5 and rejects p = 1.
+ * N-065 made the naming collision itself a refusal: every tier now rejects
+ * those four sources (a local may not be spelled like an ANF temp), so the
+ * source path to this fold defect is closed. The fold must still be right for
+ * the ANF shape, so the test replays the EXACT ANF each probe lowered to
+ * (`conformance/negatives/n064-collision-anf.json`, generated with
+ * parse -> lowerToANF and no validator) through `foldConstants`. With the
+ * pre-N-064 folder that replay reproduces every `staleFoldOn` script below
+ * byte for byte; with the current folder it gives the fold-OFF script.
  *
- * Oracle: the real `@bsv/sdk` Spend engine (the SDK's pre-broadcast dry-run,
- * and `validateContractInput` for an accepted call). Each tier's CLI artifact,
- * compiled with folding ON (the default), is deployed and called through the
- * TS SDK. The attack inputs are the crafted ones the pre-fix scripts accepted.
+ * Oracle: `@bsv/sdk` Spend under consensus rules (`newConsensusSpend`). The
+ * attack inputs are the crafted ones the stale scripts accepted; the stale
+ * scripts are checked too, so the oracle is shown to see the defect.
  *
- * What this proves: for each of the seven tiers, the fold-ON script of each
- * probe is byte-identical to that tier's fold-OFF script and to every other
- * tier's, and Spend rejects the crafted attacks (Rebind p = 1, IfStale p = 5
- * c = true, LoopStale p = 5, RebindEq p = 1) while accepting the honest
- * RebindEq p = 5.
- * What it does NOT prove: that no other fold rule is unsound, or anything
- * about hostile `--ir` JSON (the fold is the same code path, but no `--ir`
- * probe is run here).
+ * What this proves: (1) all seven tiers refuse the four probe sources with the
+ * N-065 diagnostic; (2) the reference folder, on the collision ANF, gives the
+ * fold-OFF script, which Spend rejects for Rebind p = 1, IfStale p = 5 c = true,
+ * LoopStale p = 5 and RebindEq p = 1 and accepts for the honest RebindEq p = 5,
+ * while every stale script decides the opposite way. The six native folders are
+ * pinned to the same fold-OFF bytes on the same ANF by each tier's own n064 test.
+ * What it does NOT prove: that no other fold rule is unsound, or that no other
+ * source shape rebinds a name that held a constant (the plain `let x = 0n;
+ * x = p` reassignment lowers through an `@ref` alias and did not reproduce).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -51,92 +48,36 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { compile } from 'runar-compiler';
-import { RunarContract, MockProvider, LocalSigner, buildP2PKHScript } from 'runar-sdk';
-import { Transaction } from '@bsv/sdk';
-import type { RunarArtifact } from 'runar-ir-schema';
-import { testKey, validateContractInput } from '../oracle/real-crypto-execution.js';
+import { compile, compileFromANF, foldConstants, loadANFFromJSON } from 'runar-compiler';
+import { LockingScript, UnlockingScript } from '@bsv/sdk';
+import { CONSENSUS_SPEND_CONTEXT, newConsensusSpend } from '../consensus-spend.js';
 
 const REPO = join(__dirname, '..', '..', '..', '..');
 const TMP = mkdtempSync(join(tmpdir(), 'runar-n064-'));
 
-const REBIND = `import { SmartContract, assert } from 'runar-lang';
-
-class Rebind extends SmartContract {
-  constructor() {
-    super();
-  }
-
-  public unlock(p: bigint) {
-    assert(p > 0n);
-    let t1: bigint = p;
-    assert(t1 + 1n === 1n);
-  }
+interface Probe {
+  name: string;
+  source: string;
+  ir: unknown;
+  foldOff: string;
+  staleFoldOn: string;
 }
-`;
+const PROBES = (
+  JSON.parse(
+    readFileSync(join(REPO, 'conformance', 'negatives', 'n064-collision-anf.json'), 'utf8'),
+  ) as { probes: Probe[] }
+).probes;
+const probe = (name: string): Probe => PROBES.find((p) => p.name === name)!;
 
-const REBIND_EQ = `import { SmartContract, assert } from 'runar-lang';
-
-class RebindEq extends SmartContract {
-  constructor() {
-    super();
-  }
-
-  public unlock(p: bigint) {
-    assert(p > 0n);
-    let t1: bigint = p;
-    assert(t1 === 5n);
-  }
-}
-`;
-
-const IF_STALE = `import { SmartContract, assert } from 'runar-lang';
-
-class IfStale extends SmartContract {
-  constructor() {
-    super();
-  }
-
-  public unlock(p: bigint, c: boolean) {
-    let t2: bigint = p;
-    assert(p > 0n);
-    if (c) {
-      t2 = p;
-    }
-    assert(t2 + 1n === 1n);
-  }
-}
-`;
-
-const LOOP_STALE = `import { SmartContract, assert } from 'runar-lang';
-
-class LoopStale extends SmartContract {
-  constructor() {
-    super();
-  }
-
-  public unlock(p: bigint) {
-    let t2: bigint = p;
-    assert(p > 0n);
-    for (let i: bigint = 0n; i < 2n; i++) {
-      assert(t2 + 1n === 1n);
-      t2 = p;
-    }
-    assert(t2 + 1n === 1n);
-  }
-}
-`;
-
-const PROBES: { file: string; src: string; staleFoldOn: string }[] = [
-  { file: 'Rebind.runar.ts', src: REBIND, staleFoldOn: '7600a0695151515177777777' },
-  { file: 'RebindEq.runar.ts', src: REBIND_EQ, staleFoldOn: '7600a06955007777' },
-  { file: 'IfStale.runar.ts', src: IF_STALE, staleFoldOn: '767600877c51879b6978527900a0697c637c67777668775151515177777777' },
-  {
-    file: 'LoopStale.runar.ts',
-    src: LOOP_STALE,
-    staleFoldOn: '767800a0690051515151695579547a75515151515169597a547a7551515151777777777777777777777777',
-  },
-];
+/** The local each probe spells like a temp — the name N-065 refuses. */
+const COLLIDING_LOCAL: Record<string, string> = {
+  Rebind: 't1',
+  RebindEq: 't1',
+  IfStale: 't2',
+  LoopStale: 't2',
+};
+const n065Message = (name: string): string =>
+  `'${name}' is reserved for compiler-generated names and cannot be used as an identifier`;
 
 function requireBin(p: string, how: string): string {
   if (!existsSync(p)) throw new Error(`missing compiler binary ${p} — build it with: ${how}`);
@@ -148,13 +89,6 @@ function javaJar(): string {
   const jar = existsSync(libs) ? readdirSync(libs).find((f) => f.endsWith('.jar')) : undefined;
   if (!jar) throw new Error('Java jar missing — run `gradle jar` in compilers/java');
   return join(libs, jar);
-}
-
-function run(cmd: string, args: string[], cwd?: string): string {
-  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout: 120_000, maxBuffer: 32 * 1024 * 1024 });
-  if (r.error) throw new Error(`${cmd} failed to start: ${r.error.message}`);
-  if (r.status !== 0) throw new Error(`${cmd} ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
-  return r.stdout;
 }
 
 let seq = 0;
@@ -176,120 +110,90 @@ const NATIVE: Record<string, () => { cmd: string; pre: string[]; cwd?: string }>
   java: () => ({ cmd: 'java', pre: ['-jar', javaJar()] }),
 };
 
-const TIER_NAMES = ['ts', ...Object.keys(NATIVE)];
-
-function hex(tier: string, file: string, src: string, disableFold: boolean): string {
-  if (tier === 'ts') {
-    const r = compile(src, { fileName: file, disableConstantFolding: disableFold });
-    if (!r.success || !r.artifact) throw new Error(JSON.stringify(r.diagnostics));
-    return r.artifact.script;
-  }
+/** A native CLI's verdict on a source file: exit status and all its output. */
+function nativeCompile(tier: string, file: string, src: string): { status: number | null; out: string } {
   const { cmd, pre, cwd } = NATIVE[tier]!();
-  const fold = disableFold ? ['--disable-constant-folding'] : [];
-  return run(cmd, [...pre, '--source', writeTmp(file, src), '--hex', ...fold], cwd).trim();
-}
-
-/** The artifact with folding ON — the default every user gets. */
-function artifact(tier: string, file: string, src: string): RunarArtifact {
-  if (tier === 'ts') {
-    const r = compile(src, { fileName: file });
-    if (!r.success || !r.artifact) throw new Error(JSON.stringify(r.diagnostics));
-    return r.artifact as unknown as RunarArtifact;
-  }
-  if (tier === 'java') {
-    const out = writeTmp('artifact.json', '');
-    run('java', ['-jar', javaJar(), '--source', writeTmp(file, src), '--emit-artifact', out]);
-    return JSON.parse(readFileSync(out, 'utf8'));
-  }
-  const { cmd, pre, cwd } = NATIVE[tier]!();
-  const art = JSON.parse(run(cmd, [...pre, '--source', writeTmp(file, src)], cwd));
-  return art;
-}
-
-interface Verdict {
-  accepted: boolean;
-  reachedEngine: boolean;
-  error?: string;
-}
-
-/** Deploy `art`, call `unlock(args)`, and replay the contract input on the
- *  real Spend engine. */
-async function spend(art: RunarArtifact, args: (bigint | boolean)[]): Promise<Verdict> {
-  const key = testKey('alice');
-  const signer = new LocalSigner(key.privKey);
-  const provider = new MockProvider();
-  provider.addUtxo(await signer.getAddress(), {
-    txid: key.privKey.slice(0, 64),
-    outputIndex: 0,
-    satoshis: 500_000,
-    script: buildP2PKHScript(key.pubKey),
+  const r = spawnSync(cmd, [...pre, '--source', writeTmp(file, src), '--hex'], {
+    cwd,
+    encoding: 'utf8',
+    timeout: 120_000,
+    maxBuffer: 32 * 1024 * 1024,
   });
-  const contract = new RunarContract(art, []);
-  await contract.deploy(provider, signer, {});
-  const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
-  try {
-    await contract.call('unlock', args, provider, signer, { dryRun: true });
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    return {
-      accepted: false,
-      reachedEngine: error.includes('local pre-broadcast dry-run rejected the primary contract input'),
-      error,
-    };
-  }
-  const callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
-  return { accepted: validateContractInput(callTx, 0, deployTx, 0), reachedEngine: true };
+  if (r.error) throw new Error(`${cmd} failed to start: ${r.error.message}`);
+  return { status: r.status, out: `${r.stdout ?? ''}\n${r.stderr ?? ''}` };
 }
 
-describe('N-064 — fold-ON bytes equal fold-OFF bytes, seven tiers', () => {
-  for (const probe of PROBES) {
-    it(`${probe.file}: every tier's fold-ON script equals the shared fold-OFF script`, () => {
-      const off = hex('ts', probe.file, probe.src, true);
-      expect(off).not.toBe(probe.staleFoldOn);
-      for (const tier of TIER_NAMES) {
-        expect(hex(tier, probe.file, probe.src, true), `${tier} fold-OFF diverges from ts`).toBe(off);
-        const on = hex(tier, probe.file, probe.src, false);
-        expect(on, `${tier} fold-ON still folds with a stale constant`).not.toBe(probe.staleFoldOn);
-        expect(on, `${tier} fold-ON differs from fold-OFF`).toBe(off);
-      }
+/** Spend `lockingHex` with the push-only `unlockingHex` under consensus rules. */
+function spends(lockingHex: string, unlockingHex: string): boolean {
+  try {
+    return newConsensusSpend({
+      ...CONSENSUS_SPEND_CONTEXT,
+      lockingScript: LockingScript.fromHex(lockingHex),
+      unlockingScript: UnlockingScript.fromHex(unlockingHex),
+      otherInputs: [],
+      outputs: [],
+    }).validate();
+  } catch {
+    return false;
+  }
+}
+
+/** The fold-ON script of a probe's collision ANF, from the reference folder. */
+function foldOnHex(p: Probe): string {
+  return compileFromANF(foldConstants(loadANFFromJSON(JSON.stringify(p.ir)))).scriptHex;
+}
+
+describe('N-064 / N-065 — the collision probes are refused from source in every tier', () => {
+  for (const p of PROBES) {
+    const file = `${p.name}.runar.ts`;
+    const want = n065Message(COLLIDING_LOCAL[p.name]!);
+
+    it(`ts refuses ${file}`, () => {
+      const r = compile(p.source, { fileName: file });
+      expect(r.success).toBe(false);
+      expect(r.diagnostics.map((d) => d.message)).toContain(want);
+    });
+
+    for (const tier of Object.keys(NATIVE)) {
+      it(`${tier} refuses ${file}`, () => {
+        const { status, out } = nativeCompile(tier, file, p.source);
+        expect(status, `${tier} accepted ${file}: ${out}`).not.toBe(0);
+        expect(out).toContain(want);
+      });
+    }
+  }
+});
+
+describe('N-064 — the reference folder on the collision ANF', () => {
+  for (const p of PROBES) {
+    it(`${p.name}: fold-ON equals the fold-OFF script, not the stale one`, () => {
+      expect(compileFromANF(loadANFFromJSON(JSON.stringify(p.ir))).scriptHex).toBe(p.foldOff);
+      expect(p.foldOff).not.toBe(p.staleFoldOn);
+      expect(foldOnHex(p)).toBe(p.foldOff);
     });
   }
 });
 
-for (const tier of TIER_NAMES) {
-  describe(`N-064 [${tier}] — fold-ON scripts on the Spend engine`, () => {
-    const rebind = artifact(tier, 'Rebind.runar.ts', REBIND);
-    const rebindEq = artifact(tier, 'RebindEq.runar.ts', REBIND_EQ);
-    const ifStale = artifact(tier, 'IfStale.runar.ts', IF_STALE);
-    const loopStale = artifact(tier, 'LoopStale.runar.ts', LOOP_STALE);
+describe('N-064 — fold-ON scripts on the Spend engine', () => {
+  // Unlocking scripts are the minimal pushes of the arguments, in order.
+  const attacks: Array<{ name: string; args: string; why: string }> = [
+    { name: 'Rebind', args: '51', why: 'unlock(1): 1 + 1 != 1' },
+    { name: 'IfStale', args: '5551', why: 'unlock(5, true): t2 = 5 after the if' },
+    { name: 'LoopStale', args: '55', why: 'unlock(5): t2 = 5 from iteration 1 on' },
+    { name: 'RebindEq', args: '51', why: 'unlock(1): 1 != 5' },
+  ];
 
-    it('ATTACK Rebind unlock(1) is REJECTED (1 + 1 != 1)', async () => {
-      const v = await spend(rebind, [1n]);
-      expect(v.reachedEngine, `never reached Spend: ${v.error ?? '(accepted)'}`).toBe(true);
-      expect(v.accepted, 'the guard folded with the stale t1 = 0').toBe(false);
+  for (const a of attacks) {
+    it(`ATTACK ${a.name} ${a.why} — the stale script accepts it, the fold-ON script rejects it`, () => {
+      const p = probe(a.name);
+      expect(spends(p.staleFoldOn, a.args), 'the oracle must see the pre-fix defect').toBe(a.name !== 'RebindEq');
+      expect(spends(foldOnHex(p), a.args)).toBe(false);
     });
+  }
 
-    it('ATTACK IfStale unlock(5, true) is REJECTED (t2 = 5 after the if)', async () => {
-      const v = await spend(ifStale, [5n, true]);
-      expect(v.reachedEngine, `never reached Spend: ${v.error ?? '(accepted)'}`).toBe(true);
-      expect(v.accepted, 'the guard folded with the pre-if t2 = 0').toBe(false);
-    });
-
-    it('honest RebindEq unlock(5) is ACCEPTED (the guard reads p, not the stale 0)', async () => {
-      const v = await spend(rebindEq, [5n]);
-      expect(v.accepted, v.error).toBe(true);
-    });
-
-    it('ATTACK RebindEq unlock(1) is REJECTED (1 != 5)', async () => {
-      const v = await spend(rebindEq, [1n]);
-      expect(v.reachedEngine, `never reached Spend: ${v.error ?? '(accepted)'}`).toBe(true);
-      expect(v.accepted).toBe(false);
-    });
-
-    it('ATTACK LoopStale unlock(5) is REJECTED (t2 = 5 from iteration 1 on)', async () => {
-      const v = await spend(loopStale, [5n]);
-      expect(v.reachedEngine, `never reached Spend: ${v.error ?? '(accepted)'}`).toBe(true);
-      expect(v.accepted, 'the guard folded with the loop-entry t2 = 0').toBe(false);
-    });
+  it('honest RebindEq unlock(5) is ACCEPTED (the guard reads p, not the stale 0)', () => {
+    const p = probe('RebindEq');
+    expect(spends(p.staleFoldOn, '55'), 'the stale guard folded to FALSE').toBe(false);
+    expect(spends(foldOnHex(p), '55')).toBe(true);
   });
-}
+});

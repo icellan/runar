@@ -17,6 +17,7 @@ pub mod identifier_collision;
 pub mod input_limits;
 pub mod int_literal;
 pub mod parser;
+pub mod reserved_names;
 pub mod parser_gocontract;
 pub mod parser_java;
 pub mod parser_move;

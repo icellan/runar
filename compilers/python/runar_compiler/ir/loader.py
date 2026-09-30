@@ -115,6 +115,9 @@ def load_ir(source: str) -> ANFProgram:
 
     program = anf_program_from_dict(d)
 
+    # N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+    _assert_no_reserved_ir_names(program)
+
     # Decode typed constant values from raw JSON
     try:
         decode_constants(program)
@@ -126,6 +129,66 @@ def load_ir(source: str) -> ANFProgram:
         raise ValueError(f"IR validation: {errors[0]}")
 
     return program
+
+
+def _assert_no_reserved_ir_names(program: ANFProgram) -> None:
+    """N-060 / N-065 -- ``--ir`` names that alias a name the compiler mints.
+
+    Stack lowering keeps its own slots (``_codePart``, ``__param_<name>``,
+    ``__shadowed_<n>_<name>``, ``_pub_<n>``) in the same name map as the
+    program's parameters and bindings and resolves every reference by name,
+    so an IR that declares or references one aliases a compiler slot. A
+    parameter, property, method or loop variable named like an ANF temp
+    (``t<digits>``, ``__merge$<digits>``) aliases the bindings that ARE spelled
+    that way; binding names in those families stay legal. Mirrors
+    ``assertNoReservedIrNames`` in packages/runar-compiler/src/index.ts, with
+    the source validator's message, shared verbatim by all seven tiers.
+    """
+    from runar_compiler.frontend.reserved_names import (
+        is_reserved_ir_name,
+        reserved_name_message,
+    )
+
+    def check(name, declaration: bool) -> None:
+        if isinstance(name, str) and is_reserved_ir_name(name, declaration):
+            raise ValueError(reserved_name_message(name))
+
+    def walk(bindings) -> None:
+        for b in bindings or []:
+            check(b.name, False)
+            v = b.value
+            k = v.kind
+            if k in ("load_param", "load_prop"):
+                check(v.name, True)
+            elif k == "update_prop":
+                check(v.name, True)
+                check(v.raw_value, False)
+            elif k == "load_const":
+                raw = v.raw_value
+                if isinstance(raw, str) and raw.startswith("@ref:"):
+                    check(raw[5:], False)
+            elif k == "loop":
+                check(v.iter_var, True)
+            else:
+                for r in (v.left, v.right, v.operand, v.cond, v.object,
+                          v.preimage, v.satoshis, v.script_bytes):
+                    check(r, False)
+                if k == "assert":
+                    check(v.raw_value, False)
+                for lst in (v.args, v.state_values, v.elements):
+                    for r in lst or []:
+                        check(r, False)
+            walk(v.body)
+            walk(v.then)
+            walk(v.else_)
+
+    for prop in program.properties:
+        check(prop.name, True)
+    for method in program.methods:
+        check(method.name, True)
+        for param in method.params:
+            check(param.name, True)
+        walk(method.body)
 
 
 def load_ir_from_file(path: str | Path) -> ANFProgram:

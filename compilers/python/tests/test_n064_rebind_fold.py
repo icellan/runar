@@ -3,82 +3,60 @@ holds. Port of the reference tier's case in
 packages/runar-compiler/src/__tests__/optimizer.test.ts.
 
 The folder recorded a name's constant when a binding produced one and never
-dropped it. A name can be bound more than once (a reassignment, or a user
-local that shares an earlier compiler temp's name — that collision is N-065
-and is not changed here), so with folding ON (the default) later uses folded
-with a stale value: Rebind's guard became OP_TRUE (7600a0695151515177777777,
-spendable with any p > 0), RebindEq's became OP_FALSE, and a rebinding inside
-an if arm or a loop body leaked the same way past the if / into later
-iterations.
+dropped it. A name can be bound more than once, and the probes that showed it
+bound a user local to the name of an earlier compiler temp, so with folding
+ON (the default) later uses folded with a stale value: Rebind's guard became
+OP_TRUE (7600a0695151515177777777, spendable with any p > 0), RebindEq's
+became OP_FALSE, and a rebinding inside an if arm or a loop body leaked the
+same way past the if / into later iterations.
 
-Proves: this tier compiles each probe to the same bytes in both fold modes,
-pinned to the fold-OFF bytes every tier emits. Does NOT prove on-chain
-behaviour — the Spend-engine proof for all seven tiers is
+N-065 made that naming collision a refusal, so the probe SOURCES no longer
+compile (asserted below). The fold must still be right for the ANF shape, so
+each probe's exact ANF (conformance/negatives/n064-collision-anf.json,
+generated from the source with parse -> lowerToANF and no validator) is
+loaded with ``load_ir`` and compiled with folding ON and OFF. The TS reference
+checked that the pre-N-064 folder turns this same ANF into ``staleFoldOn``
+byte for byte, so the replay keeps the regression value of the old
+source-level probes.
+
+Proves: this tier's folder compiles each probe's ANF to the fold-OFF bytes
+every tier emits (not the stale ones), and refuses the probe sources with the
+N-065 diagnostic. Does NOT prove on-chain behaviour — the Spend-engine proof is
 packages/runar-testing/src/__tests__/n064-rebind-fold-spend.test.ts.
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
-from runar_compiler.compiler import compile_from_source_str_with_result
+from runar_compiler.compiler import compile_from_program, compile_from_source_str_with_result
+from runar_compiler.ir.loader import load_ir
 
-PROBES = [
-    ("Rebind.runar.ts", """import { SmartContract, assert } from 'runar-lang';
-class Rebind extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint) {
-    assert(p > 0n);
-    let t1: bigint = p;
-    assert(t1 + 1n === 1n);
-  }
-}
-""", "76007c78a0697c8b519c77"),
-    ("RebindEq.runar.ts", """import { SmartContract, assert } from 'runar-lang';
-class RebindEq extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint) {
-    assert(p > 0n);
-    let t1: bigint = p;
-    assert(t1 === 5n);
-  }
-}
-""", "76007c78a0697c559c77"),
-    ("IfStale.runar.ts", """import { SmartContract, assert } from 'runar-lang';
-class IfStale extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint, c: boolean) {
-    let t2: bigint = p;
-    assert(p > 0n);
-    if (c) {
-      t2 = p;
-    }
-    assert(t2 + 1n === 1n);
-  }
-}
-""", "767600877c51879b69785279007c78a0697b637b677b757668778b519c77"),
-    ("LoopStale.runar.ts", """import { SmartContract, assert } from 'runar-lang';
-class LoopStale extends SmartContract {
-  constructor() { super(); }
-  public unlock(p: bigint) {
-    let t2: bigint = p;
-    assert(p > 0n);
-    for (let i: bigint = 0n; i < 2n; i++) {
-      assert(t2 + 1n === 1n);
-      t2 = p;
-    }
-    assert(t2 + 1n === 1n);
-  }
-}
-""", "7678007c78a06900517b7c93519d52797751517b7c93519d7b778b519c77"),
-]
+PROBES = json.loads(
+    (Path(__file__).resolve().parents[3] / "conformance" / "negatives"
+     / "n064-collision-anf.json").read_text(encoding="utf-8")
+)["probes"]
+
+# The local each probe spells like an ANF temp — the name N-065 refuses.
+COLLIDING_LOCAL = {"Rebind": "t1", "RebindEq": "t1", "IfStale": "t2", "LoopStale": "t2"}
 
 
 @pytest.mark.parametrize("disable", [True, False])
-@pytest.mark.parametrize("file_name,source,want", PROBES, ids=[p[0] for p in PROBES])
-def test_fold_on_does_not_use_a_stale_constant(file_name: str, source: str, want: str, disable: bool) -> None:
-    result = compile_from_source_str_with_result(source, file_name, disable_constant_folding=disable)
-    if not result.success:
-        msgs = "; ".join(d.message for d in result.diagnostics)
-        pytest.fail(f"compilation failed: {msgs}")
-    assert result.script_hex == want
+@pytest.mark.parametrize("probe", PROBES, ids=[p["name"] for p in PROBES])
+def test_fold_on_does_not_use_a_stale_constant(probe, disable: bool) -> None:
+    program = load_ir(json.dumps(probe["ir"]))
+    script = compile_from_program(program, disable_constant_folding=disable).script
+    assert script != probe["staleFoldOn"]
+    assert script == probe["foldOff"]
+
+
+@pytest.mark.parametrize("probe", PROBES, ids=[p["name"] for p in PROBES])
+def test_probe_source_is_refused_by_n065(probe) -> None:
+    result = compile_from_source_str_with_result(probe["source"], f"{probe['name']}.runar.ts")
+    assert not result.success
+    name = COLLIDING_LOCAL[probe["name"]]
+    want = f"'{name}' is reserved for compiler-generated names and cannot be used as an identifier"
+    assert want in [d.message for d in result.diagnostics]

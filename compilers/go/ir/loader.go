@@ -54,6 +54,11 @@ func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
 		return nil, fmt.Errorf("decoding constants: %w", err)
 	}
 
+	// N-060 / N-065: no name the compiler mints (shared diagnostic, 7 tiers).
+	if err := assertNoReservedIRNames(&program); err != nil {
+		return nil, err
+	}
+
 	if err := ValidateIR(&program); err != nil {
 		return nil, err
 	}
