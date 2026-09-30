@@ -774,7 +774,8 @@ module RunarCompiler
       OUTPUT_INTRINSIC_NAMES = %w[addOutput addRawOutput addDataOutput].freeze
 
       # Build the R-127 rejection. Shared verbatim with the other six
-      # tiers.
+      # tiers and with the pass-4 backstop in anf_lower's
+      # _lower_for_statement (N-006).
       def self.loop_output_intrinsic_msg(intrinsic, via)
         via_clause = via ? " (reached through private method '#{via}')" : ""
         "Output intrinsic '#{intrinsic}'#{via_clause} cannot be called inside a loop " \

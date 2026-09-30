@@ -43,7 +43,7 @@ from runar_compiler.frontend.ast_nodes import (
     UnaryExpr,
     VariableDeclStmt,
 )
-from runar_compiler.frontend.validator import is_to_byte_string_literal
+from runar_compiler.frontend.validator import is_to_byte_string_literal, loop_output_intrinsic_msg
 from runar_compiler.ir.types import (
     ANFBinding,
     ANFMethod,
@@ -756,6 +756,31 @@ class _MethodScope:
             return
         self.auto_injected_set.add(name)
         self.auto_injected_params.append(ANFParam(name=name, type=typ))
+
+
+_OUTPUT_KIND_TO_INTRINSIC = {
+    "add_output": "addOutput",
+    "add_raw_output": "addRawOutput",
+    "add_data_output": "addDataOutput",
+}
+
+
+def _first_output_intrinsic(bindings: list[ANFBinding] | None) -> str:
+    """Name the source intrinsic of the first output node in ``bindings``,
+    searching nested if/loop bodies, for the N-006 refusal."""
+    for b in bindings or []:
+        v = b.value
+        if v.kind in _OUTPUT_KIND_TO_INTRINSIC:
+            return _OUTPUT_KIND_TO_INTRINSIC[v.kind]
+        if v.kind == "if":
+            name = _first_output_intrinsic(v.then) or _first_output_intrinsic(v.else_)
+        elif v.kind == "loop":
+            name = _first_output_intrinsic(v.body)
+        else:
+            name = ""
+        if name:
+            return name
+    return ""
 
 
 class _LowerCtx:
@@ -1471,6 +1496,17 @@ class _LowerCtx:
             body_ctx._loop_vars.add(stmt.init.name)
         body_ctx.lower_statements(stmt.body, frozenset(body_reads))
         self.sync_counter(body_ctx)
+
+        # N-006 backstop for R-127 (mirrors Go's F-005 fix). An output
+        # intrinsic in the body registered its ref on body_ctx, which is
+        # dropped here, so the continuation hash would not commit to that
+        # output. Merging the refs cannot work (one body name denotes N
+        # unrolled slots), so refuse. ``lower_to_anf`` is public, so this
+        # cannot rely on the validator having run.
+        if body_ctx.get_add_output_refs() or body_ctx.get_add_data_output_refs():
+            raise ValueError(loop_output_intrinsic_msg(
+                _first_output_intrinsic(body_ctx.bindings) or "addOutput"
+            ))
 
         self.emit(ANFValue(
             kind="loop",

@@ -114,6 +114,23 @@ _VALID_PROP_TYPES: frozenset[str] = frozenset({
 # Validation context
 # ---------------------------------------------------------------------------
 
+def loop_output_intrinsic_msg(intrinsic: str, via: str | None = None) -> str:
+    """Build the R-127 rejection.
+
+    Shared verbatim with the other six tiers and with the pass-4 backstop in
+    ``anf_lower._lower_for_statement`` (N-006).
+    """
+    via_clause = f" (reached through private method '{via}')" if via else ""
+    return (
+        f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a loop "
+        "body. A loop body lowers into its own scope whose declared outputs never "
+        "reach the method's output list, so the continuation hash would commit to "
+        "fewer outputs than the transaction actually creates: the spend is rejected "
+        "by every shipped SDK and any successor it produces is unspendable. Move the "
+        "call out of the loop."
+    )
+
+
 @dataclass
 class _ValidationContext:
     contract: ContractNode
@@ -852,15 +869,7 @@ class _ValidationContext:
 
         Shared verbatim with the other six tiers.
         """
-        via_clause = f" (reached through private method '{via}')" if via else ""
-        return (
-            f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a loop "
-            "body. A loop body lowers into its own scope whose declared outputs never "
-            "reach the method's output list, so the continuation hash would commit to "
-            "fewer outputs than the transaction actually creates: the spend is rejected "
-            "by every shipped SDK and any successor it produces is unspendable. Move the "
-            "call out of the loop."
-        )
+        return loop_output_intrinsic_msg(intrinsic, via)
 
     def _validate_no_output_intrinsic_in_loop(self, stmt: ForStmt) -> None:
         """Reject an output intrinsic called inside a loop body (R-127).

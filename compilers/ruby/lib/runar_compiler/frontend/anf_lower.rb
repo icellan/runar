@@ -1702,6 +1702,17 @@ module RunarCompiler
         body_ctx.lower_statements(stmt.body, body_reads)
         sync_counter(body_ctx)
 
+        # N-006 backstop for R-127 (mirrors Go's F-005 fix). An output
+        # intrinsic in the body registered its ref on body_ctx, which is
+        # dropped here, so the continuation hash would not commit to that
+        # output. Merging the refs cannot work (one body name denotes N
+        # unrolled slots), so refuse. `Frontend.lower_to_anf` is public, so
+        # this cannot rely on the validator having run.
+        if body_ctx.get_add_output_refs.any? || body_ctx.get_add_data_output_refs.any?
+          intrinsic = Frontend._first_output_intrinsic(body_ctx.bindings) || "addOutput"
+          raise ArgumentError, ValidationContext.loop_output_intrinsic_msg(intrinsic, nil)
+        end
+
         emit(IR::ANFValue.new(kind: "loop").tap do |v|
           v.count = shape[:count]
           v.body = body_ctx.bindings
@@ -2376,6 +2387,29 @@ module RunarCompiler
     # @param func_name [String]
     # @param args [Array<String>]
     # @return [IR::ANFValue]
+    OUTPUT_KIND_TO_INTRINSIC = {
+      "add_output" => "addOutput",
+      "add_raw_output" => "addRawOutput",
+      "add_data_output" => "addDataOutput"
+    }.freeze
+
+    # Name the source intrinsic of the first output node in +bindings+,
+    # searching nested if/loop bodies, for the N-006 refusal.
+    def self._first_output_intrinsic(bindings)
+      (bindings || []).each do |b|
+        v = b.value
+        return OUTPUT_KIND_TO_INTRINSIC[v.kind] if OUTPUT_KIND_TO_INTRINSIC.key?(v.kind)
+
+        name =
+          case v.kind
+          when "if" then _first_output_intrinsic(v.then) || _first_output_intrinsic(v.else_)
+          when "loop" then _first_output_intrinsic(v.body)
+          end
+        return name if name
+      end
+      nil
+    end
+
     def self._make_call(func_name, args)
       IR::ANFValue.new(kind: "call").tap do |v|
         v.func = func_name

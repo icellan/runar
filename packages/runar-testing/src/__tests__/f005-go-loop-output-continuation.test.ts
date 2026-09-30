@@ -47,6 +47,7 @@ import {
 import { newConsensusSpend, CONSENSUS_TX_VERSION } from '../consensus-spend.js';
 import { serializeState } from 'runar-sdk';
 import type { RunarArtifact } from 'runar-ir-schema';
+import { compile, parse, lowerToANF, compileFromANF } from 'runar-compiler';
 
 const REPO = join(__dirname, '..', '..', '..', '..');
 const GO_BIN = join(REPO, 'compilers', 'go', 'runar-go');
@@ -280,5 +281,63 @@ describe('F-005: Go loop-body outputs and the continuation hash', () => {
     const { artifact, output } = goCompile(LOOP_DIRECT);
     expect(artifact).toBeUndefined();
     expect(output).toContain(REFUSAL);
+  });
+});
+
+/**
+ * N-006 — the same attack on the TS reference, through its public API.
+ *
+ * compile() refuses the array-literal shape at R-127 (F-063 taught the
+ * validator to walk array literals). But `parse`, `lowerToANF` and
+ * `compileFromANF` are all public exports, and that chain runs no validator:
+ * before the N-006 backstop, `lowerForStatement` dropped the loop body's output
+ * refs and `compileFromANF` emitted a covenant whose continuation hash covers
+ * only the state output and the change. The script is run here on the same
+ * `Spend` harness as the Go tier, with the ABI/state layout taken from the
+ * TS-compiled top-level control (identical method signature and state field).
+ *
+ * What this proves: no TS pass-4 path emits a script that lets a spender drop
+ * loop-body outputs, even when validation is skipped; top-level payouts still
+ * accept the honest spend and reject the omission.
+ * What it does not prove: the other five tiers; their pass-4 backstops are
+ * pinned by unit tests in each tier's own suite.
+ */
+describe('N-006: TS reference, validator skipped (parse -> lowerToANF -> compileFromANF)', () => {
+  function tsControl(): RunarArtifact {
+    const r = compile(TOP_LEVEL_CONTROL, { fileName: 'LoopPay.runar.ts', disableConstantFolding: true });
+    expect(r.success, JSON.stringify(r.diagnostics)).toBe(true);
+    return r.artifact!;
+  }
+
+  it('control: TS top-level payouts — honest spend ACCEPTED, omission REJECTED', () => {
+    const artifact = tsControl();
+    const honest = spend(artifact, honestOutputs(artifact), CHANGE_SATS);
+    expect(honest.error, honest.error).toBeUndefined();
+    expect(honest.accepted).toBe(true);
+    expect(spend(artifact, omittingOutputs(artifact), STOLEN_CHANGE).accepted).toBe(false);
+  });
+
+  it('array-literal loop payouts: no unvalidated TS lowering lets the spender drop them', () => {
+    const p = parse(LOOP_ARRAY_LITERAL, 'LoopPay.runar.ts');
+    expect(p.errors).toEqual([]);
+    let refusal: string | undefined;
+    let artifact: RunarArtifact | undefined;
+    try {
+      const r = compileFromANF(lowerToANF(p.contract!));
+      artifact = { ...tsControl(), script: r.scriptHex, codeSeparatorIndex: r.codeSeparatorIndices![0] };
+    } catch (e) {
+      refusal = e instanceof Error ? e.message : String(e);
+    }
+    if (artifact) {
+      // Pre-fix path: the attack must not verify.
+      const omit = spend(artifact, omittingOutputs(artifact), STOLEN_CHANGE);
+      expect(
+        omit.accepted,
+        'TS-lowered covenant ACCEPTED a spend that omits both loop payouts',
+      ).toBe(false);
+    }
+    expect(artifact, 'TS lowered an output intrinsic inside a loop body').toBeUndefined();
+    expect(refusal).toContain(REFUSAL);
+    expect(refusal).toContain('addRawOutput');
   });
 });

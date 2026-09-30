@@ -102,6 +102,13 @@ pub const LowerError = error{
     /// `passes/typecheck.zig` refuses it with a located diagnostic; this is the
     /// backstop for callers that lower without typechecking (R-012).
     OutputIndexMustBeZero,
+    /// An output intrinsic (addOutput / addRawOutput / addDataOutput) inside a
+    /// for-loop body (R-127). The body lowers into a sub-context whose output
+    /// refs never reach the method's continuation hash, and merging them cannot
+    /// work (one body name denotes N unrolled slots). `passes/validate.zig`
+    /// refuses it with a located diagnostic; this is the backstop for callers
+    /// that lower without validating (N-006).
+    OutputIntrinsicInLoop,
 };
 
 /// Name set used for the "what does the code after this statement still read"
@@ -2159,6 +2166,16 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
     try lowerStatementsWithReads(&body_ctx, for_s.body, &body_reads);
     ctx.syncCounter(&body_ctx);
 
+    // N-006 backstop for R-127 (mirrors Go's F-005 fix). An output intrinsic in
+    // the body registered its ref on body_ctx, which is dropped here, so the
+    // continuation hash would not commit to that output. Merging the refs
+    // cannot work (one body name denotes N unrolled slots), so refuse.
+    if (body_ctx.getAddOutputRefs().len > 0 or body_ctx.getAddDataOutputRefs().len > 0) {
+        const intrinsic = firstOutputIntrinsic(body_ctx.bindings.items) orelse "addOutput";
+        ctx.setDiagnostic(validate.LOOP_OUTPUT_INTRINSIC_FMT, .{ intrinsic, "" });
+        return LowerError.OutputIntrinsicInLoop;
+    }
+
     const loop_val = try ctx.allocator.create(types.ANFLoop);
     loop_val.* = .{
         .count = count,
@@ -2168,6 +2185,23 @@ fn lowerForStatement(ctx: *LowerCtx, for_s: types.ForStmt, reads_after: *const N
         .step = step,
     };
     _ = try ctx.emit(.{ .loop = loop_val });
+}
+
+/// Name the source intrinsic of the first output node in `bindings`, searching
+/// nested if/loop bodies, for the N-006 refusal.
+fn firstOutputIntrinsic(bindings: []const ANFBinding) ?[]const u8 {
+    for (bindings) |b| {
+        const found: ?[]const u8 = switch (b.value) {
+            .add_output => "addOutput",
+            .add_raw_output => "addRawOutput",
+            .add_data_output => "addDataOutput",
+            .@"if" => |i| firstOutputIntrinsic(i.then) orelse firstOutputIntrinsic(i.@"else"),
+            .loop => |l| firstOutputIntrinsic(l.body),
+            else => null,
+        };
+        if (found) |name| return name;
+    }
+    return null;
 }
 
 // ============================================================================

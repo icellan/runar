@@ -1001,8 +1001,9 @@ fn is_assert_call(expr: &Expression) -> bool {
 /// The three intrinsics that register an output ref.
 const OUTPUT_INTRINSIC_NAMES: [&str; 3] = ["addOutput", "addRawOutput", "addDataOutput"];
 
-/// Build the R-127 rejection. Shared verbatim with the other six tiers.
-fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
+/// Build the R-127 rejection. Shared verbatim with the other six tiers and
+/// with the pass-4 backstop in `anf_lower::lower_for_statement` (N-006).
+pub(crate) fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
     let via_clause = match via {
         Some(v) => format!(" (reached through private method '{}')", v),
         None => String::new(),

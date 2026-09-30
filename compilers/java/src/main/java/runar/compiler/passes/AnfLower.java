@@ -1762,7 +1762,44 @@ public final class AnfLower {
             bodyCtx.lowerStatements(stmt.body(), bodyReads);
             syncCounter(bodyCtx);
 
+            // N-006 backstop for R-127 (mirrors Go's F-005 fix). An output
+            // intrinsic in the body registered its ref on bodyCtx, which is
+            // dropped here, so the continuation hash would not commit to that
+            // output. Merging the refs cannot work (one body name denotes N
+            // unrolled slots), so refuse. AnfLower.run is public, so this
+            // cannot rely on the validator having run.
+            if (!bodyCtx.addOutputRefs.isEmpty() || !bodyCtx.addDataOutputRefs.isEmpty()) {
+                String intrinsic = firstOutputIntrinsic(bodyCtx.bindings);
+                throw new IllegalStateException(Validate.loopOutputIntrinsicMessage(
+                    intrinsic != null ? intrinsic : "addOutput", null));
+            }
+
             emit(new Loop(shape.count, bodyCtx.bindings, iterVar, shape.start, shape.step));
+        }
+
+        /**
+         * Name the source intrinsic of the first output node in {@code bindings},
+         * searching nested if/loop bodies, for the N-006 refusal.
+         */
+        private static String firstOutputIntrinsic(List<AnfBinding> bindings) {
+            for (AnfBinding b : bindings) {
+                AnfValue v = b.value();
+                String name = null;
+                if (v instanceof AddOutput) {
+                    name = "addOutput";
+                } else if (v instanceof AddRawOutput) {
+                    name = "addRawOutput";
+                } else if (v instanceof AddDataOutput) {
+                    name = "addDataOutput";
+                } else if (v instanceof If i) {
+                    name = firstOutputIntrinsic(i.thenBranch());
+                    if (name == null) name = firstOutputIntrinsic(i.elseBranch());
+                } else if (v instanceof Loop l) {
+                    name = firstOutputIntrinsic(l.body());
+                }
+                if (name != null) return name;
+            }
+            return null;
         }
 
         // -----------------------------------------------------------

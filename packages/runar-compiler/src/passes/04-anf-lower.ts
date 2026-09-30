@@ -36,6 +36,7 @@ import { computeSideEffectSummary, continuationShape } from './side-effect-summa
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
 import { isByteStringFamilyType } from './03-typecheck.js';
+import { loopOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
 
@@ -1896,6 +1897,15 @@ function lowerForStatement(
   lowerStatements(stmt.body, bodyCtx, bodyReads);
   ctx.syncCounter(bodyCtx);
 
+  // N-006 backstop for R-127 (mirrors Go's F-005 fix). An output intrinsic in
+  // the body registered its ref on bodyCtx, which is dropped here, so the
+  // continuation hash would not commit to that output. Merging the refs cannot
+  // work (one body name denotes N unrolled slots), so refuse. `lowerToANF` is
+  // a public export, so this cannot rely on the validator having run.
+  if (bodyCtx.getAddOutputRefs().length > 0 || bodyCtx.getAddDataOutputRefs().length > 0) {
+    throw new Error(loopOutputIntrinsicMessage(firstOutputIntrinsic(bodyCtx.bindings) || 'addOutput'));
+  }
+
   ctx.emit({
     kind: 'loop',
     count,
@@ -1904,6 +1914,32 @@ function lowerForStatement(
     start,
     step,
   });
+}
+
+/**
+ * Name the source intrinsic of the first output node in `bindings`, searching
+ * nested if/loop bodies, for the N-006 refusal.
+ */
+function firstOutputIntrinsic(bindings: readonly ANFBinding[]): string {
+  for (const b of bindings) {
+    const v = b.value;
+    switch (v.kind) {
+      case 'add_output': return 'addOutput';
+      case 'add_raw_output': return 'addRawOutput';
+      case 'add_data_output': return 'addDataOutput';
+      case 'if': {
+        const name = firstOutputIntrinsic(v.then) || firstOutputIntrinsic(v.else);
+        if (name) return name;
+        break;
+      }
+      case 'loop': {
+        const name = firstOutputIntrinsic(v.body);
+        if (name) return name;
+        break;
+      }
+    }
+  }
+  return '';
 }
 
 /**

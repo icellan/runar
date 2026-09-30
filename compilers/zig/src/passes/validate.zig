@@ -1165,6 +1165,16 @@ const IntrinsicSite = struct {
     location: ?SourceLocation = null,
 };
 
+/// The R-127 diagnostic (`{intrinsic}`, `{via clause}`), shared verbatim with
+/// the other six tiers and with the pass-4 backstop in
+/// `anf_lower.lowerForStatement` (N-006).
+pub const LOOP_OUTPUT_INTRINSIC_FMT =
+    "Output intrinsic '{s}'{s} cannot be called inside a loop body. A loop body " ++
+    "lowers into its own scope whose declared outputs never reach the method's " ++
+    "output list, so the continuation hash would commit to fewer outputs than the " ++
+    "transaction actually creates: the spend is rejected by every shipped SDK and " ++
+    "any successor it produces is unspendable. Move the call out of the loop.";
+
 /// Reject an output intrinsic called inside a loop body (R-127).
 ///
 /// `anf_lower` lowers a loop body into its own sub-context, which starts with a
@@ -1213,11 +1223,7 @@ fn validateNoOutputIntrinsicInLoop(
         .owned_message = true,
         .message = try std.fmt.allocPrint(
             allocator,
-            "Output intrinsic '{s}'{s} cannot be called inside a loop body. A loop body " ++
-                "lowers into its own scope whose declared outputs never reach the method's " ++
-                "output list, so the continuation hash would commit to fewer outputs than the " ++
-                "transaction actually creates: the spend is rejected by every shipped SDK and " ++
-                "any successor it produces is unspendable. Move the call out of the loop.",
+            LOOP_OUTPUT_INTRINSIC_FMT,
             .{ site.intrinsic, via_clause },
         ),
         .severity = .@"error",

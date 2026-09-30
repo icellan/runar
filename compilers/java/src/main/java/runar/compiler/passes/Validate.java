@@ -138,6 +138,21 @@ public final class Validate {
     // Internal state
     // ------------------------------------------------------------------
 
+    /**
+     * The R-127 diagnostic, shared verbatim with the other six tiers and with
+     * the pass-4 backstop in {@code AnfLower.lowerForStatement} (N-006).
+     */
+    static String loopOutputIntrinsicMessage(String intrinsic, String via) {
+        String viaClause =
+            via == null ? "" : " (reached through private method '" + via + "')";
+        return "Output intrinsic '" + intrinsic + "'" + viaClause
+            + " cannot be called inside a loop body. A loop body lowers into its own scope"
+            + " whose declared outputs never reach the method's output list, so the"
+            + " continuation hash would commit to fewer outputs than the transaction actually"
+            + " creates: the spend is rejected by every shipped SDK and any successor it"
+            + " produces is unspendable. Move the call out of the loop.";
+    }
+
     private static final class Ctx {
         final ContractNode contract;
         final List<String> errors = new ArrayList<>();
@@ -1029,14 +1044,7 @@ public final class Validate {
          * Build the R-127 rejection. Shared verbatim with the other six tiers.
          */
         private static String loopOutputIntrinsicMsg(String intrinsic, String via) {
-            String viaClause =
-                via == null ? "" : " (reached through private method '" + via + "')";
-            return "Output intrinsic '" + intrinsic + "'" + viaClause
-                + " cannot be called inside a loop body. A loop body lowers into its own scope"
-                + " whose declared outputs never reach the method's output list, so the"
-                + " continuation hash would commit to fewer outputs than the transaction actually"
-                + " creates: the spend is rejected by every shipped SDK and any successor it"
-                + " produces is unspendable. Move the call out of the loop.";
+            return loopOutputIntrinsicMessage(intrinsic, via);
         }
 
         /** Where an output intrinsic was found, and how it was reached. */

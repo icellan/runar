@@ -2122,6 +2122,16 @@ fn lower_for_statement(
     lower_statements_with_reads(body, &mut body_ctx, &body_reads);
     ctx.sync_counter(&body_ctx);
 
+    // N-006 backstop for R-127 (mirrors Go's F-005 fix). An output intrinsic in
+    // the body registered its ref on body_ctx, which is dropped here, so the
+    // continuation hash would not commit to that output. Merging the refs cannot
+    // work (one body name denotes N unrolled slots), so refuse. `lower_to_anf`
+    // is public, so this cannot rely on the validator having run.
+    if !body_ctx.add_output_refs.is_empty() || !body_ctx.add_data_output_refs.is_empty() {
+        let intrinsic = first_output_intrinsic(&body_ctx.bindings).unwrap_or("addOutput");
+        panic!("{}", super::validator::loop_output_intrinsic_msg(intrinsic, None));
+    }
+
     let iter_var = iter_binding;
     ctx.emit(ANFValue::Loop {
         count,
@@ -2130,6 +2140,27 @@ fn lower_for_statement(
         start: bigint_to_json(&start),
         step,
     });
+}
+
+/// Name the source intrinsic of the first output node in `bindings`, searching
+/// nested if/loop bodies, for the N-006 refusal.
+fn first_output_intrinsic(bindings: &[ANFBinding]) -> Option<&'static str> {
+    for b in bindings {
+        let found = match &b.value {
+            ANFValue::AddOutput { .. } => Some("addOutput"),
+            ANFValue::AddRawOutput { .. } => Some("addRawOutput"),
+            ANFValue::AddDataOutput { .. } => Some("addDataOutput"),
+            ANFValue::If { then, else_branch, .. } => {
+                first_output_intrinsic(then).or_else(|| first_output_intrinsic(else_branch))
+            }
+            ANFValue::Loop { body, .. } => first_output_intrinsic(body),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 /// Resolve a for-statement's compile-time loop shape (issue #121).
