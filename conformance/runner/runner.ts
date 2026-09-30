@@ -465,6 +465,14 @@ export interface ConformanceResult {
   irMatch: boolean;
   scriptMatch: boolean;
   errors: string[];
+  /**
+   * Set when the row produced no errors but nothing was actually checked:
+   * fewer than two tiers were compared AND no golden file was compared (e.g. a
+   * single-tier `compilers` allowlist under fold-ON, where goldens are skipped,
+   * or the only allowlisted tier was unavailable). The report counts such a
+   * row as 'vacuous', never as 'pass' (F-049). The string says why.
+   */
+  vacuous?: string;
 }
 
 /**
@@ -2209,6 +2217,33 @@ const PARITY_TIER_ORDER = ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'] 
 export interface ParityComparison {
   ok: boolean;
   detail?: string;
+  /**
+   * How many tiers' outputs were actually compared with each other. `ok` with
+   * `compared < 2` is a trivial match, not cross-validation (F-049).
+   */
+  compared: number;
+}
+
+/**
+ * F-049: decide whether a row verified anything. An artifact (IR or script) is
+ * verified when at least two tiers were compared with each other, or at least
+ * one tier's output was compared with the golden file. Returns the vacuity
+ * reason when either artifact went unverified, otherwise undefined.
+ */
+function vacuityReason(
+  ir: ParityComparison,
+  script: ParityComparison,
+  irGoldenChecked: number,
+  scriptGoldenChecked: number,
+): string | undefined {
+  const irOk = ir.compared >= 2 || irGoldenChecked > 0;
+  const scriptOk = script.compared >= 2 || scriptGoldenChecked > 0;
+  if (irOk && scriptOk) return undefined;
+  const golden = constantFoldingDisabled()
+    ? 'no tier output was compared with a golden file'
+    : 'golden comparison skipped under fold-ON';
+  return `nothing cross-validated: IR compared across ${ir.compared} tier(s), ` +
+    `script across ${script.compared} tier(s); ${golden}`;
 }
 
 function tierName(index: number): string {
@@ -2294,6 +2329,7 @@ export function compareIR(
     return {
       ok: false,
       detail: `reported success but produced empty IR: [${empty.join(', ')}]`,
+      compared: 0,
     };
   }
 
@@ -2304,18 +2340,19 @@ export function compareIR(
     .map(({ o, tier }) => ({ tier, value: o.irJson }));
 
   if (present.length < 2) {
-    if (present.length === 0) return { ok: true }; // No compilers produced IR — not a mismatch
-    if (expectedCount === 1) return { ok: true }; // Single-compiler fixture: trivial match
+    if (present.length === 0) return { ok: true, compared: 0 }; // No compilers produced IR — not a mismatch
+    if (expectedCount === 1) return { ok: true, compared: 1 }; // Single-compiler fixture: trivial match
     return {
       ok: false,
       detail: `only 1 of ${expectedCount ?? PARITY_TIER_ORDER.length} expected tier(s) produced IR ` +
         `— cannot cross-validate (present: [${present[0]!.tier}])`,
+      compared: 1,
     };
   }
 
   const groups = groupByValue(present);
-  if (groups.length === 1) return { ok: true };
-  return { ok: false, detail: describeDivergence(groups, 'char') };
+  if (groups.length === 1) return { ok: true, compared: present.length };
+  return { ok: false, detail: describeDivergence(groups, 'char'), compared: present.length };
 }
 
 /**
@@ -2339,6 +2376,7 @@ export function compareScript(
     return {
       ok: false,
       detail: `reported success but produced empty hex: [${empty.join(', ')}]`,
+      compared: 0,
     };
   }
 
@@ -2349,18 +2387,19 @@ export function compareScript(
     .map(({ o, tier }) => ({ tier, value: o.scriptHex.toLowerCase().replace(/\s/g, '') }));
 
   if (present.length < 2) {
-    if (present.length === 0) return { ok: true }; // No compilers produced hex — not a mismatch
-    if (expectedCount === 1) return { ok: true }; // Single-compiler fixture: trivial match
+    if (present.length === 0) return { ok: true, compared: 0 }; // No compilers produced hex — not a mismatch
+    if (expectedCount === 1) return { ok: true, compared: 1 }; // Single-compiler fixture: trivial match
     return {
       ok: false,
       detail: `only 1 of ${expectedCount ?? PARITY_TIER_ORDER.length} expected tier(s) produced hex ` +
         `— cannot cross-validate (present: [${present[0]!.tier}])`,
+      compared: 1,
     };
   }
 
   const groups = groupByValue(present);
-  if (groups.length === 1) return { ok: true };
-  return { ok: false, detail: describeDivergence(groups, 'byte') };
+  if (groups.length === 1) return { ok: true, compared: present.length };
+  return { ok: false, detail: describeDivergence(groups, 'byte'), compared: present.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -2562,7 +2601,12 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   // for the fold-off run.
   const skipGolden = !constantFoldingDisabled();
   const goldenGateOk = tsIncluded ? tsResult.success : true;
+  // F-049: how many tier outputs each golden block below actually compares.
+  const nativeOutputs = [goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult];
+  let irGoldenChecked = 0;
+  let scriptGoldenChecked = 0;
   if (!skipGolden && existsSync(expectedIrFile) && goldenGateOk) {
+    irGoldenChecked = (tsIncluded ? 1 : 0) + nativeOutputs.filter((o) => o?.success && o.irJson).length;
     const expectedIr = canonicalizeJson(readFileSync(expectedIrFile, 'utf-8'));
     if (tsIncluded && tsResult.irJson !== expectedIr) {
       errors.push(
@@ -2591,6 +2635,9 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   }
 
   if (!skipGolden && existsSync(expectedScriptFile) && goldenGateOk) {
+    scriptGoldenChecked =
+      (tsIncluded && tsResult.scriptHex.replace(/\s/g, '') ? 1 : 0) +
+      nativeOutputs.filter((o) => o?.success && o.scriptHex).length;
     const expectedScript = readFileSync(expectedScriptFile, 'utf-8').trim().toLowerCase();
     if (tsIncluded) {
       const tsScript = tsResult.scriptHex.toLowerCase().replace(/\s/g, '');
@@ -2648,6 +2695,7 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
     irMatch: irMatch.ok,
     scriptMatch: scriptMatch.ok,
     errors,
+    vacuous: vacuityReason(irMatch, scriptMatch, irGoldenChecked, scriptGoldenChecked),
   };
 }
 
@@ -2970,6 +3018,7 @@ export async function runConformanceTestForFormat(
       irMatch: true,
       scriptMatch: true,
       errors: [],
+      vacuous: `fold-on allowlisted: ${foldSkip}`,
     };
   }
 
@@ -3087,6 +3136,9 @@ export async function runConformanceTestForFormat(
   // under fold-on (RUNAR_DISABLE_CONSTANT_FOLDING=0) — see runConformanceTest
   // above for the rationale.
   const skipGoldenMf = !constantFoldingDisabled();
+  // F-049: how many tier outputs each golden block below actually compares.
+  let irGoldenChecked = 0;
+  let scriptGoldenChecked = 0;
   if (!skipGoldenMf && existsSync(expectedIrFile)) {
     const expectedIr = canonicalizeJson(readFileSync(expectedIrFile, 'utf-8'));
     const allOutputs = [
@@ -3098,6 +3150,7 @@ export async function runConformanceTestForFormat(
       rubyResult,
       javaResult,
     ].filter((o): o is CompilerOutput => o !== undefined && o.success && o.irJson !== '');
+    irGoldenChecked = allOutputs.length;
 
     for (const output of allOutputs) {
       if (output.irJson !== expectedIr) {
@@ -3118,6 +3171,7 @@ export async function runConformanceTestForFormat(
       rubyResult,
       javaResult,
     ].filter((o): o is CompilerOutput => o !== undefined && o.success && o.scriptHex !== '');
+    scriptGoldenChecked = allOutputs.length;
 
     for (const output of allOutputs) {
       const normalized = output.scriptHex.toLowerCase().replace(/\s/g, '');
@@ -3141,6 +3195,7 @@ export async function runConformanceTestForFormat(
     irMatch: irMatch.ok,
     scriptMatch: scriptMatch.ok,
     errors,
+    vacuous: vacuityReason(irMatch, scriptMatch, irGoldenChecked, scriptGoldenChecked),
   };
 }
 

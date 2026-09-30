@@ -207,6 +207,8 @@ A fixture (or a specific format variant of a fixture) that is known to fail the 
 
 The allowlist is currently **empty** (`"skip": []`): there are no fold-ON exemptions, so every fixture is enforced across all 7 tiers under both fold modes. If a fold-ON-only divergence is ever introduced, add an entry here (with a `reason`) and to `conformance/fold-on-allowlist.json` in the same commit.
 
+**Vacuous rows (F-049).** A row that ran without error but compared nothing — fewer than two tiers' outputs compared with each other AND no output compared with a golden — is reported `VACUOUS`, not `PASS`, and counted separately: `Summary: N passed, F failed, S skipped, V vacuous (T total)`. Under fold-ON this is every format of a single-tier (`"compilers": ["go"]`) fixture, since its only other check, the golden, is skipped; in either mode it is also a row whose only allowlisted tier was unavailable, and a fold-ON allowlist entry. A vacuous row does not fail the run, but it is never counted in `passed`, so a gate on the pass count (e.g. `scripts/release.sh`) treats it as not passed.
+
 ### File Roles
 
 | File | Purpose |

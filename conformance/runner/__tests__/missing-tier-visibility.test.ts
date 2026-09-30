@@ -25,6 +25,7 @@ const report = (avail: Record<string, boolean>): ConformanceReport => ({
   passed: 1,
   failed: 0,
   skipped: 0,
+  vacuous: 0,
   results: [
     { testName: 'demo', status: 'pass', irMatch: true, scriptMatch: true, errors: [], timings: {} },
   ],
