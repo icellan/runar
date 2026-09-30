@@ -311,7 +311,9 @@ theorem lower_preserves_method_count (p : ANFProgram) :
   simp
 
 theorem lower_method_name_preserved (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod) :
-    (lowerMethod progMethods props m).name = m.name := rfl
+    (lowerMethod progMethods props m).name = m.name :=
+  -- N-007: `lowerMethod` lowers the alpha-renamed method, which keeps the name.
+  shadowRenameMethod_name props m
 
 /-! ## Empty-program lowering -/
 

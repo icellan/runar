@@ -4353,7 +4353,9 @@ def peepholedLoweredMethod (p : ANFProgram) (anfM : ANFMethod) : StackMethod :=
 /-- `lowerMethod` preserves the method name. -/
 theorem lowerMethod_name (progMethods : List ANFMethod)
     (props : List ANFProperty) (m : ANFMethod) :
-    (Lower.lowerMethod progMethods props m).name = m.name := rfl
+    (Lower.lowerMethod progMethods props m).name = m.name :=
+  -- N-007: the shadow-rename keeps the name, propositionally.
+  Lower.lowerMethod_name progMethods props m
 
 /-- **Shape derivation — both `hPublicSingleton` and `hStackBody`.**
 
@@ -4386,7 +4388,8 @@ theorem peepholeProgram_single_public_shape
     rw [hLowMethods]; rfl
   -- The lowered method's name is `anfM.name`, which is not "constructor",
   -- so `isPublicStackMethod` holds on the post-peephole method.
-  have hPubName : (peepholedLoweredMethod p anfM).name = anfM.name := rfl
+  have hPubName : (peepholedLoweredMethod p anfM).name = anfM.name :=
+    Lower.lowerMethod_name p.methods p.properties anfM
   have hIsPublic : Emit.isPublicStackMethod (peepholedLoweredMethod p anfM) = true := by
     unfold Emit.isPublicStackMethod
     rw [hPubName]
@@ -7544,7 +7547,11 @@ theorem lowerMethod_ops_passthrough
     (hBody : anfM.body = [ANFBinding.mk bn (.loadParam x) src])
     (hPub : anfM.isPublic = true) :
     (Lower.lowerMethod progMethods props anfM).ops = [] := by
-  unfold Lower.lowerMethod
+  -- N-007: the body never deserializes state, so the parameter shadow-rename
+  -- is the identity and `lowerMethod` is `lowerMethodCore`.
+  rw [Lower.lowerMethod_of_noDeserialize progMethods props anfM (by
+    rw [hBody]; simp [Lower.bindingsUseDeserializeState])]
+  unfold Lower.lowerMethodCore
   rw [hParams, hBody, hPub]
   have hWit : Lower.lowerValueP progMethods props Lower.defaultInlineBudget 0
       (Lower.computeLastUses [ANFBinding.mk bn (.loadParam x) src]) [] [bn]
@@ -7600,7 +7607,8 @@ private theorem filter_isPublic_map_peeped
       have hmName : m.name ≠ "constructor" := hNames m (List.mem_cons_self ..)
       have hIsPub : Emit.isPublicStackMethod (peepholedLoweredMethod p m) = true := by
         unfold Emit.isPublicStackMethod
-        have hN : (peepholedLoweredMethod p m).name = m.name := rfl
+        have hN : (peepholedLoweredMethod p m).name = m.name :=
+          Lower.lowerMethod_name p.methods p.properties m
         rw [hN]
         exact bne_iff_ne.mpr hmName
       simp only [List.map_cons, List.filter, hIsPub]

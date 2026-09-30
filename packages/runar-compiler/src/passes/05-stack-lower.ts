@@ -2536,6 +2536,13 @@ class LoweringContext {
     // `checkPreimage` inside an if-branch emits a stray per-method separator,
     // which executes AFTER the script-level one and re-narrows `scriptCode`.
     thenCtx.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
+    // N-007 / issue #130: the arm's cloned stack carries the parent's reserved
+    // `__param_<name>` slot for a param that shadows a mutable property, so the
+    // arm must resolve `load_param` through the same map. A fresh context
+    // starts with it EMPTY, and the arm then read the same-named deserialized
+    // PROPERTY slot — the stale on-chain state — in place of the caller's
+    // witness argument.
+    for (const [param, slot] of this.renamedParams) thenCtx.renamedParams.set(param, slot);
     thenCtx._insideBranch = true;
     thenCtx.lowerBindings(thenBindings, terminalAssert);
 
@@ -2572,6 +2579,7 @@ class LoweringContext {
     elseCtx.stackMap = this.stackMap.clone();
     elseCtx.outerProtectedRefs = protectedRefs;
     elseCtx.scriptLevelCodeSeparator = this.scriptLevelCodeSeparator;
+    for (const [param, slot] of this.renamedParams) elseCtx.renamedParams.set(param, slot); // N-007, see thenCtx
     elseCtx._insideBranch = true;
     elseCtx.lowerBindings(elseBindings, terminalAssert);
 

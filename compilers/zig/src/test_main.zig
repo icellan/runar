@@ -49,6 +49,7 @@ test {
     _ = @import("tests/n051_branch_arm_private_helper.zig");
     _ = @import("tests/r072_method_scope_branch_arm.zig");
     _ = @import("tests/n079_inlined_param_alias_branch_arm.zig");
+    _ = @import("tests/n007_param_shadow_branch_arm.zig");
     _ = @import("tests/r297_lowering_allocation_failures.zig");
     _ = @import("tests/private_varlen_state_read.zig");
     _ = @import("tests/sig_state_varlen.zig");

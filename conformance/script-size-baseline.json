@@ -57,6 +57,7 @@
     "p384-encode-negate": 3278,
     "p384-primitives": 1887254,
     "p384-wallet": 1963362,
+    "param-shadow-branch-arm": 715,
     "post-quantum-slhdsa": 188582,
     "post-quantum-slhdsa-128f": 533851,
     "post-quantum-slhdsa-192f": 787979,

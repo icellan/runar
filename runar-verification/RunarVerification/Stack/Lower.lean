@@ -5527,7 +5527,106 @@ def bindingsUseDeserializeState : List ANFBinding → Bool
         | _                   => false
       here || bindingsUseDeserializeState rest
 
-def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod) : StackMethod :=
+/-! ### N-007 — a public-method parameter that shadows a MUTABLE property
+
+`deserializeState` (and `updateProp`) put each mutable property on the stack
+under its own name. A public-method parameter with the same name would then
+lose every name lookup to the shallower property slot, and `loadParam` would
+read the stale on-chain state instead of the caller's argument. The TS
+reference (issue #130, `05-stack-lower.ts` `LoweringContext` constructor)
+renames such a parameter's slot to `__param_<name>` and resolves every
+`load_param` of it through that map; N-007 made every if-arm context resolve
+through the same map, which is where the compilers used to fail open (an
+in-arm guard on the argument checked the on-chain state instead).
+
+The model does the same thing as one alpha-renaming of the method before
+lowering: the colliding parameter becomes `__param_<name>` in the parameter
+list AND in every `loadParam` of the body, including nested `if` arms and
+`loop` bodies. A parameter's name is not part of the program, so the renamed
+method is the same program, and it lowers to the stack layout TS builds
+(param slot `__param_<name>`, property slot `<name>`). A method with no
+colliding parameter is returned unchanged (`shadowRenameMethod_of_noShadow`).
+
+The rename is gated on the body deserializing state as well. That is the
+exact trigger condition on every program the frontends produce: TS
+`04-anf-lower.ts` injects `deserialize_state` into EVERY public method of a
+stateful contract that has a mutable property, and a contract without one has
+nothing for a parameter to collide with. It keeps the rename out of every
+state-free lowering (`shadowRenameMethod_of_noDeserialize`). Known residual
+divergence, reachable only through hand-written `--ir`: a colliding
+parameter in a body that writes the property (`updateProp`) without ever
+deserializing it is lowered unrenamed here but renamed by TS. -/
+
+/-- `n` names a MUTABLE property (the only kind `deserializeState` /
+`updateProp` put on the stack). -/
+def shadowsMutableProp (props : List ANFProperty) (n : String) : Bool :=
+  props.any (fun q => !q.readonly && q.name == n)
+
+/-- The stack-slot name of method parameter `n`: `__param_<n>` when it
+collides with a mutable property, else `n` itself. -/
+def shadowParamSlot (props : List ANFProperty) (n : String) : String :=
+  if shadowsMutableProp props n then "__param_" ++ n else n
+
+mutual
+
+/-- Rename every `loadParam n` of one of `params` through `shadowParamSlot`,
+recursing into `if` arms and `loop` bodies. -/
+def renameShadowParamsValue (props : List ANFProperty) (params : List String) :
+    ANFValue → ANFValue
+  | .loadParam n =>
+      .loadParam (if params.contains n then shadowParamSlot props n else n)
+  | .ifVal cond thn els results =>
+      .ifVal cond (renameShadowParamsBindings props params thn)
+        (renameShadowParamsBindings props params els) results
+  | .loop count body iterVar start step =>
+      .loop count (renameShadowParamsBindings props params body) iterVar start step
+  | v => v
+
+def renameShadowParamsBindings (props : List ANFProperty) (params : List String) :
+    List ANFBinding → List ANFBinding
+  | [] => []
+  | (.mk n v src) :: rest =>
+      .mk n (renameShadowParamsValue props params v) src
+        :: renameShadowParamsBindings props params rest
+
+end
+
+/-- The method `lowerMethod` actually lowers: `m` itself when no parameter
+shadows a mutable property, else `m` with those parameters alpha-renamed to
+their `__param_<name>` slot (N-007). -/
+def shadowRenameMethod (props : List ANFProperty) (m : ANFMethod) : ANFMethod :=
+  if bindingsUseDeserializeState m.body
+      && m.params.any (fun q => shadowsMutableProp props q.name) then
+    { m with
+      params := m.params.map (fun q => { q with name := shadowParamSlot props q.name })
+      body := renameShadowParamsBindings props (m.params.map (·.name)) m.body }
+  else m
+
+theorem shadowRenameMethod_of_noShadow (props : List ANFProperty) (m : ANFMethod)
+    (h : m.params.any (fun q => shadowsMutableProp props q.name) = false) :
+    shadowRenameMethod props m = m := by
+  unfold shadowRenameMethod
+  simp [h]
+
+theorem shadowRenameMethod_of_noDeserialize (props : List ANFProperty) (m : ANFMethod)
+    (h : bindingsUseDeserializeState m.body = false) :
+    shadowRenameMethod props m = m := by
+  unfold shadowRenameMethod
+  simp [h]
+
+theorem shadowRenameMethod_name (props : List ANFProperty) (m : ANFMethod) :
+    (shadowRenameMethod props m).name = m.name := by
+  unfold shadowRenameMethod
+  split <;> rfl
+
+theorem shadowRenameMethod_isPublic (props : List ANFProperty) (m : ANFMethod) :
+    (shadowRenameMethod props m).isPublic = m.isPublic := by
+  unfold shadowRenameMethod
+  split <;> rfl
+
+/-- The lowering of one public method proper; `lowerMethod` applies it to the
+N-007 alpha-renamed method. -/
+def lowerMethodCore (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod) : StackMethod :=
   -- Initial stack map: parameter names in declaration order, top = last param.
   -- For methods that call `check_preimage`, the unlocking script pushes ONE
   -- implicit param before the user-visible params (BUG-100: the OP_PUSH_TX
@@ -5647,6 +5746,30 @@ def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : A
     ops := ops
     maxStackDepth := 0
     needsCodeSeparator := scriptLevel }
+
+/-- Lower one public method. N-007: a parameter that shadows a mutable
+property is first alpha-renamed to its `__param_<name>` slot
+(`shadowRenameMethod`), so `loadParam` reaches the caller's argument, not the
+same-named property slot, at top level and inside every `if` arm and loop
+body. `lowerMethodCore` is the lowering itself. -/
+def lowerMethod (progMethods : List ANFMethod) (props : List ANFProperty) (m : ANFMethod) : StackMethod :=
+  lowerMethodCore progMethods props (shadowRenameMethod props m)
+
+theorem lowerMethod_name (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) : (lowerMethod progMethods props m).name = m.name :=
+  shadowRenameMethod_name props m
+
+theorem lowerMethod_of_noShadow (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) (h : m.params.any (fun q => shadowsMutableProp props q.name) = false) :
+    lowerMethod progMethods props m = lowerMethodCore progMethods props m := by
+  unfold lowerMethod
+  rw [shadowRenameMethod_of_noShadow props m h]
+
+theorem lowerMethod_of_noDeserialize (progMethods : List ANFMethod) (props : List ANFProperty)
+    (m : ANFMethod) (h : bindingsUseDeserializeState m.body = false) :
+    lowerMethod progMethods props m = lowerMethodCore progMethods props m := by
+  unfold lowerMethod
+  rw [shadowRenameMethod_of_noDeserialize props m h]
 
 /-- Drop per-method `OP_CODESEPARATOR` once the contract hoists a script-level
 separator. TS threads that flag through the lowering context so a

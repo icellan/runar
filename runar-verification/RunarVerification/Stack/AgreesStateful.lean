@@ -219,7 +219,11 @@ theorem lowerMethod_ops_statefulPrologue
     (hPub : anfM.isPublic = true)
     (hne1 : pre ≠ "_cp0") (hneCode : pre ≠ "_codePart") :
     (Lower.lowerMethod progMethods props anfM).ops = statefulPrologueOps := by
-  unfold Lower.lowerMethod
+  -- N-007: the body never deserializes state, so the parameter
+  -- shadow-rename is the identity and `lowerMethod` is `lowerMethodCore`.
+  rw [Lower.lowerMethod_of_noDeserialize progMethods props anfM (by
+    rw [hBody]; simp [StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody, Lower.bindingsUseDeserializeState])]
+  unfold Lower.lowerMethodCore
   rw [hParams, hBody, hPub]
   simp only [List.map_cons, List.map_nil, List.reverse_cons, List.reverse_nil,
     List.nil_append]
@@ -598,7 +602,11 @@ theorem lowerMethod_ops_statefulFull
     (hPCp : pre ≠ "_codePart")
     (hVA : stateVal ≠ "_acc") (hSA : sats ≠ "_acc") :
     (Lower.lowerMethod progMethods props anfM).ops = statefulFullOps := by
-  unfold Lower.lowerMethod
+  -- N-007: the body never deserializes state, so the parameter
+  -- shadow-rename is the identity and `lowerMethod` is `lowerMethodCore`.
+  rw [Lower.lowerMethod_of_noDeserialize progMethods props anfM (by
+    rw [hBody]; simp [statefulFullBody, StatefulBridge.gatedStatefulPrologueBody, AgreesD2.statefulPrologueBody, AgreesD2.statefulEpilogueBody, Lower.bindingsUseDeserializeState])]
+  unfold Lower.lowerMethodCore
   rw [hParams, hBody, hPub]
   simp only [List.map_cons, List.map_nil, List.reverse_cons, List.reverse_nil,
     List.nil_append, List.cons_append]

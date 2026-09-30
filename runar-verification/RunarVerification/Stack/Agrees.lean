@@ -13778,7 +13778,10 @@ theorem lowerMethod_ops_eq_userRaw_no_implicits_no_post
   -- repeated-operand fix), so `hNoTerminalAssert` alone kills both the
   -- terminal-assert elision and the NIP epilogue; `_hNoDeserialize` is
   -- retained for caller compatibility (it used to gate the epilogue).
-  unfold lowerMethodUserRawOps lowerMethod
+  -- N-007: with no `deserializeState` the parameter shadow-rename is the
+  -- identity, so `lowerMethod` is `lowerMethodCore` on `m` itself.
+  rw [Stack.Lower.lowerMethod_of_noDeserialize progMethods props m _hNoDeserialize]
+  unfold lowerMethodUserRawOps Stack.Lower.lowerMethodCore
   simp [hNoPreimage, hNoTerminalAssert]
 
 /-- If `m` is the unique public method in `methods` with its name, then
@@ -13862,6 +13865,12 @@ theorem findMethod_lower_public_unique
       = some (lowerMethod methods props m) := by
   unfold StackProgram.findMethod Stack.Lower.lower
   rw [List.find?_map]
+  -- N-007: `lowerMethod` keeps the method name only propositionally now.
+  have hComp : ((fun x : StackMethod => x.name == m.name) ∘ lowerMethod methods props)
+      = (fun a : ANFMethod => a.name == m.name) := by
+    funext a
+    simp only [Function.comp_def, Stack.Lower.lowerMethod_name]
+  simp only [hComp]
   change Option.map (lowerMethod methods props)
       ((methods.filter (fun x => x.isPublic)).find?
         (fun a => a.name == m.name))
@@ -13925,7 +13934,7 @@ theorem runMethod_lower_public_head
         m.name initialStack
       = runOps (lowerMethod (m :: rest) props m).ops initialStack := by
   have hHeadName : ((lowerMethod (m :: rest) props m).name == m.name) = true := by
-    unfold lowerMethod
+    rw [Stack.Lower.lowerMethod_name]
     exact BEq.rfl
   unfold Stack.Eval.runMethod StackProgram.bodyOf StackProgram.findMethod Stack.Lower.lower
   simp [hPublic, hHeadName]

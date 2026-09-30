@@ -5066,6 +5066,15 @@ const LowerCtx = struct {
         then_ctx.in_branch = true;
         then_ctx.copy_ref_aliases = self.copy_ref_aliases;
         then_ctx.script_level_code_separator = self.script_level_code_separator;
+        // N-007 / issue #130: the arm's cloned stack carries the parent's
+        // reserved `__param_<name>` slot for a param that shadows a mutable
+        // property, so the arm must resolve load_param through the same map.
+        // LowerCtx.init starts with it EMPTY, and the arm then read the
+        // same-named deserialized PROPERTY slot -- the stale on-chain state --
+        // in place of the caller's witness argument. The map's keys and values
+        // are owned by the program / the parent's owned_push_data, so a shallow
+        // clone is enough.
+        then_ctx.renamed_params = try self.renamed_params.clone(self.allocator);
         then_ctx.max_depth = self.max_depth;
         then_ctx.outer_protected_refs = &protected_refs;
         try then_ctx.lowerBindings(ie.then_bindings, terminal_assert);
@@ -5087,6 +5096,7 @@ const LowerCtx = struct {
         else_ctx.in_branch = true;
         else_ctx.copy_ref_aliases = self.copy_ref_aliases;
         else_ctx.script_level_code_separator = self.script_level_code_separator;
+        else_ctx.renamed_params = try self.renamed_params.clone(self.allocator); // N-007, see then_ctx
         else_ctx.max_depth = self.max_depth;
         else_ctx.outer_protected_refs = &protected_refs;
         const else_bindings = ie.else_bindings orelse &.{};

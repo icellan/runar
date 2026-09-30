@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-09-27T12:00:04.306Z",
+  "generatedAt": "2026-09-29T21:23:26.322Z",
   "summary": {
-    "byte-match": 88,
+    "byte-match": 89,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
     "skipped": 6
   },
   "pathBreakdown": {
-    "template": 83,
+    "template": 84,
     "assert-recognizer": 1,
     "symexec": 0,
     "raw_script": 4
@@ -306,6 +306,11 @@
     },
     {
       "id": "p384-wallet/P384Wallet",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "param-shadow-branch-arm/ParamShadowBranchArm",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

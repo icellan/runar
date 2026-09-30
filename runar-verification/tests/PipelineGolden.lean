@@ -563,14 +563,20 @@ byte-identical output. Adding the missing `.tr` twins made both re-derive at the
 stock 8 MB stack, and the re-derived bytes matched the stored constants exactly —
 the constants had been honest all along.
 -/
+-- 2026-09-30 (N-007): the model fingerprint moved to
+-- v1:63f:7159999b:211b18f0409da6ba (Stack/Lower.lean gained the parameter
+-- shadow-rename). The three `.regenLive` anchors (babybear, merkle-proof,
+-- state-covenant) were re-derived by a live `compileHexSafe` of their
+-- expected-ir.json under the new model; each byte-equals both its stored
+-- constant and its expected-script.hex, so only their fingerprints move.
 def cryptoAxiomPendingProvenance : List AnchorProvenance := [
-  ⟨"babybear", .regenLive, "v1:63f:7151351b:1649067847d8b106"⟩,
+  ⟨"babybear", .regenLive, "v1:63f:7159999b:211b18f0409da6ba"⟩,
   ⟨"babybear-ext4",                 .inert,     modelFingerprintAdopted⟩,
   ⟨"convergence-proof",        .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-demo",                  .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-primitives",            .inert,     modelFingerprintAdopted⟩,
   ⟨"ec-unit",                  .inert,     modelFingerprintAdopted⟩,
-  ⟨"merkle-proof", .regenLive, "v1:63f:7151351b:1649067847d8b106"⟩,
+  ⟨"merkle-proof", .regenLive, "v1:63f:7159999b:211b18f0409da6ba"⟩,
   -- p256/p384: `.regenLive` from 2026-07-28 (promoted from `.inherited` once
   -- the Peephole tail-recursion fix let live `compileHex` finish at the stock
   -- 8 MB stack). Demoted to `.inert` on 2026-08-11: the stored constants no
@@ -593,7 +599,7 @@ def cryptoAxiomPendingProvenance : List AnchorProvenance := [
   ⟨"post-quantum-slhdsa-256s", .inert,     modelFingerprintAdopted⟩,
   ⟨"schnorr-zkp",              .inert,     modelFingerprintAdopted⟩,
   ⟨"sphincs-wallet",           .inert,     modelFingerprintAdopted⟩,
-  ⟨"state-covenant", .regenLive, "v1:63f:7151351b:1649067847d8b106"⟩
+  ⟨"state-covenant", .regenLive, "v1:63f:7159999b:211b18f0409da6ba"⟩
 ]
 
 /--
@@ -718,7 +724,11 @@ number. It is pinned from both sides:
 -- restamped `auction`; every affected baseline fixture still byte-matches.
 -- `state-covenant`'s stored anchor was re-derived by a live
 -- RUNAR_VERIFICATION_REGEN=1 run whose hex byte-equals the F-024 golden.
-def expectedByteExact : Nat := 65
+--
+-- 2026-09-30 (N-007, measured): N-007 added `param-shadow-branch-arm`
+-- (byte-exact, baselineMatches) once Stack/Lower.lean gained the parameter
+-- shadow-rename: 66 = baselineMatches (63) + (21 - 18).
+def expectedByteExact : Nat := 66
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -730,8 +740,9 @@ cannot disagree with the bucket inventory) and enforced with `=` in `main` (so a
 fixture that stops parsing, or one that is added on disk, fails loudly).
 
 2026-09-29 (N-037): 82 -> 83 for N-016's `property-shadow` fixture.
+2026-09-30 (N-007): 83 -> 84 for N-007's `param-shadow-branch-arm` fixture.
 -/
-def expectedFixtureTotal : Nat := 83
+def expectedFixtureTotal : Nat := 84
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -779,6 +790,7 @@ def baselineMatches : List String := [
   "oversize-bigint-shift",
   "p256-encode-negate",
   "p384-encode-negate",
+  "param-shadow-branch-arm",
   "post-quantum-wallet",
   "post-quantum-wots",
   "private-helper-outputs",
@@ -1121,7 +1133,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 83 := by rfl
+        + lowerDivergencePending.length = 84 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

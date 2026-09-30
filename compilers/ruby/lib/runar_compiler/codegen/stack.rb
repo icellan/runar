@@ -754,7 +754,9 @@ module RunarCompiler::Codegen
                   # R-010: true when the emitter supplies the script-level
                   # OP_CODESEPARATOR, so _lower_check_preimage must not emit
                   # its own.
-                  :script_level_code_separator
+                  :script_level_code_separator,
+                  # N-007: copied into each if-arm context (see _lower_if).
+                  :renamed_params
 
     # OP_PUSH_TX on-chain signature derivation (BUG-100 fix).
     #
@@ -2363,6 +2365,13 @@ module RunarCompiler::Codegen
       # checkPreimage inside an if-branch emits a stray per-method separator,
       # which executes AFTER the script-level one and re-narrows scriptCode.
       then_ctx.script_level_code_separator = @script_level_code_separator
+      # N-007 / issue #130: the arm's cloned stack carries the parent's reserved
+      # `__param_<name>` slot for a param that shadows a mutable property, so the
+      # arm must resolve load_param through the same map. A fresh context starts
+      # with it EMPTY, and the arm then read the same-named deserialized PROPERTY
+      # slot -- the stale on-chain state -- in place of the caller's witness
+      # argument.
+      then_ctx.renamed_params = @renamed_params.dup
       then_ctx.lower_bindings(then_bindings, terminal_assert)
 
       then_ctx.drain_branch_private_residue(pre_if_names)
@@ -2382,6 +2391,7 @@ module RunarCompiler::Codegen
       else_ctx.inside_branch = true
       else_ctx.private_methods = @private_methods
       else_ctx.script_level_code_separator = @script_level_code_separator
+      else_ctx.renamed_params = @renamed_params.dup # N-007, see then_ctx above
       else_ctx.lower_bindings(else_bindings, terminal_assert)
 
       else_ctx.drain_branch_private_residue(pre_if_names)

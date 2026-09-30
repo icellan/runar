@@ -2312,6 +2312,15 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	// are source-level substitution (spec/semantics.md §6.3), which stack
 	// lowering performs; an arm is not a different scope for that.
 	thenCtx.privateMethods = ctx.privateMethods
+	// N-007 / issue #130: the arm's cloned stack carries the parent's reserved
+	// `__param_<name>` slot for a param that shadows a mutable property, so the
+	// arm must resolve load_param through the same map. newLoweringContext
+	// starts with it EMPTY, and the arm then read the same-named deserialized
+	// PROPERTY slot — the stale on-chain state — in place of the caller's
+	// witness argument.
+	for param, slot := range ctx.renamedParams {
+		thenCtx.renamedParams[param] = slot
+	}
 	thenCtx.insideBranch = true
 	thenCtx.lowerBindings(thenBindings, ta)
 
@@ -2331,6 +2340,10 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.scriptLevelCodeSeparator = ctx.scriptLevelCodeSeparator
 	elseCtx.privateMethods = ctx.privateMethods // N-051, see thenCtx above
+	// N-007, see thenCtx above.
+	for param, slot := range ctx.renamedParams {
+		elseCtx.renamedParams[param] = slot
+	}
 	elseCtx.insideBranch = true
 	elseCtx.lowerBindings(elseBindings, ta)
 

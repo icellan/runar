@@ -1,0 +1,63 @@
+{
+  "fixture": "param-shadow-branch-arm",
+  "kind": "stateful",
+  "signerKey": "alice",
+  "note": "N-007. `set(count, flag)` names its parameter like the mutable property `count` and reads it inside an `if` arm: `if (flag) { assert(count == 5n); } this.count = count;`. Before N-007 the TS, Go, Rust, Zig and Ruby tiers lowered the arm in a fresh context that lost the parameter's reserved `__param_count` slot mapping, so the arm read the deserialized on-chain state (OP_DUP of count) instead of the witness argument: with state 5, set(7, true) was ACCEPTED. Expected verdicts are derived by hand from the source.",
+  "constructorArgs": [
+    "5n"
+  ],
+  "spends": [
+    {
+      "method": "set",
+      "args": [
+        "5n",
+        true
+      ],
+      "expect": "accept",
+      "note": "honest: flag set, argument 5 == 5; commits count = 5",
+      "satoshis": 1000,
+      "expectedState": {
+        "count": "5n"
+      }
+    },
+    {
+      "method": "set",
+      "args": [
+        "7n",
+        true
+      ],
+      "expect": "reject",
+      "note": "ATTACK / business near-miss: flag set, argument 7 != 5. The pre-fix TS/Go/Rust/Zig/Ruby script compared the on-chain state (5) instead and ACCEPTED this, committing count = 7.",
+      "satoshis": 1000
+    },
+    {
+      "method": "set",
+      "args": [
+        "7n",
+        false
+      ],
+      "expect": "accept",
+      "note": "skip-arm control: flag clear, the guard does not run; commits count = 7",
+      "satoshis": 1000,
+      "expectedState": {
+        "count": "7n"
+      }
+    },
+    {
+      "method": "set",
+      "args": [
+        "5n",
+        true
+      ],
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered continuation output — the count written after the arm must be committed to by hashOutputs",
+      "satoshis": 1000
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "de534878eb1a81713f007e357958ea9631bf4443420372f5f7e31e13fa859101",
+    "expected-ir.json": "cfb98d281a5f04b70bac293255a6423732da82c28779312e0ac5d0c6743f42d8"
+  }
+}

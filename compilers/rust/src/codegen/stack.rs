@@ -2420,6 +2420,13 @@ impl LoweringContext {
         // that guard, silently emitted a constant-0 placeholder instead. An arm
         // is not a different scope for inlining.
         then_ctx.private_methods = self.private_methods.clone();
+        // N-007 / issue #130: the arm's cloned stack carries the parent's
+        // reserved `__param_<name>` slot for a param that shadows a mutable
+        // property, so the arm must resolve `load_param` through the same map.
+        // `LoweringContext::new` starts with it EMPTY, and the arm then read
+        // the same-named deserialized PROPERTY slot — the stale on-chain state
+        // — in place of the caller's witness argument.
+        then_ctx.renamed_params = self.renamed_params.clone();
         then_ctx.inside_branch = true;
         then_ctx.lower_bindings(then_bindings, terminal_assert);
 
@@ -2439,6 +2446,7 @@ impl LoweringContext {
         else_ctx.outer_protected_refs = Some(protected_refs);
         else_ctx.script_level_code_separator = self.script_level_code_separator;
         else_ctx.private_methods = self.private_methods.clone(); // N-051, see then_ctx above
+        else_ctx.renamed_params = self.renamed_params.clone(); // N-007, see then_ctx above
         else_ctx.inside_branch = true;
         else_ctx.lower_bindings(else_bindings, terminal_assert);
 
