@@ -792,29 +792,75 @@ func (p *parseContext) parseBlockStatements(node *sitter.Node) []Statement {
 }
 
 func (p *parseContext) parseStatement(node *sitter.Node) Statement {
+	errsBefore := len(p.errors)
+	var stmt Statement
 	switch node.Type() {
 	case "lexical_declaration":
-		return p.parseVariableDecl(node)
+		stmt = p.parseVariableDecl(node)
 
 	case "expression_statement":
-		return p.parseExpressionStatement(node)
+		stmt = p.parseExpressionStatement(node)
 
 	case "if_statement":
-		return p.parseIfStatement(node)
+		stmt = p.parseIfStatement(node)
 
 	case "for_statement":
-		return p.parseForStatement(node)
+		stmt = p.parseForStatement(node)
 
 	case "return_statement":
-		return p.parseReturnStatement(node)
+		stmt = p.parseReturnStatement(node)
 
 	case "{", "}", "(", ")", ";", ",", "comment":
 		return nil
 
 	default:
-		// Skip unknown node types silently (e.g., punctuation)
+		// F-064: every other node is a statement Rúnar does not support
+		// (while, switch, try, a bare block, `;`, ...). Returning nil here
+		// used to drop it silently; refuse it with the TS reference's
+		// diagnostic instead.
+		loc := p.loc(node)
+		p.errors = append(p.errors, MakeDiagnostic(
+			fmt.Sprintf("Unsupported statement kind: %s", p.tsStatementKindName(node)),
+			SeverityError, &loc))
 		return nil
 	}
+	// F-064 backstop: callers drop a nil statement, so a supported statement
+	// kind whose operands did not parse (e.g. `assert(a), assert(b);` — the
+	// expression parser returns nil for a sequence_expression) must not vanish
+	// without a diagnostic.
+	if stmt == nil && len(p.errors) == errsBefore {
+		loc := p.loc(node)
+		p.errors = append(p.errors, MakeDiagnostic(
+			fmt.Sprintf("Unsupported expression in statement: '%s'", p.snippet(node)),
+			SeverityError, &loc))
+	}
+	return stmt
+}
+
+// tsStatementKindName maps a tree-sitter statement node type onto the
+// ts.SyntaxKind name the TS reference reports for the same statement, so every
+// tier emits one shared "Unsupported statement kind: <name>" diagnostic.
+func (p *parseContext) tsStatementKindName(node *sitter.Node) string {
+	switch node.Type() {
+	case "statement_block":
+		return "Block"
+	case "for_in_statement":
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if node.Child(i).Type() == "of" {
+				return "ForOfStatement"
+			}
+		}
+		return "ForInStatement"
+	}
+	// snake_case -> PascalCase: while_statement -> WhileStatement,
+	// class_declaration -> ClassDeclaration, empty_statement -> EmptyStatement.
+	parts := strings.Split(node.Type(), "_")
+	for i, part := range parts {
+		if part != "" {
+			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 // ---------------------------------------------------------------------------

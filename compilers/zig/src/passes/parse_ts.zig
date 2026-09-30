@@ -1127,8 +1127,8 @@ const Parser = struct {
         if (self.expect(.lbrace) == null) return &.{};
         var stmts: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
-            self.skipSemicolons();
-            if (self.current.kind == .rbrace or self.current.kind == .eof) break;
+            // F-064: a stray `;` is an EmptyStatement, refused by
+            // parseStatement -- no longer swallowed here.
             if (self.parseStatement()) |s| stmts.append(self.allocator, s) catch {};
         }
         _ = self.expect(.rbrace);
@@ -1138,6 +1138,15 @@ const Parser = struct {
     // ---- Statements ----
 
     fn parseStatement(self: *Parser) ?Statement {
+        // F-064: refuse every statement kind outside spec/grammar.md §9 with
+        // the TS reference's diagnostic instead of falling through to the
+        // expression parser (or silently skipping a `;`).
+        if (self.unsupportedStatementKind()) |kind| {
+            self.addErrorFmt("Unsupported statement kind: {s}", .{kind});
+            self.skipUnsupportedStatement();
+            return null;
+        }
+
         // Variable declarations: const, let
         if (self.checkIdent("const")) return self.parseVarDecl(false);
         if (self.checkIdent("let")) return self.parseVarDecl(true);
@@ -1153,6 +1162,74 @@ const Parser = struct {
 
         // Expression statement (including assignments and calls)
         return self.parseExpressionStatement();
+    }
+
+    /// F-064: statement keywords the TS reference refuses, mapped to the
+    /// ts.SyntaxKind name its "Unsupported statement kind" diagnostic reports.
+    const unsupported_statement_keywords = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "while", "WhileStatement" },
+        .{ "do", "DoStatement" },
+        .{ "switch", "SwitchStatement" },
+        .{ "try", "TryStatement" },
+        .{ "throw", "ThrowStatement" },
+        .{ "debugger", "DebuggerStatement" },
+        .{ "with", "WithStatement" },
+        .{ "class", "ClassDeclaration" },
+        .{ "function", "FunctionDeclaration" },
+        .{ "break", "BreakStatement" },
+        .{ "continue", "ContinueStatement" },
+    });
+
+    /// The ts.SyntaxKind name of an unsupported statement starting at
+    /// `current`, or null. Looks ahead on a COPY of the tokenizer.
+    fn unsupportedStatementKind(self: *const Parser) ?[]const u8 {
+        switch (self.current.kind) {
+            .semicolon => return "EmptyStatement",
+            .lbrace => return "Block",
+            .ident => {},
+            else => return null,
+        }
+        if (unsupported_statement_keywords.get(self.current.text)) |kind| return kind;
+        var ahead = self.tokenizer;
+        const n1 = ahead.next();
+        if (n1.kind == .colon) return "LabeledStatement";
+        if (std.mem.eql(u8, self.current.text, "for") and n1.kind == .lparen) {
+            // for (const|let <name> in|of ...)
+            const n2 = ahead.next();
+            const n3 = ahead.next();
+            const n4 = ahead.next();
+            const is_decl = n2.kind == .ident and (std.mem.eql(u8, n2.text, "const") or
+                std.mem.eql(u8, n2.text, "let") or std.mem.eql(u8, n2.text, "var"));
+            if (is_decl and n3.kind == .ident and n4.kind == .ident) {
+                if (std.mem.eql(u8, n4.text, "in")) return "ForInStatement";
+                if (std.mem.eql(u8, n4.text, "of")) return "ForOfStatement";
+            }
+        }
+        return null;
+    }
+
+    /// Consume a refused statement: tokens up to a `;` or a closing brace at
+    /// nesting depth 0, stopping before a `}` that closes the enclosing block.
+    fn skipUnsupportedStatement(self: *Parser) void {
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            switch (self.current.kind) {
+                .lbrace, .lparen, .lbracket => depth += 1,
+                .rbrace, .rparen, .rbracket => {
+                    if (depth == 0) return;
+                    depth -= 1;
+                    const closed = self.bump();
+                    if (depth == 0 and closed.kind == .rbrace) return;
+                    continue;
+                },
+                .semicolon => if (depth == 0) {
+                    _ = self.bump();
+                    return;
+                },
+                else => {},
+            }
+            _ = self.bump();
+        }
     }
 
     fn parseVarDecl(self: *Parser, mutable: bool) ?Statement {
@@ -1176,7 +1253,7 @@ const Parser = struct {
         // Initializer
         if (self.expect(.assign) == null) return null;
         const val = self.parseExpression() orelse return null;
-        self.skipSemicolons();
+        if (self.current.kind == .semicolon) _ = self.bump(); // F-064: one terminator; a second `;` is an EmptyStatement
 
         if (mutable) {
             return .{ .let_decl = .{ .name = name_tok.text, .type_info = ti, .value = val, .source_loc = loc } };
@@ -1357,7 +1434,7 @@ const Parser = struct {
         }
 
         const expr = self.parseExpression();
-        self.skipSemicolons();
+        if (self.current.kind == .semicolon) _ = self.bump(); // F-064: one terminator; a second `;` is an EmptyStatement
         return .{ .return_stmt = expr };
     }
 
@@ -1372,7 +1449,7 @@ const Parser = struct {
         if (self.current.kind == .assign) {
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
-            self.skipSemicolons();
+            if (self.current.kind == .semicolon) _ = self.bump(); // F-064: one terminator; a second `;` is an EmptyStatement
             // Extract assignment target name
             return self.buildAssignment(expr, rhs, loc);
         }
@@ -1382,13 +1459,13 @@ const Parser = struct {
             const op_kind = self.current.kind;
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
-            self.skipSemicolons();
+            if (self.current.kind == .semicolon) _ = self.bump(); // F-064: one terminator; a second `;` is an EmptyStatement
             const bin_op = binOpFromCompoundAssign(op_kind);
             const compound_rhs = self.makeBinaryExpr(bin_op, expr, rhs) orelse return null;
             return self.buildAssignment(expr, compound_rhs, loc);
         }
 
-        self.skipSemicolons();
+        if (self.current.kind == .semicolon) _ = self.bump(); // F-064: one terminator; a second `;` is an EmptyStatement
         return .{ .expr_stmt = .{ .expr = expr, .source_loc = loc } };
     }
 

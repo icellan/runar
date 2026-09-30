@@ -99,6 +99,23 @@ public final class TsParser {
     // Token kinds (mirror Python TOK_* constants)
     // ---------------------------------------------------------------
 
+    /**
+     * F-064: statement keywords the TS reference refuses, mapped to the
+     * ts.SyntaxKind name its "Unsupported statement kind" diagnostic reports.
+     */
+    private static final java.util.Map<String, String> UNSUPPORTED_STATEMENT_KEYWORDS = java.util.Map.ofEntries(
+        java.util.Map.entry("while", "WhileStatement"),
+        java.util.Map.entry("do", "DoStatement"),
+        java.util.Map.entry("switch", "SwitchStatement"),
+        java.util.Map.entry("try", "TryStatement"),
+        java.util.Map.entry("throw", "ThrowStatement"),
+        java.util.Map.entry("debugger", "DebuggerStatement"),
+        java.util.Map.entry("with", "WithStatement"),
+        java.util.Map.entry("class", "ClassDeclaration"),
+        java.util.Map.entry("function", "FunctionDeclaration"),
+        java.util.Map.entry("break", "BreakStatement"),
+        java.util.Map.entry("continue", "ContinueStatement"));
+
     private static final int TOK_EOF = 0;
     private static final int TOK_IDENT = 1;
     private static final int TOK_NUMBER = 2;
@@ -1059,10 +1076,8 @@ public final class TsParser {
             List<Statement> stmts = new ArrayList<>();
 
             while (!check(TOK_RBRACE) && !check(TOK_EOF)) {
-                skipSemicolons();
-                if (check(TOK_RBRACE) || check(TOK_EOF)) {
-                    break;
-                }
+                // F-064: a stray `;` is an EmptyStatement, refused by
+                // parseStatement -- no longer swallowed here.
                 Statement stmt = parseStatement();
                 if (stmt != null) {
                     stmts.add(stmt);
@@ -1079,6 +1094,16 @@ public final class TsParser {
             SourceLocation location = loc();
             Token tok = peek();
 
+            // F-064: refuse every statement kind outside spec/grammar.md §9
+            // with the TS reference's diagnostic instead of falling through to
+            // the expression parser (or silently skipping a `;`).
+            String unsupported = unsupportedStatementKind();
+            if (unsupported != null) {
+                addError("line " + location.line() + ": Unsupported statement kind: " + unsupported);
+                skipUnsupportedStatement();
+                return null;
+            }
+
             if (tok.kind == TOK_IDENT && (tok.value.equals("const") || tok.value.equals("let"))) {
                 return parseVariableDecl(location);
             }
@@ -1092,6 +1117,55 @@ public final class TsParser {
                 return parseReturn(location);
             }
             return parseExpressionStatement(location);
+        }
+
+        /** The ts.SyntaxKind name of an unsupported statement starting here, or null. */
+        String unsupportedStatementKind() {
+            Token tok = peek();
+            if (tok.kind == TOK_SEMICOLON) return "EmptyStatement";
+            if (tok.kind == TOK_LBRACE) return "Block";
+            if (tok.kind != TOK_IDENT) return null;
+            String kw = UNSUPPORTED_STATEMENT_KEYWORDS.get(tok.value);
+            if (kw != null) return kw;
+            if (peekNextKind() == TOK_COLON) return "LabeledStatement";
+            if (tok.value.equals("for") && pos + 4 < tokens.size()) {
+                // for (const|let <name> in|of ...)
+                Token lp = tokens.get(pos + 1);
+                Token decl = tokens.get(pos + 2);
+                Token name = tokens.get(pos + 3);
+                Token op = tokens.get(pos + 4);
+                boolean isDecl = decl.kind == TOK_IDENT
+                    && (decl.value.equals("const") || decl.value.equals("let") || decl.value.equals("var"));
+                if (lp.kind == TOK_LPAREN && isDecl && name.kind == TOK_IDENT && op.kind == TOK_IDENT) {
+                    if (op.value.equals("in")) return "ForInStatement";
+                    if (op.value.equals("of")) return "ForOfStatement";
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Consume a refused statement: tokens up to a `;` or a closing brace at
+         * nesting depth 0, stopping before a `}` that closes the enclosing block.
+         */
+        void skipUnsupportedStatement() {
+            int depth = 0;
+            while (!check(TOK_EOF)) {
+                Token tok = peek();
+                if (tok.kind == TOK_LBRACE || tok.kind == TOK_LPAREN || tok.kind == TOK_LBRACKET) {
+                    depth++;
+                } else if (tok.kind == TOK_RBRACE || tok.kind == TOK_RPAREN || tok.kind == TOK_RBRACKET) {
+                    if (depth == 0) return;
+                    depth--;
+                    advance();
+                    if (depth == 0 && tok.kind == TOK_RBRACE) return;
+                    continue;
+                } else if (tok.kind == TOK_SEMICOLON && depth == 0) {
+                    advance();
+                    return;
+                }
+                advance();
+            }
         }
 
         Statement parseVariableDecl(SourceLocation locArg) throws ParseException {
@@ -1119,7 +1193,7 @@ public final class TsParser {
                 init = new BigIntLiteral(BigInteger.ZERO);
             }
 
-            skipSemicolons();
+            match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
             return new VariableDeclStatement(varName, typeNode, init, locArg);
         }
 
@@ -1212,7 +1286,7 @@ public final class TsParser {
             if (!check(TOK_SEMICOLON) && !check(TOK_RBRACE) && !check(TOK_EOF)) {
                 value = parseExpression();
             }
-            skipSemicolons();
+            match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
             return new ReturnStatement(value, locArg);
         }
 
@@ -1221,7 +1295,7 @@ public final class TsParser {
 
             if (match(TOK_ASSIGN)) {
                 Expression value = parseExpression();
-                skipSemicolons();
+                match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
                 return new AssignmentStatement(expr, value, locArg);
             }
 
@@ -1233,14 +1307,14 @@ public final class TsParser {
             for (int idx = 0; idx < compoundKinds.length; idx++) {
                 if (match(compoundKinds[idx])) {
                     Expression right = parseExpression();
-                    skipSemicolons();
+                    match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
                     Expression.BinaryOp op = Expression.BinaryOp.fromCanonical(compoundOps[idx]);
                     Expression value = new BinaryExpr(op, expr, right);
                     return new AssignmentStatement(expr, value, locArg);
                 }
             }
 
-            skipSemicolons();
+            match(TOK_SEMICOLON); // F-064: one terminator; a second `;` is an EmptyStatement
             return new ExpressionStatement(expr, locArg);
         }
 

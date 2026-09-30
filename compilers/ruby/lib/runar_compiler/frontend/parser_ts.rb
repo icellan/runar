@@ -1005,9 +1005,8 @@ module RunarCompiler
         stmts = []
 
         while !check(TOK_RBRACE) && !check(TOK_EOF)
-          skip_semicolons
-          break if check(TOK_RBRACE) || check(TOK_EOF)
-
+          # F-064: a stray `;` is an EmptyStatement, refused by
+          # parse_statement -- no longer swallowed here.
           stmt = parse_statement
           stmts << stmt unless stmt.nil?
         end
@@ -1018,9 +1017,39 @@ module RunarCompiler
 
       # -- Statement parsing ------------------------------------------------
 
+      # F-064: statement keywords the TS reference refuses, mapped to the
+      # ts.SyntaxKind name its "Unsupported statement kind" diagnostic reports.
+      UNSUPPORTED_STATEMENT_KEYWORDS = {
+        "while" => "WhileStatement",
+        "do" => "DoStatement",
+        "switch" => "SwitchStatement",
+        "try" => "TryStatement",
+        "throw" => "ThrowStatement",
+        "debugger" => "DebuggerStatement",
+        "with" => "WithStatement",
+        "class" => "ClassDeclaration",
+        "function" => "FunctionDeclaration",
+        "break" => "BreakStatement",
+        "continue" => "ContinueStatement",
+      }.freeze
+
       def parse_statement
         location = loc
         tok = peek
+
+        # F-064: refuse every statement kind outside spec/grammar.md §9 with
+        # the TS reference's diagnostic instead of falling through to the
+        # expression parser (or silently skipping a `;`).
+        unsupported = unsupported_statement_kind
+        unless unsupported.nil?
+          @errors << Diagnostic.new(
+            message: "Unsupported statement kind: #{unsupported}",
+            severity: Severity::ERROR,
+            loc: location
+          )
+          skip_unsupported_statement
+          return nil
+        end
 
         # Variable declarations: const, let
         if tok.kind == TOK_IDENT && (tok.value == "const" || tok.value == "let")
@@ -1046,6 +1075,52 @@ module RunarCompiler
         parse_expression_statement(location)
       end
 
+      # The ts.SyntaxKind name of an unsupported statement starting here.
+      def unsupported_statement_kind
+        tok = peek
+        return "EmptyStatement" if tok.kind == TOK_SEMICOLON
+        return "Block" if tok.kind == TOK_LBRACE
+        return nil unless tok.kind == TOK_IDENT
+        return UNSUPPORTED_STATEMENT_KEYWORDS[tok.value] if UNSUPPORTED_STATEMENT_KEYWORDS.key?(tok.value)
+        return "LabeledStatement" if peek_next_kind == TOK_COLON
+
+        if tok.value == "for"
+          # for (const|let <name> in|of ...)
+          ahead = @tokens[(@pos + 1), 4] || []
+          if ahead.length == 4 && ahead[0].kind == TOK_LPAREN &&
+             ahead[1].kind == TOK_IDENT && %w[const let var].include?(ahead[1].value) &&
+             ahead[2].kind == TOK_IDENT &&
+             ahead[3].kind == TOK_IDENT && %w[in of].include?(ahead[3].value)
+            return ahead[3].value == "in" ? "ForInStatement" : "ForOfStatement"
+          end
+        end
+        nil
+      end
+
+      # Consume a refused statement: tokens up to a `;` or a closing brace at
+      # nesting depth 0, stopping before a `}` that closes the enclosing block.
+      def skip_unsupported_statement
+        depth = 0
+        until check(TOK_EOF)
+          tok = peek
+          if [TOK_LBRACE, TOK_LPAREN, TOK_LBRACKET].include?(tok.kind)
+            depth += 1
+          elsif [TOK_RBRACE, TOK_RPAREN, TOK_RBRACKET].include?(tok.kind)
+            return if depth.zero?
+
+            depth -= 1
+            advance
+            return if depth.zero? && tok.kind == TOK_RBRACE
+
+            next
+          elsif tok.kind == TOK_SEMICOLON && depth.zero?
+            advance
+            return
+          end
+          advance
+        end
+      end
+
       def parse_variable_decl(location)
         keyword = advance # const or let
         is_mutable = keyword.value == "let"
@@ -1065,7 +1140,7 @@ module RunarCompiler
 
         init = BigIntLiteral.new(value: 0) if init.nil?
 
-        skip_semicolons
+        match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
 
         VariableDeclStmt.new(
           name: var_name,
@@ -1190,7 +1265,7 @@ module RunarCompiler
           value = parse_expression
         end
 
-        skip_semicolons
+        match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
         ReturnStmt.new(value: value, source_location: location)
       end
 
@@ -1200,7 +1275,7 @@ module RunarCompiler
         # Check for assignment: expr = value
         if match(TOK_ASSIGN)
           value = parse_expression
-          skip_semicolons
+          match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
           return AssignmentStmt.new(target: expr, value: value, source_location: location)
         end
 
@@ -1215,13 +1290,13 @@ module RunarCompiler
         compound_ops.each do |kind, bin_op|
           if match(kind)
             right = parse_expression
-            skip_semicolons
+            match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
             value = BinaryExpr.new(op: bin_op, left: expr, right: right)
             return AssignmentStmt.new(target: expr, value: value, source_location: location)
           end
         end
 
-        skip_semicolons
+        match(TOK_SEMICOLON) # F-064: one terminator; a second `;` is an EmptyStatement
         ExpressionStmt.new(expr: expr, source_location: location)
       end
 

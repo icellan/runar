@@ -674,11 +674,13 @@ function parseStatements(
 ): Statement[] {
   const result: Statement[] = [];
 
-  // Block can be a Block node or a SourceFile
-  const stmts = blockOrBody.getChildrenOfKind(SyntaxKind.Block).length > 0
-    ? blockOrBody.getFirstChildByKindOrThrow(SyntaxKind.Block).getStatements()
-    : (blockOrBody.isKind(SyntaxKind.Block)
-        ? blockOrBody.getStatements()
+  // F-064: a Block's own statements come first. Probing for a child Block
+  // before checking `isKind(Block)` picked a NESTED bare block `{ ... }` inside
+  // the body and used its statements AS the body, silently dropping the rest.
+  const stmts = blockOrBody.isKind(SyntaxKind.Block)
+    ? blockOrBody.getStatements()
+    : (blockOrBody.getChildrenOfKind(SyntaxKind.Block).length > 0
+        ? blockOrBody.getFirstChildByKindOrThrow(SyntaxKind.Block).getStatements()
         : []);
 
   for (const stmt of stmts) {

@@ -772,23 +772,49 @@ fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<Diagnostic>) -> Opt
 
         Stmt::Return(ret_stmt) => Some(parse_return_statement(ret_stmt, file, errors)),
 
-        Stmt::Block(block) => {
-            // Flatten block statements
-            let stmts = parse_block_stmts(&block.stmts, file, errors);
-            // Return as individual statements by wrapping in a block-like structure
-            // For simplicity, we report an error -- blocks should be part of if/for
-            if stmts.is_empty() {
-                None
-            } else {
-                errors.push(Diagnostic::error("Standalone block statements are not supported; use if/for", None));
-                None
-            }
-        }
-
+        // F-064: every other kind — a bare block `{ ... }` (empty or not)
+        // included — is refused with the TS reference's diagnostic, never
+        // dropped. An empty bare block used to return None with no error.
         _ => {
-            errors.push(Diagnostic::error(format!("Unsupported statement kind: {:?}", stmt), None));
+            errors.push(Diagnostic::error(
+                format!("Unsupported statement kind: {}", ts_statement_kind_name(stmt)),
+                None,
+            ));
             None
         }
+    }
+}
+
+/// The `ts.SyntaxKind` name the TS reference reports for a statement, so every
+/// tier emits one shared "Unsupported statement kind: <name>" diagnostic.
+fn ts_statement_kind_name(stmt: &Stmt) -> &'static str {
+    match stmt {
+        Stmt::Block(_) => "Block",
+        Stmt::Empty(_) => "EmptyStatement",
+        Stmt::Debugger(_) => "DebuggerStatement",
+        Stmt::With(_) => "WithStatement",
+        Stmt::Return(_) => "ReturnStatement",
+        Stmt::Labeled(_) => "LabeledStatement",
+        Stmt::Break(_) => "BreakStatement",
+        Stmt::Continue(_) => "ContinueStatement",
+        Stmt::If(_) => "IfStatement",
+        Stmt::Switch(_) => "SwitchStatement",
+        Stmt::Throw(_) => "ThrowStatement",
+        Stmt::Try(_) => "TryStatement",
+        Stmt::While(_) => "WhileStatement",
+        Stmt::DoWhile(_) => "DoStatement",
+        Stmt::For(_) => "ForStatement",
+        Stmt::ForIn(_) => "ForInStatement",
+        Stmt::ForOf(_) => "ForOfStatement",
+        Stmt::Expr(_) => "ExpressionStatement",
+        Stmt::Decl(Decl::Class(_)) => "ClassDeclaration",
+        Stmt::Decl(Decl::Fn(_)) => "FunctionDeclaration",
+        Stmt::Decl(Decl::Var(_)) => "VariableStatement",
+        Stmt::Decl(Decl::TsInterface(_)) => "InterfaceDeclaration",
+        Stmt::Decl(Decl::TsTypeAlias(_)) => "TypeAliasDeclaration",
+        Stmt::Decl(Decl::TsEnum(_)) => "EnumDeclaration",
+        Stmt::Decl(Decl::TsModule(_)) => "ModuleDeclaration",
+        Stmt::Decl(_) => "VariableStatement",
     }
 }
 

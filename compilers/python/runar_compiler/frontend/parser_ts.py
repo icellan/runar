@@ -390,6 +390,23 @@ _VALID_BASE_CLASSES = frozenset((
 ))
 
 
+# F-064: statement keywords the TS reference refuses, mapped to the
+# ts.SyntaxKind name its "Unsupported statement kind" diagnostic reports.
+_UNSUPPORTED_STATEMENT_KEYWORDS = {
+    "while": "WhileStatement",
+    "do": "DoStatement",
+    "switch": "SwitchStatement",
+    "try": "TryStatement",
+    "throw": "ThrowStatement",
+    "debugger": "DebuggerStatement",
+    "with": "WithStatement",
+    "class": "ClassDeclaration",
+    "function": "FunctionDeclaration",
+    "break": "BreakStatement",
+    "continue": "ContinueStatement",
+}
+
+
 class _TsParser:
     def __init__(self, file_name: str):
         self.file_name = file_name
@@ -948,9 +965,8 @@ class _TsParser:
         stmts: list[Statement] = []
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-            self.skip_semicolons()
-            if self.check(TOK_RBRACE) or self.check(TOK_EOF):
-                break
+            # F-064: a stray `;` is an EmptyStatement, refused by
+            # _parse_statement — no longer swallowed here.
             stmt = self._parse_statement()
             if stmt is not None:
                 stmts.append(stmt)
@@ -963,6 +979,19 @@ class _TsParser:
     def _parse_statement(self) -> Statement | None:
         location = self.loc()
         tok = self.peek()
+
+        # F-064: refuse every statement kind outside spec/grammar.md §9 with
+        # the TS reference's diagnostic instead of falling through to the
+        # expression parser (or silently skipping a `;`).
+        unsupported = self._unsupported_statement_kind()
+        if unsupported is not None:
+            self.errors.append(Diagnostic(
+                message=f"Unsupported statement kind: {unsupported}",
+                severity=Severity.ERROR,
+                loc=location,
+            ))
+            self._skip_unsupported_statement()
+            return None
 
         # Variable declarations: const, let
         if tok.kind == TOK_IDENT and tok.value in ("const", "let"):
@@ -983,6 +1012,50 @@ class _TsParser:
         # Expression statement (including assignments and calls)
         return self._parse_expression_statement(location)
 
+    def _unsupported_statement_kind(self) -> str | None:
+        """The ts.SyntaxKind name of an unsupported statement starting here."""
+        tok = self.peek()
+        if tok.kind == TOK_SEMICOLON:
+            return "EmptyStatement"
+        if tok.kind == TOK_LBRACE:
+            return "Block"
+        if tok.kind != TOK_IDENT:
+            return None
+        if tok.value in _UNSUPPORTED_STATEMENT_KEYWORDS:
+            return _UNSUPPORTED_STATEMENT_KEYWORDS[tok.value]
+        if self._peek_next_kind() == TOK_COLON:
+            return "LabeledStatement"
+        if tok.value == "for":
+            # for (const|let <name> in|of ...)
+            ahead = self.tokens[self.pos + 1:self.pos + 5]
+            if (len(ahead) == 4 and ahead[0].kind == TOK_LPAREN
+                    and ahead[1].kind == TOK_IDENT and ahead[1].value in ("const", "let", "var")
+                    and ahead[2].kind == TOK_IDENT
+                    and ahead[3].kind == TOK_IDENT and ahead[3].value in ("in", "of")):
+                return "ForInStatement" if ahead[3].value == "in" else "ForOfStatement"
+        return None
+
+    def _skip_unsupported_statement(self) -> None:
+        """Consume a refused statement: tokens up to a `;` or a closing brace at
+        nesting depth 0, stopping before a `}` that closes the enclosing block."""
+        depth = 0
+        while not self.check(TOK_EOF):
+            tok = self.peek()
+            if tok.kind in (TOK_LBRACE, TOK_LPAREN, TOK_LBRACKET):
+                depth += 1
+            elif tok.kind in (TOK_RBRACE, TOK_RPAREN, TOK_RBRACKET):
+                if depth == 0:
+                    return
+                depth -= 1
+                self.advance()
+                if depth == 0 and tok.kind == TOK_RBRACE:
+                    return
+                continue
+            elif tok.kind == TOK_SEMICOLON and depth == 0:
+                self.advance()
+                return
+            self.advance()
+
     def _parse_variable_decl(self, loc: SourceLocation) -> Statement:
         keyword = self.advance()  # const or let
         is_mutable = keyword.value == "let"
@@ -1001,7 +1074,7 @@ class _TsParser:
         if init is None:
             init = BigIntLiteral(value=0)
 
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)  # F-064: one terminator; a second `;` is an EmptyStatement
 
         return VariableDeclStmt(
             name=var_name,
@@ -1117,7 +1190,7 @@ class _TsParser:
         if not self.check(TOK_SEMICOLON) and not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             value = self._parse_expression()
 
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)  # F-064: one terminator; a second `;` is an EmptyStatement
         return ReturnStmt(value=value, source_location=loc)
 
     def _parse_expression_statement(self, loc: SourceLocation) -> Statement | None:
@@ -1126,7 +1199,7 @@ class _TsParser:
         # Check for assignment: expr = value
         if self.match(TOK_ASSIGN):
             value = self._parse_expression()
-            self.skip_semicolons()
+            self.match(TOK_SEMICOLON)  # F-064: one terminator; a second `;` is an EmptyStatement
             return AssignmentStmt(target=expr, value=value, source_location=loc)
 
         # Compound assignments: +=, -=, *=, /=, %=
@@ -1140,11 +1213,11 @@ class _TsParser:
         for kind, bin_op in compound_ops.items():
             if self.match(kind):
                 right = self._parse_expression()
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)  # F-064: one terminator; a second `;` is an EmptyStatement
                 value = BinaryExpr(op=bin_op, left=expr, right=right)
                 return AssignmentStmt(target=expr, value=value, source_location=loc)
 
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)  # F-064: one terminator; a second `;` is an EmptyStatement
         return ExpressionStmt(expr=expr, source_location=loc)
 
     # -- Expression parsing --------------------------------------------------

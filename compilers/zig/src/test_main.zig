@@ -90,6 +90,7 @@ test {
     _ = @import("tests/n098_bytestring_satoshis.zig");
     _ = @import("tests/n005_assert_then_asm.zig");
     _ = @import("tests/f039_sighash_malformed.zig");
+    _ = @import("tests/f064_ts_unsupported_statement.zig");
     _ = @import("tests/n105_scriptbytes.zig");
     _ = @import("tests/n105_output_shape.zig");
     _ = @import("tests/n099_ternary_branch_types.zig");
