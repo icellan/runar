@@ -352,10 +352,14 @@ module Runar
     end
 
     def blake3_hash(message)
-      msg_bytes = Builtins._hex_to_bytes(message)
-      truncated = msg_bytes.byteslice(0, 64).to_s
-      block_len = truncated.bytesize # real message length (0..64) = v[14]
-      padded = truncated
+      msg_bytes = Builtins._hex_to_bytes(message).to_s
+      # The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+      # padding size), so the runtime must fail too rather than truncate.
+      if msg_bytes.bytesize > 64
+        raise ArgumentError, "blake3Hash: message must be <= 64 bytes, got #{msg_bytes.bytesize}"
+      end
+      block_len = msg_bytes.bytesize # real message length (0..64) = v[14]
+      padded = msg_bytes
       padded = padded + ("\x00".b * (64 - padded.bytesize)) if padded.bytesize < 64
       Builtins._blake3_compress_impl(BLAKE3_IV_BYTES, padded, block_len).unpack1('H*')
     end

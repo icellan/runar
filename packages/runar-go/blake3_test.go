@@ -96,3 +96,28 @@ func blake3IVBytes() []byte {
 	}
 	return out
 }
+
+// F-128: the compiled blake3Hash script aborts on a message longer than 64
+// bytes (`64 - len` goes negative and OP_NUM2BIN refuses a negative size), so
+// the Go mock must fail too instead of hashing only the first 64 bytes.
+// Proves: Blake3Hash panics for 65/100/128-byte input and still returns the
+// standard digest at exactly 64 bytes. Does not prove the script behaviour
+// itself (pinned by execution in packages/runar-testing blake3.test.ts).
+func TestBlake3Hash_RejectsMessagesLongerThan64Bytes(t *testing.T) {
+	for _, n := range []int{65, 100, 128} {
+		msg := bytes.Repeat([]byte{0xcd}, n)
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Blake3Hash(%d bytes) returned a digest; the on-chain script aborts on >64 bytes", n)
+				}
+			}()
+			_ = Blake3Hash(ByteString(msg))
+		}()
+	}
+	msg64 := bytes.Repeat([]byte{0xcd}, 64)
+	direct := Blake3Compress(ByteString(blake3IVBytes()), ByteString(msg64))
+	if got := Blake3Hash(ByteString(msg64)); !bytes.Equal([]byte(got), []byte(direct)) {
+		t.Fatalf("Blake3Hash(64B) = %x, want %x", got, direct)
+	}
+}

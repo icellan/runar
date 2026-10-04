@@ -566,8 +566,10 @@ func Blake3Hash(message ByteString) ByteString {
 	}
 	padded := make([]byte, 64)
 	msg := []byte(message)
+	// The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+	// padding size), so the mock must fail too rather than truncate.
 	if len(msg) > 64 {
-		msg = msg[:64]
+		panic(fmt.Sprintf("blake3Hash: message must be <= 64 bytes, got %d", len(msg)))
 	}
 	copy(padded, msg)
 	return ByteString(blake3CompressImpl(cv, padded, uint32(len(msg))))

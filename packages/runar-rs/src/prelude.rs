@@ -395,9 +395,16 @@ pub fn blake3_compress(chaining_value: &[u8], block: &[u8]) -> ByteString {
 /// block_len. Matches the on-chain codegen.
 pub fn blake3_hash(message: &[u8]) -> ByteString {
     let cv = blake3_iv_bytes();
+    // The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+    // padding size), so the mock must fail too rather than truncate.
+    assert!(
+        message.len() <= 64,
+        "blake3Hash: message must be <= 64 bytes, got {}",
+        message.len()
+    );
     let mut padded = [0u8; 64];
-    let n = message.len().min(64);
-    padded[..n].copy_from_slice(&message[..n]);
+    let n = message.len();
+    padded[..n].copy_from_slice(message);
     blake3_compress_impl(&cv, &padded, n as u32).to_vec()
 }
 
@@ -1657,6 +1664,27 @@ mod tests {
             blake3_hash(short),
             "short message must differ: block_len 64 vs real length"
         );
+    }
+
+    // F-128: the compiled blake3Hash script aborts on a message longer than
+    // 64 bytes (`64 - len` goes negative and OP_NUM2BIN refuses a negative
+    // size), so the mock must fail too instead of hashing the first 64 bytes.
+    // Proves: blake3_hash panics for 65/100/128-byte input and is unchanged at
+    // exactly 64 bytes. Does not prove the script behaviour itself (pinned by
+    // execution in packages/runar-testing blake3.test.ts).
+    #[test]
+    fn test_blake3_hash_rejects_messages_longer_than_64_bytes() {
+        for n in [65usize, 100, 128] {
+            let msg = vec![0xcdu8; n];
+            let r = std::panic::catch_unwind(|| blake3_hash(&msg));
+            assert!(
+                r.is_err(),
+                "blake3_hash({} bytes) returned a digest; the on-chain script aborts on >64 bytes",
+                n
+            );
+        }
+        let msg64 = vec![0xcdu8; 64];
+        assert_eq!(blake3_hash(&msg64), blake3_compress(&blake3_iv_bytes(), &msg64));
     }
 
     #[test]

@@ -1575,11 +1575,16 @@ export class RunarInterpreter {
 
       case 'blake3Hash': {
         const msg = this.toBytes(args[0]!);
+        // The compiled script aborts on >64 bytes (OP_NUM2BIN with negative
+        // padding size), so the interpreter must fail too, not truncate.
+        if (msg.length > 64) {
+          throw new Error(`blake3Hash: message must be <= 64 bytes, got ${msg.length}`);
+        }
         // Standard BLAKE3 single block: zero-pad to 64 bytes, IV as chaining
         // value, real message length as block_len (correct for 0..64 bytes).
         const padded = new Uint8Array(64);
-        padded.set(msg.subarray(0, 64));
-        return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded, Math.min(msg.length, 64)) };
+        padded.set(msg);
+        return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded, msg.length) };
       }
 
       // Baby Bear field arithmetic (p = 2013265921)

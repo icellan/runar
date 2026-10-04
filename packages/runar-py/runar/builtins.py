@@ -401,8 +401,12 @@ def blake3_hash(message) -> bytes:
     interpreter reference.
     """
     msg = _as_bytes(message)
-    padded = msg[:64] + b"\x00" * max(0, 64 - len(msg))
-    return _blake3_compress_impl(_BLAKE3_IV_BYTES, padded, min(len(msg), 64))
+    # The compiled script aborts on >64 bytes (OP_NUM2BIN with a negative
+    # padding size), so the runtime must fail too rather than truncate.
+    if len(msg) > 64:
+        raise ValueError(f"blake3Hash: message must be <= 64 bytes, got {len(msg)}")
+    padded = msg + b"\x00" * (64 - len(msg))
+    return _blake3_compress_impl(_BLAKE3_IV_BYTES, padded, len(msg))
 
 
 # -- SHA-256 Compression (real implementation) --------------------------------
