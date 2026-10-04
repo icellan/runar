@@ -23,10 +23,19 @@ import (
 )
 
 // bn254PointToG1Affine decodes a 64-byte Rúnar Point (x[32] || y[32],
-// big-endian) into a gnark bn254.G1Affine. Identity (0,0) is rejected
-// (matching the compiled-Script on-curve check). The returned point is
-// NOT subgroup-checked — callers that need full validation should call
-// `pt.IsInSubGroup()` themselves.
+// big-endian) into a gnark bn254.G1Affine, rejecting exactly what the
+// compiled pairing scripts reject (bn254AssertG1OnCurve in
+// compilers/go/codegen/bn254_point_validation.go):
+//
+//   - a coordinate >= p. gnark's SetBigInt would silently reduce it; the
+//     script requires 0 <= x, y < p.
+//   - the all-zero encoding. gnark reads (0,0) as the point at infinity and
+//     its IsOnCurve() returns true for it; the script evaluates
+//     y² == x³ + 3 on it, which fails.
+//   - any other point off y² = x³ + 3.
+//
+// G1 has cofactor 1, so an on-curve point is already in the prime-order
+// subgroup; no separate subgroup check is needed.
 func bn254PointToG1Affine(p Point) (bn254.G1Affine, error) {
 	var out bn254.G1Affine
 	b := []byte(p)
@@ -35,8 +44,14 @@ func bn254PointToG1Affine(p Point) (bn254.G1Affine, error) {
 	}
 	xBig := new(big.Int).SetBytes(b[:32])
 	yBig := new(big.Int).SetBytes(b[32:])
+	if xBig.Cmp(fp.Modulus()) >= 0 || yBig.Cmp(fp.Modulus()) >= 0 {
+		return out, fmt.Errorf("bn254 point: coordinate not reduced mod p")
+	}
 	out.X.SetBigInt(xBig)
 	out.Y.SetBigInt(yBig)
+	if out.IsInfinity() {
+		return out, fmt.Errorf("bn254 point: identity (0,0) is not on y² = x³ + 3")
+	}
 	if !out.IsOnCurve() {
 		return out, fmt.Errorf("bn254 point not on curve")
 	}
@@ -47,6 +62,14 @@ func bn254PointToG1Affine(p Point) (bn254.G1Affine, error) {
 // coordinates (x0, x1, y0, y1) where x = x0 + x1*u, y = y0 + y1*u. gnark
 // E2 is {A0 = real, A1 = imaginary}, so Rúnar order maps one-to-one with
 // no swap.
+//
+// It rejects what the compiled pairing scripts reject (bn254ValidateG2Input
+// in compilers/go/codegen/bn254_point_validation.go): the all-zero encoding
+// (gnark's point at infinity, which its IsOnCurve() accepts but the twist
+// equation does not), any point off the twist, and any point outside the
+// prime-order subgroup. Coordinates are reduced mod p, as the script's
+// arithmetic does, so an out-of-range or negative coordinate is accepted
+// when its reduction is a valid point.
 func bn254CoordsToG2Affine(x0, x1, y0, y1 BigintBig) (bn254.G2Affine, error) {
 	var out bn254.G2Affine
 	if x0 == nil || x1 == nil || y0 == nil || y1 == nil {
@@ -61,8 +84,14 @@ func bn254CoordsToG2Affine(x0, x1, y0, y1 BigintBig) (bn254.G2Affine, error) {
 	out.X.A1 = ex1
 	out.Y.A0 = ey0
 	out.Y.A1 = ey1
+	if out.IsInfinity() {
+		return out, fmt.Errorf("bn254 G2 point: identity (0,0) is not on the twist curve")
+	}
 	if !out.IsOnCurve() {
 		return out, fmt.Errorf("bn254 G2 point not on twist curve")
+	}
+	if !out.IsInSubGroup() {
+		return out, fmt.Errorf("bn254 G2 point not in the prime-order subgroup")
 	}
 	return out, nil
 }
