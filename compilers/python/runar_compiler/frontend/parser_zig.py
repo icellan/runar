@@ -1503,6 +1503,20 @@ class _ZigParser:
                     self._expect(TOK_RPAREN, ")")
                     return BinaryExpr(op="===", left=left, right=right)
 
+                # runar.hexToBytes("deadbeef") → ByteString literal "deadbeef".
+                # Mirrors 01-parse-zig.ts and parse_zig.zig (F-094).
+                if builtin == "hexToBytes" and self._current().kind == TOK_LPAREN:
+                    self._advance()
+                    arg = self._parse_expression()
+                    self._expect(TOK_RPAREN, ")")
+                    if isinstance(arg, ByteStringLiteral):
+                        return ByteStringLiteral(value=arg.value)
+                    self._errors.append(
+                        f"{self._file}:{tok.line}:{tok.col}: "
+                        "runar.hexToBytes expects a string literal argument"
+                    )
+                    return ByteStringLiteral(value="")
+
                 return Identifier(name=builtin)
 
             return Identifier(name=tok.value)

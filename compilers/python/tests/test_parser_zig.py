@@ -883,6 +883,69 @@ pub const Test = struct {
 
 
 # ---------------------------------------------------------------------------
+# F-094: runar.hexToBytes("...") lowers to a ByteString literal
+# ---------------------------------------------------------------------------
+#
+# Proves: the Python Zig-surface parser lowers `runar.hexToBytes("<hex>")` to a
+# ByteStringLiteral carrying the hex verbatim (as the TS and Zig parsers do), so
+# it is accepted as a property initializer and the checked-in
+# examples/zig/tic-tac-toe/TicTacToe.runar.zig compiles; a non-literal argument
+# is a parse error rather than an ordinary call.
+# Does NOT prove: byte-identity with the TS tier (checked by the remediation
+# sweep, not pinned here), or that the hex payload is well-formed (TS does not
+# check that in the parser either).
+
+ZIG_HEX_TO_BYTES_SOURCE = """\
+const runar = @import("runar");
+
+pub const H = struct {
+    pub const Contract = runar.SmartContract;
+
+    prefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
+    x: runar.ByteString,
+
+    pub fn init(x: runar.ByteString) H {
+        return .{ .x = x };
+    }
+
+    pub fn verify(self: *const H, b: runar.ByteString) void {
+        runar.assert(runar.bytesEq(runar.cat(self.prefix, self.x), b));
+    }
+};
+"""
+
+
+class TestZigHexToBytes:
+    def test_hex_to_bytes_initializer_is_bytestring_literal(self):
+        result = parse_source(ZIG_HEX_TO_BYTES_SOURCE, "H.runar.zig")
+        assert result.errors == []
+        assert result.contract is not None
+        prefix = next(p for p in result.contract.properties if p.name == "prefix")
+        assert isinstance(prefix.initializer, ByteStringLiteral)
+        assert prefix.initializer.value == "1976a914"
+
+    def test_hex_to_bytes_non_literal_argument_is_error(self):
+        source = ZIG_HEX_TO_BYTES_SOURCE.replace(
+            'runar.hexToBytes("1976a914")', "runar.hexToBytes(x)"
+        )
+        result = parse_source(source, "H.runar.zig")
+        assert any(
+            "runar.hexToBytes expects a string literal argument" in e
+            for e in result.error_strings()
+        )
+
+    def test_tic_tac_toe_example_compiles(self):
+        from pathlib import Path
+        from runar_compiler.compiler import compile_from_source
+
+        repo_root = Path(__file__).resolve().parents[3]
+        src = repo_root / "examples" / "zig" / "tic-tac-toe" / "TicTacToe.runar.zig"
+        artifact = compile_from_source(str(src))
+        assert artifact.contract_name == "TicTacToe"
+        assert artifact.script
+
+
+# ---------------------------------------------------------------------------
 # Array type and array literal
 # ---------------------------------------------------------------------------
 
