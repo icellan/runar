@@ -27,8 +27,9 @@
 # conformance suite (cross-tier hex parity) and the unknown-kind
 # exhaustiveness tests.
 #
-# N-140 is the one deliberate behaviour change since: liveness considers
-# the names a binding DEFINES, not only its own +name+.
+# N-140 is a deliberate behaviour change since: liveness considers
+# the names a binding DEFINES, not only its own +name+. F-108 is the other:
+# a private method's last binding (its return value) is a liveness root.
 
 require "set"
 require_relative "../ir/types"
@@ -75,6 +76,7 @@ module RunarCompiler
       # Uses iterative elimination to handle transitive dead code
       # (e.g., if A references B and A is dead, B may also become dead).
       def self.eliminate_dead_bindings(method)
+        keep_last = returns_last_binding?(method)
         current = method.body
         changed = true
 
@@ -90,7 +92,9 @@ module RunarCompiler
 
           filtered = []
           current.each_with_index do |binding, i|
-            if referenced_externally?(binding, own_refs[i], ref_count) || has_side_effect?(binding.value)
+            if (keep_last && i == current.length - 1) ||
+               referenced_externally?(binding, own_refs[i], ref_count) ||
+               has_side_effect?(binding.value)
               filtered << binding
             else
               changed = true
@@ -101,6 +105,17 @@ module RunarCompiler
         end
 
         method.body = current
+      end
+
+      # F-108: whether +method+'s LAST binding is its return value. Stack
+      # lowering inlines a private method at each +method_call+ and takes that
+      # binding as the call's result, so it is a liveness root even though
+      # nothing inside the method references it; without the root a pure
+      # return expression (+return n + 1n+) was deleted and the helper emptied.
+      # The predicate is the one stack lowering uses to collect inlinable
+      # private methods. A public method's last binding is never a return value.
+      def self.returns_last_binding?(method)
+        method.name != "constructor" && !method.is_public
       end
 
       # Collect every SSA name a binding brings into scope: its own +name+,

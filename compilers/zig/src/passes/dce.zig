@@ -13,6 +13,12 @@
 //! its arms happened to be pure, and the merged locals kept their pre-branch
 //! values. See `conformance/dce/live-if.test.ts`.
 //!
+//! F-108: a private method's last binding is its return value -- stack
+//! lowering inlines the helper at each `method_call` and takes that binding as
+//! the call's result -- so it is a liveness root even though nothing inside the
+//! method references it. See `eliminateDeadBindingsInMethod` and
+//! `conformance/dce/private-return.test.ts`.
+//!
 //! Runs as a standalone pass after constant folding (pass 4.25) and before
 //! EC optimization (pass 4.5). Also used internally by the EC optimizer
 //! to clean up temporaries created during algebraic simplification.
@@ -34,7 +40,7 @@ pub fn eliminateDeadCode(allocator: Allocator, program: types.ANFProgram) !types
     errdefer allocator.free(new_methods);
 
     for (program.methods, 0..) |method, i| {
-        const optimized_body = try eliminateDeadBindings(allocator, method.body);
+        const optimized_body = try eliminateDeadBindingsInMethod(allocator, method);
         const changed = optimized_body.ptr != method.body.ptr;
         if (changed) any_changed = true;
         new_methods[i] = .{
@@ -65,10 +71,34 @@ pub fn eliminateDeadCode(allocator: Allocator, program: types.ANFProgram) !types
 // Core algorithm
 // ============================================================================
 
+/// F-108: whether `method`'s LAST binding is its return value. Stack lowering
+/// inlines a private method at each `method_call` and takes that binding as the
+/// call's result, so it is a liveness root even though nothing inside the
+/// method references it; without the root a pure return expression
+/// (`return n + 1n`) was deleted and the helper emptied. The predicate is the
+/// one stack lowering uses to collect inlinable private methods. A public
+/// method's last binding is never a return value.
+fn returnsLastBinding(method: types.ANFMethod) bool {
+    return !method.is_public and !std.mem.eql(u8, method.name, "constructor");
+}
+
+/// Dead-binding elimination for a whole method body: `eliminateDeadBindings`
+/// plus the F-108 root (a private method's last binding is always live).
+/// Caller must free the returned slice. The input body is NOT freed.
+pub fn eliminateDeadBindingsInMethod(allocator: Allocator, method: types.ANFMethod) ![]types.ANFBinding {
+    return eliminateDeadBindingsImpl(allocator, method.body, returnsLastBinding(method));
+}
+
 /// Remove bindings whose results are never referenced.
 /// Iterates until stable, handling transitive dead code.
 /// Caller must free the returned slice. The input `body` is NOT freed by this function.
+/// Roots nothing but side effects: for a method body, use
+/// `eliminateDeadBindingsInMethod`, which also roots a private method's return value.
 pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]types.ANFBinding {
+    return eliminateDeadBindingsImpl(allocator, body, false);
+}
+
+fn eliminateDeadBindingsImpl(allocator: Allocator, body: []types.ANFBinding, keep_last: bool) ![]types.ANFBinding {
     var current = body;
     var owns_current = false;
     var changed = true;
@@ -104,7 +134,8 @@ pub fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]
 
         for (current, 0..) |binding, i| {
             const live = try isReferencedExternally(allocator, binding, &own_refs[i], &ref_count);
-            if (live or hasSideEffect(binding.value)) {
+            const root = keep_last and i == current.len - 1;
+            if (root or live or hasSideEffect(binding.value)) {
                 try filtered.append(allocator, binding);
             } else {
                 changed = true;
@@ -377,4 +408,31 @@ test "R-140 hasSideEffect recurses into if / loop bodies" {
     // An empty `if` carries nothing, so it carries no effect.
     var empty = types.ANFIf{ .cond = "c", .then = &.{}, .@"else" = &.{} };
     try std.testing.expect(!hasSideEffect(.{ .@"if" = &empty }));
+}
+
+// F-108: a private method's last binding is its return value and must survive
+// DCE (with its inputs); a genuinely dead binding ahead of it is still dropped,
+// and a PUBLIC method's unreferenced pure last binding is still eliminated.
+// Does not prove spendability -- conformance/dce/private-return.test.ts runs the
+// compiled script on all seven tiers.
+test "F-108 eliminateDeadBindingsInMethod roots a private method's return value" {
+    const alloc = std.testing.allocator;
+
+    var body_arr = [_]types.ANFBinding{
+        .{ .name = "dead", .value = .{ .load_const = .{ .value = .{ .integer = 7 } } }, .source_loc = null },
+        .{ .name = "t0", .value = .{ .load_param = .{ .name = "n" } }, .source_loc = null },
+        .{ .name = "t1", .value = .{ .load_const = .{ .value = .{ .integer = 1 } } }, .source_loc = null },
+        .{ .name = "t2", .value = .{ .bin_op = .{ .op = "+", .left = "t0", .right = "t1" } }, .source_loc = null },
+    };
+
+    const private_result = try eliminateDeadBindingsInMethod(alloc, .{ .name = "add1", .is_public = false, .body = &body_arr });
+    defer alloc.free(private_result);
+    try std.testing.expectEqual(@as(usize, 3), private_result.len);
+    try std.testing.expectEqualStrings("t0", private_result[0].name);
+    try std.testing.expectEqualStrings("t1", private_result[1].name);
+    try std.testing.expectEqualStrings("t2", private_result[2].name);
+
+    const public_result = try eliminateDeadBindingsInMethod(alloc, .{ .name = "pub_m", .is_public = true, .body = &body_arr });
+    defer alloc.free(public_result);
+    try std.testing.expectEqual(@as(usize, 0), public_result.len);
 }

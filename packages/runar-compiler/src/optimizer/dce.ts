@@ -50,8 +50,9 @@
  * previous in-place DCE inside `constant-fold.ts`. Verified by the conformance
  * suite (cross-tier hex parity) and the optimizer unit tests.
  *
- * N-140 is the one deliberate behaviour change since: liveness considers the
- * names a binding DEFINES, not only its own `name`.
+ * N-140 is a deliberate behaviour change since: liveness considers the
+ * names a binding DEFINES, not only its own `name`. F-108 is the other: a
+ * private method's last binding (its return value) is a liveness root.
  */
 
 import type {
@@ -79,8 +80,21 @@ export function eliminateDeadBindings(program: ANFProgram): ANFProgram {
 }
 
 function eliminateDeadInMethod(method: ANFMethod): ANFMethod {
-  const live = filterLiveBindings(method.body);
+  const live = filterLiveBindings(method.body, returnsLastBinding(method));
   return { ...method, body: live };
+}
+
+/**
+ * F-108: a private method's LAST binding is its return value — stack lowering
+ * inlines the helper at each `method_call` and takes that binding as the
+ * call's result — so it is a liveness root even though nothing inside the
+ * method references it. Without this root a pure return expression
+ * (`return n + 1n`) was deleted and the helper emptied. The predicate is the
+ * one stack lowering uses to collect inlinable private methods. A public
+ * method's last binding is never a return value and stays freely eliminable.
+ */
+function returnsLastBinding(method: ANFMethod): boolean {
+  return method.name !== 'constructor' && !method.isPublic;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +276,7 @@ function isReferencedExternally(
   return false;
 }
 
-function filterLiveBindings(bindings: ANFBinding[]): ANFBinding[] {
+function filterLiveBindings(bindings: ANFBinding[], keepLast: boolean): ANFBinding[] {
   // Iterate to a fixed point so transitively dead bindings are removed too.
   let current = bindings;
   let changed = true;
@@ -283,6 +297,7 @@ function filterLiveBindings(bindings: ANFBinding[]): ANFBinding[] {
     for (let i = 0; i < current.length; i++) {
       const binding = current[i]!;
       if (
+        (keepLast && i === current.length - 1) ||
         isReferencedExternally(binding, ownRefs[i]!, refCount) ||
         hasSideEffect(binding.value)
       ) {

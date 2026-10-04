@@ -25,8 +25,9 @@
 //! previous inline DCE in `anf_optimize.rs`. Verified by the conformance suite
 //! (cross-tier hex parity) and the optimizer unit tests.
 //!
-//! N-140 is the one deliberate behaviour change since: liveness considers the
-//! names a binding DEFINES, not only its own `name`.
+//! N-140 is a deliberate behaviour change since: liveness considers the
+//! names a binding DEFINES, not only its own `name`. F-108 is the other: a
+//! private method's last binding (its return value) is a liveness root.
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,6 +56,7 @@ pub fn eliminate_dead_code(program: ANFProgram) -> ANFProgram {
 
 /// Eliminate dead (unreferenced, side-effect-free) bindings, iterating to fixed point.
 pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
+    let keep_last = returns_last_binding(method);
     let mut body = method.body.clone();
     loop {
         let own_refs: Vec<HashSet<String>> = body
@@ -75,7 +77,8 @@ pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
         let before_len = body.len();
         let mut index = 0usize;
         body.retain(|b| {
-            let keep = is_referenced_externally(b, &own_refs[index], &ref_count)
+            let keep = (keep_last && index + 1 == before_len)
+                || is_referenced_externally(b, &own_refs[index], &ref_count)
                 || has_side_effect(&b.value);
             index += 1;
             keep
@@ -93,6 +96,17 @@ pub fn eliminate_dead_bindings_method(method: &ANFMethod) -> ANFMethod {
         is_public: method.is_public,
         sighash_type: method.sighash_type,
     }
+}
+
+/// F-108: whether `method`'s LAST binding is its return value. Stack lowering
+/// inlines a private method at each `method_call` and takes that binding as the
+/// call's result, so it is a liveness root even though nothing inside the
+/// method references it; without the root a pure return expression
+/// (`return n + 1n`) was deleted and the helper emptied. The predicate is the
+/// one stack lowering uses to collect inlinable private methods. A public
+/// method's last binding is never a return value.
+fn returns_last_binding(method: &ANFMethod) -> bool {
+    method.name != "constructor" && !method.is_public
 }
 
 // ---------------------------------------------------------------------------

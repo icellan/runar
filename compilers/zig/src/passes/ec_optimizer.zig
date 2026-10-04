@@ -156,7 +156,9 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod, properties: []c
         }
     }
 
-    const optimized_body = try eliminateDeadBindings(allocator, body);
+    var rooted = method;
+    rooted.body = body;
+    const optimized_body = try dce.eliminateDeadBindingsInMethod(allocator, rooted);
     allocator.free(body);
     body = optimized_body;
 

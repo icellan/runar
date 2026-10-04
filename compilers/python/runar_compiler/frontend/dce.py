@@ -39,8 +39,9 @@ the previous inline DCE in ``anf_optimize.py``. Verified by the
 conformance suite (cross-tier hex parity) and the unknown-kind
 exhaustiveness tests.
 
-N-140 is the one deliberate behaviour change since: liveness considers
-the names a binding DEFINES, not only its own ``name``.
+N-140 is a deliberate behaviour change since: liveness considers
+the names a binding DEFINES, not only its own ``name``. F-108 is the other:
+a private method's last binding (its return value) is a liveness root.
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
     Uses iterative elimination to handle transitive dead code
     (e.g., if A references B and A is dead, B may also become dead).
     """
+    keep_last = _returns_last_binding(method)
     current = method.body
     changed = True
 
@@ -112,8 +114,10 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
 
         filtered: list[ANFBinding] = []
         for i, binding in enumerate(current):
-            if is_referenced_externally(binding, own_refs[i], ref_count) or has_side_effect(
-                binding.value
+            if (
+                (keep_last and i == len(current) - 1)
+                or is_referenced_externally(binding, own_refs[i], ref_count)
+                or has_side_effect(binding.value)
             ):
                 filtered.append(binding)
             else:
@@ -122,6 +126,19 @@ def eliminate_dead_bindings(method: ANFMethod) -> None:
         current = filtered
 
     method.body = current
+
+
+def _returns_last_binding(method: ANFMethod) -> bool:
+    """F-108: whether ``method``'s LAST binding is its return value.
+
+    Stack lowering inlines a private method at each ``method_call`` and takes
+    that binding as the call's result, so it is a liveness root even though
+    nothing inside the method references it; without the root a pure return
+    expression (``return n + 1n``) was deleted and the helper emptied. The
+    predicate is the one stack lowering uses to collect inlinable private
+    methods. A public method's last binding is never a return value.
+    """
+    return method.name != "constructor" and not method.is_public
 
 
 def collect_defined_names(binding: ANFBinding, out: set[str]) -> None:

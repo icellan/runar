@@ -209,7 +209,7 @@ public final class AnfOptimize {
                     + "low.");
         }
         // Dead-binding elimination after fixed-point.
-        body = eliminateDead(body);
+        body = eliminateDead(method.withBody(body));
         return method.withBody(body);
     }
 
@@ -650,8 +650,8 @@ public final class AnfOptimize {
     // Delegate to it so the EC rewrite's post-cleanup uses the canonical
     // implementation.
 
-    private static List<AnfBinding> eliminateDead(List<AnfBinding> body) {
-        return Dce.eliminateDead(body);
+    private static List<AnfBinding> eliminateDead(AnfMethod method) {
+        return Dce.eliminateDead(method);
     }
 
     private static <T> List<T> orEmpty(List<T> list) {

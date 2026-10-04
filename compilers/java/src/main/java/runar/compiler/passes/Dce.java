@@ -62,8 +62,9 @@ import runar.compiler.ir.anf.UpdateProp;
  * conformance suite (cross-tier hex parity) and the unknown-kind
  * exhaustiveness tests.
  *
- * <p>N-140 is the one deliberate behaviour change since: liveness considers
- * the names a binding DEFINES, not only its own {@code name}.
+ * <p>N-140 is a deliberate behaviour change since: liveness considers
+ * the names a binding DEFINES, not only its own {@code name}. F-108 is the
+ * other: a private method's last binding (its return value) is a liveness root.
  */
 public final class Dce {
 
@@ -77,7 +78,7 @@ public final class Dce {
     public static AnfProgram run(AnfProgram program) {
         List<AnfMethod> newMethods = new ArrayList<>(program.methods().size());
         for (AnfMethod m : program.methods()) {
-            List<AnfBinding> cleaned = eliminateDead(m.body());
+            List<AnfBinding> cleaned = eliminateDead(m);
             newMethods.add(m.withBody(cleaned));
         }
         return program.withMethods(newMethods);
@@ -89,6 +90,25 @@ public final class Dce {
      * the EC rewrite's post-cleanup phase.
      */
     public static List<AnfBinding> eliminateDead(List<AnfBinding> body) {
+        return eliminateDead(body, false);
+    }
+
+    /**
+     * Dead-binding elimination for a whole method body: {@link #eliminateDead(List)}
+     * plus the F-108 root. Stack lowering inlines a private method at each
+     * {@code method_call} and takes its LAST binding as the call's result, so
+     * that binding is live even though nothing inside the method references
+     * it; without the root a pure return expression ({@code return n + 1n})
+     * was deleted and the helper emptied. The predicate is the one stack
+     * lowering uses to collect inlinable private methods. A public method's
+     * last binding is never a return value.
+     */
+    public static List<AnfBinding> eliminateDead(AnfMethod method) {
+        boolean keepLast = !method.isPublic() && !"constructor".equals(method.name());
+        return eliminateDead(method.body(), keepLast);
+    }
+
+    private static List<AnfBinding> eliminateDead(List<AnfBinding> body, boolean keepLast) {
         List<AnfBinding> current = body;
         while (true) {
             List<Set<String>> ownRefs = new ArrayList<>(current.size());
@@ -104,7 +124,9 @@ public final class Dce {
             boolean removed = false;
             for (int i = 0; i < current.size(); i++) {
                 AnfBinding b = current.get(i);
-                if (isReferencedExternally(b, ownRefs.get(i), refCount) || hasSideEffect(b.value())) {
+                if ((keepLast && i == current.size() - 1)
+                    || isReferencedExternally(b, ownRefs.get(i), refCount)
+                    || hasSideEffect(b.value())) {
                     kept.add(b);
                 } else {
                     removed = true;

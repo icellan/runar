@@ -26,8 +26,9 @@ package frontend
 // previous inline DCE in anf_optimize.go. Verified by the conformance suite
 // (cross-tier hex parity) and the unknown-kind exhaustiveness tests.
 //
-// N-140 is the one deliberate behaviour change since: liveness considers the
-// names a binding DEFINES, not only its own Name.
+// N-140 is a deliberate behaviour change since: liveness considers the
+// names a binding DEFINES, not only its own Name. F-108 is the other: a
+// private method's last binding (its return value) is a liveness root.
 
 import (
 	"strings"
@@ -51,6 +52,7 @@ func EliminateDeadCode(program *ir.ANFProgram) *ir.ANFProgram {
 // EliminateDeadBindings removes bindings that are not referenced by any other
 // binding, iteratively until no more can be removed.
 func EliminateDeadBindings(method *ir.ANFMethod) {
+	keepLast := returnsLastBinding(method)
 	for {
 		ownRefs := make([]map[string]bool, len(method.Body))
 		refCount := make(map[string]int)
@@ -65,7 +67,8 @@ func EliminateDeadBindings(method *ir.ANFMethod) {
 		var kept []ir.ANFBinding
 		removed := false
 		for i, b := range method.Body {
-			if isReferencedExternally(&method.Body[i], ownRefs[i], refCount) || HasSideEffect(&b.Value) {
+			if (keepLast && i == len(method.Body)-1) ||
+				isReferencedExternally(&method.Body[i], ownRefs[i], refCount) || HasSideEffect(&b.Value) {
 				kept = append(kept, b)
 			} else {
 				removed = true
@@ -76,6 +79,17 @@ func EliminateDeadBindings(method *ir.ANFMethod) {
 			break
 		}
 	}
+}
+
+// returnsLastBinding reports whether method's LAST binding is its return value
+// (F-108). Stack lowering inlines a private method at each method_call and
+// takes that binding as the call's result, so it is a liveness root even though
+// nothing inside the method references it; without the root a pure return
+// expression (`return n + 1n`) was deleted and the helper emptied. The
+// predicate is the one stack lowering uses to collect inlinable private
+// methods. A public method's last binding is never a return value.
+func returnsLastBinding(method *ir.ANFMethod) bool {
+	return method.Name != "constructor" && !method.IsPublic
 }
 
 // ---------------------------------------------------------------------------
