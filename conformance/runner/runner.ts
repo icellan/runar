@@ -492,6 +492,7 @@ export const INPUT_FORMATS = [
 
 export type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];
 const EMPTY_COMPILERS: readonly CompilerId[] = [];
+const KNOWN_COMPILER_IDS: ReadonlySet<string> = new Set<string>(INPUT_FORMATS.flatMap((f) => f.compilers));
 
 export interface CompilerOutput {
   irJson: string;        // canonical JSON of ANF IR
@@ -2973,18 +2974,35 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
  * Returns null when the field is absent (= "all compilers"), or a Set of
  * allowed compiler ids.
  */
-function readFixtureCompilerAllowlist(testDir: string): Set<CompilerId> | null {
+export function readFixtureCompilerAllowlist(testDir: string): Set<CompilerId> | null {
   const configFile = join(testDir, 'source.json');
   if (!existsSync(configFile)) return null;
+  let config: { compilers?: unknown };
   try {
-    const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
-      compilers?: string[];
-    };
-    if (!config.compilers || !Array.isArray(config.compilers)) return null;
-    return new Set(config.compilers as CompilerId[]);
+    config = JSON.parse(readFileSync(configFile, 'utf-8')) as { compilers?: unknown };
   } catch {
     return null;
   }
+  if (!config.compilers || !Array.isArray(config.compilers)) return null;
+  // F-050: fail closed. An id that names no real tier (a typo such as "gp")
+  // would match nothing and silently drop every tier from the fixture's
+  // parity check; an empty list does the same.
+  const fixture = basename(testDir);
+  if (config.compilers.length === 0) {
+    throw new Error(
+      `conformance fixture '${fixture}': source.json "compilers" allowlist is empty; ` +
+      `remove the field to run every tier, or list the tiers that run`,
+    );
+  }
+  for (const id of config.compilers) {
+    if (typeof id !== 'string' || !KNOWN_COMPILER_IDS.has(id)) {
+      throw new Error(
+        `conformance fixture '${fixture}': source.json "compilers" allowlist names unknown ` +
+        `compiler id ${JSON.stringify(id)} (known: ${[...KNOWN_COMPILER_IDS].join(', ')})`,
+      );
+    }
+  }
+  return new Set(config.compilers as CompilerId[]);
 }
 
 /**
