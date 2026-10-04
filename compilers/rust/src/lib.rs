@@ -592,6 +592,58 @@ pub fn frontend_validate(source: &str, file_name: Option<&str>) -> (Vec<String>,
     (result.error_strings(), result.warning_strings())
 }
 
+/// F-107: a readonly property may only be written in the constructor
+/// ("cannot assign to readonly property"), and an `update_prop` must name a
+/// declared property. Walks every non-constructor method at every nesting
+/// depth (`if` arms, `loop` bodies). Port of Go F-004 `checkNoReadonlyWrites`
+/// (compilers/go/compiler/ir_frontend_rules.go), diagnostics verbatim.
+fn check_ir_no_readonly_writes(program: &ir::ANFProgram) -> Result<(), String> {
+    let readonly: std::collections::HashMap<&str, bool> = program
+        .properties
+        .iter()
+        .map(|p| (p.name.as_str(), p.readonly))
+        .collect();
+    for m in program.methods.iter().filter(|m| m.name != "constructor") {
+        check_no_readonly_writes(&m.body, &m.name, &readonly)?;
+    }
+    Ok(())
+}
+
+fn check_no_readonly_writes(
+    bindings: &[ir::ANFBinding],
+    method_name: &str,
+    readonly: &std::collections::HashMap<&str, bool>,
+) -> Result<(), String> {
+    for b in bindings {
+        match &b.value {
+            ir::ANFValue::UpdateProp { name, .. } => match readonly.get(name.as_str()) {
+                None => {
+                    return Err(format!(
+                        "IR validation: method '{}' assigns to undeclared property '{}'",
+                        method_name, name
+                    ))
+                }
+                Some(true) => {
+                    return Err(format!(
+                        "IR validation: cannot assign to readonly property '{}' in method '{}'. readonly properties may only be assigned in the constructor; a later load_prop would read the assigned value instead of the one baked into the locking script",
+                        name, method_name
+                    ))
+                }
+                Some(false) => {}
+            },
+            ir::ANFValue::If { then, else_branch, .. } => {
+                check_no_readonly_writes(then, method_name, readonly)?;
+                check_no_readonly_writes(else_branch, method_name, readonly)?;
+            }
+            ir::ANFValue::Loop { body, .. } => {
+                check_no_readonly_writes(body, method_name, readonly)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Compile a parsed ANF program to a Rúnar artifact.
 pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, String> {
     compile_from_program_with_options(program, &CompileOptions::default())
@@ -599,6 +651,11 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
 
 /// Compile a parsed ANF program to a Rúnar artifact, with options.
 pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &CompileOptions) -> Result<RunarArtifact, String> {
+    // F-107: the source validator's readonly-write rule, re-asserted on every
+    // program that reaches this entry point (the `--ir` path never runs the
+    // validator). Same check and wording as Go F-004's checkIRFrontendRules.
+    check_ir_no_readonly_writes(program)?;
+
     let mut program = program.clone();
 
     // F-103: bake constructor args (validated first) on the IR / direct-program
