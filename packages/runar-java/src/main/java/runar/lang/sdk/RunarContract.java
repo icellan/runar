@@ -1569,7 +1569,7 @@ public final class RunarContract {
         return 156 + varintLen + scriptCodeLen;
     }
 
-    private int findPublicMethodIndex(String methodName) {
+    int findPublicMethodIndex(String methodName) {
         int i = 0;
         for (RunarArtifact.ABIMethod m : artifact.abi().methods()) {
             if (!m.isPublic()) continue;

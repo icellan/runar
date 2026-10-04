@@ -1058,9 +1058,12 @@ API surface:
 ```java
 public static ContractSimulator stateless(SmartContract contract);
 public static ContractSimulator stateful(StatefulSmartContract contract);
+public static ContractSimulator stateful(StatefulSmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateful(StatefulSmartContract contract, Path source);
 
 public Object call(String methodName, Object... args);
 public Object callStateful(String methodName, Preimage preimage, Object... args);
+public Preimage preimageFor(String methodName, Preimage template, Object... args);
 public AssertionError expectFailure(String methodName, Object... args);
 
 public List<Output> outputs();    // captured this.addOutput / addRawOutput / addDataOutput emissions
@@ -1074,15 +1077,23 @@ work in concurrent tests. Each captured `Output` exposes
 mutable property declaration order), and `rawScriptBytes` (non-null for
 RAW / DATA outputs).
 
-For methods that need a structured BIP-143 preimage, build one via
-[`Preimage.builder()`](src/main/java/runar/lang/runtime/Preimage.java):
+`callStateful` checks the preimage the way `checkPreimage` does on chain:
+it builds the spending transaction the call produces from the contract's
+compiled artifact (so the simulator must be created with the artifact or
+its source path) and throws `AssertionError` unless the preimage is that
+transaction's BIP-143 preimage. Choose the spender-side fields with
+[`Preimage.builder()`](src/main/java/runar/lang/runtime/Preimage.java) and
+let `preimageFor` fill in hashPrevouts, hashSequence, scriptCode and
+hashOutputs:
 
 ```java
-Preimage preimage = Preimage.builder()
+ContractSimulator sim = ContractSimulator.stateful(contract, Path.of("MyContract.runar.java"));
+Preimage template = Preimage.builder()
     .version(2L)
     .amount(BigInteger.valueOf(5000))
     .locktime(0L)
     .build();
+Preimage preimage = sim.preimageFor("methodThatReadsPreimage", template, arg0, arg1);
 sim.callStateful("methodThatReadsPreimage", preimage, arg0, arg1);
 ```
 
@@ -1482,9 +1493,12 @@ Off-chain harness for `SmartContract` / `StatefulSmartContract`.
 ```java
 public static ContractSimulator stateless(SmartContract contract);
 public static ContractSimulator stateful(StatefulSmartContract contract);
+public static ContractSimulator stateful(StatefulSmartContract contract, RunarArtifact artifact);
+public static ContractSimulator stateful(StatefulSmartContract contract, Path source);
 
 public Object call(String methodName, Object... args);
 public Object callStateful(String methodName, Preimage preimage, Object... args);
+public Preimage preimageFor(String methodName, Preimage template, Object... args);
 public AssertionError expectFailure(String methodName, Object... args);
 
 public SmartContract contract();

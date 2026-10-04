@@ -12,6 +12,7 @@ import runar.lang.types.Sig;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class TicTacToeTest {
@@ -20,6 +21,21 @@ class TicTacToeTest {
     private static final PubKey BOB   = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000002");
     private static final PubKey ZERO_PK = PubKey.fromHex("02" + "00".repeat(32));
     private static final Sig SIG = Sig.fromHex("30440220" + "00".repeat(32) + "0220" + "00".repeat(32));
+
+    /**
+     * F-129: callStateful checks the preimage against the spending transaction
+     * it builds from the compiled contract, so every call here passes the
+     * honest preimage ({@code preimageFor}) built from the same spender-chosen
+     * fields the test used to hand-roll.
+     */
+    private static final Path SOURCE = Path.of(
+        "src", "main", "java", "runar", "examples", "tic-tac-toe",
+        "TicTacToe.runar.java"
+    );
+
+    private static ContractSimulator simOf(TicTacToe g) {
+        return ContractSimulator.stateful(g, SOURCE);
+    }
 
     private TicTacToe freshGame() {
         // Constructor takes only the two readonly props (playerX +
@@ -38,13 +54,13 @@ class TicTacToeTest {
     }
 
     private static void joinPaying(ContractSimulator sim) {
-        sim.callStateful("join", inputOf(10000 - 1000), BOB, SIG);
+        sim.callStateful("join", sim.preimageFor("join", inputOf(10000 - 1000), BOB, SIG), BOB, SIG);
     }
 
     @Test
     void joinActivatesGame() {
         TicTacToe g = freshGame();
-        ContractSimulator sim = ContractSimulator.stateful(g);
+        ContractSimulator sim = simOf(g);
         joinPaying(sim);
         assertEquals(BOB, g.playerO);
         assertEquals(Bigint.ONE, g.status);
@@ -54,7 +70,7 @@ class TicTacToeTest {
     @Test
     void moveFlipsTurn() {
         TicTacToe g = freshGame();
-        ContractSimulator sim = ContractSimulator.stateful(g);
+        ContractSimulator sim = simOf(g);
         joinPaying(sim);
         sim.call("move", Bigint.ZERO, ALICE, SIG); // turn was X (1), Alice plays cell 0
         assertEquals(Bigint.ONE, g.c0);
@@ -64,7 +80,7 @@ class TicTacToeTest {
     @Test
     void moveRejectsOccupiedCell() {
         TicTacToe g = freshGame();
-        ContractSimulator sim = ContractSimulator.stateful(g);
+        ContractSimulator sim = simOf(g);
         joinPaying(sim);
         sim.call("move", Bigint.ZERO, ALICE, SIG);
         // Bob tries to play on the occupied cell 0.
@@ -74,7 +90,7 @@ class TicTacToeTest {
     @Test
     void moveRejectsWrongPlayer() {
         TicTacToe g = freshGame();
-        ContractSimulator sim = ContractSimulator.stateful(g);
+        ContractSimulator sim = simOf(g);
         joinPaying(sim);
         // Turn is 1 (X = Alice), but Bob tries to move.
         assertThrows(AssertionError.class, () -> sim.call("move", Bigint.ZERO, BOB, SIG));
@@ -89,9 +105,12 @@ class TicTacToeTest {
     void joinRejectsWrongPayment() {
         for (long input : new long[] {10000, 10000 - 1000 + 1, 10000 - 1000 - 1}) {
             TicTacToe g = freshGame();
-            ContractSimulator sim = ContractSimulator.stateful(g);
-            assertThrows(AssertionError.class, () -> sim.callStateful("join", inputOf(input), BOB, SIG),
+            ContractSimulator sim = simOf(g);
+            Preimage pre = sim.preimageFor("join", inputOf(input), BOB, SIG);
+            AssertionError e = assertThrows(AssertionError.class, () -> sim.callStateful("join", pre, BOB, SIG),
                 "join with input " + input + " must be rejected");
+            assertFalse(String.valueOf(e.getMessage()).startsWith("checkPreimage"),
+                "rejected by join's payment rule, not by the preimage check");
             assertEquals(Bigint.ZERO, g.status);
         }
     }
