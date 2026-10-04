@@ -31,6 +31,14 @@ func verifyFriWithConfig(proof *FriProof, chal *DuplexChallenger, input []commit
 	//    quotient (f(z) - f(x)) / (z - x).
 	alpha := chal.SampleExt4()
 
+	// F-126: the query-proof count is checked here, before anything indexes
+	// QueryProofs, rather than at step 5 where verifier.rs places it. It is a
+	// pure rejection (no transcript effect), so moving it earlier changes which
+	// error a malformed proof gets, never whether it is accepted.
+	if len(proof.QueryProofs) != cfg.numQueries {
+		return fmt.Errorf("fri: query_proofs %d != %d", len(proof.QueryProofs), cfg.numQueries)
+	}
+
 	// 2. Schedule consistency checks (verifier.rs lines 147-184).
 	expectedRounds := len(proof.CommitPhaseCommits)
 	for i, qp := range proof.QueryProofs {
@@ -44,20 +52,41 @@ func verifyFriWithConfig(proof *FriProof, chal *DuplexChallenger, input []commit
 		for i, op := range proof.QueryProofs[0].CommitPhaseOpenings {
 			logArities[i] = int(op.LogArity)
 		}
-	}
-	for q, qp := range proof.QueryProofs[1:] {
-		for i, op := range qp.CommitPhaseOpenings {
-			if int(op.LogArity) != logArities[i] {
-				return fmt.Errorf("fri: query %d arity[%d] mismatch", q+1, i)
+		for q, qp := range proof.QueryProofs[1:] {
+			for i, op := range qp.CommitPhaseOpenings {
+				if int(op.LogArity) != logArities[i] {
+					return fmt.Errorf("fri: query %d arity[%d] mismatch", q+1, i)
+				}
 			}
 		}
 	}
 
+	// F-126: the arities come straight off the wire. Bound each by the
+	// config's max_log_arity (the honest prover never folds wider), and
+	// require the schedule to land exactly on the tallest input matrix.
+	// verify_query rejects any other log_global_max_height anyway, but only
+	// after SampleBits / KbTwoAdicGenerator / open_input's shifts have been
+	// fed the unchecked value — each of which panics when it is out of range.
 	totalLogReduction := 0
-	for _, la := range logArities {
+	for i, la := range logArities {
+		if la > cfg.maxLogArity {
+			return fmt.Errorf("fri: log_arity[%d] %d > max_log_arity %d", i, la, cfg.maxLogArity)
+		}
 		totalLogReduction += la
 	}
 	logGlobalMaxHeight := totalLogReduction + cfg.logBlowup + cfg.logFinalPolyLen
+	maxInputLogHeight := 0
+	for _, c := range input {
+		for _, m := range c.matrices {
+			if m.logHeightAfterBlowup > maxInputLogHeight {
+				maxInputLogHeight = m.logHeightAfterBlowup
+			}
+		}
+	}
+	if logGlobalMaxHeight != maxInputLogHeight {
+		return fmt.Errorf("fri: log_global_max_height %d != max input log height %d",
+			logGlobalMaxHeight, maxInputLogHeight)
+	}
 
 	if len(proof.CommitPowWitnesses) != expectedRounds {
 		return fmt.Errorf("fri: commit_pow_witnesses %d != %d",
@@ -85,10 +114,7 @@ func verifyFriWithConfig(proof *FriProof, chal *DuplexChallenger, input []commit
 	finalPoly := convertExt4Vec(proof.FinalPoly)
 	chal.ObserveExt4Slice(finalPoly)
 
-	// 5. Query-proof count check.
-	if len(proof.QueryProofs) != cfg.numQueries {
-		return fmt.Errorf("fri: query_proofs %d != %d", len(proof.QueryProofs), cfg.numQueries)
-	}
+	// 5. Query-proof count check — done up front (see F-126 note above).
 
 	// 6. Bind variable-arity schedule into transcript before query grinding.
 	for _, la := range logArities {
