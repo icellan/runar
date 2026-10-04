@@ -1,7 +1,17 @@
 package runar.lang.runtime;
 
 import org.junit.jupiter.api.Test;
+import runar.lang.sdk.Json;
+import runar.lang.sdk.ScriptUtils;
 import runar.lang.types.ByteString;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -86,6 +96,68 @@ class SlhDsaTest {
         SlhDsa.Params p = SlhDsa.SHA2_128f;
         assertFalse(SlhDsa.verify(p, "x".getBytes(), new byte[10], new byte[2 * p.n]));
         assertFalse(SlhDsa.verify(p, "x".getBytes(), new byte[100000], new byte[2 * p.n + 1]));
+    }
+
+    /**
+     * F-130: SHA2-256f has h - h' = 64. The tree-index mask was computed as
+     * {@code (1L << 64) - 1}; Java takes long shift counts mod 64, so that is
+     * {@code (1L << 0) - 1 == 0} and idx_tree collapsed to 0 in sign AND verify.
+     *
+     * <p>Proves: Java verifies the on-chain-accepted 256f witness signature
+     * (conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json, signed by
+     * the third-party PyPI slh-dsa 0.2.5 SHA-256-only instantiation; its 64-bit
+     * tree index 0x9cc4feac04b4276d is >= 2^63, so every high bit matters), rejects
+     * the witness's 1-bit near-miss, and Java's own deterministic signer reproduces
+     * that independent signature byte-for-byte from the same seeds.
+     *
+     * <p>Does not prove: anything about the other five parameter sets beyond the
+     * existing round-trips, nor FIPS 205 SHA-512 conformance (the repo variant is
+     * SHA-256-only by design, issue #137).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void sha2_256f_verifiesAndReproducesOnChainWitnessWithHighTreeIndex() throws Exception {
+        Path p = Paths.get(System.getProperty("user.dir"), "..", "..", "conformance", "witnesses",
+            "real-crypto", "post-quantum-slhdsa-256f.json");
+        Map<String, Object> w = (Map<String, Object>) Json.parse(Files.readString(p));
+        Map<String, Object> ctor = (Map<String, Object>) w.get("constructorArgs");
+        byte[] pk = ScriptUtils.hexToBytes(((String) ctor.get("pubkey")).substring(2));
+        List<Object> spends = (List<Object>) w.get("spends");
+        int accepts = 0;
+        int rejects = 0;
+        byte[] honestMsg = null;
+        byte[] honestSig = null;
+        for (Object o : spends) {
+            Map<String, Object> spend = (Map<String, Object>) o;
+            List<Object> args = (List<Object>) spend.get("args");
+            byte[] msg = ScriptUtils.hexToBytes(((String) args.get(0)).substring(2));
+            byte[] sig = ScriptUtils.hexToBytes(((String) args.get(1)).substring(2));
+            if ("accept".equals(spend.get("expect"))) {
+                assertTrue(SlhDsa.verify(SlhDsa.SHA2_256f, msg, sig, pk),
+                    "256f: the on-chain-accepted witness signature must verify");
+                honestMsg = msg;
+                honestSig = sig;
+                accepts++;
+            } else {
+                assertFalse(SlhDsa.verify(SlhDsa.SHA2_256f, msg, sig, pk),
+                    "256f: the witness near-miss must be rejected");
+                rejects++;
+            }
+        }
+        assertEquals(1, accepts, "witness carries one honest spend");
+        assertEquals(1, rejects, "witness carries one near-miss spend");
+
+        // Same seeds as the witness note: SHA-256('runar F-034 sk_seed' / 'sk_prf' / 'pk_seed').
+        MessageDigest sha = MessageDigest.getInstance("SHA-256");
+        byte[] seed = new byte[96];
+        System.arraycopy(sha.digest("runar F-034 sk_seed".getBytes(StandardCharsets.UTF_8)), 0, seed, 0, 32);
+        System.arraycopy(sha.digest("runar F-034 sk_prf".getBytes(StandardCharsets.UTF_8)), 0, seed, 32, 32);
+        System.arraycopy(sha.digest("runar F-034 pk_seed".getBytes(StandardCharsets.UTF_8)), 0, seed, 64, 32);
+        SlhDsa.KeyPair kp = SlhDsa.keygen(SlhDsa.SHA2_256f, seed);
+        assertArrayEquals(pk, kp.pk, "256f: keygen from the witness seeds must give the witness pubkey");
+        byte[] sig = SlhDsa.sign(SlhDsa.SHA2_256f, honestMsg, kp.sk);
+        assertArrayEquals(honestSig, sig,
+            "256f: Java's deterministic signer must reproduce the independent witness signature");
     }
 
     private static void runRoundTrip(SlhDsa.Params p) {

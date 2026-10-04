@@ -591,7 +591,9 @@ public final class SlhDsa {
         for (int i = 0; i < treeIdxLen; i++) {
             treeIdx = (treeIdx << 8) | (digest[mdLen + i] & 0xff);
         }
-        treeIdx &= (1L << (params.h - hp)) - 1;
+        // h - h' is 64 for SHA2-256f; Java masks long shift counts mod 64, so
+        // (1L << 64) - 1 would be 0. Mask only below 64 bits (F-130).
+        if (params.h - hp < 64) treeIdx &= (1L << (params.h - hp)) - 1;
 
         int leafIdx = 0;
         for (int i = 0; i < leafIdxLen; i++) {
@@ -662,7 +664,9 @@ public final class SlhDsa {
         for (int i = 0; i < treeIdxLen; i++) {
             treeIdx = (treeIdx << 8) | (digest[mdLen + i] & 0xff);
         }
-        treeIdx &= (1L << (params.h - hp)) - 1;
+        // h - h' is 64 for SHA2-256f; Java masks long shift counts mod 64, so
+        // (1L << 64) - 1 would be 0. Mask only below 64 bits (F-130).
+        if (params.h - hp < 64) treeIdx &= (1L << (params.h - hp)) - 1;
 
         int leafIdx = 0;
         for (int i = 0; i < leafIdxLen; i++) {

@@ -871,7 +871,11 @@ pub fn slh_sign(params: &SlhParams, msg: &[u8], sk: &[u8]) -> Vec<u8> {
     for i in 0..tree_idx_len {
         tree_idx = (tree_idx << 8) | (digest[md_len + i] as u64);
     }
-    tree_idx &= (1u64 << (params.h - hp)) - 1;
+    // h - h' is 64 for SHA2-256f: `1u64 << 64` panics in debug and is masked to
+    // `1 << 0` in release (mask 0). Mask only below 64 bits (F-130).
+    if params.h - hp < 64 {
+        tree_idx &= (1u64 << (params.h - hp)) - 1;
+    }
 
     let mut leaf_idx: u32 = 0;
     for i in 0..leaf_idx_len {
@@ -968,7 +972,11 @@ pub fn slh_verify(params: &SlhParams, msg: &[u8], sig: &[u8], pk: &[u8]) -> bool
     for i in 0..tree_idx_len {
         tree_idx = (tree_idx << 8) | (digest[md_len + i] as u64);
     }
-    tree_idx &= (1u64 << (params.h - hp)) - 1;
+    // h - h' is 64 for SHA2-256f: `1u64 << 64` panics in debug and is masked to
+    // `1 << 0` in release (mask 0). Mask only below 64 bits (F-130).
+    if params.h - hp < 64 {
+        tree_idx &= (1u64 << (params.h - hp)) - 1;
+    }
 
     let mut leaf_idx: u32 = 0;
     for i in 0..leaf_idx_len {
@@ -1112,5 +1120,54 @@ mod tests {
     fn test_verify_bad_pk_length() {
         let params = &SLH_SHA2_128F;
         assert!(!slh_verify(params, b"msg", b"sig", b"short"));
+    }
+
+    /// F-130: SHA2-256f has h - h' = 64, and the tree-index mask was
+    /// `(1u64 << 64) - 1`. Debug builds panic on that shift; release builds
+    /// mask the count to 0 (like Java), so the mask is 0 and idx_tree collapses.
+    ///
+    /// Proves: the Rust SDK verifies the on-chain-accepted 256f witness
+    /// (conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json, signed by
+    /// the third-party PyPI slh-dsa 0.2.5 SHA-256-only instantiation, tree index
+    /// 0x9cc4feac04b4276d >= 2^63), rejects its 1-bit near-miss, and `slh_sign`
+    /// reproduces that independent signature byte-for-byte from the same seeds.
+    ///
+    /// Does not prove: anything about the other parameter sets, or about the
+    /// release-mode codegen specifically (cargo test runs a debug build; the fix
+    /// removes the over-wide shift, so both profiles take the same path).
+    #[test]
+    fn test_sha2_256f_onchain_witness_high_tree_index() {
+        use crate::analyzer::script_parser::decode_hex;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json");
+        let w: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let hex0x = |v: &serde_json::Value| decode_hex(&v.as_str().unwrap()[2..]).unwrap();
+        let params = &SLH_SHA2_256F;
+        let pk = hex0x(&w["constructorArgs"]["pubkey"]);
+        let mut honest: Option<(Vec<u8>, Vec<u8>)> = None;
+        let (mut accepts, mut rejects) = (0, 0);
+        for spend in w["spends"].as_array().unwrap() {
+            let msg = hex0x(&spend["args"][0]);
+            let sig = hex0x(&spend["args"][1]);
+            if spend["expect"] == "accept" {
+                assert!(slh_verify(params, &msg, &sig, &pk), "256f witness must verify");
+                honest = Some((msg, sig));
+                accepts += 1;
+            } else {
+                assert!(!slh_verify(params, &msg, &sig, &pk), "256f near-miss must be rejected");
+                rejects += 1;
+            }
+        }
+        assert_eq!((accepts, rejects), (1, 1));
+
+        let mut seed = Vec::with_capacity(96);
+        seed.extend_from_slice(&sha256_hash(b"runar F-034 sk_seed"));
+        seed.extend_from_slice(&sha256_hash(b"runar F-034 sk_prf"));
+        seed.extend_from_slice(&sha256_hash(b"runar F-034 pk_seed"));
+        let kp = slh_keygen(params, Some(&seed));
+        assert_eq!(kp.pk, pk, "keygen from the witness seeds must give the witness pubkey");
+        let (msg, sig) = honest.unwrap();
+        assert!(slh_sign(params, &msg, &kp.sk) == sig, "slh_sign must reproduce the witness signature");
     }
 }
