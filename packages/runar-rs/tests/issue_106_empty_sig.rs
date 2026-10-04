@@ -76,6 +76,7 @@ fn or_checksig_artifact(pk_a_hex: &str, pk_b_hex: &str) -> RunarArtifact {
         state_fields: None,
         constructor_slots: None,
         code_sep_index_slots: None,
+        code_part_len_slots: None,
         code_separator_index: None,
         code_separator_indices: None,
         anf: None,

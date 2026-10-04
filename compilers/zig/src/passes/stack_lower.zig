@@ -3466,8 +3466,9 @@ const LowerCtx = struct {
         //     the full argument.
         if (self.hasStateSection() and self.fixedStateSectionLength() == null) {
             // delta/exact are refined by pinCodePartLength once every method
-            // has been lowered; the defaults are the sound ones (a lower bound
-            // of emittedLength + 0 holds for any deployment).
+            // has been lowered; the defaults are the sound ones (exact=false
+            // makes the emitter record a deploy-time `codePartLenSlots` entry,
+            // N-051).
             try self.emit(.{ .verify_code_part_len = .{ .delta = 0, .exact = false } });
         }
 
@@ -6538,7 +6539,9 @@ fn pinCodePartLength(methods: []types.StackMethod, properties: []const types.ANF
                             delta += growth;
                         } else {
                             // No compile-time width. Growth is never negative,
-                            // so the running sum stays a sound lower bound.
+                            // so the running sum is only a lower bound; the
+                            // emitter records the field in `codePartLenSlots`
+                            // and the SDK writes the deployed length (N-051).
                             exact = false;
                         }
                     } else {

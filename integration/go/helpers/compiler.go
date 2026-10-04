@@ -346,6 +346,10 @@ func compileToSDKArtifactWithOptions(absPath, groth16WAVKey string) (*runar.Runa
 			})
 		}
 	}
+	// N-051: deploy-time code-part length pins the SDK patches.
+	for _, s := range emitResult.CodePartLenSlots {
+		artifact.CodePartLenSlots = append(artifact.CodePartLenSlots, runar.CodePartLenSlot{ByteOffset: s.ByteOffset})
+	}
 	return artifact, nil
 }
 
@@ -525,6 +529,10 @@ func CompileSourceStringToSDKArtifact(source, fileName string, constructorArgs m
 				CodeSepIndex: s.CodeSepIndex,
 			})
 		}
+	}
+	// N-051: deploy-time code-part length pins the SDK patches.
+	for _, s := range emitResult.CodePartLenSlots {
+		artifact.CodePartLenSlots = append(artifact.CodePartLenSlots, runar.CodePartLenSlot{ByteOffset: s.ByteOffset})
 	}
 	return artifact, nil
 }

@@ -233,27 +233,55 @@ def matches_artifact(
     if not artifact.constructor_slots:
         return code_hex == template
 
-    # Deduplicate by byte_offset, keeping first occurrence
-    seen_offsets: set[int] = set()
-    slots = sorted(artifact.constructor_slots, key=lambda s: s.byte_offset)
-    unique_slots = []
-    for slot in slots:
-        if slot.byte_offset not in seen_offsets:
-            seen_offsets.add(slot.byte_offset)
-            unique_slots.append(slot)
+    # Every OP_0 placeholder the SDK substitutes at deploy time -- constructor
+    # args AND codeSepIndex slots -- is a variable element in the deployed
+    # code. Skipping the codeSepIndex slots made every stateful artifact that
+    # carries one (the placeholder bakes as OP_1) fail to match its own
+    # honest deployment. Deduplicated, ascending.
+    offsets = sorted(
+        {s.byte_offset for s in artifact.constructor_slots}
+        | {s.byte_offset for s in artifact.code_sep_index_slots}
+    )
+
+    # N-051: a `code_part_len_slots` field holds the DEPLOYED code-part length,
+    # not the template's placeholder value. It must equal the length of the
+    # code part being matched (everything before the state section,
+    # inscription envelope included).
+    len_fields = {s.byte_offset * 2 for s in artifact.code_part_len_slots}
+    deployed_len = ((len(code_hex) // 2) & 0xFFFFFFFF).to_bytes(4, 'little').hex()
+
+    def segment_matches(t_start: int, t_end: int, c_start: int) -> bool:
+        t = t_start
+        c = c_start
+        while t < t_end:
+            if t in len_fields:
+                if c + 8 > len(code_hex) or code_hex[c:c + 8] != deployed_len:
+                    return False
+                t += 8
+                c += 8
+                continue
+            if c >= len(code_hex) or template[t] != code_hex[c]:
+                return False
+            t += 1
+            c += 1
+        return True
 
     template_pos = 0
     code_pos = 0
 
-    for slot in unique_slots:
-        slot_hex_offset = slot.byte_offset * 2
-        template_segment = template[template_pos:slot_hex_offset]
-        code_segment = code_hex[code_pos:code_pos + len(template_segment)]
-        if template_segment != code_segment:
+    for offset in offsets:
+        slot_hex_offset = offset * 2
+        seg_len = slot_hex_offset - template_pos
+        if code_pos + seg_len > len(code_hex):
+            return False
+        if not segment_matches(template_pos, slot_hex_offset, code_pos):
             return False
         template_pos = slot_hex_offset + 2
-        elem_offset = code_pos + len(template_segment)
+        elem_offset = code_pos + seg_len
         _, total_hex_chars, _ = _read_script_element(code_hex, elem_offset)
         code_pos = elem_offset + total_hex_chars
 
-    return template[template_pos:] == code_hex[code_pos:]
+    return (
+        len(code_hex) - code_pos == len(template) - template_pos
+        and segment_matches(template_pos, len(template), code_pos)
+    )

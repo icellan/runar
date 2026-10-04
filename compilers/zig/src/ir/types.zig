@@ -709,10 +709,12 @@ pub const StackInstruction = union(enum) {
 ///
 /// `delta` is the deploy-time byte growth of the template's OP_0 constructor
 /// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`. `exact`
-/// says whether every placeholder's growth is type-determined: true pins with
-/// OP_NUMEQUAL, false with OP_GREATERTHANOREQUAL (a variable-width readonly
-/// constructor argument has no compile-time width, and placeholder growth is
-/// never negative, so the sum is still a sound LOWER bound).
+/// says whether every placeholder's growth is type-determined. The pin is
+/// ALWAYS an OP_NUMEQUAL equality (N-051). When `exact` is false (a
+/// variable-width readonly constructor argument has no compile-time width) the
+/// compile-time value is only a lower bound, so the emitter records the field
+/// in the artifact's `codePartLenSlots` and the SDK writes the real deployed
+/// code-part length into it at deploy time.
 pub const VerifyCodePartLen = struct { delta: i64, exact: bool };
 
 /// Backing payload for the `raw_bytes` StackInstruction variant. Bytes are
@@ -766,6 +768,9 @@ pub const ABIMethod = struct {
 pub const ABIParam = struct { name: []const u8, type_name: []const u8 };
 pub const ConstructorSlot = struct { param_index: usize, byte_offset: usize };
 pub const CodeSepIndexSlot = struct { byte_offset: usize, code_sep_index: usize };
+/// N-051 — template byte offset of the first of the 4 little-endian length
+/// bytes of a `verify_code_part_len` pin whose value the SDK fills in.
+pub const CodePartLenSlot = struct { byte_offset: usize };
 pub const StateField = struct { name: []const u8, type_name: []const u8, index: usize, initial_value: ?ConstValue = null };
 pub const SourceMapping = struct { opcode_index: u32, source_file: []const u8, line: u32, column: u32 };
 pub const SourceMap = struct { mappings: []SourceMapping };

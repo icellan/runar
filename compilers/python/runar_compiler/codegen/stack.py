@@ -151,8 +151,10 @@ class StackOp:
     # verify_code_part_len (R-095) -- pin SIZE(_codePart) against the code
     # part's own DEPLOYED byte length. code_part_len_delta is the deploy-time
     # byte growth of the template's OP_0 placeholders; code_part_len_exact says
-    # whether that growth is fully type-determined (equality pin) or only a
-    # lower bound. Both are resolved by _pin_code_part_length once every method
+    # whether that growth is fully type-determined (value final at compile
+    # time) or not (N-051: the emitter records the field as a deploy-time
+    # codePartLenSlots entry the SDK patches; the comparison is always
+    # OP_NUMEQUAL). Both are resolved by _pin_code_part_length once every method
     # has been lowered; the emitter back-patches the length itself.
     code_part_len_delta: int = 0
     code_part_len_exact: bool = False
@@ -3955,8 +3957,9 @@ class _LoweringContext:
         #     SIZE(codePart) where it found it, so the stack map is untouched.
         if self._has_state_section() and self._fixed_state_section_length() is None:
             # delta / exact are refined by _pin_code_part_length once every
-            # method has been lowered; the defaults are the sound ones (a lower
-            # bound of emitted_length + 0 holds for any deployment).
+            # method has been lowered; the defaults are the safe ones:
+            # exact=False makes the length a deploy-time slot (N-051) that the
+            # SDK fills with the real deployed code-part length.
             self.emit_op(StackOp(
                 op="verify_code_part_len",
                 code_part_len_delta=0,
@@ -5761,8 +5764,8 @@ def _pin_code_part_length(
             typ = ctor_props[param_index].type
         growth, known = _constructor_slot_growth(typ)
         if not known:
-            # No compile-time width. Growth is never negative, so the running
-            # sum stays a sound lower bound -- just not an exact one.
+            # No compile-time width: the emitter records the length field as a
+            # deploy-time codePartLenSlots entry (N-051) and the SDK patches it.
             exact = False
         else:
             delta += growth

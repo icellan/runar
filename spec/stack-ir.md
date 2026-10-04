@@ -172,7 +172,7 @@ The Stack IR uses a discriminated union with exactly **16 variants**:
 | `TuckOp` | `'tuck'` | — | Copy top behind second |
 | `PlaceholderOp` | `'placeholder'` | `paramIndex: number, paramName: string` | Constructor parameter slot |
 | `PushCodeSepIndexOp` | `'push_codesep_index'` | — | Push the method's OP_CODESEPARATOR byte offset; the emitter back-patches the value once offsets exist |
-| `VerifyCodePartLenOp` | `'verify_code_part_len'` | `delta: number, exact: boolean` | Pin `SIZE(_codePart)` against the code part's own deployed byte length |
+| `VerifyCodePartLenOp` | `'verify_code_part_len'` | `delta: number, exact: boolean` | Pin `SIZE(_codePart)` (always `OP_NUMEQUAL`) against the code part's own deployed byte length; `exact: false` makes the length a deploy-time `codePartLenSlots` entry |
 | `RawBytesOp` | `'raw_bytes'` | `bytes: Uint8Array, in_arity: number, out_arity: number` | Opaque byte span emitted verbatim; a hard barrier to every windowed optimizer |
 
 > **Not optional.** The last three variants are not an extension set a minimal implementation may skip. `raw_bytes` is how the ~428-byte `checkPreimage` transaction-binding blob reaches the script, and it is present in **every** stateful contract; a validator that does not model it either rejects every stateful artifact or drops the bytes that bind the spend to its transaction. `verify_code_part_len` and `push_codesep_index` both carry values the emitter back-patches after byte offsets exist, so neither can be reconstructed from the Stack IR alone.

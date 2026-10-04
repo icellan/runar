@@ -433,9 +433,14 @@ func normalizeWitnessBytes(s string) (string, error) {
 // violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
 // satisfy, so it is deliberately not returned here.
 //
-// Read from the emitted TEMPLATE rather than from a built code script: the
-// template holds OP_0 placeholders where constructor args go, so no
-// caller-supplied byte string can be mistaken for a pin.
+// Since N-051 every pin is an equality (9c); `a2` only appears in artifacts
+// from older compilers.
+//
+// The caller decodes from the BUILT code script (assertCodePartLengthPinHonoured)
+// so a deploy-time pin (an N-051 `codePartLenSlots` field, patched to the
+// inscribed length) is read at its real value. A caller-supplied byte string
+// that happens to contain the nine-byte run can only add a spurious pin and
+// make the guard refuse more, never less.
 func decodeExactCodePartLenPins(scriptHex string) []int {
 	var values []int
 	for i := 0; i+18 <= len(scriptHex); i += 2 {
@@ -470,13 +475,16 @@ func decodeExactCodePartLenPins(scriptHex string) []int {
 // describes the code part this contract produces.
 //
 // The check is the invariant itself, not a restatement of the compiler's
-// derivation: it decodes the pinned number straight out of the emitted template
-// and compares it to getCodePartHex(). So it permits every combination that
+// derivation: it decodes the pinned number straight out of the built code
+// script (deploy-time N-051 slots already patched) and compares it to
+// getCodePartHex(). So it permits every combination that
 // actually works -- a stateless contract or a fixed-size state layout carries
 // no pin at all, and a lower-bound pin is satisfied by a longer code part --
 // and rejects only the shape that would lock funds.
 func (c *RunarContract) assertCodePartLengthPinHonoured() error {
-	pinned := decodeExactCodePartLenPins(c.Artifact.Script)
+	// Decode from the code this contract really deploys: a deploy-time pin
+	// (N-051 `codePartLenSlots`) is patched to the inscribed length there.
+	pinned := decodeExactCodePartLenPins(c.buildCodeScript())
 	if len(pinned) == 0 {
 		return nil
 	}
@@ -2074,6 +2082,66 @@ func (c *RunarContract) SetCurrentUtxo(utxo *UTXO) {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+// codeScriptSubstitution is one template OP_0 placeholder (at TEMPLATE byte
+// offset byteOffset) replaced with the encoded hex `encoded`.
+type codeScriptSubstitution struct {
+	byteOffset int
+	encoded    string
+}
+
+// patchCodePartLenSlots (N-051) writes the deployed code-part length into
+// every `codePartLenSlots` field of a spliced code script.
+//
+// The compiler cannot know the deployed length of a code part that bakes a
+// variable-width readonly constructor arg (a ByteString, a bigint), so the
+// `SIZE(_codePart)` equality pin carries a 4-byte little-endian field the SDK
+// fills in. The field is fixed-width, so writing it changes no length and no
+// offset. A wrong or missing value is fail-safe on chain (honest spends fail
+// OP_NUMEQUAL); it is never a lower bound.
+//
+// spliced is the template with every OP_0 placeholder substituted; subs are
+// those substitutions by TEMPLATE byte offset; codePartLen is the deployed
+// code-part length in bytes, including any inscription envelope.
+func patchCodePartLenSlots(artifact *RunarArtifact, spliced string, subs []codeScriptSubstitution, codePartLen int) (string, error) {
+	slots := artifact.CodePartLenSlots
+	if len(slots) == 0 {
+		return spliced, nil
+	}
+	if codePartLen < 0 || codePartLen > 0x7fffffff {
+		return "", fmt.Errorf("patchCodePartLenSlots: code part length %d does not fit the 4-byte pin field", codePartLen)
+	}
+	le := fmt.Sprintf("%02x%02x%02x%02x",
+		codePartLen&0xff, (codePartLen>>8)&0xff, (codePartLen>>16)&0xff, (codePartLen>>24)&0xff)
+	template := artifact.Script
+	out := spliced
+	for _, slot := range slots {
+		off := slot.ByteOffset
+		// The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+		// OP_VERIFY` here; anything else means the descriptor does not
+		// describe this script.
+		if off < 1 || (off+7)*2 > len(template) ||
+			template[(off-1)*2:off*2] != "04" || template[(off+4)*2:(off+7)*2] != "819c69" {
+			return "", fmt.Errorf(
+				"patchCodePartLenSlots: %s codePartLenSlots entry at byteOffset %d does not point at a "+
+					"verify_code_part_len length field (corrupted or mismatched artifact)",
+				artifact.ContractName, off)
+		}
+		shift := 0
+		for _, sub := range subs {
+			if sub.byteOffset < off {
+				shift += len(sub.encoded)/2 - 1
+			}
+		}
+		at := (off + shift) * 2
+		if at < 0 || at+8 > len(out) {
+			return "", fmt.Errorf("patchCodePartLenSlots: %s codePartLenSlots entry at byteOffset %d falls outside the built code script",
+				artifact.ContractName, off)
+		}
+		out = out[:at] + le + out[at+8:]
+	}
+	return out, nil
+}
+
 func (c *RunarContract) buildCodeScript() string {
 	script := c.Artifact.Script
 
@@ -2084,16 +2152,12 @@ func (c *RunarContract) buildCodeScript() string {
 		// Build a unified list of all template slot substitutions, then process
 		// them in descending byte-offset order so each splice doesn't invalidate
 		// the positions of earlier (higher-offset) entries.
-		type substitution struct {
-			byteOffset int
-			encoded    string
-		}
-		var subs []substitution
+		var subs []codeScriptSubstitution
 
 		// Constructor arg slots: replace OP_0 placeholder with encoded arg
 		if hasConstructorSlots {
 			for _, slot := range c.Artifact.ConstructorSlots {
-				subs = append(subs, substitution{
+				subs = append(subs, codeScriptSubstitution{
 					byteOffset: slot.ByteOffset,
 					encoded:    encodeArg(c.constructorArgs[slot.ParamIndex]),
 				})
@@ -2107,7 +2171,7 @@ func (c *RunarContract) buildCodeScript() string {
 		if hasCodeSepSlots {
 			resolved := c.resolvedCodeSepSlotValues()
 			for _, rs := range resolved {
-				subs = append(subs, substitution{
+				subs = append(subs, codeScriptSubstitution{
 					byteOffset: rs.templateByteOffset,
 					encoded:    encodeScriptNumber(int64(rs.adjustedValue)),
 				})
@@ -2123,6 +2187,18 @@ func (c *RunarContract) buildCodeScript() string {
 			// Replace the 1-byte OP_0 placeholder (2 hex chars) with the encoded value
 			script = script[:hexOffset] + sub.encoded + script[hexOffset+2:]
 		}
+
+		// N-051: the deploy-time code-part length pins. The inscription
+		// envelope, when present, is part of `_codePart` (see getCodePartHex).
+		envelopeLen := 0
+		if c.inscription != nil {
+			envelopeLen = len(BuildInscriptionEnvelope(c.inscription.ContentType, c.inscription.Data)) / 2
+		}
+		patched, err := patchCodePartLenSlots(c.Artifact, script, subs, len(script)/2+envelopeLen)
+		if err != nil {
+			panic(err)
+		}
+		script = patched
 	} else if len(c.Artifact.StateFields) == 0 {
 		// Backward compatibility: old stateless artifacts without constructorSlots.
 		// For stateful contracts, constructor args initialize the state section

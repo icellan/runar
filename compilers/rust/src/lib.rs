@@ -562,6 +562,7 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
         &emit_result.script_asm,
         emit_result.constructor_slots,
         emit_result.code_sep_index_slots,
+        emit_result.code_part_len_slots,
         emit_result.code_separator_index,
         emit_result.code_separator_indices,
         true, // include ANF IR for SDK state auto-computation
@@ -813,6 +814,7 @@ pub fn compile_from_source_str_with_result(
                 &emit_result.script_asm,
                 emit_result.constructor_slots,
                 emit_result.code_sep_index_slots,
+                emit_result.code_part_len_slots,
                 emit_result.code_separator_index,
                 emit_result.code_separator_indices,
                 true,

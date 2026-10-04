@@ -160,6 +160,18 @@ export interface CodeSepIndexSlot {
 }
 
 /**
+ * N-051 — a `verify_code_part_len` length field whose value is only known at
+ * deploy time (a readonly constructor arg of variable width is baked into the
+ * code part). The SDK overwrites the 4 bytes at `byteOffset` with the deployed
+ * code-part length, little-endian.
+ */
+export interface CodePartLenSlot {
+  /** Byte offset, in the TEMPLATE script, of the first of the 4 little-endian
+   *  length bytes (the byte after the `04` push opcode). */
+  byteOffset: number;
+}
+
+/**
  * Byte range produced by a `raw_script` ANF node. The bytes are emitted
  * verbatim by `emitRawBytes`; the static analyzer reads these spans so it
  * can skip the contents (which are opaque, peephole-barrier-protected,
@@ -184,6 +196,10 @@ export interface EmitResult {
   /** Byte offsets of codeSepIndex placeholders in the script (OP_0 placeholders
    *  that the SDK must replace with the adjusted codeSeparatorIndex). */
   codeSepIndexSlots: CodeSepIndexSlot[];
+  /** N-051 — `verify_code_part_len` length fields the SDK patches at deploy
+   *  time with the deployed code-part length. Absent when every pin is exact
+   *  at compile time. */
+  codePartLenSlots?: CodePartLenSlot[];
   /** Byte offset of OP_CODESEPARATOR in the script (undefined if not present).
    *  For multi-method contracts, this is the LAST separator's offset. */
   codeSeparatorIndex?: number;
@@ -267,6 +283,8 @@ class EmitContext {
   readonly sourceMap: SourceMapping[] = [];
   readonly constructorSlots: ConstructorSlot[] = [];
   readonly codeSepIndexSlots: CodeSepIndexSlot[] = [];
+  /** N-051 — pin length fields the SDK patches at deploy time. */
+  readonly codePartLenSlots: CodePartLenSlot[] = [];
   /** R-095 — `verify_code_part_len` length fields awaiting back-patch. */
   private readonly codePartLenFixups: {
     valueByteOffset: number;
@@ -357,6 +375,18 @@ class EmitContext {
    *
    * `exact` is known here (the stack lowerer resolved it once every method had
    * been lowered), so only the four length bytes need patching.
+   *
+   * N-051 — the comparison is ALWAYS an equality. It used to degrade to
+   * OP_GREATERTHANOREQUAL when a variable-width readonly arg made the deployed
+   * length unknown here, and a lower bound lets a spender claim a TRUNCATED
+   * `_codePart` that ends at any 0x6a byte inside the baked value (clause 8b's
+   * `rest[0] == 0x6a` is then satisfied by the script's own bytes), planting
+   * attacker-chosen code in the continuation. When the length is not exact at
+   * compile time, the field is recorded as a `codePartLenSlots` entry and the
+   * SDK writes the real deployed code-part length into it at deploy time. The
+   * template keeps the compile-time lower bound, so an SDK that does not patch
+   * produces a contract whose honest spends fail (funds stuck), never one that
+   * accepts a truncated code part.
    */
   emitVerifyCodePartLen(delta: number, exact: boolean): void {
     this.emitOpcode('OP_DUP');
@@ -365,9 +395,10 @@ class EmitContext {
     const asmIndex = this.asmParts.length;
     this.emitPush(new Uint8Array(4));
     this.emitOpcode('OP_BIN2NUM');
-    this.emitOpcode(exact ? 'OP_NUMEQUAL' : 'OP_GREATERTHANOREQUAL');
+    this.emitOpcode('OP_NUMEQUAL');
     this.emitOpcode('OP_VERIFY');
     this.codePartLenFixups.push({ valueByteOffset, asmIndex, delta });
+    if (!exact) this.codePartLenSlots.push({ byteOffset: valueByteOffset });
   }
 
   /**
@@ -673,6 +704,7 @@ export function emit(program: StackProgram): EmitResult {
     sourceMap: ctx.sourceMap,
     constructorSlots: ctx.constructorSlots,
     codeSepIndexSlots: ctx.codeSepIndexSlots,
+    codePartLenSlots: ctx.codePartLenSlots.length > 0 ? ctx.codePartLenSlots : undefined,
     codeSeparatorIndex: ctx.codeSeparatorIndex,
     codeSeparatorIndices: ctx.codeSeparatorIndices.length > 0 ? ctx.codeSeparatorIndices : undefined,
     rawScriptSpans: ctx.rawScriptSpans.length > 0 ? ctx.rawScriptSpans : undefined,
@@ -738,6 +770,7 @@ export function emitMethod(method: StackMethod): EmitResult {
     sourceMap: ctx.sourceMap,
     constructorSlots: ctx.constructorSlots,
     codeSepIndexSlots: ctx.codeSepIndexSlots,
+    codePartLenSlots: ctx.codePartLenSlots.length > 0 ? ctx.codePartLenSlots : undefined,
     rawScriptSpans: ctx.rawScriptSpans.length > 0 ? ctx.rawScriptSpans : undefined,
   };
 }

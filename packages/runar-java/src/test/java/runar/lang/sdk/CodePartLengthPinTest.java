@@ -14,8 +14,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * nine-byte run:
  *
  * <pre>
- *   76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
- *   OP_DUP  &lt;len LE32&gt;    OP_BIN2NUM  cmp  OP_VERIFY
+ *   76 | 04 LL LL LL LL | 81 | 9c | 69
+ *   OP_DUP  &lt;len LE32&gt;    OP_BIN2NUM  OP_NUMEQUAL  OP_VERIFY
  * </pre>
  *
  * <p>The rendered locking script concatenates the inscription envelope INTO the
@@ -39,14 +39,22 @@ class CodePartLengthPinTest {
      */
     private static final String PIN_TEMPLATE_EXACT_33 = "51760421000000819c69";
     /**
-     * LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra bytes satisfy
-     * it, so it must never trigger a refusal.
+     * DEPLOY-TIME pin (N-051): the same equality run as the exact one, but its
+     * length field (template byte 3) is a {@code codePartLenSlots} entry the SDK
+     * patches with the deployed code-part length, envelope included. Before
+     * N-051 this shape was a lower-bound pin (a2 = OP_GREATERTHANOREQUAL),
+     * which the compiler no longer emits.
      */
-    private static final String PIN_TEMPLATE_LOWER_BOUND_10 = "5176040a00000081a269";
+    private static final String PIN_TEMPLATE_DEPLOY_TIME_10 = "5176040a000000819c69";
+    private static final String DEPLOY_TIME_SLOTS = ", \"codePartLenSlots\": [ { \"byteOffset\": 3 } ]";
     /** No pin at all (a bare P2PKH template). Accept. */
     private static final String PIN_TEMPLATE_NONE = "76a90088ac";
 
     private static RunarContract pinFixtureContract(String script) {
+        return pinFixtureContract(script, "");
+    }
+
+    private static RunarContract pinFixtureContract(String script, String extraFields) {
         RunarArtifact artifact = RunarArtifact.fromJson("""
             {
               "version": "runar-v1.0.0-rc.1",
@@ -62,9 +70,9 @@ class CodePartLengthPinTest {
               "script": "%s",
               "stateFields": [
                 { "name": "memo", "type": "ByteString", "index": 0, "encoding": "pushdata", "byteOffset": 0 }
-              ]
+              ]%s
             }
-            """.formatted(script));
+            """.formatted(script, extraFields));
         return new RunarContract(artifact, List.of("48656c6c6f"));
     }
 
@@ -109,16 +117,23 @@ class CodePartLengthPinTest {
     }
 
     /**
-     * Control 1 (mandatory): a LOWER-BOUND pin is satisfied by the extra bytes,
-     * so an inscription must still be accepted. Guarding {@code a2} would turn
-     * this fix into an outage for every lower-bound contract.
+     * Control 1 (mandatory): a DEPLOY-TIME pin (N-051 {@code codePartLenSlots})
+     * is patched to the inscribed length, so an inscription must still be
+     * accepted — and the deployed field must really carry that length. Guarding
+     * the raw template value would turn the N-051 fix into an outage for every
+     * contract that bakes a variable-width readonly arg.
      */
     @Test
-    void acceptsLowerBoundPin() {
-        RunarContract contract = pinFixtureContract(PIN_TEMPLATE_LOWER_BOUND_10);
+    void acceptsDeployTimePin() {
+        RunarContract contract = pinFixtureContract(PIN_TEMPLATE_DEPLOY_TIME_10, DEPLOY_TIME_SLOTS);
 
         assertDoesNotThrow(() -> contract.withInscription(pinFixtureInscription()));
         assertNotNull(contract.inscription());
+        String codePart = ContractScript.renderCodePart(
+            contract.artifact(), List.of("48656c6c6f"), pinFixtureInscription());
+        assertEquals(33, codePart.length() / 2);
+        assertTrue(codePart.startsWith("51760421000000819c69"),
+            "the deploy-time field must hold the inscribed length 33 (0x21), LE: " + codePart);
     }
 
     /**

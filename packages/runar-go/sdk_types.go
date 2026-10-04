@@ -257,6 +257,7 @@ type RunarArtifact struct {
 	StateFields          []StateField       `json:"stateFields,omitempty"`
 	ConstructorSlots     []ConstructorSlot  `json:"constructorSlots,omitempty"`
 	CodeSepIndexSlots    []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
+	CodePartLenSlots     []CodePartLenSlot  `json:"codePartLenSlots,omitempty"`
 	BuildTimestamp       string             `json:"buildTimestamp"`
 	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
 	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
@@ -338,4 +339,12 @@ type ConstructorSlot struct {
 type CodeSepIndexSlot struct {
 	ByteOffset   int `json:"byteOffset"`
 	CodeSepIndex int `json:"codeSepIndex"`
+}
+
+// CodePartLenSlot (N-051) is a `verify_code_part_len` length field whose value
+// is only known at deploy time. ByteOffset is the TEMPLATE offset of the first
+// of the 4 little-endian length bytes (the byte after the `04` push opcode);
+// the SDK writes the deployed code-part length there.
+type CodePartLenSlot struct {
+	ByteOffset int `json:"byteOffset"`
 }

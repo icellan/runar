@@ -151,15 +151,23 @@ def pinCodePartLength (stack : StackProgram) (props : List ANFProperty) :
 /-- R-095: overwrite the 4-byte zero field in every
 `OP_DUP <04 00 00 00 00> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL)
 OP_VERIFY` pin with `scriptLen + delta`, and rewrite the comparison to
-NUMEQUAL when `exact`. In-place overwrite keeps the length stable. -/
-def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (exact : Bool) :
+NUMEQUAL. In-place overwrite keeps the length stable.
+
+N-051: the comparison is NUMEQUAL whether or not the length is exact at
+compile time. A lower bound (GREATERTHANOREQUAL) accepted a truncated
+`_codePart` ending at a 0x6a inside a baked readonly value. When the
+length is not exact, `scriptLen + delta` is a placeholder the deploying
+SDK overwrites (artifact `codePartLenSlots`); the script bytes the
+compilers emit, which is what this model reproduces, are unchanged by
+that. -/
+def patchCodePartLenPins (bs : ByteArray) (delta : Nat) (_exact : Bool) :
     ByteArray :=
   let len := bs.size + delta
   let b0 : UInt8 := UInt8.ofNat (len &&& 0xff)
   let b1 : UInt8 := UInt8.ofNat ((len >>> 8) &&& 0xff)
   let b2 : UInt8 := UInt8.ofNat ((len >>> 16) &&& 0xff)
   let b3 : UInt8 := UInt8.ofNat ((len >>> 24) &&& 0xff)
-  let cmp : UInt8 := if exact then 0x9c else 0xa2
+  let cmp : UInt8 := 0x9c
   -- Accumulator form so a 10 KB WOTS script does not blow the 8 MB stack.
   let rec go (acc : List UInt8) : List UInt8 → List UInt8
     | 0x76 :: 0x04 :: 0x00 :: 0x00 :: 0x00 :: 0x00 :: 0x81 :: c :: 0x69 :: rest =>

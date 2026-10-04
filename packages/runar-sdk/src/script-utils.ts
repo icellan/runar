@@ -246,24 +246,57 @@ export function matchesArtifact(
 
   if (!artifact.constructorSlots || artifact.constructorSlots.length === 0) return codeHex === template;
 
-  const seenOffsets = new Set<number>();
-  const slots = [...artifact.constructorSlots]
-    .sort((a, b) => a.byteOffset - b.byteOffset)
-    .filter((slot) => { if (seenOffsets.has(slot.byteOffset)) return false; seenOffsets.add(slot.byteOffset); return true; });
+  // Every OP_0 placeholder the SDK replaces at deploy time is one variable
+  // script element: constructor slots AND codeSepIndex slots (the latter bake
+  // as OP_1 post-R-010, so comparing them literally rejected every honest
+  // deployment of a stateful contract that carries one; Go/Rust/Python match).
+  const placeholderOffsets = [
+    ...artifact.constructorSlots.map((s) => s.byteOffset),
+    ...(artifact.codeSepIndexSlots ?? []).map((s) => s.byteOffset),
+  ];
+
+  const slots = [...new Set(placeholderOffsets)]
+    .sort((a, b) => a - b)
+    .map((byteOffset) => ({ byteOffset }));
+
+  // N-051: a `codePartLenSlots` field holds the DEPLOYED code-part length, not
+  // the template's placeholder value. It must equal the length of the code
+  // part being matched (everything before the state section, inscription
+  // envelope included).
+  const lenFields = new Set((artifact.codePartLenSlots ?? []).map((s) => s.byteOffset * 2));
+  let deployedLen = '';
+  for (let i = 0; i < 4; i++) deployedLen += (((codeHex.length / 2) >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+  const segmentMatches = (tStart: number, tEnd: number, cStart: number): boolean => {
+    let t = tStart;
+    let c = cStart;
+    while (t < tEnd) {
+      if (lenFields.has(t)) {
+        if (codeHex.slice(c, c + 8) !== deployedLen) return false;
+        t += 8;
+        c += 8;
+        continue;
+      }
+      if (template[t] !== codeHex[c]) return false;
+      t++;
+      c++;
+    }
+    return true;
+  };
 
   let templatePos = 0;
   let codePos = 0;
 
   for (const slot of slots) {
     const slotHexOffset = slot.byteOffset * 2;
-    const templateSegment = template.slice(templatePos, slotHexOffset);
-    const codeSegment = codeHex.slice(codePos, codePos + templateSegment.length);
-    if (templateSegment !== codeSegment) return false;
+    const segLen = slotHexOffset - templatePos;
+    if (codePos + segLen > codeHex.length) return false;
+    if (!segmentMatches(templatePos, slotHexOffset, codePos)) return false;
     templatePos = slotHexOffset + 2;
-    const elemOffset = codePos + templateSegment.length;
+    const elemOffset = codePos + segLen;
     const elem = readScriptElement(codeHex, elemOffset);
     codePos = elemOffset + elem.totalHexChars;
   }
 
-  return template.slice(templatePos) === codeHex.slice(codePos);
+  return codeHex.length - codePos === template.length - templatePos &&
+    segmentMatches(templatePos, template.length, codePos);
 }

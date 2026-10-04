@@ -253,6 +253,13 @@ func ExtractConstructorArgs(artifact *RunarArtifact, scriptHex string) map[strin
 
 // MatchesArtifact determines whether a given on-chain script was produced from
 // the given contract artifact (regardless of what constructor args were used).
+//
+// N-051: a `codePartLenSlots` field holds the DEPLOYED code-part length, not
+// the template's placeholder value, so it is not compared literally: the four
+// bytes in the candidate must equal the little-endian length of the candidate
+// code part (everything before the state section, inscription envelope
+// included). codeSepIndex placeholders are, like constructor placeholders,
+// read as one script element rather than compared literally.
 func MatchesArtifact(artifact *RunarArtifact, scriptHex string) bool {
 	codeHex := scriptHex
 	if artifact.StateFields != nil && len(artifact.StateFields) > 0 {
@@ -268,39 +275,68 @@ func MatchesArtifact(artifact *RunarArtifact, scriptHex string) bool {
 		return codeHex == template
 	}
 
-	// Deduplicate by byteOffset, sorted ascending
+	// Deduplicate placeholder offsets (constructor + codeSepIndex), ascending.
 	seenOffsets := make(map[int]bool)
-	allSlots := make([]ConstructorSlot, len(artifact.ConstructorSlots))
-	copy(allSlots, artifact.ConstructorSlots)
-	sort.Slice(allSlots, func(i, j int) bool {
-		return allSlots[i].ByteOffset < allSlots[j].ByteOffset
-	})
-	var slots []ConstructorSlot
-	for _, slot := range allSlots {
+	var offsets []int
+	for _, slot := range artifact.ConstructorSlots {
 		if !seenOffsets[slot.ByteOffset] {
 			seenOffsets[slot.ByteOffset] = true
-			slots = append(slots, slot)
+			offsets = append(offsets, slot.ByteOffset)
 		}
+	}
+	for _, slot := range artifact.CodeSepIndexSlots {
+		if !seenOffsets[slot.ByteOffset] {
+			seenOffsets[slot.ByteOffset] = true
+			offsets = append(offsets, slot.ByteOffset)
+		}
+	}
+	sort.Ints(offsets)
+
+	lenFields := make(map[int]bool)
+	for _, slot := range artifact.CodePartLenSlots {
+		lenFields[slot.ByteOffset*2] = true
+	}
+	codeLen := len(codeHex) / 2
+	deployedLen := fmt.Sprintf("%02x%02x%02x%02x",
+		codeLen&0xff, (codeLen>>8)&0xff, (codeLen>>16)&0xff, (codeLen>>24)&0xff)
+	segmentMatches := func(tStart, tEnd, cStart int) bool {
+		t, c := tStart, cStart
+		for t < tEnd {
+			if lenFields[t] {
+				if c+8 > len(codeHex) || codeHex[c:c+8] != deployedLen {
+					return false
+				}
+				t += 8
+				c += 8
+				continue
+			}
+			if c >= len(codeHex) || template[t] != codeHex[c] {
+				return false
+			}
+			t++
+			c++
+		}
+		return true
 	}
 
 	templatePos := 0
 	codePos := 0
 
-	for _, slot := range slots {
-		slotHexOffset := slot.ByteOffset * 2
-		templateSegment := template[templatePos:slotHexOffset]
-		if codePos+len(templateSegment) > len(codeHex) {
+	for _, offset := range offsets {
+		slotHexOffset := offset * 2
+		segLen := slotHexOffset - templatePos
+		if codePos+segLen > len(codeHex) {
 			return false
 		}
-		codeSegment := codeHex[codePos : codePos+len(templateSegment)]
-		if templateSegment != codeSegment {
+		if !segmentMatches(templatePos, slotHexOffset, codePos) {
 			return false
 		}
 		templatePos = slotHexOffset + 2
-		elemOffset := codePos + len(templateSegment)
+		elemOffset := codePos + segLen
 		_, totalHexChars, _ := readScriptElement(codeHex, elemOffset)
 		codePos = elemOffset + totalHexChars
 	}
 
-	return template[templatePos:] == codeHex[codePos:]
+	return len(codeHex)-codePos == len(template)-templatePos &&
+		segmentMatches(templatePos, len(template), codePos)
 }

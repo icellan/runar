@@ -1094,6 +1094,16 @@ module Runar
             hex_offset = sub[:byte_offset] * 2
             script = "#{script[0, hex_offset]}#{sub[:encoded]}#{script[hex_offset + 2..]}"
           end
+
+          # N-051: the deploy-time code-part length pins. The inscription
+          # envelope, when present, is part of `_codePart` (see #get_code_part_hex).
+          envelope_len = if @inscription
+                           Ordinals.build_inscription_envelope(@inscription.content_type,
+                                                               @inscription.data).length / 2
+                         else
+                           0
+                         end
+          script = patch_code_part_len_slots(script, substitutions, script.length / 2 + envelope_len)
         elsif @artifact.state_fields.empty?
           # Backward compatibility: stateless artifacts without constructorSlots.
           @constructor_args.each { |arg| script += encode_arg(arg) }
@@ -1102,6 +1112,56 @@ module Runar
         script
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength
+
+      # N-051 -- write the deployed code-part length into every
+      # +code_part_len_slots+ field of a spliced code script.
+      #
+      # The compiler cannot know the deployed length of a code part that bakes
+      # a variable-width readonly constructor arg (a ByteString, a bigint), so
+      # the SIZE(_codePart) equality pin carries a 4-byte little-endian field
+      # the SDK fills in. The field is fixed-width, so writing it changes no
+      # length and no offset. A wrong or missing value is fail-safe on chain
+      # (honest spends fail OP_NUMEQUAL); it is never a lower bound.
+      #
+      # @param spliced [String] the template with every OP_0 placeholder substituted
+      # @param subs [Array<Hash>] those substitutions, by TEMPLATE byte offset
+      #   (each replaced one placeholder byte with +:encoded+)
+      # @param code_part_len [Integer] the deployed code-part length in bytes,
+      #   including any inscription envelope (it is part of `_codePart`)
+      # @return [String]
+      def patch_code_part_len_slots(spliced, subs, code_part_len)
+        slots = @artifact.code_part_len_slots
+        return spliced if slots.nil? || slots.empty?
+
+        unless code_part_len.is_a?(Integer) && code_part_len >= 0 && code_part_len <= 0x7fffffff
+          raise ArgumentError,
+                "patch_code_part_len_slots: code part length #{code_part_len} does not fit the 4-byte pin field"
+        end
+
+        le = [code_part_len].pack('V').unpack1('H*')
+        template = @artifact.script
+        out = spliced
+        slots.each do |slot|
+          off = slot.byte_offset
+          # The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+          # OP_VERIFY` here; anything else means the descriptor does not
+          # describe this script.
+          unless off.is_a?(Integer) && off >= 1 &&
+                 template[(off - 1) * 2, 2] == '04' && template[(off + 4) * 2, 6] == '819c69'
+            raise ArgumentError,
+                  "patch_code_part_len_slots: #{@artifact.contract_name} codePartLenSlots entry at " \
+                  "byteOffset #{off} does not point at a verify_code_part_len length field " \
+                  '(corrupted or mismatched artifact)'
+          end
+
+          shift = 0
+          subs.each { |s| shift += s[:encoded].length / 2 - 1 if s[:byte_offset] < off }
+          at = (off + shift) * 2
+          out = "#{out[0, at]}#{le}#{out[(at + 8)..]}"
+        end
+        out
+      end
+      private :patch_code_part_len_slots
 
       # Return a copy of the current state.
       #
@@ -1989,12 +2049,14 @@ module Runar
       #     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
       #
       # +9c+ is OP_NUMEQUAL -- an exact pin, the only variant a longer code part
-      # can violate. +a2+ is OP_GREATERTHANOREQUAL, a lower bound that extra
-      # bytes satisfy, so it is deliberately not returned here.
+      # can violate. +a2+ is OP_GREATERTHANOREQUAL, a lower bound that only
+      # pre-N-051 artifacts carry and that extra bytes satisfy, so it is
+      # deliberately not returned here.
       #
-      # Read from the emitted TEMPLATE rather than from a built code script: the
-      # template holds OP_0 placeholders where constructor args go, so no
-      # caller-supplied byte string can be mistaken for a pin.
+      # Called on the BUILT code script (N-051): a deploy-time pin
+      # (+codePartLenSlots+) is only meaningful once patched to the deployed
+      # length. A caller-supplied byte string that happens to contain this
+      # nine-byte run can only make the guard refuse, never accept.
       def decode_exact_code_part_len_pins(script_hex)
         values = []
         i = 0
@@ -2015,13 +2077,16 @@ module Runar
       # into this artifact still describes the code part this contract produces.
       #
       # The check is the invariant itself, not a restatement of the compiler's
-      # derivation: it decodes the pinned number straight out of the emitted
-      # template and compares it to #get_code_part_hex. So it permits every
+      # derivation: it decodes the pinned number straight out of the built code
+      # script and compares it to #get_code_part_hex. So it permits every
       # combination that actually works -- a stateless contract or a fixed-size
-      # state layout carries no pin at all, and a lower-bound pin is satisfied by
-      # a longer code part -- and rejects only the shape that would lock funds.
+      # state layout carries no pin at all, a deploy-time pin (N-051) is patched
+      # to the inscribed length, and a legacy lower-bound pin is satisfied by a
+      # longer code part -- and rejects only the shape that would lock funds.
       def assert_code_part_length_pin_honoured
-        pinned = decode_exact_code_part_len_pins(@artifact.script)
+        # Decode from the code this contract really deploys: a deploy-time pin
+        # (N-051 +codePartLenSlots+) is patched to the inscribed length there.
+        pinned = decode_exact_code_part_len_pins(build_code_script)
         return if pinned.empty?
 
         actual = get_code_part_hex.length / 2

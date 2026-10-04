@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::codegen::emit::{CodeSepIndexSlot, ConstructorSlot, RawScriptSpan, SourceMapping};
+use crate::codegen::emit::{
+    CodePartLenSlot, CodeSepIndexSlot, ConstructorSlot, RawScriptSpan, SourceMapping,
+};
 use crate::ir::{ANFProgram, ANFProperty, ANFSyntheticArrayLevel};
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,10 @@ pub struct RunarArtifact {
     pub constructor_slots: Vec<ConstructorSlot>,
     #[serde(rename = "codeSepIndexSlots", skip_serializing_if = "Vec::is_empty", default)]
     pub code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    /// N-051 — deploy-time `verify_code_part_len` length fields. Omitted when
+    /// every pin is exact at compile time.
+    #[serde(rename = "codePartLenSlots", skip_serializing_if = "Vec::is_empty", default)]
+    pub code_part_len_slots: Vec<CodePartLenSlot>,
     #[serde(rename = "codeSeparatorIndex", skip_serializing_if = "Option::is_none")]
     pub code_separator_index: Option<usize>,
     #[serde(rename = "codeSeparatorIndices", skip_serializing_if = "Option::is_none")]
@@ -150,6 +156,7 @@ pub fn assemble_artifact(
     script_asm: &str,
     constructor_slots: Vec<ConstructorSlot>,
     code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    code_part_len_slots: Vec<CodePartLenSlot>,
     code_separator_index: i64,
     code_separator_indices: Vec<usize>,
     include_anf: bool,
@@ -309,6 +316,7 @@ pub fn assemble_artifact(
         state_fields,
         constructor_slots,
         code_sep_index_slots,
+        code_part_len_slots,
         code_separator_index: cs_index,
         code_separator_indices: cs_indices,
         raw_script_spans,

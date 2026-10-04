@@ -84,6 +84,11 @@ module Runar
     # Slot recording a push_codesep_index placeholder in the template script.
     CodeSepIndexSlot = Struct.new(:byte_offset, :code_sep_index, keyword_init: true)
 
+    # N-051 -- a verify_code_part_len length field the SDK fills at deploy time.
+    # +byte_offset+ is the TEMPLATE offset of the first of the 4 little-endian
+    # length bytes (the byte after the 04 push opcode).
+    CodePartLenSlot = Struct.new(:byte_offset, keyword_init: true)
+
     # Compiled output of a Runar compiler.
     #
     # Use RunarArtifact.from_hash to load from a JSON-parsed Hash, or
@@ -91,7 +96,7 @@ module Runar
     class RunarArtifact
       attr_reader :version, :compiler_version, :contract_name, :parent_class, :abi,
                   :script, :asm, :state_fields, :constructor_slots,
-                  :code_sep_index_slots,
+                  :code_sep_index_slots, :code_part_len_slots,
                   :build_timestamp, :code_separator_index, :code_separator_indices,
                   :anf, :unsound_primitives
 
@@ -110,6 +115,7 @@ module Runar
         state_fields: [],
         constructor_slots: [],
         code_sep_index_slots: [],
+        code_part_len_slots: [],
         build_timestamp: '',
         code_separator_index: nil,
         code_separator_indices: nil,
@@ -128,6 +134,7 @@ module Runar
         @state_fields           = state_fields
         @constructor_slots      = constructor_slots
         @code_sep_index_slots   = code_sep_index_slots
+        @code_part_len_slots    = Array(code_part_len_slots)
         @build_timestamp        = build_timestamp
         @code_separator_index   = code_separator_index
         @code_separator_indices = code_separator_indices
@@ -198,6 +205,10 @@ module Runar
           CodeSepIndexSlot.new(byte_offset: cs['byteOffset'], code_sep_index: cs['codeSepIndex'])
         end
 
+        code_part_len_slots = Array(hash['codePartLenSlots']).map do |cs|
+          CodePartLenSlot.new(byte_offset: cs['byteOffset'])
+        end
+
         new(
           version:                hash.fetch('version', ''),
           compiler_version:       hash.fetch('compilerVersion', ''),
@@ -209,6 +220,7 @@ module Runar
           state_fields:           state_fields,
           constructor_slots:      constructor_slots,
           code_sep_index_slots:   code_sep_index_slots,
+          code_part_len_slots:    code_part_len_slots,
           build_timestamp:        hash.fetch('buildTimestamp', ''),
           code_separator_index:   hash['codeSeparatorIndex'],
           code_separator_indices: hash['codeSeparatorIndices'],

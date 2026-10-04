@@ -172,6 +172,11 @@ class EmitResult:
     source_map: list[SourceMapping] = field(default_factory=list)
     constructor_slots: list[ConstructorSlot] = field(default_factory=list)
     code_sep_index_slots: list[dict] = field(default_factory=list)
+    # N-051 -- ``verify_code_part_len`` length fields the SDK patches at deploy
+    # time with the deployed code-part length. Each entry is
+    # ``{"byteOffset": N}`` (TEMPLATE offset of the first of the 4 LE bytes).
+    # Empty when every pin is exact at compile time.
+    code_part_len_slots: list[dict] = field(default_factory=list)
     code_separator_index: int = -1
     code_separator_indices: list[int] = field(default_factory=list)
     # Byte ranges produced by raw_bytes StackOps (asm({...}) calls).
@@ -192,6 +197,8 @@ class _EmitContext:
         self.pending_source_loc: Optional[SourceLocation] = None
         self.constructor_slots: list[ConstructorSlot] = []
         self.code_sep_index_slots: list[dict] = []
+        # N-051 -- pin length fields the SDK patches at deploy time.
+        self.code_part_len_slots: list[dict] = []
         self.code_separator_index: int = -1
         self.code_separator_indices: list[int] = []
         self.raw_script_spans: list[RawScriptSpan] = []
@@ -280,7 +287,7 @@ class _EmitContext:
         """R-095 -- emit the 9-byte ``SIZE(_codePart)`` pin and register its
         length field for back-patching.
 
-            OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+            OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
 
         ``LL LL LL LL`` is a fixed-width little-endian field, not a minimal
         Script number push: the value being patched IS the length of the script
@@ -290,6 +297,19 @@ class _EmitContext:
 
         ``exact`` is known here (the stack lowerer resolved it once every method
         had been lowered), so only the four length bytes need patching.
+
+        N-051 -- the comparison is ALWAYS an equality. It used to degrade to
+        OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+        deployed length unknown here, and a lower bound lets a spender claim a
+        TRUNCATED ``_codePart`` that ends at any 0x6a byte inside the baked
+        value (clause 8b's ``rest[0] == 0x6a`` is then satisfied by the
+        script's own bytes), planting attacker-chosen code in the continuation.
+        When the length is not exact at compile time, the field is recorded as
+        a ``codePartLenSlots`` entry and the SDK writes the real deployed
+        code-part length into it at deploy time. The template keeps the
+        compile-time lower bound, so an SDK that does not patch produces a
+        contract whose honest spends fail (funds stuck), never one that accepts
+        a truncated code part.
         """
         self.emit_opcode("OP_DUP")
         # +1 skips the single-byte push header the 4-byte data push carries.
@@ -297,13 +317,15 @@ class _EmitContext:
         asm_index = len(self.asm_parts)
         self.emit_push(PushValue(kind="bytes", bytes_val=bytes(4)))
         self.emit_opcode("OP_BIN2NUM")
-        self.emit_opcode("OP_NUMEQUAL" if exact else "OP_GREATERTHANOREQUAL")
+        self.emit_opcode("OP_NUMEQUAL")
         self.emit_opcode("OP_VERIFY")
         self.code_part_len_fixups.append({
             "value_byte_offset": value_byte_offset,
             "asm_index": asm_index,
             "delta": delta,
         })
+        if not exact:
+            self.code_part_len_slots.append({"byteOffset": value_byte_offset})
 
     def _code_sep_index_growth(self) -> int:
         """Deploy-time byte growth contributed by the codeSepIndex placeholders.
@@ -650,6 +672,7 @@ def emit(methods: list[StackMethod]) -> EmitResult:
         source_map=ctx.source_map,
         constructor_slots=ctx.constructor_slots,
         code_sep_index_slots=ctx.code_sep_index_slots,
+        code_part_len_slots=ctx.code_part_len_slots,
         code_separator_index=ctx.code_separator_index,
         code_separator_indices=ctx.code_separator_indices,
         raw_script_spans=ctx.raw_script_spans,
@@ -667,6 +690,7 @@ def emit_method(method: StackMethod) -> EmitResult:
         source_map=ctx.source_map,
         constructor_slots=ctx.constructor_slots,
         code_sep_index_slots=ctx.code_sep_index_slots,
+        code_part_len_slots=ctx.code_part_len_slots,
         code_separator_index=ctx.code_separator_index,
         code_separator_indices=ctx.code_separator_indices,
         raw_script_spans=ctx.raw_script_spans,

@@ -85,6 +85,70 @@ fn outputFramingBytes(script_byte_len: usize) i64 {
 }
 
 // ---------------------------------------------------------------------------
+// N-051 — deploy-time code-part length pins
+// ---------------------------------------------------------------------------
+
+/// One template substitution: the OP_0 placeholder at TEMPLATE `byte_offset`
+/// was replaced by `encoded_len` bytes.
+pub const SubShift = struct {
+    byte_offset: i32,
+    encoded_len: usize,
+};
+
+/// N-051 -- write the deployed code-part length into every `codePartLenSlots`
+/// field of a spliced code script (hex, patched in place).
+///
+/// The compiler cannot know the deployed length of a code part that bakes a
+/// variable-width readonly constructor arg (a ByteString, a bigint), so the
+/// `SIZE(_codePart)` equality pin carries a 4-byte little-endian field the SDK
+/// fills in. The field is fixed-width, so writing it changes no length and no
+/// offset. A wrong or missing value is fail-safe on chain (honest spends fail
+/// OP_NUMEQUAL); it is never a lower bound.
+///
+/// `subs` are every substitution applied to the template, by TEMPLATE byte
+/// offset. `code_part_len` is the deployed code-part length in bytes,
+/// including any inscription envelope (it is part of `_codePart`).
+pub fn patchCodePartLenSlots(
+    artifact: *const types.RunarArtifact,
+    spliced: []u8,
+    subs: []const SubShift,
+    code_part_len: usize,
+) !void {
+    if (artifact.code_part_len_slots.len == 0) return;
+    if (code_part_len > 0x7fffffff) return error.CodePartLenOutOfRange;
+    const v: u32 = @intCast(code_part_len);
+    var le: [8]u8 = undefined;
+    _ = std.fmt.bufPrint(&le, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+        @as(u8, @truncate(v)),       @as(u8, @truncate(v >> 8)),
+        @as(u8, @truncate(v >> 16)), @as(u8, @truncate(v >> 24)),
+    }) catch unreachable;
+
+    const template = artifact.script;
+    for (artifact.code_part_len_slots) |slot| {
+        // The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+        // OP_VERIFY` here; anything else means the descriptor does not
+        // describe this script.
+        if (slot.byte_offset < 1) return error.CodePartLenSlotMismatch;
+        const off: usize = @intCast(slot.byte_offset);
+        if ((off + 7) * 2 > template.len or
+            !std.ascii.eqlIgnoreCase(template[(off - 1) * 2 .. off * 2], "04") or
+            !std.ascii.eqlIgnoreCase(template[(off + 4) * 2 .. (off + 7) * 2], "819c69"))
+        {
+            return error.CodePartLenSlotMismatch;
+        }
+        var shift: i64 = 0;
+        for (subs) |s| {
+            if (s.byte_offset < slot.byte_offset) shift += @as(i64, @intCast(s.encoded_len)) - 1;
+        }
+        const resolved = @as(i64, @intCast(off)) + shift;
+        if (resolved < 0) return error.CodePartLenSlotMismatch;
+        const at: usize = @intCast(resolved * 2);
+        if (at + 8 > spliced.len) return error.CodePartLenSlotMismatch;
+        @memcpy(spliced[at .. at + 8], &le);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunarContract — main contract runtime wrapper
 // ---------------------------------------------------------------------------
 
@@ -97,12 +161,13 @@ fn outputFramingBytes(script_byte_len: usize) i64 {
 ///     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
 ///
 /// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
-/// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
-/// satisfy, so it is deliberately not returned here.
+/// violate. `a2` is OP_GREATERTHANOREQUAL, the pre-N-051 lower bound that extra
+/// bytes satisfy, so it is deliberately not returned here (the compiler no
+/// longer emits it; old artifacts may still carry it).
 ///
-/// Read from the emitted TEMPLATE rather than from a built code script: the
-/// template holds OP_0 placeholders where constructor args go, so no
-/// caller-supplied byte string can be mistaken for a pin.
+/// The caller passes the BUILT code script (N-051): a deploy-time pin
+/// (`codePartLenSlots`) only carries its real value once the SDK has patched
+/// it, so decoding the raw template would compare against a placeholder.
 fn decodeExactCodePartLenPins(
     allocator: std.mem.Allocator,
     script_hex: []const u8,
@@ -369,13 +434,18 @@ pub const RunarContract = struct {
     /// into this artifact still describes the code part this contract produces.
     ///
     /// The check is the invariant itself, not a restatement of the compiler's
-    /// derivation: it decodes the pinned number straight out of the emitted
-    /// template and compares it to `getCodePartHex()`. So it permits every
+    /// derivation: it decodes the pinned number straight out of the built code
+    /// script and compares it to `getCodePartHex()`. So it permits every
     /// combination that actually works -- a stateless contract or a fixed-size
-    /// state layout carries no pin at all, and a lower-bound pin is satisfied by
+    /// state layout carries no pin at all, a deploy-time pin (N-051) is written
+    /// with the inscribed length, and a legacy lower-bound pin is satisfied by
     /// a longer code part -- and rejects only the shape that would lock funds.
     fn assertCodePartLengthPinHonoured(self: *RunarContract) !void {
-        var pinned = try decodeExactCodePartLenPins(self.allocator, self.artifact.script);
+        // Decode from the code this contract really deploys: a deploy-time pin
+        // (N-051 `codePartLenSlots`) is patched to the inscribed length there.
+        const built = try self.buildCodeScript();
+        defer self.allocator.free(built);
+        var pinned = try decodeExactCodePartLenPins(self.allocator, built);
         defer pinned.deinit(self.allocator);
         if (pinned.items.len == 0) return;
 
@@ -3202,6 +3272,7 @@ pub const RunarContract = struct {
 
     fn buildCodeScript(self: *const RunarContract) ![]u8 {
         var script = try self.allocator.dupe(u8, self.artifact.script);
+        errdefer self.allocator.free(script);
 
         const has_constructor_slots = self.artifact.constructor_slots.len > 0;
         const has_code_sep_slots = self.artifact.code_sep_index_slots.len > 0;
@@ -3264,6 +3335,23 @@ pub const RunarContract = struct {
                     self.allocator.free(script);
                     script = new_script;
                 }
+            }
+
+            // N-051: the deploy-time code-part length pins. The inscription
+            // envelope, when present, is part of `_codePart` (see getCodePartHex).
+            if (self.artifact.code_part_len_slots.len > 0) {
+                var envelope_len: usize = 0;
+                if (self.inscription) |insc| {
+                    const envelope = try ordinals.buildInscriptionEnvelope(self.allocator, insc.content_type, insc.data);
+                    defer self.allocator.free(envelope);
+                    envelope_len = envelope.len / 2;
+                }
+                const shifts = try self.allocator.alloc(SubShift, subs.items.len);
+                defer self.allocator.free(shifts);
+                for (subs.items, 0..) |sub, i| {
+                    shifts[i] = .{ .byte_offset = sub.byte_offset, .encoded_len = sub.encoded.len / 2 };
+                }
+                try patchCodePartLenSlots(self.artifact, script, shifts, script.len / 2 + envelope_len);
             }
         } else if (self.artifact.state_fields.len == 0) {
             // Backward compatibility: old stateless artifacts without constructorSlots
@@ -4170,15 +4258,18 @@ test "RunarContract.withInscription on stateful contract injects between code an
 // A stateful contract with a variable-length state section carries an EQUALITY
 // pin on the deployed code-part length, emitted as a fixed-width nine-byte run:
 //
-//     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
-//     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+//     76 | 04 LL LL LL LL | 81 | 9c | 69
+//     OP_DUP  <len LE32>    OP_BIN2NUM  OP_NUMEQUAL  OP_VERIFY
+//
+// (Pre-N-051 compilers emitted `a2`, a lower bound, when the length was not
+// known at compile time; that is now a deploy-time `codePartLenSlots` pin.)
 //
 // `getCodePartHex` concatenates the inscription envelope INTO the code part, so
 // attaching one makes the real code part longer than the pinned number and every
 // honest spend aborts at OP_VERIFY with the funds already committed.
 //
 // Each template below is a 10-byte script — `OP_1` followed by the nine-byte pin
-// run — except the unpinned one. The inscription is a two-byte `text/plain`
+// run — except the unpinned one and the deploy-time one. The inscription is a two-byte `text/plain`
 // payload whose envelope is exactly 23 bytes, so an inscribed code part is
 // 10 + 23 = 33 bytes.
 // ---------------------------------------------------------------------------
@@ -4200,9 +4291,18 @@ const pin_template_exact_10 = "5176040a000000819c69";
 /// decoder that reads the length big-endian gets 0x21000000 here and wrongly
 /// refuses.
 const pin_template_exact_33 = "51760421000000819c69";
-/// LOWER-BOUND pin (a2 = OP_GREATERTHANOREQUAL) of 10: extra bytes satisfy it,
-/// so it must never trigger a refusal.
-const pin_template_lower_bound_10 = "5176040a00000081a269";
+/// N-051 DEPLOY-TIME pin: a readonly variable-width `tag` placeholder (OP_0 at
+/// byte 0) followed by an equality pin whose 4-byte field (byte 3) is listed in
+/// `codePartLenSlots`. The template value (10) is only a placeholder; the SDK
+/// writes the deployed code-part length, envelope included.
+const pin_fixture_deploy_time_json =
+    "{\"contractName\":\"PinFixture\",\"version\":\"runar-v1.0.0-rc.1\",\"compilerVersion\":\"1.0.0-rc.1\"," ++
+    "\"parentClass\":\"StatefulSmartContract\",\"script\":\"0076040a000000819c69\",\"asm\":\"\"," ++
+    "\"abi\":{\"constructor\":{\"params\":[{\"name\":\"memo\",\"type\":\"ByteString\"},{\"name\":\"tag\",\"type\":\"ByteString\"}]}," ++
+    "\"methods\":[{\"name\":\"post\",\"params\":[{\"name\":\"newMemo\",\"type\":\"ByteString\"}],\"isPublic\":true}]}," ++
+    "\"stateFields\":[{\"name\":\"memo\",\"type\":\"ByteString\",\"index\":0}]," ++
+    "\"constructorSlots\":[{\"paramIndex\":1,\"byteOffset\":0}],\"codePartLenSlots\":[{\"byteOffset\":3}]," ++
+    "\"buildTimestamp\":\"2024-01-01\"}";
 /// No pin at all (a bare P2PKH template). Accept.
 const pin_template_none = "76a90088ac";
 
@@ -4250,19 +4350,34 @@ test "N-043 withInscription accepts a pin that already matches the inscribed len
     try std.testing.expectEqual(@as(usize, 33), code.len / 2);
 }
 
-test "N-043 withInscription accepts a lower-bound pin" {
-    // Control 1 (mandatory): a LOWER-BOUND pin is satisfied by the extra bytes,
-    // so an inscription must still be accepted. Guarding `a2` would turn this
-    // fix into an outage for every lower-bound contract.
+test "N-043 withInscription accepts a deploy-time pin and sets it to the inscribed length" {
+    // Control 1 (mandatory). This used to be a LOWER-bound (`a2`) pin, which
+    // the envelope's extra bytes satisfied. N-051 made it an equality whose
+    // value the SDK writes at deploy time (`codePartLenSlots`); the envelope is
+    // part of `_codePart`, so the SDK writes the INSCRIBED length and the
+    // inscription stays accepted. Refusing it would turn the fix into an
+    // outage for every variable-width-constructor contract.
     const allocator = std.testing.allocator;
-    var artifact = try types.RunarArtifact.fromJson(allocator, pinFixtureArtifactJson(pin_template_lower_bound_10));
+    var artifact = try types.RunarArtifact.fromJson(allocator, pin_fixture_deploy_time_json);
     defer artifact.deinit();
 
-    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "48656c6c6f" }});
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{
+        .{ .bytes = "48656c6c6f" }, .{ .bytes = "aa" },
+    });
     defer contract.deinit();
 
     try contract.withInscription(pin_fixture_inscription);
     try std.testing.expect(contract.getInscription() != null);
+
+    // Equality against the inscribed code part, not merely a bound:
+    // 2-byte `01aa` + 9-byte pin = 11, plus the 23-byte envelope = 34.
+    const code = try contract.getCodePartHex();
+    defer allocator.free(code);
+    try std.testing.expectEqual(@as(usize, 34), code.len / 2);
+    var pins = try decodeExactCodePartLenPins(allocator, code);
+    defer pins.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), pins.items.len);
+    try std.testing.expectEqual(@as(usize, 34), pins.items[0]);
 }
 
 test "N-043 withInscription accepts an unpinned contract" {

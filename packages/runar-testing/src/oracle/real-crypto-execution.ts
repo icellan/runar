@@ -401,6 +401,17 @@ export interface StatefulSpendOptions {
    * are exactly what a hand-built transaction would carry.
    */
   attackerFieldWidths?: Record<string, number>;
+  /**
+   * N-051 near-miss: claim a TRUNCATED `_codePart`. After the honest deploy,
+   * the call is built as if the contract's code part ended at byte `at` of
+   * the first occurrence of the readonly value `within` (hex) in the deployed
+   * code — a byte that must be 0x6a, so clause 8b's `rest[0] == 0x6a` is
+   * satisfied by the script's own bytes. The unlocking `_codePart` push and
+   * the continuation (`claimed || 6a || state`) both use the claimed prefix;
+   * the sighash still commits to the real deployed script. Only the
+   * `SIZE(_codePart)` equality pin can reject it.
+   */
+  truncatedCodePart?: { within: string; at: number };
 }
 
 /** Run `fn` with the named STATE_FIELD_WIDTHS entries overridden (see
@@ -553,6 +564,20 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
   const contract = new RunarContract(artifact, opts.constructorArgs);
   await contract.deploy(provider, signer, opts.deploySatoshis !== undefined ? { satoshis: opts.deploySatoshis } : {});
   const deployTx = Transaction.fromHex(provider.getBroadcastedTxs()[0]!);
+
+  if (opts.truncatedCodePart) {
+    const trueCode = contract.getCodePartHex();
+    const at = trueCode.indexOf(opts.truncatedCodePart.within.toLowerCase());
+    if (at < 0 || at % 2 !== 0) {
+      throw new Error('truncatedCodePart: readonly value not found in the deployed code part');
+    }
+    const cut = at / 2 + opts.truncatedCodePart.at;
+    if (trueCode.slice(cut * 2, cut * 2 + 2) !== '6a') {
+      throw new Error(`truncatedCodePart: deployed byte ${cut} is not 0x6a`);
+    }
+    // The SDK takes `_codePart` and the continuation's code from `_codeScript`.
+    (contract as unknown as { _codeScript: string })._codeScript = trueCode.slice(0, cut * 2);
+  }
 
   let vmAccepted = false;
   let vmError: string | undefined;

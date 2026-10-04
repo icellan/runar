@@ -77,6 +77,7 @@ module RunarCompiler
     :state_fields,
     :constructor_slots,
     :code_sep_index_slots,
+    :code_part_len_slots,
     :code_separator_index,
     :code_separator_indices,
     :raw_script_spans,
@@ -97,6 +98,7 @@ module RunarCompiler
       state_fields: [],
       constructor_slots: [],
       code_sep_index_slots: [],
+      code_part_len_slots: [],
       code_separator_index: nil,
       code_separator_indices: nil,
       raw_script_spans: nil,
@@ -530,6 +532,7 @@ module RunarCompiler
       emit_result.code_separator_index,
       emit_result.code_separator_indices,
       code_sep_index_slots: emit_result.code_sep_index_slots,
+      code_part_len_slots: emit_result.code_part_len_slots,
       source_map: emit_result.source_map,
       raw_script_spans: emit_result.raw_script_spans,
       stack_methods: stack_methods
@@ -845,6 +848,7 @@ module RunarCompiler
     code_separator_index = -1,
     code_separator_indices = nil,
     code_sep_index_slots: [],
+    code_part_len_slots: [],
     source_map: nil,
     raw_script_spans: nil,
     stack_methods: nil,
@@ -982,6 +986,7 @@ module RunarCompiler
       state_fields: state_fields,
       constructor_slots: constructor_slots,
       code_sep_index_slots: code_sep_index_slots,
+      code_part_len_slots: code_part_len_slots,
       code_separator_index: cs_index,
       code_separator_indices: cs_indices,
       raw_script_spans: (raw_script_spans && !raw_script_spans.empty? ? raw_script_spans : nil),
@@ -1100,6 +1105,14 @@ module RunarCompiler
     if artifact.code_sep_index_slots && !artifact.code_sep_index_slots.empty?
       d["codeSepIndexSlots"] = artifact.code_sep_index_slots.map do |slot|
         { "byteOffset" => slot.byte_offset, "codeSepIndex" => slot.code_sep_index }
+      end
+    end
+
+    # N-051 -- deploy-time code-part length pins. Omitted when every pin is
+    # exact at compile time.
+    if artifact.code_part_len_slots && !artifact.code_part_len_slots.empty?
+      d["codePartLenSlots"] = artifact.code_part_len_slots.map do |slot|
+        { "byteOffset" => slot.byte_offset }
       end
     end
 

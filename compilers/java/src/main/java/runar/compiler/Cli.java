@@ -536,6 +536,16 @@ public final class Cli {
                 appendJoined(b, slots);
                 b.append("],\n");
             }
+            // N-051: deploy-time SIZE(_codePart) length fields, omitted when empty.
+            if (!emit.codePartLenSlots().isEmpty()) {
+                List<String> slots = new ArrayList<>();
+                for (Emit.CodePartLenSlot s : emit.codePartLenSlots()) {
+                    slots.add("{\"byteOffset\": " + s.byteOffset() + "}");
+                }
+                b.append("  \"codePartLenSlots\": [");
+                appendJoined(b, slots);
+                b.append("],\n");
+            }
             // -1 is the "no OP_CODESEPARATOR emitted" sentinel; omit the field.
             if (emit.codeSeparatorIndex() >= 0) {
                 b.append("  \"codeSeparatorIndex\": ").append(emit.codeSeparatorIndex()).append(",\n");

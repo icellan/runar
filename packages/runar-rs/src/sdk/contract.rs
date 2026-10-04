@@ -83,17 +83,18 @@ fn normalize_witness_hex(s: &str) -> Result<String, String> {
 /// The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
 ///
 /// ```text
-///     76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
-///     OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+///     76 | 04 LL LL LL LL | 81 | 9c | 69
+///     OP_DUP  <len LE32>    OP_BIN2NUM  OP_NUMEQUAL  OP_VERIFY
 /// ```
 ///
-/// `9c` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part can
-/// violate. `a2` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
-/// satisfy, so it is deliberately not returned here.
+/// `9c` is OP_NUMEQUAL. Artifacts compiled before N-051 may still carry `a2`
+/// (OP_GREATERTHANOREQUAL), a lower bound that extra bytes satisfy, so it is
+/// deliberately not returned here.
 ///
-/// Read from the emitted TEMPLATE rather than from a built code script: the
-/// template holds OP_0 placeholders where constructor args go, so no
-/// caller-supplied byte string can be mistaken for a pin.
+/// Read from the code script this contract really deploys (N-051): a
+/// deploy-time pin (`codePartLenSlots`) holds only the compile-time lower
+/// bound in the template and is patched to the real code-part length -- the
+/// inscription envelope included -- in the built script.
 fn decode_exact_code_part_len_pins(script_hex: &str) -> Vec<usize> {
     let mut values = Vec::new();
     let bytes = script_hex.as_bytes();
@@ -130,6 +131,78 @@ fn decode_exact_code_part_len_pins(script_hex: &str) -> Vec<usize> {
         }
     }
     values
+}
+
+/// N-051 -- write the deployed code-part length into every `codePartLenSlots`
+/// field of a spliced code script.
+///
+/// The compiler cannot know the deployed length of a code part that bakes a
+/// variable-width readonly constructor arg (a ByteString, a bigint), so the
+/// `SIZE(_codePart)` equality pin carries a 4-byte little-endian field the SDK
+/// fills in. The field is fixed-width, so writing it changes no length and no
+/// offset. A wrong or missing value is fail-safe on chain (honest spends fail
+/// OP_NUMEQUAL); it is never a lower bound.
+///
+/// * `spliced` -- the template with every OP_0 placeholder substituted
+/// * `subs` -- those substitutions as `(TEMPLATE byte offset, encoded hex)`;
+///   each replaced one placeholder byte with the encoded bytes
+/// * `code_part_len` -- the deployed code-part length in bytes, including any
+///   inscription envelope (it is part of `_codePart`)
+pub fn patch_code_part_len_slots(
+    artifact: &RunarArtifact,
+    spliced: &str,
+    subs: &[(usize, String)],
+    code_part_len: usize,
+) -> Result<String, String> {
+    let slots = match artifact.code_part_len_slots {
+        Some(ref s) if !s.is_empty() => s,
+        _ => return Ok(spliced.to_string()),
+    };
+    if code_part_len > 0x7fff_ffff {
+        return Err(format!(
+            "patch_code_part_len_slots: code part length {} does not fit the 4-byte pin field",
+            code_part_len
+        ));
+    }
+    let le: String = (0..4)
+        .map(|i| format!("{:02x}", (code_part_len >> (8 * i)) & 0xff))
+        .collect();
+    let template = &artifact.script;
+    let mut out = spliced.to_string();
+    for slot in slots {
+        let off = slot.byte_offset;
+        // The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+        // OP_VERIFY` here; anything else means the descriptor does not
+        // describe this script.
+        let points_at_pin = off >= 1
+            && template.get((off - 1) * 2..off * 2) == Some("04")
+            && template.get((off + 4) * 2..(off + 7) * 2) == Some("819c69");
+        if !points_at_pin {
+            return Err(format!(
+                "patch_code_part_len_slots: {} codePartLenSlots entry at byteOffset {} \
+                 does not point at a verify_code_part_len length field (corrupted or \
+                 mismatched artifact)",
+                artifact.contract_name, off
+            ));
+        }
+        let mut shift: usize = 0;
+        for (sub_offset, encoded) in subs {
+            if *sub_offset < off {
+                // Encodings are never shorter than the 1-byte placeholder.
+                shift += (encoded.len() / 2).saturating_sub(1);
+            }
+        }
+        let at = (off + shift) * 2;
+        if at + 8 > out.len() {
+            return Err(format!(
+                "patch_code_part_len_slots: {} codePartLenSlots entry at byteOffset {} \
+                 lies outside the built code script",
+                artifact.contract_name, off
+            ));
+        }
+        out.replace_range(at..at + 8, &le);
+    }
+    Ok(out)
 }
 
 /// The well-known ByteString parameter the SDK fills in with the transaction's
@@ -497,6 +570,11 @@ impl RunarContract {
             .change_address
             .as_deref()
             .unwrap_or(&address);
+        // N-051: a malformed `codePartLenSlots` descriptor is an error here,
+        // before any funds move, not a panic inside `get_locking_script`.
+        if self.code_script.is_none() {
+            self.try_build_code_script()?;
+        }
         let locking_script = self.get_locking_script();
 
         // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
@@ -2041,13 +2119,15 @@ impl RunarContract {
     /// into this artifact still describes the code part this contract produces.
     ///
     /// The check is the invariant itself, not a restatement of the compiler's
-    /// derivation: it decodes the pinned number straight out of the emitted
-    /// template and compares it to `get_code_part_hex()`. So it permits every
-    /// combination that actually works -- a stateless contract or a fixed-size
-    /// state layout carries no pin at all, and a lower-bound pin is satisfied by
-    /// a longer code part -- and rejects only the shape that would lock funds.
+    /// derivation: it decodes the pinned number straight out of the code this
+    /// contract really deploys and compares it to `get_code_part_hex()`. So it
+    /// permits every combination that actually works -- a stateless contract or
+    /// a fixed-size state layout carries no pin at all, and a deploy-time pin
+    /// (N-051 `codePartLenSlots`) is patched to the inscribed length -- and
+    /// rejects only the shape that would lock funds: a pin baked at compile
+    /// time, which no envelope can satisfy.
     fn assert_code_part_length_pin_honoured(&self) -> Result<(), String> {
-        let pinned = decode_exact_code_part_len_pins(&self.artifact.script);
+        let pinned = decode_exact_code_part_len_pins(&self.try_build_code_script()?);
         if pinned.is_empty() {
             return Ok(());
         }
@@ -2121,7 +2201,16 @@ impl RunarContract {
 
     /// Build the code portion of the locking script from the artifact and
     /// constructor args. This is the script without any state suffix.
+    ///
+    /// Panics on a malformed `codePartLenSlots` descriptor; `deploy` and
+    /// `with_inscription` surface the same failure as an `Err` first.
     fn build_code_script(&self) -> String {
+        self.try_build_code_script()
+            .unwrap_or_else(|e| panic!("RunarContract: {}", e))
+    }
+
+    /// Fallible core of [`Self::build_code_script`].
+    fn try_build_code_script(&self) -> Result<String, String> {
         let mut script = self.artifact.script.clone();
 
         let has_constructor_slots = self
@@ -2172,7 +2261,15 @@ impl RunarContract {
                 script = format!("{}{}{}", before, encoded, after);
             }
 
-            return script;
+            // N-051: the deploy-time code-part length pins. The inscription
+            // envelope, when present, is part of `_codePart` (see
+            // `get_code_part_hex`).
+            let envelope_len = self
+                .inscription
+                .as_ref()
+                .map_or(0, |insc| build_inscription_envelope(&insc.content_type, &insc.data).len() / 2);
+            let code_part_len = script.len() / 2 + envelope_len;
+            return patch_code_part_len_slots(&self.artifact, &script, &subs, code_part_len);
         }
 
         // Backward compatibility: old stateless artifacts without constructorSlots.
@@ -2189,7 +2286,7 @@ impl RunarContract {
             }
         }
 
-        script
+        Ok(script)
     }
 
     /// Build the unlocking script for a method call.
@@ -2917,6 +3014,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3010,6 +3108,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3051,6 +3150,7 @@ mod tests {
                 byte_offset: 2,
             }]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3092,6 +3192,7 @@ mod tests {
                 ConstructorSlot { param_index: 1, byte_offset: 2 },
             ]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3129,6 +3230,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3167,6 +3269,7 @@ mod tests {
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3197,6 +3300,7 @@ mod tests {
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 2 }]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3754,6 +3858,7 @@ mod tests {
             state_fields: Some(state_fields),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3834,6 +3939,7 @@ mod tests {
             state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None, fixed_array: None }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -3879,6 +3985,7 @@ mod tests {
             ]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -4111,6 +4218,7 @@ mod tests {
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -4141,6 +4249,7 @@ mod tests {
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -4171,6 +4280,7 @@ mod tests {
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -4201,6 +4311,7 @@ mod tests {
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -4256,6 +4367,7 @@ mod tests {
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -4393,6 +4505,7 @@ mod tests {
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -4621,6 +4734,7 @@ mod tests {
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: Some(1),
             code_separator_indices: Some(vec![1, 3]),
             anf: None,

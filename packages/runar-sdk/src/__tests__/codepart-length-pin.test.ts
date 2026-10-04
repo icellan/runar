@@ -26,6 +26,7 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from 'runar-compiler';
 import { RunarContract } from '../contract.js';
+import { matchesArtifact } from '../script-utils.js';
 
 const OWNER = '02' + '11'.repeat(32);
 const ISSUER = '03' + '22'.repeat(32);
@@ -246,21 +247,49 @@ describe('R-095 code-part length pin', () => {
     }
   });
 
-  it('a variable-width readonly arg degrades the pin to a sound lower bound', () => {
+  it('a variable-width readonly arg makes the pin a deploy-time slot the SDK sets to the deployed length', () => {
+    // N-051: this used to assert a LOWER bound (OP_GREATERTHANOREQUAL, value <=
+    // deployed length). A lower bound lets a spender claim a truncated
+    // `_codePart` ending at a 0x6a inside the baked `tag`. The pin is now an
+    // equality in the template, its 4-byte field is listed in
+    // `codePartLenSlots`, and the SDK writes the real deployed length there.
     const r = compileOrThrow(VARLEN_VARIABLE_CTOR, 'VarLenVariableCtor.runar.ts');
     const pins = decodePins(r.scriptHex!);
     expect(pins.length).toBeGreaterThanOrEqual(1);
+    for (const pin of pins) expect(pin.exact).toBe(true);
+    expect(r.artifact!.codePartLenSlots!.map(s => s.byteOffset))
+      .toEqual(pins.map(p => p.byteOffset + 2));
 
-    // Two very different tag lengths: the pin cannot be exact for both, and
-    // must be <= the deployed length for BOTH or an honest spend breaks.
+    // Two very different tag lengths: the SAME template must deploy with an
+    // equality pin on each deployment's own length.
     for (const tag of ['aa', 'bb'.repeat(64)]) {
-      const deployedLen = new RunarContract(r.artifact!, ['48656c6c6f', tag])
-        .buildCodeScript().length / 2;
-      for (const pin of pins) {
-        expect(pin.exact).toBe(false);
-        expect(pin.value).toBeLessThanOrEqual(deployedLen);
+      const deployed = new RunarContract(r.artifact!, ['48656c6c6f', tag]).buildCodeScript();
+      const deployedPins = decodePins(deployed);
+      expect(deployedPins.length).toBe(pins.length);
+      for (const pin of deployedPins) {
+        expect(pin.exact).toBe(true);
+        expect(pin.value).toBe(deployed.length / 2);
       }
     }
+  });
+
+  it('N-051: matchesArtifact requires the deploy-time length field to equal the code-part length', () => {
+    const r = compileOrThrow(VARLEN_VARIABLE_CTOR, 'VarLenVariableCtor.runar.ts');
+    const c = new RunarContract(r.artifact!, ['48656c6c6f', 'bb'.repeat(64)]);
+    const locking = c.getLockingScript();
+    expect(matchesArtifact(r.artifact!, locking)).toBe(true);
+
+    // Rewrite the deployed pin to the template's compile-time value: the
+    // script is otherwise identical, and must no longer match.
+    const code = c.getCodePartHex();
+    const pin = decodePins(code)[0]!;
+    const at = (pin.byteOffset + 2) * 2;
+    const templateValue = decodePins(r.scriptHex!)[0]!.value;
+    let le = '';
+    for (let i = 0; i < 4; i++) le += ((templateValue >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+    const forged = locking.slice(0, at) + le + locking.slice(at + 8);
+    expect(forged).not.toBe(locking);
+    expect(matchesArtifact(r.artifact!, forged)).toBe(false);
   });
 
   it('an exact pin survives a readonly arg wider than the 75-byte direct-push ceiling', () => {
@@ -349,23 +378,28 @@ describe('N-043 exact pin vs the inscription envelope', () => {
     }
   });
 
-  it('a LOWER-BOUND pin is satisfied by the envelope and accepts an inscription', () => {
-    // Control: `a2` is OP_GREATERTHANOREQUAL. The extra envelope bytes make the
-    // code part LONGER, which satisfies a lower bound — so the guard must not
-    // fire here. Guarding `a2` would turn this fix into an outage for every
+  it('a DEPLOY-TIME pin is set to the inscribed length and accepts an inscription', () => {
+    // Control. This used to be a LOWER-bound (`a2`) pin, which the envelope's
+    // extra bytes satisfied. N-051 made it an equality whose value the SDK
+    // writes at deploy time (`codePartLenSlots`); the envelope is part of
+    // `_codePart`, so the SDK writes the INSCRIBED length and the inscription
+    // stays accepted. Refusing it would turn the fix into an outage for every
     // variable-width-constructor contract.
     const r = compileOrThrow(VARLEN_VARIABLE_CTOR, 'VarLenVariableCtor.runar.ts');
-    const pins = decodePins(r.scriptHex!);
-    expect(pins.length).toBeGreaterThanOrEqual(1);
-    for (const pin of pins) expect(pin.exact).toBe(false);
+    expect(r.artifact!.codePartLenSlots?.length ?? 0).toBeGreaterThanOrEqual(1);
 
     const c = new RunarContract(r.artifact!, ['48656c6c6f', 'aa']);
     c.withInscription({ contentType: 'text/plain', data: '6869' });
     expect(c.inscription).not.toBeNull();
 
-    // The bound still holds against the inscribed code part.
-    const inscribedLen = c.getCodePartHex().length / 2;
-    for (const pin of pins) expect(pin.value).toBeLessThanOrEqual(inscribedLen);
+    // Equality against the inscribed code part, not merely a bound.
+    const inscribed = c.getCodePartHex();
+    const pins = decodePins(inscribed);
+    expect(pins.length).toBeGreaterThanOrEqual(1);
+    for (const pin of pins) {
+      expect(pin.exact).toBe(true);
+      expect(pin.value).toBe(inscribed.length / 2);
+    }
   });
 
   it('a fixed-state contract carries no exact pin and accepts an inscription', () => {

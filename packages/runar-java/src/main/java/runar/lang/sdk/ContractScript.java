@@ -67,13 +67,31 @@ public final class ContractScript {
         List<Object> constructorArgs,
         Inscription inscription
     ) {
+        String envelope = inscription == null ? "" : inscription.toEnvelopeHex();
+        // Inject ordinals envelope between code and state (matches Go/Rust/Python/Zig/Ruby SDKs).
+        return buildCodeScript(artifact, constructorArgs, inscription) + envelope;
+    }
+
+    /**
+     * The spliced code script WITHOUT the ordinals envelope: the template with
+     * every constructor-arg / codeSepIndex placeholder substituted and every
+     * N-051 {@code codePartLenSlots} field set to the deployed code-part
+     * length. The envelope is part of {@code _codePart}, so when
+     * {@code inscription} is non-null its length is counted in that value even
+     * though its bytes are not returned. Parity target: TS
+     * {@code RunarContract.buildCodeScript}.
+     */
+    static String buildCodeScript(
+        RunarArtifact artifact,
+        List<Object> constructorArgs,
+        Inscription inscription
+    ) {
         String tpl = artifact.scriptHex();
 
         // Build the unified list of template slot substitutions (constructor args
         // + codeSepIndex slots), then apply them in descending template
         // byte-offset order so each splice preserves earlier offsets. Mirrors
         // the Go SDK's `buildCodeScript`.
-        record Sub(int byteOffset, String encoded) {}
         List<Sub> subs = new ArrayList<>();
         for (ConstructorSlot slot : artifact.constructorSlots()) {
             if (slot.paramIndex() >= constructorArgs.size()) continue;
@@ -96,12 +114,72 @@ public final class ContractScript {
             workingHex.replace(hexOffset, hexOffset + 2, sub.encoded());
         }
 
-        StringBuilder script = new StringBuilder(workingHex.toString());
-        // Inject ordinals envelope between code and state (matches Go/Rust/Python/Zig/Ruby SDKs).
-        if (inscription != null) {
-            script.append(inscription.toEnvelopeHex());
+        // N-051: the deploy-time code-part length pins. The inscription
+        // envelope, when present, is part of `_codePart`.
+        int envelopeLen = inscription == null ? 0 : inscription.toEnvelopeHex().length() / 2;
+        return patchCodePartLenSlots(
+            artifact, workingHex.toString(), subs, (long) workingHex.length() / 2 + envelopeLen);
+    }
+
+    /** One template placeholder substitution: the 1-byte OP_0 at {@code byteOffset} becomes {@code encoded}. */
+    record Sub(int byteOffset, String encoded) {}
+
+    /**
+     * N-051 — write the deployed code-part length into every
+     * {@code codePartLenSlots} field of a spliced code script.
+     *
+     * <p>The compiler cannot know the deployed length of a code part that bakes
+     * a variable-width readonly constructor arg (a ByteString, a bigint), so the
+     * {@code SIZE(_codePart)} equality pin carries a 4-byte little-endian field
+     * the SDK fills in. The field is fixed-width, so writing it changes no
+     * length and no offset. A wrong or missing value is fail-safe on chain
+     * (honest spends fail OP_NUMEQUAL); it is never a lower bound.
+     *
+     * @param spliced     the template with every OP_0 placeholder substituted
+     * @param subs        those substitutions, by TEMPLATE byte offset (each
+     *                    replaced one placeholder byte with {@code encoded})
+     * @param codePartLen the deployed code-part length in bytes, including any
+     *                    inscription envelope
+     */
+    static String patchCodePartLenSlots(
+        RunarArtifact artifact,
+        String spliced,
+        List<Sub> subs,
+        long codePartLen
+    ) {
+        List<RunarArtifact.CodePartLenSlot> slots = artifact.codePartLenSlots();
+        if (slots.isEmpty()) return spliced;
+        if (codePartLen < 0 || codePartLen > 0x7fffffffL) {
+            throw new IllegalArgumentException(
+                "patchCodePartLenSlots: code part length " + codePartLen + " does not fit the 4-byte pin field");
         }
-        return script.toString();
+        StringBuilder le = new StringBuilder(8);
+        for (int i = 0; i < 4; i++) le.append(String.format("%02x", (codePartLen >> (8 * i)) & 0xff));
+        String tpl = artifact.scriptHex();
+        StringBuilder out = new StringBuilder(spliced);
+        for (RunarArtifact.CodePartLenSlot slot : slots) {
+            int off = slot.byteOffset();
+            // The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+            // OP_VERIFY` here; anything else means the descriptor does not
+            // describe this script.
+            boolean shaped = off >= 1
+                && (off + 7) * 2 <= tpl.length()
+                && tpl.startsWith("04", (off - 1) * 2)
+                && tpl.startsWith("819c69", (off + 4) * 2);
+            if (!shaped) {
+                throw new IllegalArgumentException(
+                    "patchCodePartLenSlots: " + artifact.contractName() + " codePartLenSlots entry at byteOffset "
+                        + off + " does not point at a verify_code_part_len length field "
+                        + "(corrupted or mismatched artifact)");
+            }
+            int shift = 0;
+            for (Sub sub : subs) {
+                if (sub.byteOffset() < off) shift += sub.encoded().length() / 2 - 1;
+            }
+            int at = (off + shift) * 2;
+            out.replace(at, at + 8, le.toString());
+        }
+        return out.toString();
     }
 
     /** Extracts the code portion of a locking script (everything before the last OP_RETURN). */

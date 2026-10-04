@@ -778,8 +778,8 @@ public final class StackLower {
      * placeholder, so it grows the script by nothing. {@code bigint}
      * (minimally-encoded Script number) and {@code ByteString}
      * (arbitrary-length data push) depend on the VALUE, which the compiler
-     * never sees — those return {@code null} and demote the pin to a lower
-     * bound.
+     * never sees — those return {@code null} and turn the pin into a
+     * deploy-time slot (N-051) that the SDK fills in.
      */
     private static Integer constructorSlotGrowth(String type) {
         if (type == null) return null;
@@ -830,8 +830,9 @@ public final class StackLower {
                 : null;
             Integer growth = constructorSlotGrowth(type);
             if (growth == null) {
-                // No compile-time width. Growth is never negative, so the
-                // running sum stays a sound lower bound — just not an exact one.
+                // No compile-time width: the emitter records the length field as
+                // a deploy-time codePartLenSlots entry (N-051) and the SDK
+                // patches it.
                 exact = false;
             } else {
                 delta += growth;
@@ -4009,8 +4010,10 @@ public final class StackLower {
             //     Stack effect is NET ZERO — the stack map is untouched.
             if (hasStateSection() && fixedStateSectionLength() < 0) {
                 // delta / exact are refined by pinCodePartLength once every
-                // method has been lowered; the defaults are the SOUND ones (a
-                // lower bound of emittedLength + 0 holds for any deployment).
+                // method has been lowered; the defaults are the SAFE ones:
+                // exact=false makes the length a deploy-time slot (N-051) that
+                // the SDK fills with the real deployed code-part length, so no
+                // truncated _codePart can satisfy it.
                 emitOp(new VerifyCodePartLenOp(0, false));
             }
 

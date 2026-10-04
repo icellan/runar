@@ -36,6 +36,18 @@ pub struct CodeSepIndexSlot {
     pub code_sep_index: usize,
 }
 
+/// N-051 — a `verify_code_part_len` length field whose value is only known at
+/// deploy time (a readonly constructor arg of variable width is baked into the
+/// code part). The SDK overwrites the 4 bytes at `byte_offset` with the
+/// deployed code-part length, little-endian.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodePartLenSlot {
+    /// Byte offset, in the TEMPLATE script, of the first of the 4
+    /// little-endian length bytes (the byte after the `04` push opcode).
+    #[serde(rename = "byteOffset")]
+    pub byte_offset: usize,
+}
+
 // ---------------------------------------------------------------------------
 // RawScriptSpan
 // ---------------------------------------------------------------------------
@@ -80,6 +92,10 @@ pub struct EmitResult {
     pub script_asm: String,
     pub constructor_slots: Vec<ConstructorSlot>,
     pub code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    /// N-051 — `verify_code_part_len` length fields the SDK patches at deploy
+    /// time with the deployed code-part length. Empty when every pin is exact
+    /// at compile time.
+    pub code_part_len_slots: Vec<CodePartLenSlot>,
     pub code_separator_index: i64,
     pub code_separator_indices: Vec<usize>,
     /// Source mappings (opcode index to source location).
@@ -98,6 +114,8 @@ struct EmitContext {
     byte_length: usize,
     constructor_slots: Vec<ConstructorSlot>,
     code_sep_index_slots: Vec<CodeSepIndexSlot>,
+    /// N-051 — pin length fields the SDK patches at deploy time.
+    code_part_len_slots: Vec<CodePartLenSlot>,
     code_separator_index: i64,
     code_separator_indices: Vec<usize>,
     opcode_index: usize,
@@ -126,6 +144,7 @@ impl EmitContext {
             byte_length: 0,
             constructor_slots: Vec::new(),
             code_sep_index_slots: Vec::new(),
+            code_part_len_slots: Vec::new(),
             code_separator_index: -1,
             code_separator_indices: Vec::new(),
             opcode_index: 0,
@@ -226,7 +245,7 @@ impl EmitContext {
     /// field for back-patching.
     ///
     /// ```text
-    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
     /// ```
     ///
     /// `LL LL LL LL` is a fixed-width little-endian field, not a minimal Script
@@ -237,6 +256,18 @@ impl EmitContext {
     ///
     /// `exact` is known here (the stack lowerer resolved it once every method
     /// had been lowered), so only the four length bytes need patching.
+    ///
+    /// N-051 — the comparison is ALWAYS an equality. It used to degrade to
+    /// OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+    /// deployed length unknown here, and a lower bound lets a spender claim a
+    /// TRUNCATED `_codePart` that ends at any 0x6a byte inside the baked value
+    /// (the continuation's `rest[0] == 0x6a` check is then satisfied by the
+    /// script's own bytes), planting attacker-chosen code in the continuation.
+    /// When the length is not exact at compile time, the field is recorded as a
+    /// `codePartLenSlots` entry and the SDK writes the real deployed code-part
+    /// length into it at deploy time. The template keeps the compile-time lower
+    /// bound, so an SDK that does not patch produces a contract whose honest
+    /// spends fail (funds stuck), never one that accepts a truncated code part.
     fn emit_verify_code_part_len(&mut self, delta: i64, exact: bool) -> Result<(), String> {
         self.emit_opcode("OP_DUP")?;
         // +1 skips the single-byte push header the 4-byte data push carries.
@@ -244,13 +275,16 @@ impl EmitContext {
         let asm_index = self.asm_parts.len();
         self.emit_push(&PushValue::Bytes(vec![0u8; 4]));
         self.emit_opcode("OP_BIN2NUM")?;
-        self.emit_opcode(if exact { "OP_NUMEQUAL" } else { "OP_GREATERTHANOREQUAL" })?;
+        self.emit_opcode("OP_NUMEQUAL")?;
         self.emit_opcode("OP_VERIFY")?;
         self.code_part_len_fixups.push(CodePartLenFixup {
             value_byte_offset,
             asm_index,
             delta,
         });
+        if !exact {
+            self.code_part_len_slots.push(CodePartLenSlot { byte_offset: value_byte_offset });
+        }
         Ok(())
     }
 
@@ -643,6 +677,7 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
             script_asm: String::new(),
             constructor_slots: Vec::new(),
             code_sep_index_slots: Vec::new(),
+            code_part_len_slots: Vec::new(),
             code_separator_index: -1,
             code_separator_indices: Vec::new(),
             source_map: Vec::new(),
@@ -685,6 +720,7 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
+        code_part_len_slots: ctx.code_part_len_slots,
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         source_map: ctx.source_map,
@@ -743,6 +779,7 @@ pub fn emit_method(method: &StackMethod) -> Result<EmitResult, String> {
         script_asm,
         constructor_slots: ctx.constructor_slots,
         code_sep_index_slots: ctx.code_sep_index_slots,
+        code_part_len_slots: ctx.code_part_len_slots,
         code_separator_index: ctx.code_separator_index,
         code_separator_indices: ctx.code_separator_indices,
         source_map: ctx.source_map,

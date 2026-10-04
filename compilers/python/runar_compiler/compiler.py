@@ -103,6 +103,8 @@ class Artifact:
     state_fields: list[StateField] = field(default_factory=list)
     constructor_slots: list[ConstructorSlot] = field(default_factory=list)
     code_sep_index_slots: list[dict] = field(default_factory=list)
+    # N-051 -- deploy-time verify_code_part_len length fields (see emit.py).
+    code_part_len_slots: list[dict] = field(default_factory=list)
     code_separator_index: int | None = None
     code_separator_indices: list[int] | None = None
     build_timestamp: str = ""
@@ -482,6 +484,7 @@ def compile_from_program(program: ANFProgram, disable_constant_folding: bool = F
         source_map=emit_result.source_map,
         stack_methods=stack_methods,
         raw_script_spans=emit_result.raw_script_spans,
+        code_part_len_slots=emit_result.code_part_len_slots,
     )
 
 
@@ -772,6 +775,7 @@ def _assemble_artifact(
     include_ir: bool = False,
     include_source_map: bool = True,
     raw_script_spans: list | None = None,
+    code_part_len_slots: list[dict] | None = None,
 ) -> Artifact:
     """Build the final output artifact from the compilation products."""
     # Build ABI
@@ -892,6 +896,7 @@ def _assemble_artifact(
         state_fields=state_fields,
         constructor_slots=constructor_slots,
         code_sep_index_slots=code_sep_index_slots or [],
+        code_part_len_slots=code_part_len_slots or [],
         code_separator_index=cs_index,
         code_separator_indices=cs_indices,
         build_timestamp=_build_timestamp(),
@@ -998,6 +1003,10 @@ def artifact_to_json(artifact: Artifact) -> str:
         ]
     if artifact.code_sep_index_slots:
         d["codeSepIndexSlots"] = artifact.code_sep_index_slots
+    if artifact.code_part_len_slots:
+        d["codePartLenSlots"] = [
+            {"byteOffset": s["byteOffset"]} for s in artifact.code_part_len_slots
+        ]
     if artifact.code_separator_index is not None:
         d["codeSeparatorIndex"] = artifact.code_separator_index
     if artifact.code_separator_indices is not None:
@@ -1447,6 +1456,7 @@ def _compile_from_source_str_with_result(
         source_map=emit_result.source_map,
         stack_methods=stack_methods,
         raw_script_spans=emit_result.raw_script_spans,
+        code_part_len_slots=emit_result.code_part_len_slots,
     )
     result.artifact = artifact
     result.script_hex = emit_result.script_hex

@@ -64,22 +64,84 @@ def is_empty_sig(value: object) -> bool:
     return isinstance(value, _EmptySig)
 
 
+def patch_code_part_len_slots(
+    artifact: RunarArtifact,
+    spliced: str,
+    subs: Sequence[tuple[int, str]],
+    code_part_len: int,
+) -> str:
+    """N-051 -- write the deployed code-part length into every
+    ``code_part_len_slots`` field of a spliced code script.
+
+    The compiler cannot know the deployed length of a code part that bakes a
+    variable-width readonly constructor arg (a ByteString, a bigint), so the
+    ``SIZE(_codePart)`` equality pin carries a 4-byte little-endian field the
+    SDK fills in. The field is fixed-width, so writing it changes no length and
+    no offset. A wrong or missing value is fail-safe on chain (honest spends
+    fail OP_NUMEQUAL); it is never a lower bound.
+
+    ``spliced`` is the template with every OP_0 placeholder substituted;
+    ``subs`` are those substitutions as ``(template_byte_offset, encoded_hex)``
+    (each replaced one placeholder byte with ``encoded_hex``);
+    ``code_part_len`` is the deployed code-part length in bytes, including any
+    inscription envelope (it is part of ``_codePart``).
+    """
+    slots = artifact.code_part_len_slots
+    if not slots:
+        return spliced
+    if (
+        isinstance(code_part_len, bool)
+        or not isinstance(code_part_len, int)
+        or code_part_len < 0
+        or code_part_len > 0x7FFFFFFF
+    ):
+        raise ValueError(
+            f'patch_code_part_len_slots: code part length {code_part_len} does '
+            f'not fit the 4-byte pin field'
+        )
+    le = code_part_len.to_bytes(4, 'little').hex()
+    out = spliced
+    for slot in slots:
+        off = slot.byte_offset
+        # The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL
+        # OP_VERIFY` here; anything else means the descriptor does not
+        # describe this script.
+        if (
+            off < 1
+            or artifact.script[(off - 1) * 2:off * 2] != '04'
+            or artifact.script[(off + 4) * 2:(off + 7) * 2] != '819c69'
+        ):
+            raise ValueError(
+                f'patch_code_part_len_slots: {artifact.contract_name} '
+                f'codePartLenSlots entry at byteOffset {off} does not point at '
+                f'a verify_code_part_len length field (corrupted or mismatched '
+                f'artifact)'
+            )
+        shift = 0
+        for sub_offset, encoded in subs:
+            if sub_offset < off:
+                shift += len(encoded) // 2 - 1
+        at = (off + shift) * 2
+        out = out[:at] + le + out[at + 8:]
+    return out
+
+
 def decode_exact_code_part_len_pins(script_hex: str) -> list[int]:
     """Decode the value of every EQUALITY ``verify_code_part_len`` pin in a
     compiled script.
 
     The compiler emits the pin as a fixed-width, unambiguous nine-byte run::
 
-        76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
-        OP_DUP  <len LE32>    OP_BIN2NUM  cmp  OP_VERIFY
+        76 | 04 LL LL LL LL | 81 | 9c | 69
+        OP_DUP  <len LE32>    OP_BIN2NUM  OP_NUMEQUAL  OP_VERIFY
 
-    ``9c`` is OP_NUMEQUAL -- an exact pin, the only variant a longer code part
-    can violate. ``a2`` is OP_GREATERTHANOREQUAL, a lower bound that extra bytes
-    satisfy, so it is deliberately not returned here.
+    Only ``9c`` (OP_NUMEQUAL) is returned. Since N-051 the compiler never emits
+    the ``a2`` (OP_GREATERTHANOREQUAL) lower-bound variant; an artifact from an
+    older compiler that still carries one is not decoded here, because extra
+    bytes satisfy it.
 
-    Read from the emitted TEMPLATE rather than from a built code script: the
-    template holds OP_0 placeholders where constructor args go, so no
-    caller-supplied byte string can be mistaken for a pin.
+    The N-043 guard calls this on the BUILT code script, so a deploy-time pin
+    (``code_part_len_slots``) is read with the value the SDK patched in.
     """
     values: list[int] = []
     for i in range(0, max(len(script_hex) - 17, 0), 2):
@@ -1585,14 +1647,16 @@ class RunarContract:
         produces.
 
         The check is the invariant itself, not a restatement of the compiler's
-        derivation: it decodes the pinned number straight out of the emitted
-        template and compares it to ``_get_code_part_hex()``. So it permits
-        every combination that actually works -- a stateless contract or a
-        fixed-size state layout carries no pin at all, and a lower-bound pin is
-        satisfied by a longer code part -- and rejects only the shape that would
-        lock funds.
+        derivation: it decodes the pinned number straight out of the code this
+        contract really deploys and compares it to ``_get_code_part_hex()``. So
+        it permits every combination that actually works -- a stateless
+        contract or a fixed-size state layout carries no pin at all, and a
+        deploy-time pin (N-051 ``code_part_len_slots``) is patched to the
+        inscribed length -- and rejects only the shape that would lock funds:
+        an exact compile-time pin that the envelope breaks.
         """
-        pinned = decode_exact_code_part_len_pins(self.artifact.script)
+        # Decode from the built code: a deploy-time pin is patched there.
+        pinned = decode_exact_code_part_len_pins(self._build_code_script())
         if not pinned:
             return
         actual = len(self._get_code_part_hex()) // 2
@@ -1989,6 +2053,19 @@ class RunarContract:
             for byte_offset, encoded in subs:
                 hex_offset = byte_offset * 2
                 script = script[:hex_offset] + encoded + script[hex_offset + 2:]
+
+            # N-051: the deploy-time code-part length pins. The inscription
+            # envelope, when present, is part of `_codePart` (see
+            # _get_code_part_hex).
+            envelope_len = 0
+            if self._inscription:
+                envelope_len = len(build_inscription_envelope(
+                    self._inscription.content_type,
+                    self._inscription.data,
+                )) // 2
+            script = patch_code_part_len_slots(
+                self.artifact, script, subs, len(script) // 2 + envelope_len,
+            )
         elif not self.artifact.state_fields:
             # Backward compatibility: old stateless artifacts without constructorSlots.
             # For stateful contracts, constructor args initialize the state section

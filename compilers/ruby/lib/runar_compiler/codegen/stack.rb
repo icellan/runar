@@ -4169,8 +4169,9 @@ module RunarCompiler::Codegen
       #     VERIFYs), so the stack map is untouched.
       if _has_state_section && _fixed_state_section_length.nil?
         # delta / exact are refined by Codegen._pin_code_part_length once every
-        # method has been lowered; the defaults are the SOUND ones (a lower
-        # bound of emittedLength + 0 holds for any deployment).
+        # method has been lowered; the defaults are the SAFE ones: exact=false
+        # makes the length a deploy-time slot (N-051) that the SDK fills with
+        # the real deployed code-part length.
         emit_op({ op: "verify_code_part_len", code_part_len_delta: 0, code_part_len_exact: false })
       end
 
@@ -5078,7 +5079,8 @@ module RunarCompiler::Codegen
   # placeholder, so it grows the script by nothing. `bigint`
   # (minimally-encoded Script number) and `ByteString` (arbitrary-length data
   # push) depend on the VALUE, which the compiler never sees -- those are
-  # absent here and demote the pin to a lower bound.
+  # absent here and turn the pin into a deploy-time slot (N-051) that the SDK
+  # fills in.
   CONSTRUCTOR_SLOT_GROWTH = CONSTRUCTOR_SLOT_VALUE_BYTES
                             .transform_values { |n| _push_header_len(n) + n - 1 }
                             .merge("boolean" => 0)
@@ -5136,8 +5138,8 @@ module RunarCompiler::Codegen
       prop = param_index.is_a?(Integer) && param_index >= 0 ? ctor_props[param_index] : nil
       growth = prop.nil? ? nil : CONSTRUCTOR_SLOT_GROWTH[prop.type]
       if growth.nil?
-        # No compile-time width. Growth is never negative, so the running sum
-        # stays a sound lower bound -- just not an exact one.
+        # No compile-time width: the emitter records the length field as a
+        # deploy-time `codePartLenSlots` entry (N-051) and the SDK patches it.
         exact = false
       else
         delta += growth

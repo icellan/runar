@@ -214,6 +214,9 @@ pub const RunarArtifact = struct {
     state_fields: []StateField = &.{},
     constructor_slots: []ConstructorSlot = &.{},
     code_sep_index_slots: []CodeSepIndexSlot = &.{},
+    /// N-051 -- `verify_code_part_len` length fields whose value is only known
+    /// at deploy time. The SDK writes the deployed code-part length into each.
+    code_part_len_slots: []CodePartLenSlot = &.{},
     build_timestamp: []const u8 = &.{},
     code_separator_index: ?i32 = null,
     code_separator_indices: []i32 = &.{},
@@ -251,6 +254,7 @@ pub const RunarArtifact = struct {
         if (self.state_fields.len > 0) a.free(self.state_fields);
         if (self.constructor_slots.len > 0) a.free(self.constructor_slots);
         if (self.code_sep_index_slots.len > 0) a.free(self.code_sep_index_slots);
+        if (self.code_part_len_slots.len > 0) a.free(self.code_part_len_slots);
         if (self.code_separator_indices.len > 0) a.free(self.code_separator_indices);
         if (self.anf_json) |aj| a.free(aj);
         // R-062: the marker's names are duped out of the parsed JSON.
@@ -388,6 +392,21 @@ pub const RunarArtifact = struct {
                     };
                 }
                 artifact.code_sep_index_slots = csis;
+            }
+        }
+
+        // Parse codePartLenSlots (N-051)
+        if (root.get("codePartLenSlots")) |cpl_val| {
+            if (cpl_val == .array) {
+                const items = cpl_val.array.items;
+                var cpls = try allocator.alloc(CodePartLenSlot, items.len);
+                for (items, 0..) |item, i| {
+                    const obj = item.object;
+                    cpls[i] = .{
+                        .byte_offset = if (obj.get("byteOffset")) |bo| @intCast(bo.integer) else 0,
+                    };
+                }
+                artifact.code_part_len_slots = cpls;
             }
         }
 
@@ -703,6 +722,15 @@ pub const ConstructorSlot = struct {
 pub const CodeSepIndexSlot = struct {
     byte_offset: i32,
     code_sep_index: i32,
+};
+
+/// N-051 -- a `verify_code_part_len` length field whose value is only known at
+/// deploy time (a variable-width readonly constructor arg is baked into the
+/// code part). `byte_offset` is the TEMPLATE byte offset of the first of the 4
+/// little-endian length bytes (the byte after the `04` push opcode). The SDK
+/// overwrites those 4 bytes with the deployed code-part length.
+pub const CodePartLenSlot = struct {
+    byte_offset: i32,
 };
 
 // ---------------------------------------------------------------------------

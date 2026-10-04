@@ -89,6 +89,9 @@ type ConstructorSlot = codegen.ConstructorSlot
 // CodeSepIndexSlot records a codeSepIndex placeholder in the compiled script.
 type CodeSepIndexSlot = codegen.CodeSepIndexSlot
 
+// CodePartLenSlot is re-exported from codegen (N-051).
+type CodePartLenSlot = codegen.CodePartLenSlot
+
 // SourceMapping is re-exported from codegen.
 type SourceMapping = codegen.SourceMapping
 
@@ -140,6 +143,7 @@ type Artifact struct {
 	StateFields          []StateField       `json:"stateFields,omitempty"`
 	ConstructorSlots     []ConstructorSlot  `json:"constructorSlots,omitempty"`
 	CodeSepIndexSlots    []CodeSepIndexSlot `json:"codeSepIndexSlots,omitempty"`
+	CodePartLenSlots     []CodePartLenSlot  `json:"codePartLenSlots,omitempty"`
 	CodeSeparatorIndex   *int               `json:"codeSeparatorIndex,omitempty"`
 	CodeSeparatorIndices []int              `json:"codeSeparatorIndices,omitempty"`
 	BuildTimestamp       string             `json:"buildTimestamp"`
@@ -303,7 +307,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+	artifact, err := assembleArtifact(program, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +315,7 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 }
 
 // assembleArtifact builds the final output artifact from the compilation products.
-func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
+func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codePartLenSlots []CodePartLenSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) (*Artifact, error) {
 	// ---------------------------------------------------------------------
 	// Build ABI
 	// ---------------------------------------------------------------------
@@ -456,6 +460,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		StateFields:          stateFields,
 		ConstructorSlots:     constructorSlots,
 		CodeSepIndexSlots:    codeSepIndexSlots,
+		CodePartLenSlots:     codePartLenSlots,
 		CodeSeparatorIndex:   csIndex,
 		CodeSeparatorIndices: csIndices,
 		BuildTimestamp:       buildTimestamp(),
@@ -900,7 +905,7 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 			return
 		}
 
-		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
+		artifact, aerr := assembleArtifact(result.ANF, emitResult.ScriptHex, emitResult.ScriptAsm, emitResult.ConstructorSlots, emitResult.CodeSepIndexSlots, emitResult.CodePartLenSlots, emitResult.CodeSeparatorIndex, emitResult.CodeSeparatorIndices, emitResult.SourceMap, stackMethods, o)
 		if aerr != nil {
 			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
 				aerr.Error(),

@@ -36,7 +36,7 @@
 import { Hash, Utils } from '@bsv/sdk';
 import type { RunarArtifact, ConstructorSlot, StateField } from 'runar-ir-schema';
 import { annotateStateFieldLayout, totalStateByteLength } from 'runar-ir-schema';
-import { encodeArg, encodeScriptNumber } from './contract.js';
+import { encodeArg, encodeScriptNumber, patchCodePartLenSlots } from './contract.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -325,7 +325,13 @@ export function buildResolvedCodeHex(
     const hexOffset = sub.templateByteOffset * 2;
     script = script.slice(0, hexOffset) + sub.encodedHex + script.slice(hexOffset + 2);
   }
-  return script;
+  // N-051: deploy-time code-part length pins (no inscription envelope here).
+  return patchCodePartLenSlots(
+    artifact,
+    script,
+    subs.map((s) => ({ byteOffset: s.templateByteOffset, encoded: s.encodedHex })),
+    script.length / 2,
+  );
 }
 
 /**

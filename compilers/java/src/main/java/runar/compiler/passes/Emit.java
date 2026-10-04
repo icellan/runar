@@ -79,6 +79,19 @@ public final class Emit {
     public record CodeSepIndexSlot(int byteOffset, int codeSepIndex) {}
 
     /**
+     * N-051 — a {@code verify_code_part_len} length field whose value is only
+     * known at deploy time (a readonly constructor arg of variable width is
+     * baked into the code part). {@code byteOffset} is the offset, in the
+     * TEMPLATE script, of the first of the 4 little-endian length bytes (the
+     * byte after the {@code 04} push opcode). The SDK overwrites those 4 bytes
+     * with the deployed code-part length.
+     *
+     * <p>Mirrors {@code CodePartLenSlot} in
+     * {@code packages/runar-compiler/src/passes/06-emit.ts}.
+     */
+    public record CodePartLenSlot(int byteOffset) {}
+
+    /**
      * R-007: full emit result. Carries everything the deployment SDK needs to
      * turn a script into a deployable locking script: the constructor-argument
      * slot offsets, the codeSepIndex slot offsets, and the OP_CODESEPARATOR
@@ -99,7 +112,9 @@ public final class Emit {
         List<ConstructorSlot> constructorSlots,
         List<CodeSepIndexSlot> codeSepIndexSlots,
         int codeSeparatorIndex,
-        List<Integer> codeSeparatorIndices
+        List<Integer> codeSeparatorIndices,
+        /** N-051 — deploy-time pin length fields; empty when every pin is exact. */
+        List<CodePartLenSlot> codePartLenSlots
     ) {}
 
     /**
@@ -334,7 +349,8 @@ public final class Emit {
             List.copyOf(ctx.constructorSlots),
             List.copyOf(ctx.codeSepIndexSlots),
             ctx.codeSeparatorIndex,
-            List.copyOf(ctx.codeSeparatorIndices)
+            List.copyOf(ctx.codeSeparatorIndices),
+            List.copyOf(ctx.codePartLenSlots)
         );
     }
 
@@ -471,6 +487,8 @@ public final class Emit {
         final java.util.List<Integer> codeSeparatorIndices = new java.util.ArrayList<>();
         /** R-095: verify_code_part_len length fields awaiting back-patch. */
         final java.util.List<CodePartLenFixup> codePartLenFixups = new java.util.ArrayList<>();
+        /** N-051: pin length fields the SDK patches at deploy time. */
+        final java.util.List<CodePartLenSlot> codePartLenSlots = new java.util.ArrayList<>();
         /** Byte offset of the most recent OP_CODESEPARATOR; -1 when none was emitted. */
         int codeSeparatorIndex = -1;
         int byteLength = 0;
@@ -578,7 +596,7 @@ public final class Emit {
          * R-095 — emit the 9-byte {@code SIZE(_codePart)} pin and register its
          * length field for back-patching.
          *
-         * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY</pre>
+         * <pre>OP_DUP &lt;04 LL LL LL LL&gt; OP_BIN2NUM OP_NUMEQUAL OP_VERIFY</pre>
          *
          * <p>{@code LL LL LL LL} is a fixed-width little-endian field, not a
          * minimal Script number push: the value being patched IS the length of
@@ -586,6 +604,18 @@ public final class Emit {
          * would be self-referential. {@code OP_BIN2NUM} normalises the
          * fixed-width field back to a minimal Script number so the comparison
          * is numeric.
+         *
+         * <p>N-051 — the comparison is ALWAYS an equality. It used to degrade to
+         * OP_GREATERTHANOREQUAL when a variable-width readonly arg made the
+         * deployed length unknown here, and a lower bound lets a spender claim a
+         * TRUNCATED {@code _codePart} that ends at any 0x6a byte inside the baked
+         * value, planting attacker-chosen code in the continuation. When the
+         * length is not exact at compile time, the field is recorded as a
+         * {@code codePartLenSlots} entry and the SDK writes the real deployed
+         * code-part length into it at deploy time. The template keeps the
+         * compile-time lower bound, so an SDK that does not patch produces a
+         * contract whose honest spends fail (funds stuck), never one that
+         * accepts a truncated code part.
          */
         void emitVerifyCodePartLen(int delta, boolean exact) {
             emitOpcode("OP_DUP");
@@ -593,9 +623,10 @@ public final class Emit {
             int valueByteOffset = byteLength + 1;
             emitPush(PushValue.ofHex("00000000"));
             emitOpcode("OP_BIN2NUM");
-            emitOpcode(exact ? "OP_NUMEQUAL" : "OP_GREATERTHANOREQUAL");
+            emitOpcode("OP_NUMEQUAL");
             emitOpcode("OP_VERIFY");
             codePartLenFixups.add(new CodePartLenFixup(valueByteOffset, delta));
+            if (!exact) codePartLenSlots.add(new CodePartLenSlot(valueByteOffset));
         }
 
         /**

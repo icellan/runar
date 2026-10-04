@@ -227,6 +227,11 @@ pub struct RunarArtifact {
     pub constructor_slots: Option<Vec<ConstructorSlot>>,
     #[serde(default)]
     pub code_sep_index_slots: Option<Vec<CodeSepIndexSlot>>,
+    /// N-051 -- `verify_code_part_len` length fields whose value is only known
+    /// at deploy time. The SDK writes the deployed code-part length into each
+    /// one (see `patch_code_part_len_slots`). Absent when every pin is exact.
+    #[serde(default)]
+    pub code_part_len_slots: Option<Vec<CodePartLenSlot>>,
     #[serde(default, rename = "codeSeparatorIndex")]
     pub code_separator_index: Option<usize>,
     #[serde(default, rename = "codeSeparatorIndices")]
@@ -339,6 +344,16 @@ pub struct ConstructorSlot {
 pub struct CodeSepIndexSlot {
     pub byte_offset: usize,
     pub code_sep_index: usize,
+}
+
+/// N-051 -- a `verify_code_part_len` length field the SDK patches at deploy
+/// time with the deployed code-part length (4 bytes, little-endian).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodePartLenSlot {
+    /// Byte offset, in the TEMPLATE script, of the first of the 4 length bytes
+    /// (the byte after the `04` push opcode).
+    pub byte_offset: usize,
 }
 
 // ---------------------------------------------------------------------------

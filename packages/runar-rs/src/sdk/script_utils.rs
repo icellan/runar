@@ -316,6 +316,13 @@ pub fn extract_constructor_args(
 
 /// Determine whether a given on-chain script was produced from the given
 /// contract artifact (regardless of what constructor args were used).
+///
+/// Every OP_0 placeholder the SDK substitutes at deploy time -- constructor
+/// slots and codeSepIndex slots -- matches whatever single script element sits
+/// at that position. N-051: a `codePartLenSlots` field holds the DEPLOYED
+/// code-part length, not the template's compile-time value, so it must equal
+/// the length of the code part being matched (everything before the state
+/// section, inscription envelope included).
 pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> bool {
     let mut code_hex = script_hex.to_string();
     if let Some(ref state_fields) = artifact.state_fields {
@@ -333,33 +340,73 @@ pub fn matches_artifact(artifact: &RunarArtifact, script_hex: &str) -> bool {
         _ => return code_hex == *template,
     };
 
-    // Deduplicate by byteOffset and sort
+    // Deduplicate by byteOffset and sort. codeSepIndex placeholders are
+    // substituted at deploy time too (OP_0 -> the adjusted separator index).
     let mut seen_offsets = std::collections::HashSet::new();
-    let mut sorted_slots: Vec<_> = slots.iter().collect();
-    sorted_slots.sort_by_key(|s| s.byte_offset);
-    sorted_slots.retain(|s| seen_offsets.insert(s.byte_offset));
+    let mut placeholder_offsets: Vec<usize> = slots.iter().map(|s| s.byte_offset).collect();
+    if let Some(ref cs) = artifact.code_sep_index_slots {
+        placeholder_offsets.extend(cs.iter().map(|s| s.byte_offset));
+    }
+    placeholder_offsets.sort_unstable();
+    placeholder_offsets.retain(|o| seen_offsets.insert(*o));
+
+    let len_fields: std::collections::HashSet<usize> = artifact
+        .code_part_len_slots
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.byte_offset * 2).collect())
+        .unwrap_or_default();
+    let deployed_len: String = (0..4)
+        .map(|i| format!("{:02x}", ((code_hex.len() / 2) >> (8 * i)) & 0xff))
+        .collect();
+    let t_bytes = template.as_bytes();
+    let c_bytes = code_hex.as_bytes();
+    // Compare template[t_start..t_end] with code[c_start..], substituting the
+    // deployed length at every codePartLen field. Callers bounds-check first.
+    let segment_matches = |t_start: usize, t_end: usize, c_start: usize| -> bool {
+        let mut t = t_start;
+        let mut c = c_start;
+        while t < t_end {
+            if len_fields.contains(&t) {
+                if t + 8 > t_end || code_hex.get(c..c + 8) != Some(deployed_len.as_str()) {
+                    return false;
+                }
+                t += 8;
+                c += 8;
+                continue;
+            }
+            if t_bytes[t] != c_bytes[c] {
+                return false;
+            }
+            t += 1;
+            c += 1;
+        }
+        true
+    };
 
     let mut template_pos = 0;
     let mut code_pos = 0;
 
-    for slot in &sorted_slots {
-        let slot_hex_offset = slot.byte_offset * 2;
-        let template_segment = &template[template_pos..slot_hex_offset];
-        let code_end = code_pos + template_segment.len();
-        if code_end > code_hex.len() {
+    for byte_offset in &placeholder_offsets {
+        let slot_hex_offset = byte_offset * 2;
+        if slot_hex_offset < template_pos || slot_hex_offset + 2 > template.len() {
             return false;
         }
-        let code_segment = &code_hex[code_pos..code_end];
-        if template_segment != code_segment {
+        let seg_len = slot_hex_offset - template_pos;
+        if code_pos + seg_len > code_hex.len() {
+            return false;
+        }
+        if !segment_matches(template_pos, slot_hex_offset, code_pos) {
             return false;
         }
         template_pos = slot_hex_offset + 2;
-        let elem_offset = code_pos + template_segment.len();
+        let elem_offset = code_pos + seg_len;
         let (_, total_hex_chars, _) = read_script_element(&code_hex, elem_offset);
         code_pos = elem_offset + total_hex_chars;
     }
 
-    template[template_pos..] == code_hex[code_pos..]
+    code_pos <= code_hex.len()
+        && code_hex.len() - code_pos == template.len() - template_pos
+        && segment_matches(template_pos, template.len(), code_pos)
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +463,7 @@ mod tests {
             state_fields: None,
             constructor_slots: Some(slots),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -516,6 +564,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -667,6 +716,7 @@ mod tests {
             state_fields: None,
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -712,6 +762,7 @@ mod tests {
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,
@@ -894,6 +945,7 @@ mod n074_script_number_width {
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_sep_index_slots: None,
+            code_part_len_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
             anf: None,

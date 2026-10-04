@@ -331,17 +331,27 @@ pub fn matchesArtifact(
     var sorted_offsets: [64]struct { byte_offset: i32 } = undefined;
     var sorted_count: usize = 0;
 
-    // Collect unique byte offsets
-    for (artifact.constructor_slots) |slot| {
+    // Collect unique byte offsets. Every OP_0 placeholder the SDK replaces at
+    // deploy time is one variable script element: constructor slots AND
+    // codeSepIndex slots (the latter bake as OP_1 post-R-010, so comparing
+    // them literally rejected every honest deployment of a stateful contract
+    // that carries one; matches the TS/Go/Rust/Python tiers).
+    const total_slots = artifact.constructor_slots.len + artifact.code_sep_index_slots.len;
+    for (0..total_slots) |n| {
+        const off = if (n < artifact.constructor_slots.len)
+            artifact.constructor_slots[n].byte_offset
+        else
+            artifact.code_sep_index_slots[n - artifact.constructor_slots.len].byte_offset;
         var found = false;
         for (0..sorted_count) |k| {
-            if (sorted_offsets[k].byte_offset == slot.byte_offset) {
+            if (sorted_offsets[k].byte_offset == off) {
                 found = true;
                 break;
             }
         }
-        if (!found and sorted_count < 64) {
-            sorted_offsets[sorted_count] = .{ .byte_offset = slot.byte_offset };
+        if (!found) {
+            if (sorted_count >= 64) return false;
+            sorted_offsets[sorted_count] = .{ .byte_offset = off };
             sorted_count += 1;
         }
     }
@@ -357,6 +367,19 @@ pub fn matchesArtifact(
         sorted_offsets[j] = key;
     }
 
+    // N-051: a `codePartLenSlots` field holds the DEPLOYED code-part length,
+    // not the template's placeholder value. It must equal the length of the
+    // code part being matched (everything before the state section,
+    // inscription envelope included).
+    const code_len = code_hex.len / 2;
+    if (code_len > 0xffffffff) return false;
+    const code_len_u32: u32 = @intCast(code_len);
+    var deployed_len: [8]u8 = undefined;
+    _ = std.fmt.bufPrint(&deployed_len, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+        @as(u8, @truncate(code_len_u32)),       @as(u8, @truncate(code_len_u32 >> 8)),
+        @as(u8, @truncate(code_len_u32 >> 16)), @as(u8, @truncate(code_len_u32 >> 24)),
+    }) catch unreachable;
+
     var template_pos: usize = 0;
     var code_pos: usize = 0;
 
@@ -364,13 +387,12 @@ pub fn matchesArtifact(
         const slot_hex_offset: usize = @intCast(sorted_offsets[i].byte_offset * 2);
 
         // Compare template segment before this slot
+        if (slot_hex_offset < template_pos) return false;
         const template_segment_len = slot_hex_offset - template_pos;
         if (code_pos + template_segment_len > code_hex.len) return false;
         if (template_pos + template_segment_len > template.len) return false;
 
-        const template_segment = template[template_pos .. template_pos + template_segment_len];
-        const code_segment = code_hex[code_pos .. code_pos + template_segment_len];
-        if (!std.mem.eql(u8, template_segment, code_segment)) return false;
+        if (!segmentMatches(artifact, template, template_pos, slot_hex_offset, code_hex, code_pos, &deployed_len)) return false;
 
         // Skip the placeholder in template (1 byte = 2 hex chars: OP_0)
         template_pos = slot_hex_offset + 2;
@@ -382,9 +404,46 @@ pub fn matchesArtifact(
     }
 
     // Compare the remaining suffix
-    const template_rest = template[template_pos..];
-    const code_rest = code_hex[code_pos..];
-    return std.mem.eql(u8, template_rest, code_rest);
+    if (template_pos > template.len or code_pos > code_hex.len) return false;
+    if (code_hex.len - code_pos != template.len - template_pos) return false;
+    return segmentMatches(artifact, template, template_pos, template.len, code_hex, code_pos, &deployed_len);
+}
+
+/// Compare template[t_start..t_end] against code_hex starting at c_start
+/// (same length), except that each N-051 `codePartLenSlots` field must hold
+/// `deployed_len` (LE32 hex of the candidate's code-part length) instead of
+/// the template's placeholder bytes. Caller guarantees the code range exists.
+fn segmentMatches(
+    artifact: *const types.RunarArtifact,
+    template: []const u8,
+    t_start: usize,
+    t_end: usize,
+    code_hex: []const u8,
+    c_start: usize,
+    deployed_len: *const [8]u8,
+) bool {
+    var t = t_start;
+    var c = c_start;
+    while (t < t_end) {
+        var is_len_field = false;
+        for (artifact.code_part_len_slots) |slot| {
+            if (slot.byte_offset >= 0 and @as(usize, @intCast(slot.byte_offset)) * 2 == t) {
+                is_len_field = true;
+                break;
+            }
+        }
+        if (is_len_field) {
+            if (c + 8 > code_hex.len) return false;
+            if (!std.mem.eql(u8, code_hex[c .. c + 8], deployed_len)) return false;
+            t += 8;
+            c += 8;
+            continue;
+        }
+        if (template[t] != code_hex[c]) return false;
+        t += 1;
+        c += 1;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------

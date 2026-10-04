@@ -57,6 +57,9 @@ pub const EmitContext = struct {
     opcode_index: u32 = 0,
     /// R-095 — verify_code_part_len length fields awaiting back-patch.
     code_part_len_fixups: std.ArrayListUnmanaged(CodePartLenFixup) = .empty,
+    /// N-051 — verify_code_part_len length fields whose value is only known at
+    /// deploy time; the SDK overwrites each with the deployed code-part length.
+    code_part_len_slots: std.ArrayListUnmanaged(types.CodePartLenSlot) = .empty,
     /// Allocator for all dynamic allocation.
     allocator: std.mem.Allocator,
 
@@ -66,6 +69,7 @@ pub const EmitContext = struct {
 
     pub fn deinit(self: *EmitContext) void {
         self.code_part_len_fixups.deinit(self.allocator);
+        self.code_part_len_slots.deinit(self.allocator);
         self.script_bytes.deinit(self.allocator);
         for (self.owned_asm_parts.items) |part| {
             self.allocator.free(part);
@@ -402,26 +406,41 @@ pub fn emitStackInstruction(ctx: *EmitContext, inst: types.StackInstruction) !vo
             // R-095: pin SIZE(_codePart) against the code part's own deployed
             // byte length.
             //
-            //   OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+            //   OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
             //
             // LL LL LL LL is a FIXED-WIDTH little-endian field, not a minimal
             // Script number push: the value being patched IS the length of the
             // script that contains it, so a width that varied with the value
             // would be self-referential. OP_BIN2NUM normalises it back to a
             // minimal Script number so the comparison is numeric.
+            //
+            // N-051 — the comparison is ALWAYS an equality. It used to degrade
+            // to OP_GREATERTHANOREQUAL when a variable-width readonly arg made
+            // the deployed length unknown here, and a lower bound lets a
+            // spender claim a TRUNCATED `_codePart` that ends at any 0x6a byte
+            // inside the baked value, planting attacker-chosen code in the
+            // continuation. When the length is not exact at compile time the
+            // field is recorded as a `codePartLenSlots` entry and the SDK
+            // writes the real deployed code-part length into it at deploy
+            // time. The template keeps the compile-time lower bound, so an SDK
+            // that does not patch produces a contract whose honest spends fail
+            // (funds stuck), never one that accepts a truncated code part.
             try ctx.emitOpcode(.op_dup);
             // +1 skips the single-byte push header the 4-byte data push carries.
             const value_byte_offset: usize = @as(usize, ctx.byte_offset) + 1;
             const asm_index = ctx.asm_parts.items.len;
             try ctx.emitPushData(&[_]u8{ 0, 0, 0, 0 });
             try ctx.emitOpcode(.op_bin2num);
-            try ctx.emitOpcode(if (pin.exact) .op_numequal else .op_greaterthanorequal);
+            try ctx.emitOpcode(.op_numequal);
             try ctx.emitOpcode(.op_verify);
             try ctx.code_part_len_fixups.append(ctx.allocator, .{
                 .value_byte_offset = value_byte_offset,
                 .asm_index = asm_index,
                 .delta = pin.delta,
             });
+            if (!pin.exact) {
+                try ctx.code_part_len_slots.append(ctx.allocator, .{ .byte_offset = value_byte_offset });
+            }
         },
         .placeholder => |ph| {
             try ctx.recordConstructorSlot(ph.param_index);
@@ -804,6 +823,17 @@ pub fn emitArtifact(
         for (ctx.code_sep_index_slots.items, 0..) |slot, i| {
             if (i > 0) try w.writeByte(',');
             try w.print("{{\"byteOffset\":{d},\"codeSepIndex\":{d}}}", .{ slot.byte_offset, slot.code_sep_index });
+        }
+        try w.writeAll("],");
+    }
+
+    // codePartLenSlots — N-051 deploy-time `verify_code_part_len` length
+    // fields (omitted when every pin is exact at compile time).
+    if (ctx.code_part_len_slots.items.len > 0) {
+        try w.writeAll("\"codePartLenSlots\":[");
+        for (ctx.code_part_len_slots.items, 0..) |slot, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"byteOffset\":{d}}}", .{slot.byte_offset});
         }
         try w.writeAll("],");
     }

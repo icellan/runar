@@ -348,11 +348,14 @@ const TEST_SPECS: TestSpec[] = [
         'every spend would fail OP_VERIFY with the funds already committed.',
     },
   },
-  // Control 1: StateCovenant's readonly params are variable-width, so the
-  // compiler degrades the pin to a LOWER bound (a2 = OP_GREATERTHANOREQUAL).
-  // Extra envelope bytes SATISFY a lower bound. Guarding `a2` would turn the
-  // N-043 fix into an outage for every contract of this shape, so this fixture
-  // must stay ACCEPTED by all seven tiers.
+  // Control 1: StateCovenant's readonly params are variable-width. This used
+  // to degrade the pin to a LOWER bound (a2), which the envelope satisfied.
+  // Since N-051 the pin is an equality whose 4-byte value is an artifact
+  // `codePartLenSlots` entry each SDK writes at deploy time — the INSCRIBED
+  // code-part length here, since the envelope is part of `_codePart`. Refusing
+  // would turn the N-043 fix into an outage for every contract of this shape,
+  // so this fixture must stay ACCEPTED by all seven tiers, with byte-identical
+  // patched lengths. (The case name predates N-051.)
   {
     name: 'inscription-pin-lower-bound',
     source: 'examples/ts/state-covenant/StateCovenant.runar.ts',

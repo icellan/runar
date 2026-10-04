@@ -194,17 +194,16 @@ public final class RunarContract {
      * <p>The compiler emits the pin as a fixed-width, unambiguous nine-byte run:
      *
      * <pre>
-     *   76 | 04 LL LL LL LL | 81 | (9c | a2) | 69
-     *   OP_DUP  &lt;len LE32&gt;    OP_BIN2NUM  cmp  OP_VERIFY
+     *   76 | 04 LL LL LL LL | 81 | 9c | 69
+     *   OP_DUP  &lt;len LE32&gt;    OP_BIN2NUM  OP_NUMEQUAL  OP_VERIFY
      * </pre>
      *
-     * <p>{@code 9c} is OP_NUMEQUAL — an exact pin, the only variant a longer
-     * code part can violate. {@code a2} is OP_GREATERTHANOREQUAL, a lower bound
-     * that extra bytes satisfy, so it is deliberately not returned here.
+     * <p>Only {@code 9c} (OP_NUMEQUAL) is decoded. Artifacts from compilers
+     * older than N-051 may still carry {@code a2} (OP_GREATERTHANOREQUAL), a
+     * lower bound that extra bytes satisfy; it is deliberately not returned.
      *
-     * <p>Read from the emitted TEMPLATE rather than from a built code script:
-     * the template holds OP_0 placeholders where constructor args go, so no
-     * caller-supplied byte string can be mistaken for a pin.
+     * <p>N-051: the caller passes the BUILT code script, so a deploy-time pin
+     * ({@code codePartLenSlots}) is read with the value the SDK patched in.
      */
     static List<Integer> decodeExactCodePartLenPins(String scriptHex) {
         List<Integer> values = new ArrayList<>();
@@ -235,14 +234,19 @@ public final class RunarContract {
      * produces.
      *
      * <p>The check is the invariant itself, not a restatement of the compiler's
-     * derivation: it decodes the pinned number straight out of the emitted
-     * template and compares it to the rendered code part. So it permits every
+     * derivation: it decodes the pinned number straight out of the built code
+     * script and compares it to the rendered code part. So it permits every
      * combination that actually works — a stateless contract or a fixed-size
-     * state layout carries no pin at all, and a lower-bound pin is satisfied by
-     * a longer code part — and rejects only the shape that would lock funds.
+     * state layout carries no pin at all, and a deploy-time pin (N-051
+     * {@code codePartLenSlots}) is patched to the inscribed length — and
+     * rejects only the shape that would lock funds: an exact compile-time pin
+     * an envelope makes wrong.
      */
     private void assertCodePartLengthPinHonoured() {
-        List<Integer> pinned = decodeExactCodePartLenPins(artifact.scriptHex());
+        // Decode from the code this contract really deploys: a deploy-time pin
+        // (N-051 codePartLenSlots) is patched to the inscribed length there.
+        List<Integer> pinned = decodeExactCodePartLenPins(
+            ContractScript.buildCodeScript(artifact, constructorArgs, inscription));
         if (pinned.isEmpty()) return;
         int actual = ContractScript.renderCodePart(artifact, constructorArgs, inscription).length() / 2;
         for (int value : pinned) {

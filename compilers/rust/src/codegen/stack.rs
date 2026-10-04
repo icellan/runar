@@ -71,7 +71,7 @@ pub enum StackOp {
     /// FIXED-WIDTH 9-byte sequence
     ///
     /// ```text
-    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM (OP_NUMEQUAL|OP_GREATERTHANOREQUAL) OP_VERIFY
+    /// OP_DUP <04 LL LL LL LL> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY
     /// ```
     ///
     /// and back-patches `LL LL LL LL` (little-endian) once the whole script has
@@ -81,14 +81,16 @@ pub enum StackOp {
     ///
     /// `delta` is the deploy-time byte GROWTH of the template's OP_0
     /// placeholders, so `deployedCodeLen = emittedTemplateLen + delta`.
-    /// `exact` says whether every placeholder's growth is type-determined:
-    /// `true` → equality pin (OP_NUMEQUAL), `false` → lower-bound pin
-    /// (OP_GREATERTHANOREQUAL). Both are resolved by `pin_code_part_length`
-    /// once every method has been lowered.
+    /// `exact` says whether every placeholder's growth is type-determined.
+    /// The pin is ALWAYS an equality (OP_NUMEQUAL, N-051): when `exact` is
+    /// false the emitted value is only the compile-time lower bound and the
+    /// field is recorded as a `codePartLenSlots` entry that the SDK overwrites
+    /// with the real deployed length. Both are resolved by
+    /// `pin_code_part_length` once every method has been lowered.
     VerifyCodePartLen {
         /// Deploy-time byte growth of the template's OP_0 placeholders.
         delta: i64,
-        /// true → exact equality pin; false → lower-bound pin.
+        /// true → value is final at compile time; false → deploy-time slot.
         exact: bool,
     },
     /// An opaque opcode-byte span emitted verbatim by a `raw_script` ANF node.
@@ -4260,8 +4262,9 @@ impl LoweringContext {
         if self.has_state_section() && self.fixed_state_section_length().is_none() {
             // delta / exact are refined by `pin_code_part_length` once every
             // method has been lowered and the full placeholder set is known.
-            // The defaults here are the SOUND ones: a lower bound of
-            // `emittedLength + 0` holds for any deployment.
+            // The defaults here are the SOUND ones: `exact: false` makes the
+            // field a deploy-time `codePartLenSlots` entry (N-051) that the SDK
+            // patches with the real deployed length.
             self.emit_op(StackOp::VerifyCodePartLen { delta: 0, exact: false });
         }
 
@@ -6427,8 +6430,8 @@ fn push_header_len(value_bytes: i64) -> i64 {
 /// A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
 /// placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
 /// Script number) and `ByteString` (arbitrary-length data push) depend on the
-/// VALUE, which the compiler never sees — those return `None` and demote the
-/// pin to a lower bound.
+/// VALUE, which the compiler never sees — those return `None`, and the pin's
+/// length field becomes a deploy-time `codePartLenSlots` entry (N-051).
 fn constructor_slot_growth(prop_type: &str) -> Option<i64> {
     if prop_type == "boolean" {
         return Some(0);
@@ -6511,7 +6514,8 @@ fn pin_code_part_length(methods: &mut [StackMethod], properties: &[ANFProperty])
             .unwrap_or("");
         match constructor_slot_growth(prop_type) {
             // No compile-time width. Growth is never negative, so the running
-            // sum stays a sound lower bound — just not an exact one.
+            // sum is a lower bound — not the deployed length, which the SDK
+            // patches into the pin's `codePartLenSlots` field (N-051).
             None => exact = false,
             Some(growth) => delta += growth,
         }

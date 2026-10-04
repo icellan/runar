@@ -538,6 +538,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
       {
         constructorSlots: emitResult.constructorSlots,
         codeSepIndexSlots: emitResult.codeSepIndexSlots,
+        codePartLenSlots: emitResult.codePartLenSlots,
         codeSeparatorIndex: emitResult.codeSeparatorIndex,
         codeSeparatorIndices: emitResult.codeSeparatorIndices,
         rawScriptSpans: emitResult.rawScriptSpans,

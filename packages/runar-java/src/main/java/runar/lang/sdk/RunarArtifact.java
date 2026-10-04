@@ -40,16 +40,55 @@ public record RunarArtifact(
      * (R-062). Empty for every ordinary contract; see
      * {@link UnsoundPrimitives}.
      */
-    List<String> unsoundPrimitives
+    List<String> unsoundPrimitives,
+    /**
+     * N-051 — {@code verify_code_part_len} length fields whose value is only
+     * known at deploy time (a variable-width readonly constructor arg is baked
+     * into the code part). {@link ContractScript} overwrites the 4 bytes at each
+     * with the deployed code-part length, little-endian. Empty when every pin is
+     * exact at compile time.
+     */
+    List<CodePartLenSlot> codePartLenSlots
 ) {
 
     public RunarArtifact {
         unsoundPrimitives = unsoundPrimitives == null
             ? List.of() : Collections.unmodifiableList(unsoundPrimitives);
+        codePartLenSlots = codePartLenSlots == null
+            ? List.of() : Collections.unmodifiableList(codePartLenSlots);
         stateFields = stateFields == null ? List.of() : Collections.unmodifiableList(stateFields);
         constructorSlots = constructorSlots == null ? List.of() : Collections.unmodifiableList(constructorSlots);
         codeSepIndexSlots = codeSepIndexSlots == null ? List.of() : Collections.unmodifiableList(codeSepIndexSlots);
         codeSeparatorIndices = codeSeparatorIndices == null ? List.of() : Collections.unmodifiableList(codeSeparatorIndices);
+    }
+
+    /**
+     * Backwards-compatible constructor without {@code codePartLenSlots}
+     * (N-051); defaults to empty, which is what an artifact whose every pin is
+     * exact carries anyway.
+     */
+    public RunarArtifact(
+        String version,
+        String compilerVersion,
+        String contractName,
+        String parentClass,
+        ABI abi,
+        String scriptHex,
+        String asm,
+        String buildTimestamp,
+        List<StateField> stateFields,
+        List<ConstructorSlot> constructorSlots,
+        List<CodeSepIndexSlot> codeSepIndexSlots,
+        Integer codeSeparatorIndex,
+        List<Integer> codeSeparatorIndices,
+        Map<String, Object> anf,
+        List<String> unsoundPrimitives
+    ) {
+        this(
+            version, compilerVersion, contractName, parentClass, abi, scriptHex, asm,
+            buildTimestamp, stateFields, constructorSlots, codeSepIndexSlots,
+            codeSeparatorIndex, codeSeparatorIndices, anf, unsoundPrimitives, null
+        );
     }
 
     /**
@@ -188,6 +227,11 @@ public record RunarArtifact(
         if (m.get("codeSepIndexSlots") instanceof List<?> csil) {
             for (Object o : csil) cssi.add(CodeSepIndexSlot.fromMap(Json.asObject(o)));
         }
+        // N-051: deploy-time code-part length fields. Absent when every pin is exact.
+        List<CodePartLenSlot> cpls = new ArrayList<>();
+        if (m.get("codePartLenSlots") instanceof List<?> cpll) {
+            for (Object o : cpll) cpls.add(CodePartLenSlot.fromMap(Json.asObject(o)));
+        }
         Integer codeSep = null;
         if (m.containsKey("codeSeparatorIndex") && m.get("codeSeparatorIndex") != null) {
             codeSep = Json.asInt(m.get("codeSeparatorIndex"));
@@ -223,7 +267,8 @@ public record RunarArtifact(
             codeSep,
             codeSepIndices,
             anfMap,
-            unsound
+            unsound,
+            cpls
         );
     }
 
@@ -351,6 +396,17 @@ public record RunarArtifact(
     public record CodeSepIndexSlot(int byteOffset, int codeSepIndex) {
         static CodeSepIndexSlot fromMap(Map<String, Object> m) {
             return new CodeSepIndexSlot(Json.asInt(m.get("byteOffset")), Json.asInt(m.get("codeSepIndex")));
+        }
+    }
+
+    /**
+     * N-051 — byte offset, in the TEMPLATE script, of the first of the 4
+     * little-endian length bytes of a {@code verify_code_part_len} pin (the
+     * byte after its {@code 04} push opcode).
+     */
+    public record CodePartLenSlot(int byteOffset) {
+        static CodePartLenSlot fromMap(Map<String, Object> m) {
+            return new CodePartLenSlot(Json.asInt(m.get("byteOffset")));
         }
     }
 }

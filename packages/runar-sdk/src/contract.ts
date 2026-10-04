@@ -194,6 +194,60 @@ const AUTO_PREVOUTS_PARAM_NAME = 'allPrevouts';
  * template holds OP_0 placeholders where constructor args go, so no
  * caller-supplied byte string can be mistaken for a pin.
  */
+/**
+ * N-051 — write the deployed code-part length into every `codePartLenSlots`
+ * field of a spliced code script.
+ *
+ * The compiler cannot know the deployed length of a code part that bakes a
+ * variable-width readonly constructor arg (a ByteString, a bigint), so the
+ * `SIZE(_codePart)` equality pin carries a 4-byte little-endian field the SDK
+ * fills in. The field is fixed-width, so writing it changes no length and no
+ * offset. A wrong or missing value is fail-safe on chain (honest spends fail
+ * OP_NUMEQUAL); it is never a lower bound.
+ *
+ * @param spliced     the template with every OP_0 placeholder substituted
+ * @param subs        those substitutions, by TEMPLATE byte offset (each
+ *                    replaced one placeholder byte with `encoded`)
+ * @param codePartLen the deployed code-part length in bytes, including any
+ *                    inscription envelope (it is part of `_codePart`)
+ */
+export function patchCodePartLenSlots(
+  artifact: RunarArtifact,
+  spliced: string,
+  subs: ReadonlyArray<{ byteOffset: number; encoded: string }>,
+  codePartLen: number,
+): string {
+  const slots = artifact.codePartLenSlots;
+  if (!slots || slots.length === 0) return spliced;
+  if (!Number.isInteger(codePartLen) || codePartLen < 0 || codePartLen > 0x7fffffff) {
+    throw new Error(`patchCodePartLenSlots: code part length ${codePartLen} does not fit the 4-byte pin field`);
+  }
+  let le = '';
+  for (let i = 0; i < 4; i++) le += ((codePartLen >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+  let out = spliced;
+  for (const slot of slots) {
+    const off = slot.byteOffset;
+    // The template must carry `04 <4 bytes> OP_BIN2NUM OP_NUMEQUAL OP_VERIFY`
+    // here; anything else means the descriptor does not describe this script.
+    if (
+      artifact.script.slice((off - 1) * 2, off * 2) !== '04' ||
+      artifact.script.slice((off + 4) * 2, (off + 7) * 2) !== '819c69'
+    ) {
+      throw new Error(
+        `patchCodePartLenSlots: ${artifact.contractName} codePartLenSlots entry at byteOffset ${off} ` +
+          `does not point at a verify_code_part_len length field (corrupted or mismatched artifact)`,
+      );
+    }
+    let shift = 0;
+    for (const s of subs) {
+      if (s.byteOffset < off) shift += s.encoded.length / 2 - 1;
+    }
+    const at = (off + shift) * 2;
+    out = out.slice(0, at) + le + out.slice(at + 8);
+  }
+  return out;
+}
+
 function decodeExactCodePartLenPins(scriptHex: string): number[] {
   const values: number[] = [];
   for (let i = 0; i + 18 <= scriptHex.length; i += 2) {
@@ -523,7 +577,9 @@ export class RunarContract {
    * a longer code part — and rejects only the shape that would lock funds.
    */
   private assertCodePartLengthPinHonoured(): void {
-    const pinned = decodeExactCodePartLenPins(this.artifact.script);
+    // Decode from the code this contract really deploys: a deploy-time pin
+    // (N-051 `codePartLenSlots`) is patched to the inscribed length there.
+    const pinned = decodeExactCodePartLenPins(this.buildCodeScript());
     if (pinned.length === 0) return;
     const actual = this.getCodePartHex().length / 2;
     for (const value of pinned) {
@@ -2157,6 +2213,13 @@ export class RunarContract {
         // Replace the 1-byte OP_0 placeholder (2 hex chars) with the encoded value
         script = script.slice(0, hexOffset) + sub.encoded + script.slice(hexOffset + 2);
       }
+
+      // N-051: the deploy-time code-part length pins. The inscription envelope,
+      // when present, is part of `_codePart` (see getCodePartHex).
+      const envelopeLen = this._inscription
+        ? buildInscriptionEnvelope(this._inscription.contentType, this._inscription.data).length / 2
+        : 0;
+      script = patchCodePartLenSlots(this.artifact, script, subs, script.length / 2 + envelopeLen);
     } else if (!this.artifact.stateFields || this.artifact.stateFields.length === 0) {
       // Backward compatibility: old stateless artifacts without constructorSlots.
       // For stateful contracts, constructor args initialize the state section

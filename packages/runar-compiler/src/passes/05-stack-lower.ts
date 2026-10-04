@@ -4589,9 +4589,10 @@ class LoweringContext {
     if (this.hasStateSection() && this.fixedStateSectionLength() === null) {
       // delta / exact are refined by `pinCodePartLength` once every method has
       // been lowered and the full placeholder set is known. The defaults here
-      // are the SOUND ones: a lower bound of `emittedLength + 0` holds for any
-      // deployment, so a caller that lowers a method in isolation still gets a
-      // script that honest spends satisfy.
+      // are the SAFE ones: `exact: false` makes the length a deploy-time slot
+      // (N-051) that the SDK fills with the real deployed code-part length, so
+      // a caller that lowers a method in isolation still gets a script that
+      // honest spends satisfy and no truncated `_codePart` can.
       this.emitOp({ op: 'verify_code_part_len', delta: 0, exact: false });
     }
 
@@ -6651,8 +6652,8 @@ function pushHeaderLen(valueBytes: number): number {
  * A boolean bakes as a single OP_TRUE/OP_0 opcode, the same width as the
  * placeholder, so it grows the script by nothing. `bigint` (minimally-encoded
  * Script number) and `ByteString` (arbitrary-length data push) depend on the
- * VALUE, which the compiler never sees — those return `null` and demote the
- * pin to a lower bound.
+ * VALUE, which the compiler never sees — those return `null` and turn the pin
+ * into a deploy-time slot (N-051) that the SDK fills in.
  */
 function constructorSlotGrowth(type: string | undefined): number | null {
   if (type === undefined) return null;
@@ -6706,8 +6707,8 @@ function pinCodePartLength(methods: StackMethod[], properties: ANFProperty[]): v
   for (const paramIndex of placeholders) {
     const growth = constructorSlotGrowth(ctorProps[paramIndex]?.type);
     if (growth === null) {
-      // No compile-time width. Growth is never negative, so the running sum
-      // stays a sound lower bound — just not an exact one.
+      // No compile-time width: the emitter records the length field as a
+      // deploy-time `codePartLenSlots` entry (N-051) and the SDK patches it.
       exact = false;
     } else {
       delta += growth;

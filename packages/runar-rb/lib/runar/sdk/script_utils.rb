@@ -199,28 +199,58 @@ module Runar
           return code_hex == template
         end
 
+        # Every OP_0 placeholder the SDK replaces at deploy time is one
+        # variable script element: constructor slots AND codeSepIndex slots
+        # (the latter bake as OP_1, so comparing them literally rejected every
+        # honest deployment carrying one; Go/Rust/Python/TS match).
         # De-duplicate by byte_offset.
-        seen_offsets = {}
-        slots = artifact.constructor_slots
-                        .sort_by(&:byte_offset)
-                        .select { |s| seen_offsets[s.byte_offset] ? false : (seen_offsets[s.byte_offset] = true) }
+        slots = (artifact.constructor_slots.map(&:byte_offset) +
+                 Array(artifact.code_sep_index_slots).map(&:byte_offset))
+                .uniq.sort.map { |off| Struct.new(:byte_offset).new(off) }
+
+        # N-051: a +code_part_len_slots+ field holds the DEPLOYED code-part
+        # length, not the template's placeholder value. It must equal the length
+        # of the code part being matched (everything before the state section,
+        # inscription envelope included).
+        len_fields = {}
+        Array(artifact.code_part_len_slots).each { |s| len_fields[s.byte_offset * 2] = true }
+        deployed_len = [code_hex.length / 2].pack('V').unpack1('H*')
+        segment_matches = lambda do |t_start, t_end, c_start|
+          t = t_start
+          c = c_start
+          while t < t_end
+            if len_fields[t]
+              return false if code_hex[c, 8] != deployed_len
+
+              t += 8
+              c += 8
+              next
+            end
+            return false if template[t] != code_hex[c]
+
+            t += 1
+            c += 1
+          end
+          true
+        end
 
         template_pos = 0
         code_pos = 0
 
         slots.each do |slot|
           slot_hex_offset = slot.byte_offset * 2
-          template_segment = template[template_pos...slot_hex_offset]
-          code_segment = code_hex[code_pos, template_segment.length]
-          return false if template_segment != code_segment
+          seg_len = slot_hex_offset - template_pos
+          return false if code_pos + seg_len > code_hex.length
+          return false unless segment_matches.call(template_pos, slot_hex_offset, code_pos)
 
           template_pos = slot_hex_offset + 2
-          elem_offset = code_pos + template_segment.length
+          elem_offset = code_pos + seg_len
           elem = read_script_element(code_hex, elem_offset)
           code_pos = elem_offset + elem[:total_hex_chars]
         end
 
-        template[template_pos..] == code_hex[code_pos..]
+        code_hex.length - code_pos == template.length - template_pos &&
+          segment_matches.call(template_pos, template.length, code_pos)
       end
     end
 

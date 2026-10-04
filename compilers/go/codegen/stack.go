@@ -54,8 +54,10 @@ type StackOp struct {
 	// verify_code_part_len (R-095) — pin SIZE(_codePart) against the code
 	// part's own DEPLOYED byte length. CodePartLenDelta is the deploy-time
 	// byte growth of the template's OP_0 placeholders; CodePartLenExact says
-	// whether that growth is fully type-determined (equality pin) or only a
-	// lower bound. Both are resolved by pinCodePartLength once every method
+	// whether that growth is fully type-determined or only a lower bound. The
+	// pin is an equality either way (N-051): a non-exact pin's length field is
+	// recorded as a codePartLenSlots entry the SDK fills at deploy time. Both
+	// are resolved by pinCodePartLength once every method
 	// has been lowered; the emitter back-patches the length itself.
 	CodePartLenDelta int
 	CodePartLenExact bool
@@ -5851,7 +5853,9 @@ func pinCodePartLength(methods []StackMethod, properties []ir.ANFProperty) {
 		growth, known := constructorSlotGrowth(typ)
 		if !known {
 			// No compile-time width. Growth is never negative, so the running
-			// sum stays a sound lower bound — just not an exact one.
+			// sum is only a lower bound; the emitter records the pin's length
+			// field as a codePartLenSlots entry and the SDK writes the exact
+			// deployed length there (N-051). The pin stays an equality.
 			exact = false
 		} else {
 			delta += growth
