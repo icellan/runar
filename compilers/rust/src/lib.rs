@@ -131,6 +131,14 @@ fn apply_constructor_args(
             ));
         }
     }
+    // (d) Value kind / width check (F-101), in property declaration order.
+    for prop in &program.properties {
+        if let Some(val) = args.get(&prop.name) {
+            if let Some(msg) = constructor_arg_type_error(&prop.name, &prop.prop_type, val) {
+                shape_errors.push(msg);
+            }
+        }
+    }
     if !shape_errors.is_empty() {
         return shape_errors;
     }
@@ -144,6 +152,72 @@ fn apply_constructor_args(
 
     // (c) Unbaked-referenced-readonly reject.
     find_unbaked_referenced_readonly(program)
+}
+
+/// F-101: the diagnostic for a `constructor_args` value that does not match
+/// its property's declared type, or `None` when it matches. Stack lowering
+/// pushes whatever it is handed — `true` as OP_1, `42` as a 1-byte number, a
+/// 6-byte hex string as a 6-byte push — so without this a wrong-typed value
+/// where a 20-byte hash belongs compiles cleanly into an unspendable script.
+/// Message text is shared verbatim with the TypeScript reference
+/// (`constructorArgTypeError` in packages/runar-compiler/src/index.ts).
+///
+/// "Integer" is what `ir::parse_const_value` reads as one: an integral JSON
+/// number or a `"<digits>n"` decimal-bigint string.
+fn constructor_arg_type_error(
+    name: &str,
+    prop_type: &str,
+    val: &serde_json::Value,
+) -> Option<String> {
+    use serde_json::Value;
+    use std::str::FromStr;
+    let is_int = match val {
+        Value::Number(n) => num_bigint::BigInt::from_str(&n.to_string()).is_ok(),
+        Value::String(s) => ir::is_decimal_bigint_literal(s),
+        _ => false,
+    };
+    let hex_len = match val {
+        Value::String(s)
+            if !is_int && s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            Some(s.len() / 2)
+        }
+        _ => None,
+    };
+    let (expected, ok) = if frontend::typecheck::is_bigint_subtype(prop_type) {
+        ("an integer".to_string(), is_int)
+    } else if prop_type == "boolean" {
+        ("a boolean".to_string(), matches!(val, Value::Bool(_)))
+    } else if frontend::typecheck::is_bytestring_subtype(prop_type) {
+        match codegen::stack::constructor_slot_value_bytes(prop_type) {
+            Some(w) => (
+                format!("exactly {} bytes of hex", w),
+                hex_len == Some(w as usize),
+            ),
+            None => ("a hex string".to_string(), hex_len.is_some()),
+        }
+    } else {
+        return Some(format!(
+            "constructorArgs value for property '{}' ({}) cannot be baked: \
+             unsupported property type.",
+            name, prop_type
+        ));
+    };
+    if ok {
+        return None;
+    }
+    let got = match (val, hex_len) {
+        (Value::Bool(_), _) => "a boolean".to_string(),
+        _ if is_int => "an integer".to_string(),
+        (_, Some(n)) => format!("{} bytes of hex", n),
+        (Value::String(_), None) => "a non-hex string".to_string(),
+        _ => "an unsupported value".to_string(),
+    };
+    Some(format!(
+        "constructorArgs value for property '{}' ({}) must be {}, got {}. \
+         Baking it would silently put the wrong value in the locking script.",
+        name, prop_type, expected, got
+    ))
 }
 
 /// After baking `constructor_args`, find readonly properties that are

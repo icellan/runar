@@ -6386,7 +6386,7 @@ fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String
 
 /// Baked value width, in bytes, of every fixed-size constructor-arg type.
 /// Mirrors the `raw`-encoded entries of the shared `STATE_FIELD_WIDTHS` table.
-fn constructor_slot_value_bytes(prop_type: &str) -> Option<i64> {
+pub(crate) fn constructor_slot_value_bytes(prop_type: &str) -> Option<i64> {
     match prop_type {
         "PubKey" => Some(33),
         "Sha256" => Some(32),

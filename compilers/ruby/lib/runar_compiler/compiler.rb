@@ -391,6 +391,12 @@ module RunarCompiler
             "Nothing would be baked for this key."
     end
 
+    # (d) Value kind / width check (F-101), in property declaration order.
+    type_errors = program.properties.filter_map do |prop|
+      _constructor_arg_type_error(prop.name, prop.type, args[prop.name]) if args.key?(prop.name)
+    end
+    raise CompilationError, type_errors.join("; ") unless type_errors.empty?
+
     # Bake values into ANF property initial_values.
     program.properties.each do |prop|
       prop.initial_value = args[prop.name] if args.key?(prop.name)
@@ -401,6 +407,53 @@ module RunarCompiler
     raise CompilationError, unbaked.join("; ") unless unbaked.empty?
   end
   private_class_method :_apply_constructor_args
+
+  # F-101: the diagnostic for a constructorArgs value that does not match its
+  # property's declared type, or nil when it matches. Stack lowering pushes
+  # whatever it is handed -- `true` as OP_1, `42` as a 1-byte number, a 6-byte
+  # hex string as a 6-byte push -- so without this a wrong-typed value where a
+  # 20-byte hash belongs compiles cleanly into an unspendable script. Message
+  # text is shared verbatim with the TypeScript reference
+  # (`constructorArgTypeError` in packages/runar-compiler/src/index.ts).
+  def self._constructor_arg_type_error(name, type, value)
+    require_relative "frontend/typecheck"
+    require_relative "codegen/stack"
+
+    is_bool = value == true || value == false
+    is_int = value.is_a?(Integer)
+    hex_len = value.length / 2 if value.is_a?(String) && value.length.even? && value.match?(/\A[0-9a-fA-F]*\z/)
+
+    if Frontend.bigint_family?(type)
+      expected = "an integer"
+      ok = is_int
+    elsif type == "boolean"
+      expected = "a boolean"
+      ok = is_bool
+    elsif Frontend.byte_family?(type)
+      width = Codegen.fixed_width_state_bytes(type)
+      if width.positive?
+        expected = "exactly #{width} bytes of hex"
+        ok = hex_len == width
+      else
+        expected = "a hex string"
+        ok = !hex_len.nil?
+      end
+    else
+      return "constructorArgs value for property '#{name}' (#{type}) cannot be baked: " \
+             "unsupported property type."
+    end
+    return nil if ok
+
+    got = if is_bool then "a boolean"
+          elsif is_int then "an integer"
+          elsif hex_len then "#{hex_len} bytes of hex"
+          elsif value.is_a?(String) then "a non-hex string"
+          else "an unsupported value"
+          end
+    "constructorArgs value for property '#{name}' (#{type}) must be #{expected}, " \
+      "got #{got}. Baking it would silently put the wrong value in the locking script."
+  end
+  private_class_method :_constructor_arg_type_error
 
   # After baking constructor args, find readonly properties that are
   # REFERENCED by at least one method body but still have no baked

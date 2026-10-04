@@ -387,6 +387,13 @@ func isByteFamily(t string) bool {
 	return byteStringSubtypes[t]
 }
 
+// IsBigintFamilyType / IsByteStringFamilyType expose the two family sets to
+// the compiler package (constructorArgs value check, F-101) so it does not
+// keep a second copy of either list.
+func IsBigintFamilyType(t string) bool { return isBigintFamily(t) }
+
+func IsByteStringFamilyType(t string) bool { return isByteFamily(t) }
+
 // ---------------------------------------------------------------------------
 // Type environment
 // ---------------------------------------------------------------------------

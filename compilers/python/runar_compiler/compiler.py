@@ -283,6 +283,13 @@ def _apply_constructor_args(program: ANFProgram, args: dict[str, object] | None)
         return
 
     shape_errors = _validate_constructor_args_shape(program, args)
+    if not isinstance(args, (list, tuple)):
+        # (d) Value kind / width check (F-101), in property declaration order.
+        for prop in program.properties:
+            if prop.name in args:
+                msg = _constructor_arg_type_error(prop.name, prop.type, args[prop.name])
+                if msg is not None:
+                    shape_errors.append(msg)
     if shape_errors:
         raise CompilationError("constructorArgs errors:\n  " + "\n  ".join(shape_errors))
 
@@ -330,6 +337,59 @@ def _validate_constructor_args_shape(program: ANFProgram, args: object) -> list[
             )
 
     return errors
+
+
+def _constructor_arg_type_error(name: str, typ: str, value: object) -> str | None:
+    """F-101: the diagnostic for a ``constructorArgs`` value that does not
+    match its property's declared type, or ``None`` when it matches. Stack
+    lowering pushes whatever it is handed -- ``True`` as OP_1, ``42`` as a
+    1-byte number, a 6-byte hex string as a 6-byte push -- so without this a
+    wrong-typed value where a 20-byte hash belongs compiles cleanly into an
+    unspendable script. Message text is shared verbatim with the TypeScript
+    reference (``constructorArgTypeError`` in packages/runar-compiler/src/index.ts).
+    """
+    from runar_compiler.frontend.typecheck import is_bigint_family, is_byte_family
+    from runar_compiler.codegen.stack import fixed_width_state_bytes
+
+    is_bool = isinstance(value, bool)
+    is_int = isinstance(value, int) and not is_bool
+    hex_len: int | None = None
+    if isinstance(value, str) and len(value) % 2 == 0 and all(
+        c in "0123456789abcdefABCDEF" for c in value
+    ):
+        hex_len = len(value) // 2
+
+    if is_bigint_family(typ):
+        expected, ok = "an integer", is_int
+    elif typ == "boolean":
+        expected, ok = "a boolean", is_bool
+    elif is_byte_family(typ):
+        width = fixed_width_state_bytes(typ)
+        if width > 0:
+            expected, ok = f"exactly {width} bytes of hex", hex_len == width
+        else:
+            expected, ok = "a hex string", hex_len is not None
+    else:
+        return (
+            f"constructorArgs value for property '{name}' ({typ}) cannot be baked: "
+            f"unsupported property type."
+        )
+    if ok:
+        return None
+    if is_bool:
+        got = "a boolean"
+    elif is_int:
+        got = "an integer"
+    elif hex_len is not None:
+        got = f"{hex_len} bytes of hex"
+    elif isinstance(value, str):
+        got = "a non-hex string"
+    else:
+        got = "an unsupported value"
+    return (
+        f"constructorArgs value for property '{name}' ({typ}) must be {expected}, "
+        f"got {got}. Baking it would silently put the wrong value in the locking script."
+    )
 
 
 def _find_unbaked_referenced_readonly(program: ANFProgram) -> list[str]:

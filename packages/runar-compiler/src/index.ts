@@ -115,7 +115,7 @@ export * from './ir/index.js';
 
 import { parse } from './passes/01-parse.js';
 import { validate } from './passes/02-validate.js';
-import { typecheck } from './passes/03-typecheck.js';
+import { typecheck, isBigintFamilyType, isByteStringFamilyType } from './passes/03-typecheck.js';
 import { expandFixedArrays } from './passes/03b-expand-fixed-arrays.js';
 import { lowerToANF } from './passes/04-anf-lower.js';
 import { lowerToStack } from './passes/05-stack-lower.js';
@@ -129,7 +129,7 @@ import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
-import { InputLimits, CanonicalJsonError } from 'runar-ir-schema';
+import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
 // Compile options and result
@@ -1108,6 +1108,11 @@ function hasErrors(diagnostics: CompilerDiagnostic[]): boolean {
  *      placeholders (failing opaquely at runtime).
  *  (b) keys that do not match any contract property name (typos would
  *      otherwise silently bake nothing for that key).
+ *  (d) values whose kind or byte width does not match the property's declared
+ *      type (F-101). Stack lowering pushes whatever it is handed — `true` as
+ *      OP_1, `42n` as a 1-byte number, a 6-byte hex string as a 6-byte push —
+ *      so a wrong-typed value where a 20-byte hash belongs compiles cleanly
+ *      into a script no spend can satisfy.
  */
 function validateConstructorArgsShape(
   anf: ANFProgram,
@@ -1137,7 +1142,63 @@ function validateConstructorArgsShape(
     }
   }
 
+  // (d) Value kind / width check, in property declaration order.
+  for (const prop of anf.properties) {
+    if (!(prop.name in constructorArgs)) continue;
+    const msg = constructorArgTypeError(prop.name, prop.type, constructorArgs[prop.name]);
+    if (msg !== null) errors.push(msg);
+  }
+
   return errors;
+}
+
+/**
+ * F-101: return the diagnostic for a constructorArgs value that does not match
+ * its property's declared type, or `null` when it matches. The message text is
+ * shared verbatim by every tier that bakes constructorArgs (Go, Rust, Python,
+ * Ruby). Fixed widths come from the shared `STATE_FIELD_WIDTHS` table — the
+ * same widths the SDK enforces for these types (`assertFixedWidthValue`).
+ */
+function constructorArgTypeError(name: string, type: string, value: unknown): string | null {
+  const isHex = typeof value === 'string' && value.length % 2 === 0 && /^[0-9a-fA-F]*$/.test(value);
+  let expected: string;
+  let ok: boolean;
+  if (isBigintFamilyType(type)) {
+    expected = 'an integer';
+    ok = typeof value === 'bigint';
+  } else if (type === 'boolean') {
+    expected = 'a boolean';
+    ok = typeof value === 'boolean';
+  } else if (isByteStringFamilyType(type)) {
+    const width = STATE_FIELD_WIDTHS[type];
+    if (width?.encoding === 'raw') {
+      expected = `exactly ${width.size} bytes of hex`;
+      ok = isHex && (value as string).length === width.size * 2;
+    } else {
+      expected = 'a hex string';
+      ok = isHex;
+    }
+  } else {
+    return (
+      `constructorArgs value for property '${name}' (${type}) cannot be baked: ` +
+      `unsupported property type.`
+    );
+  }
+  if (ok) return null;
+  const got =
+    typeof value === 'boolean'
+      ? 'a boolean'
+      : typeof value === 'bigint'
+        ? 'an integer'
+        : isHex
+          ? `${(value as string).length / 2} bytes of hex`
+          : typeof value === 'string'
+            ? 'a non-hex string'
+            : 'an unsupported value';
+  return (
+    `constructorArgs value for property '${name}' (${type}) must be ${expected}, ` +
+    `got ${got}. Baking it would silently put the wrong value in the locking script.`
+  );
 }
 
 /**

@@ -136,6 +136,10 @@ func isVariableLengthStateType(t string) bool {
 // fixedWidthStateBytes is the declared byte width of a fixed-width byte state
 // type (N-045), or 0 for every other type. MUST match the reader's size table
 // in lowerDeserializeState and the shared STATE_FIELD_WIDTHS table.
+// FixedWidthValueBytes exports fixedWidthStateBytes for the constructorArgs
+// value check (F-101): the same widths a baked value of these types must have.
+func FixedWidthValueBytes(t string) int { return fixedWidthStateBytes(t) }
+
 func fixedWidthStateBytes(t string) int {
 	switch t {
 	case "PubKey":
