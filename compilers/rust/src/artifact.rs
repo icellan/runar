@@ -436,7 +436,9 @@ fn regroup_synthetic_runs(entries: Vec<RegroupEntry>) -> Result<Vec<RegroupEntry
             return Ok(current);
         }
     }
-    panic!("regroup_synthetic_runs: exceeded iteration cap (pathological chain nesting?)");
+    // F-105: reachable from a hostile --ir chain deeper than the cap, and
+    // assembly runs outside every catch_unwind — refuse, never panic.
+    Err("regroup_synthetic_runs: exceeded iteration cap (pathological chain nesting?)".to_string())
 }
 
 /// Run one pass of the iterative regrouper.
