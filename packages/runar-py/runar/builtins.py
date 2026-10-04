@@ -11,7 +11,7 @@ import struct
 from runar.ecdsa import ecdsa_verify, TEST_MESSAGE_DIGEST
 from runar.rabin_sig import rabin_verify as _rabin_verify_real
 from runar.wots import wots_verify as _wots_verify_real
-from runar.slhdsa_impl import slh_verify as _slh_verify
+from runar.slh_dsa import slh_verify as _slh_verify_repo
 
 
 # -- Assertion ---------------------------------------------------------------
@@ -268,25 +268,27 @@ def verify_ecdsa_p384(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
     return rx % _P384_N == r
 
 
-# -- Real SLH-DSA Verification (raises RuntimeError if slhdsa not installed) -
+# -- Real SLH-DSA Verification ---------------------------------------------
+# The repo's SHA-256-only SLH-DSA variant (runar/slh_dsa.py), the one the
+# compiled on-chain verifier and the other six SDKs implement (F-133).
 
 def verify_slh_dsa_sha2_128s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_128s')
+    return _slh_verify_repo('sha2_128s', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_128f(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_128f')
+    return _slh_verify_repo('sha2_128f', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_192s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_192s')
+    return _slh_verify_repo('sha2_192s', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_192f(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_192f')
+    return _slh_verify_repo('sha2_192f', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_256s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_256s')
+    return _slh_verify_repo('sha2_256s', msg, sig, pubkey)
 
 def verify_slh_dsa_sha2_256f(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
-    return _slh_verify(msg, sig, pubkey, 'sha2_256f')
+    return _slh_verify_repo('sha2_256f', msg, sig, pubkey)
 
 
 # -- Byte coercion -----------------------------------------------------------

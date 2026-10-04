@@ -1055,7 +1055,7 @@ Sign the fixed `TEST_MESSAGE` for fixture generation.
 
 #### `slh_keygen(param_set: str) -> SLHKeyPair` / `slh_verify(pub_key, message, signature, param_set) -> bool`
 
-Real SLH-DSA (FIPS 205) key generation and verification.
+SLH-DSA key generation and verification for the repo's SHA-256-only variant (what the compiled on-chain verifier and the other six SDKs implement; for the 192/256 sets this is not FIPS 205, which uses SHA-512 there). `slh_verify` is stdlib-only; `slh_keygen` needs the optional `slh-dsa` package.
 
 #### `SmartContract`
 
