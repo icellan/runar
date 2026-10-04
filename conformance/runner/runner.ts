@@ -2971,9 +2971,22 @@ export async function runAllConformanceTests(
 /**
  * Update the golden files for a given test case from the TypeScript compiler
  * output. This is used to establish the initial baseline.
+ *
+ * F-051: a fixture whose source.json `compilers` allowlist excludes 'ts' is
+ * refused — the comparison modes never check TS output against its golden, so
+ * stamping it from TS would replace the verified tiers' bytes with ungated ones.
  */
 export async function updateGoldenFiles(testDir: string): Promise<void> {
   const testName = basename(testDir);
+  const allowlist = readFixtureCompilerAllowlist(testDir);
+  if (allowlist && !allowlist.has('ts')) {
+    throw new Error(
+      `conformance fixture '${testName}': source.json "compilers" allowlist ` +
+      `[${[...allowlist].join(', ')}] excludes ts, so its golden cannot be stamped ` +
+      `from TS output; regenerate it from an allowlisted tier and admit it through ` +
+      `the golden-provenance gate`,
+    );
+  }
   const sourceFile = resolveSourceFile(testDir, testName);
   const source = readFileSync(sourceFile, 'utf-8');
 

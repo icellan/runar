@@ -515,6 +515,8 @@ Golden files (`expected-ir.json`, `expected-script.hex`) are checked into versio
 pnpm run update-golden
 ```
 
+   This stamps goldens from TypeScript compiler output. A fixture whose `source.json` `compilers` allowlist excludes `ts` (the Go-only fixtures) is refused and reported as `Failed`; its golden is never overwritten from TS.
+
 4. Review the diffs to verify the changes are expected.
 5. Commit the updated golden files alongside the compiler changes.
 
