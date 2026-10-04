@@ -1800,7 +1800,9 @@ module RunarCompiler::Codegen
         # Property value will be provided at deployment time; emit placeholder.
         # Initialized properties are excluded from the constructor, so the
         # deploy-time slot index counts only non-initialized props.
-        ctor_props = @properties.reject { |p| p.initial_value }
+        # F-097: test presence with nil?, not truthiness -- `false` is a
+        # legitimate initializer and must not count as a constructor param.
+        ctor_props = @properties.reject { |p| !p.initial_value.nil? }
         param_index = ctor_props.find_index { |p| p.name == prop_name }
         # #119 tail (H1): a property that reaches the placeholder fallback with
         # no matching constructor slot (param_index nil) has no deploy-time
