@@ -240,3 +240,99 @@ fn f101_accepts_correctly_typed_values() {
     compile_from_source_str_with_options(TWO_PROP_SOURCE, Some("TwoProp.runar.ts"), &opts_with(args))
         .expect("'42n' is an integer");
 }
+
+// ---------------------------------------------------------------------------
+// F-103 — the ANF-IR (`compile_from_ir_str_with_options`) and direct-program
+// (`compile_from_program_with_options`) entry points must honour
+// `constructor_args` exactly like the source pipeline, matching the TS
+// reference `compileFromANF`, which validates and bakes them.
+//
+// Before the fix both entry points ignored the field: the caller got exit 0
+// and an artifact whose script still carried the OP_0 placeholder plus a live
+// constructor slot. Proves: the named value is baked (script byte-identical to
+// the source-pipeline bake, no constructor slot left), and the same F-101 /
+// unknown-key / unbaked-readonly checks refuse bad args on these paths. Does
+// NOT prove anything about the IR loader's own validation or the SDK's
+// deploy-time constructorSlots splice.
+// ---------------------------------------------------------------------------
+
+fn hash_lock_ir() -> runar_compiler_rust::ir::ANFProgram {
+    runar_compiler_rust::compile_source_str_to_ir(HASH_LOCK_SOURCE, Some("HashLock.runar.ts"))
+        .expect("HashLock lowers to ANF")
+}
+
+fn hash_args(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+    let mut args = HashMap::new();
+    args.insert("hashValue".to_string(), v);
+    args
+}
+
+#[test]
+fn f103_ir_entry_point_bakes_constructor_args_like_the_source_pipeline() {
+    let opts = opts_with(hash_args(serde_json::Value::String(hash())));
+    let from_source =
+        compile_from_source_str_with_options(HASH_LOCK_SOURCE, Some("HashLock.runar.ts"), &opts)
+            .expect("source bake");
+    let ir_json = serde_json::to_string(&hash_lock_ir()).unwrap();
+
+    let from_ir = runar_compiler_rust::compile_from_ir_str_with_options(&ir_json, &opts)
+        .expect("IR compile with constructor_args");
+    assert!(from_ir.script.contains(&hash()), "IR path must embed the value: {}", from_ir.script);
+    assert!(
+        from_ir.constructor_slots.is_empty(),
+        "IR path must not leave a constructor slot for a baked property: {:?}",
+        from_ir.constructor_slots
+    );
+    assert_eq!(from_ir.script, from_source.script, "IR bake must match source bake");
+
+    let from_program =
+        runar_compiler_rust::compile_from_program_with_options(&hash_lock_ir(), &opts)
+            .expect("direct-program compile with constructor_args");
+    assert!(from_program.constructor_slots.is_empty());
+    assert_eq!(from_program.script, from_source.script, "program bake must match source bake");
+}
+
+#[test]
+fn f103_ir_entry_points_validate_constructor_args() {
+    let ir_json = serde_json::to_string(&hash_lock_ir()).unwrap();
+    let cases: Vec<(HashMap<String, serde_json::Value>, &str)> = vec![
+        (
+            {
+                let mut a = HashMap::new();
+                a.insert("hashVal".to_string(), serde_json::Value::String(hash()));
+                a
+            },
+            "constructorArgs key 'hashVal' does not match any property",
+        ),
+        (
+            hash_args(serde_json::json!("aabb")),
+            "property 'hashValue' (Sha256) must be exactly 32 bytes of hex, got 2 bytes of hex",
+        ),
+    ];
+    for (args, want) in cases {
+        let opts = opts_with(args);
+        let err = runar_compiler_rust::compile_from_ir_str_with_options(&ir_json, &opts)
+            .expect_err("bad constructor_args on the IR path must be refused");
+        assert!(err.contains(want), "IR path: expected '{want}', got: {err}");
+        let err = runar_compiler_rust::compile_from_program_with_options(&hash_lock_ir(), &opts)
+            .expect_err("bad constructor_args on the program path must be refused");
+        assert!(err.contains(want), "program path: expected '{want}', got: {err}");
+    }
+
+    // (c) A referenced readonly property left unbaked is refused too.
+    let two_prop_ir = runar_compiler_rust::compile_source_str_to_ir(TWO_PROP_SOURCE, Some("TwoProp.runar.ts"))
+        .expect("TwoProp lowers");
+    let mut args = HashMap::new();
+    args.insert("unused".to_string(), serde_json::json!(7));
+    let err = runar_compiler_rust::compile_from_ir_str_with_options(
+        &serde_json::to_string(&two_prop_ir).unwrap(),
+        &opts_with(args),
+    )
+    .expect_err("unbaked referenced readonly must be refused");
+    assert!(err.contains("readonly property 'target'"), "{err}");
+
+    // No args: still the placeholder artifact (unchanged behaviour).
+    let plain = runar_compiler_rust::compile_from_ir_str_with_options(&ir_json, &CompileOptions::default())
+        .expect("no-args IR compile");
+    assert!(!plain.constructor_slots.is_empty());
+}

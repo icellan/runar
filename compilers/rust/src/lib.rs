@@ -599,8 +599,20 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
 
 /// Compile a parsed ANF program to a Rúnar artifact, with options.
 pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &CompileOptions) -> Result<RunarArtifact, String> {
-    // Pass 4.25: Constant folding (optional, in case we receive unoptimized ANF from IR)
     let mut program = program.clone();
+
+    // F-103: bake constructor args (validated first) on the IR / direct-program
+    // entry points too, as the TS `compileFromANF` does. The source pipelines
+    // bake before calling here and pass empty args, so this is a no-op for them.
+    let arg_errors = apply_constructor_args(&mut program, &opts.constructor_args);
+    if !arg_errors.is_empty() {
+        return Err(format!(
+            "constructorArgs errors:\n  {}",
+            arg_errors.join("\n  ")
+        ));
+    }
+
+    // Pass 4.25: Constant folding (optional, in case we receive unoptimized ANF from IR)
     if !opts.disable_constant_folding {
         program = guarded_pass("constant folding", || {
             frontend::constant_fold::fold_constants(&program)
