@@ -30,7 +30,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { LockingScript, UnlockingScript } from '@bsv/sdk';
@@ -304,6 +305,10 @@ const FAMILIES = [
   // F-091: the G1 ADD surface, which neither probe above reaches. Its
   // execution leg is the describe block at the bottom of this file.
   { file: 'GoOnlyBn254G1Add.runar.ts', family: 'BN254 G1 add', builtin: 'bn254G1Add' },
+  // F-092: every non-Go tier refuses this one on source; its `--ir` leg — where
+  // the Python port used to compile it with 7 of 8 root limbs dropped — is the
+  // describe block below.
+  { file: 'GoOnlyPoseidon2Merkle.runar.ts', family: 'Poseidon2 Merkle', builtin: 'merkleRootPoseidon2KB' },
 ] as const;
 
 const available = TIERS.filter((t) => t.cmd !== null);
@@ -379,6 +384,62 @@ describe('R-037: Go-only families — refuse, or match Go byte for byte', () => 
               `  ${tier.id}: ${v.hex.slice(0, 60)}... (${v.hex.length / 2} bytes)`,
           ).toBe(goHex);
         });
+      }
+    });
+  }
+});
+
+/**
+ * F-092 — merkleRootPoseidon2KB through the `--ir` entry point.
+ *
+ * The source leg above cannot see this: every non-Go tier refuses the builtin
+ * in its typechecker. But `--ir` runs no frontend, and the Python tier's stack
+ * lowering carried a live port that reconciled the eight root limbs with seven
+ * OP_NIPs — keeping root_7 alone, so `merkleRootPoseidon2KB(...) === expected`
+ * authenticated one ~31-bit field element. Go had fixed the same truncation in
+ * R-056 (EmitPoseidon2RootPack).
+ *
+ * What this proves: on Go's own ANF IR for the probe, every tier either refuses
+ * (a real diagnostic, per `verdict`) or emits hex byte-identical to Go's.
+ * Execution of the Python script against Plonky3 vectors lives in
+ * compilers/python/tests/test_f092_poseidon2_merkle_root_binds_every_limb.py;
+ * Go's in compilers/go/compiler/poseidon2_merkle_root_binding_test.go.
+ * What it does not prove: that a refusing tier's diagnostic names the builtin
+ * (the Ruby and Zig `--ir` refusals today are an internal error and a bare
+ * `InvalidBuiltin`), nor depths other than 1.
+ */
+describe('F-092: merkleRootPoseidon2KB via --ir — refuse, or match Go byte for byte', () => {
+  const src = join(DIR, 'GoOnlyPoseidon2Merkle.runar.ts');
+  const irArgs = (id: string, f: string): string[] =>
+    id === 'ts' ? ['--from-ir', f, '--hex'] : id === 'zig' ? ['compile-ir', f, '--hex'] : ['--ir', f, '--hex'];
+
+  for (const tier of available.filter((t) => t.id !== 'go')) {
+    it(`${tier.id} refuses Go's IR, or matches Go exactly`, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'f092-p2kb-ir-'));
+      try {
+        const emitted = spawnSync(goTier.cmd!, [...goTier.prefix, '--source', src, '--emit-ir'], {
+          cwd: goTier.cwd,
+          encoding: 'utf-8',
+          timeout: goTier.timeoutMs,
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        expect(emitted.status, `go --emit-ir failed:\n${emitted.stderr}`).toBe(0);
+        const irFile = join(dir, 'GoOnlyPoseidon2Merkle.anf.json');
+        writeFileSync(irFile, emitted.stdout);
+
+        const goResult = verdict({ ...goTier, argsFor: () => irArgs('go', irFile) }, src);
+        expect(goResult.ok, 'Go must compile its own IR').toBe(true);
+        const goHex = (goResult as Accepted).hex;
+
+        const v = verdict({ ...tier, argsFor: () => irArgs(tier.id, irFile) }, src);
+        if (!v.ok) return; // a refusal is allowed; `verdict` already rejected a crash-less silence
+        expect(
+          v.hex,
+          `${tier.id} COMPILES merkleRootPoseidon2KB from IR and emits different bytes than Go ` +
+            `(${v.hex.length / 2} vs ${goHex.length / 2} bytes). Either match Go or refuse.`,
+        ).toBe(goHex);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
     });
   }

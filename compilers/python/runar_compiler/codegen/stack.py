@@ -5318,15 +5318,19 @@ class _LoweringContext:
         for _ in range(runtime_arg_count):
             self.sm.pop()
 
-        from runar_compiler.codegen.poseidon2_merkle import emit_poseidon2_merkle_root
+        from runar_compiler.codegen.poseidon2_merkle import (
+            emit_poseidon2_merkle_root,
+            emit_poseidon2_root_pack,
+        )
         emit_fn = lambda op: self.emit_op(op)
         emit_poseidon2_merkle_root(emit_fn, depth)
 
-        # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
-        # The type system returns a single bigint, so only root_7 (top) is accessible.
-        # Drop the lower 7 elements with OP_NIP to keep the stack clean.
-        for _ in range(7):
-            self.emit_op(StackOp(op="nip"))
+        # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on
+        # top) but the type system models the result as one bigint. F-092: this
+        # used to be reconciled with seven OP_NIPs, discarding root_0..root_6.
+        # Pack all eight limbs base-2^32 instead, matching Go's
+        # EmitPoseidon2RootPack byte for byte (Go-only-parity policy).
+        emit_poseidon2_root_pack(emit_fn)
         self.sm.push(binding_name)
         self._track_depth()
 

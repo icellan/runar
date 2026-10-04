@@ -185,3 +185,26 @@ def emit_poseidon2_merkle_root(emit: Callable[["StackOp"], None], depth: int) ->
     # After all levels: [..., root(8), index]
     emit(_make_stack_op(op="drop"))
     # Stack: [..., root_0..root_7]
+
+
+# Radix for packing the 8-element root into one Script integer. Every KoalaBear
+# element is < p = 2^31 - 2^24 + 1 < 2^32, so base-2^32 packing is injective.
+_POSEIDON2_ROOT_PACK_BASE = 1 << 32
+
+
+def emit_poseidon2_root_pack(emit: Callable[["StackOp"], None]) -> None:
+    """Fold the 8-element root left by emit_poseidon2_merkle_root into ONE integer.
+
+    Stack in:  [..., root_0, root_1, ..., root_7]   (root_7 on top)
+    Stack out: [..., packed]   packed = sum(root_i * (2^32)^i)
+
+    Port of Go's EmitPoseidon2RootPack (R-056 / CL-BUG-099), byte for byte.
+    The type system models the result as one bigint; reconciling that with
+    seven OP_NIPs kept root_7 alone and reduced the comparison to one ~31-bit
+    field element (F-092). Equality on the packed value is equality on all
+    eight limbs. Horner from the top down: no rolls needed.
+    """
+    for _ in range(7):
+        emit(_make_stack_op(op="push", value=_big_int_push(_POSEIDON2_ROOT_PACK_BASE)))
+        emit(_make_stack_op(op="opcode", code="OP_MUL"))
+        emit(_make_stack_op(op="opcode", code="OP_ADD"))
