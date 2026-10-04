@@ -816,7 +816,7 @@ pnpm run conformance:construct-ledger
 
 ## Current Test Cases
 
-The suite currently contains **85 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
+The suite currently contains **86 fixtures** under `tests/` — that directory is the authoritative list (`find tests -name source.json | wc -l`). The table below describes the most commonly referenced ones. Tier scoping (which compilers run a fixture) is governed solely by the [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) above — do not infer it from this table.
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|

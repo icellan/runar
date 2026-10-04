@@ -1552,6 +1552,18 @@ module RunarCompiler
               return BinaryExpr.new(op: "===", left: left, right: right)
             end
 
+            # runar.hexToBytes("deadbeef") -> ByteString literal "deadbeef".
+            # Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
+            if builtin_name == "hexToBytes" && check(TOK_LPAREN)
+              advance
+              arg = parse_expression
+              expect(TOK_RPAREN)
+              return ByteStringLiteral.new(value: arg.value) if arg.is_a?(ByteStringLiteral)
+
+              add_error("line #{tok.line}: runar.hexToBytes expects a string literal argument")
+              return ByteStringLiteral.new(value: "")
+            end
+
             return Identifier.new(name: builtin_name)
           end
 

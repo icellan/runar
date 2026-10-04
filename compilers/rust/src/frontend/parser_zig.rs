@@ -1726,6 +1726,21 @@ impl<'a> ZigParser<'a> {
                         };
                     }
 
+                    // runar.hexToBytes("deadbeef") -> ByteString literal "deadbeef".
+                    // Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
+                    if builtin == "hexToBytes" && *self.peek() == Token::LParen {
+                        self.advance(); // (
+                        let arg = self.parse_expression();
+                        self.expect(&Token::RParen);
+                        if let Expression::ByteStringLiteral { value } = arg {
+                            return Expression::ByteStringLiteral { value };
+                        }
+                        self.errors.push(
+                            "runar.hexToBytes expects a string literal argument".to_string(),
+                        );
+                        return Expression::ByteStringLiteral { value: String::new() };
+                    }
+
                     return Expression::Identifier { name: builtin };
                 }
 

@@ -35,6 +35,7 @@
     "fixed-array-write": 871,
     "function-patterns": 2904,
     "go-dsl-bytestring-literal": 8,
+    "hex-to-bytes-initializer": 18,
     "if-else": 29,
     "if-without-else": 27,
     "if-without-else-multi-temp": 226,

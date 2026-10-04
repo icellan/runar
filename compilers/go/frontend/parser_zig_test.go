@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -844,4 +845,72 @@ pub const BytesEq = struct {
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// N-090: runar.hexToBytes("...") lowers to a ByteString literal
+// ---------------------------------------------------------------------------
+//
+// Proves: the Go Zig-surface parser lowers `runar.hexToBytes("<hex>")` to a
+// ByteStringLiteral carrying the hex verbatim (as 01-parse-zig.ts, the Zig
+// tier and Python do), so it is accepted as a property initializer; a
+// non-literal argument is a parse error with TS's diagnostic rather than an
+// ordinary call.
+// Does NOT prove: byte identity with TS (pinned by the
+// conformance/tests/hex-to-bytes-initializer fixture), or that the hex
+// payload is well-formed (TS does not check that in the parser either).
+
+const zigHexToBytesSource = `const runar = @import("runar");
+
+pub const H = struct {
+    pub const Contract = runar.SmartContract;
+
+    prefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
+    x: runar.ByteString,
+
+    pub fn init(x: runar.ByteString) H {
+        return .{ .x = x };
+    }
+
+    pub fn verify(self: *const H, b: runar.ByteString) void {
+        runar.assert(runar.bytesEq(runar.cat(self.prefix, self.x), b));
+    }
+};
+`
+
+func TestParseZig_HexToBytesInitializer(t *testing.T) {
+	result := ParseSource([]byte(zigHexToBytesSource), "H.runar.zig")
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.ErrorStrings())
+	}
+	if result.Contract == nil {
+		t.Fatal("expected contract, got nil")
+	}
+	var prefix *PropertyNode
+	for i := range result.Contract.Properties {
+		if result.Contract.Properties[i].Name == "prefix" {
+			prefix = &result.Contract.Properties[i]
+		}
+	}
+	if prefix == nil {
+		t.Fatal("property 'prefix' not found")
+	}
+	lit, ok := prefix.Initializer.(ByteStringLiteral)
+	if !ok {
+		t.Fatalf("expected ByteStringLiteral initializer, got %T (%v)", prefix.Initializer, prefix.Initializer)
+	}
+	if lit.Value != "1976a914" {
+		t.Errorf("expected value 1976a914, got %q", lit.Value)
+	}
+}
+
+func TestParseZig_HexToBytesNonLiteralRefused(t *testing.T) {
+	source := strings.Replace(zigHexToBytesSource, `runar.hexToBytes("1976a914")`, `runar.hexToBytes(x)`, 1)
+	result := ParseSource([]byte(source), "H.runar.zig")
+	for _, e := range result.ErrorStrings() {
+		if strings.Contains(e, "runar.hexToBytes expects a string literal argument") {
+			return
+		}
+	}
+	t.Fatalf("expected 'runar.hexToBytes expects a string literal argument', got %v", result.ErrorStrings())
 }

@@ -1434,6 +1434,19 @@ public final class ZigParser {
                         expect(Kind.RPAREN, ")");
                         return new BinaryExpr(Expression.BinaryOp.EQ, left, right);
                     }
+                    // runar.hexToBytes("deadbeef") -> ByteString literal "deadbeef".
+                    // Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
+                    if ("hexToBytes".equals(builtin) && current().kind == Kind.LPAREN) {
+                        advance();
+                        Expression arg = parseExpression();
+                        expect(Kind.RPAREN, ")");
+                        if (arg instanceof ByteStringLiteral lit) {
+                            return new ByteStringLiteral(lit.value());
+                        }
+                        errors.add(file + ":" + tok.line + ":" + tok.col
+                            + ": runar.hexToBytes expects a string literal argument");
+                        return new ByteStringLiteral("");
+                    }
                     return new Identifier(builtin);
                 }
                 return new Identifier(tok.value);

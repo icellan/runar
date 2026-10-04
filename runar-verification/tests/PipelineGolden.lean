@@ -770,7 +770,11 @@ number. It is pinned from both sides:
 -- stateful-bytestring, terminal-varlen-read) still byte-match, and
 -- state-covenant's anchor was re-derived live: 67 = baselineMatches (64) +
 -- (21 - 18).
-def expectedByteExact : Nat := 67
+--
+-- 2026-10-05 (N-090, measured): N-090 added `hex-to-bytes-initializer`
+-- (byte-exact, baselineMatches) with no Lean model change: 68 =
+-- baselineMatches (65) + (21 - 18).
+def expectedByteExact : Nat := 68
 
 /--
 Number of fixtures the run must DISCOVER under `conformance/tests`.
@@ -784,8 +788,9 @@ fixture that stops parsing, or one that is added on disk, fails loudly).
 2026-09-29 (N-037): 82 -> 83 for N-016's `property-shadow` fixture.
 2026-09-30 (N-007): 83 -> 84 for N-007's `param-shadow-branch-arm` fixture.
 2026-09-30 (N-044): 84 -> 85 for N-044's `annotated-vault` fixture.
+2026-10-05 (N-090): 85 -> 86 for N-090's `hex-to-bytes-initializer` fixture.
 -/
-def expectedFixtureTotal : Nat := 85
+def expectedFixtureTotal : Nat := 86
 
 def baselineMatches : List String := [
   -- 2026-09 R-010 Lean port: 20 pre-R-010 matches plus 19 recovered
@@ -816,6 +821,7 @@ def baselineMatches : List String := [
   "fixed-array-write",
   "function-patterns",
   "go-dsl-bytestring-literal",
+  "hex-to-bytes-initializer",
   "if-else",
   "if-without-else",
   "if-without-else-multi-temp",
@@ -1177,7 +1183,7 @@ double-push bug in `lowerIf` was closed. Baseline 33 → 34.
 -/
 example : baselineMatches.length + goOnlyFixtures.length
         + cryptoAxiomPending.length + mathBuiltinsPending.length
-        + lowerDivergencePending.length = 85 := by rfl
+        + lowerDivergencePending.length = 86 := by rfl
 
 /-! ### Finding #24 — the hand-maintained counts are pinned to the buckets
 

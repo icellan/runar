@@ -1,0 +1,43 @@
+{
+  "fixture": "hex-to-bytes-initializer",
+  "kind": "stateless-signed",
+  "note": "N-090: two readonly ByteString properties initialised from hex literals (runar.hexToBytes(\"1976a914\") / runar.hexToBytes(\"88ac\") on the Zig surface). The spend must present prefix || pkh || suffix, so the verdict depends on the initializer bytes. Every script arg below is written out by hand from the source and alice's/bob's TEST_KEYS pubKeyHash, not taken from compiler output.",
+  "constructorArgs": { "pubKeyHash": { "$pkh": "alice" } },
+  "spends": [
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "alice" }, { "$pubkey": "alice" }, "1976a9149a1c78a507689f6f54b847ad1cef1e614ee23f1e88ac"],
+      "expect": "accept",
+      "note": "1976a914 || alice pkh || 88ac: the initializers decoded as hex bytes, real DER sig verifies"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "alice" }, { "$pubkey": "alice" }, "31393736613931349a1c78a507689f6f54b847ad1cef1e614ee23f1e38386163"],
+      "expect": "reject",
+      "note": "near-miss: the initializers read as ASCII text (\"1976a914\" -> 3139373661393134, \"88ac\" -> 38386163), the misreading a hexToBytes lowering must not produce"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "alice" }, { "$pubkey": "alice" }, "9a1c78a507689f6f54b847ad1cef1e614ee23f1e"],
+      "expect": "reject",
+      "note": "near-miss: both initializers dropped (empty prefix and suffix)"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "bob" }, { "$pubkey": "bob" }, "1976a91489b460e4e984ef496ff0b135712f3d9b9fc8048288ac"],
+      "expect": "reject",
+      "note": "wrong committed key: hash160(bob) != alice pkh, though the script is bob's well-formed P2PKH"
+    },
+    {
+      "method": "unlock",
+      "args": [{ "$sig": "bob" }, { "$pubkey": "alice" }, "1976a9149a1c78a507689f6f54b847ad1cef1e614ee23f1e88ac"],
+      "expect": "reject",
+      "cryptoNearMiss": true,
+      "note": "crypto near-miss: correct key and script, bob's signature against alice's pubkey; only the real checkSig rejects"
+    }
+  ],
+  "goldenHashes": {
+    "expected-script.hex": "0944d7b959a496c6b8cfd2c33de2e341abebcc3bdffa49c4a14da2eb2883218a",
+    "expected-ir.json": "d6b6ba4949ec3b3edf1fa3e453bf0675076cb0b9a919513ddb44cf0fb976cbb5"
+  }
+}

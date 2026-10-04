@@ -1578,6 +1578,19 @@ func (p *zigParser) parsePrimary() Expression {
 				return BinaryExpr{Op: "===", Left: left, Right: right}
 			}
 
+			// runar.hexToBytes("deadbeef") -> ByteString literal "deadbeef".
+			// Mirrors 01-parse-zig.ts and parse_zig.zig (N-090).
+			if builtin == "hexToBytes" && p.check(zigTokLParen) {
+				p.advance() // '('
+				arg := p.parseExpression()
+				p.expect(zigTokRParen)
+				if lit, ok := arg.(ByteStringLiteral); ok {
+					return ByteStringLiteral{Value: lit.Value}
+				}
+				p.addError(fmt.Sprintf("line %d: runar.hexToBytes expects a string literal argument", tok.line))
+				return ByteStringLiteral{Value: ""}
+			}
+
 			return Identifier{Name: builtin}
 		}
 
