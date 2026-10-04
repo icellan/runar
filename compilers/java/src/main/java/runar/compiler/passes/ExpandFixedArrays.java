@@ -314,8 +314,9 @@ public final class ExpandFixedArrays {
             if (er.error) {
                 return List.of();
             }
+            // F-098 (R35): @embedAlways on a FixedArray propagates to every slot.
             return expandArrayMeta(meta, prop.readonly(), prop.sourceLocation(),
-                er.elements, List.of());
+                er.elements, List.of(), prop.embedAlways());
         }
 
         private static final class ExtractResult {
@@ -381,7 +382,8 @@ public final class ExpandFixedArrays {
             boolean readonly,
             SourceLocation loc,
             List<Expression> initializer,
-            List<SyntheticArrayChainEntry> parentChain
+            List<SyntheticArrayChainEntry> parentChain,
+            boolean embedAlways
         ) {
             List<PropertyNode> out = new ArrayList<>();
             for (int i = 0; i < meta.slotNames.size(); i++) {
@@ -413,7 +415,7 @@ public final class ExpandFixedArrays {
                         }
                         nestedInit = nested.elements();
                     }
-                    out.addAll(expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere));
+                    out.addAll(expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere, embedAlways));
                 } else {
                     // N-133: the element-type check. Typecheck's array-literal
                     // branch never sees a property initializer -- it is
@@ -443,7 +445,8 @@ public final class ExpandFixedArrays {
                         readonly,
                         slotInit,
                         loc,
-                        List.copyOf(chainHere)
+                        List.copyOf(chainHere),
+                        embedAlways
                     ));
                 }
             }

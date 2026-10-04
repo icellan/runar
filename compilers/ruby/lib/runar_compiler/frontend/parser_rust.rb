@@ -650,7 +650,8 @@ module RunarCompiler
                   if p.name == prop_name
                     properties[i] = PropertyNode.new(
                       name: p.name, type: p.type, readonly: p.readonly,
-                      initializer: stmt.value, source_location: p.source_location
+                      initializer: stmt.value, source_location: p.source_location,
+                      synthetic_array_chain: p.synthetic_array_chain, embed_always: p.embed_always
                     )
                     break
                   end

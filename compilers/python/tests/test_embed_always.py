@@ -241,3 +241,48 @@ class TestEmbedAlwaysSurvivesFixedPointDce:
         )
         assert on.script_hex != off.script_hex
         assert len(on.script_hex) > len(off.script_hex)
+
+
+# ---------------------------------------------------------------------------
+# F-098 / R35 — @embedAlways on a FixedArray propagates to every expanded slot.
+#
+# The expansion pass used to rebuild each slot without ``embed_always``, so the
+# annotated array compiled to the same bytes as the un-annotated one ("91":
+# both slots DCE'd). The golden is the TS reference output, which equals the
+# same contract hand-written as two annotated scalars (7n, 9n) -- an oracle
+# that never runs the expansion pass. Proves: both slots survive,
+# byte-identical to TS, in both fold modes; the un-annotated control still
+# loses them. Does not prove on-chain spending (a conformance
+# fixture with a real-crypto witness is tracked as N-093).
+# ---------------------------------------------------------------------------
+
+
+def _array_source(directive: str) -> str:
+    return f"""
+import {{ SmartContract, assert }} from 'runar-lang';
+
+class Arr extends SmartContract {{
+  {directive}
+  readonly tags: FixedArray<bigint, 2> = [7n, 9n];
+
+  constructor() {{
+    super();
+  }}
+
+  public unlock(x: bigint) {{
+    assert(x === 0n);
+  }}
+}}
+"""
+
+
+def test_f098_embed_always_fixed_array_propagates_to_every_slot():
+    for disable in (True, False):
+        on = compile_from_source_str_with_result(
+            _array_source("/** @embedAlways */"), "Arr.runar.ts", disable_constant_folding=disable
+        )
+        assert on.script_hex == "57597b917777", (disable, on.diagnostics)
+        off = compile_from_source_str_with_result(
+            _array_source(""), "Arr.runar.ts", disable_constant_folding=disable
+        )
+        assert off.script_hex == "91", (disable, off.diagnostics)

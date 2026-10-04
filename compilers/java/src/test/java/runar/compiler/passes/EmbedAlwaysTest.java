@@ -178,4 +178,40 @@ class EmbedAlwaysTest {
         assertTrue(embed.length() > plain.length(),
             "annotated hex (" + embed.length() + ") must exceed un-annotated (" + plain.length() + ")");
     }
+
+    // ---- F-098 / R35: @embedAlways on a FixedArray propagates to every slot ----
+    //
+    // ExpandFixedArrays used to rebuild each slot through the 6-arg constructor,
+    // which defaults embedAlways to false, so the annotated array compiled to the
+    // same bytes as the un-annotated one ("91": both slots DCE'd). The golden is
+    // the TS reference output, which equals the same contract hand-written as two
+    // annotated scalars (7n, 9n) -- an oracle that never runs the expansion pass.
+    // Proves: both slots survive, byte-identical to TS, in both fold modes; the
+    // un-annotated control still loses them. Does not prove on-chain spending
+    // (a conformance fixture with a real-crypto witness is tracked as N-093).
+
+    private static String arraySource(String directive) {
+        return "class Arr extends SmartContract {\n"
+            + "  " + directive + "\n"
+            + "  readonly tags: FixedArray<bigint, 2> = [7n, 9n];\n"
+            + "  constructor() {\n"
+            + "    super();\n"
+            + "  }\n"
+            + "  public unlock(x: bigint) {\n"
+            + "    assert(x === 0n);\n"
+            + "  }\n"
+            + "}\n";
+    }
+
+    @Test
+    void f098EmbedAlwaysFixedArrayPropagatesToEverySlot() throws Exception {
+        for (boolean disableFold : new boolean[] {true, false}) {
+            assertEquals("57597b917777",
+                PipelineTestSupport.hex(arraySource("/** @embedAlways */"), "Arr.runar.ts", disableFold),
+                "annotated FixedArray, disableFold=" + disableFold);
+            assertEquals("91",
+                PipelineTestSupport.hex(arraySource(""), "Arr.runar.ts", disableFold),
+                "un-annotated FixedArray, disableFold=" + disableFold);
+        }
+    }
 }

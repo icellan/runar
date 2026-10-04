@@ -303,7 +303,8 @@ const Ctx = struct {
 
             // Distribute array literal initializer if present.
             const init_elements = try self.extractArrayLiteral(prop, meta);
-            try self.expandMeta(&out, meta, prop.readonly, init_elements, &.{});
+            // F-098 (R35): `@embedAlways` on a FixedArray propagates to every slot.
+            try self.expandMeta(&out, meta, prop.readonly, init_elements, &.{}, prop.embed_always);
         }
         return try out.toOwnedSlice(self.allocator);
     }
@@ -339,6 +340,7 @@ const Ctx = struct {
         readonly: bool,
         initializer: ?[]const Expression,
         parent_chain: []const SyntheticArrayLevel,
+        embed_always: bool,
     ) !void {
         for (meta.slot_names, 0..) |slot, i| {
             const slot_init: ?Expression = if (initializer) |elems| elems[i] else null;
@@ -370,7 +372,7 @@ const Ctx = struct {
                         try self.pushError("Nested FixedArray element must be an array literal");
                     },
                 };
-                try self.expandMeta(out, sub, readonly, sub_init, chain);
+                try self.expandMeta(out, sub, readonly, sub_init, chain, embed_always);
             } else {
                 // N-133: the element-type check. typecheck's array-literal
                 // branch never sees a property initializer -- it is consumed
@@ -394,6 +396,7 @@ const Ctx = struct {
                     .type_info = meta.element,
                     .readonly = readonly,
                     .initializer = slot_init,
+                    .embed_always = embed_always,
                     .fixed_array_length = 0,
                     .fixed_array_element = .unknown,
                     .fixed_array_nested_length = 0,

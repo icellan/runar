@@ -556,3 +556,47 @@ fn f039_well_formed_multiline_jsdoc_still_honoured() {
     let bump = r.artifact.unwrap().abi.methods.into_iter().find(|m| m.name == "bump").unwrap();
     assert_eq!(bump.sig_hash_type, Some(0x43));
 }
+
+// ===========================================================================
+// F-098 / R35 — @embedAlways on a FixedArray propagates to every expanded slot
+// ===========================================================================
+//
+// The expansion pass used to rebuild each slot with `embed_always: false`, so
+// the annotated array compiled to the same bytes as the un-annotated one ("91":
+// both slots DCE'd). The golden is the TS reference output, which equals the
+// same contract hand-written as two annotated scalars (7n, 9n) — an oracle that
+// never runs the expansion pass. Proves: both slots survive, byte-identical to
+// TS, in both fold modes; the un-annotated control still loses them. Does not
+// prove on-chain spending (a fixture with a real-crypto witness is N-093).
+
+fn embed_array_source(directive: &str) -> String {
+    format!(
+        "import {{ SmartContract, assert }} from 'runar-lang';\n\
+         class Arr extends SmartContract {{\n\
+         \x20 {directive}\n\
+         \x20 readonly tags: FixedArray<bigint, 2> = [7n, 9n];\n\
+         \x20 constructor() {{\n    super();\n  }}\n\
+         \x20 public unlock(x: bigint) {{\n    assert(x === 0n);\n  }}\n\
+         }}\n"
+    )
+}
+
+#[test]
+fn f098_embed_always_fixed_array_propagates_to_every_slot() {
+    for disable_constant_folding in [true, false] {
+        let opts = CompileOptions { disable_constant_folding, ..CompileOptions::default() };
+        let on = compile_from_source_str_with_result(
+            &embed_array_source("/** @embedAlways */"),
+            Some("Arr.runar.ts"),
+            &opts,
+        );
+        assert_eq!(
+            on.script_hex.as_deref(),
+            Some("57597b917777"),
+            "annotated FixedArray (disable_fold={disable_constant_folding}): {:?}",
+            on.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        let off = compile_from_source_str_with_result(&embed_array_source(""), Some("Arr.runar.ts"), &opts);
+        assert_eq!(off.script_hex.as_deref(), Some("91"), "un-annotated FixedArray (disable_fold={disable_constant_folding})");
+    }
+}

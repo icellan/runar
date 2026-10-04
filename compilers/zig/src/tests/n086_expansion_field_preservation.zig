@@ -41,11 +41,19 @@
 //!                                   byte-typed expression -> bin_op result
 //!                                   type -> OP_CAT selection.
 //!
-//! Deliberately NOT fixed here: `PropertyNode.embed_always` is dropped by this
-//! pass in all SEVEN tiers including the TypeScript reference. Fixing Zig alone
-//! would manufacture a 1-vs-6 divergence. Filed as its own seven-tier item.
-//! `Assign.index_target` is also omitted, correctly — the pass's contract is
-//! that it is null by the time ANF lowering runs.
+//!   PropertyNode.embed_always    `/** @embedAlways */ readonly tags:
+//!                                FixedArray<bigint, 2> = [7n, 9n]`, unread
+//!                                -> "91", byte-identical to the un-annotated
+//!                                   array: both slots DCE'd. The drop was in
+//!                                   all SEVEN tiers including the TypeScript
+//!                                   reference, so it was fixed in all seven
+//!                                   together (F-098, user decision R35: the
+//!                                   directive propagates to every slot).
+//!
+//! `Assign.index_target` is omitted, correctly — the pass's contract is that it
+//! is null by the time ANF lowering runs. `PropertyNode.type_name` and
+//! `source_loc` are left empty/null on the synthesized leaves by design (see
+//! their docs in `ir/types.zig`).
 //!
 //! Every test below asserts on emitted bytes or on the ANF, never on "it
 //! compiles": broken and fixed both compile.
@@ -416,4 +424,40 @@ test "N-086 expansion keeps asm<ByteString> so `+` still lowers to OP_CAT" {
     try std.testing.expectEqualStrings("0076767e8277529d0000a077", without);
     // Under the drop the FixedArray variant reads "007676938277529d0000a077".
     try std.testing.expectEqualStrings(without, with_array);
+}
+
+// ---------------------------------------------------------------------------
+// PropertyNode.embed_always (F-098 / R35)
+// ---------------------------------------------------------------------------
+
+/// A FixedArray property no method reads. `directive` goes before it.
+fn embedArraySrc(comptime directive: []const u8) []const u8 {
+    return "import { SmartContract, assert } from 'runar-lang';\n" ++
+        "class Arr extends SmartContract {\n" ++
+        "  " ++ directive ++ "\n" ++
+        "  readonly tags: FixedArray<bigint, 2> = [7n, 9n];\n" ++
+        "  constructor() {\n" ++
+        "    super();\n" ++
+        "  }\n" ++
+        "  public unlock(x: bigint) {\n" ++
+        "    assert(x === 0n);\n" ++
+        "  }\n" ++
+        "}\n";
+}
+
+// The golden is the TS reference output, which equals the same contract
+// hand-written as two annotated scalars (7n, 9n): an oracle that never runs the
+// expansion pass. Proves both slots survive, byte-identical to TS, in both fold
+// modes, and the un-annotated control still loses them. Does not prove on-chain
+// spending (a conformance fixture with a real-crypto witness is N-093).
+test "N-086 expansion keeps @embedAlways on every FixedArray slot (both fold modes)" {
+    const a = std.testing.allocator;
+    for ([_]bool{ true, false }) |disable_fold| {
+        const on = try compiler_api.compileSourceWithOptions(a, embedArraySrc("/** @embedAlways */"), "Arr.runar.ts", disable_fold);
+        defer on.deinit(a);
+        try std.testing.expectEqualStrings("57597b917777", on.script_hex);
+        const off = try compiler_api.compileSourceWithOptions(a, embedArraySrc(""), "Arr.runar.ts", disable_fold);
+        defer off.deinit(a);
+        try std.testing.expectEqualStrings("91", off.script_hex);
+    }
 }

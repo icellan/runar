@@ -253,7 +253,8 @@ module RunarCompiler
         init_elements = extract_array_literal_elements(prop, meta)
         return [] if init_elements == :error
 
-        expand_array_meta(meta, prop.readonly, prop.source_location, init_elements, [])
+        # F-098 (R35): +@embedAlways+ on a FixedArray propagates to every slot.
+        expand_array_meta(meta, prop.readonly, prop.source_location, init_elements, [], prop.embed_always)
       end
 
       # Returns the element-wise initializer list, +nil+ if the property has
@@ -326,7 +327,7 @@ module RunarCompiler
       # non-array-literal element at a nested level is a compile error.  Each
       # leaf PropertyNode receives the full +synthetic_array_chain+,
       # outermost first.
-      def expand_array_meta(meta, readonly, loc, initializer, parent_chain)
+      def expand_array_meta(meta, readonly, loc, initializer, parent_chain, embed_always)
         out = []
 
         meta.slot_names.each_with_index do |slot, i|
@@ -357,7 +358,7 @@ module RunarCompiler
               end
               nested_init = elems
             end
-            out.concat(expand_array_meta(nested_meta, readonly, loc, nested_init, chain_here))
+            out.concat(expand_array_meta(nested_meta, readonly, loc, nested_init, chain_here, embed_always))
           else
             # N-133: the element-type check. typecheck's array-literal branch
             # never sees a property initializer -- it is consumed here -- so
@@ -384,7 +385,8 @@ module RunarCompiler
               readonly: readonly,
               initializer: slot_init,
               source_location: loc,
-              synthetic_array_chain: chain_here
+              synthetic_array_chain: chain_here,
+              embed_always: embed_always
             )
           end
         end

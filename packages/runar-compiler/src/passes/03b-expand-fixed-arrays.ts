@@ -373,7 +373,10 @@ class ExpandContext {
     const initializerElements = this.extractArrayLiteralElements(prop, meta);
     if (initializerElements === 'error') return [];
 
-    return this.expandArrayMeta(meta, prop.readonly, prop.sourceLocation, initializerElements, []);
+    // F-098 (R35): `@embedAlways` on a FixedArray propagates to every slot.
+    return this.expandArrayMeta(
+      meta, prop.readonly, prop.sourceLocation, initializerElements, [], prop.embedAlways === true,
+    );
   }
 
   /**
@@ -428,6 +431,7 @@ class ExpandContext {
     loc: SourceLocation,
     initializer: Expression[] | undefined,
     parentChain: ReadonlyArray<{ base: string; index: number; length: number }>,
+    embedAlways: boolean,
   ): PropertyNode[] {
     const out: PropertyNode[] = [];
 
@@ -464,7 +468,7 @@ class ExpandContext {
           }
           nestedInit = slotInit.elements;
         }
-        out.push(...this.expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere));
+        out.push(...this.expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere, embedAlways));
       } else {
         // Attach the synthetic-array chain so `detectSyntheticRuns` can
         // distinguish compiler-generated sibling scalars from a
@@ -500,6 +504,7 @@ class ExpandContext {
           initializer: slotInit,
           sourceLocation: loc,
           __syntheticArrayChain: chainHere,
+          ...(embedAlways ? { embedAlways: true } : {}),
         });
       }
     }

@@ -326,8 +326,15 @@ impl<'a> ExpandContext<'a> {
                 ElementsResult::Some(elems) => Some(elems),
                 ElementsResult::None => None,
             };
-            let expanded =
-                self.expand_array_meta(&meta, prop.readonly, &prop.source_location, init_elems, Vec::new());
+            // F-098 (R35): `@embedAlways` on a FixedArray propagates to every slot.
+            let expanded = self.expand_array_meta(
+                &meta,
+                prop.readonly,
+                &prop.source_location,
+                init_elems,
+                Vec::new(),
+                prop.embed_always,
+            );
             out.extend(expanded);
         }
         out
@@ -378,6 +385,7 @@ impl<'a> ExpandContext<'a> {
         loc: &SourceLocation,
         initializer: Option<Vec<Expression>>,
         parent_chain: Vec<SyntheticArrayLevel>,
+        embed_always: bool,
     ) -> Vec<PropertyNode> {
         let mut out: Vec<PropertyNode> = Vec::new();
         for i in 0..meta.length {
@@ -424,7 +432,7 @@ impl<'a> ExpandContext<'a> {
                     }
                 };
                 let nested_expanded =
-                    self.expand_array_meta(&nested_meta, readonly, loc, nested_init, chain_here);
+                    self.expand_array_meta(&nested_meta, readonly, loc, nested_init, chain_here, embed_always);
                 out.extend(nested_expanded);
             } else {
                 // N-133: the element-type check. typecheck's array-literal
@@ -458,8 +466,8 @@ impl<'a> ExpandContext<'a> {
                     prop_type: meta.element_type.clone(),
                     readonly,
                     initializer: slot_init,
-                    // Synthetic array leaves are not @embedAlways targets.
-                    embed_always: false,
+                    // Every slot inherits the root property's @embedAlways (R35).
+                    embed_always,
                     source_location: loc.clone(),
                     synthetic_array_chain: Some(chain_here),
                 });

@@ -241,7 +241,8 @@ func (ctx *expandContext) expandPropertyRoot(prop PropertyNode, meta *arrayMeta)
 	if status == extractErr {
 		return nil
 	}
-	return ctx.expandArrayMeta(meta, prop.Readonly, prop.SourceLocation, elements, nil)
+	// F-098 (R35): `@embedAlways` on a FixedArray propagates to every slot.
+	return ctx.expandArrayMeta(meta, prop.Readonly, prop.SourceLocation, elements, nil, prop.EmbedAlways)
 }
 
 type extractStatus int
@@ -328,6 +329,7 @@ func (ctx *expandContext) expandArrayMeta(
 	loc SourceLocation,
 	initializer []Expression,
 	parentChain []SyntheticArrayLevel,
+	embedAlways bool,
 ) []PropertyNode {
 	var out []PropertyNode
 	for i := 0; i < len(meta.slotNames); i++ {
@@ -367,7 +369,7 @@ func (ctx *expandContext) expandArrayMeta(
 				}
 				nestedInit = nested.Elements
 			}
-			out = append(out, ctx.expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere)...)
+			out = append(out, ctx.expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere, embedAlways)...)
 		} else {
 			// N-133: the element-type check. typecheck's array-literal branch
 			// never sees a property initializer -- it is consumed here -- so
@@ -400,6 +402,7 @@ func (ctx *expandContext) expandArrayMeta(
 				Initializer:         slotInit,
 				SourceLocation:      loc,
 				SyntheticArrayChain: append([]SyntheticArrayLevel(nil), chainHere...),
+				EmbedAlways:         embedAlways,
 			})
 		}
 	}

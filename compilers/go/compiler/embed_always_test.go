@@ -246,3 +246,48 @@ func TestEmbedAlways_PreserveFlagIsNeverSerialized(t *testing.T) {
 		t.Fatalf("emitted ANF IR JSON must not carry a preserve key:\n%s", blob)
 	}
 }
+
+// F-098 / R35 — `@embedAlways` on a FixedArray property propagates to every
+// expanded slot. The expansion pass used to rebuild each slot without
+// EmbedAlways, so the annotated array compiled to the same bytes as the
+// un-annotated one ("91": both slots DCE'd). The golden below is the TS
+// reference output, which equals the same contract hand-written as two
+// annotated scalars (7n, 9n) — an oracle that never runs the expansion pass.
+// Proves: both slots survive, byte-identical to TS, in both fold modes; the
+// un-annotated control still loses them. Does not prove on-chain spending
+// (a conformance fixture with a real-crypto witness is tracked as N-093).
+func embedArraySource(directive string) string {
+	return `
+import { SmartContract, assert } from 'runar-lang';
+class Arr extends SmartContract {
+  ` + directive + `
+  readonly tags: FixedArray<bigint, 2> = [7n, 9n];
+  constructor() {
+    super();
+  }
+  public unlock(x: bigint) {
+    assert(x === 0n);
+  }
+}
+`
+}
+
+func TestEmbedAlways_FixedArrayPropagatesToEverySlot(t *testing.T) {
+	for _, fold := range []bool{true, false} {
+		opts := CompileOptions{DisableConstantFolding: fold}
+		on := CompileFromSourceStrWithResult(embedArraySource("/** @embedAlways */"), "Arr.runar.ts", opts)
+		if !on.Success {
+			t.Fatalf("compile failed (disableFold=%v): %v", fold, diagMessages(on))
+		}
+		if on.ScriptHex != "57597b917777" {
+			t.Fatalf("annotated FixedArray (disableFold=%v): got %s, want 57597b917777", fold, on.ScriptHex)
+		}
+		off := CompileFromSourceStrWithResult(embedArraySource(""), "Arr.runar.ts", opts)
+		if !off.Success {
+			t.Fatalf("compile failed (disableFold=%v): %v", fold, diagMessages(off))
+		}
+		if off.ScriptHex != "91" {
+			t.Fatalf("un-annotated FixedArray (disableFold=%v): got %s, want 91", fold, off.ScriptHex)
+		}
+	}
+}

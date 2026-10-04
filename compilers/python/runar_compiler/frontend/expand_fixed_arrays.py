@@ -323,8 +323,14 @@ class _ExpandContext:
         initializer_elements = self._extract_array_literal_elements(prop, meta)
         if initializer_elements == "error":
             return []
+        # F-098 (R35): `@embedAlways` on a FixedArray propagates to every slot.
         return self._expand_array_meta(
-            meta, prop.readonly, prop.source_location, initializer_elements, []
+            meta,
+            prop.readonly,
+            prop.source_location,
+            initializer_elements,
+            [],
+            prop.embed_always,
         )
 
     def _extract_array_literal_elements(
@@ -355,6 +361,7 @@ class _ExpandContext:
         loc: SourceLocation,
         initializer,
         parent_chain: list[SyntheticArrayChainEntry],
+        embed_always: bool,
     ) -> list[PropertyNode]:
         out: list[PropertyNode] = []
         for i, slot in enumerate(meta.slot_names):
@@ -385,7 +392,7 @@ class _ExpandContext:
                     nested_init = slot_init.elements
                 out.extend(
                     self._expand_array_meta(
-                        nested_meta, readonly, loc, nested_init, chain_here
+                        nested_meta, readonly, loc, nested_init, chain_here, embed_always
                     )
                 )
             else:
@@ -418,6 +425,7 @@ class _ExpandContext:
                         initializer=slot_init,
                         source_location=loc,
                         synthetic_array_chain=chain_here,
+                        embed_always=embed_always,
                     )
                 )
         return out

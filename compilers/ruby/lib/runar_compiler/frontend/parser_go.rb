@@ -687,7 +687,9 @@ module RunarCompiler
                       type: prop.type,
                       readonly: prop.readonly,
                       initializer: stmt.value,
-                      source_location: prop.source_location
+                      source_location: prop.source_location,
+                      synthetic_array_chain: prop.synthetic_array_chain,
+                      embed_always: prop.embed_always
                     )
                     break
                   end
