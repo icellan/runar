@@ -732,6 +732,33 @@ pub(crate) fn bn254_g1_infinity_flag(t: &mut BN254Tracker) {
     });
 }
 
+/// bn254_g1_omega_collision_verify -- F-091: abort when py + qy == 0 mod p
+/// while px != qx, reading px/py/qx/qy WITHOUT consuming them.
+///
+/// That input is not P == -Q: it is the omega-partner pair Q = (w*px, -py) or
+/// (w^2*px, -py), w a primitive cube root of unity. The unified slope is 0/0,
+/// Fermat gives inv(0) = 0, and bn254_g1_affine_add returns (-(px+qx), -py) --
+/// ON the curve and NOT P + Q, so assert(bn254G1OnCurve(r)) cannot catch it.
+/// Fail closed instead. The condition is (py + qy mod p != 0) OR (px == qx),
+/// so general addition, doubling, P == -Q and all-zero operands keep their
+/// answers. Builtin entry point only: the Groth16 MSM path keeps its bytes.
+///
+/// Byte-identical to `bn254G1OmegaCollisionVerify` in compilers/go/codegen/bn254.go.
+pub(crate) fn bn254_g1_omega_collision_verify(t: &mut BN254Tracker) {
+    t.copy_to_top("px", "_om_px");
+    t.copy_to_top("qx", "_om_qx");
+    t.raw_block(&["_om_px", "_om_qx"], Some("_om_xeq"), |e| {
+        e(StackOp::Opcode("OP_NUMEQUAL".into()));
+    });
+    t.copy_to_top("py", "_om_py");
+    t.copy_to_top("qy", "_om_qy");
+    bn254_field_add(t, "_om_py", "_om_qy", "_om_den");
+    t.raw_block(&["_om_xeq", "_om_den"], None, |e| {
+        e(StackOp::Opcode("OP_BOOLOR".into()));
+        e(StackOp::Opcode("OP_VERIFY".into()));
+    });
+}
+
 /// bn254_g1_mask_infinity: zeroes rx and ry when `_notinf` is 0, consuming it.
 ///
 /// The mask is a bare OP_MUL with no reduction: rx, ry are already in [0, p)
@@ -1219,6 +1246,8 @@ pub fn emit_bn254_g1_add(emit: &mut dyn FnMut(StackOp)) {
     // R-141: both points must be canonical before anything consumes them.
     bn254_emit_coord_canon_verify(&mut t, "px", "py");
     bn254_emit_coord_canon_verify(&mut t, "qx", "qy");
+    // F-091: the omega-partner 0/0 slope fails closed.
+    bn254_g1_omega_collision_verify(&mut t);
     // The flag must be computed BEFORE the add: bn254_g1_affine_add consumes
     // px/py/qx/qy.
     bn254_g1_infinity_flag(&mut t);

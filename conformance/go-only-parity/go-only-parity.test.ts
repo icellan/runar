@@ -33,6 +33,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { LockingScript, UnlockingScript } from '@bsv/sdk';
+import {
+  CONSENSUS_SPEND_CONTEXT,
+  newConsensusSpend,
+} from '../../packages/runar-testing/src/consensus-spend.js';
 import {
   findGoBinary,
   findJavaJarPath,
@@ -296,6 +301,9 @@ const FAMILIES = [
   // surface, so the coordinate-canonicity and OP_SIZE-64 gates on
   // bn254G1OnCurve / bn254G1Negate had no cross-tier gate at all.
   { file: 'GoOnlyBn254G1.runar.ts', family: 'BN254 G1', builtin: 'bn254G1OnCurve' },
+  // F-091: the G1 ADD surface, which neither probe above reaches. Its
+  // execution leg is the describe block at the bottom of this file.
+  { file: 'GoOnlyBn254G1Add.runar.ts', family: 'BN254 G1 add', builtin: 'bn254G1Add' },
 ] as const;
 
 const available = TIERS.filter((t) => t.cmd !== null);
@@ -371,6 +379,139 @@ describe('R-037: Go-only families — refuse, or match Go byte for byte', () => 
               `  ${tier.id}: ${v.hex.slice(0, 60)}... (${v.hex.length / 2} bytes)`,
           ).toBe(goHex);
         });
+      }
+    });
+  }
+});
+
+/**
+ * F-091 — bn254G1Add on the omega-partner pair, EXECUTED in every tier.
+ *
+ * BN254 has j-invariant 0 and p = 1 mod 3, so for P = (x, y) the points
+ * (w*x, -y) and (w^2*x, -y) are on the curve, have px != qx, and zero the
+ * unified slope's denominator py + qy. The slope is then 0/0, Fermat gives
+ * inv(0) = 0, and every tier's script used to return (-(px+qx), -py): an
+ * ON-curve point that is NOT P + Q. Measured before the fix on @bsv/sdk's
+ * Spend: `bn254G1Add(G, (w, -2)) === (w^2, -2)` was ACCEPTED and the true sum
+ * was REJECTED, byte-identically in go / python / rust / zig / ruby / ts.
+ *
+ * What this proves: for each tier that compiles the probe, the omega case
+ * ABORTS inside the builtin (an OP_VERIFY failure, not a mismatch on the final
+ * equality) whatever `expected` the spender supplies — including the old wrong
+ * answer and the true sum from an independent chord/tangent reference below —
+ * while general addition, doubling and P + (-P) -> all-zero O are ACCEPTED
+ * against that same reference. What it does not prove: anything about the
+ * Groth16 MSM path, which shares the affine adder and is deliberately left
+ * unchanged; nor about tiers that refuse the probe (Java), which the parity
+ * leg above already scores.
+ */
+describe('F-091: bn254G1Add omega-partner pair — executed on @bsv/sdk Spend', () => {
+  const P: bigint = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
+  const W: bigint = 0x30644e72e131a0295e6dd9e7e0acccb0c28f069fbb966e3de4bd44e5607cfd48n;
+  const mod = (a: bigint) => ((a % P) + P) % P;
+  const inv = (a: bigint) => {
+    // Extended Euclid — deliberately NOT Fermat, so a zero input throws.
+    let [r0, r1, s0, s1] = [mod(a), P, 1n, 0n];
+    if (r0 === 0n) throw new Error('inverse of 0');
+    while (r1 !== 0n) {
+      const q = r0 / r1;
+      [r0, r1] = [r1, r0 - q * r1];
+      [s0, s1] = [s1, s0 - q * s1];
+    }
+    return mod(s0);
+  };
+  type Pt = [bigint, bigint] | null; // null = point at infinity
+  /** Independent chord/tangent reference. */
+  const add = (a: Pt, b: Pt): Pt => {
+    if (a === null) return b;
+    if (b === null) return a;
+    const [x1, y1] = a;
+    const [x2, y2] = b;
+    let l: bigint;
+    if (x1 === x2) {
+      if (mod(y1 + y2) === 0n) return null;
+      l = mod(3n * x1 * x1 * inv(2n * y1));
+    } else {
+      l = mod((y2 - y1) * inv(x2 - x1));
+    }
+    const x3 = mod(l * l - x1 - x2);
+    return [x3, mod(l * (x1 - x3) - y1)];
+  };
+  const onCurve = ([x, y]: [bigint, bigint]) => mod(y * y - x * x * x - 3n) === 0n;
+  const hex32 = (v: bigint) => v.toString(16).padStart(64, '0');
+  const blob = (pt: Pt) => (pt === null ? '00'.repeat(64) : hex32(pt[0]) + hex32(pt[1]));
+  const push64 = (h: string) => '40' + h;
+
+  const G: [bigint, bigint] = [1n, 2n];
+  const G2 = add(G, G) as [bigint, bigint];
+  const G3 = add(G, G2) as [bigint, bigint];
+  const neg = ([x, y]: [bigint, bigint]): [bigint, bigint] => [x, mod(-y)];
+  const omegaQ = (pt: [bigint, bigint], c: bigint): [bigint, bigint] => [mod(c * pt[0]), mod(-pt[1])];
+  const W2 = mod(W * W);
+
+  function spend(lockHex: string, a: Pt, b: Pt, expected: Pt): { ok: boolean; err: string } {
+    try {
+      const ok = newConsensusSpend({
+        ...CONSENSUS_SPEND_CONTEXT,
+        lockingScript: LockingScript.fromHex(lockHex),
+        unlockingScript: UnlockingScript.fromHex(push64(blob(a)) + push64(blob(b)) + push64(blob(expected))),
+        otherInputs: [],
+        outputs: [],
+      }).validate();
+      return { ok, err: '' };
+    } catch (e) {
+      return { ok: false, err: String((e as Error).message) };
+    }
+  }
+
+  it('the witness is what it claims: on-curve, px != qx, py + qy == 0, and the old answer is wrong', () => {
+    expect(W !== 1n && mod(W * W * W) === 1n).toBe(true);
+    const Q = omegaQ(G, W);
+    expect(onCurve(Q)).toBe(true);
+    expect(Q[0]).not.toBe(G[0]);
+    expect(mod(G[1] + Q[1])).toBe(0n);
+    const oldAnswer: [bigint, bigint] = [mod(-(G[0] + Q[0])), mod(-G[1])];
+    expect(onCurve(oldAnswer)).toBe(true);
+    expect(blob(oldAnswer)).not.toBe(blob(add(G, Q)));
+  });
+
+  const src = join(DIR, 'GoOnlyBn254G1Add.runar.ts');
+  for (const tier of available) {
+    it(`${tier.id}: omega pairs abort, legitimate sums are accepted`, () => {
+      const v = verdict(tier, src);
+      if (!v.ok) {
+        // A refusal is scored by the parity leg above. Only Java refuses
+        // today; any other tier refusing would make this leg vacuous for it.
+        expect(tier.id, `${tier.id} refused the probe:\n${v.diag.slice(0, 600)}`).toBe('java');
+        return;
+      }
+      const lock = v.hex;
+
+      const accepted: Array<[string, Pt, Pt]> = [
+        ['G+2G=3G', G, G2],
+        ['G+G=2G', G, G],
+        ['G+(-G)=O', G, neg(G)],
+        ['2G+(-2G)=O', G2, neg(G2)],
+        ['3G+G', G3, G],
+      ];
+      for (const [name, a, b] of accepted) {
+        const r = spend(lock, a, b, add(a, b));
+        expect(r.ok, `${tier.id} ${name} must be accepted: ${r.err}`).toBe(true);
+      }
+
+      const omega: Array<[string, [bigint, bigint], [bigint, bigint]]> = [
+        ['G+(wG.x,-G.y)', G, omegaQ(G, W)],
+        ['G+(w^2G.x,-G.y)', G, omegaQ(G, W2)],
+        ['(wG.x,-G.y)+G', omegaQ(G, W), G],
+        ['2G+(w*2G.x,-2G.y)', G2, omegaQ(G2, W)],
+      ];
+      for (const [name, a, b] of omega) {
+        const oldAnswer: [bigint, bigint] = [mod(-(a[0] + b[0])), mod(-a[1])];
+        for (const [label, expected] of [['old wrong answer', oldAnswer], ['true sum', add(a, b)]] as const) {
+          const r = spend(lock, a, b, expected);
+          expect(r.ok, `${tier.id} ${name} == ${label} must be REJECTED`).toBe(false);
+          expect(r.err, `${tier.id} ${name} == ${label}: the builtin must abort, not mismatch`).toMatch(/OP_VERIFY/);
+        }
       }
     });
   }
