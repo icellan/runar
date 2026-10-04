@@ -759,6 +759,25 @@ module RunarCompiler::Codegen
     VARIABLE_LENGTH_STATE_TYPES.include?(t)
   end
 
+  # N-045: declared byte width of each fixed-width byte state type. MUST match
+  # the reader's size table in _lower_deserialize_state and the shared
+  # STATE_FIELD_WIDTHS table.
+  FIXED_WIDTH_STATE_BYTES = {
+    "PubKey" => 33,
+    "Addr" => 20,
+    "Ripemd160" => 20,
+    "Sha256" => 32,
+    "Point" => 64,
+    "P256Point" => 64,
+    "P384Point" => 96,
+  }.freeze
+
+  # @param t [String]
+  # @return [Integer] the declared byte width, or 0 for any other type
+  def self.fixed_width_state_bytes(t)
+    FIXED_WIDTH_STATE_BYTES.fetch(t, 0)
+  end
+
   # -----------------------------------------------------------------------
   # LoweringContext -- mutable state for the stack-lowering pass
   # -----------------------------------------------------------------------
@@ -1329,6 +1348,27 @@ module RunarCompiler::Codegen
       emit_push_int(0)
       @sm.push("")
       emit_opcode("OP_EQUALVERIFY")
+      @sm.pop; @sm.pop
+    end
+
+    # N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+    # Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
+    # assert it has exactly its declared width:
+    #
+    #   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+    #
+    # The writer copies these values as they are and the next spend's reader
+    # slices each at its declared width, so a wrong-width value shifts every
+    # later field. No-op for every other type.
+    def emit_fixed_width_state_check(type)
+      width = RunarCompiler::Codegen.fixed_width_state_bytes(type)
+      return if width.zero?
+
+      emit_opcode("OP_SIZE")
+      @sm.push("")
+      emit_push_int(width)
+      @sm.push("")
+      emit_opcode("OP_NUMEQUALVERIFY")
       @sm.pop; @sm.pop
     end
 
@@ -4378,6 +4418,9 @@ module RunarCompiler::Codegen
           @sm.push("")
         end
 
+        # N-045: a fixed-width byte value must have its declared width.
+        emit_fixed_width_state_check(prop.type)
+
         # Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
         # The width MUST come from `numeric_state_type_width` -- the same table
         # the reader splits on -- or this continuation cannot be re-read.
@@ -4616,6 +4659,9 @@ module RunarCompiler::Codegen
 
         consume = _operand_consume(value_ref, output_operands, binding_index, last_uses)
         bring_to_top(value_ref, consume)
+
+        # N-045: a fixed-width byte value must have its declared width.
+        emit_fixed_width_state_check(prop.type)
 
         # Same table as the reader -- see `numeric_state_type_width`.
         numeric_width = RunarCompiler::Codegen.numeric_state_type_width(prop.type)

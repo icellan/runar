@@ -235,6 +235,11 @@ fn encodeStateValue(
         // and TS "undefined" — four different non-hex placeholders for the same
         // mistake, a silent byte divergence on a path whose bytes are committed
         // on chain. Refusing is the only answer that is the same in every tier.
+        // N-045: a wrong-width value shifts every later field for the reader.
+        switch (value) {
+            .bytes => try checkFixedWidthValue(value, field_type),
+            else => {},
+        }
         return switch (value) {
             .bytes => |b| allocator.dupe(u8, b),
             else => error.MissingStateValue,
@@ -545,6 +550,35 @@ pub fn stateFieldByteWidth(field_type: []const u8) ?usize {
     if (std.mem.eql(u8, field_type, "Point") or std.mem.eql(u8, field_type, "P256Point")) return 64;
     if (std.mem.eql(u8, field_type, "P384Point")) return 96;
     return null;
+}
+
+/// N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+/// Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+/// that is not a hex string of exactly its declared width
+/// (`error.FixedWidthMismatch`). The on-chain reader slices each such field at
+/// its declared width, so a wrong-width value in a state section (or an
+/// argument a covenant copies into one) shifts every later field. The compiled
+/// covenant refuses such a continuation on chain (OP_SIZE <width>
+/// OP_NUMEQUALVERIFY); this is the off-chain refusal. No-op for every other
+/// type.
+pub fn checkFixedWidthValue(value: types.StateValue, field_type: []const u8) error{FixedWidthMismatch}!void {
+    const is_raw = std.mem.eql(u8, field_type, "PubKey") or
+        std.mem.eql(u8, field_type, "Addr") or
+        std.mem.eql(u8, field_type, "Ripemd160") or
+        std.mem.eql(u8, field_type, "Sha256") or
+        std.mem.eql(u8, field_type, "Point") or
+        std.mem.eql(u8, field_type, "P256Point") or
+        std.mem.eql(u8, field_type, "P384Point");
+    if (!is_raw) return;
+    const width = stateFieldByteWidth(field_type).?;
+    const hex = switch (value) {
+        .bytes => |b| b,
+        else => return error.FixedWidthMismatch,
+    };
+    if (hex.len != width * 2) return error.FixedWidthMismatch;
+    for (hex) |c| {
+        if (!std.ascii.isHex(c)) return error.FixedWidthMismatch;
+    }
 }
 
 fn decodeStateValue(

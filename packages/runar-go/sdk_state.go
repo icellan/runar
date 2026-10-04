@@ -1,6 +1,7 @@
 package runar
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/big"
@@ -443,6 +444,10 @@ func encodeStateValue(value interface{}, fieldType string, label string) string 
 					"would deploy a state section the contract's own on-chain reader cannot parse, "+
 					"leaving the output unspendable", label, fieldType))
 		}
+		// N-045: a wrong-width value shifts every later field for the reader.
+		if err := checkFixedWidthValue(value, fieldType, fmt.Sprintf("SerializeState: state field %q", label)); err != nil {
+			panic(err.Error())
+		}
 		return fmt.Sprintf("%v", value)
 	default:
 		// Variable-length types (bytes, ByteString, etc.): use push-data
@@ -625,6 +630,37 @@ func stateFieldByteWidth(fieldType string) (int, bool) {
 		return 96, true
 	}
 	return 0, false
+}
+
+// checkFixedWidthValue (N-045, defence in depth) refuses a fixed-width byte
+// value — PubKey 33, Addr / Ripemd160 20, Sha256 32, Point / P256Point 64,
+// P384Point 96 bytes — that is not a hex string of exactly its declared width.
+// The on-chain reader slices each such field at its declared width, so a
+// wrong-width value in a state section (or an argument a covenant copies into
+// one) shifts every later field. The compiled covenant refuses such a
+// continuation on chain (OP_SIZE <width> OP_NUMEQUALVERIFY); this is the
+// off-chain refusal. Returns nil for every other type.
+func checkFixedWidthValue(value interface{}, fieldType string, what string) error {
+	switch fieldType {
+	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point":
+	default:
+		return nil
+	}
+	width, _ := stateFieldByteWidth(fieldType)
+	s, isStr := value.(string)
+	if !isStr {
+		return fmt.Errorf("runar: %s (%s) must be exactly %d bytes of hex, got %T", what, fieldType, width, value)
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		return fmt.Errorf("runar: %s (%s) must be exactly %d bytes of hex, got a non-hex string", what, fieldType, width)
+	}
+	if len(s) != width*2 {
+		return fmt.Errorf(
+			"runar: %s (%s) must be exactly %d bytes of hex, got %d bytes. A wrong-width %s "+
+				"shifts every later state field when the contract's on-chain reader slices it at %d bytes",
+			what, fieldType, width, len(s)/2, fieldType, width)
+	}
+	return nil
 }
 
 // decodeStateValue reads one state field. Fixed-width types consume exactly

@@ -23,7 +23,7 @@ from runar.sdk.calling import (
 from runar.sdk.script_utils import restore_constructor_args
 from runar.sdk.state import (
     serialize_state, extract_state_from_script, find_last_op_return,
-    encode_push_data,
+    encode_push_data, check_fixed_width_value,
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
@@ -665,6 +665,14 @@ class RunarContract:
             # EMPTY_SIG (issue #106) is intentionally NOT handled here: it is not
             # None, so it is never added to `sig_indices` and never signed. It
             # stays in `resolved_args` and `_encode_arg` emits OP_0 for it.
+
+        # N-045 (defence in depth): a fixed-width method arg must have its
+        # declared width — a covenant may copy it straight into its state.
+        for i, param in enumerate(user_params):
+            check_fixed_width_value(
+                resolved_args[i], param.type,
+                f"RunarContract.prepare_call: method '{method_name}' arg '{param.name}' (index {i})",
+            )
 
         # Soft heuristic (issue #106): warn only for likely OR-CHECKSIG
         # (OP_BOOLOR + OP_CHECKSIG), not genuine multi-sig (OP_CHECKMULTISIG).

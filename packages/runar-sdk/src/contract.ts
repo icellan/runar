@@ -12,7 +12,7 @@ import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } 
 import type { Inscription } from './ordinals/types.js';
 import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction, resolveInputSequence } from './calling.js';
-import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
+import { serializeState, extractStateFromScript, findLastOpReturn, assertFixedWidthValue } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
 import { buildP2PKHScript, extractConstructorArgs } from './script-utils.js';
 import { computeNewStateAndDataOutputs } from './anf-interpreter.js';
@@ -1026,6 +1026,15 @@ export class RunarContract {
       // EMPTY_SIG (issue #106) is intentionally NOT handled here: it is not
       // `null`, so it is never added to `sigIndices` and never signed. It stays
       // in `resolvedArgs` and `encodeArg` emits OP_0 (empty sig) for it.
+    }
+
+    // N-045 (defence in depth): a fixed-width method arg must have its
+    // declared width — a covenant may copy it straight into its state.
+    for (let i = 0; i < userParams.length; i++) {
+      assertFixedWidthValue(
+        resolvedArgs[i], userParams[i]!.type,
+        `RunarContract.prepareCall: method '${methodName}' arg '${userParams[i]!.name}' (index ${i})`,
+      );
     }
 
     // Soft heuristic (issue #106): more than one auto-signed Sig slot on an

@@ -2,9 +2,9 @@
   "fixture": "annotated-vault",
   "kind": "stateful",
   "signerKey": "alice",
-  "note": "N-044: memo (mutable ByteString) is serialized BEFORE owner (mutable PubKey) and balance, so the on-chain reader must decode memo's PUSHDATA length to find owner. Before the fix every tier read that length with bare OP_BIN2NUM (signed): a 128-byte memo (4c 80) read as length 0 and the memo's first 33 bytes became owner. Memos below begin with bob's (the stranger's) compressed pubkey, the attack shape. The owner is alice throughout.",
+  "note": "N-044: memo (mutable ByteString) is serialized BEFORE owner (mutable PubKey) and balance, so the on-chain reader must decode memo's PUSHDATA length to find owner. Before the fix every tier read that length with bare OP_BIN2NUM (signed): a 128-byte memo (4c 80) read as length 0 and the memo's first 33 bytes became owner. Memos below begin with bob's (the stranger's) compressed pubkey, the attack shape. The owner is alice throughout. N-045: owner (PubKey) is now width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY) before the continuation commit. No method takes a fixed-width argument, so the WideHash attack has no entry point here; every accept spend above re-proves the honest path through the new check.",
   "goldenHashes": {
-    "expected-script.hex": "2cd60de14f2c80b2baa7c85becc671d7d2088841f1123365bbb2f5130043d772",
+    "expected-script.hex": "e6ec684d920d133ab52fb0021c0ddb94d824508fb0535667b1b93eecb209beb3",
     "expected-ir.json": "5f7d4da9c1e9272788cb691d6156f76672517fe11c2a24c02335b81560333c9b"
   },
   "constructorArgs": [

@@ -66,6 +66,10 @@ interface SpendSpec {
   /** Satoshis the deploy locks (F-024 value-conservation specs). */
   deploySatoshis?: number;
   tamperOutput?: boolean;
+  /** N-045: build the call with an attacker SDK that believes these
+   *  fixed-width types have these byte widths (see `attackerFieldWidths` in
+   *  real-crypto-execution.ts), so the covenant's own width check rejects. */
+  attackerFieldWidths?: Record<string, number>;
   /** Independent, hand-authored expected continuation state after an accepted
    *  stateful spend (audit #4). Property → scalar ("1n" | true | "0x.."). The
    *  on-chain state decoded from the call tx MUST equal this — accept/reject
@@ -254,6 +258,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               satoshis: s.satoshis,
               deploySatoshis: s.deploySatoshis,
               tamperOutput: s.tamperOutput,
+              attackerFieldWidths: s.attackerFieldWidths,
             });
             expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');
             assertNearMissReachedEngine(spec.fixture, s, r);

@@ -131,6 +131,25 @@ func isVariableLengthStateType(t string) bool {
 	return false
 }
 
+// fixedWidthStateBytes is the declared byte width of a fixed-width byte state
+// type (N-045), or 0 for every other type. MUST match the reader's size table
+// in lowerDeserializeState and the shared STATE_FIELD_WIDTHS table.
+func fixedWidthStateBytes(t string) int {
+	switch t {
+	case "PubKey":
+		return 33
+	case "Addr", "Ripemd160":
+		return 20
+	case "Sha256":
+		return 32
+	case "Point", "P256Point":
+		return 64
+	case "P384Point":
+		return 96
+	}
+	return 0
+}
+
 // ---------------------------------------------------------------------------
 // Builtin function -> opcode mapping
 // ---------------------------------------------------------------------------
@@ -1198,6 +1217,29 @@ func (ctx *loweringContext) emitAssertStateConsumed() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+}
+
+// emitFixedWidthStateCheck (N-045): before a fixed-width state value (Sha256,
+// PubKey, Addr, Ripemd160, Point, P256Point, P384Point) is committed to a
+// continuation, assert it has exactly its declared width:
+//
+//	[..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+//
+// The writer copies these values as they are and the next spend's reader
+// slices each at its declared width, so a wrong-width value shifts every later
+// field. No-op for every other type.
+func (ctx *loweringContext) emitFixedWidthStateCheck(t string) {
+	width := fixedWidthStateBytes(t)
+	if width == 0 {
+		return
+	}
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(width))})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
 	ctx.sm.pop()
 	ctx.sm.pop()
 }
@@ -3235,6 +3277,9 @@ func (ctx *loweringContext) lowerGetStateScript(bindingName string) {
 			ctx.sm.push("")
 		}
 
+		// N-045: a fixed-width byte value must have its declared width.
+		ctx.emitFixedWidthStateCheck(prop.Type)
+
 		// Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
 		// The width MUST come from numericStateTypeWidth — the same table the
 		// reader splits on — or this continuation cannot be re-read.
@@ -3856,6 +3901,9 @@ func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateVa
 
 		consume := ctx.operandConsume(valueRef, outputOperands, bindingIndex, lastUses)
 		ctx.bringToTop(valueRef, consume)
+
+		// N-045: a fixed-width byte value must have its declared width.
+		ctx.emitFixedWidthStateCheck(prop.Type)
 
 		// Convert numeric/boolean values to fixed-width bytes. Same table as the
 		// reader — see numericStateTypeWidth.

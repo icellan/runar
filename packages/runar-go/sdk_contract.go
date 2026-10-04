@@ -868,6 +868,15 @@ func (c *RunarContract) PrepareCall(
 		}
 	}
 
+	// N-045 (defence in depth): a fixed-width method arg must have its
+	// declared width — a covenant may copy it straight into its state.
+	for i, param := range userParams {
+		if err := checkFixedWidthValue(resolvedArgs[i], param.Type,
+			fmt.Sprintf("RunarContract.PrepareCall: method '%s' arg '%s' (index %d)", methodName, param.Name, i)); err != nil {
+			return nil, err
+		}
+	}
+
 	// Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not genuine
 	// multi-sig. Two or more AUTO-signed Sig slots on an OR-CHECKSIG method means
 	// every branch gets a real signature, and the branch that fails then carries a

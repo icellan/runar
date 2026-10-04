@@ -3878,6 +3878,9 @@ const LowerCtx = struct {
                 try self.stack.push(self.allocator, null);
             }
 
+            // N-045: a fixed-width byte value must have its declared width.
+            try self.emitFixedWidthStateCheck(prop.type_info);
+
             if (isNumericStateType(prop.type_info)) {
                 const width: i64 = if (prop.type_info == .boolean) 1 else 8;
                 try self.emitPushInt(width);
@@ -3923,6 +3926,41 @@ const LowerCtx = struct {
             .byte_string, .sig, .sig_hash_preimage => true,
             else => false,
         };
+    }
+
+    /// N-045: declared byte width of a fixed-width byte state type, or 0 for
+    /// every other type. MUST match statePropSize (the reader's table) and
+    /// the shared STATE_FIELD_WIDTHS table.
+    fn fixedWidthStateBytes(t: types.RunarType) i64 {
+        return switch (t) {
+            .pub_key => 33,
+            .addr, .ripemd160 => 20,
+            .sha256 => 32,
+            .point, .p256_point => 64,
+            .p384_point => 96,
+            else => 0,
+        };
+    }
+
+    /// N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+    /// Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
+    /// assert it has exactly its declared width:
+    ///
+    ///   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+    ///
+    /// The writer copies these values as they are and the next spend's reader
+    /// slices each at its declared width, so a wrong-width value shifts every
+    /// later field. No-op for every other type.
+    fn emitFixedWidthStateCheck(self: *LowerCtx, t: types.RunarType) !void {
+        const width = fixedWidthStateBytes(t);
+        if (width == 0) return;
+        try self.emitOp(.op_size);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(width);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_numequalverify);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
     }
 
     /// Size in bytes of a state property on the wire, or -1 for variable-length
@@ -6214,6 +6252,8 @@ const LowerCtx = struct {
             state_index += 1;
 
             try self.bringToTopOperand(value_ref, output_operands);
+            // N-045: a fixed-width byte value must have its declared width.
+            try self.emitFixedWidthStateCheck(prop.type_info);
             if (isNumericStateType(prop.type_info)) {
                 const width: i64 = if (prop.type_info == .boolean) 1 else 8;
                 try self.emitPushInt(width);

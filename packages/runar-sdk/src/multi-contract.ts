@@ -42,6 +42,7 @@ import {
 } from '@bsv/sdk';
 import type { RunarContract } from './contract.js';
 import { encodeArg, encodePushData, encodeScriptNumber } from './contract.js';
+import { assertFixedWidthValue } from './state.js';
 import type { Signer } from './signers/index.js';
 import type { UTXO } from './types.js';
 
@@ -246,6 +247,11 @@ export async function assembleMultiContractCall(
           `assembleMultiContractCall: input ${i}: arg ${a} (param '${userParams[a]!.name}': ${userParams[a]!.type}) is ${value}; only null Sig params are auto-signed — pass a concrete value for every other param`,
         );
       }
+      // N-045 (defence in depth): a fixed-width arg must have its declared width.
+      assertFixedWidthValue(
+        value, userParams[a]!.type,
+        `assembleMultiContractCall: input ${i}: arg ${a} (param '${userParams[a]!.name}')`,
+      );
       argsHex += encodeArg(value);
     }
 

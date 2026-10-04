@@ -456,6 +456,15 @@ module Runar
         resolved_args, sig_indices, preimage_index, prevouts_indices =
           resolve_method_args(args, user_params, signer, estimated_inputs: estimated_inputs)
 
+        # N-045 (defence in depth): a fixed-width method arg must have its
+        # declared width -- a covenant may copy it straight into its state.
+        user_params.each_with_index do |param, i|
+          State.check_fixed_width_value(
+            resolved_args[i], param.type,
+            "RunarContract.prepare_call: method '#{method_name}' arg '#{param.name}' (index #{i})"
+          )
+        end
+
         # Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not
         # genuine multi-sig. Two or more AUTO-signed Sig slots on an OR-CHECKSIG
         # method means every branch gets a real signature, and the branch that

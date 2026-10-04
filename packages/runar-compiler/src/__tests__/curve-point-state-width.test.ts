@@ -138,11 +138,16 @@ describe('P256Point / P384Point are fixed-width raw state', () => {
       // lengths unsigned, whitelists the header and asserts exact consumption
       // (+28 hex chars). The fixed-width rows are byte-unchanged, and
       // ByteString == Sig still holds.
-      { shape: 0, type: 'Point', digest: '43b6233d', hexLen: 1392 },
-      { shape: 0, type: 'P256Point', digest: '43b6233d', hexLen: 1392 },
-      { shape: 0, type: 'P384Point', digest: '3ee23454', hexLen: 1392 },
-      { shape: 0, type: 'PubKey', digest: 'a513320b', hexLen: 1392 },
-      { shape: 0, type: 'Sha256', digest: 'c55faa90', hexLen: 1392 },
+      // N-045 re-stamp: only the fixed-width rows of shape 0 (the mutating
+      // write) move — the continuation writer asserts OP_SIZE <width>
+      // OP_NUMEQUALVERIFY before committing the field (+8 hex chars). Re-measured
+      // byte-identical in all seven tiers; Point == P256Point still holds, and
+      // the read shape and the framed rows are byte-unchanged.
+      { shape: 0, type: 'Point', digest: 'd6148b45', hexLen: 1400 },
+      { shape: 0, type: 'P256Point', digest: 'd6148b45', hexLen: 1400 },
+      { shape: 0, type: 'P384Point', digest: 'e9ee2d74', hexLen: 1400 },
+      { shape: 0, type: 'PubKey', digest: '758f1fc8', hexLen: 1400 },
+      { shape: 0, type: 'Sha256', digest: '64697f2b', hexLen: 1400 },
       { shape: 0, type: 'ByteString', digest: 'ffe905dc', hexLen: 1716 },
       { shape: 0, type: 'Sig', digest: 'ffe905dc', hexLen: 1716 },
       { shape: 1, type: 'Point', digest: 'a1e544fa', hexLen: 942 },

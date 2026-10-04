@@ -2473,6 +2473,17 @@ private def getStateScriptPropLive
             | some iv => [pushInitialValue iv]
             | none    => [push 0]
           (pushed, sm.push prop.name)
+    -- Step 1b (N-045): a fixed-width byte value must have its declared
+    -- width before it is committed: `OP_SIZE <w> OP_NUMEQUALVERIFY`
+    -- (net-zero on the stack, so the stack map is unchanged). Mirrors TS
+    -- `emitFixedWidthStateCheck`. Matched on the CONSTRUCTOR so every other
+    -- property type still reduces definitionally to `[]`.
+    let check : List StackOp :=
+      match prop.type with
+      | .pubKey | .addr | .ripemd160 | .sha256 | .point | .p256Point | .p384Point =>
+          [opc "OP_SIZE", push (Int.ofNat (propTypeFixedSize prop.type)),
+           opc "OP_NUMEQUALVERIFY"]
+      | _ => []
     -- Step 2: type-aware width prefix.
     let conv : List StackOp :=
       if propTypeIsNumeric prop.type then
@@ -2491,7 +2502,7 @@ private def getStateScriptPropLive
         match sm1 with
         | _ :: rest => "_conv" :: rest
         | []        => ["_conv"]
-    (load ++ conv, smPostConv)
+    (load ++ check ++ conv, smPostConv)
 
 /-- Liveness-aware variant of `lowerGetStateScriptOps`. Mirrors TS
 `lowerGetStateScript` (`05-stack-lower.ts:2029-2095`) including the
@@ -2599,6 +2610,16 @@ def addOutputStateValuesLive (currentIndex : Nat)
       let opc (s : String) : StackOp := .opcode s
       let push (n : Int) : StackOp := .push (.bigint n)
       let (load, sm1) := loadRefOperand sm v allOperands currentIndex lastUses outerProtected
+      -- N-045: width-check a fixed-width byte value before it is committed
+      -- (`OP_SIZE <w> OP_NUMEQUALVERIFY`, net-zero on the stack). Mirrors TS
+      -- `emitFixedWidthStateCheck`. Matched on the CONSTRUCTOR, like the
+      -- ByteString arm below, so every other type reduces to `[]`.
+      let check : List StackOp :=
+        match p.type with
+        | .pubKey | .addr | .ripemd160 | .sha256 | .point | .p256Point | .p384Point =>
+            [opc "OP_SIZE", push (Int.ofNat (propTypeFixedSize p.type)),
+             opc "OP_NUMEQUALVERIFY"]
+        | _ => []
       let conv : List StackOp :=
         if propTypeIsNumeric p.type then
           [push (Int.ofNat (propTypeFixedSize p.type)), opc "OP_NUM2BIN"]
@@ -2634,7 +2655,7 @@ def addOutputStateValuesLive (currentIndex : Nat)
       let (restOps, smRest) :=
         addOutputStateValuesLive currentIndex lastUses outerProtected
           allOperands smAfterCat vs ps
-      (load ++ conv ++ [opc "OP_CAT"] ++ restOps, smRest)
+      (load ++ check ++ conv ++ [opc "OP_CAT"] ++ restOps, smRest)
 
 /--
 Liveness-aware variant of `lowerAddOutputOps`. Mirrors TS

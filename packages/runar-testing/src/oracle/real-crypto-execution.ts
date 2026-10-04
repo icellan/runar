@@ -57,6 +57,7 @@ import {
   detachUnlockingScript,
 } from 'runar-sdk';
 import type { RunarArtifact, ABIMethod, ABIParam } from 'runar-ir-schema';
+import { STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 import { TestContract } from '../test-contract.js';
 import { TEST_KEYS } from '../test-keys.js';
 import { encodeScriptNumber, hexToBytes, bytesToHex } from '../vm/utils.js';
@@ -388,6 +389,42 @@ export interface StatefulSpendOptions {
    *  unset). F-024: a value-conservation spec needs an input worth more than
    *  the continuation it tries to build. */
   deploySatoshis?: number;
+  /**
+   * N-045 near-miss: build the CALL with an "attacker SDK" that believes the
+   * named fixed-width types have these byte widths (e.g. `{ Sha256: 33 }`).
+   * The SDK refuses a wrong-width fixed-width argument or state value
+   * (defence in depth), but an attacker is not bound by our SDK, so a spec
+   * that wants the covenant's own on-chain width check to be the thing that
+   * rejects needs this. Implemented by temporarily overriding the shared
+   * `STATE_FIELD_WIDTHS` entries — the only table those SDK refusals consult —
+   * for the duration of the call; the deploy is unaffected. The bytes built
+   * are exactly what a hand-built transaction would carry.
+   */
+  attackerFieldWidths?: Record<string, number>;
+}
+
+/** Run `fn` with the named STATE_FIELD_WIDTHS entries overridden (see
+ *  `StatefulSpendOptions.attackerFieldWidths`). */
+async function withAttackerFieldWidths<T>(
+  widths: Record<string, number> | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!widths) return fn();
+  const table = STATE_FIELD_WIDTHS as Record<string, { size: number; encoding: string }>;
+  const saved = new Map<string, { size: number; encoding: string } | undefined>();
+  for (const [type, size] of Object.entries(widths)) {
+    const orig = table[type];
+    if (orig?.encoding !== 'raw') {
+      throw new Error(`attackerFieldWidths: ${type} is not a raw fixed-width state type`);
+    }
+    saved.set(type, orig);
+    table[type] = { size, encoding: orig.encoding };
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [type, orig] of saved) table[type] = orig!;
+  }
 }
 
 function mutateLastByte(hex: string): string {
@@ -545,7 +582,8 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
     if (opts.lockTime !== undefined) callOpts.locktime = opts.lockTime;
     if (opts.sequence !== undefined) callOpts.sequence = opts.sequence;
     if (opts.satoshis !== undefined) callOpts.satoshis = opts.satoshis;
-    await contract.call(opts.method, opts.args, provider, signer, callOpts);
+    await withAttackerFieldWidths(opts.attackerFieldWidths, () =>
+      contract.call(opts.method, opts.args, provider, signer, callOpts));
     callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
     // We have a broadcast call tx to validate: a subsequent reject is a genuine
     // script-guard rejection, not an SDK error before the guard ran (audit #12).

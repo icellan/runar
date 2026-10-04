@@ -472,6 +472,36 @@ _TYPE_WIDTHS = {
 }
 
 
+def check_fixed_width_value(value, field_type: str, what: str) -> None:
+    """N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+    Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+    that is not a hex string of exactly its declared width.
+
+    The on-chain reader slices each such field at its declared width, so a
+    wrong-width value in a state section (or an argument a covenant copies
+    into one) shifts every later field. The compiled covenant refuses such a
+    continuation on chain (``OP_SIZE <width> OP_NUMEQUALVERIFY``); this is the
+    off-chain refusal. No-op for every other type.
+    """
+    width = _TYPE_WIDTHS.get(field_type)
+    if width is None:
+        return
+    if not isinstance(value, str):
+        raise ValueError(
+            f'{what} ({field_type}) must be exactly {width} bytes of hex, got {type(value).__name__}'
+        )
+    if len(value) % 2 != 0 or any(c not in '0123456789abcdefABCDEF' for c in value):
+        raise ValueError(
+            f'{what} ({field_type}) must be exactly {width} bytes of hex, got a non-hex string'
+        )
+    if len(value) != width * 2:
+        raise ValueError(
+            f'{what} ({field_type}) must be exactly {width} bytes of hex, got {len(value) // 2} bytes. '
+            f'A wrong-width {field_type} shifts every later state field when the '
+            f"contract's on-chain reader slices it at {width} bytes"
+        )
+
+
 def _encode_state_value(value, field_type: str, label: str = '?') -> str:
     if field_type in ('int', 'bigint'):
         if value is None:
@@ -507,6 +537,8 @@ def _encode_state_value(value, field_type: str, label: str = '?') -> str:
                 "Writing a placeholder would deploy a state section the contract's own "
                 'on-chain reader cannot parse, leaving the output unspendable'
             )
+        # N-045: a wrong-width value shifts every later field for the reader.
+        check_fixed_width_value(value, field_type, f'serialize_state: state field {label!r}')
         return value
     else:
         # Variable-length types (ByteString, etc.): use push-data encoding

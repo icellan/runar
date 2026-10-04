@@ -197,6 +197,22 @@ public final class StackLower {
     }
 
     /**
+     * N-045: declared byte width of a fixed-width byte state type, or 0 for
+     * every other type. MUST match the reader's size table in the
+     * deserializer and the shared STATE_FIELD_WIDTHS table.
+     */
+    private static int fixedWidthStateBytes(String t) {
+        return switch (t) {
+            case "PubKey" -> 33;
+            case "Addr", "Ripemd160" -> 20;
+            case "Sha256" -> 32;
+            case "Point", "P256Point" -> 64;
+            case "P384Point" -> 96;
+            default -> 0;
+        };
+    }
+
+    /**
      * Unrolled-loop bound for {@code reverseBytes}: 520 is the maximum BSV
      * stack-element size, so the loop always drains the input. The count is
      * part of the emitted bytes, so it must match every peer tier exactly.
@@ -3718,6 +3734,9 @@ public final class StackLower {
                     sm.push("");
                 }
 
+                // N-045: a fixed-width byte value must have its declared width.
+                emitFixedWidthStateCheck(prop.type());
+
                 // The width MUST come from numericStateTypeWidth — the same
                 // table the reader splits on — or this continuation cannot be
                 // re-read.
@@ -4483,6 +4502,26 @@ public final class StackLower {
             sm.pop(); sm.pop();
         }
 
+        /**
+         * N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+         * Ripemd160, Point, P256Point, P384Point) is committed to a
+         * continuation, assert it has exactly its declared width:
+         * {@code [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]}.
+         * The writer copies these values as they are and the next spend's
+         * reader slices each at its declared width, so a wrong-width value
+         * shifts every later field. No-op for every other type.
+         */
+        private void emitFixedWidthStateCheck(String type) {
+            int width = fixedWidthStateBytes(type);
+            if (width == 0) return;
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(width)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUALVERIFY"));
+            sm.pop(); sm.pop();
+        }
+
         private void splitFixedStateFields(List<AnfProperty> stateProps, List<Integer> sizes) {
             if (stateProps.size() == 1) {
                 AnfProperty p = stateProps.get(0);
@@ -4554,6 +4593,8 @@ public final class StackLower {
                 String valueRef = stateValues.get(i);
                 AnfProperty prop = stateProps.get(i);
                 bringToTop(valueRef, operandConsume(valueRef, outputOperands, idx, lastUses));
+                // N-045: a fixed-width byte value must have its declared width.
+                emitFixedWidthStateCheck(prop.type());
                 // Same table as the reader — see numericStateTypeWidth.
                 int numericWidth = numericStateTypeWidth(prop.type());
                 if (numericWidth > 0) {

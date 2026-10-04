@@ -128,6 +128,41 @@ public final class StateSerializer {
     // Encoding — matches Go encodeStateValue
     // ------------------------------------------------------------------
 
+    /**
+     * N-045 (defence in depth): refuses a fixed-width byte value — PubKey 33,
+     * Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+     * that is not a hex string of exactly its declared width. The on-chain
+     * reader slices each such field at its declared width, so a wrong-width
+     * value in a state section (or an argument a covenant copies into one)
+     * shifts every later field. The compiled covenant refuses such a
+     * continuation on chain ({@code OP_SIZE <width> OP_NUMEQUALVERIFY}); this
+     * is the off-chain refusal. No-op for every other type.
+     *
+     * @throws IllegalArgumentException on a wrong-width or non-hex value
+     */
+    public static void checkFixedWidthValue(Object value, String fieldType, String what) {
+        switch (fieldType) {
+            case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "P256Point", "P384Point" -> { }
+            default -> { return; }
+        }
+        int width = stateFieldByteWidth(fieldType);
+        if (!(value instanceof String hex)) {
+            throw new IllegalArgumentException(String.format(
+                "%s (%s) must be exactly %d bytes of hex, got %s",
+                what, fieldType, width, value == null ? "null" : value.getClass().getSimpleName()));
+        }
+        if (hex.length() % 2 != 0 || !hex.matches("[0-9a-fA-F]*")) {
+            throw new IllegalArgumentException(String.format(
+                "%s (%s) must be exactly %d bytes of hex, got a non-hex string", what, fieldType, width));
+        }
+        if (hex.length() != width * 2) {
+            throw new IllegalArgumentException(String.format(
+                "%s (%s) must be exactly %d bytes of hex, got %d bytes. A wrong-width %s shifts "
+                    + "every later state field when the contract's on-chain reader slices it at %d bytes",
+                what, fieldType, width, hex.length() / 2, fieldType, width));
+        }
+    }
+
     static String encodeStateValue(Object value, String fieldType, String label) {
         return switch (fieldType) {
             case "int", "bigint" -> encodeNum2Bin(toBigInteger(value), 8, label);
@@ -160,6 +195,8 @@ public final class StateSerializer {
                             + "on-chain reader cannot parse, leaving the output unspendable",
                         label, fieldType));
                 }
+                // N-045: a wrong-width value shifts every later field for the reader.
+                checkFixedWidthValue(value, fieldType, "serializeState: state field \"" + label + "\"");
                 yield String.valueOf(value);
             }
             default -> {

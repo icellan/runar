@@ -484,6 +484,13 @@ fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String
             // cast constructors hard-assert those widths and all seven compilers
             // emit them as fixed raw slices; framing them instead deploys a state
             // section 1-2 bytes long and the first spend fails.
+            //
+            // N-045: a wrong-width value shifts every later field for the reader.
+            if let Err(e) = check_fixed_width_value(
+                value, field_type, &format!("serialize_state: state field {:?}", label),
+            ) {
+                panic!("{}", e);
+            }
             value.as_bytes().to_string()
         }
         _ => {
@@ -701,6 +708,47 @@ pub(crate) fn state_field_byte_width(field_type: &str) -> Option<usize> {
         "P384Point" => Some(96),
         _ => None,
     }
+}
+
+/// N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+/// Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+/// that is not a hex string of exactly its declared width. The on-chain reader
+/// slices each such field at its declared width, so a wrong-width value in a
+/// state section (or an argument a covenant copies into one) shifts every
+/// later field. The compiled covenant refuses such a continuation on chain
+/// (`OP_SIZE <width> OP_NUMEQUALVERIFY`); this is the off-chain refusal.
+/// `Ok(())` for every other type.
+pub(crate) fn check_fixed_width_value(value: &SdkValue, field_type: &str, what: &str) -> Result<(), String> {
+    if !matches!(
+        field_type,
+        "PubKey" | "Addr" | "Ripemd160" | "Sha256" | "Point" | "P256Point" | "P384Point"
+    ) {
+        return Ok(());
+    }
+    let width = state_field_byte_width(field_type).unwrap_or(0);
+    let hex = match value {
+        SdkValue::Bytes(h) => h,
+        other => {
+            return Err(format!(
+                "runar: {} ({}) must be exactly {} bytes of hex, got {:?}",
+                what, field_type, width, other
+            ))
+        }
+    };
+    if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "runar: {} ({}) must be exactly {} bytes of hex, got a non-hex string",
+            what, field_type, width
+        ));
+    }
+    if hex.len() != width * 2 {
+        return Err(format!(
+            "runar: {} ({}) must be exactly {} bytes of hex, got {} bytes. A wrong-width {} \
+             shifts every later state field when the contract's on-chain reader slices it at {} bytes",
+            what, field_type, width, hex.len() / 2, field_type, width
+        ));
+    }
+    Ok(())
 }
 
 fn decode_state_value(

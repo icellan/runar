@@ -305,6 +305,35 @@ export function findLastOpReturn(scriptHex: string): number {
 // ---------------------------------------------------------------------------
 
 /**
+ * N-045 (defence in depth): refuse a fixed-width byte value — PubKey 33,
+ * Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96 bytes —
+ * that is not a hex string of exactly its declared width. The state reader
+ * slices each such field at its declared width, so a wrong-width value
+ * written into a state section (or passed as the argument a covenant copies
+ * into one) shifts every later field: a 66-byte Sha256 `R || pubkey || 0x22`
+ * is read back as root = R, owner = pubkey. The compiled covenant refuses such
+ * a continuation on chain (`OP_SIZE <width> OP_NUMEQUALVERIFY`); this is the
+ * off-chain refusal, so the SDK never builds one. No-op for every other type.
+ */
+export function assertFixedWidthValue(value: unknown, type: string, what: string): void {
+  const width = STATE_FIELD_WIDTHS[type];
+  if (width?.encoding !== 'raw') return;
+  if (typeof value !== 'string' || !/^[0-9a-fA-F]*$/.test(value) || value.length !== width.size * 2) {
+    const got =
+      typeof value === 'string'
+        ? /^[0-9a-fA-F]*$/.test(value) && value.length % 2 === 0
+          ? `${value.length / 2} bytes`
+          : 'a non-hex string'
+        : typeof value;
+    throw new Error(
+      `${what} (${type}) must be exactly ${width.size} bytes of hex, got ${got}. ` +
+        `A wrong-width ${type} shifts every later state field when the ` +
+        `contract's on-chain reader slices it at ${width.size} bytes.`,
+    );
+  }
+}
+
+/**
  * Encode a state field as raw bytes (no push opcode wrapper) matching the
  * compiler's OP_NUM2BIN-based fixed-width serialization.
  * The result is raw hex bytes that are concatenated after OP_RETURN.
@@ -364,6 +393,8 @@ function encodeStateValue(value: unknown, type: string, label = '?'): string {
               `the contract's own on-chain reader cannot parse.`,
           );
         }
+        // N-045: a wrong-width value shifts every later field for the reader.
+        assertFixedWidthValue(value, type, `serializeState: state field "${label}"`);
         return String(value);
       }
       // Variable-length types (bytes, ByteString, etc.): use push-data

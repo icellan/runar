@@ -222,8 +222,13 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       // bigint == RabinSig still holds.
       // N-044 re-stamp (ByteString only): the push-data writer gains its
       // PUSHDATA4 arm. Every non-framed row is unmoved.
+      // N-045 re-stamp (PubKey only): the continuation writer asserts
+      // OP_SIZE 33 OP_NUMEQUALVERIFY before committing a fixed-width field;
+      // re-measured byte-identical in all seven tiers (the same script as
+      // curve-point-state-width's PubKey write pin). The numeric and framed
+      // rows are unmoved.
       ByteString: 'ffe905dc3e740a5ed3c3ee819b7d5269cc6a78feb7857b0aceef29c5420d332d',
-      PubKey: 'a513320b54ef7740778454b67e1901010ac8e71cffe76c0a0ebea2fe1df4cbd8',
+      PubKey: '758f1fc87b596cfa2eac87f77ee2b3639fef1e3ea5c1bdd6d1b461a07fa98741',
       bigint: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
       // parameter and so gains the 9-byte ABI-domain gate. `bigint` and

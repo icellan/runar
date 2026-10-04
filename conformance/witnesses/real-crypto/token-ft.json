@@ -1,7 +1,7 @@
 {
   "fixture": "token-ft",
   "kind": "stateful",
-  "note": "FungibleToken send(): real checkSig(owner) then a single continuation output carrying the transferred balance to the new owner. Real checkPreimage continuation.",
+  "note": "FungibleToken send(): real checkSig(owner) then a single continuation output carrying the transferred balance to the new owner. Real checkPreimage continuation. N-045: owner (PubKey) is now width-checked (OP_SIZE 33 OP_NUMEQUALVERIFY) before every addOutput commit. The WideHash near-miss below is built by an attacker SDK (attackerFieldWidths) because our own SDK refuses a wrong-width PubKey argument.",
   "spends": [
     {
       "method": "send",
@@ -54,10 +54,34 @@
       "cryptoNearMiss": true,
       "expect": "reject",
       "note": "wrong signer: owner=bob signed by alice"
+    },
+    {
+      "method": "send",
+      "args": [
+        null,
+        "0x03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f3500",
+        "1n"
+      ],
+      "constructorArgs": [
+        {
+          "$pubkey": "alice"
+        },
+        "10n",
+        "0n",
+        "01"
+      ],
+      "signerKey": "alice",
+      "satoshis": 1,
+      "attackerFieldWidths": {
+        "PubKey": 34
+      },
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-045 WIDEHASH: the owner sends to a 34-byte recipient (bob's key + 0x00). Pre-fix the continuation committed all 34 bytes and the next reader (which takes the last 49 bytes) read owner as bob's key shifted by one byte, a key nobody holds; post-fix the covenant's own width check rejects the send on the real Spend engine."
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "3b615cdbe90623922030ce21ca2abd7da2d42e90ad934ad6af4de688a42068e2",
+    "expected-script.hex": "410156418da6d89f5848bfa5788c1ade77df9334a76c9def98821f654a5a18ea",
     "expected-ir.json": "5d2557b57bae9a2fd2a5502af3d8b7d829f04850f260f807c320f35892717197"
   }
 }

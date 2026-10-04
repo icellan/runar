@@ -153,6 +153,21 @@ pub const ContractError = error{
     RawOutputLayoutUnsupported,
 };
 
+/// N-045 (defence in depth): every fixed-width method arg must have its
+/// declared width — a covenant may copy it straight into its state. The
+/// `.int = 0` auto-resolve markers (a PubKey taken from the signer, the
+/// `allPrevouts` slot) are resolved later and skipped here.
+fn checkFixedWidthArgs(params: []const types.ABIParam, args: []const types.StateValue) !void {
+    for (params, args) |p, a| {
+        if (a == .int and a.int == 0 and
+            (std.mem.eql(u8, p.type_name, "PubKey") or std.mem.eql(u8, p.name, AUTO_PREVOUTS_PARAM_NAME)))
+        {
+            continue;
+        }
+        try state_mod.checkFixedWidthValue(a, p.type_name);
+    }
+}
+
 /// RunarContract is a runtime wrapper for a compiled Runar contract. It handles
 /// deployment, method invocation, state tracking, and script construction.
 pub const RunarContract = struct {
@@ -623,6 +638,9 @@ pub const RunarContract = struct {
                 }
             }
         }
+
+        // N-045 (defence in depth): a fixed-width arg must have its declared width.
+        try checkFixedWidthArgs(user_params, args);
 
         var sig_indices: std.ArrayListUnmanaged(usize) = .empty;
         defer sig_indices.deinit(self.allocator);
@@ -1805,6 +1823,8 @@ pub const RunarContract = struct {
 
         const abi_method = self.findMethod(method_name) orelse return ContractError.MethodNotFound;
         if (args.len != abi_method.params.len) return ContractError.ArgCountMismatch;
+        // N-045 (defence in depth): a fixed-width arg must have its declared width.
+        try checkFixedWidthArgs(abi_method.params, args);
 
         // ---- Resolve user args ------------------------------------------
         var resolved_args = try self.allocator.alloc(types.StateValue, args.len);
@@ -2075,6 +2095,9 @@ pub const RunarContract = struct {
                 }
             }
         }
+
+        // N-045 (defence in depth): a fixed-width arg must have its declared width.
+        try checkFixedWidthArgs(user_params, args);
 
         // ---- Resolve args (Sig → 72-byte placeholder) --------------------
         var resolved_args = try self.allocator.alloc(types.StateValue, args.len);

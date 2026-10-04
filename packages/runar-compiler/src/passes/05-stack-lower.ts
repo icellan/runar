@@ -1335,6 +1335,30 @@ class LoweringContext {
   }
 
   /**
+   * N-045: before a fixed-width state value (Sha256, PubKey, Addr, Ripemd160,
+   * Point, P256Point, P384Point) is committed to a continuation, assert it
+   * has exactly its declared width:
+   *
+   *   [..., value]  OP_SIZE <width> OP_NUMEQUALVERIFY  -> [..., value]
+   *
+   * The writer copies these values as they are, and the next spend's reader
+   * slices each one at its declared width. A wrong-width value therefore
+   * shifts every later field: a 66-byte Sha256 `R || pubkey || 0x22` is read
+   * as root = R and owner = pubkey. No-op for every other type.
+   */
+  private emitFixedWidthStateCheck(type: string): void {
+    const width = fixedWidthStateBytes(type);
+    if (width === undefined) return;
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: BigInt(width) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' });
+    this.stackMap.pop();
+    this.stackMap.pop();
+  }
+
+  /**
    * Bring a named value to the top of the stack.
    * If `consume` is true, use ROLL (removes from original position).
    * If `consume` is false, use PICK (copies, leaving original in place).
@@ -3509,6 +3533,9 @@ class LoweringContext {
         this.stackMap.push(null);
       }
 
+      // N-045: a fixed-width byte value must have its declared width.
+      this.emitFixedWidthStateCheck(prop.type);
+
       // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
       // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
       if (prop.type === 'bigint' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
@@ -3861,6 +3888,9 @@ class LoweringContext {
 
       const consume = this.operandConsume(valueRef, outputOperands, bindingIndex, lastUses);
       this.bringToTop(valueRef, consume);
+
+      // N-045: a fixed-width byte value must have its declared width.
+      this.emitFixedWidthStateCheck(prop.type);
 
       // Convert numeric/boolean values to fixed-width bytes.
       // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
@@ -6742,6 +6772,24 @@ function methodUsesCheckPreimage(
  */
 function isVariableLengthStateType(type: string): boolean {
   return type === 'ByteString' || type === 'Sig' || type === 'SigHashPreimage';
+}
+
+/**
+ * N-045: the declared byte width of a fixed-width byte state type, or
+ * `undefined` for every other type. MUST match the reader's size table in
+ * `lowerDeserializeState` (and runar-ir-schema's STATE_FIELD_WIDTHS).
+ */
+function fixedWidthStateBytes(type: string): number | undefined {
+  switch (type) {
+    case 'PubKey': return 33;
+    case 'Addr': return 20;
+    case 'Ripemd160': return 20;
+    case 'Sha256': return 32;
+    case 'Point': return 64;
+    case 'P256Point': return 64;
+    case 'P384Point': return 96;
+    default: return undefined;
+  }
 }
 
 /**

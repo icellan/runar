@@ -776,6 +776,19 @@ impl RunarContract {
             // emits OP_0 for it.
         }
 
+        // N-045 (defence in depth): a fixed-width method arg must have its
+        // declared width — a covenant may copy it straight into its state.
+        for (i, param) in user_params.iter().enumerate() {
+            super::state::check_fixed_width_value(
+                &resolved_args[i],
+                &param.param_type,
+                &format!(
+                    "RunarContract.prepareCall: method '{}' arg '{}' (index {})",
+                    method_name, param.name, i
+                ),
+            )?;
+        }
+
         // Soft heuristic (issue #106): warn only for likely OR-CHECKSIG
         // (OP_BOOLOR + OP_CHECKSIG), not genuine multi-sig (OP_CHECKMULTISIG).
         if sig_indices.len() >= 2 && is_likely_or_checksig(&self.artifact) {

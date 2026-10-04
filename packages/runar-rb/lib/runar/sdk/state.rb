@@ -423,6 +423,36 @@ module Runar
       end
       private_class_method :encode_push_data_state
 
+      # N-045 (defence in depth): refuse a fixed-width byte value -- PubKey 33,
+      # Addr / Ripemd160 20, Sha256 32, Point / P256Point 64, P384Point 96
+      # bytes -- that is not a hex string of exactly its declared width. The
+      # on-chain reader slices each such field at its declared width, so a
+      # wrong-width value in a state section (or an argument a covenant copies
+      # into one) shifts every later field. The compiled covenant refuses such
+      # a continuation on chain (OP_SIZE <width> OP_NUMEQUALVERIFY); this is the
+      # off-chain refusal. No-op for every other type.
+      #
+      # @raise [ArgumentError]
+      def check_fixed_width_value(value, field_type, what)
+        width = TYPE_WIDTHS[field_type]
+        return if width.nil?
+
+        unless value.is_a?(String)
+          raise ArgumentError,
+                "#{what} (#{field_type}) must be exactly #{width} bytes of hex, got #{value.class}"
+        end
+        if value.length.odd? || value !~ /\A[0-9a-fA-F]*\z/
+          raise ArgumentError,
+                "#{what} (#{field_type}) must be exactly #{width} bytes of hex, got a non-hex string"
+        end
+        return if value.length == width * 2
+
+        raise ArgumentError,
+              "#{what} (#{field_type}) must be exactly #{width} bytes of hex, got #{value.length / 2} bytes. " \
+              "A wrong-width #{field_type} shifts every later state field when the " \
+              "contract's on-chain reader slices it at #{width} bytes"
+      end
+
       # @param field_type [String] Runar type name
       # @return [String] hex-encoded bytes
       def encode_state_value(value, field_type, label = '?')
@@ -448,6 +478,8 @@ module Runar
                     "Writing a placeholder would deploy a state section the contract's own " \
                     'on-chain reader cannot parse, leaving the output unspendable'
             end
+            # N-045: a wrong-width value shifts every later field for the reader.
+            check_fixed_width_value(value, field_type, "serialize_state: state field '#{label}'")
             value
           else
             hex = value.is_a?(String) ? value : ''

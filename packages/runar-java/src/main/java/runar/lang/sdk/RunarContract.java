@@ -631,6 +631,14 @@ public final class RunarContract {
             }
         }
 
+        // N-045 (defence in depth): a fixed-width method arg must have its
+        // declared width — a covenant may copy it straight into its state.
+        for (int i = 0; i < userParams.size(); i++) {
+            StateSerializer.checkFixedWidthValue(resolved.get(i), userParams.get(i).type(),
+                "RunarContract.call: method '" + methodName + "' arg '" + userParams.get(i).name()
+                    + "' (index " + i + ")");
+        }
+
         // Soft heuristic (issue #106): warn only for likely OR-CHECKSIG, not
         // genuine multi-sig. Two or more AUTO-signed Sig slots on an OR-CHECKSIG
         // method means every branch gets a real signature, and the branch that
@@ -2020,6 +2028,14 @@ public final class RunarContract {
             }
             rejectUnresolvableNullArg(
                 "RunarContract.prepareCall", m.params().get(i), i, resolved.get(i));
+        }
+
+        // N-045 (defence in depth): a fixed-width method arg must have its
+        // declared width — a covenant may copy it straight into its state.
+        for (int i = 0; i < m.params().size() && i < resolved.size(); i++) {
+            StateSerializer.checkFixedWidthValue(resolved.get(i), m.params().get(i).type(),
+                "RunarContract.prepareCall: method '" + methodName + "' arg '" + m.params().get(i).name()
+                    + "' (index " + i + ")");
         }
 
         String unlockHex = buildUnlockingScript(m, resolved) + intentWitnessHex;

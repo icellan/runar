@@ -236,6 +236,20 @@ fn is_variable_length_state_type(t: &str) -> bool {
     matches!(t, "ByteString" | "Sig" | "SigHashPreimage")
 }
 
+/// N-045: the declared byte width of a fixed-width byte state type, or 0 for
+/// every other type. MUST match the reader's size table in
+/// `lower_deserialize_state` and the shared STATE_FIELD_WIDTHS table.
+fn fixed_width_state_bytes(t: &str) -> usize {
+    match t {
+        "PubKey" => 33,
+        "Addr" | "Ripemd160" => 20,
+        "Sha256" => 32,
+        "Point" | "P256Point" => 64,
+        "P384Point" => 96,
+        _ => 0,
+    }
+}
+
 fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "sha256" => Some(vec!["OP_SHA256"]),
@@ -1219,6 +1233,29 @@ impl LoweringContext {
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
         self.sm.pop(); self.sm.pop();
+    }
+
+    /// N-045: before a fixed-width state value (Sha256, PubKey, Addr,
+    /// Ripemd160, Point, P256Point, P384Point) is committed to a continuation,
+    /// assert it has exactly its declared width:
+    ///
+    ///   [..., value] OP_SIZE <width> OP_NUMEQUALVERIFY -> [..., value]
+    ///
+    /// The writer copies these values as they are and the next spend's reader
+    /// slices each at its declared width, so a wrong-width value shifts every
+    /// later field. No-op for every other type.
+    fn emit_fixed_width_state_check(&mut self, t: &str) {
+        let width = fixed_width_state_bytes(t);
+        if width == 0 {
+            return;
+        }
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(width))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+        self.sm.pop();
+        self.sm.pop();
     }
 
     fn is_last_use(&self, name: &str, current_index: usize, last_uses: &HashMap<String, usize>) -> bool {
@@ -3342,6 +3379,9 @@ impl LoweringContext {
                 self.sm.push("");
             }
 
+            // N-045: a fixed-width byte value must have its declared width.
+            self.emit_fixed_width_state_check(&prop.prop_type);
+
             // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
             // The width MUST come from `numeric_state_type_width` — the same
             // table the reader splits on — or this continuation cannot be
@@ -3683,6 +3723,9 @@ impl LoweringContext {
 
             let consume = self.operand_consume(value_ref, &output_operands, binding_index, last_uses);
             self.bring_to_top(value_ref, consume);
+
+            // N-045: a fixed-width byte value must have its declared width.
+            self.emit_fixed_width_state_check(&prop.prop_type);
 
             // Same table as the reader — see `numeric_state_type_width`.
             let numeric_width = numeric_state_type_width(&prop.prop_type);
