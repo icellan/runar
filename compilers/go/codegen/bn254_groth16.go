@@ -525,6 +525,22 @@ func emitWAG2AddAffine(t *BN254Tracker, tPrefix, qPrefix, lamPrefix, rPrefix, un
 	t.copyToTop(tPrefix+"_x_1", pfx+"tx1")
 	bn254Fp2Sub(t, pfx+"qx0", pfx+"qx1", pfx+"tx0", pfx+"tx1", pfx+"xdf_0", pfx+"xdf_1")
 
+	// Assert Qx ≠ Tx: abort unless (Qx − Tx) mod p is a nonzero Fp2
+	// element. Without this, T == Q makes both differences zero and the
+	// gradient check below holds for every λ, so the "sum" would be the
+	// attacker-chosen λ² − 2·Tx. Reduce first: the subtraction may be
+	// unreduced (or a nonzero multiple of p) under modThreshold.
+	t.copyToTop(pfx+"xdf_0", pfx+"xnz0")
+	t.copyToTop(pfx+"xdf_1", pfx+"xnz1")
+	bn254FieldMod(t, pfx+"xnz0", pfx+"xnz0r")
+	bn254FieldMod(t, pfx+"xnz1", pfx+"xnz1r")
+	t.toTop(pfx + "xnz0r")
+	t.toTop(pfx + "xnz1r")
+	t.rawBlock([]string{pfx + "xnz0r", pfx + "xnz1r"}, "", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_BOOLOR"})
+		e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+	})
+
 	// Verify: λ · (Qx − Tx) == (Qy − Ty) in Fp2. This consumes the
 	// numerator/denominator slots and leaves λ under pfx+"lam".
 	emitWitnessGradientVerifyFp2(t, lamPrefix, pfx+"xdf", pfx+"ydf", pfx+"lam")
@@ -582,9 +598,11 @@ func emitWAG2AddAffine(t *BN254Tracker, tPrefix, qPrefix, lamPrefix, rPrefix, un
 // Soundness note: for a well-formed witness, each intermediate T_i has
 // Ty ≠ 0 (since P ∈ G2 with r ∤ i · k for 0 < i ≤ k) and each addition
 // step has Qx ≠ Tx (since i·P ≠ ±P for i ∈ (1, r)). For a forged P, the
-// gradient check fails at the first 2-torsion or x-collision step (see
-// helper docstrings above). The final equality with ψ(P) is the primary
-// soundness gate.
+// script aborts at the first 2-torsion step (the doubling gradient check
+// has no solution) or x-collision step: T = −P fails the chord gradient
+// check, and T = P — where λ·0 == 0 holds for any λ — is caught by the
+// explicit Qx ≠ Tx assertion in emitWAG2AddAffine. The final equality
+// with ψ(P) is the primary soundness gate.
 func emitWAG2FixedScalarMul(t *BN254Tracker, basePrefix string, k *big.Int, gradientPrefix, rPrefix string) {
 	if k.Sign() <= 0 {
 		panic("emitWAG2FixedScalarMul: scalar must be positive")
