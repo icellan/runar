@@ -130,6 +130,29 @@ def test_payload_depth_vectors(fixture: dict) -> None:
             )
 
 
+def test_malleability_vectors(fixture: dict) -> None:
+    """F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
+    signature, and the TS reference accepts it: BIP-62's low-S rule is
+    transaction-script policy, not part of the envelope protocol. Ruby used to
+    reject it as bad-sig. Proves this tier reaches the TS verdict on the
+    fixture's high-S envelope; it does not prove anything about signing
+    (every tier's signer still emits low-S).
+    """
+    vectors = fixture["malleability_vectors"]
+    assert vectors, "malleability_vectors missing or empty"
+    for v in vectors:
+        vid = v.get("_vector_id", "?")
+        env = SignedEnvelope.from_dict(v["envelope"])
+        r = verify_envelope(env, now_ms=fixture["verify_now_ms"])
+        if v["expect_ok"]:
+            assert r.ok, f"{vid}: expected ok=True, got reason={r.reason}"
+        else:
+            assert not r.ok, f"{vid}: expected ok=False"
+            assert r.reason == VerifyEnvelopeReason(v["reason"]), (
+                f"{vid}: got reason={r.reason}, want {v['reason']}"
+            )
+
+
 def test_payload_depth_limit_matches_fixture(fixture: dict) -> None:
     """The bound is part of the wire contract, so the fixture pins it and
     every tier asserts its own constant against the fixture's number."""

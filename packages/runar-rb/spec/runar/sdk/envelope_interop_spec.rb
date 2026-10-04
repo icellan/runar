@@ -106,6 +106,29 @@ RSpec.describe 'Runar::SDK::Envelope cross-tier interop' do
     end
   end
 
+  # F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
+  # signature, and the TS reference accepts it: BIP-62's low-S rule is
+  # transaction-script policy, not part of the envelope protocol. THIS tier
+  # used to reject it as bad-sig (Runar::ECDSA.ecdsa_verify enforced low-S for
+  # every caller). Proves verify_envelope reaches the TS verdict on the
+  # fixture's high-S envelope; it does not prove anything about signing (the
+  # signer still emits low-S) or about the low-S check other callers keep.
+  it 'reaches the TS verdict on every malleability vector' do
+    vectors = fixture['malleability_vectors']
+    expect(vectors).not_to be_empty
+    vectors.each do |v|
+      vid = v['_vector_id']
+      env = Runar::SDK::Envelope::SignedEnvelope.from_h(v['envelope'])
+      r = Runar::SDK::Envelope.verify_envelope(envelope: env, now_ms: fixture['verify_now_ms'])
+      if v['expect_ok']
+        expect(r[:ok]).to be(true), "#{vid}: expected ok=true, got reason=#{r[:reason]}"
+      else
+        expect(r[:ok]).to be(false), "#{vid}: expected ok=false"
+        expect(r[:reason]).to eq(v['reason']), "#{vid}: got reason=#{r[:reason]}"
+      end
+    end
+  end
+
   # This tier needs an assertion the end-to-end vectors cannot give it. Ruby's
   # JSON.parse default (max_nesting: 100) already rejects the over-limit vector
   # on its own, so weakening payload_exceeds_max_depth? does NOT redden the

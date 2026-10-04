@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -522,5 +522,59 @@ describe('verifyEnvelope clockSkewMs (R-261)', () => {
     const r = verifyEnvelope({ envelope: env, clockSkewMs: 10_000 });
     expect(r.reason).toBeUndefined();
     expect(r.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-138 — high-S signatures.
+//
+// ECDSA is malleable: if (r, s) verifies, so does (r, N - s). BIP-62's low-S
+// rule is transaction-script policy, not part of the envelope protocol, and
+// this tier (the reference) delegates to @bsv/sdk's raw ECDSA verify, which
+// has no low-S check — so a high-S envelope signature is ACCEPTED. Ruby used
+// to reject it as bad-sig. The fixture's malleability_vectors pin the verdict
+// for all seven tiers; TS replays them with Date.now() pinned to the fixture's
+// verify_now_ms, since its verify has no injectable clock.
+//
+// Proves: TS's verdict on the committed high-S vector is what the fixture
+// says, and the vector really is high-S. Does not prove anything about
+// signing — every signer still emits low-S.
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope malleability vectors (F-138)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reaches the fixture verdict on every malleability vector', () => {
+    const fixturePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../conformance/sdk-envelope/fixtures.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      verify_now_ms: number;
+      malleability_vectors: Array<{
+        _vector_id: string;
+        expect_ok: boolean;
+        reason?: string;
+        envelope: SignedEnvelope;
+      }>;
+    };
+    expect(fixture.malleability_vectors.length).toBeGreaterThan(0);
+    vi.spyOn(Date, 'now').mockReturnValue(fixture.verify_now_ms);
+
+    const N = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+    for (const v of fixture.malleability_vectors) {
+      // The vector must actually carry a high-S signature, or it pins nothing.
+      const der = Utils.toArray(v.envelope.sig, 'hex');
+      const rLen = der[3]!;
+      const sLen = der[4 + rLen + 1]!;
+      const s = BigInt('0x' + Utils.toHex(der.slice(4 + rLen + 2, 4 + rLen + 2 + sLen)));
+      expect(s > N / 2n, `${v._vector_id}: s must be high`).toBe(true);
+
+      const r = verifyEnvelope({ envelope: v.envelope });
+      expect(r.ok, `${v._vector_id}: reason=${r.reason}`).toBe(v.expect_ok);
+      if (!v.expect_ok) expect(r.reason).toBe(v.reason);
+    }
   });
 });

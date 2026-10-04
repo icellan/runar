@@ -358,6 +358,50 @@ test "interop: shared payload depth bound" {
     }
 }
 
+// F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
+// signature, and the TS reference accepts it: BIP-62's low-S rule is
+// transaction-script policy, not part of the envelope protocol. Ruby used to
+// reject it as bad-sig. Proves this tier reaches the TS verdict on the
+// fixture's high-S envelope; it does not prove anything about signing (every
+// tier's signer still emits low-S).
+test "interop: malleability vectors reach the TS verdict" {
+    const allocator = std.testing.allocator;
+    const bytes = try loadFixtureBytes(allocator);
+    defer allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const now_ms = parsed.value.object.get("verify_now_ms").?.integer;
+    const mvs = parsed.value.object.get("malleability_vectors").?.array;
+    try std.testing.expect(mvs.items.len > 0);
+    for (mvs.items) |mv| {
+        const obj = mv.object;
+        const vid = obj.get("_vector_id").?.string;
+        const e = obj.get("envelope").?.object;
+        const env = envelope.SignedEnvelope{
+            .payload = e.get("payload").?.string,
+            .sig = e.get("sig").?.string,
+            .pubkey = e.get("pubkey").?.string,
+            .nonce = e.get("nonce").?.integer,
+            .expiresAt = e.get("expiresAt").?.integer,
+        };
+        var r = try envelope.verifyEnvelope(allocator, .{ .envelope = &env, .now_ms = now_ms });
+        defer r.deinit();
+        if (obj.get("expect_ok").?.bool) {
+            if (!r.ok) {
+                std.debug.print("{s}: expected ok=true, got reason={s}\n", .{ vid, if (r.reason) |x| x.wire() else "-" });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        if (r.ok) {
+            std.debug.print("{s}: expected ok=false\n", .{vid});
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expectEqualStrings(obj.get("reason").?.string, r.reason.?.wire());
+    }
+}
+
 // R-261. An EXPLICIT clock skew of 0 must mean 0, not "not supplied". Six
 // tiers already distinguished the two (this one via a struct default); Go
 // conflated them and silently gave a caller asking for strict expiry a

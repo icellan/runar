@@ -255,6 +255,36 @@ class EnvelopeInteropTest {
     }
 
     /**
+     * F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
+     * signature, and the TS reference accepts it: BIP-62's low-S rule is
+     * transaction-script policy, not part of the envelope protocol. Ruby used
+     * to reject it as bad-sig. Proves this tier reaches the TS verdict on the
+     * fixture's high-S envelope; it does not prove anything about signing
+     * (every tier's signer still emits low-S).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void malleabilityVectors() throws Exception {
+        Map<String, Object> fixture = loadFixture();
+        long verifyNowMs = ((Number) fixture.get("verify_now_ms")).longValue();
+        List<Map<String, Object>> vectors = (List<Map<String, Object>>) fixture.get("malleability_vectors");
+        assertFalse(vectors.isEmpty(), "malleability_vectors missing or empty");
+        for (Map<String, Object> mv : vectors) {
+            String vid = (String) mv.get("_vector_id");
+            Envelope.VerifyEnvelopeOpts vo = new Envelope.VerifyEnvelopeOpts();
+            vo.envelope = envelopeFromMap((Map<String, Object>) mv.get("envelope"));
+            vo.nowMs = verifyNowMs;
+            Envelope.VerifyEnvelopeResult r = Envelope.verify(vo);
+            if (Boolean.TRUE.equals(mv.get("expect_ok"))) {
+                assertTrue(r.ok, vid + ": expected ok=true, got reason=" + r.reason);
+            } else {
+                assertFalse(r.ok, vid + ": expected ok=false");
+                assertEquals(mv.get("reason"), r.reason.wire, vid);
+            }
+        }
+    }
+
+    /**
      * The bound is part of the wire contract, so the fixture pins it and every
      * tier asserts its own constant against the fixture's number.
      */

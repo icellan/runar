@@ -40,6 +40,13 @@ type fixtureDepthVector struct {
 	Envelope SignedEnvelope `json:"envelope"`
 }
 
+type fixtureMalleability struct {
+	VectorID string         `json:"_vector_id"`
+	ExpectOK bool           `json:"expect_ok"`
+	Reason   string         `json:"reason"`
+	Envelope SignedEnvelope `json:"envelope"`
+}
+
 type fixtureClockVector struct {
 	VectorID string `json:"_vector_id"`
 	// Pointers so a JSON null ("the caller supplies nothing") is
@@ -63,6 +70,7 @@ type fixture struct {
 	PayloadDepthLimit    int                      `json:"payload_depth_limit"`
 	ClockSkewVectors     []fixtureClockVector     `json:"clock_skew_vectors"`
 	DepthVectors         []fixtureDepthVector     `json:"depth_vectors"`
+	MalleabilityVectors  []fixtureMalleability    `json:"malleability_vectors"`
 }
 
 func loadFixture(t *testing.T) fixture {
@@ -334,6 +342,35 @@ func TestEnvelopeInterop_DepthVectors(t *testing.T) {
 		}
 		if string(r.Reason) != dv.Reason {
 			t.Errorf("%s: got reason=%s want=%s", dv.VectorID, r.Reason, dv.Reason)
+		}
+	}
+}
+
+// TestEnvelopeInterop_MalleabilityVectors — F-138. A high-S signature (s
+// replaced by N - s) is still a valid ECDSA signature, and the TS reference
+// accepts it: BIP-62's low-S rule is transaction-script policy, not part of
+// the envelope protocol. Ruby used to reject it as bad-sig. Proves this tier
+// reaches the TS verdict on the fixture's high-S envelope; it does not prove
+// anything about signing (every tier's signer still emits low-S).
+func TestEnvelopeInterop_MalleabilityVectors(t *testing.T) {
+	f := loadFixture(t)
+	if len(f.MalleabilityVectors) == 0 {
+		t.Fatal("malleability_vectors missing or empty")
+	}
+	for _, mv := range f.MalleabilityVectors {
+		r := VerifyEnvelope(VerifyEnvelopeOpts{Envelope: mv.Envelope, NowMs: Int64Ptr(f.VerifyNowMs)})
+		if mv.ExpectOK {
+			if !r.OK {
+				t.Errorf("%s: expected ok=true, got reason=%s", mv.VectorID, r.Reason)
+			}
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s: expected ok=false", mv.VectorID)
+			continue
+		}
+		if string(r.Reason) != mv.Reason {
+			t.Errorf("%s: got reason=%s want=%s", mv.VectorID, r.Reason, mv.Reason)
 		}
 	}
 }

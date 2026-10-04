@@ -115,9 +115,12 @@ module Runar
     # @param sig_bytes [String] binary DER signature
     # @param pk_bytes  [String] binary public key (33 or 65 bytes)
     # @param msg_hash  [String] binary 32-byte message hash
+    # @param low_s     [Boolean] enforce BIP-62's low-S rule (default true).
+    #                  Pass false for protocols that are not Bitcoin script —
+    #                  the signed envelope accepts high-S like the TS reference.
     # @return [Boolean]
     # rubocop:disable Metrics/MethodLength, Metrics/AbcSize, Metrics/CyclomaticComplexity
-    def ecdsa_verify(sig_bytes, pk_bytes, msg_hash)
+    def ecdsa_verify(sig_bytes, pk_bytes, msg_hash, low_s: true)
       parsed = parse_der_signature_bytes(sig_bytes)
       return false if parsed.nil?
 
@@ -128,7 +131,7 @@ module Runar
       # Bitcoin nodes enforce this on-chain; the signer already normalizes to
       # low-S (see ecdsa_sign), so the verifier must mirror that enforcement.
       half_n = CURVE_N >> 1
-      return false if sig_s > half_n
+      return false if low_s && sig_s > half_n
 
       qx, qy = decompress_pubkey_bytes(pk_bytes)
 

@@ -265,5 +265,41 @@ RSpec.describe Runar::ECDSA do
       expect(described_class.verify(TEST_DIGEST_HEX, bob_sig_hex, ALICE_PUB_HEX)).to be false
     end
   end
+
+  # -------------------------------------------------------------------------
+  # F-138: the low-S rule is opt-out, not gone
+  # -------------------------------------------------------------------------
+  # The signed envelope verifies with low_s: false (the TS reference accepts
+  # high-S there). Every other caller — check_sig, the ANF interpreter — keeps
+  # BIP-62's rule by default. Proves both halves on one (r, s) / (r, N - s)
+  # pair from conformance/sdk-envelope/fixtures.json; says nothing about
+  # whether a Bitcoin node would relay either.
+  describe '.ecdsa_verify low_s option' do
+    let(:payload) { '{"expiresAt":1700000030000,"kind":"hello","n":7,"nonce":1700000000000}' }
+    let(:digest) { Digest::SHA256.digest(payload) }
+    let(:pk) { ['0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'].pack('H*') }
+    let(:low_s_sig) do
+      ['3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e52' \
+       '02201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31'].pack('H*')
+    end
+    let(:high_s_sig) do
+      ['3046022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e52' \
+       '022100e307deab2c8784b1045b630792ea83f084b1df3f21618d9107cd9d570a522510'].pack('H*')
+    end
+
+    it 'rejects the high-S form by default and accepts the low-S form' do
+      expect(described_class.ecdsa_verify(low_s_sig, pk, digest)).to be true
+      expect(described_class.ecdsa_verify(high_s_sig, pk, digest)).to be false
+    end
+
+    it 'accepts the high-S form with low_s: false' do
+      expect(described_class.ecdsa_verify(high_s_sig, pk, digest, low_s: false)).to be true
+    end
+
+    it 'still rejects a high-S signature over a different digest with low_s: false' do
+      other = Digest::SHA256.digest("#{payload} ")
+      expect(described_class.ecdsa_verify(high_s_sig, pk, other, low_s: false)).to be false
+    end
+  end
 end
 # rubocop:enable Metrics/BlockLength

@@ -241,6 +241,42 @@ fn payload_depth_vectors() {
     }
 }
 
+/// F-138. A high-S signature (s replaced by N - s) is still a valid ECDSA
+/// signature, and the TS reference accepts it: BIP-62's low-S rule is
+/// transaction-script policy, not part of the envelope protocol. Ruby used to
+/// reject it as bad-sig. Proves this tier reaches the TS verdict on the
+/// fixture's high-S envelope; it does not prove anything about signing (every
+/// tier's signer still emits low-S).
+#[test]
+fn malleability_vectors() {
+    let fixture = load_fixture();
+    let now_ms = fixture["verify_now_ms"].as_i64().unwrap();
+    let vectors = fixture["malleability_vectors"]
+        .as_array()
+        .expect("malleability_vectors missing");
+    assert!(!vectors.is_empty(), "malleability_vectors empty");
+    for v in vectors {
+        let id = v["_vector_id"].as_str().unwrap_or("?");
+        let env = envelope_from_value(&v["envelope"]);
+        let r = verify_envelope(VerifyEnvelopeOpts {
+            envelope: &env,
+            expected_keys: None,
+            clock_skew_ms: None,
+            now_ms: Some(now_ms),
+        });
+        if v["expect_ok"].as_bool().unwrap() {
+            assert!(r.ok, "{id}: expected ok=true, got {:?}", r.reason);
+            continue;
+        }
+        assert!(!r.ok, "{id}: expected ok=false");
+        let want = match v["reason"].as_str().unwrap() {
+            "bad-sig" => VerifyEnvelopeReason::BadSig,
+            other => panic!("unknown reason {other}"),
+        };
+        assert_eq!(r.reason, Some(want), "{id}");
+    }
+}
+
 /// The bound is part of the wire contract, so the fixture pins it and every
 /// tier asserts its own constant against the fixture's number.
 #[test]

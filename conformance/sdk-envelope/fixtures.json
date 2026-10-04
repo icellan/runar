@@ -304,6 +304,21 @@
       }
     }
   ],
+  "malleability_vectors_notes": "F-138 (CL-BUG-159 / CL-BUG-241). ECDSA signatures are malleable: if (r, s) verifies for a digest under a key, so does (r, N - s). BIP-62's low-S rule is a Bitcoin SCRIPT policy (SCRIPT_VERIFY_LOW_S) for transaction signatures; it is not part of the envelope protocol. The TS reference verifyEnvelope delegates to @bsv/sdk's raw ECDSA verify, which has no low-S check, so the reference ACCEPTS a high-S envelope signature. Measured on mv1 before the fix: ts / go / python / zig / java ok:true; ruby bad-sig (an explicit BIP-62 check in Runar::ECDSA.ecdsa_verify, now skipped for envelopes via low_s: false) and rust bad-sig (k256's verify_prehash rejects high-S outright; envelope.rs now normalizes s before verifying). Every signer in every tier still EMITS low-S; this section only pins what a VERIFIER must accept, which is the case an overlay backend meets when a client signs with a non-normalizing library or a relay malleates s. Every signature in the rest of this file is low-S, so without this vector the split was invisible. Replay each envelope at verify_now_ms with no allowlist; the vector's signature is valid for its payload, so a tier that rejects it can only do so on the low-S rule.",
+  "malleability_vectors": [
+    {
+      "_vector_id": "mv1-high-s-signature-accepted",
+      "_notes": "valid_envelope with its signature's s replaced by N - s (DER re-encoded: s now has its top bit set, so it gains a 0x00 pad byte and the sig grows from 0x45 to 0x46 bytes). r, payload, pubkey, nonce and expiresAt are unchanged. Mathematically the same signature class as valid_envelope; the TS reference accepts it.",
+      "expect_ok": true,
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3046022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e52022100e307deab2c8784b1045b630792ea83f084b1df3f21618d9107cd9d570a522510",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    }
+  ],
   "signing_vectors_notes": "GAP-064 cross-tier signing reproduction. Each tier, signing the SAME payload with the SAME key (alice priv=1) via RFC 6979 deterministic ECDSA whose nonce HMAC uses PLAIN SHA-256, MUST produce the BYTE-IDENTICAL low-S DER signature listed in expected_sig. expected_payload = canonicalJson({...data, nonce, expiresAt}); expected_sig = low-S DER of deterministic ECDSA over sha256(expected_payload) signed directly (the digest is the message representative — do NOT re-hash). Generated via the TS reference (runar-ir-schema canonicalJsonStringify + @bsv/sdk primitives/ECDSA sign with forceLowS=true).",
   "signing_vectors": [
     {
