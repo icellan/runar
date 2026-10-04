@@ -3,6 +3,7 @@ package ir
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 // N-069 — presence and JSON type of the ANF IR's required fields, checked on
@@ -248,6 +249,61 @@ func irOptSigHashType(method irObj, path string) error {
 	return fmt.Errorf("IR validation: %s must be one of 65, 66, 67, 193, 194, 195, got %v", lp, n)
 }
 
+// N-059 / F-102: a check_preimage binding's optional sighashFlag, at every
+// nesting depth, on the raw document — where an explicit 0 is still
+// distinguishable from an absent field (the typed ANFValue decodes both to 0).
+// Codegen appends `sighashFlag & 0xff` to the OP_PUSH_TX binding, so an
+// out-of-set value is a byte no BSV spend can satisfy and an explicit 0 emits
+// 0x00 in five tiers. Absent (or null) means the default ALL|FORKID. In a
+// public method the flag must also equal the method's sigHashType (default
+// 0x41): the artifact tells the SDK to sign under sigHashType, the script
+// derives its sighash under the flag, and a divergence is unspendable. Both
+// diagnostics are shared verbatim with the other six tiers (the first is
+// F-068's, which validateBindings also still raises on the typed program).
+func irCheckSighashFlags(obj irObj, key, path, method string, isPublic bool, declared float64) error {
+	lp := irFieldPath(path, key)
+	for i, b := range obj[key].([]any) {
+		binding := b.(map[string]any)
+		vp := fmt.Sprintf("%s[%d].value", lp, i)
+		v := binding["value"].(map[string]any)
+		switch v["kind"] {
+		case "if":
+			if err := irCheckSighashFlags(v, "then", vp, method, isPublic, declared); err != nil {
+				return err
+			}
+			if err := irCheckSighashFlags(v, "else", vp, method, isPublic, declared); err != nil {
+				return err
+			}
+		case "loop":
+			if err := irCheckSighashFlags(v, "body", vp, method, isPublic, declared); err != nil {
+				return err
+			}
+		case "check_preimage":
+			flag := float64(0x41)
+			if raw, ok := v["sighashFlag"]; ok && raw != nil {
+				n, isNum := raw.(float64)
+				if !isNum {
+					return irMalformed(irFieldPath(vp, "sighashFlag"), "an integer", raw)
+				}
+				flag = n
+				switch n {
+				case 0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3:
+				default:
+					return fmt.Errorf(
+						"IR validation: method %s binding %v check_preimage has sighashFlag %s; sighashFlag must be one of {0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3} (ALL/NONE/SINGLE with FORKID, optionally ANYONECANPAY). Any other value is truncated to a sighash byte no BSV spend can satisfy.",
+						method, binding["name"], strconv.FormatFloat(n, 'f', -1, 64))
+				}
+			}
+			if isPublic && flag != declared {
+				return fmt.Errorf(
+					"IR validation: method %s binding %v check_preimage has sighashFlag %s but the method declares sigHashType %s; a public method's check_preimage must bind the sighash type its ABI declares, or the SDK signs a preimage the script rejects.",
+					method, binding["name"], strconv.FormatFloat(flag, 'f', -1, 64), strconv.FormatFloat(declared, 'f', -1, 64))
+			}
+		}
+	}
+	return nil
+}
+
 // assertRequiredIRFields returns the first required field that is missing or
 // of the wrong JSON type. See the file comment.
 func assertRequiredIRFields(data []byte) error {
@@ -316,6 +372,13 @@ func assertRequiredIRFields(data []byte) error {
 			}
 		}
 		if err := irCheckBindings(method, "body", mp); err != nil {
+			return err
+		}
+		declared, isNum := method["sigHashType"].(float64)
+		if !isNum {
+			declared = 0x41
+		}
+		if err := irCheckSighashFlags(method, "body", mp, method["name"].(string), method["isPublic"].(bool), declared); err != nil {
 			return err
 		}
 	}

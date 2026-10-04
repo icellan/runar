@@ -172,6 +172,54 @@ def _opt_sighash_type(obj: dict, path: str) -> None:
         )
 
 
+# N-059 / F-102 (F-068 in Go): a ``check_preimage`` binding's optional
+# ``sighashFlag``, at every nesting depth. Codegen appends ``sighashFlag & 0xff``
+# to the OP_PUSH_TX binding, so an out-of-set value was truncated to a byte no
+# BSV spend can satisfy (999999 -> 0x3F, FORKID clear) and an explicit 0
+# emitted a 0x00 byte. Absent (or null) means the default ALL|FORKID. In a
+# public method the flag must also equal the method's ``sigHashType`` (default
+# 0x41): the artifact tells the SDK to sign under ``sigHashType``, the script
+# derives its sighash under the flag, and a divergence is unspendable. Both
+# diagnostics are shared verbatim with the other six tiers.
+_SIGHASH_DEFAULT = 0x41
+
+
+def _check_sighash_flags(
+    obj: dict, key: str, path: str, method: str, is_public: bool, declared: int
+) -> None:
+    lp = _path(path, key)
+    for i, binding in enumerate(obj[key]):
+        vp = f"{lp}[{i}].value"
+        v = binding["value"]
+        kind = v["kind"]
+        if kind == "if":
+            _check_sighash_flags(v, "then", vp, method, is_public, declared)
+            _check_sighash_flags(v, "else", vp, method, is_public, declared)
+        elif kind == "loop":
+            _check_sighash_flags(v, "body", vp, method, is_public, declared)
+        elif kind == "check_preimage":
+            flag = v.get("sighashFlag")
+            if flag is None:
+                flag = _SIGHASH_DEFAULT
+            elif isinstance(flag, bool) or not isinstance(flag, (int, float)):
+                raise _malformed(_path(vp, "sighashFlag"), "an integer", flag)
+            elif flag not in _SIGHASH_TYPES:
+                raise ValueError(
+                    f"IR validation: method {method} binding {binding['name']} check_preimage "
+                    f"has sighashFlag {flag}; sighashFlag must be one of "
+                    "{0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3} (ALL/NONE/SINGLE with FORKID, "
+                    "optionally ANYONECANPAY). Any other value is truncated to a sighash "
+                    "byte no BSV spend can satisfy."
+                )
+            if is_public and flag != declared:
+                raise ValueError(
+                    f"IR validation: method {method} binding {binding['name']} check_preimage "
+                    f"has sighashFlag {int(flag)} but the method declares sigHashType {declared}; "
+                    "a public method's check_preimage must bind the sighash type its ABI "
+                    "declares, or the SDK signs a preimage the script rejects."
+                )
+
+
 def assert_required_ir_fields(root: Any) -> None:
     """Raise ``ValueError`` on the first required field that is missing or mistyped."""
     program = _as_obj(root, "the IR document")
@@ -193,3 +241,8 @@ def assert_required_ir_fields(root: Any) -> None:
             param = _as_obj(p, pp)
             _req_strs(param, pp, "name", "type")
         _check_bindings(method, "body", mp)
+        declared = method.get("sigHashType")
+        _check_sighash_flags(
+            method, "body", mp, method["name"], method["isPublic"],
+            _SIGHASH_DEFAULT if declared is None else int(declared),
+        )

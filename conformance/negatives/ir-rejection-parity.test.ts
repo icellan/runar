@@ -139,12 +139,24 @@ const PROPERTY_INIT_POSITIVE_CONTROL = join(
   'conformance/tests/fixed-array-index/expected-ir.json',
 );
 
+/**
+ * The fifth control. `I43`-`I46` (N-059) are about a `check_preimage`
+ * binding's `sighashFlag`, and none of the goldens above contains a
+ * `check_preimage`. `stateful-counter` does (`increment`'s `t1`); it has no
+ * `compilers` allowlist and all six IR tiers emit its golden bytes.
+ */
+const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
+  REPO,
+  'conformance/tests/stateful-counter/expected-ir.json',
+);
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],
   ['bounded-loop', LOOP_POSITIVE_CONTROL],
   ['multi-method', METHOD_CALL_POSITIVE_CONTROL],
   ['fixed-array-index', PROPERTY_INIT_POSITIVE_CONTROL],
+  ['stateful-counter', CHECK_PREIMAGE_POSITIVE_CONTROL],
 ];
 
 const fixtures = readdirSync(DIR)

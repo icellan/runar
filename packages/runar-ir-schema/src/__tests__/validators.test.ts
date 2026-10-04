@@ -484,6 +484,28 @@ describe('R-089 — check_preimage.sighashFlag (ANF)', () => {
       ),
     ).toBe(true);
   });
+
+  // N-059: the schema allowed 0..255, but codegen appends the flag as the
+  // sighash byte, and only the six modes the @sighash grammar produces carry
+  // FORKID with a real base type. 63 (0x3F) and an explicit 0 validated and
+  // compiled to covenants no BSV spend can satisfy. Proves the schema now
+  // matches the --ir loaders' set; does not prove the flag/sigHashType
+  // consistency rule, which JSON Schema cannot express (the loaders enforce
+  // it; conformance/negatives/ir-sighash-flag.test.ts).
+  it.each([0, 1, 0x3f, 0x40, 0x44, 0x81, 0xff, 256, 511, 999999, -5])(
+    'rejects sighashFlag %d (outside the @sighash set)',
+    (flag) => {
+      const anf = makeSighashANF();
+      (anf.methods[0]!.body[1]!.value as Record<string, unknown>).sighashFlag = flag;
+      expect(validateANF(anf).valid).toBe(false);
+    },
+  );
+
+  it.each([0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3])('accepts sighashFlag %d', (flag) => {
+    const anf = makeSighashANF();
+    (anf.methods[0]!.body[1]!.value as Record<string, unknown>).sighashFlag = flag;
+    expect(validateANF(anf).valid).toBe(true);
+  });
 });
 
 describe('R-089 — ABIMethod.sigHashType (artifact)', () => {

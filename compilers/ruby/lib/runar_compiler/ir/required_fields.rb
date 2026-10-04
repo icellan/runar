@@ -150,6 +150,52 @@ module RunarCompiler
         raise ArgumentError, "IR validation: #{lp} must be one of #{SIGHASH_TYPES.join(', ')}, got #{v}"
       end
 
+      # N-059 / F-102 (F-068 in Go): a check_preimage binding's optional
+      # sighashFlag, at every nesting depth. Codegen appends `sighashFlag & 0xff`
+      # to the OP_PUSH_TX binding, so an out-of-set value was truncated to a byte
+      # no BSV spend can satisfy (999999 -> 0x3F, FORKID clear) and an explicit 0
+      # emitted a 0x00 byte. Absent (or null) means the default ALL|FORKID. In a
+      # public method the flag must also equal the method's sigHashType (default
+      # 0x41): the artifact tells the SDK to sign under sigHashType, the script
+      # derives its sighash under the flag, and a divergence is unspendable. Both
+      # diagnostics are shared verbatim with the other six tiers.
+      SIGHASH_DEFAULT = 0x41
+
+      def check_sighash_flags(obj, key, path, method, is_public, declared)
+        lp = field_path(path, key)
+        obj[key].each_with_index do |binding, i|
+          vp = "#{lp}[#{i}].value"
+          v = binding["value"]
+          case v["kind"]
+          when "if"
+            check_sighash_flags(v, "then", vp, method, is_public, declared)
+            check_sighash_flags(v, "else", vp, method, is_public, declared)
+          when "loop"
+            check_sighash_flags(v, "body", vp, method, is_public, declared)
+          when "check_preimage"
+            flag = v["sighashFlag"]
+            if flag.nil?
+              flag = SIGHASH_DEFAULT
+            elsif !flag.is_a?(Numeric)
+              raise malformed(field_path(vp, "sighashFlag"), "an integer", flag)
+            elsif !SIGHASH_TYPES.include?(flag)
+              raise ArgumentError,
+                    "IR validation: method #{method} binding #{binding['name']} check_preimage has " \
+                    "sighashFlag #{flag}; sighashFlag must be one of {0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3} " \
+                    "(ALL/NONE/SINGLE with FORKID, optionally ANYONECANPAY). Any other value is " \
+                    "truncated to a sighash byte no BSV spend can satisfy."
+            end
+            if is_public && flag != declared
+              raise ArgumentError,
+                    "IR validation: method #{method} binding #{binding['name']} check_preimage has " \
+                    "sighashFlag #{flag.to_i} but the method declares sigHashType #{declared}; a public " \
+                    "method's check_preimage must bind the sighash type its ABI declares, or the SDK " \
+                    "signs a preimage the script rejects."
+            end
+          end
+        end
+      end
+
       # Raise ArgumentError on the first required field that is missing or mistyped.
       def assert!(root)
         program = as_obj(root, "the IR document")
@@ -172,6 +218,8 @@ module RunarCompiler
             req_str(as_obj(p, pp), pp, "name", "type")
           end
           check_bindings(method, "body", mp)
+          declared = method["sigHashType"].nil? ? SIGHASH_DEFAULT : method["sigHashType"].to_i
+          check_sighash_flags(method, "body", mp, method["name"], method["isPublic"], declared)
         end
       end
     end

@@ -105,12 +105,15 @@ class R086IrIntegerRangeTest {
 
     @Test
     void controlInRangeIntegerFieldsStillDecode() {
-        AnfProgram p = parseShell(
+        // N-059: a public method's check_preimage flag must equal the method's
+        // sigHashType (default 0x41), so the shell declares the 67 it carries.
+        AnfProgram p = AnfLoader.parse(SHELL.formatted(
             "{\"name\":\"t0\",\"value\":{\"kind\":\"check_preimage\",\"preimage\":\"p\","
                 + "\"sighashFlag\":67},"
                 + "\"sourceLoc\":{\"file\":\"C.runar.ts\",\"line\":12,\"column\":4}},"
                 + "{\"name\":\"t1\",\"value\":{\"kind\":\"raw_script\",\"bytes\":\"51\","
-                + "\"in_arity\":0,\"out_arity\":1}}");
+                + "\"in_arity\":0,\"out_arity\":1}}")
+            .replace("\"isPublic\":true,", "\"isPublic\":true,\"sigHashType\":67,"));
         CheckPreimage cp = (CheckPreimage) p.methods().get(0).body().get(0).value();
         assertEquals(67, cp.sighashFlag());
         assertEquals(12, p.methods().get(0).body().get(0).sourceLoc().line());
@@ -122,18 +125,18 @@ class R086IrIntegerRangeTest {
     @Test
     void controlTheIntBoundariesThemselvesStillDecode() {
         // Integer.MIN_VALUE / MAX_VALUE are representable and must not be
-        // swept up by the range check.
-        AnfProgram p = parseShell(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"check_preimage\",\"preimage\":\"p\","
-                + "\"sighashFlag\":-2147483648}}");
-        assertEquals(Integer.MIN_VALUE,
-            ((CheckPreimage) p.methods().get(0).body().get(0).value()).sighashFlag());
+        // swept up by the range check. N-059 moved the vehicle: this used to be
+        // check_preimage.sighashFlag, which now has a semantic bound (the six
+        // @sighash modes) far inside the machine one, the same move N-115 made
+        // for loop.count below. loop.step is range-checked by the same helper
+        // and has no narrower rule.
+        Loop p = (Loop) AnfLoader.parse(LOOP_IR.formatted("3", "-2147483648"))
+            .methods().get(0).body().get(2).value();
+        assertEquals(Integer.MIN_VALUE, p.step());
 
-        AnfProgram q = parseShell(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"check_preimage\",\"preimage\":\"p\","
-                + "\"sighashFlag\":2147483647}}");
-        assertEquals(Integer.MAX_VALUE,
-            ((CheckPreimage) q.methods().get(0).body().get(0).value()).sighashFlag());
+        Loop q = (Loop) AnfLoader.parse(LOOP_IR.formatted("3", "2147483647"))
+            .methods().get(0).body().get(2).value();
+        assertEquals(Integer.MAX_VALUE, q.step());
     }
 
     /**
@@ -141,7 +144,7 @@ class R086IrIntegerRangeTest {
      * {@code loop.count} of {@code Integer.MAX_VALUE} decodes, on the reasoning
      * that the int boundaries must not be swept up by {@code asInt}'s range
      * check. That reasoning holds for every OTHER int field — {@code
-     * sighashFlag} above still carries it — but not for {@code loop.count}:
+     * loop.step} above still carries it — but not for {@code loop.count}:
      * that field has a semantic bound far below the machine one, and 2147483647
      * is 214748 times the largest unroll any emitter can honour.
      *

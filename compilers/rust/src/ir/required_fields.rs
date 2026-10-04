@@ -185,6 +185,77 @@ fn opt_sighash_type(obj: &Obj, path: &str) -> R<()> {
     }
 }
 
+/// N-059 / F-102 (F-068 in Go): a `check_preimage` binding's optional
+/// `sighashFlag`, at every nesting depth. Codegen appends `sighashFlag & 0xff`
+/// to the OP_PUSH_TX binding, so an out-of-set value was truncated to a byte no
+/// BSV spend can satisfy (999999 -> 0x3F, FORKID clear) and an explicit 0
+/// emitted a 0x00 byte. Absent (or null) means the default ALL|FORKID. In a
+/// public method the flag must also equal the method's `sigHashType` (default
+/// 0x41): the artifact tells the SDK to sign under `sigHashType`, the script
+/// derives its sighash under the flag, and a divergence is unspendable. Both
+/// diagnostics are shared verbatim with the other six tiers.
+const SIGHASH_DEFAULT: i64 = 0x41;
+
+fn check_sighash_flags(
+    obj: &Obj,
+    key: &str,
+    path: &str,
+    method: &str,
+    is_public: bool,
+    declared: i64,
+) -> R<()> {
+    let lp = field_path(path, key);
+    let list = match obj.get(key).and_then(Value::as_array) {
+        Some(l) => l,
+        None => return Ok(()),
+    };
+    for (i, b) in list.iter().enumerate() {
+        let vp = format!("{}[{}].value", lp, i);
+        let binding = match b.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let v = match binding.get("value").and_then(Value::as_object) {
+            Some(o) => o,
+            None => continue,
+        };
+        let name = binding.get("name").and_then(Value::as_str).unwrap_or("");
+        match v.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "if" => {
+                check_sighash_flags(v, "then", &vp, method, is_public, declared)?;
+                check_sighash_flags(v, "else", &vp, method, is_public, declared)?;
+            }
+            "loop" => check_sighash_flags(v, "body", &vp, method, is_public, declared)?,
+            "check_preimage" => {
+                let mut flag = SIGHASH_DEFAULT;
+                match v.get("sighashFlag") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Number(n)) => match n.as_i64().filter(|f| SIGHASH_TYPES.contains(f)) {
+                        Some(f) => flag = f,
+                        None => {
+                            return Err(format!(
+                                "IR validation: method {} binding {} check_preimage has sighashFlag {}; sighashFlag must be one of {{0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3}} (ALL/NONE/SINGLE with FORKID, optionally ANYONECANPAY). Any other value is truncated to a sighash byte no BSV spend can satisfy.",
+                                method, name, n
+                            ))
+                        }
+                    },
+                    Some(other) => {
+                        return Err(malformed(&field_path(&vp, "sighashFlag"), "an integer", Some(other)))
+                    }
+                }
+                if is_public && flag != declared {
+                    return Err(format!(
+                        "IR validation: method {} binding {} check_preimage has sighashFlag {} but the method declares sigHashType {}; a public method's check_preimage must bind the sighash type its ABI declares, or the SDK signs a preimage the script rejects.",
+                        method, name, flag, declared
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Return the first required field that is missing or of the wrong JSON type.
 pub fn assert_required_ir_fields(json_str: &str) -> R<()> {
     // A syntax error is left to the typed parse, which reports it in the
@@ -213,6 +284,10 @@ pub fn assert_required_ir_fields(json_str: &str) -> R<()> {
             req_str(as_obj(Some(p), &pp)?, &pp, &["name", "type"])?;
         }
         check_bindings(method, "body", &mp)?;
+        let declared = method.get("sigHashType").and_then(Value::as_i64).unwrap_or(SIGHASH_DEFAULT);
+        let name = method.get("name").and_then(Value::as_str).unwrap_or("");
+        let is_public = method.get("isPublic").and_then(Value::as_bool).unwrap_or(false);
+        check_sighash_flags(method, "body", &mp, name, is_public, declared)?;
     }
     Ok(())
 }

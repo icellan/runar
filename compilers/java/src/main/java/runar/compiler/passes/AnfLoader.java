@@ -519,7 +519,70 @@ public final class AnfLoader {
             params.add(new AnfParam(reqString(po, "name", pp), reqString(po, "type", pp)));
         }
         List<AnfBinding> body = toBindingList(obj, "body", path);
+        checkSighashFlags(obj, "body", path, name, isPublic,
+            sigHashType == null ? SIGHASH_DEFAULT : sigHashType.longValue());
         return new AnfMethod(name, params, body, isPublic, sigHashType);
+    }
+
+    /**
+     * N-059 / F-102 (F-068 in Go): a {@code check_preimage} binding's optional
+     * {@code sighashFlag}, at every nesting depth, on the raw document (the
+     * structure was validated by {@code toBindingList} just before). Codegen
+     * appends {@code sighashFlag & 0xff} to the OP_PUSH_TX binding, so an
+     * out-of-set value was truncated to a byte no BSV spend can satisfy
+     * (999999 -> 0x3F, FORKID clear) and an explicit 0 emitted a 0x00 byte.
+     * Absent (or null) means the default ALL|FORKID. In a public method the
+     * flag must also equal the method's {@code sigHashType} (default 0x41): the
+     * artifact tells the SDK to sign under {@code sigHashType}, the script
+     * derives its sighash under the flag, and a divergence is unspendable. Both
+     * diagnostics are shared verbatim with the other six tiers.
+     */
+    private static final long SIGHASH_DEFAULT = 0x41L;
+
+    private static void checkSighashFlags(
+        Map<?, ?> obj, String key, String path, String method, boolean isPublic, long declared
+    ) {
+        String lp = fieldPath(path, key);
+        List<?> list = (List<?>) obj.get(key);
+        for (int i = 0; i < list.size(); i++) {
+            String vp = lp + "[" + i + "].value";
+            Map<?, ?> binding = (Map<?, ?>) list.get(i);
+            Map<?, ?> v = (Map<?, ?>) binding.get("value");
+            Object kind = v.get("kind");
+            if ("if".equals(kind)) {
+                checkSighashFlags(v, "then", vp, method, isPublic, declared);
+                checkSighashFlags(v, "else", vp, method, isPublic, declared);
+            } else if ("loop".equals(kind)) {
+                checkSighashFlags(v, "body", vp, method, isPublic, declared);
+            } else if ("check_preimage".equals(kind)) {
+                long flag = SIGHASH_DEFAULT;
+                Object raw = v.get("sighashFlag");
+                if (raw != null) {
+                    if (!(raw instanceof Number)) {
+                        throw malformed(fieldPath(vp, "sighashFlag"), "an integer", raw);
+                    }
+                    Long n = null;
+                    if (raw instanceof Long l) n = l;
+                    else if (raw instanceof Integer in) n = in.longValue();
+                    else if (raw instanceof BigInteger bi && bi.bitLength() < 63) n = bi.longValue();
+                    if (n == null || !SIGHASH_TYPES.contains(n)) {
+                        throw new RuntimeException("IR validation: method " + method + " binding "
+                            + binding.get("name") + " check_preimage has sighashFlag " + raw
+                            + "; sighashFlag must be one of {0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3}"
+                            + " (ALL/NONE/SINGLE with FORKID, optionally ANYONECANPAY). Any other"
+                            + " value is truncated to a sighash byte no BSV spend can satisfy.");
+                    }
+                    flag = n;
+                }
+                if (isPublic && flag != declared) {
+                    throw new RuntimeException("IR validation: method " + method + " binding "
+                        + binding.get("name") + " check_preimage has sighashFlag " + flag
+                        + " but the method declares sigHashType " + declared
+                        + "; a public method's check_preimage must bind the sighash type its ABI"
+                        + " declares, or the SDK signs a preimage the script rejects.");
+                }
+            }
+        }
     }
 
     /** Walks every binding, including nested ones, checking builtin arity. */

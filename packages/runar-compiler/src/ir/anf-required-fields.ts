@@ -185,6 +185,62 @@ function optSigHashType(obj: Obj, path: string): void {
   }
 }
 
+/**
+ * N-059 / F-102 (F-068 in Go): a `check_preimage` binding's optional
+ * `sighashFlag`, at every nesting depth. Codegen appends `sighashFlag & 0xff`
+ * to the OP_PUSH_TX binding, so an out-of-set value was truncated to a byte no
+ * BSV spend can satisfy (999999 -> 0x3F, FORKID clear) and an explicit 0
+ * emitted a 0x00 byte. Absent (or null) means the default ALL|FORKID. In a
+ * public method the flag must also equal the method's `sigHashType` (default
+ * 0x41): the artifact tells the SDK to sign under `sigHashType`, the script
+ * derives its sighash under the flag, and a divergence is unspendable. Both
+ * diagnostics are shared verbatim with the other six tiers.
+ */
+const SIGHASH_DEFAULT = 0x41;
+
+function checkSighashFlags(
+  obj: Obj,
+  key: string,
+  path: string,
+  method: string,
+  isPublic: boolean,
+  declared: number,
+): void {
+  const lp = fieldPath(path, key);
+  (obj[key] as Obj[]).forEach((binding, i) => {
+    const vp = `${lp}[${i}].value`;
+    const v = binding.value as Obj;
+    if (v.kind === 'if') {
+      checkSighashFlags(v, 'then', vp, method, isPublic, declared);
+      checkSighashFlags(v, 'else', vp, method, isPublic, declared);
+    } else if (v.kind === 'loop') {
+      checkSighashFlags(v, 'body', vp, method, isPublic, declared);
+    } else if (v.kind === 'check_preimage') {
+      let flag = SIGHASH_DEFAULT;
+      if (v.sighashFlag !== undefined && v.sighashFlag !== null) {
+        if (typeof v.sighashFlag !== 'number') {
+          throw malformed(fieldPath(vp, 'sighashFlag'), 'an integer', v.sighashFlag);
+        }
+        flag = v.sighashFlag;
+        if (!SIGHASH_TYPES.includes(flag)) {
+          throw new Error(
+            `IR validation: method ${method} binding ${binding.name as string} check_preimage has sighashFlag ${flag}; ` +
+              'sighashFlag must be one of {0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3} (ALL/NONE/SINGLE with FORKID, ' +
+              'optionally ANYONECANPAY). Any other value is truncated to a sighash byte no BSV spend can satisfy.',
+          );
+        }
+      }
+      if (isPublic && flag !== declared) {
+        throw new Error(
+          `IR validation: method ${method} binding ${binding.name as string} check_preimage has sighashFlag ${flag} ` +
+            `but the method declares sigHashType ${declared}; a public method's check_preimage must bind ` +
+            'the sighash type its ABI declares, or the SDK signs a preimage the script rejects.',
+        );
+      }
+    }
+  });
+}
+
 /** Throw on the first required field that is missing or of the wrong JSON type. */
 export function assertRequiredIrFields(root: unknown): void {
   const program = asObject(root, 'the IR document');
@@ -210,5 +266,7 @@ export function assertRequiredIrFields(root: unknown): void {
       reqString(param, 'type', pp);
     });
     checkBindings(method, 'body', mp);
+    const declared = typeof method.sigHashType === 'number' ? method.sigHashType : SIGHASH_DEFAULT;
+    checkSighashFlags(method, 'body', mp, method.name as string, method.isPublic as boolean, declared);
   });
 }

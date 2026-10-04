@@ -301,10 +301,8 @@
         "kind": { "const": "check_preimage" },
         "preimage": { "type": "string", "minLength": 1 },
         "sighashFlag": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 255,
-          "description": "Issue #123: BIP-143 sighash byte the on-chain OP_PUSH_TX binding appends to the derived signature. Emitted by every tier for a method declaring a non-default `@sighash` mode; ABSENT means the default ALL|FORKID (0x41), which keeps every pre-existing golden byte-identical."
+          "enum": [65, 66, 67, 193, 194, 195],
+          "description": "Issue #123: BIP-143 sighash byte the on-chain OP_PUSH_TX binding appends to the derived signature. Emitted by every tier for a method declaring a non-default `@sighash` mode; ABSENT means the default ALL|FORKID (0x41), which keeps every pre-existing golden byte-identical. N-059: only the six FORKID modes the `@sighash` grammar produces; any other value (including 0) is a byte no BSV spend can satisfy. In a public method it must also equal the method's sigHashType (default 65), which the --ir loaders enforce."
         }
       }
     },

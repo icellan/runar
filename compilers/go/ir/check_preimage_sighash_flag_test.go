@@ -93,7 +93,8 @@ func TestLoadIRFromBytes_RejectsInvalidCheckPreimageSighashFlag(t *testing.T) {
 func TestLoadIRFromBytes_AcceptsValidCheckPreimageSighashFlag(t *testing.T) {
 	for _, flag := range []int{0x41, 0x42, 0x43, 0xC1, 0xC2, 0xC3} {
 		t.Run(fmt.Sprintf("0x%02x", flag), func(t *testing.T) {
-			prog, err := LoadIRFromBytes([]byte(checkPreimageIR(fmt.Sprintf(`, "sighashFlag": %d`, flag), "top")))
+			// N-059: a public method's flag must equal its declared sigHashType.
+			prog, err := LoadIRFromBytes([]byte(withSigHashType(checkPreimageIR(fmt.Sprintf(`, "sighashFlag": %d`, flag), "top"), flag)))
 			if err != nil {
 				t.Fatalf("expected sighashFlag=0x%02x to be accepted, got: %v", flag, err)
 			}
@@ -107,4 +108,46 @@ func TestLoadIRFromBytes_AcceptsValidCheckPreimageSighashFlag(t *testing.T) {
 			t.Fatalf("expected an absent sighashFlag (default ALL|FORKID) to be accepted, got: %v", err)
 		}
 	})
+}
+
+func withSigHashType(irJSON string, sigHashType int) string {
+	return strings.Replace(irJSON, `"isPublic": true,`, fmt.Sprintf(`"isPublic": true, "sigHashType": %d,`, sigHashType), 1)
+}
+
+// N-059 / F-102: what the typed validateBindings above cannot see. An explicit
+// `"sighashFlag": 0` decodes to the same 0 as an absent field, so F-068 let it
+// through as "default"; Rust, Python, Ruby, Java and TS emitted it as a 0x00
+// byte. And a public method's flag could diverge from the sigHashType its ABI
+// declares, so the SDK signed a preimage the script then rejected. Both are now
+// refused on the raw document (required_fields.go) with the shared diagnostics.
+// Proves: LoadIRFromBytes refuses both shapes at the top level and in if/loop
+// bodies, and still accepts a matching pair. Does not prove: the other tiers
+// (conformance/negatives/ir-sighash-flag.test.ts drives all seven).
+func TestLoadIRFromBytes_RejectsExplicitZeroSighashFlag(t *testing.T) {
+	for _, wrap := range []string{"top", "if", "loop"} {
+		_, err := LoadIRFromBytes([]byte(checkPreimageIR(`, "sighashFlag": 0`, wrap)))
+		if err == nil || !strings.Contains(err.Error(), "check_preimage has sighashFlag 0; sighashFlag must be one of") {
+			t.Errorf("%s: expected explicit sighashFlag 0 to be refused, got: %v", wrap, err)
+		}
+	}
+}
+
+func TestLoadIRFromBytes_RejectsSighashFlagSigHashTypeMismatch(t *testing.T) {
+	cases := []struct {
+		name string
+		ir   string
+		want string
+	}{
+		{"flag 0xc3, sigHashType absent", checkPreimageIR(`, "sighashFlag": 195`, "top"), "has sighashFlag 195 but the method declares sigHashType 65"},
+		{"flag absent, sigHashType 0xc3", withSigHashType(checkPreimageIR("", "top"), 0xc3), "has sighashFlag 65 but the method declares sigHashType 195"},
+		{"flag 0x43, sigHashType 0x42", withSigHashType(checkPreimageIR(`, "sighashFlag": 67`, "top"), 0x42), "has sighashFlag 67 but the method declares sigHashType 66"},
+		{"if arm", checkPreimageIR(`, "sighashFlag": 193`, "if"), "has sighashFlag 193 but the method declares sigHashType 65"},
+		{"loop body", checkPreimageIR(`, "sighashFlag": 193`, "loop"), "has sighashFlag 193 but the method declares sigHashType 65"},
+	}
+	for _, c := range cases {
+		_, err := LoadIRFromBytes([]byte(c.ir))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: expected refusal containing %q, got: %v", c.name, c.want, err)
+		}
+	}
 }

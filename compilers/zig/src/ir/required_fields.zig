@@ -211,6 +211,91 @@ fn optSigHashType(obj: Obj, path: []const u8) Error!void {
     }
 }
 
+/// N-059 / F-102 (F-068 in Go): a `check_preimage` binding's optional
+/// `sighashFlag`, at every nesting depth. Codegen appends `sighashFlag & 0xff`
+/// to the OP_PUSH_TX binding, so an out-of-set value was truncated to a byte no
+/// BSV spend can satisfy (999999 -> 0x3F, FORKID clear). Absent (or null), and
+/// for Zig's reader an explicit 0, meant the default ALL|FORKID; an explicit 0
+/// is now refused like every other out-of-set value. In a public method the
+/// flag must also equal the method's `sigHashType` (default 0x41): the artifact
+/// tells the SDK to sign under `sigHashType`, the script derives its sighash
+/// under the flag, and a divergence is unspendable. Both diagnostics are shared
+/// verbatim with the other six tiers.
+const SIGHASH_DEFAULT: i64 = 0x41;
+const BAD_FLAG_FMT = "IR validation: method {s} binding {s} check_preimage has sighashFlag {s}; sighashFlag must be one of {{0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3}} (ALL/NONE/SINGLE with FORKID, optionally ANYONECANPAY). Any other value is truncated to a sighash byte no BSV spend can satisfy.";
+
+fn checkSighashFlags(w: Walker, obj: Obj, key: []const u8, path: []const u8, method: []const u8, is_public: bool, declared: i64) CheckError!void {
+    const eq = std.mem.eql;
+    const lp = try w.fieldPath(path, key);
+    const list = switch (obj.get(key) orelse return) {
+        .array => |arr| arr,
+        else => return,
+    };
+    for (list.items, 0..) |b, i| {
+        const vp = try std.fmt.allocPrint(w.a, "{s}[{d}].value", .{ lp, i });
+        const binding = switch (b) {
+            .object => |o| o,
+            else => continue,
+        };
+        const v = switch (binding.get("value") orelse continue) {
+            .object => |o| o,
+            else => continue,
+        };
+        const name = switch (binding.get("name") orelse .null) {
+            .string => |s| s,
+            else => "",
+        };
+        const kind = switch (v.get("kind") orelse .null) {
+            .string => |s| s,
+            else => "",
+        };
+        if (eq(u8, kind, "if")) {
+            try checkSighashFlags(w, v, "then", vp, method, is_public, declared);
+            try checkSighashFlags(w, v, "else", vp, method, is_public, declared);
+        } else if (eq(u8, kind, "loop")) {
+            try checkSighashFlags(w, v, "body", vp, method, is_public, declared);
+        } else if (eq(u8, kind, "check_preimage")) {
+            var flag: i64 = SIGHASH_DEFAULT;
+            const raw = v.get("sighashFlag") orelse .null;
+            switch (raw) {
+                .null => {},
+                .integer => |n| {
+                    var ok = false;
+                    for (SIGHASH_TYPES) |t| if (n == t) {
+                        ok = true;
+                    };
+                    if (!ok) {
+                        setDiag(BAD_FLAG_FMT, .{ method, name, try std.fmt.allocPrint(w.a, "{d}", .{n}) });
+                        return Error.IRFieldWrongType;
+                    }
+                    flag = n;
+                },
+                // An integer too large for i64 arrives as its digit string.
+                .number_string => |digits| {
+                    setDiag(BAD_FLAG_FMT, .{ method, name, digits });
+                    return Error.IRFieldWrongType;
+                },
+                .float => |x| {
+                    var ok = false;
+                    for (SIGHASH_TYPES) |t| if (x == @as(f64, @floatFromInt(t))) {
+                        ok = true;
+                    };
+                    if (!ok) {
+                        setDiag(BAD_FLAG_FMT, .{ method, name, try std.fmt.allocPrint(w.a, "{d}", .{x}) });
+                        return Error.IRFieldWrongType;
+                    }
+                    flag = @intFromFloat(x);
+                },
+                else => return Walker.malformed(try w.fieldPath(vp, "sighashFlag"), "an integer", raw),
+            }
+            if (is_public and flag != declared) {
+                setDiag("IR validation: method {s} binding {s} check_preimage has sighashFlag {d} but the method declares sigHashType {d}; a public method's check_preimage must bind the sighash type its ABI declares, or the SDK signs a preimage the script rejects.", .{ method, name, flag, declared });
+                return Error.IRFieldWrongType;
+            }
+        }
+    }
+}
+
 /// Return the first required field that is missing or of the wrong JSON type;
 /// its message is then available from `lastDiagnostic()`.
 pub fn assertRequiredIrFields(allocator: std.mem.Allocator, root: std.json.Value) CheckError!void {
@@ -239,5 +324,10 @@ pub fn assertRequiredIrFields(allocator: std.mem.Allocator, root: std.json.Value
             try w.reqStr(try Walker.asObj(p, pp), pp, &.{ "name", "type" });
         }
         try w.checkBindings(method, "body", mp);
+        const declared: i64 = switch (method.get("sigHashType") orelse .null) {
+            .integer => |n| n,
+            else => SIGHASH_DEFAULT,
+        };
+        try checkSighashFlags(w, method, "body", mp, method.get("name").?.string, method.get("isPublic").?.bool, declared);
     }
 }
