@@ -75,6 +75,30 @@ sync_locks() {
 
 # --- check: verify all versions are consistent ---
 
+# check_exact FILE ERE...  (called from check_versions; reads $expected, sets $ok)
+# Each ERE has exactly one capture group around the version. Every value any of
+# them captures in FILE must equal $expected exactly, and at least one must be
+# captured. A missing FILE is skipped, as everywhere else in this check.
+check_exact() {
+  local f="$1"; shift
+  [ -f "$f" ] || return 0
+  local rel="${f#"$ROOT"/}" found=0 ere v
+  for ere in "$@"; do
+    while IFS= read -r v; do
+      found=1
+      if [ "$v" != "$expected" ]; then
+        echo "  ✗ $rel: $v"
+        ok=false
+      fi
+    # `|` delimits: the shapes contain `/` (`</version>`) but never `|`.
+    done < <(sed -nE "s|.*${ere}.*|\1|p" "$f")
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "  ✗ $rel: no version string found"
+    ok=false
+  fi
+}
+
 check_versions() {
   local expected
   expected=$(get_current_version)
@@ -149,44 +173,44 @@ check_versions() {
     fi
   done
 
-  # Java + sdk-output fixtures + ordinals tests + READMEs — generic stale-string sweep
-  # over the file set that bump_version touches. Any literal $expected mismatch surfaces here.
-  local java_files=(
-    "$ROOT/compilers/java/src/main/java/runar/compiler/Version.java"
-    "$ROOT/compilers/java/build.gradle.kts"
-    "$ROOT/packages/runar-java/build.gradle.kts"
-    "$ROOT/examples/java/build.gradle.kts"
-    "$ROOT/examples/end2end-example/java/build.gradle.kts"
-    "$ROOT/integration/java/build.gradle.kts"
-    "$ROOT/conformance/anf-interpreter/drivers/java/build.gradle.kts"
-    "$ROOT/conformance/sdk-output/tools/java-driver/build.gradle.kts"
-    "$ROOT/packages/runar-java/README.md"
-    "$ROOT/packages/runar-java/src/test/resources/artifacts/stateful-counter.runar.json"
-    "$ROOT/conformance/sdk-output/runner/sdk-runner.ts"
-    "$ROOT/packages/runar-sdk/src/__tests__/ordinals-contract.test.ts"
-    "$ROOT/packages/runar-py/tests/test_ordinals.py"
-    "$ROOT/packages/runar-rb/spec/sdk/ordinals_spec.rb"
-    "$ROOT/packages/runar-zig/README.md"
-  )
-  local sdk_inputs=()
-  while IFS= read -r line; do sdk_inputs+=("$line"); done < <(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null)
-  # `"${sdk_inputs[@]}"` on an EMPTY array is an unbound-variable error under
-  # `set -u` in bash 3.2 (macOS), which aborted --check with a bash diagnostic
-  # instead of a version report. It never fired in this repo because the find
-  # always matches; it fires in any tree where conformance/sdk-output/tests has
-  # no input.json yet. R-211.
-  for f in "${java_files[@]}" ${sdk_inputs[@]+"${sdk_inputs[@]}"}; do
-    [ -f "$f" ] || continue
-    # Match version-shaped tokens that are NOT $expected. Skip historical refs in CHANGELOG-style content.
-    while IFS=: read -r ln content; do
-      [ -z "$ln" ] && continue
-      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"):$ln $content"
-      ok=false
-    done < <(grep -nE '(version|Version|compilerVersion|VALUE|java-sdk-driver|runar-zig-v|build\.runar:runar-java)' "$f" 2>/dev/null \
-      | grep -E '0\.[0-9]+\.[0-9]+' \
-      | grep -v "$expected" \
-      | grep -vE '0\.0\.0|0\.1\.|0\.2\.|0\.3\.' || true)
+  # Java + sdk-output fixtures + ordinals tests + READMEs. Each file is read
+  # with the exact line shapes bump_version rewrites in it, and every captured
+  # value must equal $expected. F-085: this used to be a substring sweep that
+  # only looked at lines containing `0.N.M` and dropped any line containing
+  # $expected as a substring, so in the 1.x family every drift (`1.0.1`,
+  # `2.0.0`, `1.0.0-rc.10`) passed. A file in which none of its shapes match
+  # also fails: a renamed field must not quietly leave the gate.
+  local gradle_shapes=('version = "([^"]*)"' 'build\.runar:runar-java[a-z-]*:([^"'"'"']*)')
+  local artifact_shapes=('"version": "runar-v([^"]*)"' '"compilerVersion": "([^"]*)"')
+  local g
+  for g in \
+    "$ROOT/compilers/java/build.gradle.kts" \
+    "$ROOT/packages/runar-java/build.gradle.kts" \
+    "$ROOT/examples/java/build.gradle.kts" \
+    "$ROOT/examples/end2end-example/java/build.gradle.kts" \
+    "$ROOT/integration/java/build.gradle.kts" \
+    "$ROOT/conformance/anf-interpreter/drivers/java/build.gradle.kts" \
+    "$ROOT/conformance/sdk-output/tools/java-driver/build.gradle.kts"; do
+    check_exact "$g" "${gradle_shapes[@]}"
   done
+  check_exact "$ROOT/compilers/java/src/main/java/runar/compiler/Version.java" 'VALUE = "([^"]*)"'
+  check_exact "$ROOT/packages/runar-java/README.md" \
+    'build\.runar:runar-java[a-z-]*:([^"'"'"']*)' '<version>([^<]*)</version>'
+  check_exact "$ROOT/packages/runar-java/src/test/resources/artifacts/stateful-counter.runar.json" \
+    "${artifact_shapes[@]}"
+  check_exact "$ROOT/conformance/sdk-output/runner/sdk-runner.ts" 'java-sdk-driver-([^/"'"'"']*)-all\.jar'
+  # The ordinals fixtures also carry `version: 'runar-v0.1.0'`, a hand-written
+  # artifact field bump never rewrites; only compilerVersion is compared.
+  check_exact "$ROOT/packages/runar-sdk/src/__tests__/ordinals-contract.test.ts" "compilerVersion: '([^']*)'"
+  check_exact "$ROOT/packages/runar-py/tests/test_ordinals.py" "compiler_version='([^']*)'"
+  check_exact "$ROOT/packages/runar-rb/spec/sdk/ordinals_spec.rb" "'compilerVersion'[[:space:]]*=> '([^']*)'"
+  # The README's `.version = "0.1.0"` is the consumer's example manifest, not ours.
+  check_exact "$ROOT/packages/runar-zig/README.md" \
+    'runar-zig-v([^/ )"]*)\.tar\.gz' 'SDK is at \*\*v([^*]*)\*\*'
+  local sdk_input
+  while IFS= read -r sdk_input; do
+    check_exact "$sdk_input" "${artifact_shapes[@]}"
+  done < <(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null)
 
   # Zig package manifest, Ruby gemspec, and the embedded compiler-version
   # strings (R-211). bump_version rewrites all eight of these files; until now
@@ -215,19 +239,33 @@ check_versions() {
 
   # Every `runar-v<semver>` and `<semver>-<tier>` token in the six files must be
   # $expected. Matching the tokens rather than each tier's syntax keeps this
-  # working when a tier renames its constant.
+  # working when a tier renames its constant. F-085: the token's prerelease part
+  # may itself contain `-` (`1.0.0-rc.1-go`), which the old token regex could
+  # not parse, so an rc-family compilerVersion drift went unread; and the TS
+  # tier stamps an unsuffixed DEFAULT_COMPILER_VERSION that no token matched.
+  local semver='[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z]+)*'
   for f in "${COMPILER_VERSION_FILES[@]}"; do
     [ -f "$f" ] || continue
+    local found=0 bad
     while IFS= read -r bad; do
       [ -z "$bad" ] && continue
-      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): $bad"
-      ok=false
+      found=1
+      if [ "$bad" != "$expected" ]; then
+        echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): $bad"
+        ok=false
+      fi
     # Comment lines are excluded: assembler.ts documents the field with
     # `e.g. "runar-v0.1.0"`, which is an illustration and not a stamped version.
     # Flagging it would make the gate cry wolf at every release.
-    done < <(grep -vE '^[[:space:]]*(//|#|\*|/\*)' "$f" 2>/dev/null \
-      | grep -oE '(runar-v[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.-]*|[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.]*-(go|rust|zig|ruby|python|ts))' \
-      | grep -vE "^(runar-v)?${expected}(-(go|rust|zig|ruby|python|ts))?$" | sort -u || true)
+    done < <( { grep -vE '^[[:space:]]*(//|#|\*|/\*)' "$f" 2>/dev/null \
+                  | grep -oE "runar-v${semver}|${semver}-(go|rust|zig|ruby|python|ts)" \
+                  | sed -E 's/^runar-v//; s/-(go|rust|zig|ruby|python|ts)$//'
+                sed -nE "s/.*DEFAULT_COMPILER_VERSION = '([^']*)'.*/\1/p" "$f"
+              } | sort -u || true)
+    if [ "$found" -eq 0 ]; then
+      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): no version string found"
+      ok=false
+    fi
   done
 
   if $ok; then
