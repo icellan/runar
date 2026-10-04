@@ -224,6 +224,14 @@ def validate_ir(program: ANFProgram) -> list[str]:
     mutable_count = sum(1 for p in program.properties if not p.readonly)
     # F-014 / CL-BUG-266: readonly properties, for the update_prop rule below.
     readonly_props = frozenset(p.name for p in program.properties if p.readonly)
+    declared_props = frozenset(p.name for p in program.properties)
+
+    # N-087: the source validator's parentClass rules (see
+    # _parent_class_error). Ahead of the per-binding checks so that, as in
+    # the other six tiers, it outranks the F-014 readonly-write diagnostic.
+    parent_class_error = _parent_class_error(program)
+    if parent_class_error:
+        errors.append(parent_class_error)
 
     for i, method in enumerate(program.methods):
         if not method.name:
@@ -239,7 +247,7 @@ def validate_ir(program: ANFProgram) -> list[str]:
                 )
         errors.extend(
             _validate_bindings(
-                method.body, method.name, mutable_count, readonly_props
+                method.body, method.name, mutable_count, readonly_props, declared_props
             )
         )
 
@@ -352,6 +360,67 @@ def _allowed_arity(name: str):
     return (len(sig.params),)
 
 
+_STATEFUL_ONLY_KINDS = frozenset({
+    "add_output", "add_raw_output", "add_data_output",
+    "get_state_script", "deserialize_state",
+})
+
+
+def _walk_values(bindings: list[ANFBinding] | None):
+    for binding in bindings or []:
+        yield binding.value
+        yield from _walk_values(binding.value.then)
+        yield from _walk_values(binding.value.else_)
+        yield from _walk_values(binding.value.body)
+
+
+def _parent_class_error(program: ANFProgram) -> str | None:
+    """N-087: the source validator's parentClass rules, which --ir never ran.
+
+    A SmartContract property declared readonly:false got no constructor slot,
+    so ``update_prop owner = x; assert(owner == x)`` compiled to 76767b8777,
+    which any key spends. Checked in this order, with the diagnostics all
+    seven tiers share (conformance/negatives/ir-parent-class-cases.json):
+    (1) SmartContract / UnsafeSmartContract properties must be readonly;
+    (2) stateful-only nodes require StatefulSmartContract; (3) raw_script
+    (asm) requires UnsafeSmartContract. An absent parentClass (IR older than
+    F-038) is inferred fail-closed: StatefulSmartContract only from a
+    stateful-only node, else UnsafeSmartContract from a raw_script, else
+    SmartContract.
+    """
+    kinds = [
+        [v.kind for v in _walk_values(m.body)] for m in program.methods
+    ]
+    flat = {k for ks in kinds for k in ks}
+    pc = program.parent_class or (
+        "StatefulSmartContract" if flat & _STATEFUL_ONLY_KINDS
+        else "UnsafeSmartContract" if "raw_script" in flat
+        else "SmartContract"
+    )
+    if pc != "StatefulSmartContract":
+        for prop in program.properties:
+            if not prop.readonly:
+                return (
+                    f"Property '{prop.name}' in {pc} must be readonly. "
+                    f"Use StatefulSmartContract for mutable state."
+                )
+        for method, ks in zip(program.methods, kinds):
+            for k in ks:
+                if k in _STATEFUL_ONLY_KINDS:
+                    return (
+                        f"'{k}' in method '{method.name}' is only available "
+                        f"in StatefulSmartContract; got {pc}"
+                    )
+    if pc != "UnsafeSmartContract":
+        for method, ks in zip(program.methods, kinds):
+            if "raw_script" in ks:
+                return (
+                    f"'raw_script' in method '{method.name}' is only available "
+                    f"in contracts extending UnsafeSmartContract; got {pc}"
+                )
+    return None
+
+
 def _ends_with_assert(bindings: list[ANFBinding]) -> bool:
     """ANF analogue of the source validator's ``_ends_with_assert`` (plus the
     UnsafeSmartContract terminal-asm form): the last binding is an ``assert``,
@@ -376,6 +445,7 @@ def _validate_bindings(
     method_name: str,
     mutable_count: int,
     readonly_props: frozenset[str] = frozenset(),
+    declared_props: frozenset[str] | None = None,
 ) -> list[str]:
     """Validate a list of ANF bindings, including nested ones."""
     errors: list[str] = []
@@ -474,26 +544,30 @@ def _validate_bindings(
         # F-014 / CL-BUG-266: readonly properties may only be assigned in the
         # constructor (frontend/validator.py ``_check_readonly_writes``). --ir
         # runs no frontend, so an update_prop on one compiled clean.
-        if (
-            kind == "update_prop"
-            and method_name != "constructor"
-            and (binding.value.name or "") in readonly_props
-        ):
-            errors.append(
-                f"cannot assign to readonly property '{binding.value.name}' in "
-                f"method '{method_name}' (binding {binding.name}). readonly "
-                f"properties may only be assigned in the constructor."
-            )
+        # N-087: an update_prop naming no declared property is refused too,
+        # with Go F-004's sentence.
+        if kind == "update_prop" and method_name != "constructor":
+            prop_name = binding.value.name or ""
+            if declared_props is not None and prop_name not in declared_props:
+                errors.append(
+                    f"method '{method_name}' assigns to undeclared property '{prop_name}'"
+                )
+            elif prop_name in readonly_props:
+                errors.append(
+                    f"cannot assign to readonly property '{prop_name}' in "
+                    f"method '{method_name}' (binding {binding.name}). readonly "
+                    f"properties may only be assigned in the constructor."
+                )
 
         # Validate nested bindings
         if kind == "if":
             if binding.value.then:
                 errors.extend(
-                    _validate_bindings(binding.value.then, method_name, mutable_count, readonly_props)
+                    _validate_bindings(binding.value.then, method_name, mutable_count, readonly_props, declared_props)
                 )
             if binding.value.else_:
                 errors.extend(
-                    _validate_bindings(binding.value.else_, method_name, mutable_count, readonly_props)
+                    _validate_bindings(binding.value.else_, method_name, mutable_count, readonly_props, declared_props)
                 )
 
         if kind == "loop":
@@ -510,7 +584,7 @@ def _validate_bindings(
                 )
             if binding.value.body:
                 errors.extend(
-                    _validate_bindings(binding.value.body, method_name, mutable_count, readonly_props)
+                    _validate_bindings(binding.value.body, method_name, mutable_count, readonly_props, declared_props)
                 )
 
         if kind == "raw_script":

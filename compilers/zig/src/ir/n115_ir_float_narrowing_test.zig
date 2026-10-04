@@ -105,9 +105,11 @@ fn irWithBinding(allocator: std.mem.Allocator, binding: []const u8) ![]const u8 
 }
 
 /// Same, with the properties list supplied verbatim instead.
+// N-087: the probes declare mutable properties, which the loader accepts only
+// in a StatefulSmartContract.
 fn irWithProperties(allocator: std.mem.Allocator, properties: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator,
-        \\{{"contractName":"Probe","properties":[{s}],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"load_const","value":0}}}},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
+        \\{{"contractName":"Probe","parentClass":"StatefulSmartContract","properties":[{s}],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"load_const","value":0}}}},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
     , .{properties});
 }
 

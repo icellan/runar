@@ -170,6 +170,12 @@ module RunarCompiler
         end
       end
 
+      # N-087: the source validator's parentClass rules, then Go F-004's
+      # readonly / undeclared-property write rule. See _parent_class_error and
+      # _write_error.
+      pc_err = _parent_class_error(program) || _write_error(program)
+      errors << pc_err if pc_err
+
       # N-071: --ir skips frontend/validator.rb, whose ends-with-assert rule
       # is what makes a public method's script a covenant. Stack lowering
       # leaves the method's last binding as the script result, so
@@ -215,6 +221,97 @@ module RunarCompiler
       end
 
       errors
+    end
+
+    STATEFUL_ONLY_KINDS = %w[
+      add_output add_raw_output add_data_output get_state_script deserialize_state
+    ].freeze
+
+    # Every ANF value in +bindings+, nested if arms and loop bodies included.
+    def self._each_value(bindings, &blk)
+      (bindings || []).each do |b|
+        v = b.value
+        blk.call(v)
+        _each_value(v.then, &blk)
+        _each_value(v.else_, &blk)
+        _each_value(v.body, &blk)
+      end
+    end
+
+    # N-087: the source validator's parentClass rules, which --ir never ran. A
+    # SmartContract property declared readonly:false got no constructor slot,
+    # so `update_prop owner = x; assert(owner == x)` compiled to 76767b8777,
+    # which any key spends. Checked in this order, with the diagnostics all
+    # seven tiers share (conformance/negatives/ir-parent-class-cases.json):
+    # (1) SmartContract / UnsafeSmartContract properties must be readonly;
+    # (2) stateful-only nodes require StatefulSmartContract; (3) raw_script
+    # (asm) requires UnsafeSmartContract. An absent parentClass (IR older than
+    # F-038) is inferred fail-closed: StatefulSmartContract only from a
+    # stateful-only node, else UnsafeSmartContract from a raw_script, else
+    # SmartContract.
+    def self._parent_class_error(program)
+      kinds = program.methods.map do |m|
+        ks = []
+        _each_value(m.body) { |v| ks << v.kind }
+        ks
+      end
+      flat = kinds.flatten
+      pc = program.parent_class.to_s
+      if pc.empty?
+        pc = if flat.any? { |k| STATEFUL_ONLY_KINDS.include?(k) }
+               "StatefulSmartContract"
+             elsif flat.include?("raw_script")
+               "UnsafeSmartContract"
+             else
+               "SmartContract"
+             end
+      end
+      if pc != "StatefulSmartContract"
+        prop = program.properties.find { |p| !p.readonly }
+        if prop
+          return "Property '#{prop.name}' in #{pc} must be readonly. " \
+                 "Use StatefulSmartContract for mutable state."
+        end
+        program.methods.zip(kinds).each do |m, ks|
+          k = ks.find { |kind| STATEFUL_ONLY_KINDS.include?(kind) }
+          return "'#{k}' in method '#{m.name}' is only available in StatefulSmartContract; got #{pc}" if k
+        end
+      end
+      if pc != "UnsafeSmartContract"
+        program.methods.zip(kinds).each do |m, ks|
+          if ks.include?("raw_script")
+            return "'raw_script' in method '#{m.name}' is only available in " \
+                   "contracts extending UnsafeSmartContract; got #{pc}"
+          end
+        end
+      end
+      nil
+    end
+
+    # N-087 (port of Go F-004 checkNoReadonlyWrites): a readonly property may
+    # only be written in the constructor, and an update_prop must name a
+    # declared property. Otherwise a later load_prop reads the written value
+    # instead of the one baked into the locking script. Go's sentences.
+    def self._write_error(program)
+      readonly = program.properties.to_h { |p| [p.name, p.readonly] }
+      program.methods.each do |m|
+        next if m.name == "constructor"
+
+        _each_value(m.body) do |v|
+          next unless v.kind == "update_prop"
+
+          unless readonly.key?(v.name)
+            return "method '#{m.name}' assigns to undeclared property '#{v.name}'"
+          end
+          if readonly[v.name]
+            return "cannot assign to readonly property '#{v.name}' in method '#{m.name}'. " \
+                   "readonly properties may only be assigned in the constructor; a later " \
+                   "load_prop would read the assigned value instead of the one baked into " \
+                   "the locking script"
+          end
+        end
+      end
+      nil
     end
 
     # N-071: ANF form of the source validator's ends-with-assert rule -- the

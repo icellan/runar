@@ -150,6 +150,17 @@ const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
   'conformance/tests/stateful-counter/expected-ir.json',
 );
 
+/*
+ * `I47`-`I52` (N-087, the parentClass and property-write rules) reuse three
+ * controls above: `multi-method` (I47 one property made mutable; I52 the same
+ * with parentClass also removed, so the fail-closed inference is exercised),
+ * `stateful-counter` (I48 relabelled SmartContract; I49 `count` made readonly,
+ * so `increment` writes a readonly property; I51 relabelled AND every property
+ * made readonly, so the stateful-only nodes are the only violation) and
+ * `asm-raw-script` (I50 relabelled SmartContract). I51 and I52 change two
+ * fields because their rule cannot be reached with one.
+ */
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],

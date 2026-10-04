@@ -68,6 +68,14 @@ const ParseError = error{
     // position; an ANF temp spelling as a parameter / property / method / loop
     // variable). Message in required_fields.lastDiagnostic().
     ReservedName,
+    // N-087: the source validator's parentClass rules (a mutable property
+    // outside StatefulSmartContract, a stateful-only node outside it, a
+    // raw_script outside UnsafeSmartContract). Message in
+    // required_fields.lastDiagnostic().
+    ParentClassRuleViolation,
+    // N-087 (port of Go F-004): an update_prop outside the constructor on a
+    // readonly or undeclared property. Message in lastDiagnostic().
+    IllegalPropertyWrite,
 };
 
 const max_parse_depth: u32 = 256;
@@ -464,12 +472,139 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         else => null,
     } else null;
 
+    try checkParentClassRules(parent_class, properties, method_list.items);
+    try checkNoIllegalPropertyWrites(properties, method_list.items);
+
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),
         .parent_class = parent_class,
         .properties = properties,
         .methods = try method_list.toOwnedSlice(allocator),
     };
+}
+
+/// N-087: the ANF kind name of a node only StatefulSmartContract lowering
+/// produces, or null.
+fn statefulOnlyKind(v: types.ANFValue) ?[]const u8 {
+    return switch (v) {
+        .add_output => "add_output",
+        .add_raw_output => "add_raw_output",
+        .add_data_output => "add_data_output",
+        .get_state_script => "get_state_script",
+        .deserialize_state => "deserialize_state",
+        else => null,
+    };
+}
+
+/// First stateful-only kind (or, with `raw`, the first raw_script) in a
+/// binding list, nested `if` arms and `loop` bodies included.
+fn findKind(bindings: []const types.ANFBinding, raw: bool) ?[]const u8 {
+    for (bindings) |b| {
+        if (raw) {
+            if (b.value == .raw_script) return "raw_script";
+        } else if (statefulOnlyKind(b.value)) |k| return k;
+        switch (b.value) {
+            .@"if" => |v| {
+                if (findKind(v.then, raw)) |k| return k;
+                if (findKind(v.@"else", raw)) |k| return k;
+            },
+            .loop => |v| if (findKind(v.body, raw)) |k| return k,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// N-087: the source validator's parentClass rules, which --ir never ran. A
+/// SmartContract property declared readonly:false got no constructor slot, so
+/// `update_prop owner = x; assert(owner == x)` compiled to 76767b8777, which
+/// any key spends. Checked in this order, with the diagnostics all seven tiers
+/// share (conformance/negatives/ir-parent-class-cases.json): (1) SmartContract
+/// / UnsafeSmartContract properties must be readonly; (2) stateful-only nodes
+/// require StatefulSmartContract; (3) raw_script (asm) requires
+/// UnsafeSmartContract. An absent parentClass (IR older than F-038) is
+/// inferred fail-closed: StatefulSmartContract only from a stateful-only node,
+/// else UnsafeSmartContract from a raw_script, else SmartContract.
+fn checkParentClassRules(declared: ?types.ParentClass, properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!void {
+    var has_stateful = false;
+    var has_raw = false;
+    for (methods) |m| {
+        if (findKind(m.body, false) != null) has_stateful = true;
+        if (findKind(m.body, true) != null) has_raw = true;
+    }
+    const pc: types.ParentClass = declared orelse
+        if (has_stateful) .stateful_smart_contract else if (has_raw) .unsafe_smart_contract else .smart_contract;
+    const pc_name = pc.toTsString();
+    if (pc != .stateful_smart_contract) {
+        for (properties) |p| {
+            if (!p.readonly) {
+                required_fields.setDiag(
+                    "IR validation: Property '{s}' in {s} must be readonly. Use StatefulSmartContract for mutable state.",
+                    .{ p.name, pc_name },
+                );
+                return ParseError.ParentClassRuleViolation;
+            }
+        }
+        for (methods) |m| {
+            if (findKind(m.body, false)) |k| {
+                required_fields.setDiag(
+                    "IR validation: '{s}' in method '{s}' is only available in StatefulSmartContract; got {s}",
+                    .{ k, m.name, pc_name },
+                );
+                return ParseError.ParentClassRuleViolation;
+            }
+        }
+    }
+    if (pc != .unsafe_smart_contract) {
+        for (methods) |m| {
+            if (findKind(m.body, true) != null) {
+                required_fields.setDiag(
+                    "IR validation: 'raw_script' in method '{s}' is only available in contracts extending UnsafeSmartContract; got {s}",
+                    .{ m.name, pc_name },
+                );
+                return ParseError.ParentClassRuleViolation;
+            }
+        }
+    }
+}
+
+/// N-087 (port of Go F-004 checkNoReadonlyWrites): a readonly property may
+/// only be written in the constructor, and an update_prop must name a declared
+/// property; otherwise a later load_prop reads the written value instead of
+/// the one baked into the locking script. Go's sentences.
+fn checkNoIllegalPropertyWrites(properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!void {
+    for (methods) |m| {
+        if (std.mem.eql(u8, m.name, "constructor")) continue;
+        try checkWrites(m.body, m.name, properties);
+    }
+}
+
+fn checkWrites(bindings: []const types.ANFBinding, method: []const u8, properties: []const types.ANFProperty) ParseError!void {
+    for (bindings) |b| {
+        switch (b.value) {
+            .update_prop => |v| {
+                const prop = for (properties) |p| {
+                    if (std.mem.eql(u8, p.name, v.name)) break p;
+                } else {
+                    required_fields.setDiag("IR validation: method '{s}' assigns to undeclared property '{s}'", .{ method, v.name });
+                    return ParseError.IllegalPropertyWrite;
+                };
+                if (prop.readonly) {
+                    required_fields.setDiag(
+                        "IR validation: cannot assign to readonly property '{s}' in method '{s}'. readonly properties may only be assigned in the constructor; a later load_prop would read the assigned value instead of the one baked into the locking script",
+                        .{ v.name, method },
+                    );
+                    return ParseError.IllegalPropertyWrite;
+                }
+            },
+            .@"if" => |v| {
+                try checkWrites(v.then, method, properties);
+                try checkWrites(v.@"else", method, properties);
+            },
+            .loop => |v| try checkWrites(v.body, method, properties),
+            else => {},
+        }
+    }
 }
 
 /// Walk a binding list — nested `if` arms and `loop` bodies included — and
@@ -3027,7 +3162,8 @@ test "parse update_prop ANF IR" {
         \\      "params": []
         \\    }
         \\  ],
-        \\  "properties": []
+        \\  "parentClass": "StatefulSmartContract",
+        \\  "properties": [{"name": "count", "type": "bigint", "readonly": false}]
         \\}
     ;
 

@@ -172,5 +172,7 @@ def test_constructor_may_write_readonly_property() -> None:
 def test_update_prop_on_mutable_property_still_accepted() -> None:
     props = [{"name": "owner", "type": "ByteString", "readonly": False}]
     payload = json.loads(_program(_readonly_write_body(), properties=props))
+    # N-087: a mutable property needs a StatefulSmartContract label on IR.
+    payload["parentClass"] = "StatefulSmartContract"
     # add_output arity etc. is irrelevant here; only the readonly rule is probed.
     load_ir(json.dumps(payload))

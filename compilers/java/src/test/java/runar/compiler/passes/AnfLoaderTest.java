@@ -293,8 +293,13 @@ class AnfLoaderTest {
 
     @Test
     void parsesUpdatePropNode() {
-        AnfBinding b = firstBinding(
-            "{\"name\":\"t0\",\"value\":{\"kind\":\"update_prop\",\"name\":\"count\",\"value\":\"newCount\"}}");
+        // N-087: the loader refuses a write to an undeclared property, so the
+        // shell declares `count` as a StatefulSmartContract state field.
+        AnfProgram p = AnfLoader.parse(EMPTY_SHELL.formatted(
+            "{\"name\":\"t0\",\"value\":{\"kind\":\"update_prop\",\"name\":\"count\",\"value\":\"newCount\"}}")
+            .replace("\"properties\":[]",
+                "\"parentClass\":\"StatefulSmartContract\",\"properties\":[{\"name\":\"count\",\"type\":\"bigint\",\"readonly\":false}]"));
+        AnfBinding b = p.methods().get(0).body().get(0);
         assertTrue(b.value() instanceof UpdateProp up
             && "count".equals(up.name())
             && "newCount".equals(up.value()));

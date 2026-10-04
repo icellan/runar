@@ -638,6 +638,7 @@ export function compileFromANF(
       );
     }
   }
+  assertIrParentClassRules(anf);
 
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.
@@ -703,6 +704,94 @@ function endsWithTerminalAssert(bindings: ANFBinding[]): boolean {
   if (v.kind === 'if') return endsWithTerminalAssert(v.then) && endsWithTerminalAssert(v.else);
   if (v.kind === 'raw_script') return v.out_arity === 1;
   return false;
+}
+
+/** ANF kinds only StatefulSmartContract lowering produces (typecheck's addOutput()/
+ *  addRawOutput()/addDataOutput() rule plus the auto-injected state continuation). */
+const STATEFUL_ONLY_KINDS = new Set([
+  'add_output', 'add_raw_output', 'add_data_output', 'get_state_script', 'deserialize_state',
+]);
+
+function forEachIrBinding(bindings: ANFBinding[], fn: (v: ANFBinding['value']) => void): void {
+  for (const b of bindings) {
+    fn(b.value);
+    const v = b.value as { then?: ANFBinding[]; else?: ANFBinding[]; body?: ANFBinding[] };
+    for (const nested of [v.then, v.else, v.body]) if (nested) forEachIrBinding(nested, fn);
+  }
+}
+
+/**
+ * N-087: IR skips 02-validate and 03-typecheck, so their parentClass rules
+ * never ran. A SmartContract property declared `readonly: false` got no
+ * constructor slot, and `update_prop owner = x; assert(owner == x)` compiled
+ * to `76767b8777`, which any key spends. Re-asserted here, in this order, with
+ * the diagnostics all seven tiers share:
+ *   1. SmartContract / UnsafeSmartContract properties must be readonly.
+ *   2. add_output / add_raw_output / add_data_output / get_state_script /
+ *      deserialize_state require StatefulSmartContract.
+ *   3. raw_script (asm) requires UnsafeSmartContract.
+ *   4. Go F-004's rule: no update_prop outside the constructor on a readonly
+ *      or undeclared property.
+ * Absent parentClass (IR older than F-038) is inferred fail-closed:
+ * StatefulSmartContract only if a stateful-only node is present, else
+ * UnsafeSmartContract if a raw_script is, else SmartContract.
+ */
+function assertIrParentClassRules(program: ANFProgram): void {
+  let hasStateful = false;
+  let hasRaw = false;
+  for (const m of program.methods) {
+    forEachIrBinding(m.body, (v) => {
+      if (STATEFUL_ONLY_KINDS.has(v.kind)) hasStateful = true;
+      if (v.kind === 'raw_script') hasRaw = true;
+    });
+  }
+  const pc = program.parentClass
+    ?? (hasStateful ? 'StatefulSmartContract' : hasRaw ? 'UnsafeSmartContract' : 'SmartContract');
+
+  if (pc !== 'StatefulSmartContract') {
+    for (const p of program.properties) {
+      if (!p.readonly) {
+        throw new Error(
+          `IR validation: Property '${p.name}' in ${pc} must be readonly. Use StatefulSmartContract for mutable state.`,
+        );
+      }
+    }
+  }
+  for (const m of program.methods) {
+    forEachIrBinding(m.body, (v) => {
+      if (pc !== 'StatefulSmartContract' && STATEFUL_ONLY_KINDS.has(v.kind)) {
+        throw new Error(
+          `IR validation: '${v.kind}' in method '${m.name}' is only available in StatefulSmartContract; got ${pc}`,
+        );
+      }
+    });
+  }
+  for (const m of program.methods) {
+    forEachIrBinding(m.body, (v) => {
+      if (pc !== 'UnsafeSmartContract' && v.kind === 'raw_script') {
+        throw new Error(
+          `IR validation: 'raw_script' in method '${m.name}' is only available in contracts extending UnsafeSmartContract; got ${pc}`,
+        );
+      }
+    });
+  }
+
+  const readonly = new Map(program.properties.map((p) => [p.name, p.readonly]));
+  for (const m of program.methods) {
+    if (m.name === 'constructor') continue;
+    forEachIrBinding(m.body, (v) => {
+      if (v.kind !== 'update_prop') return;
+      const ro = readonly.get(v.name);
+      if (ro === undefined) {
+        throw new Error(`IR validation: method '${m.name}' assigns to undeclared property '${v.name}'`);
+      }
+      if (ro) {
+        throw new Error(
+          `IR validation: cannot assign to readonly property '${v.name}' in method '${m.name}'. readonly properties may only be assigned in the constructor; a later load_prop would read the assigned value instead of the one baked into the locking script`,
+        );
+      }
+    });
+  }
 }
 
 /**

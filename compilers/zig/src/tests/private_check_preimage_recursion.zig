@@ -84,9 +84,12 @@ const helper_ir =
 /// Same program with NO `check_preimage` anywhere. The `_codePart` gate must
 /// stay gated — the recursion must not make `usesCodePart` unconditionally
 /// true just because a private helper is called.
+/// (N-087: labelled StatefulSmartContract, since the loader refuses a mutable
+/// property in IR with no parentClass and no stateful-only node.)
 const no_preimage_ir =
     \\{
     \\  "contractName": "VarLenPrivateRead",
+    \\  "parentClass": "StatefulSmartContract",
     \\  "properties": [{"name": "tag", "type": "ByteString", "readonly": false}],
     \\  "methods": [
     \\    {

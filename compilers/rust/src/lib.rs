@@ -644,6 +644,87 @@ fn check_no_readonly_writes(
     Ok(())
 }
 
+/// N-087: the source validator's parentClass rules, which `--ir` never ran. A
+/// SmartContract property declared readonly:false got no constructor slot, so
+/// `update_prop owner = x; assert(owner == x)` compiled to 76767b8777, which any
+/// key spends. Checked in this order, with the diagnostics all seven tiers share
+/// (conformance/negatives/ir-parent-class-cases.json): (1) SmartContract /
+/// UnsafeSmartContract properties must be readonly; (2) stateful-only nodes
+/// require StatefulSmartContract; (3) raw_script (asm) requires
+/// UnsafeSmartContract. An absent parentClass (IR older than F-038) is inferred
+/// fail-closed: StatefulSmartContract only from a stateful-only node, else
+/// UnsafeSmartContract from a raw_script, else SmartContract.
+fn check_ir_parent_class_rules(program: &ir::ANFProgram) -> Result<(), String> {
+    fn stateful_only_kind(v: &ir::ANFValue) -> Option<&'static str> {
+        match v {
+            ir::ANFValue::AddOutput { .. } => Some("add_output"),
+            ir::ANFValue::AddRawOutput { .. } => Some("add_raw_output"),
+            ir::ANFValue::AddDataOutput { .. } => Some("add_data_output"),
+            ir::ANFValue::GetStateScript { .. } => Some("get_state_script"),
+            ir::ANFValue::DeserializeState { .. } => Some("deserialize_state"),
+            _ => None,
+        }
+    }
+    fn walk(bindings: &[ir::ANFBinding], f: &mut dyn FnMut(&ir::ANFValue) -> Result<(), String>) -> Result<(), String> {
+        for b in bindings {
+            f(&b.value)?;
+            match &b.value {
+                ir::ANFValue::If { then, else_branch, .. } => {
+                    walk(then, f)?;
+                    walk(else_branch, f)?;
+                }
+                ir::ANFValue::Loop { body, .. } => walk(body, f)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    let (mut has_stateful, mut has_raw) = (false, false);
+    for m in &program.methods {
+        walk(&m.body, &mut |v| {
+            has_stateful |= stateful_only_kind(v).is_some();
+            has_raw |= matches!(v, ir::ANFValue::RawScript { .. });
+            Ok(())
+        })?;
+    }
+    let pc: &str = if !program.parent_class.is_empty() {
+        &program.parent_class
+    } else if has_stateful {
+        "StatefulSmartContract"
+    } else if has_raw {
+        "UnsafeSmartContract"
+    } else {
+        "SmartContract"
+    };
+    if pc != "StatefulSmartContract" {
+        if let Some(p) = program.properties.iter().find(|p| !p.readonly) {
+            return Err(format!(
+                "IR validation: Property '{}' in {} must be readonly. Use StatefulSmartContract for mutable state.",
+                p.name, pc
+            ));
+        }
+    }
+    for m in &program.methods {
+        walk(&m.body, &mut |v| match stateful_only_kind(v) {
+            Some(kind) if pc != "StatefulSmartContract" => Err(format!(
+                "IR validation: '{}' in method '{}' is only available in StatefulSmartContract; got {}",
+                kind, m.name, pc
+            )),
+            _ => Ok(()),
+        })?;
+    }
+    for m in &program.methods {
+        walk(&m.body, &mut |v| match v {
+            ir::ANFValue::RawScript { .. } if pc != "UnsafeSmartContract" => Err(format!(
+                "IR validation: 'raw_script' in method '{}' is only available in contracts extending UnsafeSmartContract; got {}",
+                m.name, pc
+            )),
+            _ => Ok(()),
+        })?;
+    }
+    Ok(())
+}
+
 /// Compile a parsed ANF program to a Rúnar artifact.
 pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, String> {
     compile_from_program_with_options(program, &CompileOptions::default())
@@ -654,6 +735,7 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     // F-107: the source validator's readonly-write rule, re-asserted on every
     // program that reaches this entry point (the `--ir` path never runs the
     // validator). Same check and wording as Go F-004's checkIRFrontendRules.
+    check_ir_parent_class_rules(program)?;
     check_ir_no_readonly_writes(program)?;
 
     let mut program = program.clone();

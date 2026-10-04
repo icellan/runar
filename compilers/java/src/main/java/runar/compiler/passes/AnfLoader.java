@@ -201,7 +201,116 @@ public final class AnfLoader {
                 throw new RuntimeException(err);
             }
         }
+        // N-087: the source validator's parentClass rules, then Go F-004's
+        // readonly / undeclared-property write rule.
+        checkParentClassRules(parentClass, props, methods);
+        checkNoIllegalPropertyWrites(props, methods);
         return new AnfProgram(name, props, methods, parentClass);
+    }
+
+    private static final java.util.Set<String> STATEFUL_ONLY_KINDS = java.util.Set.of(
+        "add_output", "add_raw_output", "add_data_output", "get_state_script", "deserialize_state");
+
+    /** Every ANF value in {@code bindings}, nested if arms and loop bodies included. */
+    private static void collectValues(List<AnfBinding> bindings, List<AnfValue> out) {
+        for (AnfBinding b : bindings) {
+            AnfValue v = b.value();
+            out.add(v);
+            if (v instanceof If iff) {
+                collectValues(iff.thenBranch(), out);
+                collectValues(iff.elseBranch(), out);
+            } else if (v instanceof Loop loop) {
+                collectValues(loop.body(), out);
+            }
+        }
+    }
+
+    /**
+     * N-087: the source validator's parentClass rules, which {@code --ir} never
+     * ran. A SmartContract property declared readonly:false got no constructor
+     * slot, so {@code update_prop owner = x; assert(owner == x)} compiled to
+     * {@code 76767b8777}, which any key spends. Checked in this order, with the
+     * diagnostics all seven tiers share
+     * (conformance/negatives/ir-parent-class-cases.json): (1) SmartContract /
+     * UnsafeSmartContract properties must be readonly; (2) stateful-only nodes
+     * require StatefulSmartContract; (3) raw_script (asm) requires
+     * UnsafeSmartContract. An absent parentClass (IR older than F-038) is
+     * inferred fail-closed: StatefulSmartContract only from a stateful-only
+     * node, else UnsafeSmartContract from a raw_script, else SmartContract.
+     */
+    private static void checkParentClassRules(String declared, List<AnfProperty> props, List<AnfMethod> methods) {
+        List<List<AnfValue>> values = new ArrayList<>();
+        boolean hasStateful = false;
+        boolean hasRaw = false;
+        for (AnfMethod m : methods) {
+            List<AnfValue> vs = new ArrayList<>();
+            collectValues(m.body(), vs);
+            values.add(vs);
+            for (AnfValue v : vs) {
+                hasStateful |= STATEFUL_ONLY_KINDS.contains(v.kind());
+                hasRaw |= v instanceof RawScript;
+            }
+        }
+        String pc = declared != null ? declared
+            : hasStateful ? "StatefulSmartContract"
+            : hasRaw ? "UnsafeSmartContract"
+            : "SmartContract";
+        if (!"StatefulSmartContract".equals(pc)) {
+            for (AnfProperty p : props) {
+                if (!p.readonly()) {
+                    throw new RuntimeException("IR validation: Property '" + p.name() + "' in " + pc
+                        + " must be readonly. Use StatefulSmartContract for mutable state.");
+                }
+            }
+            for (int i = 0; i < methods.size(); i++) {
+                for (AnfValue v : values.get(i)) {
+                    if (STATEFUL_ONLY_KINDS.contains(v.kind())) {
+                        throw new RuntimeException("IR validation: '" + v.kind() + "' in method '"
+                            + methods.get(i).name() + "' is only available in StatefulSmartContract; got " + pc);
+                    }
+                }
+            }
+        }
+        if (!"UnsafeSmartContract".equals(pc)) {
+            for (int i = 0; i < methods.size(); i++) {
+                for (AnfValue v : values.get(i)) {
+                    if (v instanceof RawScript) {
+                        throw new RuntimeException("IR validation: 'raw_script' in method '" + methods.get(i).name()
+                            + "' is only available in contracts extending UnsafeSmartContract; got " + pc);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * N-087 (port of Go F-004 checkNoReadonlyWrites): a readonly property may
+     * only be written in the constructor, and an update_prop must name a
+     * declared property; otherwise a later load_prop reads the written value
+     * instead of the one baked into the locking script. Go's sentences.
+     */
+    private static void checkNoIllegalPropertyWrites(List<AnfProperty> props, List<AnfMethod> methods) {
+        Map<String, Boolean> readonly = new LinkedHashMap<>();
+        for (AnfProperty p : props) readonly.put(p.name(), p.readonly());
+        for (AnfMethod m : methods) {
+            if ("constructor".equals(m.name())) continue;
+            List<AnfValue> vs = new ArrayList<>();
+            collectValues(m.body(), vs);
+            for (AnfValue v : vs) {
+                if (!(v instanceof UpdateProp up)) continue;
+                Boolean ro = readonly.get(up.name());
+                if (ro == null) {
+                    throw new RuntimeException("IR validation: method '" + m.name()
+                        + "' assigns to undeclared property '" + up.name() + "'");
+                }
+                if (ro) {
+                    throw new RuntimeException("IR validation: cannot assign to readonly property '" + up.name()
+                        + "' in method '" + m.name() + "'. readonly properties may only be assigned in the"
+                        + " constructor; a later load_prop would read the assigned value instead of the one"
+                        + " baked into the locking script");
+                }
+            }
+        }
     }
 
     /**

@@ -45,6 +45,9 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 	if err := checkIRNoRecursion(program); err != nil {
 		return err
 	}
+	if err := checkIRParentClassRules(program); err != nil {
+		return err
+	}
 
 	for i := range program.Methods {
 		m := &program.Methods[i]
@@ -58,6 +61,90 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 		}
 		if err := checkNoReadonlyWrites(m.Body, m.Name, readonly); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// N-087: the source validator's parentClass rules, which --ir never ran. A
+// SmartContract property declared readonly:false got no constructor slot, so
+// `update_prop owner = x; assert(owner == x)` compiled to 76767b8777, which
+// any key spends. Checked in this order, with the diagnostics all seven tiers
+// share (conformance/negatives/ir-parent-class-cases.json):
+//  1. SmartContract / UnsafeSmartContract properties must be readonly;
+//  2. stateful-only nodes require StatefulSmartContract;
+//  3. raw_script (asm) requires UnsafeSmartContract.
+//
+// An absent parentClass (IR older than F-038) is inferred fail-closed:
+// StatefulSmartContract only from a stateful-only node, else
+// UnsafeSmartContract from a raw_script, else SmartContract.
+var irStatefulOnlyKinds = map[string]bool{
+	"add_output": true, "add_raw_output": true, "add_data_output": true,
+	"get_state_script": true, "deserialize_state": true,
+}
+
+func checkIRParentClassRules(program *ir.ANFProgram) error {
+	hasStateful, hasRaw := false, false
+	for i := range program.Methods {
+		walkIRBindings(program.Methods[i].Body, func(v *ir.ANFValue) error {
+			hasStateful = hasStateful || irStatefulOnlyKinds[v.Kind]
+			hasRaw = hasRaw || v.Kind == "raw_script"
+			return nil
+		})
+	}
+	pc := program.ParentClass
+	if pc == "" {
+		switch {
+		case hasStateful:
+			pc = "StatefulSmartContract"
+		case hasRaw:
+			pc = "UnsafeSmartContract"
+		default:
+			pc = "SmartContract"
+		}
+	}
+	if pc != "StatefulSmartContract" {
+		for _, p := range program.Properties {
+			if !p.Readonly {
+				return fmt.Errorf("IR validation: Property '%s' in %s must be readonly. Use StatefulSmartContract for mutable state.", p.Name, pc)
+			}
+		}
+	}
+	for i := range program.Methods {
+		name := program.Methods[i].Name
+		if err := walkIRBindings(program.Methods[i].Body, func(v *ir.ANFValue) error {
+			if pc != "StatefulSmartContract" && irStatefulOnlyKinds[v.Kind] {
+				return fmt.Errorf("IR validation: '%s' in method '%s' is only available in StatefulSmartContract; got %s", v.Kind, name, pc)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	for i := range program.Methods {
+		name := program.Methods[i].Name
+		if err := walkIRBindings(program.Methods[i].Body, func(v *ir.ANFValue) error {
+			if pc != "UnsafeSmartContract" && v.Kind == "raw_script" {
+				return fmt.Errorf("IR validation: 'raw_script' in method '%s' is only available in contracts extending UnsafeSmartContract; got %s", name, pc)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func walkIRBindings(bindings []ir.ANFBinding, fn func(v *ir.ANFValue) error) error {
+	for i := range bindings {
+		v := &bindings[i].Value
+		if err := fn(v); err != nil {
+			return err
+		}
+		for _, nested := range [][]ir.ANFBinding{v.Then, v.Else, v.Body} {
+			if err := walkIRBindings(nested, fn); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
