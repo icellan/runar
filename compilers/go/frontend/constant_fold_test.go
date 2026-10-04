@@ -439,6 +439,24 @@ func TestFoldConstants_DoesNotFoldWithParam(t *testing.T) {
 	assertNotFolded(t, result.Methods[0].Body[2], "bin_op")
 }
 
+// F-078 / N-064: a name bound to a constant and then rebound to an @ref alias
+// of a runtime value must lose its constant. The alias is still a load_const
+// node, but anfValueToConst rejects "@ref:" strings, so foldBinding must drop
+// the old entry instead of leaving x=5 in the env (which folded y to 6).
+// Proves: foldBindings does not fold through a stale entry after an @ref
+// rebinding. Does not prove: if-arm / loop-body invalidation or on-chain
+// behaviour (see compilers/go/compiler/n064_rebind_fold_test.go).
+func TestFoldConstants_RebindToRefAliasDropsStaleConstant(t *testing.T) {
+	folded := foldBindings([]ir.ANFBinding{
+		b("t", loadParam("p")),
+		b("x", mkInt(5)),
+		b("x", mkStr("@ref:t")),
+		b("one", mkInt(1)),
+		b("y", binOp("+", "x", "one")),
+	}, newConstEnv())
+	assertNotFolded(t, folded[4], "bin_op")
+}
+
 // ---------------------------------------------------------------------------
 // If-branch folding
 // ---------------------------------------------------------------------------
