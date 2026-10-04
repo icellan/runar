@@ -24,6 +24,7 @@ from runar_compiler.compiler import (
     compile_from_source_collecting_warnings,
     compile_source_to_ir,
 )
+from runar_compiler.frontend.sighash_directive import SIGHASH_DEFAULT
 
 
 # GAP-011: source-map sourceFile values must be repo-relative (POSIX) so
@@ -318,24 +319,23 @@ _FIELD_ALIASES = {
     "else_": "else",
     "value_ref": "value",
     "raw_value": "value",
+    # F-065 / F-088: the schema spells it `sigHashType` (the ABI's spelling),
+    # not the mechanical camelCase `sighashType`.
+    "sighash_type": "sigHashType",
 }
 
 # Fields that should be excluded from IR output (internal decoded fields)
 _IR_EXCLUDED_FIELDS = frozenset({
     "const_string", "const_big_int", "const_bool", "const_int",
     "source_loc",  # debug-only, not part of conformance
-    # In-memory carrier for the artifact's top-level parentClass field.
-    # Excluded from --emit-ir so it never affects cross-tier ANF parity.
-    "parent_class",
     # Issue #109 (@embedAlways): compiler-internal DCE opt-out flag on
     # load_prop. The Zig reference keeps it out of the emitted IR too, so
     # excluding it here keeps the cross-tier ANF bytes identical.
     "preserve",
-    # N-094 / issue #123: in-memory carrier for the method's declared @sighash
-    # mode. The ANF wire format carries the mode on the `check_preimage` node's
-    # `sighashFlag` instead; the ANFMethod schema is additionalProperties:false,
-    # so emitting it here makes the whole program fail validateANF.
-    "sighash_type",
+    # F-038: `parent_class` and `sighash_type` are NOT excluded. They are wire
+    # data (anf-ir.schema.json `parentClass` / `ANFMethod.sigHashType`): an
+    # --emit-ir -> --ir round trip that dropped them produced an artifact with
+    # no parentClass and no abi sigHashType, both of which the SDK signs by.
 })
 
 
@@ -399,6 +399,14 @@ def _anf_to_camel_dict(obj: object) -> object:
             # (`skip_serializing_if`) do, so the ANF of a FixedArray-free
             # contract keeps the bytes the goldens were stamped with.
             if f.name == "synthetic_array_chain" and not v:
+                continue
+            # F-038: parentClass is always set by the source path; an IR
+            # loaded without it (pre-F-038) re-emits without it.
+            if f.name == "parent_class" and not v:
+                continue
+            # F-065 / F-088: omit the default ALL|FORKID (0x41) so explicit
+            # `@sighash ALL|FORKID` and no directive emit identical ANF.
+            if f.name == "sighash_type" and v == SIGHASH_DEFAULT:
                 continue
             key = _snake_key(f.name)
             d[key] = _anf_to_camel_dict(v)

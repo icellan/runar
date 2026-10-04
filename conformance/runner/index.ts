@@ -19,7 +19,7 @@ import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, readdirSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
-import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults, emptyFixtureSetError } from './runner.js';
+import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, runAllIrParityChecks, printIrParityReport, runAllIrRoundTripChecks, printIrRoundTripReport, updateGoldenFiles, shutdownJavaDaemon, getSpawnStats, getHarnessFaults, emptyFixtureSetError } from './runner.js';
 import {
   generateReport,
   formatReportAsJSON,
@@ -45,6 +45,8 @@ interface CLIOptions {
   parserOnly: boolean;
   /** When true, run the IR -> hex cross-tier parity gate and exit. */
   irParity: boolean;
+  /** When true, run the --emit-ir -> --ir artifact round-trip gate and exit. */
+  irRoundTrip: boolean;
   prebuild: boolean;
   help: boolean;
 }
@@ -57,6 +59,7 @@ function parseArgs(argv: string[]): CLIOptions {
     multiFormat: false,
     parserOnly: false,
     irParity: false,
+    irRoundTrip: false,
     // Pre-build is OFF by default to keep the runner safe to drop into CI
     // jobs that ship prebuilt binaries via actions/download-artifact. Local
     // dev loops should pass --prebuild (or set RUNAR_PREBUILD=1) to ensure
@@ -91,6 +94,9 @@ function parseArgs(argv: string[]): CLIOptions {
         break;
       case '--ir-parity':
         opts.irParity = true;
+        break;
+      case '--ir-roundtrip':
+        opts.irRoundTrip = true;
         break;
       case '--prebuild':
         opts.prebuild = true;
@@ -147,6 +153,11 @@ Options:
                         were stamped fold-OFF). This mode is the single
                         source of truth for the rule that ci.yml used to
                         re-implement inline in bash/jq.
+  --ir-roundtrip        F-038: per non-TS tier, compile every fixture with
+                        --source, and again via its own --emit-ir -> --ir,
+                        and require the two artifacts to agree on script,
+                        parentClass, abi and stateFields. The per-fixture
+                        \`compilers\` allowlist scopes it.
   --prebuild            Pre-build all native compiler binaries (Go, Rust, Zig,
                         Java) before running the suite. Default: off (so CI
                         jobs that download prebuilt artifacts aren't slowed
@@ -315,6 +326,34 @@ async function main(): Promise<void> {
     if (tainted) {
       process.exit(EXIT_HARNESS_FAILURE);
     }
+    if (!report.allOk) {
+      for (const f of report.failures) {
+        console.error(`::error::conformance: ${f.fixture} — ${f.error.split('\n')[0]}`);
+      }
+      process.exit(1);
+    }
+    return;
+  }
+
+  // Handle --ir-roundtrip mode (F-038): --emit-ir -> --ir must reproduce the
+  // --source artifact in every non-TS tier.
+  if (opts.irRoundTrip) {
+    console.log(`Running --emit-ir -> --ir artifact round trip from: ${opts.testsDir}`);
+    if (opts.filter) console.log(`Filter: ${opts.filter}`);
+    const startedAt = Date.now();
+    const report = await runAllIrRoundTripChecks(opts.testsDir, { filter: opts.filter });
+    console.log(`\nCompleted ${report.results.length} fixture round trips in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`);
+    printIrRoundTripReport(report);
+    const empty = emptyFixtureSetError(report.results.length, {
+      mode: 'ir-roundtrip', testsDir: opts.testsDir, filter: opts.filter,
+    });
+    if (empty) {
+      console.error(empty);
+      await shutdownJavaDaemon();
+      process.exit(EXIT_HARNESS_FAILURE);
+    }
+    await shutdownJavaDaemon();
+    if (reportHarnessFaults()) process.exit(EXIT_HARNESS_FAILURE);
     if (!report.allOk) {
       for (const f of report.failures) {
         console.error(`::error::conformance: ${f.fixture} — ${f.error.split('\n')[0]}`);

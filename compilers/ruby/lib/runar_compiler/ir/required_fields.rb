@@ -124,10 +124,37 @@ module RunarCompiler
         # their fields. Unknown kinds are refused by validate_ir.
       end
 
+      # F-038 / F-065: optional keys the artifact copies into the fields the SDK
+      # signs by. Absent or null is legal (IR written before they existed); a
+      # present value must be one the source path can produce. Shared verbatim
+      # with the other six tiers.
+      PARENT_CLASSES = %w[SmartContract StatefulSmartContract UnsafeSmartContract].freeze
+      SIGHASH_TYPES = [0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3].freeze
+
+      def opt_parent_class(obj)
+        v = obj["parentClass"]
+        return if v.nil?
+        raise malformed("parentClass", "a string", v) unless v.is_a?(String)
+        return if PARENT_CLASSES.include?(v)
+
+        raise ArgumentError, "IR validation: parentClass must be one of #{PARENT_CLASSES.join(', ')}, got #{v}"
+      end
+
+      def opt_sighash_type(obj, path)
+        v = obj["sigHashType"]
+        return if v.nil?
+        lp = field_path(path, "sigHashType")
+        raise malformed(lp, "an integer", v) unless v.is_a?(Numeric)
+        return if SIGHASH_TYPES.include?(v)
+
+        raise ArgumentError, "IR validation: #{lp} must be one of #{SIGHASH_TYPES.join(', ')}, got #{v}"
+      end
+
       # Raise ArgumentError on the first required field that is missing or mistyped.
       def assert!(root)
         program = as_obj(root, "the IR document")
         req_str(program, "", "contractName")
+        opt_parent_class(program)
         req_list(program, "properties", "").each_with_index do |p, i|
           pp = "properties[#{i}]"
           prop = as_obj(p, pp)
@@ -139,6 +166,7 @@ module RunarCompiler
           method = as_obj(m, mp)
           req_str(method, mp, "name")
           req_bool(method, "isPublic", mp)
+          opt_sighash_type(method, mp)
           req_list(method, "params", mp).each_with_index do |p, j|
             pp = "#{mp}.params[#{j}]"
             req_str(as_obj(p, pp), pp, "name", "type")

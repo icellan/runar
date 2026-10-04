@@ -14,6 +14,15 @@ export interface ANFProgram {
   contractName: string;
   properties: ANFProperty[];
   methods: ANFMethod[];
+  /**
+   * F-038: the base class the source contract extends. Every tier's ANF
+   * carries it so an `--emit-ir` -> `--ir` round trip keeps the artifact's
+   * `parentClass`, which the SDKs read to gate the issue-#42/#44 subscript
+   * trim (a StatefulSmartContract with zero mutable fields has empty
+   * stateFields and still needs it). Optional only so IR written before it
+   * existed still loads.
+   */
+  parentClass?: 'SmartContract' | 'StatefulSmartContract' | 'UnsafeSmartContract';
 }
 
 /**
@@ -50,6 +59,14 @@ export interface ANFMethod {
   params: ANFParam[];
   body: ANFBinding[];
   isPublic: boolean;
+  /**
+   * F-065 / F-088: the non-default BIP-143 sighash type a `@sighash` directive
+   * declared for this method (e.g. 0x43 for SINGLE|FORKID). Omitted for the
+   * default ALL|FORKID (0x41). Wire data, so an `--emit-ir` -> `--ir` round
+   * trip keeps the artifact's `abi.methods[].sigHashType`; the script bytes
+   * ride on each `check_preimage` node's `sighashFlag`.
+   */
+  sigHashType?: number;
 }
 
 export interface ANFParam {

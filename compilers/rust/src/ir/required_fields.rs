@@ -150,6 +150,41 @@ fn check_value(v: &Obj, path: &str) -> R<()> {
     }
 }
 
+/// F-038 / F-065: the two OPTIONAL keys the artifact copies into the fields
+/// the SDK signs by. Absent (or null) is legal; a present value must be one the
+/// source path can produce. Shared verbatim with the other six tiers.
+const PARENT_CLASSES: [&str; 3] = ["SmartContract", "StatefulSmartContract", "UnsafeSmartContract"];
+const SIGHASH_TYPES: [i64; 6] = [0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3];
+
+fn opt_parent_class(obj: &Obj) -> R<()> {
+    match obj.get("parentClass") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(s)) if PARENT_CLASSES.contains(&s.as_str()) => Ok(()),
+        Some(Value::String(s)) => Err(format!(
+            "IR validation: parentClass must be one of {}, got {}",
+            PARENT_CLASSES.join(", "),
+            s
+        )),
+        Some(v) => Err(malformed("parentClass", "a string", Some(v))),
+    }
+}
+
+fn opt_sighash_type(obj: &Obj, path: &str) -> R<()> {
+    let lp = field_path(path, "sigHashType");
+    match obj.get("sigHashType") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Number(n)) => {
+            if n.as_i64().map_or(false, |v| SIGHASH_TYPES.contains(&v)) {
+                Ok(())
+            } else {
+                let list: Vec<String> = SIGHASH_TYPES.iter().map(|v| v.to_string()).collect();
+                Err(format!("IR validation: {} must be one of {}, got {}", lp, list.join(", "), n))
+            }
+        }
+        Some(v) => Err(malformed(&lp, "an integer", Some(v))),
+    }
+}
+
 /// Return the first required field that is missing or of the wrong JSON type.
 pub fn assert_required_ir_fields(json_str: &str) -> R<()> {
     // A syntax error is left to the typed parse, which reports it in the
@@ -160,6 +195,7 @@ pub fn assert_required_ir_fields(json_str: &str) -> R<()> {
     };
     let program = as_obj(Some(&root), "the IR document")?;
     req_str(program, "", &["contractName"])?;
+    opt_parent_class(program)?;
     for (i, p) in req_list(program, "properties", "")?.iter().enumerate() {
         let pp = format!("properties[{}]", i);
         let prop = as_obj(Some(p), &pp)?;
@@ -171,6 +207,7 @@ pub fn assert_required_ir_fields(json_str: &str) -> R<()> {
         let method = as_obj(Some(m), &mp)?;
         req_str(method, &mp, &["name"])?;
         req_bool(method, "isPublic", &mp)?;
+        opt_sighash_type(method, &mp)?;
         for (j, p) in req_list(method, "params", &mp)?.iter().enumerate() {
             let pp = format!("{}.params[{}]", mp, j);
             req_str(as_obj(Some(p), &pp)?, &pp, &["name", "type"])?;

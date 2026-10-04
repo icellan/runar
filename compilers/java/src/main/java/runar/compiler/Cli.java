@@ -371,12 +371,13 @@ public final class Cli {
             if (rc != 0) return rc;
         }
 
-        // R-007: --emit-artifact also runs on the IR path. parentClass is not
-        // carried in the ANF IR JSON in ANY tier (it is `json:"-"` in Go), so
-        // the field is omitted here exactly as Go's CompileFromIR omits it; the
-        // SDK falls back to `stateFields non-empty` (RunarArtifact#parentStateful).
+        // R-007: --emit-artifact also runs on the IR path. F-038: parentClass is
+        // wire data in the ANF IR (every tier emits it), so the IR-path artifact
+        // carries the same parentClass as the source-path one. IR written before
+        // F-038 has none; the field is then omitted and the SDK falls back to
+        // `stateFields non-empty` (RunarArtifact#parentStateful).
         if (parsed.emitArtifact != null) {
-            int rc = writeArtifact(anf, null, parsed.emitArtifact);
+            int rc = writeArtifact(anf, anf.parentClass(), parsed.emitArtifact);
             if (rc != 0) return rc;
             if (!parsed.emitIr && !parsed.hex) return 0;
         }

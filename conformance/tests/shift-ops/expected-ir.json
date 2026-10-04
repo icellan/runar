@@ -227,6 +227,7 @@
       "params": []
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "a",

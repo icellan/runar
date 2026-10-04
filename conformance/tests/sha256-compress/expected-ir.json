@@ -118,6 +118,7 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "expected",

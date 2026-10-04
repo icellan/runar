@@ -402,6 +402,7 @@
       ]
     }
   ],
+  "parentClass": "StatefulSmartContract",
   "properties": [
     {
       "name": "count",

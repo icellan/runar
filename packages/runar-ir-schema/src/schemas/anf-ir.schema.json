@@ -18,6 +18,10 @@
     "methods": {
       "type": "array",
       "items": { "$ref": "#/$defs/ANFMethod" }
+    },
+    "parentClass": {
+      "enum": ["SmartContract", "StatefulSmartContract", "UnsafeSmartContract"],
+      "description": "F-038: the base class the source contract extends. Every tier's --emit-ir writes it; it is optional on input only so IR written before it existed still loads (the artifact then has no parentClass). The artifact copies it to its top-level parentClass, which the SDKs read to gate the issue-#42/#44 OP_CODESEPARATOR subscript trim: a StatefulSmartContract with zero mutable fields has empty stateFields and still needs the trim."
     }
   },
   "$defs": {
@@ -68,7 +72,11 @@
           "type": "array",
           "items": { "$ref": "#/$defs/ANFBinding" }
         },
-        "isPublic": { "type": "boolean" }
+        "isPublic": { "type": "boolean" },
+        "sigHashType": {
+          "enum": [65, 66, 67, 193, 194, 195],
+          "description": "F-065 / F-088: the BIP-143 sighash type a `@sighash` directive declared for this method (ALL/NONE/SINGLE, optionally ANYONECANPAY, always FORKID). Omitted for the default ALL|FORKID (65). The artifact copies it to abi.methods[].sigHashType, which the SDKs read to build the preimage the covenant asserts; the check_preimage node's sighashFlag drives the script bytes."
+        }
       }
     },
     "ANFParam": {

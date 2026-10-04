@@ -528,6 +528,7 @@
       ]
     }
   ],
+  "parentClass": "StatefulSmartContract",
   "properties": [
     {
       "name": "memo",

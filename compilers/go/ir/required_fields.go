@@ -211,6 +211,43 @@ func irCheckValue(v irObj, path string) error {
 	return nil
 }
 
+// F-038 / F-065: the two OPTIONAL keys the artifact copies into the fields the
+// SDK signs by. Absent or null is legal (IR written before they existed); a
+// present value must be one the source path can produce. Shared verbatim with
+// the other six tiers.
+func irOptParentClass(program irObj) error {
+	v, ok := program["parentClass"]
+	if !ok || v == nil {
+		return nil
+	}
+	s, isStr := v.(string)
+	if !isStr {
+		return irMalformed("parentClass", "a string", v)
+	}
+	switch s {
+	case "SmartContract", "StatefulSmartContract", "UnsafeSmartContract":
+		return nil
+	}
+	return fmt.Errorf("IR validation: parentClass must be one of SmartContract, StatefulSmartContract, UnsafeSmartContract, got %s", s)
+}
+
+func irOptSigHashType(method irObj, path string) error {
+	v, ok := method["sigHashType"]
+	if !ok || v == nil {
+		return nil
+	}
+	lp := irFieldPath(path, "sigHashType")
+	n, isNum := v.(float64)
+	if !isNum {
+		return irMalformed(lp, "an integer", v)
+	}
+	switch n {
+	case 0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3:
+		return nil
+	}
+	return fmt.Errorf("IR validation: %s must be one of 65, 66, 67, 193, 194, 195, got %v", lp, n)
+}
+
 // assertRequiredIRFields returns the first required field that is missing or
 // of the wrong JSON type. See the file comment.
 func assertRequiredIRFields(data []byte) error {
@@ -223,6 +260,9 @@ func assertRequiredIRFields(data []byte) error {
 		return err
 	}
 	if err := irReqString(program, "contractName", ""); err != nil {
+		return err
+	}
+	if err := irOptParentClass(program); err != nil {
 		return err
 	}
 	props, err := irReqArray(program, "properties", "")
@@ -256,6 +296,9 @@ func assertRequiredIRFields(data []byte) error {
 			return err
 		}
 		if err := irReqBool(method, "isPublic", mp); err != nil {
+			return err
+		}
+		if err := irOptSigHashType(method, mp); err != nil {
 			return err
 		}
 		params, err := irReqArray(method, "params", mp)

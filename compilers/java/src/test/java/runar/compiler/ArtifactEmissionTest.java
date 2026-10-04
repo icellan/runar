@@ -292,8 +292,15 @@ class ArtifactEmissionTest {
                 assertTrue(artifact.contains("\"methods\": [" + bump + ", " + plain + "]"),
                     "abi.methods (fold " + (fold ? "ON" : "OFF") + ") must equal the TS/Go reference; got:\n"
                         + artifact.substring(artifact.indexOf("\"abi\""), artifact.indexOf("\"script\"")));
-                assertEquals(1, artifact.split("\"sigHashType\"", -1).length - 1,
-                    "exactly one sigHashType key (bump only; none on the default method or constructor)");
+                // F-038: the stateful artifact's embedded `anf` now carries the
+                // method's sigHashType too (wire data), so count per section.
+                String abi = artifact.substring(artifact.indexOf("\"abi\""), artifact.indexOf("\"script\""));
+                assertEquals(1, abi.split("\"sigHashType\"", -1).length - 1,
+                    "exactly one abi sigHashType key (bump only; none on the default method or constructor)");
+                String anf = artifact.substring(artifact.indexOf("\"anf\""));
+                assertEquals(1, anf.split("\"sigHashType\"", -1).length - 1,
+                    "exactly one embedded-ANF sigHashType key (bump only)");
+                assertTrue(anf.contains("\"sigHashType\":67"), "the embedded-ANF key carries bump's 0x43");
             }
         } finally {
             Files.deleteIfExists(source);

@@ -37,14 +37,19 @@ pub struct ANFProgram {
     pub properties: Vec<ANFProperty>,
     pub methods: Vec<ANFMethod>,
     /// Base class the source contract extends ("SmartContract" |
-    /// "StatefulSmartContract" | "UnsafeSmartContract"). In-memory carrier
-    /// ONLY (`#[serde(skip)]`) so it never appears in the emitted ANF IR JSON
-    /// that the conformance suite compares cross-tier. The artifact assembler
-    /// copies it to the top-level artifact field so SDKs can gate the
-    /// issue-#42/#44 terminal sighash subscript trim on the authoritative
-    /// parent class (a StatefulSmartContract with zero mutable fields still
-    /// needs the trim even though state_fields is empty).
-    #[serde(skip, default)]
+    /// "StatefulSmartContract" | "UnsafeSmartContract"). F-038: wire data
+    /// (`parentClass`, `$defs`-root of the shared JSON Schema), so an
+    /// `--emit-ir` -> `--ir` round trip keeps it. The artifact assembler copies
+    /// it to the top-level artifact field so SDKs can gate the issue-#42/#44
+    /// terminal sighash subscript trim on the authoritative parent class (a
+    /// StatefulSmartContract with zero mutable fields still needs the trim even
+    /// though state_fields is empty). Empty = absent (IR written before F-038).
+    #[serde(
+        rename = "parentClass",
+        skip_serializing_if = "String::is_empty",
+        default,
+        deserialize_with = "null_as_empty"
+    )]
     pub parent_class: String,
 }
 
@@ -88,13 +93,23 @@ pub struct ANFMethod {
     #[serde(rename = "isPublic")]
     pub is_public: bool,
     /// Issue #123: the method's declared `@sighash` type (e.g. `0x43` for
-    /// SINGLE|FORKID), `None` for the default `ALL|FORKID`. In-memory carrier
-    /// ONLY (`#[serde(skip)]`, like `ANFProgram::parent_class`) so it never
-    /// appears in the emitted ANF IR JSON the conformance suite compares
-    /// cross-tier; the artifact assembler copies a non-default value into
+    /// SINGLE|FORKID), `None` for the default `ALL|FORKID`. F-065 / F-088:
+    /// wire data (`sigHashType`), omitted for the default so directive-free
+    /// ANF is unchanged; an `--emit-ir` -> `--ir` round trip keeps it. The
+    /// artifact assembler copies a non-default value into
     /// `ABIMethod.sigHashType` so the SDK builds the matching preimage.
-    #[serde(skip, default)]
+    #[serde(rename = "sigHashType", skip_serializing_if = "is_default_sighash", default)]
     pub sighash_type: Option<i64>,
+}
+
+/// A JSON `null` `parentClass` reads as absent, like every other loader.
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(<Option<String> as serde::Deserialize>::deserialize(d)?.unwrap_or_default())
+}
+
+/// `sigHashType` is omitted for `None` and for the default ALL|FORKID (0x41).
+fn is_default_sighash(v: &Option<i64>) -> bool {
+    matches!(v, None | Some(0x41))
 }
 
 /// A method parameter.

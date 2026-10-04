@@ -138,10 +138,45 @@ def _check_value(v: dict, path: str) -> None:
     # fields. Unknown kinds are refused by validate_ir.
 
 
+# F-038 / F-065: two OPTIONAL keys the artifact copies into the fields the SDK
+# signs by. Absent (or null) is legal -- IR written before they existed -- but
+# a present value must be one the source path can produce. Shared verbatim
+# with the other six tiers.
+_PARENT_CLASSES = ("SmartContract", "StatefulSmartContract", "UnsafeSmartContract")
+_SIGHASH_TYPES = (0x41, 0x42, 0x43, 0xC1, 0xC2, 0xC3)
+
+
+def _opt_parent_class(obj: dict) -> None:
+    v = obj.get("parentClass")
+    if v is None:
+        return
+    if not isinstance(v, str):
+        raise _malformed("parentClass", "a string", v)
+    if v not in _PARENT_CLASSES:
+        raise ValueError(
+            f"IR validation: parentClass must be one of {', '.join(_PARENT_CLASSES)}, got {v}"
+        )
+
+
+def _opt_sighash_type(obj: dict, path: str) -> None:
+    v = obj.get("sigHashType")
+    if v is None:
+        return
+    lp = _path(path, "sigHashType")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise _malformed(lp, "an integer", v)
+    if v not in _SIGHASH_TYPES:
+        raise ValueError(
+            f"IR validation: {lp} must be one of "
+            f"{', '.join(str(t) for t in _SIGHASH_TYPES)}, got {v}"
+        )
+
+
 def assert_required_ir_fields(root: Any) -> None:
     """Raise ``ValueError`` on the first required field that is missing or mistyped."""
     program = _as_obj(root, "the IR document")
     _req_str(program, "contractName", "")
+    _opt_parent_class(program)
     for i, p in enumerate(_req_list(program, "properties", "")):
         pp = f"properties[{i}]"
         prop = _as_obj(p, pp)
@@ -152,6 +187,7 @@ def assert_required_ir_fields(root: Any) -> None:
         method = _as_obj(m, mp)
         _req_str(method, "name", mp)
         _req_bool(method, "isPublic", mp)
+        _opt_sighash_type(method, mp)
         for j, p in enumerate(_req_list(method, "params", mp)):
             pp = f"{mp}.params[{j}]"
             param = _as_obj(p, pp)

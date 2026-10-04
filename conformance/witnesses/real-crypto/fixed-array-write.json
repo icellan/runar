@@ -5,7 +5,7 @@
   "note": "R-094's testable assertion: `this.table[i]++` must produce byte-identical hex across all seven tiers. It does now — Zig joined under N-124. This spec is the half a byte comparison cannot cover: that the increment WRITES BACK. N-019 was a fund-loss defect precisely because the bytes looked plausible while the method emitted no state continuation at all, so the accept below pins the post-spend state by hand rather than trusting agreement.",
   "goldenHashes": {
     "expected-script.hex": "01fdcbbfce93578b230edb69bd692382681b0c39d90844457687c2419d793f0a",
-    "expected-ir.json": "fcf5b26eed4ad7f696b1bc48ff9fa9355988384ca2a1f8beac0830fb1a56fd84"
+    "expected-ir.json": "fe5c66492d3be63071f3f8f7d7c87c1fad35639b03a244b0b3d46e08087484e9"
   },
   "constructorArgs": [],
   "spends": [

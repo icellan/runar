@@ -482,6 +482,7 @@
       ]
     }
   ],
+  "parentClass": "StatefulSmartContract",
   "properties": [
     {
       "name": "message",

@@ -1210,22 +1210,33 @@ module RunarCompiler
       { "name" => b.name, "value" => ser_value.call(b.value) }
     end
 
-    {
+    out = {
       "contractName" => program.contract_name,
       "properties" => program.properties.map do |p|
         pd = { "name" => p.name, "type" => p.type, "readonly" => p.readonly }
         pd["initialValue"] = p.initial_value unless p.initial_value.nil?
+        # N-095: the FixedArray regrouping chain, omitted on ordinary fields.
+        chain = p.synthetic_array_chain
+        pd["syntheticArrayChain"] = chain unless chain.nil? || chain.empty?
         pd
       end,
       "methods" => program.methods.map do |m|
-        {
+        md = {
           "name" => m.name,
           "params" => m.params.map { |p| { "name" => p.name, "type" => p.type } },
           "body" => m.body.map { |b| ser_binding.call(b) },
           "isPublic" => m.is_public,
         }
+        # F-065: a non-default @sighash mode is wire data (omitted for ALL|FORKID).
+        unless m.sighash_type.nil? || m.sighash_type == Frontend::SighashDirective::SIGHASH_DEFAULT
+          md["sigHashType"] = m.sighash_type
+        end
+        md
       end,
     }
+    # F-038: the base class is wire data (omitted only when unknown).
+    out["parentClass"] = program.parent_class unless program.parent_class.nil? || program.parent_class.empty?
+    out
   end
   private_class_method :_serialize_anf_program
 

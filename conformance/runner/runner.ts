@@ -2012,6 +2012,160 @@ export function printIrParityReport(report: IrParityReport): void {
 }
 
 // ---------------------------------------------------------------------------
+// --ir-roundtrip: `--emit-ir` -> `--ir` reproduces the `--source` artifact
+// ---------------------------------------------------------------------------
+//
+// F-038 (+ F-065, F-066, F-070, F-088). `--ir-parity` above proves every tier
+// turns the SAME IR into the same script. It cannot see what the IR fails to
+// carry: `parentClass` and a method's `@sighash` mode used to be in-memory
+// only, so a tier's own `--emit-ir` -> `--ir` round trip produced the right
+// script and an artifact without them — and the SDK signs by those fields.
+// This mode compiles every fixture three ways per tier (`--source` artifact,
+// `--source --emit-ir`, `--ir` of that IR artifact) and requires the two
+// artifacts to agree on script, parentClass, abi and stateFields. TS is out:
+// its `--from-ir` CLI writes a minimal artifact (contractName/script/asm).
+// The per-fixture `compilers` allowlist scopes it, as it scopes --ir-parity.
+
+export interface IrRoundTripFixtureResult {
+  fixture: string;
+  status: 'ok' | 'skipped' | 'failed';
+  activeCompilers: CompilerId[];
+  unavailable: CompilerId[];
+  errors: string[];
+}
+
+export interface IrRoundTripReport {
+  results: IrRoundTripFixtureResult[];
+  allOk: boolean;
+  failures: Array<{ fixture: string; error: string }>;
+}
+
+/** The artifact fields the SDK reads to deploy and sign. */
+const ROUND_TRIP_FIELDS = ['script', 'parentClass', 'abi', 'stateFields'] as const;
+
+async function irRoundTripOneTier(
+  id: Exclude<CompilerId, 'ts'>,
+  sourceFile: string,
+  stem: string,
+): Promise<string[] | null> {
+  const spec = NATIVE_COMPILERS[id];
+  const binary = spec.find();
+  if (!binary) return null;
+  const { cmd, args: binArgs } = splitCmd(binary);
+  const opts = (phase: string): RunOptions => ({
+    timeoutMs: spec.timeoutMs,
+    cwd: spec.cwd,
+    env: spec.env?.(),
+    label: `${id} ${phase} on ${basename(sourceFile)}`,
+    // An artifact (script + asm + source map) of the SLH-DSA / EC fixtures
+    // runs past the default 10 MiB capture; the IR alone can too.
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  const irFile = `${stem}.ir.json`;
+
+  // Java prints IR on stdout by default; its artifact goes to --emit-artifact.
+  const artifactOf = async (inputArgs: string[], phase: string, out: string): Promise<Record<string, unknown>> => {
+    const res = id === 'java'
+      ? await runCmd(cmd, [...binArgs, ...inputArgs, '--emit-artifact', out], opts(phase))
+      : await runCmd(cmd, [...binArgs, ...inputArgs], opts(phase));
+    requireCleanExit(spec, res, phase);
+    if (res.code !== 0) throw new Error(`${phase} ${describeExit(res)}: ${res.stderr.split('\n').slice(0, 5).join(' | ')}`);
+    return JSON.parse(id === 'java' ? readFileSync(out, 'utf-8') : res.stdout) as Record<string, unknown>;
+  };
+
+  const errors: string[] = [];
+  try {
+    const direct = await artifactOf(['--source', sourceFile, ...foldFlag()], '--source', `${stem}.direct.json`);
+    const emit = await runCmd(cmd, [...binArgs, '--source', sourceFile, '--emit-ir', ...foldFlag()], opts('--emit-ir'));
+    requireCleanExit(spec, emit, '--emit-ir');
+    if (emit.code !== 0) throw new Error(`--emit-ir ${describeExit(emit)}: ${emit.stderr.split('\n').slice(0, 5).join(' | ')}`);
+    writeFileSync(irFile, emit.stdout, 'utf-8');
+    const ir = JSON.parse(emit.stdout) as Record<string, unknown>;
+    const viaIr = await artifactOf(id === 'zig' ? ['compile-ir', irFile] : ['--ir', irFile], '--ir', `${stem}.via-ir.json`);
+
+    if (typeof direct.parentClass !== 'string') {
+      errors.push(`${id}: the --source artifact carries no parentClass (vacuous comparison)`);
+    } else if (ir.parentClass !== direct.parentClass) {
+      errors.push(`${id}: --emit-ir parentClass ${JSON.stringify(ir.parentClass)} != artifact ${JSON.stringify(direct.parentClass)}`);
+    }
+    for (const field of ROUND_TRIP_FIELDS) {
+      const a = JSON.stringify(sortKeys(direct[field]));
+      const b = JSON.stringify(sortKeys(viaIr[field]));
+      if (a !== b) {
+        errors.push(`${id}: ${field} differs after --emit-ir -> --ir\n    --source: ${(a ?? 'undefined').slice(0, 300)}\n    --ir:     ${(b ?? 'undefined').slice(0, 300)}`);
+      }
+    }
+  } catch (err) {
+    errors.push(`${id}: ${(err as Error).message}`);
+  }
+  return errors;
+}
+
+export async function runAllIrRoundTripChecks(
+  testsDir: string,
+  options?: { filter?: string },
+): Promise<IrRoundTripReport> {
+  assertAllCompilersAvailableInCi();
+  const testDirs = discoverFixtureDirs(testsDir, options);
+  const tmpDir = join(__dirname, '..', '.tmp');
+  if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+
+  const limit = makeLimiter(defaultConcurrency());
+  const results = await Promise.all(testDirs.map((testDir) => limit(async (): Promise<IrRoundTripFixtureResult> => {
+    const fixture = basename(testDir);
+    const allowlist = readFixtureCompilerAllowlist(testDir);
+    const inScope = IR_PARITY_COMPILERS.filter((c) => !allowlist || allowlist.has(c));
+    const sourceFile = resolveSourceFile(testDir, fixture);
+    const errors: string[] = [];
+    const active: CompilerId[] = [];
+    const unavailable: CompilerId[] = [];
+    const stems: string[] = [];
+    const runs = await Promise.all(inScope.map(async (id) => {
+      const stem = join(tmpDir, `roundtrip-${id}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      stems.push(stem);
+      return { id, errs: await irRoundTripOneTier(id, sourceFile, stem) };
+    }));
+    for (const stem of stems) {
+      for (const ext of ['.ir.json', '.direct.json', '.via-ir.json']) rmSync(`${stem}${ext}`, { force: true });
+    }
+    for (const { id, errs } of runs) {
+      if (errs === null) { unavailable.push(id); continue; }
+      active.push(id);
+      errors.push(...errs);
+    }
+    const status = errors.length > 0 ? 'failed' : active.length === 0 ? 'skipped' : 'ok';
+    return { fixture, status, activeCompilers: active, unavailable, errors };
+  })));
+
+  const failures = results.flatMap((r) => r.errors.map((error) => ({ fixture: r.fixture, error })));
+  return { results, allOk: failures.length === 0, failures };
+}
+
+/** Pretty-print an --ir-roundtrip report to stdout. */
+export function printIrRoundTripReport(report: IrRoundTripReport): void {
+  console.log('');
+  console.log('--emit-ir -> --ir round trip (artifact script/parentClass/abi/stateFields vs --source):');
+  console.log('');
+  for (const r of report.results) {
+    const activeCsv = r.activeCompilers.join(',');
+    if (r.status === 'skipped') {
+      console.log(`  === ${r.fixture} === SKIP (no in-scope compiler available)`);
+    } else if (r.status === 'ok') {
+      console.log(`  === ${r.fixture} === active=[${activeCsv}] OK`);
+    } else {
+      console.log(`  === ${r.fixture} === active=[${activeCsv}] FAIL`);
+      for (const e of r.errors) console.log(`    ${e}`);
+    }
+  }
+  console.log('');
+  const ok = report.results.filter((r) => r.status === 'ok').length;
+  const skipped = report.results.filter((r) => r.status === 'skipped').length;
+  const failed = report.results.filter((r) => r.status === 'failed').length;
+  console.log(`  ${ok} ok, ${failed} failed, ${skipped} skipped (${report.results.length} fixtures)`);
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
 // Strict-mode: fail loudly if any compiler binary is missing.
 // ---------------------------------------------------------------------------
 //

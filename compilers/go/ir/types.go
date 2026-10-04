@@ -21,13 +21,14 @@ type ANFProgram struct {
 	Methods      []ANFMethod   `json:"methods"`
 	// ParentClass is the base class the source contract extends
 	// ("SmartContract" | "StatefulSmartContract" | "UnsafeSmartContract").
-	// It is an in-memory carrier ONLY (json:"-") so it never appears in the
-	// emitted ANF IR JSON that the conformance suite compares cross-tier.
+	// F-038 / F-066: wire data. The source path always sets it, so --emit-ir
+	// always writes it; it is empty only for IR written before it existed.
 	// The artifact assembler copies it to the top-level artifact field so
 	// SDKs can gate the issue-#42/#44 terminal sighash subscript trim on the
 	// authoritative parent class (a StatefulSmartContract with zero mutable
-	// fields still needs the trim even though stateFields is empty).
-	ParentClass string `json:"-"`
+	// fields still needs the trim even though stateFields is empty), so an
+	// --emit-ir -> --ir round trip must keep it.
+	ParentClass string `json:"parentClass,omitempty"`
 }
 
 // ANFSyntheticArrayLevel is one level of the synthetic FixedArray chain
@@ -63,12 +64,12 @@ type ANFMethod struct {
 
 	// SigHashType is the non-default BIP-143 sighash mode a `@sighash`
 	// directive declared for this (public) method (issue #123), e.g. 0x43 for
-	// SINGLE|FORKID. Nil = default ALL|FORKID (0x41). Carried in-memory only
-	// (json:"-") so it never appears in the emitted ANF IR JSON compared
-	// cross-tier — the codegen-relevant flag rides on each check_preimage
-	// node's sighashFlag instead. The artifact assembler copies it to
-	// ABIMethod.SigHashType so the SDK builds a matching preimage.
-	SigHashType *int `json:"-"`
+	// SINGLE|FORKID. Nil = default ALL|FORKID (0x41), and then the key is
+	// omitted. F-065: wire data, so an --emit-ir -> --ir round trip keeps it;
+	// the codegen-relevant flag rides on each check_preimage node's
+	// sighashFlag. The artifact assembler copies it to ABIMethod.SigHashType
+	// so the SDK builds a matching preimage.
+	SigHashType *int `json:"sigHashType,omitempty"`
 }
 
 // ANFParam describes a method parameter.

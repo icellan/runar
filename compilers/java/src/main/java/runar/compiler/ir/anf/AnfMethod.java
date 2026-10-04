@@ -1,7 +1,7 @@
 package runar.compiler.ir.anf;
 
 import java.util.List;
-import runar.compiler.canonical.JsonSkip;
+import runar.compiler.canonical.JsonName;
 
 /**
  * A single lowered contract method.
@@ -10,18 +10,31 @@ import runar.compiler.canonical.JsonSkip;
  *                    {@code @sighash} directive declared for this method (e.g.
  *                    {@code 0x43} for SINGLE|FORKID); {@code null} = default
  *                    ALL|FORKID. The artifact writer copies it to
- *                    {@code abi.methods[].sigHashType}. Compiler-internal —
- *                    {@link JsonSkip} keeps it out of the emitted ANF IR JSON
- *                    (Go: {@code json:"-"}), where the codegen-relevant flag
- *                    rides on each {@code check_preimage.sighashFlag} instead.
+ *                    {@code abi.methods[].sigHashType}. F-065 / F-088: wire
+ *                    data, emitted as {@code sigHashType} so an
+ *                    {@code --emit-ir} -> {@code --ir} round trip keeps the
+ *                    ABI's mode (the script bytes ride on each
+ *                    {@code check_preimage.sighashFlag}). The default 0x41 is
+ *                    normalised to {@code null} so it is never emitted —
+ *                    explicit {@code @sighash ALL|FORKID} and no directive give
+ *                    the same ANF, as in every other tier.
  */
 public record AnfMethod(
     String name,
     List<AnfParam> params,
     List<AnfBinding> body,
     boolean isPublic,
-    @JsonSkip Integer sighashType
+    @JsonName("sigHashType") Integer sighashType
 ) {
+    /** SIGHASH_ALL | SIGHASH_FORKID (SighashDirective.SIGHASH_DEFAULT). */
+    private static final int SIGHASH_DEFAULT = 0x41;
+
+    public AnfMethod {
+        if (sighashType != null && sighashType == SIGHASH_DEFAULT) {
+            sighashType = null;
+        }
+    }
+
     /** A method with the default sighash mode (no directive). */
     public AnfMethod(String name, List<AnfParam> params, List<AnfBinding> body, boolean isPublic) {
         this(name, params, body, isPublic, null);

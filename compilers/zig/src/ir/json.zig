@@ -8,6 +8,7 @@ const types = @import("types.zig");
 const opcodes = @import("../codegen/opcodes.zig");
 const unknown_anf_kind = @import("unknown_anf_kind.zig");
 const reserved_names = @import("../passes/reserved_names.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
@@ -457,8 +458,15 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         if (!std.mem.eql(u8, m.name, "constructor")) try checkNoSuperCall(m.body);
     }
 
+    // F-038: optional on input (required_fields.zig validated the value).
+    const parent_class: ?types.ParentClass = if (obj.get("parentClass")) |v| switch (v) {
+        .string => |s| types.ParentClass.fromTsString(s),
+        else => null,
+    } else null;
+
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),
+        .parent_class = parent_class,
         .properties = properties,
         .methods = try method_list.toOwnedSlice(allocator),
     };
@@ -574,12 +582,18 @@ fn parseMethod(allocator: std.mem.Allocator, method_obj: std.json.ObjectMap) !ty
     const name = try getString(method_obj, "name");
     const is_public = try getBool(method_obj, "isPublic");
     const params = try parseParams(allocator, method_obj);
+    // F-065 / F-088: optional on input (required_fields.zig validated the value).
+    const sighash_type: ?i32 = if (method_obj.get("sigHashType")) |v| switch (v) {
+        .integer => |n| @intCast(n),
+        else => null,
+    } else null;
 
     const body_val = method_obj.get("body") orelse return .{
         .name = try allocator.dupe(u8, name),
         .is_public = is_public,
         .params = params,
         .body = &.{},
+        .sighash_type = sighash_type,
     };
     const bindings = try parseBindings(allocator, body_val.array, 0);
 
@@ -588,6 +602,7 @@ fn parseMethod(allocator: std.mem.Allocator, method_obj: std.json.ObjectMap) !ty
         .is_public = is_public,
         .params = params,
         .body = bindings,
+        .sighash_type = sighash_type,
     };
 }
 
@@ -1154,7 +1169,7 @@ fn parseStringArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: 
 fn writeCanonicalProgram(writer: anytype, program: types.ANFProgram, depth: usize) !void {
     try writer.writeAll("{\n");
 
-    // Keys in alphabetical order: contractName, methods, properties
+    // Keys in alphabetical order: contractName, methods, parentClass, properties
     try writeIndent(writer, depth + 1);
     try writeJsonString(writer, "contractName");
     try writer.writeAll(": ");
@@ -1166,6 +1181,17 @@ fn writeCanonicalProgram(writer: anytype, program: types.ANFProgram, depth: usiz
     try writer.writeAll(": ");
     try writeMethodsArray(writer, program.methods, depth + 1);
     try writer.writeAll(",\n");
+
+    // F-038: wire data, so `--emit-ir` -> `compile-ir` keeps the artifact's
+    // parentClass. Always known on the source path; absent only when an IR
+    // input lacked it.
+    if (program.parent_class) |pc| {
+        try writeIndent(writer, depth + 1);
+        try writeJsonString(writer, "parentClass");
+        try writer.writeAll(": ");
+        try writeJsonString(writer, pc.toTsString());
+        try writer.writeAll(",\n");
+    }
 
     try writeIndent(writer, depth + 1);
     try writeJsonString(writer, "properties");
@@ -1197,7 +1223,7 @@ fn writeMethodsArray(writer: anytype, methods: []const types.ANFMethod, depth: u
 fn writeMethodObject(writer: anytype, method: types.ANFMethod, depth: usize) !void {
     try writer.writeAll("{\n");
 
-    // Sorted keys: body, isPublic, name, params
+    // Sorted keys: body, isPublic, name, params, sigHashType
     try writeIndent(writer, depth + 1);
     try writeJsonString(writer, "body");
     try writer.writeAll(": ");
@@ -1224,6 +1250,17 @@ fn writeMethodObject(writer: anytype, method: types.ANFMethod, depth: usize) !vo
     try writeJsonString(writer, "params");
     try writer.writeAll(": ");
     try writeParamsArray(writer, method.params, depth + 1);
+
+    // F-065 / F-088: a non-default @sighash mode is wire data, so the ABI's
+    // sigHashType survives `--emit-ir` -> `compile-ir`. Omitted for the default.
+    if (method.sighash_type) |st| {
+        if (st != sighash_directive.SIGHASH_DEFAULT) {
+            try writer.writeAll(",\n");
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "sigHashType");
+            try writer.print(": {d}", .{st});
+        }
+    }
     try writer.writeByte('\n');
 
     try writeIndent(writer, depth);

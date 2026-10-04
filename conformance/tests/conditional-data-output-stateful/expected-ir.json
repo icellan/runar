@@ -443,6 +443,7 @@
       ]
     }
   ],
+  "parentClass": "StatefulSmartContract",
   "properties": [
     {
       "name": "amount",

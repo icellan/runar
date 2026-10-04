@@ -12,6 +12,7 @@ const std = @import("std");
 const types = @import("../ir/types.zig");
 const opcodes = @import("opcodes.zig");
 const stack_lower = @import("../passes/stack_lower.zig");
+const sighash_directive = @import("../frontend/sighash_directive.zig");
 const Opcode = opcodes.Opcode;
 
 // ============================================================================
@@ -729,12 +730,13 @@ pub fn emitArtifact(
 
     // parentClass — authoritative stateful signal for the issue-#42/#44
     // terminal sighash subscript trim (a StatefulSmartContract with zero
-    // mutable fields still needs the trim). Sourced from the ANF program; it
-    // is deliberately NOT part of the emitted ANF IR JSON, so cross-tier
-    // conformance parity is unaffected.
-    try w.writeAll("\"parentClass\":");
-    try writeJsonString(w, anf_program.parent_class.toTsString());
-    try w.writeByte(',');
+    // mutable fields still needs the trim). Sourced from the ANF program, which
+    // carries it on the wire (F-038); omitted when an IR input does not.
+    if (anf_program.parent_class) |pc| {
+        try w.writeAll("\"parentClass\":");
+        try writeJsonString(w, pc.toTsString());
+        try w.writeByte(',');
+    }
 
     // abi
     try w.writeAll("\"abi\":{");
@@ -791,7 +793,7 @@ pub fn emitArtifact(
             // byte-identical.
             if (method.is_public) {
                 if (method.sighash_type) |st| {
-                    try w.print(",\"sigHashType\":{d}", .{st});
+                    if (st != sighash_directive.SIGHASH_DEFAULT) try w.print(",\"sigHashType\":{d}", .{st});
                 }
             }
             try w.writeByte('}');

@@ -330,6 +330,7 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "sourceScriptHash",

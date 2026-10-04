@@ -1120,6 +1120,9 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
                 "type": p.type,
                 "readonly": p.readonly,
                 **({"initialValue": p.initial_value} if p.initial_value is not None else {}),
+                # N-095 / F-038: same wire key, same omit-when-empty rule as --emit-ir.
+                **({"syntheticArrayChain": [dict(c) for c in p.synthetic_array_chain]}
+                   if p.synthetic_array_chain else {}),
             }
             for p in program.properties
         ],
@@ -1136,6 +1139,8 @@ def _serialize_anf_program(program: ANFProgram) -> dict[str, Any]:
             }
             for m in program.methods
         ],
+        # F-038: wire data (anf-ir.schema.json), emitted as --emit-ir does.
+        **({"parentClass": program.parent_class} if program.parent_class else {}),
     }
 
 

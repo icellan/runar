@@ -80,7 +80,7 @@ public final class Dce {
             List<AnfBinding> cleaned = eliminateDead(m.body());
             newMethods.add(m.withBody(cleaned));
         }
-        return new AnfProgram(program.contractName(), program.properties(), newMethods);
+        return program.withMethods(newMethods);
     }
 
     /**

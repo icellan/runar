@@ -89,6 +89,7 @@ public final class AnfLoader {
         // finds nothing), and `--ir --hex` exited 0 with an EMPTY locking
         // script. Each diagnostic names the malformed field's path.
         String name = reqString(obj, "contractName", "");
+        String parentClass = optParentClass(obj);
         List<AnfProperty> props = new ArrayList<>();
         List<?> pl = reqList(obj, "properties", "");
         for (int i = 0; i < pl.size(); i++) {
@@ -200,7 +201,7 @@ public final class AnfLoader {
                 throw new RuntimeException(err);
             }
         }
-        return new AnfProgram(name, props, methods);
+        return new AnfProgram(name, props, methods, parentClass);
     }
 
     /**
@@ -509,6 +510,7 @@ public final class AnfLoader {
     private static AnfMethod toMethod(Map<?, ?> obj, String path) {
         String name = reqString(obj, "name", path);
         boolean isPublic = reqBool(obj, "isPublic", path);
+        Integer sigHashType = optSigHashType(obj, path);
         List<AnfParam> params = new ArrayList<>();
         List<?> pl = reqList(obj, "params", path);
         for (int i = 0; i < pl.size(); i++) {
@@ -517,7 +519,7 @@ public final class AnfLoader {
             params.add(new AnfParam(reqString(po, "name", pp), reqString(po, "type", pp)));
         }
         List<AnfBinding> body = toBindingList(obj, "body", path);
-        return new AnfMethod(name, params, body, isPublic);
+        return new AnfMethod(name, params, body, isPublic, sigHashType);
     }
 
     /** Walks every binding, including nested ones, checking builtin arity. */
@@ -785,6 +787,51 @@ public final class AnfLoader {
 
     private static String fieldPath(String path, String key) {
         return path.isEmpty() ? key : path + "." + key;
+    }
+
+    /**
+     * F-038 / F-065: the two OPTIONAL keys the artifact copies into the fields
+     * the SDK signs by. Absent (or JSON null) is legal — IR written before they
+     * existed — but a present value must be one the source path can produce:
+     * an unknown parentClass or a FORKID-less sigHashType would otherwise reach
+     * the artifact and steer the SDK into a spend the script rejects. Same
+     * words as {@code packages/runar-compiler/src/ir/anf-required-fields.ts}.
+     */
+    private static final List<String> PARENT_CLASSES =
+        List.of("SmartContract", "StatefulSmartContract", "UnsafeSmartContract");
+    private static final List<Long> SIGHASH_TYPES = List.of(0x41L, 0x42L, 0x43L, 0xc1L, 0xc2L, 0xc3L);
+
+    private static String optParentClass(Map<?, ?> obj) {
+        Object v = obj.get("parentClass");
+        if (v == null) return null;
+        if (!(v instanceof String s)) throw malformed("parentClass", "a string", v);
+        if (!PARENT_CLASSES.contains(s)) {
+            throw new RuntimeException("IR validation: parentClass must be one of "
+                + String.join(", ", PARENT_CLASSES) + ", got " + s);
+        }
+        return s;
+    }
+
+    private static Integer optSigHashType(Map<?, ?> obj, String path) {
+        Object v = obj.get("sigHashType");
+        if (v == null) return null;
+        String lp = fieldPath(path, "sigHashType");
+        if (v instanceof String || v instanceof Boolean || v instanceof List<?> || v instanceof Map<?, ?>) {
+            throw malformed(lp, "an integer", v);
+        }
+        Long value = null;
+        if (v instanceof Long l) value = l;
+        else if (v instanceof Integer i) value = i.longValue();
+        else if (v instanceof BigInteger bi && bi.bitLength() < 63) value = bi.longValue();
+        if (value == null || !SIGHASH_TYPES.contains(value)) {
+            StringBuilder allowed = new StringBuilder();
+            for (Long t : SIGHASH_TYPES) {
+                if (allowed.length() > 0) allowed.append(", ");
+                allowed.append(t);
+            }
+            throw new RuntimeException("IR validation: " + lp + " must be one of " + allowed + ", got " + v);
+        }
+        return value.intValue();
     }
 
     private static String jsonType(Object v) {

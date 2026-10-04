@@ -43,6 +43,6 @@
   ],
   "goldenHashes": {
     "expected-script.hex": "be936edc0f327032c580d55ad36b5daf8a102236aa50b2118a9e4b8d57168f11",
-    "expected-ir.json": "19e83f3e3219e7efe738dc75d9573f2a84dfe79fde30b1f025c90a602022e56c"
+    "expected-ir.json": "e341b053c3d67c7fa7b1315a44a2cd51930d3d3c6a54629a3dfe9ed9c565e18b"
   }
 }

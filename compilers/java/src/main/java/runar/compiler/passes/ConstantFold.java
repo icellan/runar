@@ -65,7 +65,7 @@ public final class ConstantFold {
         for (AnfMethod m : program.methods()) {
             folded.add(foldMethod(m));
         }
-        return new AnfProgram(program.contractName(), program.properties(), folded);
+        return program.withMethods(folded);
     }
 
     private static AnfMethod foldMethod(AnfMethod method) {

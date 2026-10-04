@@ -1479,6 +1479,250 @@
         ]
       },
       "error": "IR validation: required field methods[0].body[3].value.body is missing"
+    },
+    {
+      "name": "parent-class-number",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": 7
+      },
+      "error": "IR validation: parentClass must be a string, got number"
+    },
+    {
+      "name": "parent-class-unknown",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ]
+          }
+        ],
+        "parentClass": "Contract"
+      },
+      "error": "IR validation: parentClass must be one of SmartContract, StatefulSmartContract, UnsafeSmartContract, got Contract"
+    },
+    {
+      "name": "sighash-type-string",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ],
+            "sigHashType": "0x43"
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].sigHashType must be an integer, got string"
+    },
+    {
+      "name": "sighash-type-no-forkid",
+      "ir": {
+        "contractName": "X",
+        "properties": [
+          {
+            "name": "pk",
+            "type": "PubKey",
+            "readonly": true
+          }
+        ],
+        "methods": [
+          {
+            "name": "unlock",
+            "isPublic": true,
+            "params": [
+              {
+                "name": "sig",
+                "type": "Sig"
+              }
+            ],
+            "body": [
+              {
+                "name": "t0",
+                "value": {
+                  "kind": "load_param",
+                  "name": "sig"
+                }
+              },
+              {
+                "name": "t1",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "pk"
+                }
+              },
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "call",
+                  "func": "checkSig",
+                  "args": [
+                    "t0",
+                    "t1"
+                  ]
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "assert",
+                  "value": "t2"
+                }
+              }
+            ],
+            "sigHashType": 3
+          }
+        ]
+      },
+      "error": "IR validation: methods[0].sigHashType must be one of 65, 66, 67, 193, 194, 195, got 3"
     }
   ]
 }

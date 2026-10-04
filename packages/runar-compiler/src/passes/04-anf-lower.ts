@@ -65,6 +65,8 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
     contractName: contract.name,
     properties,
     methods,
+    // F-038: wire data, so `--emit-ir` -> `--ir` keeps the artifact's parentClass.
+    parentClass: contract.parentClass,
   };
 }
 
@@ -545,6 +547,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
         params: finalParams,
         body: methodCtx.bindings,
         isPublic: true,
+        ...methodSigHashType(method),
       });
     } else {
       // Issue #109: stateless public methods (and stateless contracts'
@@ -570,11 +573,23 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
         params,
         body: methodCtx.bindings,
         isPublic: method.visibility === 'public',
+        ...methodSigHashType(method),
       });
     }
   }
 
   return result;
+}
+
+/**
+ * F-065 / F-088: a non-default `@sighash` mode rides on the ANF method so an
+ * `--emit-ir` -> `--ir` round trip keeps the ABI's `sigHashType`. Omitted for
+ * the default ALL|FORKID, which keeps every directive-free ANF unchanged.
+ */
+function methodSigHashType(method: MethodNode): { sigHashType?: number } {
+  return method.sighashType !== undefined && method.sighashType !== SIGHASH_DEFAULT
+    ? { sigHashType: method.sighashType }
+    : {};
 }
 
 function lowerParams(params: ParamNode[]): ANFParam[] {

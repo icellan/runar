@@ -651,9 +651,9 @@ func foldConstantsOnly(program *ir.ANFProgram) *ir.ANFProgram {
 //
 // Enumerating them is how N-093 shipped: the rebuild listed 4 of 5 fields and
 // silently dropped SigHashType, so a `@sighash` directive survived fold-OFF and
-// vanished under the shipped fold-ON default. SigHashType is `json:"-"`, so the
-// cross-tier ANF comparison structurally cannot catch that class of loss.
-// Copy-then-overwrite makes a future sixth field unlosable by construction
+// vanished under the shipped fold-ON default. SigHashType was then `json:"-"`,
+// so the cross-tier ANF comparison could not catch that class of loss (F-065
+// put it on the wire since). Copy-then-overwrite makes a future sixth field unlosable by construction
 // (the same shape frontend/expand_fixed_arrays.go already uses).
 func foldMethod(method *ir.ANFMethod) ir.ANFMethod {
 	env := newConstEnv()

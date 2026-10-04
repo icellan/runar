@@ -153,10 +153,43 @@ function checkValue(v: Obj, path: string): void {
   }
 }
 
+/**
+ * F-038 / F-065: the two OPTIONAL program/method keys the artifact copies into
+ * the fields the SDK signs by. Absent (or null) is legal — IR written before
+ * they existed — but a present value must be one the source path can produce:
+ * an unknown parentClass or a FORKID-less sigHashType would otherwise reach
+ * the artifact and steer the SDK into a spend the script rejects. Shared
+ * verbatim with the other six tiers.
+ */
+const PARENT_CLASSES = ['SmartContract', 'StatefulSmartContract', 'UnsafeSmartContract'];
+const SIGHASH_TYPES = [0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3];
+
+function optParentClass(obj: Obj): void {
+  const v = obj.parentClass;
+  if (v === undefined || v === null) return;
+  if (typeof v !== 'string') throw malformed('parentClass', 'a string', v);
+  if (!PARENT_CLASSES.includes(v)) {
+    throw new Error(
+      `IR validation: parentClass must be one of ${PARENT_CLASSES.join(', ')}, got ${v}`,
+    );
+  }
+}
+
+function optSigHashType(obj: Obj, path: string): void {
+  const v = obj.sigHashType;
+  if (v === undefined || v === null) return;
+  const lp = fieldPath(path, 'sigHashType');
+  if (typeof v !== 'number') throw malformed(lp, 'an integer', v);
+  if (!SIGHASH_TYPES.includes(v)) {
+    throw new Error(`IR validation: ${lp} must be one of ${SIGHASH_TYPES.join(', ')}, got ${v}`);
+  }
+}
+
 /** Throw on the first required field that is missing or of the wrong JSON type. */
 export function assertRequiredIrFields(root: unknown): void {
   const program = asObject(root, 'the IR document');
   reqString(program, 'contractName', '');
+  optParentClass(program);
   reqArray(program, 'properties', '').forEach((p, i) => {
     const pp = `properties[${i}]`;
     const prop = asObject(p, pp);
@@ -169,6 +202,7 @@ export function assertRequiredIrFields(root: unknown): void {
     const method = asObject(m, mp);
     reqString(method, 'name', mp);
     reqBool(method, 'isPublic', mp);
+    optSigHashType(method, mp);
     reqArray(method, 'params', mp).forEach((p, j) => {
       const pp = `${mp}.params[${j}]`;
       const param = asObject(p, pp);

@@ -271,6 +271,7 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "rA",

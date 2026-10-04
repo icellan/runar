@@ -170,7 +170,8 @@ public final class AnfLower {
             lifted.add(m.withBody(newBody));
         }
 
-        return new AnfProgram(contract.name(), properties, lifted);
+        return new AnfProgram(contract.name(), properties, lifted,
+            contract.parentClass() == null ? null : contract.parentClass().canonical());
     }
 
     // ------------------------------------------------------------------

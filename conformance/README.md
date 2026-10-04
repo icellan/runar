@@ -164,6 +164,8 @@ The runner's `--ir-parity` mode (CI step "Run IR -> hex cross-tier parity") comp
 
 Unlike `--parser-only`, this gate **is** scoped by the per-fixture `compilers` allowlist — hex parity is exactly what the allowlist governs. A fixture whose allowlist has no overlap with the six non-TS tiers is skipped. The mode always runs fold-OFF (`--disable-constant-folding`), regardless of `RUNAR_DISABLE_CONSTANT_FOLDING`, because the goldens were stamped fold-OFF; fold-ON parity is `--multi-format`'s job.
 
+`--ir-roundtrip` (F-038) is its companion: per non-TS tier it compiles every fixture with `--source`, and again through that tier's own `--emit-ir` -> `--ir`, and requires the two artifacts to agree on `script`, `parentClass`, `abi` and `stateFields` — the fields the SDKs sign by, which hex parity cannot see. Same allowlist scoping.
+
 This replaces ~180 lines of inline bash/jq that `.github/workflows/ci.yml` used to carry, which held its **own** copy of the allowlist rule and could drift from the runner's. The workflow step is now a thin caller. `runar-verification/scripts/cross-compiler-diff.sh` remains a separate implementation — it is the Tier-6.1 verification gate and additionally drives the Lean reference tier, which this runner does not know about. **If you change parity or allowlist semantics, change `runner/runner.ts` first and mirror it there.**
 
 Run locally:

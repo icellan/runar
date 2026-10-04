@@ -431,7 +431,10 @@ pub const UnaryOperator = enum {
 // ============================================================================
 
 pub const ANFProgram = struct {
-    contract_name: []const u8, parent_class: ParentClass = .smart_contract,
+    /// F-038: wire data (`parentClass`), so `--emit-ir` -> `compile-ir` keeps
+    /// the artifact's parentClass. Null only for IR that does not carry it; the
+    /// artifact then omits the field instead of inventing "SmartContract".
+    contract_name: []const u8, parent_class: ?ParentClass = null,
     properties: []ANFProperty, constructor: ANFConstructor = .{ .params = &.{}, .assertions = &.{} },
     methods: []ANFMethod,
     pub fn deinit(self: *const ANFProgram, allocator: std.mem.Allocator) void {
@@ -462,11 +465,11 @@ pub const ANFMethod = struct {
     body: []ANFBinding = &.{},
     /// Non-default BIP-143 sighash mode a `@sighash` directive declared for
     /// this (public) method (issue #123), e.g. 0x43 for SINGLE|FORKID. Null =
-    /// default ALL|FORKID (0x41). In-memory carrier only — never serialized
-    /// into the ANF IR JSON compared cross-tier (the codegen-relevant flag
-    /// rides on each check_preimage node's sighash_flag). The artifact
-    /// assembler copies it to ABIMethod.sighash_type so the SDK builds a
-    /// matching preimage.
+    /// default ALL|FORKID (0x41). F-065 / F-088: wire data (`sigHashType`,
+    /// omitted for the default), so `--emit-ir` -> `compile-ir` keeps it; the
+    /// codegen-relevant flag rides on each check_preimage node's sighash_flag.
+    /// The artifact assembler copies it to ABIMethod.sighash_type so the SDK
+    /// builds a matching preimage.
     sighash_type: ?i32 = null,
 };
 pub const ANFBinding = struct { name: []const u8, value: ANFValue, source_loc: ?SourceLocation = null };

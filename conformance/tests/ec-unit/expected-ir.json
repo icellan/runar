@@ -371,6 +371,7 @@
       "params": []
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "pubKey",

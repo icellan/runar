@@ -38,6 +38,8 @@ module RunarCompiler
       "else_" => "else",
       "value_ref" => "value",
       "raw_value" => "value",
+      # F-065 / F-088: the schema's (and the artifact ABI's) spelling.
+      "sighash_type" => "sigHashType",
     }.freeze
 
     # Fields deliberately kept OUT of the emitted ANF IR JSON. Everything a
@@ -49,17 +51,15 @@ module RunarCompiler
       "const_string", "const_big_int", "const_bool", "const_int",
       # Debug-only source positions, not part of conformance.
       "source_loc",
-      # In-memory carrier for the artifact's top-level parentClass field.
-      "parent_class",
       # Issue #109 (@embedAlways): compiler-internal DCE opt-out on load_prop.
       # The Zig reference keeps it out of the emitted IR too.
       "preserve",
-      # N-094 / issue #123: in-memory carrier for the method's declared
-      # @sighash mode. The ANF wire format carries the mode on the
-      # check_preimage node's sighashFlag instead; the ANFMethod schema is
-      # additionalProperties:false, so emitting it fails validateANF.
-      "sighash_type",
     ]).freeze
+    # F-038 / F-065: +parent_class+ and the method +sighash_type+ used to be
+    # listed above as in-memory carriers. They are wire data now (declared in
+    # the schema), so an --emit-ir -> --ir round trip keeps the artifact's
+    # parentClass and abi sigHashType; see +_anf_to_camel_dict+ for when each
+    # is omitted.
 
     module_function
 
@@ -347,6 +347,10 @@ module RunarCompiler
 
           v = obj[member_name]
           next if v.nil?
+          # F-038: "" is the unset parentClass (IR loaded without one).
+          next if name_str == "parent_class" && v.empty?
+          # F-065: the default ALL|FORKID is omitted, as in the artifact ABI.
+          next if name_str == "sighash_type" && v == Frontend::SighashDirective::SIGHASH_DEFAULT
 
           # raw_value is the canonical Go JSON "value" field -- parse and emit its content
           if name_str == "raw_value"

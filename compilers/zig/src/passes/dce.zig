@@ -43,6 +43,7 @@ pub fn eliminateDeadCode(allocator: Allocator, program: types.ANFProgram) !types
             .params = method.params,
             .bindings = method.bindings,
             .body = optimized_body,
+            .sighash_type = method.sighash_type,
         };
     }
 

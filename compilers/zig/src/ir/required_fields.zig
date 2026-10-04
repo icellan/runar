@@ -168,6 +168,49 @@ const Walker = struct {
     }
 };
 
+/// F-038 / F-065: the two OPTIONAL keys the artifact copies into the fields the
+/// SDK signs by. Absent (or null) is legal — IR written before they existed —
+/// but a present value must be one the source path can produce: an unknown
+/// parentClass or a FORKID-less sigHashType would otherwise reach the artifact
+/// and steer the SDK into a spend the script rejects. Shared verbatim with the
+/// other six tiers (packages/runar-compiler/src/ir/anf-required-fields.ts).
+const PARENT_CLASSES = [_][]const u8{ "SmartContract", "StatefulSmartContract", "UnsafeSmartContract" };
+const SIGHASH_TYPES = [_]i64{ 0x41, 0x42, 0x43, 0xc1, 0xc2, 0xc3 };
+
+fn optParentClass(obj: Obj) Error!void {
+    const v = obj.get("parentClass") orelse return;
+    switch (v) {
+        .null => return,
+        .string => |s| {
+            for (PARENT_CLASSES) |pc| if (std.mem.eql(u8, s, pc)) return;
+            setDiag("IR validation: parentClass must be one of SmartContract, StatefulSmartContract, UnsafeSmartContract, got {s}", .{s});
+            return Error.IRFieldWrongType;
+        },
+        else => return Walker.malformed("parentClass", "a string", v),
+    }
+}
+
+fn optSigHashType(obj: Obj, path: []const u8) Error!void {
+    const v = obj.get("sigHashType") orelse return;
+    switch (v) {
+        .null => return,
+        .integer => |n| {
+            for (SIGHASH_TYPES) |t| if (n == t) return;
+            setDiag("IR validation: {s}.sigHashType must be one of 65, 66, 67, 193, 194, 195, got {d}", .{ path, n });
+            return Error.IRFieldWrongType;
+        },
+        // An integer too large for i64 arrives as its digit string.
+        .number_string => |digits| {
+            setDiag("IR validation: {s}.sigHashType must be one of 65, 66, 67, 193, 194, 195, got {s}", .{ path, digits });
+            return Error.IRFieldWrongType;
+        },
+        else => {
+            setDiag("IR validation: {s}.sigHashType must be an integer, got {s}", .{ path, jsonType(v) });
+            return Error.IRFieldWrongType;
+        },
+    }
+}
+
 /// Return the first required field that is missing or of the wrong JSON type;
 /// its message is then available from `lastDiagnostic()`.
 pub fn assertRequiredIrFields(allocator: std.mem.Allocator, root: std.json.Value) CheckError!void {
@@ -178,6 +221,7 @@ pub fn assertRequiredIrFields(allocator: std.mem.Allocator, root: std.json.Value
 
     const program = try Walker.asObj(root, "the IR document");
     try w.reqStr(program, "", &.{"contractName"});
+    try optParentClass(program);
     for ((try w.reqList(program, "properties", "")).items, 0..) |p, i| {
         const pp = try std.fmt.allocPrint(w.a, "properties[{d}]", .{i});
         const prop = try Walker.asObj(p, pp);
@@ -189,6 +233,7 @@ pub fn assertRequiredIrFields(allocator: std.mem.Allocator, root: std.json.Value
         const method = try Walker.asObj(m, mp);
         try w.reqStr(method, mp, &.{"name"});
         try w.reqBool(method, "isPublic", mp);
+        try optSigHashType(method, mp);
         for ((try w.reqList(method, "params", mp)).items, 0..) |p, j| {
             const pp = try std.fmt.allocPrint(w.a, "{s}.params[{d}]", .{ mp, j });
             try w.reqStr(try Walker.asObj(p, pp), pp, &.{ "name", "type" });

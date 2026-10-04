@@ -97,7 +97,7 @@ public final class AnfOptimize {
         for (AnfMethod m : program.methods()) {
             opts.add(optimizeEcMethod(m, program.properties()));
         }
-        return new AnfProgram(program.contractName(), program.properties(), opts);
+        return program.withMethods(opts);
     }
 
     // ===================================================================

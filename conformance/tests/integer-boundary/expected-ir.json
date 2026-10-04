@@ -244,6 +244,7 @@
       ]
     }
   ],
+  "parentClass": "SmartContract",
   "properties": [
     {
       "name": "target",
