@@ -41,7 +41,7 @@ const VALUES: Record<string, unknown> = {
   p256: '11'.repeat(64),
   p384: '22'.repeat(96),
   sig: '3044' + 'ee'.repeat(66),
-  rab: 'ff'.repeat(8),
+  rab: (1n << 63n) - 1n, // F-035: RabinSig is a bigint alias
   bs: '0011',
 };
 
@@ -56,13 +56,13 @@ const CROSS_SDK_GOLDEN =
   '11'.repeat(64) + //       P256Point 64 raw   <- was framed "40" + 64
   '22'.repeat(96) + //       P384Point 96 raw   <- was framed "4c60" + 96
   '44' + '3044' + 'ee'.repeat(66) + // Sig      framed <len><data>
-  '08' + 'ff'.repeat(8) + //           RabinSig framed <len><data>
+  'ffffffffffffff7f' + //              RabinSig NUM2BIN 8 (F-035; was framed "08" + ff*8)
   '02' + '0011'; //                    ByteString framed <len><data>
 
 describe('P256Point / P384Point state field width (TypeScript SDK)', () => {
   it('serializes the cross-SDK golden record byte for byte', () => {
     expect(serializeState(FIELDS, VALUES)).toBe(CROSS_SDK_GOLDEN);
-    expect(CROSS_SDK_GOLDEN.length / 2).toBe(399);
+    expect(CROSS_SDK_GOLDEN.length / 2).toBe(398);
   });
 
   it('deserializes the golden record back to every input value', () => {
@@ -92,7 +92,7 @@ describe('P256Point / P384Point state field width (TypeScript SDK)', () => {
     expect(deserializeState(fields, hex).v).toBe(v);
   });
 
-  it('controls are byte-unchanged: Point/PubKey/Sha256 raw, ByteString/Sig/RabinSig framed', () => {
+  it('controls: Point/PubKey/Sha256 raw, ByteString/Sig framed, RabinSig NUM2BIN 8 (F-035)', () => {
     const raw: Array<[string, number]> = [
       ['Point', 64],
       ['PubKey', 33],
@@ -102,7 +102,9 @@ describe('P256Point / P384Point state field width (TypeScript SDK)', () => {
       const v = 'ab'.repeat(size);
       expect(serializeState([{ name: 'v', type, index: 0 }], { v })).toBe(v);
     }
-    const framed: string[] = ['ByteString', 'Sig', 'RabinSig'];
+    // F-035: RabinSig left this list — it is a bigint alias, NUM2BIN 8.
+    expect(serializeState([{ name: 'v', type: 'RabinSig', index: 0 }], { v: 1n })).toBe('0100000000000000');
+    const framed: string[] = ['ByteString', 'Sig'];
     for (const type of framed) {
       const v = 'ab'.repeat(64);
       expect(serializeState([{ name: 'v', type, index: 0 }], { v })).toBe('40' + v);

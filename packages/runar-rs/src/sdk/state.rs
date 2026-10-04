@@ -457,7 +457,9 @@ pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
 /// compiler's OP_NUM2BIN-based fixed-width serialization.
 fn encode_state_value(value: &SdkValue, field_type: &str, label: &str) -> String {
     match field_type {
-        "int" | "bigint" => {
+        // F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
+        // stores them as the same 8-byte OP_NUM2BIN word.
+        "int" | "bigint" | "RabinSig" | "RabinPubKey" => {
             // Defensively handle SdkValue::Bytes containing a BigInt string
             // (e.g. "0n", "1000n") that may have slipped through from JSON
             // artifacts loaded without a BigInt reviver.
@@ -700,7 +702,7 @@ fn to_little_endian_32(n: u32) -> String {
 pub(crate) fn state_field_byte_width(field_type: &str) -> Option<usize> {
     match field_type {
         "bool" | "boolean" => Some(1),
-        "int" | "bigint" => Some(8),
+        "int" | "bigint" | "RabinSig" | "RabinPubKey" => Some(8),
         "PubKey" => Some(33),
         "Addr" | "Ripemd160" => Some(20),
         "Sha256" => Some(32),
@@ -780,7 +782,9 @@ fn decode_state_value(
         // boolean field as push data and desynchronises every field after it.
         "bool" | "boolean" => Ok((SdkValue::Bool(data != "00"), hex_width)),
         // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
-        "int" | "bigint" => Ok((SdkValue::Int(decode_num2bin(data)), hex_width)),
+        "int" | "bigint" | "RabinSig" | "RabinPubKey" => {
+            Ok((SdkValue::Int(decode_num2bin(data)), hex_width))
+        }
         // Raw fixed-size byte types.
         _ => Ok((SdkValue::Bytes(data.to_string()), hex_width)),
     }

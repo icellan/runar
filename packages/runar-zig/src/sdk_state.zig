@@ -177,6 +177,15 @@ pub fn findLastOpReturn(script_hex: []const u8) ?usize {
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+/// F-035: RabinSig / RabinPubKey are bigint aliases; every compiler stores them
+/// as the same 8-byte OP_NUM2BIN word as int / bigint.
+fn isNum2Bin8Type(field_type: []const u8) bool {
+    return std.mem.eql(u8, field_type, "int") or
+        std.mem.eql(u8, field_type, "bigint") or
+        std.mem.eql(u8, field_type, "RabinSig") or
+        std.mem.eql(u8, field_type, "RabinPubKey");
+}
+
 /// Encode a state value as hex. The result is raw hex bytes (no push opcode for
 /// fixed-width types) matching the compiler's OP_NUM2BIN-based serialization.
 fn encodeStateValue(
@@ -184,7 +193,7 @@ fn encodeStateValue(
     value: types.StateValue,
     field_type: []const u8,
 ) ![]u8 {
-    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
+    if (isNum2Bin8Type(field_type)) {
         switch (value) {
             .big_int => |decimal_str| return encodeBigNum2Bin(allocator, decimal_str, 8),
             else => {},
@@ -543,7 +552,7 @@ const DecodedValue = struct {
 /// cannot drift.
 pub fn stateFieldByteWidth(field_type: []const u8) ?usize {
     if (std.mem.eql(u8, field_type, "bool") or std.mem.eql(u8, field_type, "boolean")) return 1;
-    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) return 8;
+    if (isNum2Bin8Type(field_type)) return 8;
     if (std.mem.eql(u8, field_type, "PubKey")) return 33;
     if (std.mem.eql(u8, field_type, "Addr") or std.mem.eql(u8, field_type, "Ripemd160")) return 20;
     if (std.mem.eql(u8, field_type, "Sha256")) return 32;
@@ -606,7 +615,7 @@ fn decodeStateValue(
         // boolean field as push data and desynchronises every field after it.
         return .{ .value = .{ .boolean = !std.mem.eql(u8, data, "00") }, .hex_chars_read = hex_width };
     }
-    if (std.mem.eql(u8, field_type, "int") or std.mem.eql(u8, field_type, "bigint")) {
+    if (isNum2Bin8Type(field_type)) {
         // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
         return .{ .value = .{ .int = decodeNum2Bin(data) }, .hex_chars_read = hex_width };
     }

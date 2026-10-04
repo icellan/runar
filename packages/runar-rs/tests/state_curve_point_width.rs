@@ -58,7 +58,7 @@ fn curve_point_values() -> HashMap<String, SdkValue> {
     v.insert("p256".into(), SdkValue::Bytes(rep("11", 64)));
     v.insert("p384".into(), SdkValue::Bytes(rep("22", 96)));
     v.insert("sig".into(), SdkValue::Bytes(format!("3044{}", rep("ee", 66))));
-    v.insert("rab".into(), SdkValue::Bytes(rep("ff", 8)));
+    v.insert("rab".into(), SdkValue::Int(i64::MAX)); // F-035: RabinSig is a bigint alias
     v.insert("bs".into(), SdkValue::Bytes("0011".into()));
     v
 }
@@ -76,7 +76,7 @@ fn cross_sdk_golden() -> String {
         rep("11", 64),                   // P256Point 64 raw  <- was framed "40" + 64
         rep("22", 96),                   // P384Point 96 raw  <- was framed "4c60" + 96
         format!("443044{}", rep("ee", 66)), // Sig        framed <len><data>
-        format!("08{}", rep("ff", 8)),   // RabinSig   framed <len><data>
+        "ffffffffffffff7f".to_string(),  // RabinSig   NUM2BIN 8 (F-035; was framed "08" + ff*8)
         "020011",                        // ByteString framed <len><data>
     )
 }
@@ -91,7 +91,7 @@ fn bytes_of(v: &SdkValue) -> String {
 #[test]
 fn curve_point_cross_sdk_golden_serialize() {
     let want = cross_sdk_golden();
-    assert_eq!(want.len() / 2, 399, "golden must be 399 bytes");
+    assert_eq!(want.len() / 2, 398, "golden must be 398 bytes");
     assert_eq!(
         serialize_state(&curve_point_fields(), &curve_point_values()),
         want,
@@ -104,8 +104,9 @@ fn curve_point_cross_sdk_golden_deserialize() {
         .expect("refused the cross-SDK golden");
     assert!(matches!(back["n"], SdkValue::Int(1)), "n: {:?}", back["n"]);
     assert!(matches!(back["flag"], SdkValue::Bool(true)), "flag: {:?}", back["flag"]);
+    assert!(matches!(back["rab"], SdkValue::Int(i64::MAX)), "rab: {:?}", back["rab"]);
     let input = curve_point_values();
-    for k in ["pk", "h", "ad", "pt", "p256", "p384", "sig", "rab", "bs"] {
+    for k in ["pk", "h", "ad", "pt", "p256", "p384", "sig", "bs"] {
         assert_eq!(bytes_of(&back[k]), bytes_of(&input[k]), "field {k}");
     }
 }
@@ -137,7 +138,15 @@ fn curve_point_controls_unchanged() {
             "{field_type} control must stay raw",
         );
     }
-    for field_type in ["ByteString", "Sig", "RabinSig"] {
+    // F-035: RabinSig left this list — it is a bigint alias, NUM2BIN 8.
+    let mut one: HashMap<String, SdkValue> = HashMap::new();
+    one.insert("v".into(), SdkValue::Int(1));
+    assert_eq!(
+        serialize_state(&[field("v", "RabinSig", 0)], &one),
+        "0100000000000000",
+        "RabinSig control must be NUM2BIN 8",
+    );
+    for field_type in ["ByteString", "Sig"] {
         let v = rep("ab", 64);
         let mut values: HashMap<String, SdkValue> = HashMap::new();
         values.insert("v".into(), SdkValue::Bytes(v.clone()));

@@ -165,7 +165,9 @@ public final class StateSerializer {
 
     static String encodeStateValue(Object value, String fieldType, String label) {
         return switch (fieldType) {
-            case "int", "bigint" -> encodeNum2Bin(toBigInteger(value), 8, label);
+            // F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
+            // stores them as the same 8-byte OP_NUM2BIN word.
+            case "int", "bigint", "RabinSig", "RabinPubKey" -> encodeNum2Bin(toBigInteger(value), 8, label);
             // 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
             // what every compiler writes into stateFields[].type, alongside
             // encoding "bool1" / byteLength 1 — and `bool` is an accepted alias.
@@ -270,7 +272,7 @@ public final class StateSerializer {
     static Integer stateFieldByteWidth(String fieldType) {
         return switch (fieldType) {
             case "bool", "boolean" -> 1;
-            case "int", "bigint" -> 8;
+            case "int", "bigint", "RabinSig", "RabinPubKey" -> 8;
             case "PubKey" -> 33;
             case "Addr", "Ripemd160" -> 20;
             case "Sha256" -> 32;
@@ -303,7 +305,8 @@ public final class StateSerializer {
         // every field after it.
         if (fieldType.equals("bool") || fieldType.equals("boolean")) return !"00".equals(data);
         // 8 raw bytes LE sign-magnitude (NUM2BIN 8).
-        if (fieldType.equals("int") || fieldType.equals("bigint")) return decodeNum2Bin(data);
+        if (fieldType.equals("int") || fieldType.equals("bigint")
+            || fieldType.equals("RabinSig") || fieldType.equals("RabinPubKey")) return decodeNum2Bin(data);
         // Raw fixed-size byte types.
         return data;
     }

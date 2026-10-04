@@ -2511,6 +2511,15 @@
       "reviewer": "siggi",
       "review-status": "reviewed",
       "date": "2026-09-27"
+    },
+    {
+      "path": "conformance/sdk-output/tests/state-rabin/expected-locking.hex",
+      "sha256": "570f9e4d3e40b7e0c2437b8b11cdb4169746a4e3ae36cfbe40cf6b288cf1295a",
+      "verified-against": "second-implementation",
+      "reason": "F-035 / R30 route B (user decision D2: the compiler is canonical). New sdk-output fixture: conformance/sdk-output/contracts/RabinState.runar.ts deployed with mutable RabinPubKey 0x1234567890ABCDEF, RabinSig -1000000007, bigint 3. Every compiler stores RabinSig/RabinPubKey (bigint aliases) as an 8-byte OP_NUM2BIN word; the shared STATE_FIELD_WIDTHS table and all seven SDK state codecs lacked both types and push-data framed them (measured pre-fix through these same tools: TS/Go/Java wrote the decimal text as non-hex, Python/Ruby/Zig wrote 00 00 losing the values, Rust panicked). Verified against: (1) seven-SDK agreement - all 7 tools emit this exact 763-byte script (sdk-runner --filter state-rabin, 7/7); (2) the state tail 6a efcdab9078563412 07ca9a3b00000080 0300000000000000 is derived by hand from the num2bin-le8 rule, independent of any SDK; (3) @bsv/sdk Spend with strict consensus flags accepts a rotate spending exactly this locking script and its continuation (packages/runar-testing/src/__tests__/f035-rabin-state-spend.test.ts, which also accepts two chained rotates on each of the 7 compiler tiers' own artifact in both fold modes and rejects both pre-fix framed continuation layouts). The code part is the unchanged TS compiler output; no conformance fixture golden moved.",
+      "reviewer": "siggi",
+      "review-status": "reviewed",
+      "date": "2026-10-04"
     }
   ]
 }

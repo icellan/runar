@@ -408,7 +408,9 @@ func hexByteValAt(hex string, pos int) uint64 {
 // The result is raw hex bytes that are concatenated after OP_RETURN.
 func encodeStateValue(value interface{}, fieldType string, label string) string {
 	switch fieldType {
-	case "int", "bigint":
+	// F-035: RabinSig / RabinPubKey are bigint aliases; every compiler stores
+	// them as the same 8-byte OP_NUM2BIN word.
+	case "int", "bigint", "RabinSig", "RabinPubKey":
 		n := stateFieldInt64(value, label, 8)
 		return encodeNum2Bin(n, 8)
 	// 1 raw byte. The canonical Rúnar primitive name is `boolean` — that is
@@ -616,7 +618,7 @@ func stateFieldByteWidth(fieldType string) (int, bool) {
 	switch fieldType {
 	case "bool", "boolean":
 		return 1, true
-	case "int", "bigint":
+	case "int", "bigint", "RabinSig", "RabinPubKey":
 		return 8, true
 	case "PubKey":
 		return 33, true
@@ -682,7 +684,7 @@ func decodeStateValue(hex string, offset int, fieldType string, label string) (i
 			// encodeStateValue — a reader that knows only "bool" walks a real
 			// boolean field as push data and desynchronises every field after it.
 			return data != "00", hexWidth, nil
-		case "int", "bigint":
+		case "int", "bigint", "RabinSig", "RabinPubKey":
 			// 8 raw bytes LE sign-magnitude (NUM2BIN 8)
 			return decodeNum2Bin(data), hexWidth, nil
 		default:

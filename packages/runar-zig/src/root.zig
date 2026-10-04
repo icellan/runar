@@ -263,6 +263,7 @@ test {
     _ = @import("sdk_n074_script_number_width_test.zig");
     _ = @import("sdk_state_range_guard_test.zig");
     _ = @import("sdk_state_curve_point_test.zig");
+    _ = @import("sdk_state_rabin_width_test.zig");
     _ = @import("sdk_state_boolean_spelling_test.zig");
     _ = @import("sdk_state_fixed_array_test.zig");
     _ = @import("sdk_fixed_array_call_continuation_test.zig");

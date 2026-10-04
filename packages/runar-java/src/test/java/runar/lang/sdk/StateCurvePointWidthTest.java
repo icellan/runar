@@ -55,7 +55,7 @@ class StateCurvePointWidthTest {
         v.put("p256", rep("11", 64));
         v.put("p384", rep("22", 96));
         v.put("sig", "3044" + rep("ee", 66));
-        v.put("rab", rep("ff", 8));
+        v.put("rab", BigInteger.ONE.shiftLeft(63).subtract(BigInteger.ONE)); // F-035: bigint alias
         v.put("bs", "0011");
         return v;
     }
@@ -71,12 +71,12 @@ class StateCurvePointWidthTest {
         + rep("11", 64)                    // P256Point 64 raw  <- was framed "40" + 64
         + rep("22", 96)                    // P384Point 96 raw  <- was framed "4c60" + 96
         + "44" + "3044" + rep("ee", 66)    // Sig        framed <len><data>
-        + "08" + rep("ff", 8)              // RabinSig   framed <len><data>
+        + "ffffffffffffff7f"               // RabinSig   NUM2BIN 8 (F-035; was framed "08" + ff*8)
         + "02" + "0011";                   // ByteString framed <len><data>
 
     @Test
     void crossSdkGoldenSerializesByteForByte() {
-        assertEquals(399, CROSS_SDK_GOLDEN.length() / 2, "golden must be 399 bytes");
+        assertEquals(398, CROSS_SDK_GOLDEN.length() / 2, "golden must be 398 bytes");
         assertEquals(CROSS_SDK_GOLDEN, StateSerializer.serialize(FIELDS, values()));
     }
 
@@ -114,7 +114,12 @@ class StateCurvePointWidthTest {
                     Map.of("v", v)),
                 c.type() + " control must stay raw");
         }
-        for (String type : List.of("ByteString", "Sig", "RabinSig")) {
+        // F-035: RabinSig left this list — it is a bigint alias, NUM2BIN 8.
+        assertEquals("0100000000000000",
+            StateSerializer.serialize(List.of(new StateField("v", "RabinSig", 0, null, null)),
+                Map.of("v", BigInteger.ONE)),
+            "RabinSig control must be NUM2BIN 8");
+        for (String type : List.of("ByteString", "Sig")) {
             String v = rep("ab", 64);
             assertEquals("40" + v,
                 StateSerializer.serialize(List.of(new StateField("v", type, 0, null, null)),

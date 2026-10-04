@@ -502,8 +502,13 @@ def check_fixed_width_value(value, field_type: str, what: str) -> None:
         )
 
 
+# F-035: RabinSig / RabinPubKey are bigint aliases; every compiler stores them
+# as the same 8-byte OP_NUM2BIN word.
+_NUM2BIN8_TYPES = ('int', 'bigint', 'RabinSig', 'RabinPubKey')
+
+
 def _encode_state_value(value, field_type: str, label: str = '?') -> str:
-    if field_type in ('int', 'bigint'):
+    if field_type in _NUM2BIN8_TYPES:
         if value is None:
             n = 0
         elif isinstance(value, str) and value.endswith('n'):
@@ -558,7 +563,7 @@ def _state_field_byte_width(field_type: str) -> int | None:
     """
     if field_type in ('bool', 'boolean'):
         return 1
-    if field_type in ('int', 'bigint'):
+    if field_type in _NUM2BIN8_TYPES:
         return 8
     return _TYPE_WIDTHS.get(field_type)
 
@@ -580,7 +585,7 @@ def _decode_state_value(hex_str: str, offset: int, field_type: str,
             # _encode_state_value — a reader that knows only 'bool' walks a real
             # boolean field as push data and desynchronises every field after it.
             return data != '00', hex_width
-        if field_type in ('int', 'bigint'):
+        if field_type in _NUM2BIN8_TYPES:
             # 8 raw bytes LE sign-magnitude
             return _decode_num2bin(data), hex_width
         # Raw fixed-size byte types

@@ -457,7 +457,9 @@ module Runar
       # @return [String] hex-encoded bytes
       def encode_state_value(value, field_type, label = '?')
         case field_type
-        when 'int', 'bigint'
+        # F-035: RabinSig / RabinPubKey are bigint aliases; every compiler
+        # stores them as the same 8-byte OP_NUM2BIN word.
+        when 'int', 'bigint', 'RabinSig', 'RabinPubKey'
           n = coerce_to_integer(value)
           encode_num2bin(n, 8, label)
         when 'bool', 'boolean'
@@ -515,7 +517,7 @@ module Runar
           # encode_state_value — a reader that knows only 'bool' walks a real
           # boolean field as push data and desynchronises every field after it.
           [data != '00', hex_width]
-        when 'int', 'bigint'
+        when 'int', 'bigint', 'RabinSig', 'RabinPubKey'
           # 8 raw bytes LE sign-magnitude (NUM2BIN 8)
           [decode_num2bin(data), hex_width]
         else
@@ -532,7 +534,7 @@ module Runar
       def state_field_byte_width(field_type)
         case field_type
         when 'bool', 'boolean' then 1
-        when 'int', 'bigint' then 8
+        when 'int', 'bigint', 'RabinSig', 'RabinPubKey' then 8
         else TYPE_WIDTHS[field_type]
         end
       end

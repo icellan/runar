@@ -341,7 +341,11 @@ export function assertFixedWidthValue(value: unknown, type: string, what: string
 function encodeStateValue(value: unknown, type: string, label = '?'): string {
   switch (type) {
     case 'int':
-    case 'bigint': {
+    case 'bigint':
+    // F-035: bigint aliases, stored by every compiler as the same 8-byte
+    // OP_NUM2BIN word (STATE_FIELD_WIDTHS: num2bin-le8).
+    case 'RabinSig':
+    case 'RabinPubKey': {
       let n: bigint;
       if (typeof value === 'bigint') {
         n = value;

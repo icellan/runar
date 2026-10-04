@@ -319,6 +319,21 @@ const TEST_SPECS: TestSpec[] = [
       { type: 'boolean', value: 'false' },
     ],
   },
+  // F-035: the corpus's only MUTABLE RabinPubKey / RabinSig state fields.
+  // Every compiler stores both as a bare 8-byte OP_NUM2BIN word (they are
+  // bigint aliases); the SDKs used to push-data frame them. The values are
+  // multi-byte and the second is negative, so byte order and the sign bit are
+  // pinned too. The tool `type` is the arg CONVERSION (bigint -> integer); the
+  // field type the codec sees comes from the artifact's stateFields.
+  {
+    name: 'state-rabin',
+    source: 'conformance/sdk-output/contracts/RabinState.runar.ts',
+    constructorArgs: [
+      { type: 'bigint', value: '1311768467294899695' },
+      { type: 'bigint', value: '-1000000007' },
+      { type: 'bigint', value: '3' },
+    ],
+  },
   // N-043: the three verdicts every SDK must agree on when a 1sat-ordinals
   // envelope meets a `SIZE(_codePart)` pin. The envelope is concatenated INTO
   // the code part, and its length is a deploy-time value the compiler never
