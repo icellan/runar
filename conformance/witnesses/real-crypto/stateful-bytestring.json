@@ -54,9 +54,63 @@
       "cryptoNearMiss": true,
       "expect": "reject",
       "note": "wrong signer: owner=bob signed by alice -> checkSig fails"
+    },
+    {
+      "method": "burn",
+      "args": [
+        null
+      ],
+      "constructorArgs": [
+        "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+        {
+          "$pubkey": "alice"
+        }
+      ],
+      "signerKey": "alice",
+      "expect": "accept",
+      "note": "N-044: owner burn with a 128-byte message (framed 4c 80). The continuation must carry the 128-byte message through unchanged, so the on-chain writer and the SDK agree on the unsigned PUSHDATA1 length",
+      "expectedState": {
+        "message": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      }
+    },
+    {
+      "method": "post",
+      "args": [
+        "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      ],
+      "constructorArgs": [
+        "00",
+        {
+          "$pubkey": "alice"
+        }
+      ],
+      "signerKey": "alice",
+      "expect": "accept",
+      "note": "N-044: post a 129-byte message (4c 81) — the on-chain writer frames it with an unsigned length the next spend can read",
+      "expectedState": {
+        "message": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      }
+    },
+    {
+      "method": "post",
+      "args": [
+        "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      ],
+      "constructorArgs": [
+        "00",
+        {
+          "$pubkey": "alice"
+        }
+      ],
+      "signerKey": "alice",
+      "expect": "accept",
+      "note": "N-044: post a 256-byte message — PUSHDATA2 frame (4d 00 01)",
+      "expectedState": {
+        "message": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      }
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "19757d05ea80200bc1cde7fcfe98d8ce585f07edea6dc79b9e26bab777e1190b"
+    "expected-script.hex": "7d4c0f14c9466718006660a9694c211681900361704411de5ca305ed4c0042b9"
   }
 }

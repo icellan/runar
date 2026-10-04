@@ -1,0 +1,141 @@
+{
+  "fixture": "state-covenant",
+  "kind": "stateful",
+  "signerKey": "alice",
+  "note": "N-044. The fixture carries a compilers:[\"go\"] allowlist for its bbFieldMul + merkleRootSha256 builtins, but the TS tier compiles this exact source to bytes identical to expected-script.hex (checked fold-OFF), so the real-crypto harness executes the golden's own covenant. Vectors are hand-derived, independent of the compiler: the verifying-key hash is the root of a 16-leaf SHA-256 tree whose leaf i is sha256(byte i) and whose nodes are sha256(left||right); the proof is the 4 bottom-up siblings of leaf 3; proofFieldC = 1000000 * 2000000 mod 2013265921 (Baby Bear); batchDataHash = hash256(preStateRoot || newStateRoot).",
+  "goldenHashes": {
+    "expected-script.hex": "1eddf9f6564df4aac23ed09b0e7b4001b0b628fd2c292571f3b9a3b48d6b9ab1"
+  },
+  "constructorArgs": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0n",
+    "c0c3fe0b145addf71ab16a54fe056bd17d2b5f4b913d11e07220e604f108a9e1"
+  ],
+  "spends": [
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "1n",
+        "0xce0e2fe11db4681b4e87109fe19898cd64522bb37dc6549f5b0a137b3bc148af",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "1000000n",
+        "2000000n",
+        "826940447n",
+        "0x084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5",
+        "0xdbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d98630e1867424e66e8b6d159246db94e3486778136f7e386ff5f001859d6b8484ab042ad79b36e16fe6feca0b57ca795547c49a510754ec5ff2117ce3ca1713505d602fc2d8f795b75ffce1ba31bbe8e1ac5206881268a1dc817c23d16f1f852177",
+        "3n"
+      ],
+      "expect": "accept",
+      "note": "honest: block 0 -> 1 from a 32-byte pre-state, valid Baby Bear product, valid Merkle path to the verifying-key hash",
+      "expectedState": {
+        "stateRoot": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "blockNumber": "1n"
+      }
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "1n",
+        "0x9cbb2d8cea2bf8e3d96aea6ce328884354eba0a403ed82b269a6d57e38877f9f",
+        "0x0500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "1000000n",
+        "2000000n",
+        "826940447n",
+        "0x084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5",
+        "0xdbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d98630e1867424e66e8b6d159246db94e3486778136f7e386ff5f001859d6b8484ab042ad79b36e16fe6feca0b57ca795547c49a510754ec5ff2117ce3ca1713505d602fc2d8f795b75ffce1ba31bbe8e1ac5206881268a1dc817c23d16f1f852177",
+        "3n"
+      ],
+      "constructorArgs": [
+        "0500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "0n",
+        "c0c3fe0b145addf71ab16a54fe056bd17d2b5f4b913d11e07220e604f108a9e1"
+      ],
+      "expect": "accept",
+      "note": "N-044: before the fix every tier read a PUSHDATA state length with bare OP_BIN2NUM (signed), so this 128-byte stateRoot (framed 4c 80) read as EMPTY and the honest transition from it was REJECTED. Now: block 0 -> 1 from the real 128-byte pre-state",
+      "expectedState": {
+        "stateRoot": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "blockNumber": "1n"
+      }
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "6n",
+        "0xbab283e4f9be71cb5699cdbc323066ed5a7433306422e63ff5318e2d8a67ba90",
+        "0x",
+        "1000000n",
+        "2000000n",
+        "826940447n",
+        "0x084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5",
+        "0xdbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d98630e1867424e66e8b6d159246db94e3486778136f7e386ff5f001859d6b8484ab042ad79b36e16fe6feca0b57ca795547c49a510754ec5ff2117ce3ca1713505d602fc2d8f795b75ffce1ba31bbe8e1ac5206881268a1dc817c23d16f1f852177",
+        "3n"
+      ],
+      "constructorArgs": [
+        "0500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "0n",
+        "c0c3fe0b145addf71ab16a54fe056bd17d2b5f4b913d11e07220e604f108a9e1"
+      ],
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-044 ATTACK: on-chain stateRoot is 128 bytes (05 00..00), blockNumber 0. Before the fix the reader took stateRoot as EMPTY and blockNumber as BIN2NUM(05 00..00) = 5, so pre-state '' with block 6 was ACCEPTED \u2014 a transition from a state the covenant never held. The fixed reader sees the real root and refuses it"
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "1n",
+        "0xce0e2fe11db4681b4e87109fe19898cd64522bb37dc6549f5b0a137b3bc148af",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "1000000n",
+        "2000000n",
+        "826940447n",
+        "0xe52d9c508c502347344d8c07ad91cbd6068afc75ff6292f062a09ca381c89e71",
+        "0xdbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d98630e1867424e66e8b6d159246db94e3486778136f7e386ff5f001859d6b8484ab042ad79b36e16fe6feca0b57ca795547c49a510754ec5ff2117ce3ca1713505d602fc2d8f795b75ffce1ba31bbe8e1ac5206881268a1dc817c23d16f1f852177",
+        "3n"
+      ],
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "wrong Merkle leaf (leaf 4 with leaf 3's path) -> computed root != verifyingKeyHash"
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "1n",
+        "0xce0e2fe11db4681b4e87109fe19898cd64522bb37dc6549f5b0a137b3bc148af",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "1000000n",
+        "2000000n",
+        "826940448n",
+        "0x084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5",
+        "0xdbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d98630e1867424e66e8b6d159246db94e3486778136f7e386ff5f001859d6b8484ab042ad79b36e16fe6feca0b57ca795547c49a510754ec5ff2117ce3ca1713505d602fc2d8f795b75ffce1ba31bbe8e1ac5206881268a1dc817c23d16f1f852177",
+        "3n"
+      ],
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "wrong Baby Bear product (C + 1)"
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "1n",
+        "0xce0e2fe11db4681b4e87109fe19898cd64522bb37dc6549f5b0a137b3bc148af",
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "1000000n",
+        "2000000n",
+        "826940447n",
+        "0x084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5",
+        "0xdbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d98630e1867424e66e8b6d159246db94e3486778136f7e386ff5f001859d6b8484ab042ad79b36e16fe6feca0b57ca795547c49a510754ec5ff2117ce3ca1713505d602fc2d8f795b75ffce1ba31bbe8e1ac5206881268a1dc817c23d16f1f852177",
+        "3n"
+      ],
+      "tamperOutput": true,
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "tampered continuation output \u2014 the covenant must bind the new state"
+    }
+  ]
+}

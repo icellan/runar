@@ -990,6 +990,11 @@ class LoweringContext {
    *   - len <= 75:     1-byte length prefix
    *   - len 76-255:    0x4c + 1-byte length
    *   - len 256-65535: 0x4d + 2-byte LE length
+   *   - len >= 65536:  0x4e + 4-byte LE length (N-044 / F-083: this arm was
+   *                    missing, so a >= 64 KiB value was framed as 0x4d with
+   *                    its length silently truncated mod 65536)
+   *
+   * Every length is UNSIGNED — `emitPushDataDecode` reads it back that way.
    *
    * Uses save/restore of the stack map at each OP_ELSE to correctly
    * track all branches.
@@ -1093,7 +1098,23 @@ class LoweringContext {
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
     // Restore stack map to inner branch point for inner ELSE
     this.stackMap = smAfterInnerIf.clone();
-    // --- ELSE: len >= 256 → OP_PUSHDATA2: 0x4d + 2-byte LE length ---
+    // --- ELSE: len >= 256 ---
+    // Stack: [..., bs_value, size]
+    this.emitOp({ op: 'dup' }); // [..., bs_value, size, size]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 65536n }); // [..., bs_value, size, size, 65536]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [..., bs_value, size, size<65536]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop(); // pop condition
+    // Save stack map state at the PUSHDATA2/4 branch point: [..., bs_value, size]
+    const smAfterPd4If = this.stackMap.clone();
+
+    // --- THEN: 256 <= len <= 65535 → OP_PUSHDATA2: 0x4d + 2-byte LE length ---
     // Stack: [..., bs_value, size]
     // Use NUM2BIN 4 + SPLIT to get unsigned 2-byte LE
     this.emitOp({ op: 'push', value: 4n });
@@ -1126,6 +1147,43 @@ class LoweringContext {
     this.emitOp({ op: 'opcode', code: 'OP_CAT' }); // [..., prefix || bs_value]
     this.stackMap.push(null);
 
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAfterPd4If.clone();
+    // --- ELSE: len >= 65536 → OP_PUSHDATA4: 0x4e + 4-byte LE length ---
+    // Stack: [..., bs_value, size]
+    // NUM2BIN 5 + SPLIT 4 gives the unsigned 4-byte LE length (a script
+    // number below 2^32 needs at most 5 sign-magnitude bytes).
+    this.emitOp({ op: 'push', value: 5n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' }); // [..., bs_value, size_5bytes]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 4n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., bs_value, low4bytes, highByte]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.stackMap.push(null);
+    this.emitOp({ op: 'drop' }); // [..., bs_value, low4bytes]
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: new Uint8Array([0x4e]) }); // [..., bs_value, low4bytes, 0x4e]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' }); // [..., bs_value, 0x4e, low4bytes]
+    this.stackMap.swap();
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' }); // [..., bs_value, 0x4e || len_4LE]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' }); // [..., 0x4e || len_4LE, bs_value]
+    this.stackMap.swap();
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' }); // [..., prefix || bs_value]
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     // Restore to the target end state (same for all branches)
@@ -1139,10 +1197,16 @@ class LoweringContext {
    * Expects stack: [..., state_bytes]
    * Leaves stack:  [..., data, remaining_state]
    *
-   * Push-data format:
-   *   - first byte < 76:  that IS the length → split at that length
-   *   - first byte == 76 (0x4c): read 1 more byte as length
-   *   - first byte == 77 (0x4d): read 2 more bytes as LE length
+   * Push-data format (the exact set `emitPushDataEncode` writes):
+   *   - header < 76 (0x4c): the header IS the length
+   *   - header == 0x4c:     1 more byte of length
+   *   - header == 0x4d:     2 more bytes of LE length
+   *   - header == 0x4e:     4 more bytes of LE length
+   *   - any other header:   the script fails (OP_NUMEQUALVERIFY)
+   * The header and every length are read UNSIGNED (`emitUnsignedBin2Num`):
+   * bare OP_BIN2NUM treats the top bit as a sign bit, so a length framed as
+   * `80` (128) or `00 80` (32768) read back as 0, and `81`..`ff` negative
+   * (N-044).
    *
    * Uses save/restore of the stack map at each OP_ELSE to correctly
    * track all branches.
@@ -1151,30 +1215,29 @@ class LoweringContext {
     // Stack: [..., state_bytes]
     this.emitOp({ op: 'push', value: 1n });
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., first_byte, rest]
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., header, rest]
     this.stackMap.pop();
     this.stackMap.pop();
-    this.stackMap.push(null); // first_byte
+    this.stackMap.push(null); // header
     this.stackMap.push(null); // rest
-    this.emitOp({ op: 'swap' }); // [..., rest, first_byte]
+    this.emitOp({ op: 'swap' }); // [..., rest, header]
     this.stackMap.swap();
-    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // [..., rest, fb_num]
-    this.emitOp({ op: 'dup' }); // [..., rest, fb_num, fb_num]
+    this.emitUnsignedBin2Num(); // [..., rest, hb]  (0..255)
+    this.emitOp({ op: 'dup' }); // [..., rest, hb, hb]
     this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 76n }); // [..., rest, fb_num, fb_num, 76]
+    this.emitOp({ op: 'push', value: 76n }); // [..., rest, hb, hb, 76]
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [..., rest, fb_num, fb<76]
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [..., rest, hb, hb<76]
     this.stackMap.pop();
     this.stackMap.pop();
     this.stackMap.push(null);
 
     this.emitOp({ op: 'opcode', code: 'OP_IF' });
     this.stackMap.pop(); // pop condition
-    // Save stack map at branch point: [..., rest, fb_num]
+    // Save stack map at branch point: [..., rest, hb]
     const smAfterOuterIf = this.stackMap.clone();
 
-    // --- THEN: fb_num < 76 → fb_num IS the length ---
-    // Stack: [..., rest, fb_num]
+    // --- THEN: hb < 76 → hb IS the length ---
     this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., data, remaining]
     this.stackMap.pop();
     this.stackMap.pop();
@@ -1184,72 +1247,91 @@ class LoweringContext {
     const smEndTarget = this.stackMap.clone();
 
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-    // Restore stack map to branch point
     this.stackMap = smAfterOuterIf.clone();
-    // --- ELSE: fb_num >= 76 ---
-    // Stack: [..., rest, fb_num]
-    this.emitOp({ op: 'dup' }); // [..., rest, fb_num, fb_num]
+    // --- ELSE: hb >= 76 → map the header to its length width (1, 2 or 4) ---
+    // Stack: [..., rest, hb]
+    this.emitOp({ op: 'dup' });
     this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 77n }); // [..., rest, fb_num, fb_num, 77]
+    this.emitOp({ op: 'push', value: 76n });
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' }); // [..., rest, fb_num, fb==77]
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' }); // [..., rest, hb, hb==0x4c]
     this.stackMap.pop();
     this.stackMap.pop();
     this.stackMap.push(null);
-
     this.emitOp({ op: 'opcode', code: 'OP_IF' });
-    this.stackMap.pop(); // pop condition
-    // Save stack map at inner branch point: [..., rest, fb_num]
-    const smAfterInnerIf = this.stackMap.clone();
-
-    // --- THEN: fb_num == 77 (0x4d) → 2-byte LE length ---
-    // Stack: [..., rest, fb_num]
-    this.emitOp({ op: 'drop' }); // [..., rest]
     this.stackMap.pop();
-    this.emitOp({ op: 'push', value: 2n });
+    const smAfterPd1If = this.stackMap.clone();
+    // --- 0x4c → width 1 ---
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: 1n }); // [..., rest, 1]
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., len_2LE, rest2]
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null); // len_2LE
-    this.stackMap.push(null); // rest2
-    this.emitOp({ op: 'swap' }); // [..., rest2, len_2LE]
-    this.stackMap.swap();
-    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // [..., rest2, len]
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., data, remaining]
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null); // data
-    this.stackMap.push(null); // remaining
+    const smWidth = this.stackMap.clone();
 
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-    // Restore stack map to inner branch point
-    this.stackMap = smAfterInnerIf.clone();
-    // --- ELSE: fb_num == 76 (0x4c) → 1-byte length ---
-    // Stack: [..., rest, fb_num]
-    this.emitOp({ op: 'drop' }); // [..., rest]
-    this.stackMap.pop();
-    this.emitOp({ op: 'push', value: 1n });
+    this.stackMap = smAfterPd1If.clone();
+    this.emitOp({ op: 'dup' });
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., len_1byte, rest2]
+    this.emitOp({ op: 'push', value: 77n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' }); // [..., rest, hb, hb==0x4d]
     this.stackMap.pop();
     this.stackMap.pop();
-    this.stackMap.push(null); // len_1byte
-    this.stackMap.push(null); // rest2
-    this.emitOp({ op: 'swap' }); // [..., rest2, len_1byte]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop();
+    const smAfterPd2If = this.stackMap.clone();
+    // --- 0x4d → width 2 ---
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: 2n }); // [..., rest, 2]
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAfterPd2If.clone();
+    // --- 0x4e → width 4; any other header fails the script ---
+    this.emitOp({ op: 'push', value: 78n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUMEQUALVERIFY' }); // [..., rest]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: 4n }); // [..., rest, 4]
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    this.stackMap = smWidth;
+    // Stack: [..., rest, width]
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., len_bytes, rest2]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' }); // [..., rest2, len_bytes]
     this.stackMap.swap();
-    this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // [..., rest2, len]
+    this.emitUnsignedBin2Num(); // [..., rest2, len]
     this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., data, remaining]
     this.stackMap.pop();
     this.stackMap.pop();
     this.stackMap.push(null); // data
     this.stackMap.push(null); // remaining
 
-    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     // Restore to the target end state (same for all branches)
     this.stackMap = smEndTarget;
     // --- Stack: [..., data, remaining] ---
+  }
+
+  /**
+   * `[..., rest]` → `[...]`, failing the script unless `rest` is empty: the
+   * last state field must consume the state section exactly (N-044).
+   */
+  private emitAssertStateConsumed(): void {
+    this.emitOp({ op: 'push', value: 0n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_EQUALVERIFY' });
+    this.stackMap.pop();
+    this.stackMap.pop();
   }
 
   /**
@@ -4072,10 +4154,10 @@ class LoweringContext {
       if (stateProps.length === 1) {
         const prop = stateProps[0]!;
         if (isVariableLengthStateType(prop.type)) {
-          // Single variable-length field: decode push-data prefix, drop trailing empty
+          // Single variable-length field: decode push-data prefix; the
+          // remainder MUST be empty (exact consumption, N-044).
           this.emitPushDataDecode(); // [..., data, remaining]
-          this.emitOp({ op: 'drop' }); // drop remaining (should be empty for single field)
-          this.stackMap.pop();
+          this.emitAssertStateConsumed(); // [..., data]
         } else if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
           this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
         }
@@ -4119,14 +4201,22 @@ class LoweringContext {
               this.stackMap.push(null);
             }
           } else {
-            // Last property — remaining bytes are this property
+            // Last property — it must consume the state section exactly
+            // (N-044): a trailing byte fails the script instead of being
+            // folded into (or silently dropped after) the last field.
             if (isVariableLengthStateType(prop.type)) {
-              // Last variable-length field: decode push-data prefix, drop trailing empty
               this.emitPushDataDecode(); // [..., data, remaining]
-              this.emitOp({ op: 'drop' }); // drop remaining (should be empty)
-              this.stackMap.pop();
-            } else if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
-              this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+              this.emitAssertStateConsumed(); // [..., data]
+            } else {
+              this.emitOp({ op: 'push', value: BigInt(propSizes[i]!) });
+              this.stackMap.push(null);
+              this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [..., field, rest]
+              this.stackMap.pop(); this.stackMap.pop();
+              this.stackMap.push(null); this.stackMap.push(null);
+              this.emitAssertStateConsumed(); // [..., field]
+              if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
+                this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+              }
             }
             this.stackMap.pop();
             this.stackMap.push(prop.name);

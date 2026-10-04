@@ -398,7 +398,8 @@ test "R-073 control: FixedArray<ByteString,2> written with a ByteString still co
     const hex = try compileHex(a, GOOD_BYTESTRING_WORDS, "PosWords.runar.ts");
     defer a.free(hex);
     // F-024 (R14): +34 hex for the injected _newAmount >= extractAmount(txPreimage) check (check-stripped ANF re-emits 1784).
-    try std.testing.expectEqual(@as(usize, 1818), hex.len); // W1: +6, two zero-pad sites
+    // N-044: +134 hex for the two ByteString slots' PUSHDATA4 writer arm and the unsigned-length reader.
+    try std.testing.expectEqual(@as(usize, 1952), hex.len); // W1: +6, two zero-pad sites
     try std.testing.expect(std.mem.startsWith(u8, hex, "61ab7676aa517f517f"));
 }
 

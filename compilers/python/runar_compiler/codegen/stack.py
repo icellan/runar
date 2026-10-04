@@ -913,7 +913,20 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
         self.sm = sm_after_inner_if
 
-        # ELSE: >= 256 -> 0x4d + 2-byte LE
+        # ELSE: >= 256
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(65536)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_pd4_if = self.sm.clone()
+
+        # THEN: 256-65535 -> 0x4d + 2-byte LE
         self.emit_op(StackOp(op="push", value=big_int_push(4)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
@@ -936,6 +949,35 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.push("")
 
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_pd4_if
+
+        # ELSE: >= 65536 -> 0x4e + 4-byte LE (N-044 / F-194: this arm was
+        # missing, so the length was silently truncated mod 65536).
+        # NUM2BIN 5 + SPLIT 4 gives the unsigned 4-byte LE length.
+        self.emit_op(StackOp(op="push", value=big_int_push(5)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x4E]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.sm = sm_end_target
@@ -945,6 +987,12 @@ class _LoweringContext:
 
         Expects stack: [..., state_bytes]
         Leaves stack:  [..., data, remaining_state]
+
+        Accepts exactly the headers ``emit_push_data_encode`` writes: < 76
+        (the header is the length), 0x4c (1-byte length), 0x4d (2-byte LE),
+        0x4e (4-byte LE); any other header fails the script. The header and
+        every length are read UNSIGNED (``_emit_unsigned_bin2num``) — bare
+        OP_BIN2NUM read 0x80 as 0 and 0x81..0xff as negative (N-044).
         """
         self.emit_op(StackOp(op="push", value=big_int_push(1)))
         self.sm.push("")
@@ -952,7 +1000,7 @@ class _LoweringContext:
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
         self.emit_op(StackOp(op="swap")); self.sm.swap()
-        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        self._emit_unsigned_bin2num()  # [..., rest, hb]
         self.emit_op(StackOp(op="dup"))
         self.sm.push("")
         self.emit_op(StackOp(op="push", value=big_int_push(76)))
@@ -965,7 +1013,7 @@ class _LoweringContext:
         self.sm.pop()
         sm_after_outer_if = self.sm.clone()
 
-        # THEN: fb < 76 -> direct length
+        # THEN: hb < 76 -> direct length
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
@@ -974,6 +1022,25 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
         self.sm = sm_after_outer_if.clone()
 
+        # ELSE: map the header to its length width (1, 2 or 4).
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(76)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_pd1_if = self.sm.clone()
+        # 0x4c -> width 1
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        sm_width = self.sm.clone()
+
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_pd1_if
         self.emit_op(StackOp(op="dup"))
         self.sm.push("")
         self.emit_op(StackOp(op="push", value=big_int_push(77)))
@@ -981,43 +1048,48 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
         self.sm.pop(); self.sm.pop()
         self.sm.push("")
-
         self.emit_op(StackOp(op="opcode", code="OP_IF"))
         self.sm.pop()
-        sm_after_inner_if = self.sm.clone()
-
-        # THEN: fb == 77 -> 2-byte LE
+        sm_after_pd2_if = self.sm.clone()
+        # 0x4d -> width 2
         self.emit_op(StackOp(op="drop")); self.sm.pop()
         self.emit_op(StackOp(op="push", value=big_int_push(2)))
         self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop(); self.sm.pop()
-        self.sm.push(""); self.sm.push("")
-        self.emit_op(StackOp(op="swap")); self.sm.swap()
-        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop(); self.sm.pop()
-        self.sm.push(""); self.sm.push("")
 
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-        self.sm = sm_after_inner_if
-
-        # ELSE: fb == 76 -> 1-byte
-        self.emit_op(StackOp(op="drop")); self.sm.pop()
-        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm = sm_after_pd2_if
+        # 0x4e -> width 4; any other header fails the script
+        self.emit_op(StackOp(op="push", value=big_int_push(78)))
         self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUALVERIFY"))
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.sm = sm_width
+        # [..., rest, width]
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
         self.emit_op(StackOp(op="swap")); self.sm.swap()
-        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        self._emit_unsigned_bin2num()  # [..., rest2, len]
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
         self.sm.pop(); self.sm.pop()
         self.sm.push(""); self.sm.push("")
 
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
-        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.sm = sm_end_target
+
+    def emit_assert_state_consumed(self) -> None:
+        """Fail the script unless the value on top (the rest of the state
+        section after the last field) is empty, and pop it: the last state
+        field must consume the state section exactly (N-044)."""
+        self.emit_op(StackOp(op="push", value=big_int_push(0)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_EQUALVERIFY"))
+        self.sm.pop(); self.sm.pop()
 
     # -----------------------------------------------------------------
     # bring_to_top
@@ -3246,10 +3318,10 @@ class _LoweringContext:
         if len(state_props) == 1:
             prop = state_props[0]
             if is_variable_length_state_type(prop.type):
-                # Single variable-length byte-string: decode push-data prefix,
-                # drop the trailing empty remainder.
+                # Single variable-length byte-string: decode push-data prefix;
+                # the remainder must be empty (N-044).
                 self.emit_push_data_decode()  # [..., data, remaining]
-                self.emit_op(StackOp(op="drop")); self.sm.pop()
+                self.emit_assert_state_consumed()  # [..., data]
             elif is_numeric_state_type(prop.type):
                 self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
             self.sm.pop()
@@ -3279,13 +3351,20 @@ class _LoweringContext:
                         self.sm.push(prop.name)
                         self.sm.push("")
                 else:
+                    # Last field: it must consume the state section exactly
+                    # (N-044).
                     if is_variable_length_state_type(prop.type):
-                        # Last variable-length field: decode push-data prefix,
-                        # drop the trailing empty remainder.
                         self.emit_push_data_decode()  # [..., data, remaining]
-                        self.emit_op(StackOp(op="drop")); self.sm.pop()
-                    elif is_numeric_state_type(prop.type):
-                        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+                        self.emit_assert_state_consumed()  # [..., data]
+                    else:
+                        self.emit_op(StackOp(op="push", value=big_int_push(prop_sizes[i])))
+                        self.sm.push("")
+                        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+                        self.sm.pop(); self.sm.pop()
+                        self.sm.push(""); self.sm.push("")
+                        self.emit_assert_state_consumed()  # [..., field]
+                        if is_numeric_state_type(prop.type):
+                            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                     self.sm.pop()
                     self.sm.push(prop.name)
 

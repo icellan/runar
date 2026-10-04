@@ -1326,3 +1326,47 @@ test "state ByteString: round-trips for every single-byte value" {
         try std.testing.expectEqualStrings(&in_buf, decoded[0].bytes);
     }
 }
+
+// N-044: the compiler's on-chain state reader and writer frame a ByteString
+// with an UNSIGNED length (<len> below 76, 4c <len8>, 4d <len16 LE>,
+// 4e <len32 LE>), and the covenant only accepts a continuation whose state
+// bytes equal the SDK's. Hand-written expected headers at every boundary where
+// a signed reading of the length used to differ (0x80, 0x81.., 0x8000, 0xffff)
+// and where PUSHDATA4 starts. The on-chain side is run against the same frames
+// by packages/runar-testing/src/__tests__/n044-state-length-sign-spend.
+test "state ByteString: PUSHDATA length boundaries match the on-chain frame" {
+    const allocator = std.testing.allocator;
+    const fields = &[_]types.StateField{
+        .{ .name = "b", .type_name = "ByteString", .index = 0 },
+    };
+    const Case = struct { n: usize, header: []const u8 };
+    const cases = [_]Case{
+        .{ .n = 75, .header = "4b" },       .{ .n = 76, .header = "4c4c" },
+        .{ .n = 127, .header = "4c7f" },    .{ .n = 128, .header = "4c80" },
+        .{ .n = 129, .header = "4c81" },    .{ .n = 255, .header = "4cff" },
+        .{ .n = 256, .header = "4d0001" },  .{ .n = 32767, .header = "4dff7f" },
+        .{ .n = 32768, .header = "4d0080" }, .{ .n = 65535, .header = "4dffff" },
+        .{ .n = 65536, .header = "4e00000100" },
+    };
+    for (cases) |c| {
+        const payload = try allocator.alloc(u8, c.n * 2);
+        defer allocator.free(payload);
+        var k: usize = 0;
+        while (k < payload.len) : (k += 2) {
+            payload[k] = 'a';
+            payload[k + 1] = 'b';
+        }
+        const values = &[_]types.StateValue{.{ .bytes = payload }};
+        const serialized = try serializeState(allocator, fields, values);
+        defer allocator.free(serialized);
+        try std.testing.expectEqual(c.header.len + payload.len, serialized.len);
+        try std.testing.expectEqualStrings(c.header, serialized[0..c.header.len]);
+        try std.testing.expectEqualStrings(payload, serialized[c.header.len..]);
+        const decoded = try deserializeState(allocator, fields, serialized);
+        defer {
+            for (decoded) |*v| v.deinit(allocator);
+            allocator.free(decoded);
+        }
+        try std.testing.expectEqualStrings(payload, decoded[0].bytes);
+    }
+}

@@ -172,9 +172,11 @@ test "C27: checkPreimage reachable only through a private helper still emits _co
     // `verify_code_part_len` pin adds 9 to the one authenticating method, this
     // contract's state being a variable-length ByteString). Zig under-emitted
     // while the private-method map was null. All seven tiers were re-measured
-    // at 625 on the same ANF input before this number was moved.
+    // at 625 on the same ANF input before this number was moved. N-044: +14
+    // for the unsigned PUSHDATA-length reader, header whitelist and exact
+    // state consumption -> 639.
     const hex = try scriptHex(artifact);
-    try std.testing.expectEqual(@as(usize, 625 * 2), hex.len);
+    try std.testing.expectEqual(@as(usize, 639 * 2), hex.len);
 }
 
 test "C27: the _codePart gate stays gated when no checkPreimage is reachable" {

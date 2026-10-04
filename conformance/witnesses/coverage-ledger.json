@@ -373,16 +373,6 @@
       }
     },
     {
-      "fixture": "state-covenant",
-      "cause": "crypto-witness-infeasible",
-      "reason": "hash256 + SHA-256 Merkle covenant (Go-only, compilers:[go]) + stateful preimage — no TS codegen",
-      "coveredBy": {
-        "kind": "integration",
-        "path": "integration/zig/src/state_covenant_test.zig",
-        "note": "real deploy + spend on a live regtest node: StateCovenant_AdvanceState and StateCovenant_ChainAdvances (accepts) plus four reject cases (wrong pre-state root, invalid block number, invalid BabyBear proof, invalid Merkle proof). Compiles examples/ts/state-covenant/StateCovenant.runar.ts — this fixture's own source — verified byte-identical to expected-script.hex (1196 bytes)."
-      }
-    },
-    {
       "fixture": "stateful-wots-gate",
       "cause": "crypto-witness-infeasible",
       "reason": "WOTS+ verification gate + checkPreimage — WOTS+ one-time witness + tx context. UPGRADED from byte-golden-only: script_execution_test.go now compiles and EXECUTES this exact fixture with a real tx-context spend (stateful preimage check + state continuation composed with a real WOTS+ signature in one script) on the go-sdk Spend engine.",

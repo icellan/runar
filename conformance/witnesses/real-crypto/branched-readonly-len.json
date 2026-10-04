@@ -41,9 +41,57 @@
       "cryptoNearMiss": true,
       "expect": "reject",
       "note": "tampered continuation output: recomputed sighash no longer matches the on-stack preimage"
+    },
+    {
+      "method": "spend",
+      "args": [
+        "0x4142"
+      ],
+      "constructorArgs": [
+        "5n",
+        "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+      ],
+      "expect": "accept",
+      "note": "N-044: before the fix every tier read a PUSHDATA state length with bare OP_BIN2NUM (signed), so this 129-byte tag (framed 4c 81) read as length -1 and OP_SPLIT aborted: the UTXO could not be spent at all. Now read as 129: count 5->6, tag->4142",
+      "expectedState": {
+        "count": "6n",
+        "tag": "0x4142"
+      }
+    },
+    {
+      "method": "spend",
+      "args": [
+        "0x"
+      ],
+      "constructorArgs": [
+        "5n",
+        "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+      ],
+      "expect": "accept",
+      "note": "N-044: before the fix every tier read a PUSHDATA state length with bare OP_BIN2NUM (signed), so a 255-byte tag (4c ff) read as -127 and bricked the UTXO. Else-branch: count 5->4, tag->3030",
+      "expectedState": {
+        "count": "4n",
+        "tag": "0x3030"
+      }
+    },
+    {
+      "method": "spend",
+      "args": [
+        "0x4142"
+      ],
+      "constructorArgs": [
+        "5n",
+        "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+      ],
+      "expect": "accept",
+      "note": "N-044: a 256-byte tag takes the PUSHDATA2 frame (4d 00 01); count 5->6, tag->4142",
+      "expectedState": {
+        "count": "6n",
+        "tag": "0x4142"
+      }
     }
   ],
   "goldenHashes": {
-    "expected-script.hex": "98a2ebe512253a48f8ca6f1e01edd94257c66aea0d82cbc5bad18af583ff57d4"
+    "expected-script.hex": "83b59da228159bf2f5929782a1fba1a7c2f101328b4b6ba16bab94f0bfca45ec"
   }
 }

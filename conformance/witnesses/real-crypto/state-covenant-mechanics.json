@@ -4,7 +4,7 @@
   "signerKey": "alice",
   "note": "R-192. `state-covenant` carries a fixture-wide `\"compilers\": [\"go\"]` allowlist, justified by two Go-only builtins (bbFieldMul, merkleRootSha256). But the allowlist is FIXTURE-wide, so the covenant's state-continuation lowering, its OP_CODESEPARATOR handling and its output construction were excused from cross-tier parity too — mechanics that have nothing to do with the STARK families. This is the same contract with the two builtin calls removed, as a full seven-tier fixture, so the mechanics are checked and only the two builtins stay isolated.",
   "goldenHashes": {
-    "expected-script.hex": "3181bf18b13ef52843061c40be001f6d179f6ab01e3efeb524d46eca2eb07406",
+    "expected-script.hex": "38a26cc4b17d26190b2e2b94ad87c62a65d77ed74f51c4f6dce871da961c28d9",
     "expected-ir.json": "8e483f31477e250bf6657755021e5b045039096f35401401af999bb873f3c673"
   },
   "constructorArgs": [
@@ -51,6 +51,43 @@
       "cryptoNearMiss": true,
       "expect": "reject",
       "note": "tampered continuation output — the covenant must bind the new state"
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "1n",
+        "0x9cbb2d8cea2bf8e3d96aea6ce328884354eba0a403ed82b269a6d57e38877f9f",
+        "0x0500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "constructorArgs": [
+        "0500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "0n",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "expect": "accept",
+      "note": "N-044: before the fix every tier read a PUSHDATA state length with bare OP_BIN2NUM (signed), so this 128-byte stateRoot (4c 80) read as EMPTY and the next 8 bytes became blockNumber: the honest transition from the real 128-byte pre-state was REJECTED. Now: block 0 -> 1, pre-state = the 128-byte root, batch hash = hash256(pre||new)",
+      "expectedState": {
+        "stateRoot": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "blockNumber": "1n"
+      }
+    },
+    {
+      "method": "advanceState",
+      "args": [
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "6n",
+        "0xbab283e4f9be71cb5699cdbc323066ed5a7433306422e63ff5318e2d8a67ba90",
+        "0x"
+      ],
+      "constructorArgs": [
+        "0500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "0n",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "cryptoNearMiss": true,
+      "expect": "reject",
+      "note": "N-044 ATTACK: the same on-chain state (a 128-byte stateRoot 05 00..00, blockNumber 0). Before the fix the reader took stateRoot as EMPTY and blockNumber as BIN2NUM(05 00..00) = 5, so a spender claiming pre-state '' and block 6 advanced the covenant from a state it never had (ACCEPTED pre-fix). The fixed reader sees the real 128-byte root, so pre-state '' is refused"
     }
   ]
 }

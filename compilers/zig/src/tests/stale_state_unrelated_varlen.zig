@@ -111,10 +111,12 @@ const NO_STATE_READ_SRC =
 
 /// Cross-tier pins, captured from the five tiers that already carry the fix
 /// (TypeScript, Go, Rust, Python, Ruby). sha256 is taken over the ASCII hex
-/// string, exactly as the sibling Python test does.
-const PROBE_FIXED_LEN: usize = 1280;
+/// string, exactly as the sibling Python test does. N-044 re-stamp: the
+/// var-length reader reads PUSHDATA lengths unsigned, whitelists the header
+/// and asserts exact consumption (1280 -> 1308 hex chars, all seven tiers).
+const PROBE_FIXED_LEN: usize = 1308;
 const PROBE_FIXED_SHA256 =
-    "782ca34bbffc1d3889b034d74e4af18b4d326fa1910229086a7b08befd64232d";
+    "0eff5de2f7274f45f37850f4aa186ca85ead5f1e7623c0798c059fcddfb07a04";
 
 /// The broken script this finding is about. Pinned as a MUST-NOT-EQUAL so a
 /// future regression cannot quietly restore it. NOTE: this digest is of the

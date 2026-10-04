@@ -475,3 +475,23 @@ class TestFixedArrayState:
         )
         result = deserialize_state(fields, hex_out)
         assert result == {'grid': [[5, 6], [7, 8]]}
+
+
+# N-044: the compiler's on-chain state reader and writer frame a ByteString
+# with an UNSIGNED length (<len> below 76, 4c <len8>, 4d <len16 LE>,
+# 4e <len32 LE>), and the covenant only accepts a continuation whose state
+# bytes equal the SDK's. Hand-written expected headers at every boundary where
+# a signed reading of the length used to differ (0x80, 0x81.., 0x8000, 0xffff)
+# and where PUSHDATA4 starts. The on-chain side is run against the same frames
+# by packages/runar-testing/src/__tests__/n044-state-length-sign-spend.
+@pytest.mark.parametrize('n,header', [
+    (75, '4b'), (76, '4c4c'), (127, '4c7f'), (128, '4c80'), (129, '4c81'),
+    (255, '4cff'), (256, '4d0001'), (32767, '4dff7f'), (32768, '4d0080'),
+    (65535, '4dffff'), (65536, '4e00000100'),
+])
+def test_bytestring_pushdata_length_boundaries_match_on_chain_frame(n, header):
+    fields = [StateField(name='b', type='ByteString', index=0)]
+    payload = 'ab' * n
+    encoded = serialize_state(fields, {'b': payload})
+    assert encoded == header + payload
+    assert deserialize_state(fields, encoded) == {'b': payload}

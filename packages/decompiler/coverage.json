@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-09-29T21:23:26.322Z",
+  "generatedAt": "2026-09-30T17:00:32.959Z",
   "summary": {
-    "byte-match": 89,
+    "byte-match": 90,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
     "skipped": 6
   },
   "pathBreakdown": {
-    "template": 84,
+    "template": 85,
     "assert-recognizer": 1,
     "symexec": 0,
     "raw_script": 4
@@ -26,6 +26,11 @@
     },
     {
       "id": "all-readonly-cleanstack/AllReadonlyCleanstack",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "annotated-vault/AnnotatedVault",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

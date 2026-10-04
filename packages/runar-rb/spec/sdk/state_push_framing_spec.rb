@@ -62,4 +62,24 @@ RSpec.describe 'Runar::SDK::State state-section framing' do
       expect(mod.deserialize_state(fields, encode(payload))).to eq({ 'b' => payload })
     end
   end
+
+  # N-044: the compiler's on-chain state reader and writer frame a ByteString
+  # with an UNSIGNED length (<len> below 76, 4c <len8>, 4d <len16 LE>,
+  # 4e <len32 LE>), and the covenant only accepts a continuation whose state
+  # bytes equal the SDK's. Hand-written expected headers at every boundary
+  # where a signed reading of the length used to differ (0x80, 0x81.., 0x8000,
+  # 0xffff) and where PUSHDATA4 starts. The on-chain side is run against the
+  # same frames by packages/runar-testing/src/__tests__/n044-state-length-sign-spend.
+  it 'frames every PUSHDATA length boundary exactly as the on-chain writer does' do
+    {
+      75 => '4b', 76 => '4c4c', 127 => '4c7f', 128 => '4c80', 129 => '4c81',
+      255 => '4cff', 256 => '4d0001', 32_767 => '4dff7f', 32_768 => '4d0080',
+      65_535 => '4dffff', 65_536 => '4e00000100'
+    }.each do |n, header|
+      payload = 'ab' * n
+      encoded = encode(payload)
+      expect(encoded).to eq(header + payload), "len #{n}: frame header"
+      expect(mod.deserialize_state(fields, encoded)).to eq({ 'b' => payload })
+    end
+  end
 end

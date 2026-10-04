@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-09-16T05:04:30.494097Z",
   "summary": {
-    "byte-match": 87,
+    "byte-match": 88,
     "byte-diff": 0,
     "compile-error": 0,
     "parse-error": 0,
@@ -10,7 +10,7 @@
   "pathBreakdown": {
     "assert-recognizer": 1,
     "raw_script": 4,
-    "template": 82
+    "template": 83
   },
   "rows": [
     {
@@ -25,6 +25,11 @@
     },
     {
       "id": "all-readonly-cleanstack/AllReadonlyCleanstack",
+      "outcome": "byte-match",
+      "recoveryPath": "template"
+    },
+    {
+      "id": "annotated-vault/AnnotatedVault",
       "outcome": "byte-match",
       "recoveryPath": "template"
     },

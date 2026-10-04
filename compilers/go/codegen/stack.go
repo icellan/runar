@@ -987,7 +987,21 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
 	ctx.sm = smAfterInnerIf.clone()
 
-	// ELSE: >= 256 → 0x4d + 2-byte LE
+	// ELSE: >= 256
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(65536)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterPd4If := ctx.sm.clone()
+
+	// THEN: 256-65535 → 0x4d + 2-byte LE
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
@@ -1018,6 +1032,43 @@ func (ctx *loweringContext) emitPushDataEncode() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterPd4If.clone()
+
+	// ELSE: >= 65536 → 0x4e + 4-byte LE (N-044 / F-361: this arm was missing,
+	// so the length was silently truncated mod 65536). NUM2BIN 5 + SPLIT 4
+	// gives the unsigned 4-byte LE length.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(5)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4e}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.sm = smEndTarget
@@ -1028,6 +1079,12 @@ func (ctx *loweringContext) emitPushDataEncode() {
 //
 // Expects stack: [..., state_bytes]
 // Leaves stack:  [..., data, remaining_state]
+//
+// Accepts exactly the headers emitPushDataEncode writes: < 76 (the header is
+// the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e (4-byte LE); any
+// other header fails the script. The header and every length are read
+// UNSIGNED (emitUnsignedBin2Num) — bare OP_BIN2NUM read 0x80 as 0 and 0x81..
+// 0xff as negative (N-044).
 func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 	ctx.sm.push("")
@@ -1038,7 +1095,7 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitUnsignedBin2Num() // [..., rest, hb]
 	ctx.emitOp(StackOp{Op: "dup"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
@@ -1052,7 +1109,7 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.pop()
 	smAfterOuterIf := ctx.sm.clone()
 
-	// THEN: fb < 76 → direct length
+	// THEN: hb < 76 → direct length
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -1063,6 +1120,27 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
 	ctx.sm = smAfterOuterIf.clone()
 
+	// ELSE: map the header to its length width (1, 2 or 4).
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterPd1If := ctx.sm.clone()
+	// 0x4c → width 1
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	smWidth := ctx.sm.clone()
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterPd1If.clone()
 	ctx.emitOp(StackOp{Op: "dup"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(77)})
@@ -1071,38 +1149,30 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.pop()
 	ctx.sm.pop()
 	ctx.sm.push("")
-
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
-	smAfterInnerIf := ctx.sm.clone()
-
-	// THEN: fb == 77 → 2-byte LE
+	smAfterPd2If := ctx.sm.clone()
+	// 0x4d → width 2
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
 	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.sm.swap()
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
-	ctx.sm = smAfterInnerIf.clone()
-
-	// ELSE: fb == 76 → 1-byte
-	ctx.emitOp(StackOp{Op: "drop"})
-	ctx.sm.pop()
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm = smAfterPd2If.clone()
+	// 0x4e → width 4; any other header fails the script
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(78)})
 	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.sm = smWidth
+	// [..., rest, width]
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -1110,7 +1180,7 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})
 	ctx.sm.swap()
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitUnsignedBin2Num() // [..., rest2, len]
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 	ctx.sm.pop()
 	ctx.sm.pop()
@@ -1118,8 +1188,18 @@ func (ctx *loweringContext) emitPushDataDecode() {
 	ctx.sm.push("")
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.sm = smEndTarget
+}
+
+// emitAssertStateConsumed fails the script unless the value on top (the rest
+// of the state section after the last field) is empty, and pops it: the last
+// state field must consume the state section exactly (N-044).
+func (ctx *loweringContext) emitAssertStateConsumed() {
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+	ctx.sm.pop()
+	ctx.sm.pop()
 }
 
 // bringToTop moves the named value to the top of the stack.
@@ -3671,10 +3751,9 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 		prop := stateProps[0]
 		if isVariableLengthStateType(prop.Type) {
 			// Single variable-length byte-string: decode push-data
-			// prefix, drop trailing empty.
-			ctx.emitPushDataDecode() // [..., data, remaining]
-			ctx.emitOp(StackOp{Op: "drop"})
-			ctx.sm.pop()
+			// prefix; the remainder must be empty (N-044).
+			ctx.emitPushDataDecode()      // [..., data, remaining]
+			ctx.emitAssertStateConsumed() // [..., data]
 		} else if isNumericStateType(prop.Type) {
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 		}
@@ -3712,14 +3791,23 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					ctx.sm.push("")
 				}
 			} else {
+				// Last field: it must consume the state section
+				// exactly (N-044).
 				if isVariableLengthStateType(prop.Type) {
-					// Last variable-length byte-string: decode
-					// push-data prefix, drop trailing empty.
-					ctx.emitPushDataDecode() // [..., data, remaining]
-					ctx.emitOp(StackOp{Op: "drop"})
+					ctx.emitPushDataDecode()      // [..., data, remaining]
+					ctx.emitAssertStateConsumed() // [..., data]
+				} else {
+					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(propSizes[i]))})
+					ctx.sm.push("")
+					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 					ctx.sm.pop()
-				} else if isNumericStateType(prop.Type) {
-					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+					ctx.sm.pop()
+					ctx.sm.push("")
+					ctx.sm.push("")
+					ctx.emitAssertStateConsumed() // [..., field]
+					if isNumericStateType(prop.Type) {
+						ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+					}
 				}
 				ctx.sm.pop()
 				ctx.sm.push(prop.Name)

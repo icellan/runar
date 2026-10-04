@@ -2356,9 +2356,11 @@ def pushInitialValue : ConstValue → StackOp
 
 /-- Push-data encode (length-prefix encode a ByteString as Bitcoin
 script push-data). On entry stack top is the ByteString value; on
-exit it is `prefix || value` (1-byte length, 0x4c||1byte, or
-0x4d||2byteLE). Mirrors TS `emitPushDataEncode`
-(`05-stack-lower.ts:534-671`). -/
+exit it is `prefix || value` (1-byte length, 0x4c||1byte,
+0x4d||2byteLE, or 0x4e||4byteLE). Every length is UNSIGNED. Mirrors TS
+`emitPushDataEncode` (`05-stack-lower.ts`); N-044 / F-083 added the
+0x4e arm, without which a >= 64 KiB value was framed as 0x4d with its
+length truncated mod 65536. -/
 def pushDataEncodeOps : List StackOp :=
   let opc (s : String) : StackOp := .opcode s
   let push (n : Int) : StackOp := .push (.bigint n)
@@ -2375,11 +2377,18 @@ def pushDataEncodeOps : List StackOp :=
       .push (.bytes (ByteArray.mk #[0x4c])), .swap, opc "OP_CAT",
       .swap, opc "OP_CAT"]
   ++ [opc "OP_ELSE"]
-  -- ELSE: >= 256 → OP_PUSHDATA2: 0x4d + 2-byte LE length
+  -- ELSE: len >= 256, OP_DUP push 65536 OP_LESSTHAN OP_IF
+  ++ [.dup, push 65536, opc "OP_LESSTHAN", opc "OP_IF"]
+  -- THEN: 256..65535 → OP_PUSHDATA2: 0x4d + 2-byte LE length
   ++ [push 4, opc "OP_NUM2BIN", push 2, opc "OP_SPLIT", .drop,
       .push (.bytes (ByteArray.mk #[0x4d])), .swap, opc "OP_CAT",
       .swap, opc "OP_CAT"]
-  ++ [opc "OP_ENDIF", opc "OP_ENDIF"]
+  ++ [opc "OP_ELSE"]
+  -- ELSE: >= 65536 → OP_PUSHDATA4: 0x4e + 4-byte LE length
+  ++ [push 5, opc "OP_NUM2BIN", push 4, opc "OP_SPLIT", .drop,
+      .push (.bytes (ByteArray.mk #[0x4e])), .swap, opc "OP_CAT",
+      .swap, opc "OP_CAT"]
+  ++ [opc "OP_ENDIF", opc "OP_ENDIF", opc "OP_ENDIF"]
 
 /-- Per-property serialization for `getStateScript` / `addOutput`:
 load the property's value onto the stack, then apply the type-aware
@@ -2728,21 +2737,36 @@ can reuse it.
 
 Push-data prefix decode. On entry stack is `[..., bytes]`; on exit
 `[..., data, remaining]`. Mirrors TS `emitPushDataDecode`
-(`05-stack-lower.ts:687-790`). -/
+(`05-stack-lower.ts`).
+
+N-044: the header byte and every length are read UNSIGNED — a 0x00
+sign byte is appended before OP_BIN2NUM (bare OP_BIN2NUM read 0x80 as
+0 and 0x81..0xff as negative) — and only the headers the encoder
+writes are accepted: < 76 (the header is the length), 0x4c (1-byte
+length), 0x4d (2-byte LE), 0x4e (4-byte LE); any other header fails
+OP_NUMEQUALVERIFY. -/
 def pushDataDecodeOps : List StackOp :=
   let opc (s : String) : StackOp := .opcode s
   let push (n : Int) : StackOp := .push (.bigint n)
-  -- Split first byte and convert to num: [..., rest, fb_num]
-  [push 1, opc "OP_SPLIT", .swap, opc "OP_BIN2NUM"]
-  -- Outer IF: fb < 76 → fb IS the length (OP_SPLIT directly)
+  let unsignedBin2Num : List StackOp :=
+    [.push (.bytes (ByteArray.mk #[0x00])), opc "OP_CAT", opc "OP_BIN2NUM"]
+  -- Split the header byte and read it unsigned: [..., rest, hb]
+  [push 1, opc "OP_SPLIT", .swap] ++ unsignedBin2Num
+  -- Outer IF: hb < 76 → hb IS the length (OP_SPLIT directly)
   ++ [.dup, push 76, opc "OP_LESSTHAN", opc "OP_IF", opc "OP_SPLIT", opc "OP_ELSE"]
-  -- Middle IF: fb == 77 → 2-byte LE length
-  ++ [.dup, push 77, opc "OP_NUMEQUAL", opc "OP_IF",
-      .drop, push 2, opc "OP_SPLIT", .swap, opc "OP_BIN2NUM", opc "OP_SPLIT",
-      opc "OP_ELSE"]
-  -- Else: fb == 76 → 1-byte length
-  ++ [.drop, push 1, opc "OP_SPLIT", .swap, opc "OP_BIN2NUM", opc "OP_SPLIT"]
-  ++ [opc "OP_ENDIF", opc "OP_ENDIF"]
+  -- Map the header to its length width: 0x4c → 1, 0x4d → 2, 0x4e → 4
+  ++ [.dup, push 76, opc "OP_NUMEQUAL", opc "OP_IF", .drop, push 1, opc "OP_ELSE",
+      .dup, push 77, opc "OP_NUMEQUAL", opc "OP_IF", .drop, push 2, opc "OP_ELSE",
+      push 78, opc "OP_NUMEQUALVERIFY", push 4,
+      opc "OP_ENDIF", opc "OP_ENDIF"]
+  -- [..., rest, width] → read the width-byte length unsigned, split data
+  ++ [opc "OP_SPLIT", .swap] ++ unsignedBin2Num ++ [opc "OP_SPLIT"]
+  ++ [opc "OP_ENDIF"]
+
+/-- `[..., rest] → [...]`, failing unless `rest` is empty: the last
+state field must consume the state section exactly (N-044). -/
+def assertStateConsumedOps : List StackOp :=
+  [.push (.bigint 0), .opcode "OP_EQUALVERIFY"]
 
 /-- Per-property decoder for variable-length state, non-final case.
 Mirrors TS `05-stack-lower.ts:2782-2812`. On entry top is
@@ -2765,17 +2789,20 @@ def deserializeVarFieldNonFinal (prop : ANFProperty) : List StackOp :=
         ++ [.swap]
 
 /-- Per-property decoder for variable-length state, final case.
-Mirrors TS `05-stack-lower.ts:2814-2825`. On entry top is the entire
-remaining state; on exit top is the property value (drop trailing
-empty for ByteString, BIN2NUM for numeric). -/
+Mirrors TS `lowerDeserializeState`'s last-field arm. On entry top is
+the entire remaining state; on exit top is the property value. N-044:
+the field must consume the state section exactly — the remainder after
+it is asserted empty (`assertStateConsumedOps`) instead of being
+dropped (ByteString) or folded into the value (fixed-size). -/
 def deserializeVarFieldFinal (prop : ANFProperty) : List StackOp :=
   let opc (s : String) : StackOp := .opcode s
   match prop.type with
   | .byteString =>
-      -- pushDataDecode then drop the trailing empty remainder.
-      pushDataDecodeOps ++ [.drop]
+      pushDataDecodeOps ++ assertStateConsumedOps
   | _ =>
-      if propTypeIsNumeric prop.type then [opc "OP_BIN2NUM"] else []
+      let size := propTypeFixedSize prop.type
+      [.push (.bigint (Int.ofNat size)), opc "OP_SPLIT"] ++ assertStateConsumedOps
+        ++ (if propTypeIsNumeric prop.type then [opc "OP_BIN2NUM"] else [])
 
 /-- Per-property loop (variable-length path). Iterates left-to-right
 and emits the appropriate decoder for each. Last property uses the
@@ -4056,8 +4083,18 @@ def bindingsReadVarLenState (progMethods : List ANFMethod)
       here || bindingsReadVarLenState progMethods varLenProps fuel rest
 termination_by fuel bs => (fuel, sizeOf bs)
 
+/-- The mutable properties whose READ needs `_codePart`. Mirrors TS
+`computeUsesCodePart` (R-074): when ANY mutable property is
+variable-length the whole state section is located via the
+`_codePart`-relative offset, so reading EVERY mutable property — the
+fixed-size siblings of the var-length one included — needs it. The
+previous form listed only the var-length properties themselves, so a
+method reading a fixed-size field beside one (N-044's `annotated-vault`
+`withdraw` reads `owner` after `memo`) skipped deserialization here while
+every reference compiler performs it. -/
 def varLenPropNames (props : List ANFProperty) : List String :=
-  (props.filter (fun p => !p.readonly && p.type = .byteString)).map (·.name)
+  let mutableProps := props.filter (fun p => !p.readonly)
+  if mutableProps.any (fun p => p.type = .byteString) then mutableProps.map (·.name) else []
 
 def methodNeedsCodePart (progMethods : List ANFMethod) (props : List ANFProperty)
     (m : ANFMethod) : Bool :=

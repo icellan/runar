@@ -4068,7 +4068,22 @@ const LowerCtx = struct {
         self.stack = sm_after_inner_if;
         sm_after_inner_if = .{};
 
-        // ELSE: >= 256 -> 0x4d + 2-byte LE length
+        // ELSE: >= 256
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(65536);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_lessthan);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+
+        // OP_IF
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_after_pd4_if = try self.stack.clone(self.allocator);
+
+        // THEN: 256-65535 -> 0x4d + 2-byte LE length
         try self.emitPushInt(4);
         try self.stack.push(self.allocator, null);
         try self.emitOp(.op_num2bin);
@@ -4106,9 +4121,55 @@ const LowerCtx = struct {
         try self.emitOp(.op_cat);
         try self.stack.push(self.allocator, null);
 
-        // OP_ENDIF (inner)
+        // OP_ELSE
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_after_pd4_if;
+        sm_after_pd4_if = .{};
+
+        // ELSE: >= 65536 -> 0x4e + 4-byte LE length (N-044: this arm was
+        // missing, so the length was silently truncated mod 65536).
+        // NUM2BIN 5 + SPLIT 4 gives the unsigned 4-byte LE length.
+        try self.emitPushInt(5);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_num2bin);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(4);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
+        // push 0x4e
+        try self.emitPushData(&.{0x4e});
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_swap);
+        const t5_top = self.stack.pop();
+        const t5_next = self.stack.pop();
+        try self.stack.push(self.allocator, t5_top);
+        try self.stack.push(self.allocator, t5_next);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.emitOp(.op_cat);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_swap);
+        const t6_top = self.stack.pop();
+        const t6_next = self.stack.pop();
+        try self.stack.push(self.allocator, t6_top);
+        try self.stack.push(self.allocator, t6_next);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.emitOp(.op_cat);
+        try self.stack.push(self.allocator, null);
+
+        // OP_ENDIF x3
         try self.emitOp(.op_endif);
-        // OP_ENDIF (outer)
+        try self.emitOp(.op_endif);
         try self.emitOp(.op_endif);
         self.stack.deinit(self.allocator);
         self.stack = sm_end_target;
@@ -4120,6 +4181,12 @@ const LowerCtx = struct {
     ///
     /// Expects stack: [..., state_bytes]
     /// Leaves stack:  [..., data, remaining_state]
+    ///
+    /// Accepts exactly the headers `emitPushDataEncode` writes: < 76 (the
+    /// header is the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e
+    /// (4-byte LE); any other header fails the script. The header and every
+    /// length are read UNSIGNED (`emitUnsignedBin2Num`) -- bare OP_BIN2NUM
+    /// read 0x80 as 0 and 0x81..0xff as negative (N-044).
     fn emitPushDataDecode(self: *LowerCtx) !void {
         // Split first byte
         try self.emitPushInt(1);
@@ -4127,23 +4194,21 @@ const LowerCtx = struct {
         try self.emitOp(.op_split);
         _ = self.stack.pop();
         _ = self.stack.pop();
-        try self.stack.push(self.allocator, null); // first_byte
+        try self.stack.push(self.allocator, null); // header
         try self.stack.push(self.allocator, null); // rest
-        // SWAP -> [..., rest, first_byte]
+        // SWAP -> [..., rest, header]
         try self.emitOp(.op_swap);
         const sw1_top = self.stack.pop();
         const sw1_next = self.stack.pop();
         try self.stack.push(self.allocator, sw1_top);
         try self.stack.push(self.allocator, sw1_next);
-        // BIN2NUM -> [..., rest, fb_num]
-        try self.emitOp(.op_bin2num);
-        // DUP -> [..., rest, fb_num, fb_num]
+        // unsigned BIN2NUM -> [..., rest, hb]
+        try self.emitUnsignedBin2Num();
+        // DUP push 76 LESSTHAN -> [..., rest, hb, (hb<76)]
         try self.emitOp(.op_dup);
         try self.stack.push(self.allocator, null);
-        // push 76 -> [..., rest, fb_num, fb_num, 76]
         try self.emitPushInt(76);
         try self.stack.push(self.allocator, null);
-        // OP_LESSTHAN -> [..., rest, fb_num, (fb<76)]
         try self.emitOp(.op_lessthan);
         _ = self.stack.pop();
         _ = self.stack.pop();
@@ -4152,17 +4217,14 @@ const LowerCtx = struct {
         // OP_IF
         try self.emitOp(.op_if);
         _ = self.stack.pop();
-        // Save stack at branch: [..., rest, fb_num]
         var sm_after_outer_if = try self.stack.clone(self.allocator);
 
-        // THEN: fb_num < 76 -> fb_num IS the length
-        // SPLIT -> [..., data, remaining]
+        // THEN: hb < 76 -> hb IS the length
         try self.emitOp(.op_split);
         _ = self.stack.pop();
         _ = self.stack.pop();
         try self.stack.push(self.allocator, null); // data
         try self.stack.push(self.allocator, null); // remaining
-        // Save end target
         var sm_end_target = try self.stack.clone(self.allocator);
 
         // OP_ELSE
@@ -4170,46 +4232,78 @@ const LowerCtx = struct {
         self.stack.deinit(self.allocator);
         self.stack = sm_after_outer_if;
         sm_after_outer_if = .{};
-        // Stack: [..., rest, fb_num]
-
-        // DUP -> [..., rest, fb_num, fb_num]
+        // ELSE: map the header to its length width (1, 2 or 4).
         try self.emitOp(.op_dup);
         try self.stack.push(self.allocator, null);
-        // push 77 -> [..., rest, fb_num, fb_num, 77]
-        try self.emitPushInt(77);
+        try self.emitPushInt(76);
         try self.stack.push(self.allocator, null);
-        // OP_NUMEQUAL -> [..., rest, fb_num, (fb==77)]
         try self.emitOp(.op_numequal);
         _ = self.stack.pop();
         _ = self.stack.pop();
         try self.stack.push(self.allocator, null);
-
-        // OP_IF
         try self.emitOp(.op_if);
         _ = self.stack.pop();
-        var sm_after_inner_if = try self.stack.clone(self.allocator);
-
-        // THEN: fb_num == 77 (0x4d) -> 2-byte LE length
-        // DROP fb_num -> [..., rest]
+        var sm_after_pd1_if = try self.stack.clone(self.allocator);
+        // 0x4c -> width 1
         try self.emitOp(.op_drop);
         _ = self.stack.pop();
-        // push 2
+        try self.emitPushInt(1);
+        try self.stack.push(self.allocator, null);
+        var sm_width = try self.stack.clone(self.allocator);
+
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_after_pd1_if;
+        sm_after_pd1_if = .{};
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(77);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_numequal);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_after_pd2_if = try self.stack.clone(self.allocator);
+        // 0x4d -> width 2
+        try self.emitOp(.op_drop);
+        _ = self.stack.pop();
         try self.emitPushInt(2);
         try self.stack.push(self.allocator, null);
-        // SPLIT -> [..., len_2bytes, rest2]
+
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_after_pd2_if;
+        sm_after_pd2_if = .{};
+        // 0x4e -> width 4; any other header fails the script
+        try self.emitPushInt(78);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_numequalverify);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.emitPushInt(4);
+        try self.stack.push(self.allocator, null);
+
+        try self.emitOp(.op_endif);
+        try self.emitOp(.op_endif);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_width;
+        sm_width = .{};
+        // [..., rest, width] SPLIT -> [..., len_bytes, rest2]
         try self.emitOp(.op_split);
         _ = self.stack.pop();
         _ = self.stack.pop();
         try self.stack.push(self.allocator, null);
         try self.stack.push(self.allocator, null);
-        // SWAP -> [..., rest2, len_2bytes]
+        // SWAP -> [..., rest2, len_bytes]
         try self.emitOp(.op_swap);
         const sw2_top = self.stack.pop();
         const sw2_next = self.stack.pop();
         try self.stack.push(self.allocator, sw2_top);
         try self.stack.push(self.allocator, sw2_next);
-        // BIN2NUM -> [..., rest2, len]
-        try self.emitOp(.op_bin2num);
+        // unsigned BIN2NUM -> [..., rest2, len]
+        try self.emitUnsignedBin2Num();
         // SPLIT -> [..., data, remaining]
         try self.emitOp(.op_split);
         _ = self.stack.pop();
@@ -4217,47 +4311,22 @@ const LowerCtx = struct {
         try self.stack.push(self.allocator, null);
         try self.stack.push(self.allocator, null);
 
-        // OP_ELSE
-        try self.emitOp(.op_else);
-        self.stack.deinit(self.allocator);
-        self.stack = sm_after_inner_if;
-        sm_after_inner_if = .{};
-
-        // ELSE: fb_num == 76 (0x4c) -> 1-byte length
-        // DROP fb_num -> [..., rest]
-        try self.emitOp(.op_drop);
-        _ = self.stack.pop();
-        // push 1
-        try self.emitPushInt(1);
-        try self.stack.push(self.allocator, null);
-        // SPLIT -> [..., len_1byte, rest2]
-        try self.emitOp(.op_split);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
-        try self.stack.push(self.allocator, null);
-        // SWAP -> [..., rest2, len_1byte]
-        try self.emitOp(.op_swap);
-        const sw3_top = self.stack.pop();
-        const sw3_next = self.stack.pop();
-        try self.stack.push(self.allocator, sw3_top);
-        try self.stack.push(self.allocator, sw3_next);
-        // BIN2NUM -> [..., rest2, len]
-        try self.emitOp(.op_bin2num);
-        // SPLIT -> [..., data, remaining]
-        try self.emitOp(.op_split);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
-        try self.stack.push(self.allocator, null);
-
-        // OP_ENDIF (inner)
-        try self.emitOp(.op_endif);
         // OP_ENDIF (outer)
         try self.emitOp(.op_endif);
         self.stack.deinit(self.allocator);
         self.stack = sm_end_target;
         sm_end_target = .{};
+    }
+
+    /// Fail the script unless the value on top (the rest of the state section
+    /// after the last field) is empty, and pop it: the last state field must
+    /// consume the state section exactly (N-044).
+    fn emitAssertStateConsumed(self: *LowerCtx) !void {
+        try self.emitPushInt(0);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_equalverify);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
     }
 
     /// Split fixed-size state bytes into individual properties.
@@ -4306,10 +4375,10 @@ const LowerCtx = struct {
         if (state_props.len == 1) {
             const prop = state_props[0];
             if (isVariableLengthStateType(prop.type_info)) {
-                // Single variable-length field: decode push-data prefix, drop trailing empty
+                // Single variable-length field: decode push-data prefix; the
+                // remainder must be empty (N-044).
                 try self.emitPushDataDecode(); // [..., data, remaining]
-                try self.emitOp(.op_drop);
-                _ = self.stack.pop();
+                try self.emitAssertStateConsumed(); // [..., data]
             } else if (isNumericStateType(prop.type_info)) {
                 try self.emitOp(.op_bin2num);
             }
@@ -4346,13 +4415,20 @@ const LowerCtx = struct {
                         try self.stack.renameAtDepth(self.allocator, 1, prop.name);
                     }
                 } else {
+                    // Last field: it must consume the state section exactly (N-044).
                     if (isVariableLengthStateType(prop.type_info)) {
-                        // Last variable-length field: decode push-data prefix, drop trailing empty
                         try self.emitPushDataDecode(); // [..., data, remaining]
-                        try self.emitOp(.op_drop);
+                        try self.emitAssertStateConsumed(); // [..., data]
+                    } else {
+                        try self.emitPushInt(prop_sizes[i]);
+                        try self.stack.push(self.allocator, null);
+                        try self.emitOp(.op_split);
                         _ = self.stack.pop();
-                    } else if (isNumericStateType(prop.type_info)) {
-                        try self.emitOp(.op_bin2num);
+                        _ = self.stack.pop();
+                        try self.stack.push(self.allocator, null);
+                        try self.stack.push(self.allocator, null);
+                        try self.emitAssertStateConsumed(); // [..., field]
+                        if (isNumericStateType(prop.type_info)) try self.emitOp(.op_bin2num);
                     }
                     try self.stack.renameAtDepth(self.allocator, 0, prop.name);
                 }

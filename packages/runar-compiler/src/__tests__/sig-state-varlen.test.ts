@@ -220,7 +220,9 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
       // `_newAmount >= extractAmount(txPreimage)` value check (+16 B, +17 B for
       // boolean); each check-stripped ANF re-emits the previous digest, and
       // bigint == RabinSig still holds.
-      ByteString: '3d3784b9326243f3a70f227fba84e017a3f1e8274af7acdac8b6429ef07c2ea1',
+      // N-044 re-stamp (ByteString only): the push-data writer gains its
+      // PUSHDATA4 arm. Every non-framed row is unmoved.
+      ByteString: 'ffe905dc3e740a5ed3c3ee819b7d5269cc6a78feb7857b0aceef29c5420d332d',
       PubKey: 'a513320b54ef7740778454b67e1901010ac8e71cffe76c0a0ebea2fe1df4cbd8',
       bigint: '569975c3ba57b07d45436fc76894f18a955b45f2c51a46c97bd466d06a67503d',
       // W3 / BoolBamboozle re-stamp: `update(next: boolean)` takes a `boolean`
@@ -244,8 +246,10 @@ describe('Sig / SigHashPreimage are push-data-framed variable-length state', () 
     }
 
     it('the ByteString control read path is byte-unchanged', () => {
+      // N-044 re-stamp: the push-data reader reads lengths unsigned,
+      // whitelists the header byte and asserts exact consumption.
       expect(sha256(hexOf(terminalSource('ByteString'), READ_FILE))).toBe(
-        'ecfc6f7aea65c879be7375ffbb232a756cada31e1679b5b71c23f73309659522',
+        '0cff82c1a9079c665da13495c3fe0f8d8613507a60bb1fcb1e646255b1970e10',
       );
     });
   });

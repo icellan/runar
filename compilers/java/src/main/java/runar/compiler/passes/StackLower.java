@@ -4302,10 +4302,9 @@ public final class StackLower {
                 AnfProperty p = stateProps.get(0);
                 if (isVariableLengthStateType(p.type())) {
                     // Single variable-length byte-string field: decode push-data
-                    // prefix, drop trailing empty.
+                    // prefix; the remainder must be empty (N-044).
                     emitPushDataDecode(); // [..., data, remaining]
-                    emitOp(new DropOp());
-                    sm.pop();
+                    emitAssertStateConsumed(); // [..., data]
                 } else if (isNumericStateType(p.type())) {
                     emitOp(new OpcodeOp("OP_BIN2NUM"));
                 }
@@ -4341,14 +4340,21 @@ public final class StackLower {
                             sm.push("");
                         }
                     } else {
+                        // Last field: it must consume the state section
+                        // exactly (N-044).
                         if (isVariableLengthStateType(p.type())) {
-                            // Last variable-length byte-string: decode push-data
-                            // prefix, drop trailing empty.
                             emitPushDataDecode(); // [..., data, remaining]
-                            emitOp(new DropOp());
-                            sm.pop();
-                        } else if (isNumericStateType(p.type())) {
-                            emitOp(new OpcodeOp("OP_BIN2NUM"));
+                            emitAssertStateConsumed(); // [..., data]
+                        } else {
+                            emitOp(new PushOp(PushValue.of(sizes.get(i))));
+                            sm.push("");
+                            emitOp(new OpcodeOp("OP_SPLIT"));
+                            sm.pop(); sm.pop();
+                            sm.push(""); sm.push("");
+                            emitAssertStateConsumed(); // [..., field]
+                            if (isNumericStateType(p.type())) {
+                                emitOp(new OpcodeOp("OP_BIN2NUM"));
+                            }
                         }
                         sm.pop();
                         sm.push(p.name());
@@ -4361,6 +4367,11 @@ public final class StackLower {
         // ByteString from the state bytes on top of the stack.
         // Expects stack: [..., state_bytes]
         // Leaves stack:  [..., data, remaining_state]
+        // Accepts exactly the headers emitPushDataEncode writes: < 76 (the
+        // header is the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e
+        // (4-byte LE); any other header fails the script. The header and every
+        // length are read UNSIGNED (emitUnsignedBin2Num) -- bare OP_BIN2NUM
+        // read 0x80 as 0 and 0x81..0xff as negative (N-044).
         // Mirrors {@code emitPushDataDecode} in
         // {@code compilers/go/codegen/stack.go}.
         private void emitPushDataDecode() {
@@ -4371,7 +4382,7 @@ public final class StackLower {
             sm.push(""); sm.push("");
             emitOp(new SwapOp());
             sm.swap();
-            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitUnsignedBin2Num(); // [..., rest, hb]
             emitOp(new DupOp());
             sm.push("");
             emitOp(new PushOp(PushValue.of(76)));
@@ -4384,7 +4395,7 @@ public final class StackLower {
             sm.pop();
             StackMap smAfterOuterIf = sm.clone0();
 
-            // THEN: fb < 76 → direct length
+            // THEN: hb < 76 → direct length
             emitOp(new OpcodeOp("OP_SPLIT"));
             sm.pop(); sm.pop();
             sm.push(""); sm.push("");
@@ -4394,6 +4405,27 @@ public final class StackLower {
             sm.slots.clear();
             sm.slots.addAll(smAfterOuterIf.slots);
 
+            // ELSE: map the header to its length width (1, 2 or 4).
+            emitOp(new DupOp());
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(76)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUAL"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAfterPd1If = sm.clone0();
+            // 0x4c → width 1
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            StackMap smWidth = sm.clone0();
+
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAfterPd1If.slots);
             emitOp(new DupOp());
             sm.push("");
             emitOp(new PushOp(PushValue.of(77)));
@@ -4401,49 +4433,54 @@ public final class StackLower {
             emitOp(new OpcodeOp("OP_NUMEQUAL"));
             sm.pop(); sm.pop();
             sm.push("");
-
             emitOp(new OpcodeOp("OP_IF"));
             sm.pop();
-            StackMap smAfterInnerIf = sm.clone0();
-
-            // THEN: fb == 77 → 2-byte LE length
+            StackMap smAfterPd2If = sm.clone0();
+            // 0x4d → width 2
             emitOp(new DropOp());
             sm.pop();
             emitOp(new PushOp(PushValue.of(2)));
             sm.push("");
-            emitOp(new OpcodeOp("OP_SPLIT"));
-            sm.pop(); sm.pop();
-            sm.push(""); sm.push("");
-            emitOp(new SwapOp());
-            sm.swap();
-            emitOp(new OpcodeOp("OP_BIN2NUM"));
-            emitOp(new OpcodeOp("OP_SPLIT"));
-            sm.pop(); sm.pop();
-            sm.push(""); sm.push("");
 
             emitOp(new OpcodeOp("OP_ELSE"));
             sm.slots.clear();
-            sm.slots.addAll(smAfterInnerIf.slots);
-
-            // ELSE: fb == 76 → 1-byte length
-            emitOp(new DropOp());
-            sm.pop();
-            emitOp(new PushOp(PushValue.of(1)));
+            sm.slots.addAll(smAfterPd2If.slots);
+            // 0x4e → width 4; any other header fails the script
+            emitOp(new PushOp(PushValue.of(78)));
             sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUALVERIFY"));
+            sm.pop(); sm.pop();
+            emitOp(new PushOp(PushValue.of(4)));
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            sm.slots.clear();
+            sm.slots.addAll(smWidth.slots);
+            // [..., rest, width]
             emitOp(new OpcodeOp("OP_SPLIT"));
             sm.pop(); sm.pop();
             sm.push(""); sm.push("");
             emitOp(new SwapOp());
             sm.swap();
-            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitUnsignedBin2Num(); // [..., rest2, len]
             emitOp(new OpcodeOp("OP_SPLIT"));
             sm.pop(); sm.pop();
             sm.push(""); sm.push("");
 
             emitOp(new OpcodeOp("OP_ENDIF"));
-            emitOp(new OpcodeOp("OP_ENDIF"));
             sm.slots.clear();
             sm.slots.addAll(smEndTarget.slots);
+        }
+
+        // Fail the script unless the value on top (the rest of the state
+        // section after the last field) is empty, and pop it: the last state
+        // field must consume the state section exactly (N-044).
+        private void emitAssertStateConsumed() {
+            emitOp(new PushOp(PushValue.of(0)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_EQUALVERIFY"));
+            sm.pop(); sm.pop();
         }
 
         private void splitFixedStateFields(List<AnfProperty> stateProps, List<Integer> sizes) {
@@ -5239,7 +5276,20 @@ public final class StackLower {
             sm.slots.clear();
             sm.slots.addAll(afterInnerIf.slots);
 
-            // ELSE: >=256 -> 0x4d + 2-byte LE
+            // ELSE: >= 256
+            emitOp(new DupOp());
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(65536)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_LESSTHAN"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap afterPd4If = sm.clone0();
+
+            // THEN: 256-65535 -> 0x4d + 2-byte LE
             emitOp(new PushOp(PushValue.of(4)));
             sm.push("");
             emitOp(new OpcodeOp("OP_NUM2BIN"));
@@ -5265,6 +5315,39 @@ public final class StackLower {
             emitOp(new OpcodeOp("OP_CAT"));
             sm.push("");
 
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(afterPd4If.slots);
+
+            // ELSE: >= 65536 -> 0x4e + 4-byte LE (N-044 / F-083: this arm was
+            // missing, so the length was silently truncated mod 65536).
+            // NUM2BIN 5 + SPLIT 4 gives the unsigned 4-byte LE length.
+            emitOp(new PushOp(PushValue.of(5)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUM2BIN"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(4)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new PushOp(PushValue.ofHex("4e")));
+            sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            sm.pop(); sm.pop();
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            sm.pop(); sm.pop();
+            emitOp(new OpcodeOp("OP_CAT"));
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_ENDIF"));
             emitOp(new OpcodeOp("OP_ENDIF"));
             emitOp(new OpcodeOp("OP_ENDIF"));
             sm.slots.clear();

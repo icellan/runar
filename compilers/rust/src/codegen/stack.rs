@@ -1041,7 +1041,20 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
         self.sm = sm_after_inner_if;
 
-        // ELSE: >= 256 → 0x4d + 2-byte LE
+        // ELSE: >= 256
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(65536))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_pd4_if = self.sm.clone();
+
+        // THEN: 256-65535 → 0x4d + 2-byte LE
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
@@ -1064,6 +1077,35 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.push("");
 
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_pd4_if;
+
+        // ELSE: >= 65536 → 0x4e + 4-byte LE (N-044: this arm was missing, so
+        // the length was silently truncated mod 65536). NUM2BIN 5 + SPLIT 4
+        // gives the unsigned 4-byte LE length.
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(5))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x4e])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.sm = sm_end_target;
@@ -1073,6 +1115,12 @@ impl LoweringContext {
     ///
     /// Expects stack: [..., state_bytes]
     /// Leaves stack:  [..., data, remaining_state]
+    ///
+    /// Accepts exactly the headers `emit_push_data_encode` writes: < 76 (the
+    /// header is the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e
+    /// (4-byte LE); any other header fails the script. The header and every
+    /// length are read UNSIGNED (`emit_unsigned_bin2num`) — bare OP_BIN2NUM
+    /// read 0x80 as 0 and 0x81..0xff as negative (N-044).
     fn emit_push_data_decode(&mut self) {
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
         self.sm.push("");
@@ -1080,7 +1128,7 @@ impl LoweringContext {
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
         self.emit_op(StackOp::Swap); self.sm.swap();
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        self.emit_unsigned_bin2num(); // [..., rest, hb]
         self.emit_op(StackOp::Dup);
         self.sm.push("");
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(76))));
@@ -1093,7 +1141,7 @@ impl LoweringContext {
         self.sm.pop();
         let sm_after_outer_if = self.sm.clone();
 
-        // THEN: fb < 76 → direct length
+        // THEN: hb < 76 → direct length
         self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
@@ -1102,6 +1150,25 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
         self.sm = sm_after_outer_if.clone();
 
+        // ELSE: map the header to its length width (1, 2 or 4).
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(76))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_pd1_if = self.sm.clone();
+        // 0x4c → width 1
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm.push("");
+        let sm_width = self.sm.clone();
+
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_pd1_if;
         self.emit_op(StackOp::Dup);
         self.sm.push("");
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(77))));
@@ -1109,43 +1176,49 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push("");
-
         self.emit_op(StackOp::Opcode("OP_IF".into()));
         self.sm.pop();
-        let sm_after_inner_if = self.sm.clone();
-
-        // THEN: fb == 77 → 2-byte LE
+        let sm_after_pd2_if = self.sm.clone();
+        // 0x4d → width 2
         self.emit_op(StackOp::Drop); self.sm.pop();
         self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(2))));
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop(); self.sm.pop();
-        self.sm.push(""); self.sm.push("");
-        self.emit_op(StackOp::Swap); self.sm.swap();
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop(); self.sm.pop();
-        self.sm.push(""); self.sm.push("");
 
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-        self.sm = sm_after_inner_if;
-
-        // ELSE: fb == 76 → 1-byte
-        self.emit_op(StackOp::Drop); self.sm.pop();
-        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(1))));
+        self.sm = sm_after_pd2_if;
+        // 0x4e → width 4; any other header fails the script
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(78))));
         self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUALVERIFY".into()));
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(4))));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.sm = sm_width;
+        // [..., rest, width]
         self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
         self.emit_op(StackOp::Swap); self.sm.swap();
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        self.emit_unsigned_bin2num(); // [..., rest2, len]
         self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
         self.sm.pop(); self.sm.pop();
         self.sm.push(""); self.sm.push("");
 
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
-        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.sm = sm_end_target;
+    }
+
+    /// Fail the script unless the value on top (the rest of the state section
+    /// after the last field) is empty, and pop it: the last state field must
+    /// consume the state section exactly (N-044).
+    fn emit_assert_state_consumed(&mut self) {
+        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(0))));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_EQUALVERIFY".into()));
+        self.sm.pop(); self.sm.pop();
     }
 
     fn is_last_use(&self, name: &str, current_index: usize, last_uses: &HashMap<String, usize>) -> bool {
@@ -4507,9 +4580,10 @@ impl LoweringContext {
         let num_props = prop_names.len();
         if num_props == 1 {
             if is_variable_length_state_type(&prop_types[0]) {
-                // Variable-length byte-string: decode push-data prefix, drop trailing empty
+                // Variable-length byte-string: decode push-data prefix; the
+                // remainder must be empty (N-044).
                 self.emit_push_data_decode(); // [..., data, remaining]
-                self.emit_op(StackOp::Drop); self.sm.pop();
+                self.emit_assert_state_consumed(); // [..., data]
             } else if is_numeric_state_type(&prop_types[0]) {
                 self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
             }
@@ -4540,12 +4614,20 @@ impl LoweringContext {
                         self.sm.push("");
                     }
                 } else {
+                    // Last field: it must consume the state section exactly (N-044).
                     if is_variable_length_state_type(&prop_types[i]) {
-                        // Last variable-length field: decode push-data prefix, drop trailing empty
                         self.emit_push_data_decode(); // [..., data, remaining]
-                        self.emit_op(StackOp::Drop); self.sm.pop();
-                    } else if is_numeric_state_type(&prop_types[i]) {
-                        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+                        self.emit_assert_state_consumed(); // [..., data]
+                    } else {
+                        self.emit_op(StackOp::Push(PushValue::Int(BigInt::from(prop_sizes[i]))));
+                        self.sm.push("");
+                        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+                        self.sm.pop(); self.sm.pop();
+                        self.sm.push(""); self.sm.push("");
+                        self.emit_assert_state_consumed(); // [..., field]
+                        if is_numeric_state_type(&prop_types[i]) {
+                            self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+                        }
                     }
                     self.sm.pop();
                     self.sm.push(&prop_names[i]);

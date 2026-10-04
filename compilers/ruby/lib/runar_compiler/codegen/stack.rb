@@ -1164,7 +1164,19 @@ module RunarCompiler::Codegen
       emit_opcode("OP_ELSE")
       @sm = sm_after_inner_if
 
-      # ELSE: >= 256 -> 0x4d + 2-byte LE
+      # ELSE: >= 256
+      emit_op({ op: "dup" })
+      @sm.push(@sm.peek_at_depth(0))
+      emit_push_int(65536)
+      @sm.push("")
+      emit_opcode("OP_LESSTHAN")
+      @sm.pop; @sm.pop; @sm.push("")
+
+      emit_opcode("OP_IF")
+      @sm.pop
+      sm_after_pd4_if = @sm.clone
+
+      # THEN: 256-65535 -> 0x4d + 2-byte LE
       emit_push_int(4)
       @sm.push("")
       emit_opcode("OP_NUM2BIN")
@@ -1185,6 +1197,33 @@ module RunarCompiler::Codegen
       emit_opcode("OP_CAT")
       @sm.push("")
 
+      emit_opcode("OP_ELSE")
+      @sm = sm_after_pd4_if
+
+      # ELSE: >= 65536 -> 0x4e + 4-byte LE (N-044: this arm was missing, so
+      # the length was silently truncated mod 65536). NUM2BIN 5 + SPLIT 4
+      # gives the unsigned 4-byte LE length.
+      emit_push_int(5)
+      @sm.push("")
+      emit_opcode("OP_NUM2BIN")
+      @sm.pop; @sm.pop; @sm.push("")
+      emit_push_int(4)
+      @sm.push("")
+      emit_opcode("OP_SPLIT")
+      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+      emit_op({ op: "drop" }); @sm.pop
+      emit_push_bytes([0x4E].pack("C"))
+      @sm.push("")
+      emit_op({ op: "swap" }); @sm.swap
+      @sm.pop; @sm.pop
+      emit_opcode("OP_CAT")
+      @sm.push("")
+      emit_op({ op: "swap" }); @sm.swap
+      @sm.pop; @sm.pop
+      emit_opcode("OP_CAT")
+      @sm.push("")
+
+      emit_opcode("OP_ENDIF")
       emit_opcode("OP_ENDIF")
       emit_opcode("OP_ENDIF")
       @sm = sm_end_target
@@ -1194,13 +1233,19 @@ module RunarCompiler::Codegen
     #
     # Expects stack: [..., state_bytes]
     # Leaves stack:  [..., data, remaining_state]
+    #
+    # Accepts exactly the headers +emit_push_data_encode+ writes: < 76 (the
+    # header is the length), 0x4c (1-byte length), 0x4d (2-byte LE), 0x4e
+    # (4-byte LE); any other header fails the script. The header and every
+    # length are read UNSIGNED (+_emit_unsigned_bin2num+) -- bare OP_BIN2NUM
+    # read 0x80 as 0 and 0x81..0xff as negative (N-044).
     def emit_push_data_decode
       emit_push_int(1)
       @sm.push("")
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
       emit_op({ op: "swap" }); @sm.swap
-      emit_opcode("OP_BIN2NUM")
+      _emit_unsigned_bin2num # [..., rest, hb]
       emit_op({ op: "dup" })
       @sm.push(@sm.peek_at_depth(0))
       emit_push_int(76)
@@ -1212,7 +1257,7 @@ module RunarCompiler::Codegen
       @sm.pop
       sm_after_outer_if = @sm.clone
 
-      # THEN: fb < 76 -> direct length
+      # THEN: hb < 76 -> direct length
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
       sm_end_target = @sm.clone
@@ -1220,45 +1265,71 @@ module RunarCompiler::Codegen
       emit_opcode("OP_ELSE")
       @sm = sm_after_outer_if.clone
 
+      # ELSE: map the header to its length width (1, 2 or 4).
+      emit_op({ op: "dup" })
+      @sm.push(@sm.peek_at_depth(0))
+      emit_push_int(76)
+      @sm.push("")
+      emit_opcode("OP_NUMEQUAL")
+      @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_IF")
+      @sm.pop
+      sm_after_pd1_if = @sm.clone
+      # 0x4c -> width 1
+      emit_op({ op: "drop" }); @sm.pop
+      emit_push_int(1)
+      @sm.push("")
+      sm_width = @sm.clone
+
+      emit_opcode("OP_ELSE")
+      @sm = sm_after_pd1_if
       emit_op({ op: "dup" })
       @sm.push(@sm.peek_at_depth(0))
       emit_push_int(77)
       @sm.push("")
       emit_opcode("OP_NUMEQUAL")
       @sm.pop; @sm.pop; @sm.push("")
-
       emit_opcode("OP_IF")
       @sm.pop
-      sm_after_inner_if = @sm.clone
-
-      # THEN: fb == 77 -> 2-byte LE
+      sm_after_pd2_if = @sm.clone
+      # 0x4d -> width 2
       emit_op({ op: "drop" }); @sm.pop
       emit_push_int(2)
       @sm.push("")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-      emit_op({ op: "swap" }); @sm.swap
-      emit_opcode("OP_BIN2NUM")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
 
       emit_opcode("OP_ELSE")
-      @sm = sm_after_inner_if
-
-      # ELSE: fb == 76 -> 1-byte
-      emit_op({ op: "drop" }); @sm.pop
-      emit_push_int(1)
+      @sm = sm_after_pd2_if
+      # 0x4e -> width 4; any other header fails the script
+      emit_push_int(78)
       @sm.push("")
+      emit_opcode("OP_NUMEQUALVERIFY")
+      @sm.pop; @sm.pop
+      emit_push_int(4)
+      @sm.push("")
+
+      emit_opcode("OP_ENDIF")
+      emit_opcode("OP_ENDIF")
+      @sm = sm_width
+      # [..., rest, width]
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
       emit_op({ op: "swap" }); @sm.swap
-      emit_opcode("OP_BIN2NUM")
+      _emit_unsigned_bin2num # [..., rest2, len]
       emit_opcode("OP_SPLIT")
       @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
 
       emit_opcode("OP_ENDIF")
-      emit_opcode("OP_ENDIF")
       @sm = sm_end_target
+    end
+
+    # Fail the script unless the value on top (the rest of the state section
+    # after the last field) is empty, and pop it: the last state field must
+    # consume the state section exactly (N-044).
+    def emit_assert_state_consumed
+      emit_push_int(0)
+      @sm.push("")
+      emit_opcode("OP_EQUALVERIFY")
+      @sm.pop; @sm.pop
     end
 
     # -----------------------------------------------------------------
@@ -4475,7 +4546,7 @@ module RunarCompiler::Codegen
         prop = state_props[0]
         if RunarCompiler::Codegen.variable_length_state_type?(prop.type)
           emit_push_data_decode
-          emit_op({ op: "drop" }); @sm.pop
+          emit_assert_state_consumed # the remainder must be empty (N-044)
         elsif RunarCompiler::Codegen.numeric_state_type?(prop.type)
           emit_opcode("OP_BIN2NUM")
         end
@@ -4499,11 +4570,15 @@ module RunarCompiler::Codegen
               @sm.push(prop.name); @sm.push("")
             end
           else
+            # Last field: it must consume the state section exactly (N-044).
             if RunarCompiler::Codegen.variable_length_state_type?(prop.type)
               emit_push_data_decode
-              emit_op({ op: "drop" }); @sm.pop
-            elsif RunarCompiler::Codegen.numeric_state_type?(prop.type)
-              emit_opcode("OP_BIN2NUM")
+              emit_assert_state_consumed
+            else
+              emit_push_int(prop_sizes[i]); @sm.push("")
+              emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+              emit_assert_state_consumed
+              emit_opcode("OP_BIN2NUM") if RunarCompiler::Codegen.numeric_state_type?(prop.type)
             end
             @sm.pop
             @sm.push(prop.name)
