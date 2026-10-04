@@ -1460,7 +1460,7 @@ def verifySlhDsa_SHA2_192f (msg sig pk : ByteArray) : Bool :=
 def verifySlhDsa_SHA2_256s (msg sig pk : ByteArray) : Bool :=
   RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256s msg sig pk
 
-/-- FIPS 205 SLH-DSA-SHA2-256f spec (n=32, h=68, d=17, a=8, k=35). -/
+/-- FIPS 205 SLH-DSA-SHA2-256f spec (n=32, h=68, d=17, a=9, k=35). -/
 def verifySlhDsa_SHA2_256f (msg sig pk : ByteArray) : Bool :=
   RunarVerification.ANF.Eval.Crypto.verifySLHDSA_SHA2_256f msg sig pk
 

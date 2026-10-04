@@ -50,7 +50,7 @@ module Runar
       sha2_192s: { name: 'SLH-DSA-SHA2-192s', n: 24, h: 63, d: 7,  hp: 9, a: 14, k: 17, w: 16, len: wots_len(24) }.freeze,
       sha2_192f: { name: 'SLH-DSA-SHA2-192f', n: 24, h: 66, d: 22, hp: 3, a: 8,  k: 33, w: 16, len: wots_len(24) }.freeze,
       sha2_256s: { name: 'SLH-DSA-SHA2-256s', n: 32, h: 64, d: 8,  hp: 8, a: 14, k: 22, w: 16, len: wots_len(32) }.freeze,
-      sha2_256f: { name: 'SLH-DSA-SHA2-256f', n: 32, h: 68, d: 17, hp: 4, a: 8,  k: 35, w: 16, len: wots_len(32) }.freeze
+      sha2_256f: { name: 'SLH-DSA-SHA2-256f', n: 32, h: 68, d: 17, hp: 4, a: 9,  k: 35, w: 16, len: wots_len(32) }.freeze
     }.freeze
 
     # --------------------------------------------------------------------

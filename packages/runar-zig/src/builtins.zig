@@ -131,7 +131,7 @@ const slh_sha2_128f = slhParams(16, 66, 22, 3, 6, 33, 35);
 const slh_sha2_192s = slhParams(24, 63, 7, 9, 14, 17, 51);
 const slh_sha2_192f = slhParams(24, 66, 22, 3, 8, 33, 51);
 const slh_sha2_256s = slhParams(32, 64, 8, 8, 14, 22, 67);
-const slh_sha2_256f = slhParams(32, 68, 17, 4, 8, 35, 67);
+const slh_sha2_256f = slhParams(32, 68, 17, 4, 9, 35, 67);
 pub const assert_failure_message = "runar assertion failed";
 
 pub const MockPreimageParts = struct {
@@ -2486,7 +2486,8 @@ test "SLH SHA2 parameter sizes stay aligned with the published script matrix" {
     try std.testing.expectEqual(@as(usize, 16224), slh_sha2_192s.sig_len);
     try std.testing.expectEqual(@as(usize, 35664), slh_sha2_192f.sig_len);
     try std.testing.expectEqual(@as(usize, 29792), slh_sha2_256s.sig_len);
-    try std.testing.expectEqual(@as(usize, 48736), slh_sha2_256f.sig_len);
+    // F-034: FIPS 205 Table 2 SLH-DSA-SHA2-256f uses FORS height a=9 (was a=8: 48,736).
+    try std.testing.expectEqual(@as(usize, 49856), slh_sha2_256f.sig_len);
 }
 
 test "verifySLHDSA_SHA2_128s accepts a real deterministic signature and rejects tampering" {
@@ -2714,6 +2715,10 @@ test "verifySLHDSA_SHA2_256s accepts a real deterministic signature and rejects 
     );
 }
 
+// F-034: the 256f fixtures are FIPS 205 a=9 (49,856-byte signature), signed over
+// "256f" by the third-party slh-dsa 0.2.5 PyPI package's SHA-256-only
+// instantiation Sha2_1Parameter(25, 32, 68, 17, 4, 9, 35, 4, 49), with the same
+// key as conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json.
 test "verifySLHDSA_SHA2_256f accepts a real deterministic signature and rejects tampering" {
     try expectRealSlhVariant(
         "256f",

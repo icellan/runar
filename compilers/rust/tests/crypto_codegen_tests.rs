@@ -253,7 +253,9 @@ fn test_emit_verify_slh_dsa_op_counts_match_go_reference() {
         ("SHA2_192s", 41964),
         ("SHA2_192f", 121740),
         ("SHA2_256s", 61207),
-        ("SHA2_256f", 123020),
+        // F-034: 256f now uses FIPS 205's FORS height a=9 (one more auth
+        // level per FORS tree) and a 9-byte first tree-address encoding.
+        ("SHA2_256f", 123680),
     ];
     for (key, want) in expected {
         let ops = collect(|s| emit_verify_slh_dsa(s, key));

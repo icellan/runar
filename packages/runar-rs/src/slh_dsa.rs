@@ -90,7 +90,7 @@ pub const SLH_SHA2_256S: SlhParams = SlhParams {
 
 pub const SLH_SHA2_256F: SlhParams = SlhParams {
     name: "SLH-DSA-SHA2-256f",
-    n: 32, h: 68, d: 17, hp: 4, a: 8, k: 35, w: 16,
+    n: 32, h: 68, d: 17, hp: 4, a: 9, k: 35, w: 16,
     len: wots_len(32, 16),
 };
 

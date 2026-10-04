@@ -6,12 +6,16 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import runar.compiler.frontend.TsParser;
 import runar.compiler.ir.anf.AnfProgram;
 import runar.compiler.ir.ast.ContractNode;
+import runar.compiler.ir.stack.BigIntPushValue;
+import runar.compiler.ir.stack.OpcodeOp;
+import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.StackOp;
 import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.passes.AnfLower;
@@ -60,6 +64,30 @@ class SlhDsaTest {
             // op a PushOp of 0 (for pubkey already on top branch — OP_PICK_0
             // becomes OP_DUP) i.e. a DupOp; we just assert non-empty here
             // and rely on the byte-prefix tests below for content.
+        }
+    }
+
+    /**
+     * F-034: SHA2_256f shipped FORS height a=8 (48,736-byte signature) in all
+     * 7 tiers; FIPS 205 Table 2 says a=9 (49,856 bytes), so the compiled
+     * verifier rejected every honest 256f signature at its OP_SIZE gate.
+     * Proves each set's exact-length gate demands the FIPS 205 Table 2
+     * signature size (n + k(a+1)n + (h + d*len)n, so a wrong a moves it); does
+     * NOT prove a real signature verifies (that is the real-crypto witness
+     * conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json).
+     */
+    @Test
+    void sizeGateMatchesFips205Table2SignatureSize() {
+        String[] keys = {"SHA2_128s", "SHA2_128f", "SHA2_192s", "SHA2_192f", "SHA2_256s", "SHA2_256f"};
+        long[] sigBytes = {7856, 17088, 16224, 35664, 29792, 49856};
+        for (int j = 0; j < keys.length; j++) {
+            List<StackOp> ops = new ArrayList<>();
+            SlhDsa.emitVerifySlhDsa(ops::add, keys[j]);
+            int i = 0;
+            while (i < ops.size() && !(ops.get(i) instanceof OpcodeOp op && op.code().equals("OP_SIZE"))) i++;
+            assertTrue(i < ops.size() - 1, keys[j] + ": no OP_SIZE gate");
+            assertEquals(new PushOp(new BigIntPushValue(BigInteger.valueOf(sigBytes[j]))), ops.get(i + 1),
+                keys[j] + ": OP_SIZE gate vs FIPS 205 signature size");
         }
     }
 
@@ -163,7 +191,7 @@ class SlhDsaTest {
     private static final String EXPECTED_PREFIX_256S =
         "007b7b7b7c82026074887c01207f782000000000000000000000000000000000000000000000000000000000000000007e537a01207f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04000000017ea85f7f757e01277f57";
     private static final String EXPECTED_PREFIX_256F =
-        "007b7b7b7c820360be00887c01207f782000000000000000000000000000000000000000000000000000000000000000007e537a01207f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04000000017ea85c7f757e01237f";
+        "007b7b7b7c8203c0c200887c01207f782000000000000000000000000000000000000000000000000000000000000000007e537a01207f7855795379577957795a797e7e7ea87e7e007c7604000000007ea87b7c7e7c04000000017ea801117f757e0128";
 
     // BUG-011: each verifySLHDSA_* prologue now emits an OP_SIZE exact-length
     // guard (+5 Stack-IR ops per parameter set, +14 or +16 hex chars depending
@@ -191,7 +219,12 @@ class SlhDsaTest {
     private static final int EXPECTED_HEX_LEN_192S = 553136;
     private static final int EXPECTED_HEX_LEN_192F = 1575958;
     private static final int EXPECTED_HEX_LEN_256S = 738310;
-    private static final int EXPECTED_HEX_LEN_256F = 1458636;
+    // F-034: SHA2_256f now uses FIPS 205's FORS height a=9 (one more
+    // authentication level in each of the 35 FORS trees; OP_SIZE gate 48,736 ->
+    // 49,856) and encodes its 64-bit first tree address in 9 bytes before
+    // dropping the sign byte. Length and prefix re-captured from the
+    // regenerated conformance golden.
+    private static final int EXPECTED_HEX_LEN_256F = 1467684;
 
     @Test
     void compilesSlhDsa128sToCanonicalHex() throws Exception {

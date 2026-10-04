@@ -673,7 +673,7 @@ def params128f : SlhDsaParams := mkParams 16 66 22 6  33
 def params192s : SlhDsaParams := mkParams 24 63 7  14 17
 def params192f : SlhDsaParams := mkParams 24 66 22 8  33
 def params256s : SlhDsaParams := mkParams 32 64 8  14 22
-def params256f : SlhDsaParams := mkParams 32 68 17 8  35
+def params256f : SlhDsaParams := mkParams 32 68 17 9  35
 
 /-- Read byte `i` of `b`, or `0` if out of bounds. -/
 @[inline] def byteAt (b : ByteArray) (i : Nat) : Nat :=
@@ -1055,7 +1055,7 @@ def verifySLHDSA_SHA2_192f (msg sig pk : ByteArray) : Bool :=
 def verifySLHDSA_SHA2_256s (msg sig pk : ByteArray) : Bool :=
   SlhDsa.slhDsaVerifyImpl SlhDsa.params256s msg sig pk
 
-/-- FIPS 205 SLH-DSA-SHA2-256f verifier (n=32, h=68, d=17, a=8, k=35). -/
+/-- FIPS 205 SLH-DSA-SHA2-256f verifier (n=32, h=68, d=17, a=9, k=35). -/
 def verifySLHDSA_SHA2_256f (msg sig pk : ByteArray) : Bool :=
   SlhDsa.slhDsaVerifyImpl SlhDsa.params256f msg sig pk
 

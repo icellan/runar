@@ -174,3 +174,44 @@ func TestSlhdsaEmitOpCountGoldens(t *testing.T) {
 		})
 	}
 }
+
+// F-034: every SLH-DSA parameter set must match FIPS 205 Table 2. SHA2_256f
+// shipped FORS height a=8 (48,736-byte signature) in all 7 tiers; FIPS 205
+// says a=9 (49,856 bytes), so the compiled verifier rejected every honest 256f
+// signature at its OP_SIZE gate. Proves the table and the emitted exact-length
+// gate; does NOT prove a real signature verifies (that is the real-crypto
+// witness conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json).
+func TestSlhdsaParamsMatchFIPS205Table2(t *testing.T) {
+	cases := []struct {
+		param                     string
+		n, h, d, hp, a, k, sigLen int
+	}{
+		{"SHA2_128s", 16, 63, 7, 9, 12, 14, 7856},
+		{"SHA2_128f", 16, 66, 22, 3, 6, 33, 17088},
+		{"SHA2_192s", 24, 63, 7, 9, 14, 17, 16224},
+		{"SHA2_192f", 24, 66, 22, 3, 8, 33, 35664},
+		{"SHA2_256s", 32, 64, 8, 8, 14, 22, 29792},
+		{"SHA2_256f", 32, 68, 17, 4, 9, 35, 49856},
+	}
+	for _, tc := range cases {
+		t.Run(tc.param, func(t *testing.T) {
+			p := SLHParams[tc.param]
+			got := [6]int{p.N, p.H, p.D, p.HP, p.A, p.K}
+			want := [6]int{tc.n, tc.h, tc.d, tc.hp, tc.a, tc.k}
+			if got != want {
+				t.Fatalf("SLHParams[%s] (n,h,d,h',a,k) = %v, FIPS 205 Table 2 = %v", tc.param, got, want)
+			}
+			ops := gatherOps(func(e func(StackOp)) { EmitVerifySLHDSA(e, tc.param) })
+			for i, op := range ops {
+				if op.Op == "opcode" && op.Code == "OP_SIZE" {
+					nx := ops[i+1]
+					if nx.Op != "push" || nx.Value.BigInt == nil || nx.Value.BigInt.Int64() != int64(tc.sigLen) {
+						t.Fatalf("%s: OP_SIZE gate pushes %+v, want the FIPS %d-byte signature", tc.param, nx.Value, tc.sigLen)
+					}
+					return
+				}
+			}
+			t.Fatalf("%s: no OP_SIZE gate emitted", tc.param)
+		})
+	}
+}

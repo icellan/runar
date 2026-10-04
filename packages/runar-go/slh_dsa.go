@@ -48,7 +48,7 @@ var (
 	SLH_SHA2_192s = SLHParams{Name: "SLH-DSA-SHA2-192s", N: 24, H: 63, D: 7, HP: 9, A: 14, K: 17, W: 16, Len: slhWotsLen(24, 16)}
 	SLH_SHA2_192f = SLHParams{Name: "SLH-DSA-SHA2-192f", N: 24, H: 66, D: 22, HP: 3, A: 8, K: 33, W: 16, Len: slhWotsLen(24, 16)}
 	SLH_SHA2_256s = SLHParams{Name: "SLH-DSA-SHA2-256s", N: 32, H: 64, D: 8, HP: 8, A: 14, K: 22, W: 16, Len: slhWotsLen(32, 16)}
-	SLH_SHA2_256f = SLHParams{Name: "SLH-DSA-SHA2-256f", N: 32, H: 68, D: 17, HP: 4, A: 8, K: 35, W: 16, Len: slhWotsLen(32, 16)}
+	SLH_SHA2_256f = SLHParams{Name: "SLH-DSA-SHA2-256f", N: 32, H: 68, D: 17, HP: 4, A: 9, K: 35, W: 16, Len: slhWotsLen(32, 16)}
 )
 
 // AllSHA2Params contains all 6 SHA-256 parameter sets.

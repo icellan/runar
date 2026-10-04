@@ -51,7 +51,7 @@ public final class SlhDsa {
     public static final Params SHA2_192s = new Params("SLH-DSA-SHA2-192s", 24, 63, 7, 9, 14, 17, 16);
     public static final Params SHA2_192f = new Params("SLH-DSA-SHA2-192f", 24, 66, 22, 3, 8, 33, 16);
     public static final Params SHA2_256s = new Params("SLH-DSA-SHA2-256s", 32, 64, 8, 8, 14, 22, 16);
-    public static final Params SHA2_256f = new Params("SLH-DSA-SHA2-256f", 32, 68, 17, 4, 8, 35, 16);
+    public static final Params SHA2_256f = new Params("SLH-DSA-SHA2-256f", 32, 68, 17, 4, 9, 35, 16);
 
     public static final class KeyPair {
         public final byte[] sk; // SK.seed || SK.prf || PK.seed || PK.root

@@ -87,3 +87,42 @@ describe('SLH-DSA codegen — op-count goldens (T-006)', () => {
     expect(() => countSlhdsaOps('SHA2_999x')).toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-034: parameter table vs FIPS 205 Table 2.
+//
+// SHA2_256f shipped FORS tree height a=8 (48,736-byte signature, 44-byte
+// digest) in every tier; FIPS 205 Table 2 says a=9 (49,856 bytes, m=49), so
+// the compiled verifier rejected every honestly generated 256f signature at
+// its OP_SIZE gate. Proves: each set's (n, h, d, h', a, k) equals FIPS 205
+// Table 2 and the emitted exact-length gate pushes the FIPS signature size.
+// Does NOT prove the verifier accepts a real signature — that is the
+// real-crypto witness conformance/witnesses/real-crypto/post-quantum-slhdsa-256f.json
+// (an independently produced signature run on @bsv/sdk Spend).
+// ---------------------------------------------------------------------------
+describe('SLH-DSA parameter sets match FIPS 205 Table 2 (F-034)', () => {
+  // [n, h, d, h', a, k, signature bytes]
+  const fips205: Record<string, [number, number, number, number, number, number, number]> = {
+    SHA2_128s: [16, 63, 7, 9, 12, 14, 7856],
+    SHA2_128f: [16, 66, 22, 3, 6, 33, 17088],
+    SHA2_192s: [24, 63, 7, 9, 14, 17, 16224],
+    SHA2_192f: [24, 66, 22, 3, 8, 33, 35664],
+    SHA2_256s: [32, 64, 8, 8, 14, 22, 29792],
+    SHA2_256f: [32, 68, 17, 4, 9, 35, 49856],
+  };
+
+  for (const [key, [n, h, d, hp, a, k, sigBytes]] of Object.entries(fips205)) {
+    it(`${key}: (n, h, d, h', a, k) = (${n}, ${h}, ${d}, ${hp}, ${a}, ${k})`, () => {
+      const p = SLH_PARAMS[key]!;
+      expect([p.n, p.h, p.d, p.hp, p.a, p.k]).toEqual([n, h, d, hp, a, k]);
+    });
+
+    it(`${key}: the OP_SIZE gate demands the FIPS ${sigBytes}-byte signature`, () => {
+      const ops: StackOp[] = [];
+      emitVerifySLHDSA((op: StackOp) => ops.push(op), key);
+      const i = ops.findIndex((o) => o.op === 'opcode' && o.code === 'OP_SIZE');
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(ops[i + 1]).toEqual({ op: 'push', value: BigInt(sigBytes) });
+    });
+  }
+});
