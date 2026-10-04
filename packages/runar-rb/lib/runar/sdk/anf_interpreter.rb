@@ -822,11 +822,18 @@ module Runar
       # @param b [Integer]
       # @return [Integer]
       def truncate_div(a, b)
-        if (a < 0) != (b < 0) && (a % b != 0)
-          (a.to_f / b).truncate
-        else
-          a / b
-        end
+        # Exact integer arithmetic: a Float quotient loses the low digits
+        # once the operands pass 2^53 (F-134).
+        q = a.abs / b.abs
+        (a < 0) != (b < 0) ? -q : q
+      end
+
+      # OP_DIV as a builtin uses it: truncating, and a zero divisor aborts the
+      # script, so it raises here instead of inventing a value (F-134).
+      def abort_div(a, b, name)
+        raise "#{name}: division by zero" if b == 0
+
+        truncate_div(a, b)
       end
 
       # Modulo matching truncation toward zero.
@@ -971,13 +978,17 @@ module Runar
           x = to_int(args[0])
           x >= to_int(args[1]) && x < to_int(args[2])
 
+        # The division-shaped builtins and pow/sqrt ABORT where the compiled
+        # script aborts (zero divisor, the pow exponent guard, the sqrt domain
+        # guards), like the other opcode-abort paths in this module (F-134).
         when 'safediv'
-          d = to_int(args[1])
-          d == 0 ? 0 : truncate_div(to_int(args[0]), d)
+          abort_div(to_int(args[0]), to_int(args[1]), 'safediv')
 
         when 'safemod'
           d = to_int(args[1])
-          d == 0 ? 0 : truncate_mod(to_int(args[0]), d)
+          raise 'safemod: modulo by zero' if d == 0
+
+          truncate_mod(to_int(args[0]), d)
 
         when 'clamp'
           v  = to_int(args[0])
@@ -992,10 +1003,16 @@ module Runar
         when 'pow'
           base = to_int(args[0])
           exp  = to_int(args[1])
-          exp < 0 ? 0 : base**exp
+          raise 'pow: negative exponent' if exp < 0
+          raise 'pow: exponent outside the supported domain (exp > 32)' if exp > 32
+
+          base**exp
 
         when 'sqrt'
           v = to_int(args[0])
+          raise 'sqrt: negative input' if v < 0
+          raise 'sqrt: input outside the supported domain (n >= 2^495)' if v >= 1 << 495
+
           integer_sqrt(v)
 
         when 'gcd'
@@ -1005,9 +1022,7 @@ module Runar
           a
 
         when 'divmod'
-          a = to_int(args[0])
-          b = to_int(args[1])
-          b == 0 ? 0 : truncate_div(a, b)
+          abort_div(to_int(args[0]), to_int(args[1]), 'divmod')
 
         when 'log2'
           v = to_int(args[0])
@@ -1017,7 +1032,7 @@ module Runar
           is_truthy(args[0]) ? 1 : 0
 
         when 'mulDiv'
-          truncate_div(to_int(args[0]) * to_int(args[1]), to_int(args[2]))
+          abort_div(to_int(args[0]) * to_int(args[1]), to_int(args[2]), 'mulDiv')
 
         when 'percentOf'
           truncate_div(to_int(args[0]) * to_int(args[1]), 10_000)

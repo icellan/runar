@@ -281,6 +281,9 @@ export function sign(value: bigint): bigint {
 
 export function pow(base: bigint, exp: bigint): bigint {
   if (exp < 0n) throw new Error('pow: negative exponent');
+  // The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and ABORTS
+  // for any exponent above 32, even where the power is trivial (F-134).
+  if (exp > 32n) throw new Error('pow: exponent outside the supported domain (exp > 32)');
   let result = 1n;
   let b = base;
   let e = exp;
@@ -302,6 +305,8 @@ export function percentOf(amount: bigint, bps: bigint): bigint {
 
 export function sqrt(n: bigint): bigint {
   if (n < 0n) throw new Error('sqrt: negative input');
+  // The compiled script VERIFYs OP_SIZE(n) < 63, i.e. n < 2^495 (F-134).
+  if (n >= 1n << 495n) throw new Error('sqrt: input outside the supported domain (n >= 2^495)');
   if (n === 0n) return 0n;
   let x = n;
   let y = (x + 1n) / 2n;

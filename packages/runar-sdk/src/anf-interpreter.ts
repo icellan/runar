@@ -954,13 +954,19 @@ function evalCall(
       const x = toBigInt(args[0]);
       return x >= toBigInt(args[1]) && x < toBigInt(args[2]);
     }
+    // The division-shaped builtins and pow/sqrt ABORT where the compiled
+    // script aborts (zero divisor in OP_DIV/OP_MOD, the pow exponent guard,
+    // the sqrt domain guards) instead of inventing a value, like the other
+    // opcode-abort paths in this module (F-134).
     case 'safediv': {
       const d = toBigInt(args[1]);
-      return d === 0n ? 0n : toBigInt(args[0]) / d;
+      if (d === 0n) throw new Error('safediv: division by zero');
+      return toBigInt(args[0]) / d;
     }
     case 'safemod': {
       const d = toBigInt(args[1]);
-      return d === 0n ? 0n : toBigInt(args[0]) % d;
+      if (d === 0n) throw new Error('safemod: modulo by zero');
+      return toBigInt(args[0]) % d;
     }
     case 'clamp': {
       const v = toBigInt(args[0]);
@@ -975,14 +981,17 @@ function evalCall(
     case 'pow': {
       const base = toBigInt(args[0]);
       const exp = toBigInt(args[1]);
-      if (exp < 0n) return 0n;
+      if (exp < 0n) throw new Error('pow: negative exponent');
+      if (exp > 32n) throw new Error('pow: exponent outside the supported domain (exp > 32)');
       let result = 1n;
       for (let i = 0n; i < exp; i++) result *= base;
       return result;
     }
     case 'sqrt': {
       const v = toBigInt(args[0]);
-      if (v <= 0n) return 0n;
+      if (v < 0n) throw new Error('sqrt: negative input');
+      if (v >= 1n << 495n) throw new Error('sqrt: input outside the supported domain (n >= 2^495)');
+      if (v === 0n) return 0n;
       let x = v;
       let y = (x + 1n) / 2n;
       while (y < x) { x = y; y = (x + v / x) / 2n; }
@@ -999,7 +1008,7 @@ function evalCall(
     case 'divmod': {
       const a = toBigInt(args[0]);
       const b = toBigInt(args[1]);
-      if (b === 0n) return 0n;
+      if (b === 0n) throw new Error('divmod: division by zero');
       // Returns quotient; in ANF the second result is in a separate binding
       return a / b;
     }
@@ -1013,7 +1022,9 @@ function evalCall(
     }
     case 'bool': return isTruthy(args[0]) ? 1n : 0n;
     case 'mulDiv': {
-      return (toBigInt(args[0]) * toBigInt(args[1])) / toBigInt(args[2]);
+      const c = toBigInt(args[2]);
+      if (c === 0n) throw new Error('mulDiv: division by zero');
+      return (toBigInt(args[0]) * toBigInt(args[1])) / c;
     }
     case 'percentOf': {
       return (toBigInt(args[0]) * toBigInt(args[1])) / 10000n;

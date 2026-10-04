@@ -563,6 +563,11 @@ public final class MockCrypto {
 
     public static BigInteger pow(BigInteger base, BigInteger exp) {
         if (exp.signum() < 0) throw new ArithmeticException("pow: negative exponent");
+        // The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and
+        // ABORTS for any exponent above 32, even where the power is trivial (F-134).
+        if (exp.compareTo(BigInteger.valueOf(32)) > 0) {
+            throw new ArithmeticException("pow: exponent outside the supported domain (exp > 32)");
+        }
         BigInteger result = BigInteger.ONE;
         BigInteger b = base;
         BigInteger e = exp;
@@ -584,6 +589,10 @@ public final class MockCrypto {
 
     public static BigInteger sqrt(BigInteger n) {
         if (n.signum() < 0) throw new ArithmeticException("sqrt: negative input");
+        // The compiled script VERIFYs OP_SIZE(n) < 63, i.e. n < 2^495 (F-134).
+        if (n.bitLength() > 495) {
+            throw new ArithmeticException("sqrt: input outside the supported domain (n >= 2^495)");
+        }
         return n.sqrt();
     }
 

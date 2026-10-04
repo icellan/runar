@@ -900,8 +900,8 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
       expect(mod.eval_call('within', [10, 1, 10])).to be false
     end
 
-    it 'safediv returns 0 when divisor is zero' do
-      expect(mod.eval_call('safediv', [10, 0])).to eq(0)
+    it 'safediv aborts when divisor is zero, like the script (F-134)' do
+      expect { mod.eval_call('safediv', [10, 0]) }.to raise_error(RuntimeError, /safediv: division by zero/)
     end
 
     it 'safediv truncates toward zero' do

@@ -1224,11 +1224,14 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		hi := anfToBigInt(args[2])
 		return x.Cmp(lo) >= 0 && x.Cmp(hi) < 0
 
+	// The division-shaped builtins and pow/sqrt ABORT where the compiled
+	// script aborts (zero divisor in OP_DIV/OP_MOD, the pow exponent guard,
+	// the sqrt domain guards) instead of inventing a value (F-134).
 	case "safediv":
 		a := anfToBigInt(args[0])
 		d := anfToBigInt(args[1])
 		if d.Sign() == 0 {
-			return big.NewInt(0)
+			panic(&ScriptOpcodeError{Opcode: "safediv", Message: "division by zero"})
 		}
 		return new(big.Int).Quo(a, d)
 
@@ -1236,7 +1239,7 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		a := anfToBigInt(args[0])
 		d := anfToBigInt(args[1])
 		if d.Sign() == 0 {
-			return big.NewInt(0)
+			panic(&ScriptOpcodeError{Opcode: "safemod", Message: "modulo by zero"})
 		}
 		return new(big.Int).Rem(a, d)
 
@@ -1260,7 +1263,10 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		base := anfToBigInt(args[0])
 		exp := anfToBigInt(args[1])
 		if exp.Sign() < 0 {
-			return big.NewInt(0)
+			panic(&ScriptOpcodeError{Opcode: "pow", Message: "negative exponent"})
+		}
+		if exp.Cmp(big.NewInt(32)) > 0 {
+			panic(&ScriptOpcodeError{Opcode: "pow", Message: "exponent outside the supported domain (exp > 32)"})
 		}
 		result := big.NewInt(1)
 		for i := big.NewInt(0); i.Cmp(exp) < 0; i.Add(i, big.NewInt(1)) {
@@ -1270,8 +1276,11 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 
 	case "sqrt":
 		v := anfToBigInt(args[0])
-		if v.Sign() <= 0 {
-			return big.NewInt(0)
+		if v.Sign() < 0 {
+			panic(&ScriptOpcodeError{Opcode: "sqrt", Message: "negative input"})
+		}
+		if v.BitLen() > 495 {
+			panic(&ScriptOpcodeError{Opcode: "sqrt", Message: "input outside the supported domain (n >= 2^495)"})
 		}
 		return new(big.Int).Sqrt(v)
 
@@ -1284,7 +1293,7 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		a := anfToBigInt(args[0])
 		b := anfToBigInt(args[1])
 		if b.Sign() == 0 {
-			return big.NewInt(0)
+			panic(&ScriptOpcodeError{Opcode: "divmod", Message: "division by zero"})
 		}
 		return new(big.Int).Quo(a, b)
 
@@ -1305,6 +1314,9 @@ func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx,
 		a := anfToBigInt(args[0])
 		b := anfToBigInt(args[1])
 		c := anfToBigInt(args[2])
+		if c.Sign() == 0 {
+			panic(&ScriptOpcodeError{Opcode: "mulDiv", Message: "division by zero"})
+		}
 		prod := new(big.Int).Mul(a, b)
 		return new(big.Int).Quo(prod, c)
 

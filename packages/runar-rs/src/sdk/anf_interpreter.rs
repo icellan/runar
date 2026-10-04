@@ -1035,6 +1035,16 @@ fn eval_value(
                     return Ok(Val::Undefined);
                 }
             }
+            // A math builtin whose compiled script ABORTS on these operands
+            // (zero divisor, the pow exponent guard, sqrt of a negative) fails
+            // the spend; surface it through the rejection channel instead of
+            // letting `eval_call` invent a value (F-134).
+            if math_builtin_aborts(&func, &args) {
+                return Err(AssertionFailureError {
+                    method_name: strict.map(|c| c.method_name.clone()).unwrap_or_default(),
+                    binding_name: binding_name.to_string(),
+                });
+            }
             let real_crypto = strict.and_then(|c| c.real_crypto.as_ref());
             let witness = strict.and_then(|c| c.witness.as_ref());
             eval_call(&func, &args, real_crypto, witness)
@@ -1525,6 +1535,21 @@ fn eval_unary_op(op: &str, operand: &Val, result_type: &str) -> Val {
 // ---------------------------------------------------------------------------
 // Built-in function calls
 // ---------------------------------------------------------------------------
+
+/// True when the compiled script for this math builtin ABORTS on these
+/// operands: OP_DIV/OP_MOD by zero (`safediv`, `safemod`, `divmod`, `mulDiv`),
+/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, and `sqrt`'s
+/// `n >= 0` guard. (`sqrt`'s `n < 2^495` guard is out of i64 reach.)
+fn math_builtin_aborts(func: &str, args: &[Val]) -> bool {
+    let arg = |i: usize| args.get(i).map(|v| v.to_i64()).unwrap_or(0);
+    match func {
+        "safediv" | "safemod" | "divmod" => arg(1) == 0,
+        "mulDiv" => arg(2) == 0,
+        "pow" => !(0..=32).contains(&arg(1)),
+        "sqrt" => arg(0) < 0,
+        _ => false,
+    }
+}
 
 fn eval_call(
     func: &str,

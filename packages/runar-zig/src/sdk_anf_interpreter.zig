@@ -174,7 +174,9 @@ pub const StrictError = error{
     /// Mirrors the TS interpreter's "requires witness bytes" error.
     MissingWitness,
     /// A bigint `& | ^` was applied to operands whose minimal script-number
-    /// encodings differ in length, or a `<< >>` used a negative shift count.
+    /// encodings differ in length, or a `<< >>` used a negative shift count,
+    /// or a math builtin hit an input its script aborts on (F-134: zero
+    /// divisor, `pow` exponent outside 0..32, `sqrt` of a negative).
     /// On-chain OP_AND/OP_OR/OP_XOR/OP_LSHIFT/OP_RSHIFT abort the script in
     /// exactly these cases; the interpreter surfaces the same failure so
     /// off-chain simulation agrees with the deployed script byte-for-byte.
@@ -919,6 +921,11 @@ fn evalNode(
                 if (!isTruthy(arg)) return error.AssertionFailure;
                 return anf_none;
             }
+            // A math builtin whose compiled script ABORTS on these operands
+            // (zero divisor, the pow exponent guard, sqrt of a negative) fails
+            // the spend, like a byte-op abort; `evalCall` would otherwise
+            // invent a value (F-134).
+            if (mathBuiltinAborts(c.func, c.args, env)) return error.ScriptNumberError;
             const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
             return evalCall(allocator, c.func, c.args, env, real_crypto, eval_ctx.mock_env);
         },
@@ -1429,6 +1436,24 @@ fn evalUnaryOp(allocator: std.mem.Allocator, op: []const u8, operand: ANFValue, 
 // ---------------------------------------------------------------------------
 // Built-in function calls
 // ---------------------------------------------------------------------------
+
+/// True when the compiled script for this math builtin ABORTS on these
+/// operands: OP_DIV/OP_MOD by zero (`safediv`, `safemod`, `divmod`, `mulDiv`),
+/// `pow`'s `OP_DUP 0 33 OP_WITHIN OP_VERIFY` exponent guard, and `sqrt`'s
+/// `n >= 0` guard. (`sqrt`'s `n < 2^495` guard is out of i64 reach.)
+fn mathBuiltinAborts(func: []const u8, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue)) bool {
+    const eql = std.mem.eql;
+    if (eql(u8, func, "safediv") or eql(u8, func, "safemod") or eql(u8, func, "divmod")) {
+        return toInt(getArg(arg_names, 1, env)) == 0;
+    }
+    if (eql(u8, func, "mulDiv")) return toInt(getArg(arg_names, 2, env)) == 0;
+    if (eql(u8, func, "pow")) {
+        const exp = toInt(getArg(arg_names, 1, env));
+        return exp < 0 or exp > 32;
+    }
+    if (eql(u8, func, "sqrt")) return toInt(getArg(arg_names, 0, env)) < 0;
+    return false;
+}
 
 fn evalCall(
     allocator: std.mem.Allocator,
@@ -4087,5 +4112,70 @@ test "@ref: alias carries the threaded stack bytes" {
         };
         const v = try H.run(allocator, &body);
         try std.testing.expectEqual(@as(i64, 5), v.int);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-134: the math builtins match the compiled script.
+//
+// The expected column was established by EXECUTING the TS compiler's script
+// for each builtin in @bsv/sdk's Spend (fold ON and OFF, identical): OP_DIV /
+// OP_MOD truncate toward zero; a zero divisor aborts; `pow` aborts outside
+// 0 <= exp <= 32 (OP_WITHIN guard); `sqrt` aborts on n < 0 (its n < 2^495
+// guard is out of i64 reach). `null` means the script fails, so the
+// interpreter must return its abort error instead of inventing a value.
+//
+// Proves: for each listed input the interpreter returns the script's value or
+// aborts where the script aborts. Does not prove: agreement outside the
+// table, or anything about the script itself (it is the oracle here). The
+// native builtins.zig mocks were already script-faithful for these inputs.
+// ---------------------------------------------------------------------------
+
+test "F-134 math builtins match the compiled script" {
+    const V = struct { func: []const u8, args: []const i64, want: ?i64 };
+    const vectors = [_]V{
+        .{ .func = "divmod", .args = &.{ -7, 2 }, .want = -3 },
+        .{ .func = "divmod", .args = &.{ 7, -2 }, .want = -3 },
+        .{ .func = "divmod", .args = &.{ 1, 0 }, .want = null },
+        .{ .func = "mulDiv", .args = &.{ -7, 1, 2 }, .want = -3 },
+        .{ .func = "mulDiv", .args = &.{ 1, 1, 0 }, .want = null },
+        .{ .func = "percentOf", .args = &.{ -1, 5000 }, .want = 0 },
+        .{ .func = "percentOf", .args = &.{ -15000, 1 }, .want = -1 },
+        .{ .func = "pow", .args = &.{ 2, -1 }, .want = null },
+        .{ .func = "pow", .args = &.{ 2, 0 }, .want = 1 },
+        .{ .func = "pow", .args = &.{ -2, 3 }, .want = -8 },
+        .{ .func = "pow", .args = &.{ 2, 32 }, .want = 4294967296 },
+        .{ .func = "pow", .args = &.{ 2, 33 }, .want = null },
+        .{ .func = "pow", .args = &.{ 1, 40 }, .want = null },
+        .{ .func = "sqrt", .args = &.{-1}, .want = null },
+        .{ .func = "sqrt", .args = &.{0}, .want = 0 },
+        .{ .func = "sqrt", .args = &.{8}, .want = 2 },
+        .{ .func = "safediv", .args = &.{ -7, 2 }, .want = -3 },
+        .{ .func = "safediv", .args = &.{ 1, 0 }, .want = null },
+        .{ .func = "safemod", .args = &.{ -7, 2 }, .want = -1 },
+        .{ .func = "safemod", .args = &.{ 7, -2 }, .want = 1 },
+        .{ .func = "safemod", .args = &.{ 1, 0 }, .want = null },
+    };
+    const names = [_][]const u8{ "a", "b", "c" };
+    for (vectors) |v| {
+        var body: [5]ANFBinding = undefined;
+        for (v.args, 0..) |arg, i| {
+            body[i] = .{ .name = names[i], .value = .{ .load_const = .{ .value = .{ .int = arg } } } };
+        }
+        const n = v.args.len;
+        body[n] = .{ .name = "r", .value = .{ .call = .{ .func = v.func, .args = names[0..n] } } };
+        body[n + 1] = .{ .name = "u", .value = .{ .update_prop = .{ .name = "result", .value = "r" } } };
+        const got = runAliasBody(std.testing.allocator, body[0 .. n + 2]);
+        if (v.want) |w| {
+            std.testing.expectEqual(w, try got) catch |e| {
+                std.debug.print("F-134: {s}{any} diverges from the script\n", .{ v.func, v.args });
+                return e;
+            };
+        } else {
+            std.testing.expectError(error.ScriptNumberError, got) catch |e| {
+                std.debug.print("F-134: {s}{any} script aborts, interpreter did not\n", .{ v.func, v.args });
+                return e;
+            };
+        }
     }
 }

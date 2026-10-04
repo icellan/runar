@@ -1007,6 +1007,9 @@ pub fn sign(n: Int) -> Int {
 /// Exponentiation for non-negative exponents. Panics on i64 overflow.
 pub fn pow(base: Int, exp: Int) -> Int {
     assert!(exp >= 0, "pow: negative exponent");
+    // The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and ABORTS
+    // for any exponent above 32, even where the power is trivial (F-134).
+    assert!(exp <= 32, "pow: exponent outside the supported domain (exp > 32)");
     let mut result: Int = 1;
     for _ in 0..exp {
         result = result.checked_mul(base).unwrap_or_else(|| {

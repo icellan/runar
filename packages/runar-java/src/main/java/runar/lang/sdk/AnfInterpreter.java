@@ -1372,32 +1372,42 @@ public final class AnfInterpreter {
             case "min":        return MockCrypto.min(toBigInt(args.get(0)), toBigInt(args.get(1)));
             case "max":        return MockCrypto.max(toBigInt(args.get(0)), toBigInt(args.get(1)));
             case "within":     return MockCrypto.within(toBigInt(args.get(0)), toBigInt(args.get(1)), toBigInt(args.get(2)));
+            // The division-shaped builtins and pow/sqrt ABORT where the
+            // compiled script aborts (zero divisor in OP_DIV/OP_MOD, the pow
+            // exponent guard, the sqrt domain guards) instead of inventing a
+            // value, like the other opcode-abort paths here (F-134).
             case "safediv": {
                 BigInteger d = toBigInt(args.get(1));
-                if (d.signum() == 0) return BigInteger.ZERO;
+                if (d.signum() == 0) throw new InterpreterException("safediv: division by zero");
                 return toBigInt(args.get(0)).divide(d);
             }
             case "safemod": {
                 BigInteger d = toBigInt(args.get(1));
-                if (d.signum() == 0) return BigInteger.ZERO;
+                if (d.signum() == 0) throw new InterpreterException("safemod: modulo by zero");
                 return toBigInt(args.get(0)).remainder(d);
             }
             case "clamp":      return MockCrypto.clamp(toBigInt(args.get(0)), toBigInt(args.get(1)), toBigInt(args.get(2)));
             case "sign":       return MockCrypto.sign(toBigInt(args.get(0)));
             case "pow": {
                 BigInteger e = toBigInt(args.get(1));
-                if (e.signum() < 0) return BigInteger.ZERO;
+                if (e.signum() < 0) throw new InterpreterException("pow: negative exponent");
+                if (e.compareTo(BigInteger.valueOf(32)) > 0) {
+                    throw new InterpreterException("pow: exponent outside the supported domain (exp > 32)");
+                }
                 return MockCrypto.pow(toBigInt(args.get(0)), e);
             }
             case "sqrt": {
                 BigInteger v = toBigInt(args.get(0));
-                if (v.signum() <= 0) return BigInteger.ZERO;
+                if (v.signum() < 0) throw new InterpreterException("sqrt: negative input");
+                if (v.bitLength() > 495) {
+                    throw new InterpreterException("sqrt: input outside the supported domain (n >= 2^495)");
+                }
                 return v.sqrt();
             }
             case "gcd":        return MockCrypto.gcd(toBigInt(args.get(0)), toBigInt(args.get(1)));
             case "divmod": {
                 BigInteger b = toBigInt(args.get(1));
-                if (b.signum() == 0) return BigInteger.ZERO;
+                if (b.signum() == 0) throw new InterpreterException("divmod: division by zero");
                 return toBigInt(args.get(0)).divide(b);
             }
             case "log2": {
@@ -1406,7 +1416,11 @@ public final class AnfInterpreter {
                 return BigInteger.valueOf(v.bitLength() - 1);
             }
             case "bool":       return isTruthy(args.get(0)) ? BigInteger.ONE : BigInteger.ZERO;
-            case "mulDiv":     return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(toBigInt(args.get(2)));
+            case "mulDiv": {
+                BigInteger c = toBigInt(args.get(2));
+                if (c.signum() == 0) throw new InterpreterException("mulDiv: division by zero");
+                return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(c);
+            }
             case "percentOf":  return toBigInt(args.get(0)).multiply(toBigInt(args.get(1))).divide(BigInteger.valueOf(10000));
 
             // Preimage extractors. When a WitnessContext is supplied, read

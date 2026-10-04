@@ -524,24 +524,34 @@ module Runar
 
     # -- Math Utilities --------------------------------------------------------
 
-    def safediv(a, b)
-      return 0 if b == 0
+    # Ruby's `/` and `%` floor; Bitcoin Script's OP_DIV / OP_MOD truncate
+    # toward zero and abort on a zero divisor. Every division-shaped builtin
+    # goes through these so a native run computes what the deployed script
+    # computes (F-134).
+    def _script_div(a, b, name)
+      # OP_DIV by zero fails the script; there is no value to return.
+      raise ZeroDivisionError, "#{name}: division by zero" if b == 0
 
-      # Bitcoin Script truncates toward zero, unlike Ruby's floor division.
-      if (a < 0) != (b < 0) && a % b != 0
-        -(a.abs / b.abs)
-      else
-        a / b
-      end
+      q = a.abs / b.abs
+      (a < 0) != (b < 0) ? -q : q
     end
 
-    def safemod(a, b)
-      return 0 if b == 0
+    def _script_mod(a, b, name)
+      raise ZeroDivisionError, "#{name}: modulo by zero" if b == 0
 
-      r = a % b
-      # Ensure sign matches dividend (Bitcoin Script behavior)
-      r -= b if r != 0 && (a < 0) != (r < 0)
-      r
+      a - _script_div(a, b, name) * b
+    end
+    private :_script_div, :_script_mod
+
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_DIV -- a zero divisor aborts.
+    def safediv(a, b)
+      _script_div(a, b, 'safediv')
+    end
+
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_MOD -- the remainder takes the
+    # dividend's sign; a zero divisor aborts.
+    def safemod(a, b)
+      _script_mod(a, b, 'safemod')
     end
 
     def clamp(value, lo, hi)
@@ -558,21 +568,30 @@ module Runar
       0
     end
 
+    # Script: OP_DUP 0 33 OP_WITHIN OP_VERIFY, then 32 unrolled multiplies --
+    # any exponent outside 0..32 aborts.
     def pow(base, exp)
+      raise ArgumentError, 'pow: negative exponent' if exp < 0
+      raise ArgumentError, 'pow: exponent outside the supported domain (exp > 32)' if exp > 32
+
       base**exp
     end
 
+    # Script: <a> <b> OP_MUL <c> OP_DIV -- truncated; a zero divisor aborts.
     def mul_div(a, b, c)
-      (a * b) / c
+      _script_div(a * b, c, 'mulDiv')
     end
 
+    # Script: <amount> <bps> OP_MUL 10000 OP_DIV -- truncated toward zero.
     def percent_of(amount, bps)
-      (amount * bps) / 10_000
+      _script_div(amount * bps, 10_000, 'percentOf')
     end
 
     # Integer square root using Newton's method.
+    # Script: n >= 0 and OP_SIZE(n) < 63 are VERIFIED, i.e. 0 <= n < 2^495.
     def sqrt(n)
-      raise ArgumentError, 'sqrt of negative number' if n < 0
+      raise ArgumentError, 'sqrt: negative input' if n < 0
+      raise ArgumentError, 'sqrt: input outside the supported domain (n >= 2^495)' if n >= 1 << 495
       return 0 if n == 0
 
       x = n
@@ -592,8 +611,9 @@ module Runar
     end
 
     # Returns quotient only (matching Runar's divmod which returns quotient).
+    # Script: OP_2DUP OP_DIV ... OP_MOD OP_DROP -- truncated; zero aborts.
     def divmod(a, b)
-      a / b
+      _script_div(a, b, 'divmod')
     end
 
     def log2(n)

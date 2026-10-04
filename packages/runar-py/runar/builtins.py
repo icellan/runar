@@ -668,23 +668,31 @@ def set_mock_continuation_amount(amount: int) -> int:
 
 # -- Math Utilities ----------------------------------------------------------
 
-def safediv(a: int, b: int) -> int:
+# Python's ``//`` and ``%`` floor; Bitcoin Script's OP_DIV / OP_MOD truncate
+# toward zero, and abort on a zero divisor. Every division-shaped builtin
+# below goes through these two so the native run of a contract computes what
+# the deployed script computes (F-134).
+
+def _script_div(a: int, b: int, name: str) -> int:
     if b == 0:
-        return 0
-    # Python integer division truncates toward negative infinity,
-    # but Bitcoin Script truncates toward zero. Match that behavior.
-    if (a < 0) != (b < 0) and a % b != 0:
-        return -(abs(a) // abs(b))
-    return a // b
+        # OP_DIV by zero fails the script; there is no value to return.
+        raise ZeroDivisionError(f'{name}: division by zero')
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+def _script_mod(a: int, b: int, name: str) -> int:
+    if b == 0:
+        raise ZeroDivisionError(f'{name}: modulo by zero')
+    return a - _script_div(a, b, name) * b
+
+def safediv(a: int, b: int) -> int:
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_DIV -- a zero divisor aborts.
+    return _script_div(a, b, 'safediv')
 
 def safemod(a: int, b: int) -> int:
-    if b == 0:
-        return 0
-    r = a % b
-    # Ensure sign matches dividend (Bitcoin Script behavior)
-    if r != 0 and (a < 0) != (r < 0):
-        r -= b
-    return r
+    # Script: OP_DUP OP_0NOTEQUAL OP_VERIFY OP_MOD -- remainder takes the
+    # dividend's sign; a zero divisor aborts.
+    return _script_mod(a, b, 'safemod')
 
 def clamp(value: int, lo: int, hi: int) -> int:
     if value < lo:
@@ -701,18 +709,29 @@ def sign(n: int) -> int:
     return 0
 
 def pow_(base: int, exp: int) -> int:
+    # Script: OP_DUP 0 33 OP_WITHIN OP_VERIFY, then 32 unrolled multiplies --
+    # any exponent outside 0..32 aborts.
+    if exp < 0:
+        raise ValueError('pow: negative exponent')
+    if exp > 32:
+        raise ValueError('pow: exponent outside the supported domain (exp > 32)')
     return base ** exp
 
 def mul_div(a: int, b: int, c: int) -> int:
-    return (a * b) // c
+    # Script: <a> <b> OP_MUL <c> OP_DIV -- truncated; a zero divisor aborts.
+    return _script_div(a * b, c, 'mulDiv')
 
 def percent_of(amount: int, bps: int) -> int:
-    return (amount * bps) // 10000
+    # Script: <amount> <bps> OP_MUL 10000 OP_DIV -- truncated toward zero.
+    return _script_div(amount * bps, 10000, 'percentOf')
 
 def sqrt(n: int) -> int:
     """Integer square root using Newton's method."""
+    # Script: n >= 0 and OP_SIZE(n) < 63 are VERIFIED, i.e. 0 <= n < 2^495.
     if n < 0:
-        raise ValueError("sqrt of negative number")
+        raise ValueError('sqrt: negative input')
+    if n >= 1 << 495:
+        raise ValueError('sqrt: input outside the supported domain (n >= 2^495)')
     if n == 0:
         return 0
     x = n
@@ -730,7 +749,8 @@ def gcd(a: int, b: int) -> int:
 
 def divmod_(a: int, b: int) -> int:
     """Returns quotient only (matching Runar's divmod which returns quotient)."""
-    return a // b
+    # Script: OP_2DUP OP_DIV ... OP_MOD OP_DROP -- truncated; zero aborts.
+    return _script_div(a, b, 'divmod')
 
 def log2(n: int) -> int:
     if n <= 0:

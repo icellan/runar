@@ -1279,6 +1279,11 @@ func Pow(base, exp int64) int64 {
 	if exp < 0 {
 		panic("pow: negative exponent")
 	}
+	// The compiled script guards `OP_DUP 0 33 OP_WITHIN OP_VERIFY` and ABORTS
+	// for any exponent above 32, even where the power is trivial (F-134).
+	if exp > 32 {
+		panic("pow: exponent outside the supported domain (exp > 32)")
+	}
 	r := PowBig(big.NewInt(base), big.NewInt(exp))
 	if !r.IsInt64() {
 		panic("pow: int64 overflow — PowBig is a native Go *big.Int helper only; it is not a .runar.go builtin")

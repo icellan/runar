@@ -139,13 +139,14 @@ RSpec.describe Runar::Builtins do
       expect(ctx.safediv(-7, 2)).to eq(-3)
       expect(ctx.safediv(7, -2)).to eq(-3)
       expect(ctx.safediv(0, 5)).to eq(0)
-      expect(ctx.safediv(5, 0)).to eq(0)
+      # The script aborts on a zero divisor (OP_0NOTEQUAL OP_VERIFY) (F-134).
+      expect { ctx.safediv(5, 0) }.to raise_error(ZeroDivisionError)
     end
 
     it 'safemod matches Bitcoin Script behaviour' do
       expect(ctx.safemod(7, 3)).to eq(1)
       expect(ctx.safemod(-7, 3)).to eq(-1)
-      expect(ctx.safemod(7, 0)).to eq(0)
+      expect { ctx.safemod(7, 0) }.to raise_error(ZeroDivisionError)
     end
 
     it 'clamp constrains values' do

@@ -1119,8 +1119,19 @@ def _eval_bin_op(op: str, left: Any, right: Any, result_type: Optional[str] = No
 
 
 def _truncate_div(a: int, b: int) -> int:
-    """Integer division truncating toward zero (matching JS/Bitcoin semantics)."""
-    return int(a / b) if (a < 0) != (b < 0) and a % b != 0 else a // b
+    """Integer division truncating toward zero (matching JS/Bitcoin semantics).
+
+    Exact integer arithmetic: a float quotient (``int(a / b)``) loses the low
+    digits once the operands pass 2^53 (F-134)."""
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
+
+
+def _abort_div(a: int, b: int, name: str) -> int:
+    """OP_DIV as a builtin uses it: truncating, and a zero divisor aborts."""
+    if b == 0:
+        raise ValueError(f'{name}: division by zero')
+    return _truncate_div(a, b)
 
 
 def _truncate_mod(a: int, b: int) -> int:
@@ -1237,12 +1248,17 @@ def _eval_call(
     if func == 'within':
         x = _to_int(args[0])
         return x >= _to_int(args[1]) and x < _to_int(args[2])
+    # The division-shaped builtins and pow/sqrt ABORT where the compiled
+    # script aborts (zero divisor in OP_DIV/OP_MOD, the pow exponent guard,
+    # the sqrt domain guards) instead of inventing a value; ValueError is
+    # this module's opcode-abort signal (F-134).
     if func == 'safediv':
-        d = _to_int(args[1])
-        return 0 if d == 0 else _truncate_div(_to_int(args[0]), d)
+        return _abort_div(_to_int(args[0]), _to_int(args[1]), 'safediv')
     if func == 'safemod':
         d = _to_int(args[1])
-        return 0 if d == 0 else _truncate_mod(_to_int(args[0]), d)
+        if d == 0:
+            raise ValueError('safemod: modulo by zero')
+        return _truncate_mod(_to_int(args[0]), d)
     if func == 'clamp':
         v, lo, hi = _to_int(args[0]), _to_int(args[1]), _to_int(args[2])
         return lo if v < lo else hi if v > hi else v
@@ -1253,11 +1269,17 @@ def _eval_call(
         base = _to_int(args[0])
         exp = _to_int(args[1])
         if exp < 0:
-            return 0
+            raise ValueError('pow: negative exponent')
+        if exp > 32:
+            raise ValueError('pow: exponent outside the supported domain (exp > 32)')
         return base ** exp
     if func == 'sqrt':
         v = _to_int(args[0])
-        if v <= 0:
+        if v < 0:
+            raise ValueError('sqrt: negative input')
+        if v >= 1 << 495:
+            raise ValueError('sqrt: input outside the supported domain (n >= 2^495)')
+        if v == 0:
             return 0
         x = v
         y = (x + 1) // 2
@@ -1271,11 +1293,7 @@ def _eval_call(
             a, b = b, a % b
         return a
     if func == 'divmod':
-        a = _to_int(args[0])
-        b = _to_int(args[1])
-        if b == 0:
-            return 0
-        return _truncate_div(a, b)
+        return _abort_div(_to_int(args[0]), _to_int(args[1]), 'divmod')
     if func == 'log2':
         v = _to_int(args[0])
         if v <= 0:
@@ -1289,7 +1307,7 @@ def _eval_call(
     if func == 'bool':
         return 1 if _is_truthy(args[0]) else 0
     if func == 'mulDiv':
-        return _truncate_div(_to_int(args[0]) * _to_int(args[1]), _to_int(args[2]))
+        return _abort_div(_to_int(args[0]) * _to_int(args[1]), _to_int(args[2]), 'mulDiv')
     if func == 'percentOf':
         return _truncate_div(_to_int(args[0]) * _to_int(args[1]), 10000)
 

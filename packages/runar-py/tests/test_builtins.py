@@ -154,7 +154,10 @@ class TestMathUtils:
         assert safediv(-7, 2) == -3
 
     def test_safediv_by_zero(self):
-        assert safediv(10, 0) == 0
+        # The script aborts on a zero divisor (OP_0NOTEQUAL OP_VERIFY), so the
+        # mock refuses instead of returning a value (F-134).
+        with pytest.raises(ZeroDivisionError):
+            safediv(10, 0)
 
     def test_safemod(self):
         assert safemod(7, 2) == 1
