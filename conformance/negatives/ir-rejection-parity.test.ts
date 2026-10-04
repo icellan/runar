@@ -161,6 +161,15 @@ const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
  * fields because their rule cannot be reached with one.
  */
 
+/*
+ * `I53`-`I56` (N-101, the re-derived StatefulSmartContract scaffolding) reuse
+ * the `stateful-counter` control, each with ONE field of `increment` changed:
+ * I53 the continuation compares the output hash with itself; I54 the
+ * sighash-type assert pins 67 instead of 65; I55 the checkPreimage assert
+ * asserts the preimage instead of the check's result; I56 the auto-injected
+ * `_newAmount` parameter is retyped ByteString.
+ */
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],

@@ -16,6 +16,7 @@ require_relative "unknown_anf_kind_error"
 require_relative "input_limits"
 require_relative "required_fields"
 require_relative "../frontend/reserved_names"
+require_relative "stateful_scaffold"
 
 module RunarCompiler
   module IR
@@ -191,6 +192,14 @@ module RunarCompiler
                   "leaves on the stack decides the spend"
       end
 
+      # N-101: a StatefulSmartContract (declared or inferred) must carry
+      # exactly the scaffolding the frontend injects into each public method.
+      # Runs only on IR every check above accepted. See stateful_scaffold.rb.
+      if errors.empty? && _effective_parent_class(program) == "StatefulSmartContract"
+        scaffold_err = StatefulScaffold.error(program)
+        errors << scaffold_err if scaffold_err
+      end
+
       # N-113 / R-081: a contract with no public method has no spending entry
       # point and emits an EMPTY locking script -- which is anyone-can-spend,
       # not merely useless. On the real @bsv/sdk `Spend` engine under full
@@ -238,6 +247,23 @@ module RunarCompiler
       end
     end
 
+    # The declared parentClass, or the N-087 fail-closed inference for IR
+    # without one (see _parent_class_error).
+    def self._effective_parent_class(program)
+      pc = program.parent_class.to_s
+      return pc unless pc.empty?
+
+      flat = []
+      program.methods.each { |m| _each_value(m.body) { |v| flat << v.kind } }
+      if flat.any? { |k| STATEFUL_ONLY_KINDS.include?(k) }
+        "StatefulSmartContract"
+      elsif flat.include?("raw_script")
+        "UnsafeSmartContract"
+      else
+        "SmartContract"
+      end
+    end
+
     # N-087: the source validator's parentClass rules, which --ir never ran. A
     # SmartContract property declared readonly:false got no constructor slot,
     # so `update_prop owner = x; assert(owner == x)` compiled to 76767b8777,
@@ -255,17 +281,7 @@ module RunarCompiler
         _each_value(m.body) { |v| ks << v.kind }
         ks
       end
-      flat = kinds.flatten
-      pc = program.parent_class.to_s
-      if pc.empty?
-        pc = if flat.any? { |k| STATEFUL_ONLY_KINDS.include?(k) }
-               "StatefulSmartContract"
-             elsif flat.include?("raw_script")
-               "UnsafeSmartContract"
-             else
-               "SmartContract"
-             end
-      end
+      pc = _effective_parent_class(program)
       if pc != "StatefulSmartContract"
         prop = program.properties.find { |p| !p.readonly }
         if prop

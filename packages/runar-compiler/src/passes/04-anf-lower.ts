@@ -35,6 +35,7 @@ import { MERGED_LOCAL_TEMP_PREFIX, MAX_LOOP_COUNT, PRESERVE } from '../ir/index.
 import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
 import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
+import { emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
 import { isByteStringFamilyType } from './03-typecheck.js';
 import { loopOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
@@ -349,37 +350,11 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // Issue #123: the declared per-method sighash mode (default ALL|FORKID).
       // Drives BOTH the OP_PUSH_TX binding flag (so the derived sig re-computes
       // the tx sighash under this mode) AND the runtime preimage-type assert.
+      // N-101: the prologue is emitted by `stateful-scaffold.ts`, which the
+      // `--ir` scaffolding check re-derives it from.
       const sighashMode = method.sighashType ?? SIGHASH_DEFAULT;
-      const isDefaultSighash = sighashMode === SIGHASH_DEFAULT;
-
-      // Inject checkPreimage(txPreimage) at the start
-      const preimageRef = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-      const checkResult = methodCtx.emit({
-        kind: 'check_preimage',
-        preimage: preimageRef,
-        // Omit for the default so the ANF (and pinned binding blob) is unchanged.
-        ...(isDefaultSighash ? {} : { sighashFlag: sighashMode }),
-      });
-      methodCtx.emit({ kind: 'assert', value: checkResult });
-
-      // GAP-302 / #123: pin the sighash type to the declared mode. The
-      // auto-injected covenant verifies a real tx preimage, but without this
-      // check the spend could use a DIFFERENT sighash flag than declared that
-      // zeroes out preimage fields the contract (or its continuation) relies on
-      // (hashOutputs / hashPrevouts / hashSequence). The value defaults to 0x41
-      // (SIGHASH_ALL|FORKID) so existing contracts emit byte-identical ANF.
-      const sigHashPreimageRef = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-      const sigHashTypeRef = methodCtx.emit({ kind: 'call', func: 'extractSigHashType', args: [sigHashPreimageRef] });
-      const expectedSigHashRef = methodCtx.emit({ kind: 'load_const', value: BigInt(sighashMode) });
-      const sigHashOkRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: sigHashTypeRef, right: expectedSigHashRef });
-      methodCtx.emit({ kind: 'assert', value: sigHashOkRef });
-
-      // Deserialize mutable state from the preimage's scriptCode.
       const stateProps = contract.properties.filter(p => p.kind === 'property' && !p.readonly);
-      if (stateProps.length > 0) {
-        const preimageRef3 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-        methodCtx.emit({ kind: 'deserialize_state', preimage: preimageRef3 });
-      }
+      emitStatefulPrologue(methodCtx, sighashMode, stateProps.length > 0);
 
       // Issue #109: preserve @embedAlways fields at the first user-statement
       // position (after the checkPreimage/deserialize preamble), mirroring
@@ -392,29 +367,9 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // Lower the developer's method body
       lowerStatements(method.body, methodCtx);
 
-      // Determine state continuation type.
-      //
-      // === Continuation-hash construction (reference for other compilers) ===
-      //
-      // The auto-injected continuation assertion verifies that the spending
-      // transaction's hashOutputs field matches a compiler-constructed hash
-      // over the outputs this method declares. Outputs are concatenated in
-      // the following order before hashing with hash256:
-      //
-      //   1. state outputs       (from this.addOutput / this.addRawOutput,
-      //                           tracked via addOutputRef)
-      //   2. data outputs        (from this.addDataOutput, tracked via
-      //                           addDataOutputRef) — NEW
-      //   3. change output       (P2PKH to _changePKH, value = _changeAmount)
-      //
-      // For the "single-output" fast path (no addOutput used, but state is
-      // mutated), the state output is computed on the fly from
-      // (preimage, stateScript, _newAmount) instead of coming from
-      // addOutputRefs. Data outputs may still be declared in this mode and
-      // are inserted BETWEEN the single state output and the change output.
-      //
-      // If no state output and no data output is present, the legacy
-      // single-output path applies (no data-output insertion needed).
+      // Determine state continuation type and emit it (N-101: the
+      // continuation is emitted by `stateful-scaffold.ts`, see the
+      // continuation-hash reference there).
       const addOutputRefs = methodCtx.getAddOutputRefs();
       const addDataOutputRefs = methodCtx.getAddDataOutputRefs();
       // Gate the continuation assertion on the same shape used for
@@ -432,85 +387,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // to the full runtime output set. Locked in by the all-tier
       // `private-helper-outputs` conformance fixture (its `partition`
       // and `log` methods route outputs through private helpers).
-      if (needsChangeOutput) {
-        // F-024 (R14): the default single-output continuation carries the
-        // spender-chosen `_newAmount` into the new state UTXO. Without this
-        // check a spender sets `_newAmount = 1` and pays the rest of the
-        // input value to their own change output — the committed outputs
-        // then match the covenant's hash exactly. Value may grow (a deposit
-        // paid by a funding input) but never shrink below the input amount.
-        // addOutput/addRawOutput methods size their outputs explicitly and
-        // terminal methods have no continuation, so neither gets the check.
-        if (addOutputRefs.length === 0) {
-          const amountPreimageRef = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-          const inputAmountRef = methodCtx.emit({ kind: 'call', func: 'extractAmount', args: [amountPreimageRef] });
-          const newAmountCheckRef = methodCtx.emit({ kind: 'load_param', name: '_newAmount' });
-          const amountOkRef = methodCtx.emit({ kind: 'bin_op', op: '>=', left: newAmountCheckRef, right: inputAmountRef });
-          methodCtx.emit({ kind: 'assert', value: amountOkRef });
-        }
-
-        // Build the P2PKH change output for hashOutputs verification.
-        //
-        // Issue #116: the SDK's buildCallTransaction OMITS the change output
-        // when `change <= 0` (an exact-cover call) and passes `_changeAmount =
-        // 0`. Gate the change segment on `_changeAmount != 0` at runtime so the
-        // hashed output set matches the SDK at the exact-zero boundary — the
-        // segment is the P2PKH change output when non-zero, and empty bytes
-        // (cat with empty is a no-op) when zero, reproducing the omission. For
-        // any change > 0 the hashed bytes are unchanged; only the emitted
-        // script gains the guard.
-        const changePKHRef = methodCtx.emit({ kind: 'load_param', name: '_changePKH' });
-        const changeAmountRef = methodCtx.emit({ kind: 'load_param', name: '_changeAmount' });
-        const zeroRef = methodCtx.emit({ kind: 'load_const', value: 0n });
-        const changeNonZeroRef = methodCtx.emit({ kind: 'bin_op', op: '!==', left: changeAmountRef, right: zeroRef });
-        const changeThenCtx = methodCtx.subContext();
-        changeThenCtx.emit({ kind: 'call', func: 'buildChangeOutput', args: [changePKHRef, changeAmountRef] });
-        methodCtx.syncCounter(changeThenCtx);
-        const changeElseCtx = methodCtx.subContext();
-        changeElseCtx.emit({ kind: 'load_const', value: '' });
-        methodCtx.syncCounter(changeElseCtx);
-        const changeOutputRef = methodCtx.emit({
-          kind: 'if',
-          cond: changeNonZeroRef,
-          then: changeThenCtx.bindings,
-          else: changeElseCtx.bindings,
-        });
-
-        if (addOutputRefs.length > 0) {
-          // Multi-output continuation: concat all state outputs, then all
-          // data outputs, then change output, then hash.
-          let accumulated = addOutputRefs[0]!;
-          for (let i = 1; i < addOutputRefs.length; i++) {
-            accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, addOutputRefs[i]!] });
-          }
-          for (const dataRef of addDataOutputRefs) {
-            accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, dataRef] });
-          }
-          accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, changeOutputRef] });
-          const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [accumulated] });
-          const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-          const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef2] });
-          const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
-          methodCtx.emit({ kind: 'assert', value: eqRef, isAutoInjectedStateCheck: true });
-        } else {
-          // Single-output continuation: build raw output bytes, then splice in
-          // any declared data outputs, then concat with change, then hash.
-          const stateScriptRef = methodCtx.emit({ kind: 'get_state_script' });
-          const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-          const newAmountRef = methodCtx.emit({ kind: 'load_param', name: '_newAmount' });
-          const contractOutputRef = methodCtx.emit({ kind: 'call', func: 'computeStateOutput', args: [preimageRef2, stateScriptRef, newAmountRef] });
-          let accumulated = contractOutputRef;
-          for (const dataRef of addDataOutputRefs) {
-            accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, dataRef] });
-          }
-          const allOutputs = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, changeOutputRef] });
-          const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [allOutputs] });
-          const preimageRef4 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-          const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef4] });
-          const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
-          methodCtx.emit({ kind: 'assert', value: eqRef, isAutoInjectedStateCheck: true });
-        }
-      }
+      emitStatefulContinuation(methodCtx, shape, addOutputRefs, addDataOutputRefs);
 
       // Build augmented params list for ABI
       const augmentedParams: ParamNode[] = method.params.filter(param => !isStatefulContextParam(param));

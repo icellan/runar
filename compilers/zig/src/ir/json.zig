@@ -9,6 +9,7 @@ const opcodes = @import("../codegen/opcodes.zig");
 const unknown_anf_kind = @import("unknown_anf_kind.zig");
 const reserved_names = @import("../passes/reserved_names.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
+const stateful_scaffold = @import("stateful_scaffold.zig");
 pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
@@ -76,6 +77,10 @@ const ParseError = error{
     // N-087 (port of Go F-004): an update_prop outside the constructor on a
     // readonly or undeclared property. Message in lastDiagnostic().
     IllegalPropertyWrite,
+    // N-101: a StatefulSmartContract public method whose auto-injected
+    // parameters, prologue or state continuation differ from what the
+    // frontend injects. Message in required_fields.lastDiagnostic().
+    StatefulScaffoldMismatch,
 };
 
 const max_parse_depth: u32 = 256;
@@ -472,8 +477,16 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
         else => null,
     } else null;
 
-    try checkParentClassRules(parent_class, properties, method_list.items);
+    const effective_class = try checkParentClassRules(parent_class, properties, method_list.items);
     try checkNoIllegalPropertyWrites(properties, method_list.items);
+    // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+    // the scaffolding the frontend injects. See stateful_scaffold.zig.
+    if (effective_class == .stateful_smart_contract) {
+        stateful_scaffold.check(allocator, properties, method_list.items) catch |err| switch (err) {
+            error.StatefulScaffoldMismatch => return ParseError.StatefulScaffoldMismatch,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
 
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),
@@ -524,8 +537,9 @@ fn findKind(bindings: []const types.ANFBinding, raw: bool) ?[]const u8 {
 /// require StatefulSmartContract; (3) raw_script (asm) requires
 /// UnsafeSmartContract. An absent parentClass (IR older than F-038) is
 /// inferred fail-closed: StatefulSmartContract only from a stateful-only node,
-/// else UnsafeSmartContract from a raw_script, else SmartContract.
-fn checkParentClassRules(declared: ?types.ParentClass, properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!void {
+/// else UnsafeSmartContract from a raw_script, else SmartContract. Returns the
+/// (declared or inferred) parentClass.
+fn checkParentClassRules(declared: ?types.ParentClass, properties: []const types.ANFProperty, methods: []const types.ANFMethod) ParseError!types.ParentClass {
     var has_stateful = false;
     var has_raw = false;
     for (methods) |m| {
@@ -566,6 +580,7 @@ fn checkParentClassRules(declared: ?types.ParentClass, properties: []const types
             }
         }
     }
+    return pc;
 }
 
 /// N-087 (port of Go F-004 checkNoReadonlyWrites): a readonly property may
@@ -2957,6 +2972,9 @@ test "parse stateful contract with check_preimage and get_state_script" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // N-101: a stateful program's public methods must carry the scaffolding
+    // the frontend injects, so the node under test sits in a private method
+    // (methods[0]) beside a public terminal method that carries it.
     const json_source =
         \\{
         \\  "contractName": "Counter",
@@ -2985,7 +3003,7 @@ test "parse stateful contract with check_preimage and get_state_script" {
         \\        }
         \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
-        \\      "isPublic": true,
+        \\      "isPublic": false,
         \\      "name": "increment",
         \\      "params": [
         \\        {
@@ -2994,6 +3012,7 @@ test "parse stateful contract with check_preimage and get_state_script" {
         \\        }
         \\      ]
         \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
         \\  ],
         \\  "properties": [
         \\    {
@@ -3039,6 +3058,9 @@ test "parse add_output ANF IR" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // N-101: a stateful program's public methods must carry the scaffolding
+    // the frontend injects, so the node under test sits in a private method
+    // (methods[0]) beside a public terminal method that carries it.
     const json_source =
         \\{
         \\  "contractName": "OutputTest",
@@ -3056,10 +3078,11 @@ test "parse add_output ANF IR" {
         \\        }
         \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
-        \\      "isPublic": true,
+        \\      "isPublic": false,
         \\      "name": "spend",
         \\      "params": []
         \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
         \\  ],
         \\  "properties": [
         \\    { "name": "a", "readonly": false, "type": "bigint" },
@@ -3141,6 +3164,9 @@ test "parse update_prop ANF IR" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // N-101: a stateful program's public methods must carry the scaffolding
+    // the frontend injects, so the node under test sits in a private method
+    // (methods[0]) beside a public terminal method that carries it.
     const json_source =
         \\{
         \\  "contractName": "PropTest",
@@ -3157,10 +3183,11 @@ test "parse update_prop ANF IR" {
         \\        }
         \\        ,{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}
         \\      ],
-        \\      "isPublic": true,
+        \\      "isPublic": false,
         \\      "name": "inc",
         \\      "params": []
         \\    }
+        \\    ,{"name":"unlock","isPublic":true,"params":[{"name":"txPreimage","type":"SigHashPreimage"}],"body":[{"name":"p0","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p1","value":{"kind":"check_preimage","preimage":"p0"}},{"name":"p2","value":{"kind":"assert","value":"p1"}},{"name":"p3","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p4","value":{"kind":"call","func":"extractSigHashType","args":["p3"]}},{"name":"p5","value":{"kind":"load_const","value":65}},{"name":"p6","value":{"kind":"bin_op","op":"===","left":"p4","right":"p5"}},{"name":"p7","value":{"kind":"assert","value":"p6"}},{"name":"p8","value":{"kind":"load_param","name":"txPreimage"}},{"name":"p9","value":{"kind":"deserialize_state","preimage":"p8"}},{"name":"_ok","value":{"kind":"load_const","value":true}},{"name":"_ok_assert","value":{"kind":"assert","value":"_ok"}}]}
         \\  ],
         \\  "parentClass": "StatefulSmartContract",
         \\  "properties": [{"name": "count", "type": "bigint", "readonly": false}]

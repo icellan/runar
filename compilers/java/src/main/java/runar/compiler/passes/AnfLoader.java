@@ -203,8 +203,13 @@ public final class AnfLoader {
         }
         // N-087: the source validator's parentClass rules, then Go F-004's
         // readonly / undeclared-property write rule.
-        checkParentClassRules(parentClass, props, methods);
+        String effectiveClass = checkParentClassRules(parentClass, props, methods);
         checkNoIllegalPropertyWrites(props, methods);
+        // N-101: a StatefulSmartContract (declared or inferred) must carry
+        // exactly the scaffolding the frontend injects. See StatefulScaffold.
+        if ("StatefulSmartContract".equals(effectiveClass)) {
+            StatefulScaffold.check(props, methods);
+        }
         return new AnfProgram(name, props, methods, parentClass);
     }
 
@@ -237,8 +242,9 @@ public final class AnfLoader {
      * UnsafeSmartContract. An absent parentClass (IR older than F-038) is
      * inferred fail-closed: StatefulSmartContract only from a stateful-only
      * node, else UnsafeSmartContract from a raw_script, else SmartContract.
+     * Returns the (declared or inferred) parentClass.
      */
-    private static void checkParentClassRules(String declared, List<AnfProperty> props, List<AnfMethod> methods) {
+    private static String checkParentClassRules(String declared, List<AnfProperty> props, List<AnfMethod> methods) {
         List<List<AnfValue>> values = new ArrayList<>();
         boolean hasStateful = false;
         boolean hasRaw = false;
@@ -281,6 +287,7 @@ public final class AnfLoader {
                 }
             }
         }
+        return pc;
     }
 
     /**

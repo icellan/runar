@@ -45,7 +45,8 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 	if err := checkIRNoRecursion(program); err != nil {
 		return err
 	}
-	if err := checkIRParentClassRules(program); err != nil {
+	parentClass, err := checkIRParentClassRules(program)
+	if err != nil {
 		return err
 	}
 
@@ -63,6 +64,11 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 			return err
 		}
 	}
+	// N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+	// the scaffolding the frontend injects. See ir_stateful_scaffold.go.
+	if parentClass == "StatefulSmartContract" {
+		return checkIRStatefulScaffolding(program)
+	}
 	return nil
 }
 
@@ -77,13 +83,14 @@ func checkIRFrontendRules(program *ir.ANFProgram) error {
 //
 // An absent parentClass (IR older than F-038) is inferred fail-closed:
 // StatefulSmartContract only from a stateful-only node, else
-// UnsafeSmartContract from a raw_script, else SmartContract.
+// UnsafeSmartContract from a raw_script, else SmartContract. Returns the
+// (declared or inferred) parentClass.
 var irStatefulOnlyKinds = map[string]bool{
 	"add_output": true, "add_raw_output": true, "add_data_output": true,
 	"get_state_script": true, "deserialize_state": true,
 }
 
-func checkIRParentClassRules(program *ir.ANFProgram) error {
+func checkIRParentClassRules(program *ir.ANFProgram) (string, error) {
 	hasStateful, hasRaw := false, false
 	for i := range program.Methods {
 		walkIRBindings(program.Methods[i].Body, func(v *ir.ANFValue) error {
@@ -106,7 +113,7 @@ func checkIRParentClassRules(program *ir.ANFProgram) error {
 	if pc != "StatefulSmartContract" {
 		for _, p := range program.Properties {
 			if !p.Readonly {
-				return fmt.Errorf("IR validation: Property '%s' in %s must be readonly. Use StatefulSmartContract for mutable state.", p.Name, pc)
+				return "", fmt.Errorf("IR validation: Property '%s' in %s must be readonly. Use StatefulSmartContract for mutable state.", p.Name, pc)
 			}
 		}
 	}
@@ -118,7 +125,7 @@ func checkIRParentClassRules(program *ir.ANFProgram) error {
 			}
 			return nil
 		}); err != nil {
-			return err
+			return "", err
 		}
 	}
 	for i := range program.Methods {
@@ -129,10 +136,10 @@ func checkIRParentClassRules(program *ir.ANFProgram) error {
 			}
 			return nil
 		}); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return nil
+	return pc, nil
 }
 
 func walkIRBindings(bindings []ir.ANFBinding, fn func(v *ir.ANFValue) error) error {

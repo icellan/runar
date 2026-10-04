@@ -99,8 +99,11 @@ class F038IrRoundTripTest {
 
     @Test
     void loaderReadsAndValidatesBothKeys() {
-        assertEquals("StatefulSmartContract",
-            AnfLoader.parse(withProgramKey("\"parentClass\":\"StatefulSmartContract\"")).parentClass());
+        // N-101: a StatefulSmartContract label would now also demand the
+        // injected scaffolding, which this stateless control does not carry; a
+        // non-default label still proves the key survives the loader.
+        assertEquals("UnsafeSmartContract",
+            AnfLoader.parse(withProgramKey("\"parentClass\":\"UnsafeSmartContract\"")).parentClass());
         assertEquals(Integer.valueOf(0x43),
             AnfLoader.parse(withMethodKey("\"sigHashType\":67")).methods().get(0).sighashType());
         assertEquals(null, AnfLoader.parse(CONTROL).parentClass());

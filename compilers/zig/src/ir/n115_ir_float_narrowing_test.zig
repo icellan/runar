@@ -106,10 +106,11 @@ fn irWithBinding(allocator: std.mem.Allocator, binding: []const u8) ![]const u8 
 
 /// Same, with the properties list supplied verbatim instead.
 // N-087: the probes declare mutable properties, which the loader accepts only
-// in a StatefulSmartContract.
+// in a StatefulSmartContract. N-101: whose public method must then carry the
+// checkPreimage / sighash / deserialize_state prologue the frontend injects.
 fn irWithProperties(allocator: std.mem.Allocator, properties: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator,
-        \\{{"contractName":"Probe","parentClass":"StatefulSmartContract","properties":[{s}],"methods":[{{"name":"unlock","params":[],"isPublic":true,"body":[{{"name":"t0","value":{{"kind":"load_const","value":0}}}},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
+        \\{{"contractName":"Probe","parentClass":"StatefulSmartContract","properties":[{s}],"methods":[{{"name":"unlock","params":[{{"name":"txPreimage","type":"SigHashPreimage"}}],"isPublic":true,"body":[{{"name":"p0","value":{{"kind":"load_param","name":"txPreimage"}}}},{{"name":"p1","value":{{"kind":"check_preimage","preimage":"p0"}}}},{{"name":"p2","value":{{"kind":"assert","value":"p1"}}}},{{"name":"p3","value":{{"kind":"load_param","name":"txPreimage"}}}},{{"name":"p4","value":{{"kind":"call","func":"extractSigHashType","args":["p3"]}}}},{{"name":"p5","value":{{"kind":"load_const","value":65}}}},{{"name":"p6","value":{{"kind":"bin_op","op":"===","left":"p4","right":"p5"}}}},{{"name":"p7","value":{{"kind":"assert","value":"p6"}}}},{{"name":"p8","value":{{"kind":"load_param","name":"txPreimage"}}}},{{"name":"p9","value":{{"kind":"deserialize_state","preimage":"p8"}}}},{{"name":"t0","value":{{"kind":"load_const","value":0}}}},{{"name":"_ok","value":{{"kind":"load_const","value":true}}}},{{"name":"_ok_assert","value":{{"kind":"assert","value":"_ok"}}}}]}}]}}
     , .{properties});
 }
 

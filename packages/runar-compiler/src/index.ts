@@ -129,6 +129,7 @@ import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
+import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
 import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
 
 // ---------------------------------------------------------------------------
@@ -638,7 +639,11 @@ export function compileFromANF(
       );
     }
   }
-  assertIrParentClassRules(anf);
+  // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+  // the scaffolding the frontend injects into each public method.
+  if (assertIrParentClassRules(anf) === 'StatefulSmartContract') {
+    assertIrStatefulScaffolding(anf);
+  }
 
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.
@@ -734,9 +739,10 @@ function forEachIrBinding(bindings: ANFBinding[], fn: (v: ANFBinding['value']) =
  *      or undeclared property.
  * Absent parentClass (IR older than F-038) is inferred fail-closed:
  * StatefulSmartContract only if a stateful-only node is present, else
- * UnsafeSmartContract if a raw_script is, else SmartContract.
+ * UnsafeSmartContract if a raw_script is, else SmartContract. Returns the
+ * (declared or inferred) parentClass.
  */
-function assertIrParentClassRules(program: ANFProgram): void {
+function assertIrParentClassRules(program: ANFProgram): NonNullable<ANFProgram['parentClass']> {
   let hasStateful = false;
   let hasRaw = false;
   for (const m of program.methods) {
@@ -792,6 +798,7 @@ function assertIrParentClassRules(program: ANFProgram): void {
       }
     });
   }
+  return pc;
 }
 
 /**

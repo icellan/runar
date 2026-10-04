@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from .required_fields import assert_required_ir_fields
+from .stateful_scaffold import stateful_scaffold_error
 from .types import (
     ANFBinding,
     ANFProgram,
@@ -279,6 +280,14 @@ def validate_ir(program: ANFProgram) -> list[str]:
                 f"leaves on the stack decides the spend"
             )
 
+    # N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+    # the scaffolding the frontend injects into each public method. Runs only
+    # on IR every check above accepted. See ir/stateful_scaffold.py.
+    if not errors and _effective_parent_class(program) == "StatefulSmartContract":
+        scaffold_error = stateful_scaffold_error(program)
+        if scaffold_error:
+            errors.append(scaffold_error)
+
     # N-113 / R-081: a contract with no public method has no spending entry
     # point and emits an EMPTY locking script -- which is anyone-can-spend, not
     # merely useless. On the real @bsv/sdk `Spend` engine under full consensus
@@ -374,6 +383,17 @@ def _walk_values(bindings: list[ANFBinding] | None):
         yield from _walk_values(binding.value.body)
 
 
+def _effective_parent_class(program: ANFProgram) -> str:
+    """The declared parentClass, or the N-087 fail-closed inference for IR
+    without one (see ``_parent_class_error``)."""
+    flat = {v.kind for m in program.methods for v in _walk_values(m.body)}
+    return program.parent_class or (
+        "StatefulSmartContract" if flat & _STATEFUL_ONLY_KINDS
+        else "UnsafeSmartContract" if "raw_script" in flat
+        else "SmartContract"
+    )
+
+
 def _parent_class_error(program: ANFProgram) -> str | None:
     """N-087: the source validator's parentClass rules, which --ir never ran.
 
@@ -391,12 +411,7 @@ def _parent_class_error(program: ANFProgram) -> str | None:
     kinds = [
         [v.kind for v in _walk_values(m.body)] for m in program.methods
     ]
-    flat = {k for ks in kinds for k in ks}
-    pc = program.parent_class or (
-        "StatefulSmartContract" if flat & _STATEFUL_ONLY_KINDS
-        else "UnsafeSmartContract" if "raw_script" in flat
-        else "SmartContract"
-    )
+    pc = _effective_parent_class(program)
     if pc != "StatefulSmartContract":
         for prop in program.properties:
             if not prop.readonly:

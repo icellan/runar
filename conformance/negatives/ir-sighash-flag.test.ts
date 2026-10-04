@@ -147,7 +147,17 @@ const ACCEPTED: Array<{ name: string; ir: Json; flag: number }> = [
   { name: 'flag absent (golden)', ir: counter(() => {}), flag: 0x41 },
   ...VALID.map((f) => ({
     name: `flag 0x${f.toString(16)} with sigHashType 0x${f.toString(16)}`,
-    ir: counter((m, cp) => { cp.sighashFlag = f; m.sigHashType = f; }),
+    // N-101: the auto-injected sighash-type assert (increment.t5) pins the
+    // declared mode too, as the frontend emits it for `@sighash`.
+    ir: counter((m, cp) => {
+      cp.sighashFlag = f;
+      m.sigHashType = f;
+      const pinned = m.body[5].value;
+      if (pinned.kind !== 'load_const' || pinned.value !== 65) {
+        throw new Error('stateful-counter golden no longer has increment.t5 = load_const 65');
+      }
+      pinned.value = f;
+    }),
     flag: f,
   })),
 ];

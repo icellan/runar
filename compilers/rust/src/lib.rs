@@ -9,6 +9,7 @@ pub mod codegen;
 pub mod frontend;
 pub mod ir;
 pub mod refusal;
+mod stateful_scaffold;
 
 use artifact::{assemble_artifact, RunarArtifact};
 use codegen::emit::emit;
@@ -653,8 +654,9 @@ fn check_no_readonly_writes(
 /// require StatefulSmartContract; (3) raw_script (asm) requires
 /// UnsafeSmartContract. An absent parentClass (IR older than F-038) is inferred
 /// fail-closed: StatefulSmartContract only from a stateful-only node, else
-/// UnsafeSmartContract from a raw_script, else SmartContract.
-fn check_ir_parent_class_rules(program: &ir::ANFProgram) -> Result<(), String> {
+/// UnsafeSmartContract from a raw_script, else SmartContract. Returns the
+/// (declared or inferred) parentClass.
+fn check_ir_parent_class_rules(program: &ir::ANFProgram) -> Result<String, String> {
     fn stateful_only_kind(v: &ir::ANFValue) -> Option<&'static str> {
         match v {
             ir::ANFValue::AddOutput { .. } => Some("add_output"),
@@ -722,7 +724,7 @@ fn check_ir_parent_class_rules(program: &ir::ANFProgram) -> Result<(), String> {
             _ => Ok(()),
         })?;
     }
-    Ok(())
+    Ok(pc.to_string())
 }
 
 /// Compile a parsed ANF program to a Rúnar artifact.
@@ -735,8 +737,13 @@ pub fn compile_from_program_with_options(program: &ir::ANFProgram, opts: &Compil
     // F-107: the source validator's readonly-write rule, re-asserted on every
     // program that reaches this entry point (the `--ir` path never runs the
     // validator). Same check and wording as Go F-004's checkIRFrontendRules.
-    check_ir_parent_class_rules(program)?;
+    let parent_class = check_ir_parent_class_rules(program)?;
     check_ir_no_readonly_writes(program)?;
+    // N-101: a StatefulSmartContract (declared or inferred) must carry exactly
+    // the scaffolding the frontend injects. See stateful_scaffold.rs.
+    if parent_class == "StatefulSmartContract" {
+        stateful_scaffold::check_ir_stateful_scaffolding(program)?;
+    }
 
     let mut program = program.clone();
 

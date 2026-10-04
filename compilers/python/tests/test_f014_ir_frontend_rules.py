@@ -28,6 +28,7 @@ is covered by this test. It also says nothing about the other six tiers.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -170,9 +171,16 @@ def test_constructor_may_write_readonly_property() -> None:
 
 
 def test_update_prop_on_mutable_property_still_accepted() -> None:
-    props = [{"name": "owner", "type": "ByteString", "readonly": False}]
-    payload = json.loads(_program(_readonly_write_body(), properties=props))
-    # N-087: a mutable property needs a StatefulSmartContract label on IR.
-    payload["parentClass"] = "StatefulSmartContract"
-    # add_output arity etc. is irrelevant here; only the readonly rule is probed.
+    # N-087: a mutable property needs a StatefulSmartContract label on IR, and
+    # N-101: a StatefulSmartContract method that writes one must carry the
+    # scaffolding the frontend injects. The stateful-counter golden is that
+    # program: `increment` writes the mutable `count` outside the constructor.
+    golden = (Path(__file__).resolve().parents[3] / "conformance" / "tests"
+              / "stateful-counter" / "expected-ir.json").read_text(encoding="utf-8")
+    payload = json.loads(golden)
+    assert any(
+        b["value"]["kind"] == "update_prop" and b["value"]["name"] == "count"
+        for m in payload["methods"] if m["name"] == "increment" for b in m["body"]
+    )
+    assert payload["properties"] == [{"name": "count", "readonly": False, "type": "bigint"}]
     load_ir(json.dumps(payload))

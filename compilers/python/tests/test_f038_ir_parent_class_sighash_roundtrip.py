@@ -197,8 +197,11 @@ def _with(program_extra: dict, method_extra: dict) -> str:
 
 
 def test_loader_keeps_both_keys():
-    program = load_ir(_with({"parentClass": "StatefulSmartContract"}, {"sigHashType": 0xC3}))
-    assert program.parent_class == "StatefulSmartContract"
+    # N-101: a StatefulSmartContract label would now also demand the injected
+    # scaffolding, which this stateless control does not carry; a non-default
+    # label still proves the key survives the loader.
+    program = load_ir(_with({"parentClass": "UnsafeSmartContract"}, {"sigHashType": 0xC3}))
+    assert program.parent_class == "UnsafeSmartContract"
     assert program.methods[0].sighash_type == 0xC3
 
 
