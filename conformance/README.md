@@ -581,7 +581,7 @@ node conformance/scripts/check-golden-provenance.mjs --print-hashes --base origi
 node conformance/scripts/check-golden-provenance.mjs --self-test
 ```
 
-**CI wiring.** The `golden-provenance-gate` job in `.github/workflows/ci.yml` runs on `pull_request` (no `continue-on-error`), checks out with `fetch-depth: 0`, and passes the PR base commit SHA via `$GOLDEN_GATE_BASE` (through `env:`, never interpolated into a shell command). It runs the checker in auto-detect mode and then `--self-test` so the gate cannot rot into a silent no-op. The script is dependency-light (Node built-ins + `git`; no `pnpm install`).
+**CI wiring.** The `golden-provenance-gate` job in `.github/workflows/ci.yml` runs on every event — `pull_request`, `merge_group`, `push` and dispatch — (no `continue-on-error`), checks out with `fetch-depth: 0`, and passes a base commit SHA via `$GOLDEN_GATE_BASE`: the PR base SHA, the merge-group base SHA, or the pre-push tip (falling back to `HEAD^` for a new branch, tag, force-push or dispatch). Event values go through `env:`, never interpolated into a shell command. It runs the checker in auto-detect mode and then `--self-test` so the gate cannot rot into a silent no-op. The script is dependency-light (Node built-ins + `git`; no `pnpm install`).
 
 ### Provenance discipline — the rule for regenerating a golden (plan §F3)
 

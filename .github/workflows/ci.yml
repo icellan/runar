@@ -95,19 +95,22 @@ jobs:
     # (sha256 + verified-against + reason + reviewer sign-off). Cheap (Node
     # built-ins only, no install) — gates the heavy matrix like the other lints.
     #
-    # Security note: the only github.event.* value consumed is the base commit
-    # SHA, passed via `env:` (never interpolated into the shell) and used solely
-    # as a git ref for the three-dot diff. No untrusted event text reaches a
-    # `run:` block.
+    # Runs on EVERY event (pull_request, merge_group, push, dispatch), not just
+    # pull_request (F-053): most commits reach main by direct push (see the
+    # wire-format gate below), so a PR-only gate never saw them. On push it
+    # still fails the run, which makes an unjustified golden on main loud even
+    # though it has already landed.
+    #
+    # Security note: the only github.event.* values consumed are base commit
+    # SHAs, passed via `env:` (never interpolated into the shell) and used
+    # solely as git refs for the three-dot diff. No untrusted event text
+    # reaches a `run:` block.
     name: Lint — golden-regeneration provenance gate
     runs-on: ubuntu-latest
-    # A merged golden change on `main` is already landed; the gate is a PR
-    # admission control, so scope it to pull_request events.
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so the PR base commit is present for the merge-base
+          # Full history so the base commit is present for the merge-base
           # three-dot diff below.
           fetch-depth: 0
       - uses: actions/setup-node@v4
@@ -115,12 +118,31 @@ jobs:
           node-version: 22
       - name: Check golden/vector provenance (changed set vs merge-base)
         env:
-          # base.sha = tip of the branch this PR merges into. The script diffs
-          # `<base>...HEAD` (three-dot = merge-base) to get the PR's true
-          # changed set, so an already-merged commit from another PR is never
-          # misattributed here.
-          GOLDEN_GATE_BASE: ${{ github.event.pull_request.base.sha }}
-        run: node conformance/scripts/check-golden-provenance.mjs
+          # The script diffs `<base>...HEAD` (three-dot = merge-base). Base per
+          # event: pull_request -> base.sha (tip of the branch the PR merges
+          # into); merge_group -> the queue's base SHA; push -> the tip before
+          # this push. Same resolution order as wire-format-must-move-golden.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR_BASE_SHA:-}" ]; then
+            base="${PR_BASE_SHA}"
+          elif [ -n "${MERGE_GROUP_BASE:-}" ]; then
+            base="${MERGE_GROUP_BASE}"
+          elif [ -n "${PUSH_BEFORE:-}" ] \
+            && [ "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            base="${PUSH_BEFORE}"
+          else
+            # New branch or tag (all-zero before), a force-pushed-away tip not
+            # in the clone, or workflow_dispatch: the first parent. --verify -q
+            # so a root commit falls through to HEAD (empty changed set).
+            base="$(git rev-parse --verify -q HEAD^ || git rev-parse --verify HEAD)"
+          fi
+          echo "golden-provenance gate base ref: ${base}"
+          GOLDEN_GATE_BASE="${base}" node conformance/scripts/check-golden-provenance.mjs
       - name: Self-test the gate (both directions)
         # Belt-and-suspenders: proves the checker still rejects an unjustified
         # golden change and passes a justified one, so the gate can't silently

@@ -15,14 +15,23 @@ name: Cross-compiler bytewise
 # fixtures (e.g. babybear, babybear-ext4, merkle-proof, state-covenant)
 # only require the listed tiers to agree.
 #
-# This workflow takes only `pull_request` and manual-dispatch triggers and
-# does not interpolate any github.event.* inputs into shell commands. All
-# values fed into `run:` blocks come from in-repo files (the diff script
-# and its JSON report), so there is no command-injection surface.
+# Triggers: pull_request, merge_group, push to main / release/v*, and manual
+# dispatch. Push is not optional: most commits reach main by direct push, never
+# through a PR (see the wire-format gate's rationale in ci.yml), so a
+# pull_request-only trigger left this matrix dark on most of main (F-053).
+# There is deliberately no cancel-in-progress: cancelling a push run would
+# leave that commit unchecked.
+#
+# The workflow does not interpolate any github.event.* inputs into shell
+# commands. All values fed into `run:` blocks come from in-repo files (the
+# diff script and its JSON report), so there is no command-injection surface.
 
 on:
+  push:
+    branches: [main, 'release/v*']
   pull_request:
     branches: [main, 'release/v*']
+  merge_group:
   workflow_dispatch:
 
 env:
