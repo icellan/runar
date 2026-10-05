@@ -475,20 +475,97 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
+        CallPlan plan = planCall("call", methodName, args, options, signer);
+        List<CallOptions.TerminalOutput> terminalOutputs =
+            options == null ? null : options.terminalOutputs;
+        List<UTXO> fundingUtxos =
+            options == null || options.fundingUtxos == null ? List.of() : options.fundingUtxos;
+
+        // ------------------------------------------------------------
+        // Terminal call: contract fully spent into caller-supplied
+        // outputs, no continuation, no automatic change. Bypasses both
+        // legacy paths and routes to the dedicated terminal builder.
+        // ------------------------------------------------------------
+        if (terminalOutputs != null) {
+            int terminalLocktime = (options != null && options.locktime != null)
+                ? options.locktime : 0;
+            return callTerminal(
+                plan.m(), methodName, plan.resolved(), plan.sigIndices(),
+                plan.methodNeedsChange(), plan.methodNeedsNewAmount(),
+                plan.isStateful(), plan.parentStateful(), terminalOutputs, fundingUtxos, provider, signer,
+                terminalLocktime, options
+            );
+        }
+
+        // ------------------------------------------------------------
+        // Stateless single-method contract: thin path (legacy P2PKH).
+        // ------------------------------------------------------------
+        if (!plan.isStateful() && !plan.needsOpPushTx()) {
+            return callStateless(plan.m(), plan.resolved(), plan.sigIndices(), provider, signer);
+        }
+
+        // ------------------------------------------------------------
+        // Stateful (or stateless+OP_PUSH_TX) contract: full flow with
+        // funding inputs, OP_PUSH_TX prefix, preimage push, method
+        // selector.
+        // ------------------------------------------------------------
+        int pushTxLocktime = (options != null && options.locktime != null)
+            ? options.locktime : 0;
+        return callWithPushTx(
+            plan.m(), methodName, plan.resolved(), plan.sigIndices(),
+            plan.methodNeedsChange(), plan.methodNeedsNewAmount(),
+            plan.isStateful(), plan.parentStateful(), plan.dataOutputs(), plan.orderedOutputs(),
+            provider, signer, pushTxLocktime, options
+        );
+    }
+
+    /**
+     * Everything {@link #planCall} settles before a call is laid out: the
+     * method, its resolved user args (Sig slots as 72-byte placeholders), the
+     * interpreter-derived data / ordered outputs, and the path flags.
+     */
+    private record CallPlan(
+        RunarArtifact.ABIMethod m,
+        List<Object> resolved,
+        List<Integer> sigIndices,
+        List<TransactionBuilder.DataOutput> dataOutputs,
+        List<AnfInterpreter.OrderedOutput> orderedOutputs,
+        boolean methodNeedsChange,
+        boolean methodNeedsNewAmount,
+        boolean needsOpPushTx,
+        boolean isStateful,
+        boolean parentStateful
+    ) {}
+
+    /**
+     * The call prelude shared by {@link #callWithOptions} and the OP_PUSH_TX
+     * {@link #prepareCall} path (N-145): validates the call, runs the ANF
+     * interpreter (new state, data outputs, explicit addOutput amounts —
+     * honouring {@code options.satoshis}), applies explicit state, and
+     * resolves the user args. Mutates {@link #state} exactly as a call does.
+     * {@code api} only names the entry point in diagnostics.
+     */
+    private CallPlan planCall(
+        String api,
+        String methodName,
+        List<Object> args,
+        CallOptions options,
+        Signer signer
+    ) {
         if (currentUtxo == null) {
             throw new IllegalStateException(
-                "RunarContract.call: contract has not been deployed. Call deploy() or setCurrentUtxo()."
+                "RunarContract." + api + ": contract has not been deployed. Call deploy() or setCurrentUtxo()."
             );
         }
         // DoS-bound: reject pathological scripts BEFORE any signing / broadcast.
         ScriptSizeExceededError.assertScriptHexUnderLimit(
             currentUtxo.scriptHex(), InputLimits.MAX_SCRIPT_BYTES,
-            artifact.contractName() + ".call(" + methodName + ")"
+            artifact.contractName() + "." + api + "(" + methodName + ")"
         );
         RunarArtifact.ABIMethod m = findMethod(methodName);
         if (m == null) {
             throw new IllegalArgumentException(
-                "RunarContract.call: method '" + methodName + "' not found in " + artifact.contractName()
+                "RunarContract." + api + ": method '" + methodName + "' not found in " + artifact.contractName()
             );
         }
 
@@ -508,7 +585,7 @@ public final class RunarContract {
         List<RunarArtifact.ABIParam> userParams = userParams(m, isStateful);
         if (userParams.size() != args.size()) {
             throw new IllegalArgumentException(
-                "RunarContract.call: method '" + methodName + "' expects "
+                "RunarContract." + api + ": method '" + methodName + "' expects "
                     + userParams.size() + " user args, got " + args.size()
             );
         }
@@ -516,9 +593,6 @@ public final class RunarContract {
         Map<String, Object> stateUpdates = options == null ? null : options.newState;
         List<CallOptions.TerminalOutput> terminalOutputs =
             options == null ? null : options.terminalOutputs;
-        List<UTXO> fundingUtxos =
-            options == null || options.fundingUtxos == null ? List.of() : options.fundingUtxos;
-
         // Auto-merge state updates: explicit caller-supplied stateUpdates
         // win; otherwise the ANF interpreter computes the new state and
         // any addDataOutput entries from the contract body. Mirrors the
@@ -599,7 +673,7 @@ public final class RunarContract {
                     // TO: an explicit `newState` covers only the state field
                     // and still leaves the outputs missing.
                     throw new IllegalStateException(
-                        "RunarContract.call('" + methodName + "'): the ANF interpreter could not"
+                        "RunarContract." + api + "('" + methodName + "'): the ANF interpreter could not"
                             + " evaluate the method body, so the state continuation and data"
                             + " outputs this call would commit cannot be derived. Refusing to"
                             + " broadcast a transaction built from the pre-call state. Cause: "
@@ -638,7 +712,7 @@ public final class RunarContract {
                 resolved.set(i, "00".repeat(36 * estimatedInputs));
             } else {
                 rejectUnresolvableNullArg(
-                    "RunarContract.call", userParams.get(i), i, resolved.get(i));
+                    "RunarContract." + api, userParams.get(i), i, resolved.get(i));
             }
         }
 
@@ -646,7 +720,7 @@ public final class RunarContract {
         // declared width — a covenant may copy it straight into its state.
         for (int i = 0; i < userParams.size(); i++) {
             StateSerializer.checkFixedWidthValue(resolved.get(i), userParams.get(i).type(),
-                "RunarContract.call: method '" + methodName + "' arg '" + userParams.get(i).name()
+                "RunarContract." + api + ": method '" + methodName + "' arg '" + userParams.get(i).name()
                     + "' (index " + i + ")");
         }
 
@@ -658,10 +732,10 @@ public final class RunarContract {
         // non-matching branch instead.
         if (sigIndices.size() >= 2 && isLikelyOrChecksig(artifact)) {
             System.err.printf(
-                "runar-sdk: warning: %s.call(\"%s\") has %d auto-signed Sig slots. "
+                "runar-sdk: warning: %s.%s(\"%s\") has %d auto-signed Sig slots. "
                     + "If this is an OR-CHECKSIG method, pass EMPTY_SIG for the "
                     + "non-matching branch(es) to satisfy BIP146 NULLFAIL (issue #106).%n",
-                artifact.contractName(), methodName, sigIndices.size());
+                artifact.contractName(), api, methodName, sigIndices.size());
         }
 
         // Detect injected param shapes: stateful contracts may carry
@@ -675,11 +749,6 @@ public final class RunarContract {
         // trimmed subscript (issue #44). stateful+ txPreimage covers the rest.
         boolean needsOpPushTx = parentStateful || isStateful || hasParam(m, "txPreimage");
 
-        // ------------------------------------------------------------
-        // Terminal call: contract fully spent into caller-supplied
-        // outputs, no continuation, no automatic change. Bypasses both
-        // legacy paths and routes to the dedicated terminal builder.
-        // ------------------------------------------------------------
         // Only the OP_PUSH_TX path below can bind an extra contract input to its
         // own preimage. The terminal and legacy-stateless builders lay out a
         // single contract input, so accepting the option there would silently
@@ -687,7 +756,7 @@ public final class RunarContract {
         // and the merge would look like it succeeded. Fail loudly instead.
         if (extraContractInputCount(options) > 0 && (terminalOutputs != null || !needsOpPushTx)) {
             throw new IllegalArgumentException(
-                "RunarContract.call(" + methodName + "): additionalContractInputs is only "
+                "RunarContract." + api + "(" + methodName + "): additionalContractInputs is only "
                     + "supported on the OP_PUSH_TX call path. "
                     + (terminalOutputs != null
                         ? "Terminal calls spend the contract into a caller-supplied output set "
@@ -696,36 +765,9 @@ public final class RunarContract {
                           + "covenant to bind it."));
         }
 
-        if (terminalOutputs != null) {
-            int terminalLocktime = (options != null && options.locktime != null)
-                ? options.locktime : 0;
-            return callTerminal(
-                m, methodName, resolved, sigIndices,
-                methodNeedsChange, methodNeedsNewAmount,
-                isStateful, parentStateful, terminalOutputs, fundingUtxos, provider, signer,
-                terminalLocktime, options
-            );
-        }
-
-        // ------------------------------------------------------------
-        // Stateless single-method contract: thin path (legacy P2PKH).
-        // ------------------------------------------------------------
-        if (!isStateful && !needsOpPushTx) {
-            return callStateless(m, resolved, sigIndices, provider, signer);
-        }
-
-        // ------------------------------------------------------------
-        // Stateful (or stateless+OP_PUSH_TX) contract: full flow with
-        // funding inputs, OP_PUSH_TX prefix, preimage push, method
-        // selector.
-        // ------------------------------------------------------------
-        int pushTxLocktime = (options != null && options.locktime != null)
-            ? options.locktime : 0;
-        return callWithPushTx(
-            m, methodName, resolved, sigIndices,
-            methodNeedsChange, methodNeedsNewAmount,
-            isStateful, parentStateful, resolvedDataOutputs, orderedOutputs, provider, signer, pushTxLocktime,
-            options
+        return new CallPlan(
+            m, resolved, sigIndices, resolvedDataOutputs, orderedOutputs,
+            methodNeedsChange, methodNeedsNewAmount, needsOpPushTx, isStateful, parentStateful
         );
     }
 
@@ -780,8 +822,112 @@ public final class RunarContract {
      * to pay the fee, splices the {@code preimage} into the unlocking
      * script, and broadcasts. (BUG-100 fix: no OP_PUSH_TX signature is
      * pushed — it is derived on-chain from the preimage.)
+     *
+     * <p>N-145: this is {@link #layoutPushTx} (shared with {@link #prepareCall})
+     * followed by signing the method's own Sig slots with {@code signer} and
+     * {@link #finishPushTx}. {@code prepareCall} + {@code finalizeCall} run the
+     * same two halves with an external signer in between, so both emit the
+     * same bytes.
      */
     private CallOutcome callWithPushTx(
+        RunarArtifact.ABIMethod m,
+        String methodName,
+        List<Object> resolved,
+        List<Integer> sigIndices,
+        boolean methodNeedsChange,
+        boolean methodNeedsNewAmount,
+        boolean isStateful,
+        boolean parentStateful,
+        List<TransactionBuilder.DataOutput> dataOutputs,
+        List<AnfInterpreter.OrderedOutput> orderedOutputs,
+        Provider provider,
+        Signer signer,
+        int locktime,
+        CallOptions options
+    ) {
+        PushTxLayout lay = layoutPushTx(
+            m, methodName, resolved, sigIndices,
+            methodNeedsChange, methodNeedsNewAmount,
+            isStateful, parentStateful, dataOutputs, orderedOutputs, provider, signer, locktime,
+            options
+        );
+        // Sign Sig placeholders against the same code-separator-aware
+        // sighash the contract input enforces (issue #123: under the method's mode).
+        List<Object> signedArgs = new ArrayList<>(lay.resolved());
+        for (int idx : sigIndices) {
+            byte[] der = signer.sign(lay.userSighash(), null);
+            signedArgs.set(idx, ScriptUtils.bytesToHex(der)
+                + String.format("%02x", lay.methodSigHash() & 0xff));
+        }
+        return finishPushTx(m, methodName, lay.tx(), lay, signedArgs, provider);
+    }
+
+    /**
+     * A fully laid-out OP_PUSH_TX call tx whose every input is final except
+     * the primary contract input's user Sig slots, which still hold 72-byte
+     * zero placeholders (input 0 carries that placeholder unlock). BIP-143
+     * commits to no scriptSig, so the preimage, the OP_PUSH_TX signature, the
+     * extra-input unlocks and the funding signatures all stay valid when
+     * input 0's unlock is rebuilt with the real signatures.
+     */
+    record PushTxLayout(
+        RawTx tx,
+        List<Object> resolved,
+        byte[] userSighash,
+        int methodSigHash,
+        String opPushTxSigHex,
+        String preimageHex,
+        String changePkhHex,
+        long changeAmount,
+        boolean methodNeedsNewAmount,
+        long newSats,
+        String newLockingScript,
+        int continuationIndex,
+        String intentWitnessHex,
+        boolean isStateful
+    ) {}
+
+    /**
+     * Splice the primary unlock (built from {@code lay} with {@code signedArgs})
+     * into {@code tx} — the layout's tx, or its re-parsed hex on the
+     * finalizeCall path — broadcast, and track the continuation.
+     */
+    private CallOutcome finishPushTx(
+        RunarArtifact.ABIMethod m,
+        String methodName,
+        RawTx tx,
+        PushTxLayout lay,
+        List<Object> signedArgs,
+        Provider provider
+    ) {
+        tx.setUnlockingScript(0, buildPushTxUnlock(
+            m, methodName, signedArgs,
+            lay.opPushTxSigHex(),
+            lay.changePkhHex(),
+            lay.changeAmount(), lay.methodNeedsNewAmount(), lay.newSats(),
+            lay.preimageHex(),
+            lay.intentWitnessHex()
+        ));
+        String txHex = tx.toHex();
+        String txid = provider.broadcastRaw(txHex);
+
+        UTXO nextUtxo = null;
+        if (lay.isStateful() && lay.newLockingScript() != null) {
+            nextUtxo = new UTXO(txid, lay.continuationIndex(), lay.newSats(), lay.newLockingScript());
+            this.currentUtxo = nextUtxo;
+        } else {
+            this.currentUtxo = null;
+        }
+        return new CallOutcome(txid, txHex, nextUtxo);
+    }
+
+    /**
+     * Lays out the OP_PUSH_TX call tx (see {@link PushTxLayout}). Signs the
+     * extra contract inputs' Sig slots with {@code signer} and the funding
+     * inputs with the funding signer, as {@code call()} always has; leaves the
+     * primary input's Sig slots to the caller.
+     */
+    private PushTxLayout layoutPushTx(
         RunarArtifact.ABIMethod m,
         String methodName,
         List<Object> resolved,
@@ -1158,20 +1304,13 @@ public final class RunarContract {
             tx, 0, sighashSubscript, currentUtxo.satoshis(), methodSigHash
         );
 
-        // Sign Sig placeholders against the same code-separator-aware
-        // sighash the contract input enforces (issue #123: under the method's mode).
-        if (!sigIndices.isEmpty()) {
-            byte[] userSighash = tx.sighashBIP143(
-                0, sighashSubscript, currentUtxo.satoshis(), methodSigHash
-            );
-            for (int idx : sigIndices) {
-                byte[] der = signer.sign(userSighash, null);
-                String sigHex = ScriptUtils.bytesToHex(der)
-                    + String.format("%02x", methodSigHash & 0xff);
-                resolved.set(idx, sigHex);
-            }
-        }
+        // The digest the primary input's Sig slots are signed over (by the
+        // caller: call() signs it in-process, prepareCall publishes it).
+        byte[] userSighash = sigIndices.isEmpty()
+            ? new byte[0]
+            : tx.sighashBIP143(0, sighashSubscript, currentUtxo.satoshis(), methodSigHash);
 
+        // Placeholder-Sig unlock; the final one is spliced in by finishPushTx.
         String finalUnlock = buildPushTxUnlock(
             m, methodName, resolved,
             ScriptUtils.bytesToHex(opPushTxSig),
@@ -1232,23 +1371,20 @@ public final class RunarContract {
             tx.setUnlockingScript(inputIdx, fundUnlock);
         }
 
-        String txHex = tx.toHex();
-        String txid = provider.broadcastRaw(txHex);
-
-        UTXO nextUtxo = null;
-        if (isStateful && newLockingScript != null) {
-            // The state continuation is normally output 0, but a method that
-            // also calls this.addRawOutput(...) (finding G1) can push raw
-            // outputs ahead of it — track it at its real source-order index and
-            // its real sats (which may legitimately be 0). The no-raw path
-            // keeps index 0 / newSats unchanged.
-            int contIdx = orderedContractOutputs != null ? continuationIndex : 0;
-            nextUtxo = new UTXO(txid, contIdx, newSats, newLockingScript);
-            this.currentUtxo = nextUtxo;
-        } else {
-            this.currentUtxo = null;
-        }
-        return new CallOutcome(txid, txHex, nextUtxo);
+        // The state continuation is normally output 0, but a method that
+        // also calls this.addRawOutput(...) (finding G1) can push raw
+        // outputs ahead of it — track it at its real source-order index and
+        // its real sats (which may legitimately be 0). The no-raw path
+        // keeps index 0 / newSats unchanged.
+        int contIdx = orderedContractOutputs != null ? continuationIndex : 0;
+        return new PushTxLayout(
+            tx, resolved, userSighash, methodSigHash,
+            ScriptUtils.bytesToHex(opPushTxSig),
+            ScriptUtils.bytesToHex(preimage),
+            methodNeedsChange ? changePkhHex : null,
+            finalChangeAmount, methodNeedsNewAmount, newSats,
+            newLockingScript, contIdx, intentWitnessHex, isStateful
+        );
     }
 
     /**
@@ -1994,10 +2130,13 @@ public final class RunarContract {
      *       supply the pubkey explicitly</li>
      * </ul>
      *
-     * @param signer optional signer used to fill in auto-compute PubKey
-     *               slots. Pass {@code null} if the caller is supplying
-     *               every non-{@code Sig} arg up front (e.g. a pure
-     *               remote-signing flow).
+     * @param signer signer used to fill in auto-compute PubKey slots. For an
+     *               OP_PUSH_TX method (stateful, or taking {@code txPreimage})
+     *               it is REQUIRED: it funds the tx, receives the change and
+     *               signs the funding inputs exactly as {@link #call} does, so
+     *               the prepared tx is the one {@code call()} would build
+     *               (N-145). Otherwise optional — pass {@code null} if the
+     *               caller supplies every non-{@code Sig} arg up front.
      */
     public PreparedCall prepareCall(
         String methodName,
@@ -2006,6 +2145,33 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
+        return prepareNonTerminalCall(
+            methodName, args,
+            stateUpdates == null ? null : new CallOptions(stateUpdates, null, null),
+            provider, signer
+        );
+    }
+
+    /**
+     * Non-terminal prepare. An OP_PUSH_TX method (stateful, or a stateless
+     * method taking {@code txPreimage}) goes through the same
+     * {@link #planCall} + {@link #layoutPushTx} {@code call()} uses (N-145),
+     * so the ANF interpreter runs and {@code options.satoshis} / explicit
+     * {@code addOutput} amounts are honoured; every other method keeps the
+     * legacy single-input builder, which is also what {@code call()} uses.
+     */
+    private PreparedCall prepareNonTerminalCall(
+        String methodName,
+        List<Object> args,
+        CallOptions options,
+        Provider provider,
+        Signer signer
+    ) {
+        RunarArtifact.ABIMethod pm = findMethod(methodName);
+        if (pm != null && (artifact.parentStateful() || artifact.isStateful() || hasParam(pm, "txPreimage"))) {
+            return preparePushTxCall(methodName, args, options, provider, signer);
+        }
+        Map<String, Object> stateUpdates = options == null ? null : options.newState;
         if (currentUtxo == null) {
             throw new IllegalStateException(
                 "RunarContract.prepareCall: contract has not been deployed. Call deploy() or setCurrentUtxo()."
@@ -2103,6 +2269,57 @@ public final class RunarContract {
         );
     }
 
+    private PreparedCall preparePushTxCall(
+        String methodName,
+        List<Object> args,
+        CallOptions options,
+        Provider provider,
+        Signer signer
+    ) {
+        if (signer == null) {
+            // call() funds the tx from this signer, pays it the change and signs
+            // the funding inputs; without it the prepared tx cannot be the one
+            // call() would build. Only the method's own Sig slots are external.
+            throw new IllegalArgumentException(
+                "RunarContract.prepareCall('" + methodName + "'): a signer is required for an "
+                    + "OP_PUSH_TX method — it funds the transaction, receives the change and signs "
+                    + "the funding inputs, as in call(). Only the method's own Sig slots are left "
+                    + "for external signers."
+            );
+        }
+        CallPlan plan = planCall("prepareCall", methodName, args, options, signer);
+        int locktime = (options != null && options.locktime != null) ? options.locktime : 0;
+        PushTxLayout lay = layoutPushTx(
+            plan.m(), methodName, plan.resolved(), plan.sigIndices(),
+            plan.methodNeedsChange(), plan.methodNeedsNewAmount(),
+            plan.isStateful(), plan.parentStateful(), plan.dataOutputs(), plan.orderedOutputs(),
+            provider, signer, locktime, options
+        );
+        // DoS-bound: also reject pathological continuation scripts BEFORE broadcast.
+        if (lay.newLockingScript() != null) {
+            ScriptSizeExceededError.assertScriptHexUnderLimit(
+                lay.newLockingScript(), InputLimits.MAX_SCRIPT_BYTES,
+                artifact.contractName() + ".prepareCall(" + methodName + ").continuation"
+            );
+        }
+        List<byte[]> sighashes = new ArrayList<>(plan.sigIndices().size());
+        for (int i = 0; i < plan.sigIndices().size(); i++) sighashes.add(lay.userSighash());
+        return new PreparedCall(
+            lay.tx().toHex(),
+            sighashes,
+            plan.sigIndices(),
+            methodName,
+            lay.resolved(),
+            currentUtxo,
+            plan.isStateful(),
+            plan.isStateful() ? new java.util.LinkedHashMap<>(state) : null,
+            lay.newLockingScript(),
+            lay.newSats(),
+            lay.intentWitnessHex(),
+            lay
+        );
+    }
+
     public PreparedCall prepareCall(
         String methodName,
         List<Object> args,
@@ -2139,13 +2356,7 @@ public final class RunarContract {
         Signer signer
     ) {
         if (options == null || options.terminalOutputs == null) {
-            return prepareCall(
-                methodName,
-                args,
-                options == null ? null : options.newState,
-                provider,
-                signer
-            );
+            return prepareNonTerminalCall(methodName, args, options, provider, signer);
         }
         return prepareTerminalCall(methodName, args, options, provider, signer);
     }
@@ -2410,6 +2621,11 @@ public final class RunarContract {
             String sigHex = ScriptUtils.bytesToHex(der)
                 + String.format("%02x", methodSigHash & 0xff);
             resolved.set(argIdx, sigHex);
+        }
+        if (prepared.pushTx != null) {
+            // OP_PUSH_TX path (N-145): rebuild input 0 exactly as call() does.
+            return finishPushTx(m, prepared.methodName, RawTxParser.parse(prepared.txHex()),
+                prepared.pushTx, resolved, provider);
         }
         String unlockHex = buildUnlockingScript(m, resolved) + prepared.intentWitnessHex;
 

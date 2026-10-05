@@ -278,6 +278,71 @@ class TypedContractGeneratorTest {
                 + "(unaffected by N-144, asserted as a companion guard)");
     }
 
+    // ------------------------------------------------------------------
+    // N-145: the generated prepare<Method> for a non-terminal stateful method
+    // forwarded only newState() to inner.prepareCall, dropping
+    // StatefulCallOptions.satoshis exactly as the call emission did before
+    // N-144. FungibleToken.send(sig, to, outputSatoshis) is used because a
+    // prepare/finalize pair is only emitted for methods with a Sig param.
+    // Proves the override reaches the prepared tx's continuation output via
+    // the wrapper; does not re-prove prepare/call byte parity
+    // (PreparedCallParityTest covers that on RunarContract directly).
+    // ------------------------------------------------------------------
+
+    @Test
+    void generatedWrapperPrepareForwardsStatefulCallOptionsSatoshis() throws Exception {
+        RunarArtifact artifact;
+        try (java.io.InputStream in = TypedContractGeneratorTest.class.getClassLoader()
+                .getResourceAsStream("artifacts/token-ft.runar.json")) {
+            assertNotNull(in, "test artifact not found on classpath: artifacts/token-ft.runar.json");
+            artifact = RunarArtifact.fromJson(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        String src = TypedContractGenerator.generate(artifact, "runar.generated.tokenprepsat");
+        String clsName = "runar.generated.tokenprepsat." + artifact.contractName() + "Contract";
+        Class<?> cls = compileInMemory(clsName, src);
+
+        runar.lang.sdk.MockProvider provider = new runar.lang.sdk.MockProvider();
+        runar.lang.sdk.LocalSigner signer = new runar.lang.sdk.LocalSigner(
+            "18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+        String pubHex = runar.lang.sdk.ScriptUtils.bytesToHex(signer.pubKey());
+
+        Class<?> ctorArgsCls = cls.getDeclaredClasses()[
+            indexOfNested(cls, artifact.contractName() + "ConstructorArgs")];
+        Object ctorArgs = ctorArgsCls.getDeclaredConstructors()[0].newInstance(
+            PubKey.fromHex(pubHex), BigInteger.valueOf(100), BigInteger.ZERO,
+            runar.lang.types.ByteString.fromHex("abcd"));
+        Object wrapper = cls.getDeclaredConstructor(RunarArtifact.class, ctorArgsCls)
+            .newInstance(artifact, ctorArgs);
+        cls.getMethod("connect", runar.lang.sdk.Provider.class, runar.lang.sdk.Signer.class)
+            .invoke(wrapper, provider, signer);
+        runar.lang.sdk.RunarContract inner =
+            (runar.lang.sdk.RunarContract) cls.getMethod("contract").invoke(wrapper);
+        runar.lang.sdk.UTXO spend =
+            new runar.lang.sdk.UTXO("cc".repeat(32), 0, 5_000L, inner.lockingScript());
+        inner.setCurrentUtxo(spend);
+        provider.addKnownOutpoint(spend);
+        provider.addUtxo(signer.address(), new runar.lang.sdk.UTXO(
+            "ab".repeat(32), 0, 200_000L,
+            runar.lang.sdk.ScriptUtils.buildP2PKHScript(signer.address())));
+
+        Class<?> optsCls = cls.getDeclaredClasses()[
+            indexOfNested(cls, artifact.contractName() + "StatefulCallOptions")];
+        Object options = optsCls.getDeclaredConstructor(
+            BigInteger.class, String.class, String.class, Map.class, List.class
+        ).newInstance(BigInteger.valueOf(9_999L), null, null, null, null);
+
+        Method prepareSend = cls.getDeclaredMethod(
+            "prepareSend", PubKey.class, BigInteger.class, optsCls);
+        PreparedCall prepared = (PreparedCall) prepareSend.invoke(
+            wrapper, PubKey.fromHex(pubHex), BigInteger.valueOf(1_000), options);
+        runar.lang.sdk.RunarContract.CallOutcome outcome = inner.finalizeCall(
+            prepared, List.of(signer.sign(prepared.sighashes().get(0), null)), provider);
+
+        assertEquals(9_999L, outcome.nextContractUtxo().satoshis(),
+            "generated StatefulCallOptions.satoshis must reach the prepared continuation output "
+                + "(the explicit addOutput amount here is 1000)");
+    }
+
     private static RunarArtifact loadRealCounterArtifact() throws Exception {
         try (java.io.InputStream in = TypedContractGeneratorTest.class.getClassLoader()
                 .getResourceAsStream("artifacts/stateful-counter.runar.json")) {

@@ -464,11 +464,20 @@ public final class TypedContractGenerator {
             b.append("        return inner.prepareCallWithOptions(\"").append(methodName)
                 .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else if (isStateful) {
+            // Same option threading as emitInnerCall (N-144), so the prepared
+            // tx honours StatefulCallOptions.satoshis like call() does (N-145).
             b.append("        java.util.Map<String, Object> stateUpdates = ")
                 .append(optionsArgName).append(" != null ? ")
                 .append(optionsArgName).append(".newState() : null;\n");
-            b.append("        return inner.prepareCall(\"").append(methodName)
-                .append("\", callArgs, stateUpdates, provider, signer);\n");
+            b.append("        Long satoshisOverride = ")
+                .append(optionsArgName).append(" != null && ")
+                .append(optionsArgName).append(".satoshis() != null ? ")
+                .append(optionsArgName).append(".satoshis().longValueExact() : null;\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = (stateUpdates == null && satoshisOverride == null)\n");
+            b.append("            ? null\n");
+            b.append("            : new runar.lang.sdk.CallOptions(stateUpdates, null, null).withSatoshis(satoshisOverride);\n");
+            b.append("        return inner.prepareCallWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else {
             b.append("        if (").append(optionsArgName).append(" != null) {\n");
             b.append("            java.util.List<runar.lang.sdk.CallOptions.TerminalOutput> sdkOuts = new java.util.ArrayList<>();\n");

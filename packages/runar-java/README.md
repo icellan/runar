@@ -592,7 +592,8 @@ PreparedCall prep = contract.prepareCall(
     List.of(),
     null,
     provider,
-    signer        // optional; provides the auto-PubKey value if any
+    signer        // funds + signs the funding inputs (required for stateful /
+                  // OP_PUSH_TX methods); also provides the auto-PubKey value
 );
 
 // Hand each sighash to the external signer.
