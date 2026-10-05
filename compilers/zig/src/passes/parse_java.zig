@@ -1411,6 +1411,20 @@ const Parser = struct {
                 self.current = save2_current;
             }
         }
+        // N-128: any other update (`count += ONE`, `this.count += ONE`,
+        // `i += Bigint.TWO`, `++i`, a bare call) used to be skipped as raw
+        // tokens below, leaving `update == null` — which validate.zig reads as
+        // an implied-step surface and accepts. Parse it as the statement it is,
+        // as the TS reference does, so the validator can judge it. An empty
+        // slot stays null and is refused via `header_requires_update`.
+        if (update == null and self.current.kind != .rparen) {
+            if (self.parseExpressionStatement()) |s| update = self.storeUpdateStmt(s);
+        }
+        // N-128: the update slot holds exactly one statement. Trailing tokens
+        // (`i++, j++`) used to be swallowed by the recovery loop below.
+        if (self.current.kind != .rparen and self.current.kind != .eof) {
+            self.addErrorFmt("expected ')', got '{s}'", .{self.current.text});
+        }
 
         // Consume whatever is left until the matching `)` for the for-loop.
         // Track nested parentheses so that `i = i.plus(Bigint.ONE)` does not
@@ -1428,7 +1442,7 @@ const Parser = struct {
         _ = self.expect(.rparen);
 
         const body = self.parseStmtOrBlock();
-        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .bound_is_const = bound_is_const, .bound_ident = bound_ident, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .body = body, .source_loc = loc } };
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = init_value, .init_is_const = init_is_const, .bound = bound, .bound_is_const = bound_is_const, .bound_ident = bound_ident, .descending = descending, .inclusive = inclusive, .cond_tests_iter = cond_tests_iter, .update = update, .header_requires_update = true, .body = body, .source_loc = loc } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

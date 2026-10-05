@@ -446,3 +446,99 @@ test "N-061 CONTROL: a countdown loop still compiles" {
     const down = try std.mem.replaceOwned(u8, alloc, src, "i < 3n", "i > 0n");
     _ = compileHex(alloc, down, "UpdateProbe.runar.ts") orelse return error.CountdownRegressed;
 }
+
+// ---------------------------------------------------------------------------
+// N-128: the .runar.java for-header update slot
+// ---------------------------------------------------------------------------
+//
+// `parse_java.zig`'s parseForStmt recognised only `ident = expr`, `ident++`
+// and `ident--` in the update slot. Anything else was skipped as raw tokens to
+// the closing `)`, leaving `update == null`, and the Java header never set
+// `header_requires_update` — so the validator read the C-style header as an
+// implied-step surface and let it through. `count += Bigint.ONE`,
+// `this.count += Bigint.ONE`, `this.count = this.count.plus(...)`, a bare
+// `i.plus(Bigint.ONE)` call, an empty slot and, worst, `i += Bigint.TWO` (a
+// non-unit step coerced to a unit step) all compiled in this tier alone.
+//
+// What these tests prove: each shape is refused with the shared cross-tier
+// diagnostic, and the unit-step spellings TS accepts (`i++`, `++i`,
+// `i += Bigint.ONE`, `i = i.plus(Bigint.ONE)`) still compile to the
+// bounded-loop bytes. What they do not prove: anything about the other
+// surfaces' headers, or that the refusal fires in the same pass as TS (TS
+// refuses the empty slot in its parser; this tier refuses it in validate).
+
+/// A stateful Java contract parameterised on the for-loop update clause.
+fn javaWithUpdate(alloc: Allocator, update: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(alloc,
+        \\package runar.examples.updateprobe;
+        \\
+        \\import runar.lang.StatefulSmartContract;
+        \\import runar.lang.annotations.Public;
+        \\import runar.lang.types.Bigint;
+        \\
+        \\class UpdateProbe extends StatefulSmartContract {{
+        \\
+        \\    Bigint count;
+        \\
+        \\    UpdateProbe(Bigint count) {{
+        \\        super(count);
+        \\        this.count = count;
+        \\    }}
+        \\
+        \\    @Public
+        \\    void increment() {{
+        \\        for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); {s}) {{ this.count = this.count.plus(Bigint.ONE); }}
+        \\    }}
+        \\}}
+    , .{update});
+}
+
+test "N-128: unrepresentable .runar.java for-updates are rejected, not skipped" {
+    const updates = [_][]const u8{
+        "count += Bigint.ONE",
+        "this.count += Bigint.ONE",
+        "this.count = this.count.plus(Bigint.ONE)",
+        "i += Bigint.TWO",
+        "i.plus(Bigint.ONE)",
+        "",
+    };
+    for (updates) |u| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const src = try javaWithUpdate(alloc, u);
+        expectRejectedWithSharedDiagnostic(alloc, src, "UpdateProbe.runar.java") catch |e| {
+            std.debug.print("update `{s}`\n", .{u});
+            return e;
+        };
+    }
+}
+
+// The recovery loop after the update also swallowed trailing tokens, so
+// `i++, this.count++` compiled as `i++` with the state write dropped. TS
+// refuses it in the parser with `expected ')', got ','`.
+test "N-128: a comma-joined .runar.java for-update is rejected, not truncated" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try javaWithUpdate(alloc, "i++, this.count++");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.java", "expected ')', got ','");
+}
+
+test "N-128 CONTROL: unit-step .runar.java for-updates keep the bounded-loop bytes" {
+    const updates = [_][]const u8{ "i++", "++i", "i += Bigint.ONE", "i = i.plus(Bigint.ONE)" };
+    for (updates) |u| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const src = try std.mem.replaceOwned(u8, alloc, src_java, "i = i.plus(Bigint.ONE)", u);
+        const hex = compileHex(alloc, src, "BoundedLoop.runar.java") orelse {
+            std.debug.print("update `{s}`: must still compile\n", .{u});
+            return error.ControlRegressed;
+        };
+        std.testing.expectEqualStrings(bounded_loop_hex, hex) catch |e| {
+            std.debug.print("update `{s}`: bytes moved\n", .{u});
+            return e;
+        };
+    }
+}
