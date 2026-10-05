@@ -19,14 +19,10 @@
  * require the full lifter to reconstruct otherwise.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { bytesToHex } from 'runar-testing';
 import type { Op } from './types.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { packageDataPath } from './package-data.js';
 
 interface ManifestEntry {
   hex: string;
@@ -43,15 +39,18 @@ interface Manifest {
 
 function loadManifest(): ReadonlyMap<string, ManifestEntry> {
   const out = new Map<string, ManifestEntry>();
-  const path = resolve(__dirname, '..', 'templates-data.json');
-  if (!existsSync(path)) return out;
+  const path = packageDataPath('templates-data.json');
+  // A missing or invalid manifest throws: an empty map would silently
+  // send almost every input down the raw_script path while still
+  // reporting success.
+  let m: Manifest;
   try {
-    const m = JSON.parse(readFileSync(path, 'utf8')) as Manifest;
-    for (const e of m.entries) {
-      if (!out.has(e.hex)) out.set(e.hex, e);
-    }
-  } catch {
-    // missing or invalid — fall through to empty map
+    m = JSON.parse(readFileSync(path, 'utf8')) as Manifest;
+  } catch (e) {
+    throw new Error(`runar-decompiler: cannot load template manifest ${path}: ${(e as Error).message}`);
+  }
+  for (const e of m.entries) {
+    if (!out.has(e.hex)) out.set(e.hex, e);
   }
   return out;
 }

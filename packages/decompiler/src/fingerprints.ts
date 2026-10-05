@@ -14,26 +14,21 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
 import type { Fingerprint, FingerprintDB } from './types.js';
+import { packageDataPath } from './package-data.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-/** Resolve the default DB path relative to the package root. */
-function defaultDbPath(): string {
-  // src/fingerprints.ts → ../fingerprints.json (built or source layout)
-  return resolve(__dirname, '..', 'fingerprints.json');
-}
-
+/**
+ * Load the fingerprint DB (default: `<package root>/fingerprints.json`).
+ * A missing or unparseable file throws: an empty DB would silently
+ * disable fingerprint-assisted recovery while decompilation still
+ * reports success.
+ */
 export function loadFingerprints(path?: string): FingerprintDB {
-  const p = path ?? defaultDbPath();
+  const p = path ?? packageDataPath('fingerprints.json');
   try {
-    const raw = readFileSync(p, 'utf8');
-    return JSON.parse(raw) as FingerprintDB;
-  } catch {
-    return emptyDB();
+    return JSON.parse(readFileSync(p, 'utf8')) as FingerprintDB;
+  } catch (e) {
+    throw new Error(`runar-decompiler: cannot load fingerprint DB ${p}: ${(e as Error).message}`);
   }
 }
 

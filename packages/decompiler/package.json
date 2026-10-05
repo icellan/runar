@@ -21,7 +21,7 @@
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit"
   },
-  "files": ["dist", "fingerprints.json", "coverage-baseline.json"],
+  "files": ["dist", "fingerprints.json", "templates-data.json", "coverage-baseline.json"],
   "license": "MIT",
   "dependencies": {
     "runar-compiler": "workspace:*",
