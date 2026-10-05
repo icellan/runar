@@ -128,7 +128,7 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
 // BIP-143 preimage computation (returns raw bytes, not hashed)
 // ---------------------------------------------------------------------------
 
-fn sha256d(data: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256d(data: &[u8]) -> [u8; 32] {
     let first = Sha256::digest(data);
     let second = Sha256::digest(first);
     let mut out = [0u8; 32];
@@ -136,7 +136,11 @@ fn sha256d(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn bip143_preimage(
+/// The SDK's one BIP-143 preimage builder. F-137: `LocalSigner` and
+/// `WalletSigner` used to carry their own copies that skipped the issue-#123
+/// per-flag zeroing below and signed the wrong digest for every flag other than
+/// ALL|FORKID; they now call this.
+pub(crate) fn bip143_preimage(
     tx: &ParsedTx,
     input_index: usize,
     subscript: &[u8],
@@ -221,28 +225,28 @@ fn bip143_preimage(
 }
 
 // ---------------------------------------------------------------------------
-// Minimal raw transaction parser (duplicated from signer.rs for module independence)
+// Minimal raw transaction parser (shared with signer.rs / wallet.rs, F-137)
 // ---------------------------------------------------------------------------
 
-struct ParsedInput {
+pub(crate) struct ParsedInput {
     prev_txid_bytes: [u8; 32],
     prev_output_index: u32,
     sequence: u32,
 }
 
-struct ParsedOutput {
+pub(crate) struct ParsedOutput {
     satoshis: u64,
     script: Vec<u8>,
 }
 
-struct ParsedTx {
+pub(crate) struct ParsedTx {
     version: u32,
-    inputs: Vec<ParsedInput>,
+    pub(crate) inputs: Vec<ParsedInput>,
     outputs: Vec<ParsedOutput>,
     locktime: u32,
 }
 
-fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
+pub(crate) fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
     let mut offset = 0;
 
     let read = |offset: &mut usize, n: usize| -> Result<&[u8], String> {

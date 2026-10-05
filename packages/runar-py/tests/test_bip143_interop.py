@@ -78,3 +78,62 @@ def test_bip143_preimage_and_signature(fixture: dict) -> None:
         assert ecdsa_verify(sig_bytes, pk_bytes, _sha256d(preimage_bytes)), (
             f"{name}: TS reference signature does not verify under this tier's digest"
         )
+
+
+# F-137: the signer paths. LocalSigner's pure-Python backend and WalletSigner
+# each carried a private BIP-143 builder that never got the issue-#123 fix:
+# both digested every prevout / sequence / output whatever the sighash flags
+# said. The test above only checks the compute_op_push_tx builder, so the
+# divergence was invisible.
+#
+# Proves: for every fixture scenario, including all six FORKID modes
+# (0x41/42/43/c1/c2/c3) on the shared 2-in/2-out tx signing input 1, each
+# signer's full signature (RFC-6979, priv=1, so deterministic) is
+# byte-identical to the TS (@bsv/sdk) reference sigHex.
+# Does not prove: anything about LocalSigner's bsv-sdk backend, or that a node
+# accepts the signature (the fixture is TS + Go go-sdk cross-checked, not
+# broadcast).
+
+
+def test_local_signer_fallback_matches_ts_reference(fixture: dict, monkeypatch) -> None:
+    import runar.sdk.local_signer as ls_module
+
+    monkeypatch.setattr(ls_module, "_BSV_SDK_AVAILABLE", False)
+    signer = ls_module.LocalSigner(fixture["signer_priv_hex"])
+    assert signer._backend == "fallback"
+    assert signer.get_public_key() == fixture["signer_pub_hex"]
+
+    for s in fixture["scenarios"]:
+        sig = signer.sign(
+            s["unsignedTxHex"], s["inputIndex"], s["prevScriptHex"],
+            s["prevValueSats"], s["sighashFlags"],
+        )
+        assert sig == s["sigHex"], f"{s['scenario']}: LocalSigner diverges from TS reference"
+
+
+def test_wallet_signer_matches_ts_reference(fixture: dict) -> None:
+    from runar.ecdsa import ecdsa_sign
+    from runar.sdk.wallet import WalletClient, WalletSigner
+
+    priv_int = int(fixture["signer_priv_hex"], 16)
+
+    class _KeyOneWallet(WalletClient):
+        def get_public_key(self, protocol_id, key_id):
+            return fixture["signer_pub_hex"]
+
+        def create_signature(self, hash_to_sign, protocol_id, key_id):
+            return ecdsa_sign(priv_int, hash_to_sign)
+
+        def create_action(self, description, outputs):
+            raise NotImplementedError
+
+        def list_outputs(self, basket, tags, limit=100):
+            raise NotImplementedError
+
+    signer = WalletSigner(_KeyOneWallet(), (2, "runar"), "1")
+    for s in fixture["scenarios"]:
+        sig = signer.sign(
+            s["unsignedTxHex"], s["inputIndex"], s["prevScriptHex"],
+            s["prevValueSats"], s["sighashFlags"],
+        )
+        assert sig == s["sigHex"], f"{s['scenario']}: WalletSigner diverges from TS reference"

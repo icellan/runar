@@ -13,6 +13,7 @@ use serde_json::Value;
 use super::types::{RunarArtifact, TransactionData, TxInput, TxOutput, Utxo};
 use super::provider::Provider;
 use super::signer::Signer;
+use super::oppushtx;
 use super::script_utils::build_p2pkh_script;
 use super::errors::{assert_script_hex_under_limit, MAX_SCRIPT_BYTES};
 use super::unsound_primitives::assert_unsound_primitives_acknowledged;
@@ -590,7 +591,8 @@ impl<W: WalletClient> Signer for WalletSigner<W> {
 
         // 1. Compute BIP-143 sighash from the transaction context
         let tx_bytes = hex_to_bytes(tx_hex)?;
-        let tx = parse_raw_tx(&tx_bytes)?;
+        // F-137: parse + build with the SDK's one BIP-143 builder (oppushtx.rs).
+        let tx = oppushtx::parse_raw_tx(&tx_bytes).map_err(|e| format!("WalletSigner: {}", e))?;
 
         if input_index >= tx.inputs.len() {
             return Err(format!(
@@ -601,7 +603,7 @@ impl<W: WalletClient> Signer for WalletSigner<W> {
         }
 
         let subscript_bytes = hex_to_bytes(subscript)?;
-        let sighash = bip143_sighash(&tx, input_index, &subscript_bytes, satoshis as u64, flag);
+        let sighash = sha256d(&oppushtx::bip143_preimage(&tx, input_index, &subscript_bytes, satoshis as u64, flag));
 
         // 2. Send to wallet for signing
         let pid = (self.protocol_id.0, self.protocol_id.1.as_str());
@@ -705,7 +707,7 @@ pub fn deploy_with_wallet<W: WalletClient>(
 }
 
 // ---------------------------------------------------------------------------
-// BIP-143 sighash computation (local copy for module independence)
+// Sighash constant + sha256d (the BIP-143 builder itself lives in oppushtx.rs, F-137)
 // ---------------------------------------------------------------------------
 
 const SIGHASH_ALL_FORKID: u32 = 0x41;
@@ -716,52 +718,6 @@ fn sha256d(data: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&second);
     out
-}
-
-fn bip143_sighash(
-    tx: &ParsedTx,
-    input_index: usize,
-    subscript: &[u8],
-    satoshis: u64,
-    sig_hash_type: u32,
-) -> [u8; 32] {
-    let mut prevouts_data = Vec::new();
-    for inp in &tx.inputs {
-        prevouts_data.extend_from_slice(&inp.prev_txid_bytes);
-        prevouts_data.extend_from_slice(&inp.prev_output_index.to_le_bytes());
-    }
-    let hash_prevouts = sha256d(&prevouts_data);
-
-    let mut sequence_data = Vec::new();
-    for inp in &tx.inputs {
-        sequence_data.extend_from_slice(&inp.sequence.to_le_bytes());
-    }
-    let hash_sequence = sha256d(&sequence_data);
-
-    let mut outputs_data = Vec::new();
-    for out in &tx.outputs {
-        outputs_data.extend_from_slice(&out.satoshis.to_le_bytes());
-        write_var_int(&mut outputs_data, out.script.len() as u64);
-        outputs_data.extend_from_slice(&out.script);
-    }
-    let hash_outputs = sha256d(&outputs_data);
-
-    let input = &tx.inputs[input_index];
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(&tx.version.to_le_bytes());
-    preimage.extend_from_slice(&hash_prevouts);
-    preimage.extend_from_slice(&hash_sequence);
-    preimage.extend_from_slice(&input.prev_txid_bytes);
-    preimage.extend_from_slice(&input.prev_output_index.to_le_bytes());
-    write_var_int(&mut preimage, subscript.len() as u64);
-    preimage.extend_from_slice(subscript);
-    preimage.extend_from_slice(&satoshis.to_le_bytes());
-    preimage.extend_from_slice(&input.sequence.to_le_bytes());
-    preimage.extend_from_slice(&hash_outputs);
-    preimage.extend_from_slice(&tx.locktime.to_le_bytes());
-    preimage.extend_from_slice(&sig_hash_type.to_le_bytes());
-
-    sha256d(&preimage)
 }
 
 // ---------------------------------------------------------------------------
@@ -869,21 +825,6 @@ fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
         outputs,
         locktime,
     })
-}
-
-fn write_var_int(buf: &mut Vec<u8>, n: u64) {
-    if n < 0xfd {
-        buf.push(n as u8);
-    } else if n <= 0xffff {
-        buf.push(0xfd);
-        buf.extend_from_slice(&(n as u16).to_le_bytes());
-    } else if n <= 0xffff_ffff {
-        buf.push(0xfe);
-        buf.extend_from_slice(&(n as u32).to_le_bytes());
-    } else {
-        buf.push(0xff);
-        buf.extend_from_slice(&n.to_le_bytes());
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 
 from runar._ripemd160 import ripemd160_digest
+from runar.sdk.oppushtx import _bip143_preimage
 from runar.sdk.signer import Signer
 
 try:
@@ -256,8 +257,9 @@ def _parse_raw_tx(data: bytes) -> dict:
     """Parse a raw Bitcoin transaction into its component parts.
 
     Returns a dict with keys: version, inputs, outputs, locktime.
-    Each input is a dict with prev_txid (32 bytes), prev_output_index (int),
-    sequence (int). Each output has satoshis (int) and script (bytes).
+    Each input is a dict with prev_txid_bytes (32 bytes), prev_output_index
+    (int), sequence (int) -- the shape :func:`runar.sdk.oppushtx._bip143_preimage`
+    consumes. Each output has satoshis (int) and script (bytes).
     """
     pos = 0
 
@@ -296,7 +298,7 @@ def _parse_raw_tx(data: bytes) -> dict:
         _read(script_len)  # skip scriptSig
         sequence = _read_u32_le()
         inputs.append({
-            'prev_txid': prev_txid,
+            'prev_txid_bytes': prev_txid,
             'prev_output_index': prev_idx,
             'sequence': sequence,
         })
@@ -319,16 +321,6 @@ def _parse_raw_tx(data: bytes) -> dict:
     }
 
 
-def _write_var_int(n: int) -> bytes:
-    if n < 0xfd:
-        return bytes([n])
-    if n <= 0xffff:
-        return bytes([0xfd]) + n.to_bytes(2, 'little')
-    if n <= 0xffffffff:
-        return bytes([0xfe]) + n.to_bytes(4, 'little')
-    return bytes([0xff]) + n.to_bytes(8, 'little')
-
-
 def _sha256d(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
@@ -340,43 +332,14 @@ def _bip143_sighash(
     satoshis: int,
     sighash_type: int,
 ) -> bytes:
-    """Compute BIP-143 sighash preimage digest."""
-    # hashPrevouts = SHA256d(all outpoints)
-    prevouts = b''.join(
-        inp['prev_txid'] + inp['prev_output_index'].to_bytes(4, 'little')
-        for inp in tx['inputs']
-    )
-    hash_prevouts = _sha256d(prevouts)
+    """Compute the BIP-143 sighash digest.
 
-    # hashSequence = SHA256d(all sequences)
-    seqs = b''.join(inp['sequence'].to_bytes(4, 'little') for inp in tx['inputs'])
-    hash_sequence = _sha256d(seqs)
-
-    # hashOutputs = SHA256d(all outputs)
-    outs = b''
-    for out in tx['outputs']:
-        outs += out['satoshis'].to_bytes(8, 'little')
-        outs += _write_var_int(len(out['script']))
-        outs += out['script']
-    hash_outputs = _sha256d(outs)
-
-    inp = tx['inputs'][input_index]
-    preimage = (
-        tx['version'].to_bytes(4, 'little')
-        + hash_prevouts
-        + hash_sequence
-        + inp['prev_txid']
-        + inp['prev_output_index'].to_bytes(4, 'little')
-        + _write_var_int(len(subscript))
-        + subscript
-        + satoshis.to_bytes(8, 'little', signed=False)
-        + inp['sequence'].to_bytes(4, 'little')
-        + hash_outputs
-        + tx['locktime'].to_bytes(4, 'little')
-        + (sighash_type & 0xffffffff).to_bytes(4, 'little')
-    )
-
-    return _sha256d(preimage)
+    F-137: delegates to the SDK's one preimage builder
+    (:func:`runar.sdk.oppushtx._bip143_preimage`). This module used to carry its
+    own copy that skipped the issue-#123 per-flag zeroing and signed the wrong
+    digest for every flag other than ALL|FORKID.
+    """
+    return _sha256d(_bip143_preimage(tx, input_index, subscript, satoshis, sighash_type))
 
 
 # ---------------------------------------------------------------------------

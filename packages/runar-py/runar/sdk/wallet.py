@@ -17,6 +17,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from runar._ripemd160 import ripemd160_digest
+from runar.sdk.oppushtx import _bip143_preimage
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.types import TransactionData, TxInput, TxOutput, Utxo
@@ -432,7 +433,7 @@ class WalletSigner(Signer):
             )
         flag = sighash_type if sighash_type is not None else self.SIGHASH_ALL_FORKID
 
-        # 1. Compute BIP-143 preimage
+        # 1. Compute BIP-143 preimage (F-137: the SDK's one builder, in oppushtx)
         tx_bytes = bytes.fromhex(tx_hex)
         tx = _parse_raw_tx(tx_bytes)
         subscript_bytes = bytes.fromhex(subscript)
@@ -475,52 +476,6 @@ class WalletSigner(Signer):
 
 def _sha256d(data: bytes) -> bytes:
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
-
-
-def _bip143_preimage(
-    tx: dict,
-    input_index: int,
-    subscript: bytes,
-    satoshis: int,
-    sighash_type: int = 0x41,
-) -> bytes:
-    # hashPrevouts
-    prevouts = b''
-    for inp in tx['inputs']:
-        prevouts += inp['prev_txid_bytes'] + struct.pack('<I', inp['prev_output_index'])
-    hash_prevouts = _sha256d(prevouts)
-
-    # hashSequence
-    sequences = b''
-    for inp in tx['inputs']:
-        sequences += struct.pack('<I', inp['sequence'])
-    hash_sequence = _sha256d(sequences)
-
-    # hashOutputs
-    outputs_data = b''
-    for out in tx['outputs']:
-        outputs_data += struct.pack('<Q', out['satoshis'])
-        outputs_data += _encode_varint_bytes(len(out['script']))
-        outputs_data += out['script']
-    hash_outputs = _sha256d(outputs_data)
-
-    # Build preimage
-    inp = tx['inputs'][input_index]
-    preimage = b''
-    preimage += struct.pack('<I', tx['version'])
-    preimage += hash_prevouts
-    preimage += hash_sequence
-    preimage += inp['prev_txid_bytes']
-    preimage += struct.pack('<I', inp['prev_output_index'])
-    preimage += _encode_varint_bytes(len(subscript))
-    preimage += subscript
-    preimage += struct.pack('<Q', satoshis)
-    preimage += struct.pack('<I', inp['sequence'])
-    preimage += hash_outputs
-    preimage += struct.pack('<I', tx['locktime'])
-    preimage += struct.pack('<I', sighash_type)
-
-    return preimage
 
 
 def _parse_raw_tx(data: bytes) -> dict:
@@ -582,17 +537,6 @@ def _parse_raw_tx(data: bytes) -> dict:
         'outputs': outputs,
         'locktime': locktime,
     }
-
-
-def _encode_varint_bytes(n: int) -> bytes:
-    if n < 0xfd:
-        return bytes([n])
-    elif n <= 0xffff:
-        return b'\xfd' + struct.pack('<H', n)
-    elif n <= 0xffffffff:
-        return b'\xfe' + struct.pack('<I', n)
-    else:
-        return b'\xff' + struct.pack('<Q', n)
 
 
 def _parse_raw_tx_to_data(txid: str, raw_hex: str) -> TransactionData:

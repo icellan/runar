@@ -4,6 +4,8 @@ use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
 
+use super::oppushtx::{bip143_preimage, parse_raw_tx, sha256d};
+
 // ---------------------------------------------------------------------------
 // Signer trait
 // ---------------------------------------------------------------------------
@@ -117,7 +119,7 @@ impl Signer for LocalSigner {
 
         let tx_bytes = hex_to_bytes(tx_hex)
             .map_err(|e| format!("LocalSigner: invalid tx hex: {}", e))?;
-        let tx = parse_raw_tx(&tx_bytes)?;
+        let tx = parse_raw_tx(&tx_bytes).map_err(|e| format!("LocalSigner: {}", e))?;
 
         if input_index >= tx.inputs.len() {
             return Err(format!(
@@ -129,7 +131,8 @@ impl Signer for LocalSigner {
         let subscript_bytes = hex_to_bytes(subscript)
             .map_err(|e| format!("LocalSigner: invalid subscript hex: {}", e))?;
 
-        let sighash = bip143_sighash(&tx, input_index, &subscript_bytes, satoshis as u64, flag);
+        // F-137: the SDK's one BIP-143 builder (oppushtx.rs).
+        let sighash = sha256d(&bip143_preimage(&tx, input_index, &subscript_bytes, satoshis as u64, flag));
 
         let (sig, _) = self.signing_key.sign_prehash(&sighash)
             .map_err(|e| format!("LocalSigner: ECDSA signing failed: {}", e))?;
@@ -138,188 +141,6 @@ impl Signer for LocalSigner {
         let mut result = der_bytes.as_bytes().to_vec();
         result.push(flag as u8);
         Ok(bytes_to_hex(&result))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BIP-143 sighash computation
-// ---------------------------------------------------------------------------
-
-fn sha256d(data: &[u8]) -> [u8; 32] {
-    let first = Sha256::digest(data);
-    let second = Sha256::digest(first);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&second);
-    out
-}
-
-fn bip143_sighash(
-    tx: &ParsedTx,
-    input_index: usize,
-    subscript: &[u8],
-    satoshis: u64,
-    sig_hash_type: u32,
-) -> [u8; 32] {
-    // hashPrevouts = SHA256d(all outpoints)
-    let mut prevouts_data = Vec::new();
-    for inp in &tx.inputs {
-        prevouts_data.extend_from_slice(&inp.prev_txid_bytes);
-        prevouts_data.extend_from_slice(&inp.prev_output_index.to_le_bytes());
-    }
-    let hash_prevouts = sha256d(&prevouts_data);
-
-    // hashSequence = SHA256d(all sequences)
-    let mut sequence_data = Vec::new();
-    for inp in &tx.inputs {
-        sequence_data.extend_from_slice(&inp.sequence.to_le_bytes());
-    }
-    let hash_sequence = sha256d(&sequence_data);
-
-    // hashOutputs = SHA256d(all outputs)
-    let mut outputs_data = Vec::new();
-    for out in &tx.outputs {
-        outputs_data.extend_from_slice(&out.satoshis.to_le_bytes());
-        write_var_int(&mut outputs_data, out.script.len() as u64);
-        outputs_data.extend_from_slice(&out.script);
-    }
-    let hash_outputs = sha256d(&outputs_data);
-
-    // BIP-143 preimage
-    let input = &tx.inputs[input_index];
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(&tx.version.to_le_bytes());
-    preimage.extend_from_slice(&hash_prevouts);
-    preimage.extend_from_slice(&hash_sequence);
-    preimage.extend_from_slice(&input.prev_txid_bytes);
-    preimage.extend_from_slice(&input.prev_output_index.to_le_bytes());
-    write_var_int(&mut preimage, subscript.len() as u64);
-    preimage.extend_from_slice(subscript);
-    preimage.extend_from_slice(&satoshis.to_le_bytes());
-    preimage.extend_from_slice(&input.sequence.to_le_bytes());
-    preimage.extend_from_slice(&hash_outputs);
-    preimage.extend_from_slice(&tx.locktime.to_le_bytes());
-    preimage.extend_from_slice(&sig_hash_type.to_le_bytes());
-
-    sha256d(&preimage)
-}
-
-// ---------------------------------------------------------------------------
-// Minimal raw transaction parser
-// ---------------------------------------------------------------------------
-
-struct ParsedInput {
-    prev_txid_bytes: [u8; 32], // raw internal byte order
-    prev_output_index: u32,
-    sequence: u32,
-}
-
-struct ParsedOutput {
-    satoshis: u64,
-    script: Vec<u8>,
-}
-
-struct ParsedTx {
-    version: u32,
-    inputs: Vec<ParsedInput>,
-    outputs: Vec<ParsedOutput>,
-    locktime: u32,
-}
-
-fn parse_raw_tx(bytes: &[u8]) -> Result<ParsedTx, String> {
-    let mut offset = 0;
-
-    let read = |offset: &mut usize, n: usize| -> Result<&[u8], String> {
-        if *offset + n > bytes.len() {
-            return Err("LocalSigner: transaction hex too short".to_string());
-        }
-        let slice = &bytes[*offset..*offset + n];
-        *offset += n;
-        Ok(slice)
-    };
-
-    let read_u32_le = |offset: &mut usize| -> Result<u32, String> {
-        let b = read(offset, 4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-
-    let read_u64_le = |offset: &mut usize| -> Result<u64, String> {
-        let b = read(offset, 8)?;
-        Ok(u64::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]))
-    };
-
-    let read_var_int = |offset: &mut usize| -> Result<u64, String> {
-        let first = read(offset, 1)?[0];
-        match first {
-            0..=0xfc => Ok(first as u64),
-            0xfd => {
-                let b = read(offset, 2)?;
-                Ok(u16::from_le_bytes([b[0], b[1]]) as u64)
-            }
-            0xfe => {
-                let b = read(offset, 4)?;
-                Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64)
-            }
-            0xff => {
-                let b = read(offset, 8)?;
-                Ok(u64::from_le_bytes([
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                ]))
-            }
-        }
-    };
-
-    let version = read_u32_le(&mut offset)?;
-
-    let input_count = read_var_int(&mut offset)?;
-    let mut inputs = Vec::new();
-    for _ in 0..input_count {
-        let txid_slice = read(&mut offset, 32)?;
-        let mut prev_txid_bytes = [0u8; 32];
-        prev_txid_bytes.copy_from_slice(txid_slice);
-        let prev_output_index = read_u32_le(&mut offset)?;
-        let script_len = read_var_int(&mut offset)?;
-        let _ = read(&mut offset, script_len as usize)?; // skip scriptSig
-        let sequence = read_u32_le(&mut offset)?;
-        inputs.push(ParsedInput {
-            prev_txid_bytes,
-            prev_output_index,
-            sequence,
-        });
-    }
-
-    let output_count = read_var_int(&mut offset)?;
-    let mut outputs = Vec::new();
-    for _ in 0..output_count {
-        let satoshis = read_u64_le(&mut offset)?;
-        let script_len = read_var_int(&mut offset)?;
-        let script = read(&mut offset, script_len as usize)?.to_vec();
-        outputs.push(ParsedOutput { satoshis, script });
-    }
-
-    let locktime = read_u32_le(&mut offset)?;
-
-    Ok(ParsedTx {
-        version,
-        inputs,
-        outputs,
-        locktime,
-    })
-}
-
-fn write_var_int(buf: &mut Vec<u8>, n: u64) {
-    if n < 0xfd {
-        buf.push(n as u8);
-    } else if n <= 0xffff {
-        buf.push(0xfd);
-        buf.extend_from_slice(&(n as u16).to_le_bytes());
-    } else if n <= 0xffff_ffff {
-        buf.push(0xfe);
-        buf.extend_from_slice(&(n as u32).to_le_bytes());
-    } else {
-        buf.push(0xff);
-        buf.extend_from_slice(&n.to_le_bytes());
     }
 }
 
