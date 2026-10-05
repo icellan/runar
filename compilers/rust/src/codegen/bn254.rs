@@ -1117,11 +1117,30 @@ pub(crate) fn bn254_g1_negate(t: &mut BN254Tracker, point_name: &str, result_nam
 // Public emit functions -- entry points called from stack.rs
 // ===========================================================================
 
+/// bn254_emit_field_canon_verify -- F-196: every operand of the five public
+/// BN254 scalar-field entry points must BE a field element, aborting form.
+/// Port of Go's bn254EmitFieldCanonVerify (the R-119 gate for this field):
+/// before it, bn254FieldAdd(-1, 0) returned -1 through the bare-OP_MOD
+/// reduction, and p was accepted as a second spelling of 0. Emitted before
+/// push_prime_cache.
+fn bn254_emit_field_canon_verify(t: &mut BN254Tracker, names: &[&str]) {
+    for n in names {
+        t.copy_to_top(n, "_bn_fcv");
+        t.push_int("_bn_fcv_lo", 0);
+        t.push_field_p("_bn_fcv_p");
+        t.raw_block(&["_bn_fcv", "_bn_fcv_lo", "_bn_fcv_p"], None, |e| {
+            e(StackOp::Opcode("OP_WITHIN".into()));
+            e(StackOp::Opcode("OP_VERIFY".into()));
+        });
+    }
+}
+
 /// emit_bn254_field_add: BN254 field addition.
 /// Stack in: [..., a, b] (b on top)
 /// Stack out: [..., (a + b) mod p]
 pub fn emit_bn254_field_add(emit: &mut dyn FnMut(StackOp)) {
     let mut t = BN254Tracker::new(&["a", "b"], emit);
+    bn254_emit_field_canon_verify(&mut t, &["a", "b"]);
     t.push_prime_cache();
     bn254_field_add(&mut t, "a", "b", "result");
     t.pop_prime_cache();
@@ -1132,6 +1151,7 @@ pub fn emit_bn254_field_add(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [..., (a - b) mod p]
 pub fn emit_bn254_field_sub(emit: &mut dyn FnMut(StackOp)) {
     let mut t = BN254Tracker::new(&["a", "b"], emit);
+    bn254_emit_field_canon_verify(&mut t, &["a", "b"]);
     t.push_prime_cache();
     bn254_field_sub(&mut t, "a", "b", "result");
     t.pop_prime_cache();
@@ -1142,6 +1162,7 @@ pub fn emit_bn254_field_sub(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [..., (a * b) mod p]
 pub fn emit_bn254_field_mul(emit: &mut dyn FnMut(StackOp)) {
     let mut t = BN254Tracker::new(&["a", "b"], emit);
+    bn254_emit_field_canon_verify(&mut t, &["a", "b"]);
     t.push_prime_cache();
     bn254_field_mul(&mut t, "a", "b", "result");
     t.pop_prime_cache();
@@ -1152,6 +1173,7 @@ pub fn emit_bn254_field_mul(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [..., a^(p-2) mod p]
 pub fn emit_bn254_field_inv(emit: &mut dyn FnMut(StackOp)) {
     let mut t = BN254Tracker::new(&["a"], emit);
+    bn254_emit_field_canon_verify(&mut t, &["a"]);
     t.push_prime_cache();
     bn254_field_inv(&mut t, "a", "result");
     t.pop_prime_cache();
@@ -1162,6 +1184,7 @@ pub fn emit_bn254_field_inv(emit: &mut dyn FnMut(StackOp)) {
 /// Stack out: [..., (p - a) mod p]
 pub fn emit_bn254_field_neg(emit: &mut dyn FnMut(StackOp)) {
     let mut t = BN254Tracker::new(&["a"], emit);
+    bn254_emit_field_canon_verify(&mut t, &["a"]);
     t.push_prime_cache();
     bn254_field_neg(&mut t, "a", "result");
     t.pop_prime_cache();

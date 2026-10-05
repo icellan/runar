@@ -309,6 +309,9 @@ const FAMILIES = [
   // the Python port used to compile it with 7 of 8 root limbs dropped — is the
   // describe block below.
   { file: 'GoOnlyPoseidon2Merkle.runar.ts', family: 'Poseidon2 Merkle', builtin: 'merkleRootPoseidon2KB' },
+  // F-196: all five scalar-field entry points, which GoOnlyBn254 (Mul only)
+  // does not reach. Its execution leg is the F-196 describe block below.
+  { file: 'GoOnlyBn254Field.runar.ts', family: 'BN254 field', builtin: 'bn254FieldAdd' },
 ] as const;
 
 const available = TIERS.filter((t) => t.cmd !== null);
@@ -572,6 +575,140 @@ describe('F-091: bn254G1Add omega-partner pair — executed on @bsv/sdk Spend', 
           const r = spend(lock, a, b, expected);
           expect(r.ok, `${tier.id} ${name} == ${label} must be REJECTED`).toBe(false);
           expect(r.err, `${tier.id} ${name} == ${label}: the builtin must abort, not mismatch`).toMatch(/OP_VERIFY/);
+        }
+      }
+    });
+  }
+});
+
+/**
+ * F-196 — operand canonicity of the five raw BN254 scalar-field builtins,
+ * EXECUTED in every tier.
+ *
+ * Their operands are unlock arguments. Before the gate, every tier fed them
+ * straight into OP_ADD / OP_MUL and a bare OP_MOD — which keeps the sign of the
+ * dividend — so `bn254FieldAdd(-1, 0) === -1` SPENT, and `bn254FieldAdd(p, 0)
+ * === 0` spent as a second spelling of 0. Each entry point now runs
+ * `<0> <p> OP_WITHIN OP_VERIFY` on every operand first.
+ *
+ * What this proves: for each tier that compiles the probe, on @bsv/sdk's Spend,
+ * an operand of -1, of exactly p, or of 5+p in ANY position of ANY of the five
+ * builtins ABORTS inside the builtin (OP_VERIFY, not a mismatch on the final
+ * equality), whatever `expected` the spender supplies — the escaped value or
+ * the reduced residue; and canonical operands up to p-1 are ACCEPTED against
+ * results computed here with bigint arithmetic, so an over-strict gate reddens.
+ * What it does not prove: anything about the Groth16 / pairing paths, which use
+ * the internal field helpers and are deliberately left ungated; nor tiers that
+ * refuse the probe (Java), which the parity leg above scores.
+ */
+describe('F-196: bn254Field* operand canonicity — executed on @bsv/sdk Spend', () => {
+  const P: bigint = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
+  const mod = (a: bigint) => ((a % P) + P) % P;
+  const pow = (b: bigint, e: bigint): bigint => {
+    let r = 1n;
+    let x = mod(b);
+    while (e > 0n) {
+      if (e & 1n) r = (r * x) % P;
+      x = (x * x) % P;
+      e >>= 1n;
+    }
+    return r;
+  };
+
+  /** Minimal-push encoding of a script number (push-only, minimal pushes). */
+  const pushNum = (n: bigint): string => {
+    if (n === 0n) return '00';
+    if (n === -1n) return '4f';
+    if (n >= 1n && n <= 16n) return (0x50 + Number(n)).toString(16);
+    const neg = n < 0n;
+    let abs = neg ? -n : n;
+    const bytes: number[] = [];
+    while (abs > 0n) {
+      bytes.push(Number(abs & 0xffn));
+      abs >>= 8n;
+    }
+    if (bytes[bytes.length - 1]! & 0x80) bytes.push(neg ? 0x80 : 0x00);
+    else if (neg) bytes[bytes.length - 1]! |= 0x80;
+    if (bytes.length >= 0x4c) throw new Error('pushNum: test values stay below 76 bytes');
+    return bytes.length.toString(16).padStart(2, '0') + bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+  };
+
+  // Public methods in declaration order — the dispatch index.
+  const M = { add: 0, sub: 1, mul: 2, inv: 3, neg: 4 } as const;
+  type Op = keyof typeof M;
+  const ref: Record<Op, (...a: bigint[]) => bigint> = {
+    add: (a, b) => mod(a! + b!),
+    sub: (a, b) => mod(a! - b!),
+    mul: (a, b) => mod(a! * b!),
+    inv: (a) => pow(a!, P - 2n),
+    neg: (a) => mod(-a!),
+  };
+
+  function spend(lockHex: string, op: Op, args: bigint[], expected: bigint): { ok: boolean; err: string } {
+    const unlock = [...args, expected].map(pushNum).join('') + pushNum(BigInt(M[op]));
+    try {
+      const ok = newConsensusSpend({
+        ...CONSENSUS_SPEND_CONTEXT,
+        lockingScript: LockingScript.fromHex(lockHex),
+        unlockingScript: UnlockingScript.fromHex(unlock),
+        otherInputs: [],
+        outputs: [],
+      }).validate();
+      return { ok, err: '' };
+    } catch (e) {
+      return { ok: false, err: String((e as Error).message) };
+    }
+  }
+
+  const PM1 = P - 1n;
+  const BAD: Array<[string, bigint]> = [['-1', -1n], ['p', P], ['5+p', P + 5n]];
+
+  const src = join(DIR, 'GoOnlyBn254Field.runar.ts');
+  for (const tier of available) {
+    it(`${tier.id}: non-canonical operands abort, canonical operands near p are accepted`, () => {
+      const v = verdict(tier, src);
+      if (!v.ok) {
+        expect(tier.id, `${tier.id} refused the probe:\n${v.diag.slice(0, 600)}`).toBe('java');
+        return;
+      }
+      const lock = v.hex;
+
+      // CONTROL WITH TEETH: honest spends against independently computed results.
+      const accepted: Array<[Op, bigint[]]> = [
+        ['add', [PM1, PM1]], ['add', [PM1, 1n]], ['add', [0n, 0n]],
+        ['sub', [0n, PM1]], ['sub', [0n, 1n]], ['sub', [PM1, PM1]],
+        ['mul', [PM1, PM1]], ['mul', [PM1, 2n]], ['mul', [P - 2n, P - 3n]],
+        ['inv', [PM1]], ['inv', [2n]],
+        ['neg', [0n]], ['neg', [1n]], ['neg', [PM1]],
+      ];
+      for (const [op, args] of accepted) {
+        const r = spend(lock, op, args, ref[op](...args));
+        expect(r.ok, `${tier.id} ${op}(${args.join(', ')}) must be accepted: ${r.err}`).toBe(true);
+      }
+
+      // The finding, verbatim: bn254FieldAdd(-1, 0) used to return -1.
+      for (const expected of [-1n, PM1]) {
+        const r = spend(lock, 'add', [-1n, 0n], expected);
+        expect(r.ok, `${tier.id} add(-1, 0) == ${expected} must be REJECTED`).toBe(false);
+        expect(r.err, `${tier.id} add(-1, 0): the builtin must abort`).toMatch(/OP_VERIFY/);
+      }
+
+      for (const op of ['add', 'sub', 'mul', 'inv', 'neg'] as const) {
+        const arity = op === 'inv' || op === 'neg' ? 1 : 2;
+        for (let pos = 0; pos < arity; pos++) {
+          for (const [label, bad] of BAD) {
+            const args = arity === 1 ? [bad] : pos === 0 ? [bad, 3n] : [3n, bad];
+            // Offer both the reduced residue and, for add / mul, the value the
+            // ungated bare OP_MOD returned (sign of the dividend, which is JS
+            // bigint `%`); the gate must abort either way.
+            const escaped =
+              op === 'add' ? (args[0]! + args[1]!) % P : op === 'mul' ? (args[0]! * args[1]!) % P : ref[op](...args);
+            for (const expected of [ref[op](...args), escaped]) {
+              const r = spend(lock, op, args, expected);
+              expect(r.ok, `${tier.id} ${op} with operand ${pos} = ${label} must be REJECTED`).toBe(false);
+              expect(r.err, `${tier.id} ${op} operand ${pos} = ${label}: must abort in the gate`).toMatch(/OP_VERIFY/);
+            }
+          }
         }
       }
     });

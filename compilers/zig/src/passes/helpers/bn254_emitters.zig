@@ -1112,31 +1112,52 @@ fn g1Negate(t: *BN254Tracker, point_name: []const u8, result_name: []const u8) !
 // Public emit entry points
 // ===========================================================================
 
+/// bn254EmitFieldCanonVerify -- F-196: every operand of the five public BN254
+/// scalar-field entry points must BE a field element, aborting form. Port of
+/// Go's bn254EmitFieldCanonVerify (the R-119 gate for this field): before it,
+/// bn254FieldAdd(-1, 0) returned -1 through the bare-OP_MOD reduction, and p
+/// was accepted as a second spelling of 0. Emitted before pushPrimeCache.
+fn bn254EmitFieldCanonVerify(t: *BN254Tracker, names: []const []const u8) !void {
+    for (names) |n| {
+        try t.copyToTop(n, "_bn_fcv");
+        try t.pushInt("_bn_fcv_lo", 0);
+        try t.pushFieldP("_bn_fcv_p");
+        t.popNames(3);
+        try t.emitOpcode("OP_WITHIN");
+        try t.emitOpcode("OP_VERIFY");
+    }
+}
+
 fn emitBN254FieldAdd(t: *BN254Tracker) !void {
+    try bn254EmitFieldCanonVerify(t, &.{ "a", "b" });
     try t.pushPrimeCache();
     try fieldAdd(t, "a", "b", "result");
     try t.popPrimeCache();
 }
 
 fn emitBN254FieldSub(t: *BN254Tracker) !void {
+    try bn254EmitFieldCanonVerify(t, &.{ "a", "b" });
     try t.pushPrimeCache();
     try fieldSub(t, "a", "b", "result");
     try t.popPrimeCache();
 }
 
 fn emitBN254FieldMul(t: *BN254Tracker) !void {
+    try bn254EmitFieldCanonVerify(t, &.{ "a", "b" });
     try t.pushPrimeCache();
     try fieldMul(t, "a", "b", "result");
     try t.popPrimeCache();
 }
 
 fn emitBN254FieldInv(t: *BN254Tracker) !void {
+    try bn254EmitFieldCanonVerify(t, &.{ "a" });
     try t.pushPrimeCache();
     try fieldInv(t, "a", "result");
     try t.popPrimeCache();
 }
 
 fn emitBN254FieldNeg(t: *BN254Tracker) !void {
+    try bn254EmitFieldCanonVerify(t, &.{ "a" });
     try t.pushPrimeCache();
     try fieldNeg(t, "a", "result");
     try t.popPrimeCache();

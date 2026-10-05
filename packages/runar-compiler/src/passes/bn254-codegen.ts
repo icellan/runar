@@ -1112,12 +1112,32 @@ export function bn254G1Negate(
 // ===========================================================================
 
 /**
+ * bn254EmitFieldCanonVerify — F-196: every operand of the five public BN254
+ * scalar-field entry points must BE a field element, aborting form. Port of
+ * Go's bn254EmitFieldCanonVerify (the R-119 gate for this field): before it,
+ * bn254FieldAdd(-1, 0) returned -1 through the bare-OP_MOD reduction, and p
+ * was accepted as a second spelling of 0. Emitted before pushPrimeCache.
+ */
+function bn254EmitFieldCanonVerify(t: BN254Tracker, ...names: string[]): void {
+  for (const n of names) {
+    t.copyToTop(n, '_bn_fcv');
+    t.rawBlock(['_bn_fcv'], null, (e) => {
+      e({ op: 'push', value: 0n });
+      e({ op: 'push', value: BN254_P });
+      e({ op: 'opcode', code: 'OP_WITHIN' });
+      e({ op: 'opcode', code: 'OP_VERIFY' });
+    });
+  }
+}
+
+/**
  * emitBn254FieldAdd: BN254 field addition.
  * Stack in:  [..., a, b] (b on top)
  * Stack out: [..., (a + b) mod p]
  */
 export function emitBn254FieldAdd(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a', 'b'], emit);
+  bn254EmitFieldCanonVerify(t, 'a', 'b');
   t.pushPrimeCache();
   bn254FieldAdd(t, 'a', 'b', 'result');
   t.popPrimeCache();
@@ -1130,6 +1150,7 @@ export function emitBn254FieldAdd(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldSub(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a', 'b'], emit);
+  bn254EmitFieldCanonVerify(t, 'a', 'b');
   t.pushPrimeCache();
   bn254FieldSub(t, 'a', 'b', 'result');
   t.popPrimeCache();
@@ -1142,6 +1163,7 @@ export function emitBn254FieldSub(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldMul(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a', 'b'], emit);
+  bn254EmitFieldCanonVerify(t, 'a', 'b');
   t.pushPrimeCache();
   bn254FieldMul(t, 'a', 'b', 'result');
   t.popPrimeCache();
@@ -1154,6 +1176,7 @@ export function emitBn254FieldMul(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldInv(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a'], emit);
+  bn254EmitFieldCanonVerify(t, 'a');
   t.pushPrimeCache();
   bn254FieldInv(t, 'a', 'result');
   t.popPrimeCache();
@@ -1166,6 +1189,7 @@ export function emitBn254FieldInv(emit: (op: StackOp) => void): void {
  */
 export function emitBn254FieldNeg(emit: (op: StackOp) => void): void {
   const t = new BN254Tracker(['a'], emit);
+  bn254EmitFieldCanonVerify(t, 'a');
   t.pushPrimeCache();
   bn254FieldNeg(t, 'a', 'result');
   t.popPrimeCache();

@@ -1228,11 +1228,33 @@ func bn254G1Negate(t *BN254Tracker, pointName, resultName string) {
 // Public emit functions -- entry points called from stack.go
 // ===========================================================================
 
+// bn254EmitFieldCanonVerify -- F-196: every operand of the five public BN254
+// scalar-field entry points must BE a field element, aborting form. The R-119
+// gate (bbEmitCanonVerify) for this field: before it, bn254FieldAdd(-1, 0)
+// returned -1, because bn254FieldModPositive reduces with a bare OP_MOD that
+// keeps the dividend's sign, and bn254FieldAdd(p, 0) accepted p as a second
+// spelling of 0. Reject rather than reduce, on the INPUT, on the public entry
+// points only -- the internal helpers run inside the Groth16 / pairing code on
+// values that are canonical by construction or validated by their own
+// preambles. Emitted before PushPrimeCache, so the alt-stack is untouched.
+func bn254EmitFieldCanonVerify(t *BN254Tracker, names ...string) {
+	for _, n := range names {
+		t.copyToTop(n, "_bn_fcv")
+		t.rawBlock([]string{"_bn_fcv"}, "", func(e func(StackOp)) {
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(0)}})
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(bn254FieldP)}})
+			e(StackOp{Op: "opcode", Code: "OP_WITHIN"})
+			e(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+		})
+	}
+}
+
 // EmitBN254FieldAdd emits BN254 field addition.
 // Stack in: [..., a, b] (b on top)
 // Stack out: [..., (a + b) mod p]
 func EmitBN254FieldAdd(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a", "b"}, emit)
+	bn254EmitFieldCanonVerify(t, "a", "b")
 	t.PushPrimeCache()
 	bn254FieldAdd(t, "a", "b", "result")
 	t.PopPrimeCache()
@@ -1243,6 +1265,7 @@ func EmitBN254FieldAdd(emit func(StackOp)) {
 // Stack out: [..., (a - b) mod p]
 func EmitBN254FieldSub(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a", "b"}, emit)
+	bn254EmitFieldCanonVerify(t, "a", "b")
 	t.PushPrimeCache()
 	bn254FieldSub(t, "a", "b", "result")
 	t.PopPrimeCache()
@@ -1253,6 +1276,7 @@ func EmitBN254FieldSub(emit func(StackOp)) {
 // Stack out: [..., (a * b) mod p]
 func EmitBN254FieldMul(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a", "b"}, emit)
+	bn254EmitFieldCanonVerify(t, "a", "b")
 	t.PushPrimeCache()
 	bn254FieldMul(t, "a", "b", "result")
 	t.PopPrimeCache()
@@ -1263,6 +1287,7 @@ func EmitBN254FieldMul(emit func(StackOp)) {
 // Stack out: [..., a^(p-2) mod p]
 func EmitBN254FieldInv(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a"}, emit)
+	bn254EmitFieldCanonVerify(t, "a")
 	t.PushPrimeCache()
 	bn254FieldInv(t, "a", "result")
 	t.PopPrimeCache()
@@ -1273,6 +1298,7 @@ func EmitBN254FieldInv(emit func(StackOp)) {
 // Stack out: [..., (p - a) mod p]
 func EmitBN254FieldNeg(emit func(StackOp)) {
 	t := NewBN254Tracker([]string{"a"}, emit)
+	bn254EmitFieldCanonVerify(t, "a")
 	t.PushPrimeCache()
 	bn254FieldNeg(t, "a", "result")
 	t.PopPrimeCache()

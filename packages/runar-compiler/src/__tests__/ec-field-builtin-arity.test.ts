@@ -176,12 +176,17 @@ export class Probe extends SmartContract {
       // terminal-assert check, adding one fixed trailing OP_TRUE (0x51) to
       // every script below. The digests were recomputed from that new byte
       // sequence; the guard itself changed nothing upstream of the append.
+      //
+      // F-196 re-stamps exactly the TWO bn254 FIELD digests: the field gate is
+      // one `<0> <p> OP_WITHIN OP_VERIFY` per witness operand on the five
+      // bn254Field* entry points, the R-119 gate for this field. The other
+      // seven digests are the control that it stayed off every other emitter.
       ecAdd: 'fe483046de165476fe0cd40df10bc4b8ae2db27ae596915b86f4aa65c112b116',
       ecPointX: '53726c95e164ce324e32889a6934902ad9eadd2a25ba5bfe3c813408cbe3ca87',
       p256Add: 'e16038ed755d7263035dd43a51db9ca5c121c50b90b0546d382d86d57585e44c',
       p384Negate: '84da75c3c5ceef1ada452b1156d1af554ce2d54f731d2527cd21bdd05775b7f2',
-      bn254FieldAdd: '065a2aad768c61e156c7dc0b81414e3ff40738c0bb922b061843e79505a59c9b',
-      bn254FieldNeg: '45227c558ec2614faa0dab8c2263141edbaded60da98e3b6a60e079070c6500e',
+      bn254FieldAdd: '06a7ea3aa48ecd1cdd81aa2865055861b90a246547e3da832b943eded50bcd7a',
+      bn254FieldNeg: '10edf181d703fb76a418265963985ded6072cf9fef2a4b457ae73b392f84027a',
       bbFieldAdd: 'bfe2ec39a830c67de5dd52820078146d368123d98c29dea482e4f16c59117e10',
       bbExt4Inv0: '8fa60adfcd55207763200366a56dd212af876f76e41f737b6f384bcfc8932067',
       kbFieldInv: 'f2c21a3172a58d6633b74f7538f3f6fdf6a8a3702282eef44b4a161369eb53f1',

@@ -998,6 +998,29 @@ def _bn254_g1_negate(t: BN254Tracker, point_name: str, result_name: str) -> None
 # Public emit functions -- entry points called from stack.py
 # ===========================================================================
 
+def _bn254_emit_field_canon_verify(t: BN254Tracker, *names: str) -> None:
+    """F-196 -- every operand of the five public BN254 scalar-field entry points
+    must BE a field element, aborting form.
+
+    Port of Go's bn254EmitFieldCanonVerify (the R-119 gate for this field):
+    before it, bn254FieldAdd(-1, 0) returned -1 through the bare-OP_MOD
+    _bn254_field_mod_positive, and p was accepted as a second spelling of 0.
+    Emitted before push_prime_cache.
+    """
+    for n in names:
+        t.copy_to_top(n, "_bn_fcv")
+        t.push_int("_bn_fcv_lo", 0)
+        _bn254_push_field_p(t, "_bn_fcv_p")
+        t.raw_block(
+            ["_bn_fcv", "_bn_fcv_lo", "_bn_fcv_p"],
+            "",
+            lambda e: (
+                e(_make_stack_op(op="opcode", code="OP_WITHIN")),
+                e(_make_stack_op(op="opcode", code="OP_VERIFY")),
+            ),
+        )
+
+
 def emit_bn254_field_add(emit: Callable[["StackOp"], None]) -> None:
     """BN254 field addition.
 
@@ -1005,6 +1028,7 @@ def emit_bn254_field_add(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a + b) mod p]
     """
     t = BN254Tracker(["a", "b"], emit)
+    _bn254_emit_field_canon_verify(t, "a", "b")
     t.push_prime_cache()
     _bn254_field_add(t, "a", "b", "result")
     t.pop_prime_cache()
@@ -1017,6 +1041,7 @@ def emit_bn254_field_sub(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a - b) mod p]
     """
     t = BN254Tracker(["a", "b"], emit)
+    _bn254_emit_field_canon_verify(t, "a", "b")
     t.push_prime_cache()
     _bn254_field_sub(t, "a", "b", "result")
     t.pop_prime_cache()
@@ -1029,6 +1054,7 @@ def emit_bn254_field_mul(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (a * b) mod p]
     """
     t = BN254Tracker(["a", "b"], emit)
+    _bn254_emit_field_canon_verify(t, "a", "b")
     t.push_prime_cache()
     _bn254_field_mul(t, "a", "b", "result")
     t.pop_prime_cache()
@@ -1041,6 +1067,7 @@ def emit_bn254_field_inv(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., a^(p-2) mod p]
     """
     t = BN254Tracker(["a"], emit)
+    _bn254_emit_field_canon_verify(t, "a")
     t.push_prime_cache()
     _bn254_field_inv(t, "a", "result")
     t.pop_prime_cache()
@@ -1053,6 +1080,7 @@ def emit_bn254_field_neg(emit: Callable[["StackOp"], None]) -> None:
     Stack out: [..., (p - a) mod p]
     """
     t = BN254Tracker(["a"], emit)
+    _bn254_emit_field_canon_verify(t, "a")
     t.push_prime_cache()
     _bn254_field_neg(t, "a", "result")
     t.pop_prime_cache()
