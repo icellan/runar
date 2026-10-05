@@ -1712,3 +1712,89 @@ describe('Cross-compiler: a terminal read sees live state despite a var-length s
     }
   }, 180_000);
 });
+
+// ---------------------------------------------------------------------------
+// Mixed add/sub constant chain — 7 tiers, both fold modes
+// ---------------------------------------------------------------------------
+//
+// N-001. Zig alone carried peephole reassociation rules 29/30
+// (`PUSH a OP_ADD PUSH b OP_SUB -> PUSH(a-b) OP_ADD` and the sub/add mirror).
+// No other tier, TS included, has them, so `x + 5n - 3n` compiled to
+// `5293009c` in Zig and `55935394009c` in the other six. No conformance
+// fixture has the shape, which is why the golden suite stayed green.
+//
+// What this proves: for each mixed add/sub shape, every tier lowers the same
+// TS-produced ANF to the TS reference bytes, with the IR generated under fold
+// OFF and fold ON. The TS hex is also pinned literally so that all seven
+// drifting together still fails.
+// What it does not prove: that the shapes behave correctly on-chain (the
+// unrewritten opcodes are what every tier already emitted for these shapes),
+// or parity of the source-level frontends (covered by the conformance runner).
+// ---------------------------------------------------------------------------
+
+function reassocProbeSource(expr: string): string {
+  return `import { SmartContract, assert } from 'runar-lang';
+class Reassoc extends SmartContract {
+  readonly target: bigint;
+  constructor(target: bigint) { super(target); this.target = target; }
+  public unlock(x: bigint) { assert(${expr} == this.target); }
+}
+`;
+}
+
+const REASSOC_SHAPES = [
+  // PUSH5 ADD PUSH3 SUB <target> NUMEQUAL — Zig's removed rule 29 gave 52 93 (PUSH2 ADD).
+  { label: 'add then sub', expr: 'x + 5n - 3n', hex: '55935394009c' },
+  // PUSH3 SUB PUSH7 ADD — Zig's removed rule 30 gave PUSH4 ADD.
+  { label: 'sub then add', expr: 'x - 3n + 7n', hex: '53945793009c' },
+  // PUSH7 SUB PUSH3 ADD — Zig's removed rule 30 gave PUSH4 SUB.
+  { label: 'sub then add, a > b', expr: 'x - 7n + 3n', hex: '57945393009c' },
+] as const;
+
+const REASSOC_TIERS: { name: string; skip: boolean; run: (ir: string) => CompilerOutput }[] = [
+  { name: 'Go', skip: !hasGo, run: runGoCompiler },
+  { name: 'Rust', skip: !rustBinaryPath, run: runRustCompiler },
+  { name: 'Python', skip: !hasPython, run: runPythonCompiler },
+  { name: 'Zig', skip: !zigBinaryPath, run: runZigCompiler },
+  { name: 'Ruby', skip: !rubyScriptPath, run: runRubyCompiler },
+  { name: 'Java', skip: !javaJarPath, run: runJavaCompiler },
+];
+
+describe('Cross-compiler: a mixed add/sub constant chain is byte-identical in all 7 tiers', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-reassoc-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  for (const { label, expr, hex } of REASSOC_SHAPES) {
+    for (const foldOff of [true, false]) {
+      const mode = foldOff ? 'fold OFF' : 'fold ON';
+      it(`${label} (\`${expr}\`, ${mode}) matches the TS reference in every tier`, () => {
+        const name = `Reassoc-${label.replace(/[^a-z]+/gi, '-')}-${foldOff ? 'off' : 'on'}`;
+        const tsResult = compile(reassocProbeSource(expr), { disableConstantFolding: foldOff });
+        if (!tsResult.success) {
+          throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+        }
+        const tsHex = (tsResult.scriptHex as string).toLowerCase();
+        expect(tsHex, 'TS reference bytes moved').toBe(hex);
+
+        const irPath = join(tempDir, `${name}.anf.json`);
+        writeFileSync(irPath, anfToJson(tsResult.anf!));
+        for (const tier of REASSOC_TIERS) {
+          if (tier.skip) continue;
+          const tierHex = requireHex(tier.run(irPath), tier.name, name).toLowerCase();
+          expect(tierHex, `${tier.name} diverges from the TS reference`).toBe(tsHex);
+        }
+      }, 180_000);
+    }
+  }
+});

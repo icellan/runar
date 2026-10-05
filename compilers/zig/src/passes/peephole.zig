@@ -571,14 +571,16 @@ fn tryWindow4(allocator: Allocator, w: *const [4]Inst) !?Replacement4 {
     // raw_bytes is a hard peephole barrier — never rewrite across it.
     if (isRawBytes(w[0]) or isRawBytes(w[1]) or isRawBytes(w[2]) or isRawBytes(w[3])) return null;
 
-    // Rules 27-30 reassociate two constant operands across a pair of
-    // OP_ADD / OP_SUB. Like rules 24-26 they read at full precision and in
-    // either push representation (issue #162).
+    // Rules 27-28 reassociate two constant operands across a pair of
+    // OP_ADD / OP_SUB of the SAME kind. Like rules 24-26 they read at full
+    // precision and in either push representation (issue #162).
+    //
+    // Rules 29/30 (mixed OP_ADD / OP_SUB) were removed (N-001): no other tier,
+    // the TS reference included, implements them, so `x + 5n - 3n` emitted
+    // different bytes here than in the other six tiers.
     const add_add = isOp(w[1], .op_add) and isOp(w[3], .op_add);
     const sub_sub = isOp(w[1], .op_sub) and isOp(w[3], .op_sub);
-    const add_sub = isOp(w[1], .op_add) and isOp(w[3], .op_sub);
-    const sub_add = isOp(w[1], .op_sub) and isOp(w[3], .op_add);
-    if (!add_add and !sub_sub and !add_sub and !sub_add) return null;
+    if (!add_add and !sub_sub) return null;
 
     var a = (try pushOperand(allocator, w[0])) orelse return null;
     defer a.deinit();
@@ -587,29 +589,12 @@ fn tryWindow4(allocator: Allocator, w: *const [4]Inst) !?Replacement4 {
 
     var r = try const_arith.Big.init(allocator);
     defer r.deinit();
+    try r.add(&a, &b);
 
     // Rule 27: PUSH(a) + OP_ADD + PUSH(b) + OP_ADD -> PUSH(a+b) + OP_ADD
-    if (add_add) {
-        try r.add(&a, &b);
-        return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_add }, null, null };
-    }
-
     // Rule 28: PUSH(a) + OP_SUB + PUSH(b) + OP_SUB -> PUSH(a+b) + OP_SUB
-    if (sub_sub) {
-        try r.add(&a, &b);
-        return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_sub }, null, null };
-    }
-
-    // Rule 29: PUSH(a) + OP_ADD + PUSH(b) + OP_SUB -> PUSH(a-b) + OP_ADD (if a >= b)
-    //          or PUSH(b-a) + OP_SUB (if b > a)
-    // Rule 30: PUSH(a) + OP_SUB + PUSH(b) + OP_ADD -> PUSH(b-a) + OP_ADD (if b >= a)
-    //          or PUSH(a-b) + OP_SUB (if a > b)
-    if (add_sub) try r.sub(&a, &b) else try r.sub(&b, &a);
-    if (!const_arith.isNegative(r)) {
-        return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_add }, null, null };
-    }
-    r.abs();
-    return .{ try foldedPushBig(allocator, r), Inst{ .op = .op_sub }, null, null };
+    const op: Opcode = if (add_add) .op_add else .op_sub;
+    return .{ try foldedPushBig(allocator, r), Inst{ .op = op }, null, null };
 }
 
 // ============================================================================
@@ -938,10 +923,17 @@ test "rule 28: reassociate sub + sub" {
     try expectOps(&.{ .{ .push_int = 10 }, .{ .op = .op_sub } }, result);
 }
 
-// --- Rule 29: PUSH(a) + OP_ADD + PUSH(b) + OP_SUB ---
-test "rule 29: reassociate add + sub" {
+// --- Rules 29/30 (removed, N-001): PUSH(a) + OP_ADD + PUSH(b) + OP_SUB and
+// PUSH(a) + OP_SUB + PUSH(b) + OP_ADD are kept ---
+// Zig alone carried these reassociations; the TS reference and the other five
+// tiers have no such rule, so `x + 5n - 3n` compiled to 5293009c here and to
+// 55935394009c everywhere else (cross-tier hex parity break). These tests prove
+// the peephole leaves both mixed windows untouched. They do not prove the
+// emitted script for the whole contract matches the other tiers; that is pinned
+// by the 7-tier probe in packages/runar-compiler/src/__tests__/cross-compiler.test.ts.
+test "rule 29 (N-001): push + add + push + sub kept" {
     const alloc = testing.allocator;
-    // x + 5 - 3 => x + (5-3) = x + 2
+    // x + 5 - 3 stays as written: no tier but the old Zig folded it to x + 2.
     const input = [_]Inst{
         .{ .push_int = 5 },
         .{ .op = .op_add },
@@ -950,13 +942,12 @@ test "rule 29: reassociate add + sub" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try expectOps(&.{ .{ .push_int = 2 }, .{ .op = .op_add } }, result);
+    try expectOps(&input, result);
 }
 
-// --- Rule 30: PUSH(a) + OP_SUB + PUSH(b) + OP_ADD ---
-test "rule 30: reassociate sub + add" {
+test "rule 30 (N-001): push + sub + push + add kept" {
     const alloc = testing.allocator;
-    // x - 3 + 7 => x + (7-3) = x + 4
+    // x - 3 + 7 stays as written: no tier but the old Zig folded it to x + 4.
     const input = [_]Inst{
         .{ .push_int = 3 },
         .{ .op = .op_sub },
@@ -965,7 +956,21 @@ test "rule 30: reassociate sub + add" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try expectOps(&.{ .{ .push_int = 4 }, .{ .op = .op_add } }, result);
+    try expectOps(&input, result);
+}
+
+test "rule 30 (N-001): push + sub + push + add kept when a > b" {
+    const alloc = testing.allocator;
+    // The old b < a arm rewrote this to PUSH(4) OP_SUB.
+    const input = [_]Inst{
+        .{ .push_int = 7 },
+        .{ .op = .op_sub },
+        .{ .push_int = 3 },
+        .{ .op = .op_add },
+    };
+    const result = try optimizeOps(alloc, &input);
+    defer alloc.free(result);
+    try expectOps(&input, result);
 }
 
 // --- Fixed-point iteration ---
@@ -985,11 +990,11 @@ test "fixed-point: cascading optimizations" {
     try testing.expectEqual(@as(usize, 0), result.len);
 }
 
-test "fixed-point: reassociation then identity" {
+test "fixed-point (N-001): equal add/sub constants are not cancelled" {
     const alloc = testing.allocator;
-    // PUSH(5) OP_ADD PUSH(5) OP_SUB
-    // Rule 29: diff = 5-5 = 0 -> PUSH(0) OP_ADD
-    // PUSH(0) OP_ADD is then KEPT (F-001: OP_ADD validates/normalises x).
+    // PUSH(5) OP_ADD PUSH(5) OP_SUB used to become PUSH(0) OP_ADD via the
+    // removed rule 29. With no mixed-window reassociation (matching TS) the
+    // sequence is left exactly as written.
     const input = [_]Inst{
         .{ .push_int = 5 },
         .{ .op = .op_add },
@@ -998,7 +1003,7 @@ test "fixed-point: reassociation then identity" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try expectOps(&.{ .{ .push_int = 0 }, .{ .op = .op_add } }, result);
+    try expectOps(&input, result);
 }
 
 // --- No-op on already optimal code ---
@@ -1067,12 +1072,11 @@ test "greedy: window 4 takes priority" {
     try expectOps(&.{ .{ .push_int = 5 }, .{ .op = .op_add } }, result);
 }
 
-// --- Reassociation resulting in push(1) triggers further optimization ---
-test "fixed-point: reassociation yields push(1) then 1add" {
+// --- A mixed add/sub window whose difference is 1 is NOT turned into OP_1ADD ---
+test "fixed-point (N-001): mixed add/sub with difference 1 stays unfolded" {
     const alloc = testing.allocator;
-    // PUSH(3) OP_ADD PUSH(2) OP_SUB
-    // Rule 29: 3-2=1 -> PUSH(1) OP_ADD
-    // Rule 4: PUSH(1) OP_ADD -> OP_1ADD
+    // PUSH(3) OP_ADD PUSH(2) OP_SUB used to cascade through the removed
+    // rule 29 (-> PUSH(1) OP_ADD) into rule 4 (-> OP_1ADD). TS keeps it as is.
     const input = [_]Inst{
         .{ .push_int = 3 },
         .{ .op = .op_add },
@@ -1081,7 +1085,7 @@ test "fixed-point: reassociation yields push(1) then 1add" {
     };
     const result = try optimizeOps(alloc, &input);
     defer alloc.free(result);
-    try expectOps(&.{.{ .op = .op_1add }}, result);
+    try expectOps(&input, result);
 }
 
 // --- Empty input ---
