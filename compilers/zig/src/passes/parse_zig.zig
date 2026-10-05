@@ -804,30 +804,51 @@ const Parser = struct {
             if (self.parseStatement()) |s| {
                 // Merge `var i: i64 = 0; while (i < N) : (i += 1) { ... }` into a single for_stmt
                 // by patching the init_value from the preceding let_decl.
-                if (s == .for_stmt and stmts.items.len > 0) {
-                    const last = &stmts.items[stmts.items.len - 1];
-                    if (last.* == .let_decl) {
-                        const ld = last.let_decl;
-                        if (std.mem.eql(u8, ld.name, s.for_stmt.var_name)) {
-                            // N-138: a negated literal is a literal.
-                            // N-137: a declaration whose value is not a literal
-                            // at all leaves the start unknown, which the
-                            // unrolled loop model cannot represent.
-                            var init_val: i64 = 0;
-                            var init_const = true;
-                            if (ld.value) |v| {
-                                if (loopStartLiteral(v)) |n| init_val = n else {
-                                    init_const = false;
-                                }
+                //
+                // N-008: fold exactly as the reference (01-parse-zig.ts) does —
+                // only when the preceding statement declares the variable the
+                // UPDATE advances — and otherwise keep its `__while_no_init`
+                // placeholder iterator, which the condition never tests, so
+                // validate.zig refuses the loop with the reference's sentence.
+                // This tier used to fold on the name the CONDITION tests and,
+                // when nothing folded, keep that name with a start of 0: a
+                // non-adjacent `var i = 3;` compiled from 0, a silent
+                // miscompile every other tier refuses.
+                if (s == .for_stmt) {
+                    const upd_name = whileUpdateTargetName(s.for_stmt);
+                    const last: ?*Statement = if (stmts.items.len > 0) &stmts.items[stmts.items.len - 1] else null;
+                    if (last != null and last.?.* == .let_decl and upd_name != null and
+                        std.mem.eql(u8, last.?.let_decl.name, upd_name.?))
+                    {
+                        const ld = last.?.let_decl;
+                        // N-138: a negated literal is a literal.
+                        // N-137: a declaration whose value is not a literal
+                        // at all leaves the start unknown, which the
+                        // unrolled loop model cannot represent.
+                        var init_val: i64 = 0;
+                        var init_const = true;
+                        if (ld.value) |v| {
+                            if (loopStartLiteral(v)) |n| init_val = n else {
+                                init_const = false;
                             }
-                            stmts.items.len -= 1; // pop the let_decl
-                            var merged = s.for_stmt;
-                            merged.init_value = init_val;
-                            merged.init_is_const = init_const;
-                            stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
-                            continue;
                         }
+                        stmts.items.len -= 1; // pop the let_decl
+                        var merged = s.for_stmt;
+                        merged.init_value = init_val;
+                        merged.init_is_const = init_const;
+                        // The folded declaration is the iterator. A
+                        // condition naming some other variable does not
+                        // test it.
+                        if (!std.mem.eql(u8, merged.var_name, ld.name)) merged.cond_tests_iter = false;
+                        merged.var_name = ld.name;
+                        stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
+                        continue;
                     }
+                    var unfolded = s.for_stmt;
+                    unfolded.var_name = "__while_no_init";
+                    unfolded.cond_tests_iter = false;
+                    stmts.append(self.allocator, .{ .for_stmt = unfolded }) catch {};
+                    continue;
                 }
                 stmts.append(self.allocator, s) catch {};
             }
@@ -961,6 +982,9 @@ const Parser = struct {
         // recognise used to stay at 0 and compile a loop that runs zero times.
         var bound_is_const: bool = false;
         var bound_ident: ?[]const u8 = null;
+        // N-008: see `ForStmt.cond_lhs_name`.
+        var cond_lhs_name: ?[]const u8 = null;
+        if (cond == .binary_op and cond.binary_op.left == .identifier) cond_lhs_name = cond.binary_op.left.identifier;
         switch (cond) {
             .binary_op => |bop| {
                 if (bop.op == .lt or bop.op == .lte) {
@@ -1074,9 +1098,21 @@ const Parser = struct {
             .inclusive = inclusive,
             .cond_tests_iter = cond_tests_iter,
             .update = update,
+            .cond_lhs_name = cond_lhs_name,
             .body = body,
             .source_loc = loc,
         } };
+    }
+
+    /// N-008: the variable a while loop's continue expression advances — the
+    /// name the reference folds the preceding declaration on — or null when
+    /// the loop has no continue expression this parser records.
+    fn whileUpdateTargetName(f: types.ForStmt) ?[]const u8 {
+        const u = f.update orelse return null;
+        return switch (u.*) {
+            .assign => |a| if (a.target_is_property) null else a.target,
+            else => null,
+        };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

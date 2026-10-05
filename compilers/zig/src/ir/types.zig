@@ -354,7 +354,12 @@ pub const MAX_LOOP_COUNT: i64 = 10_000;
 /// anything but the iterator; the range-based surfaces (`for i in 0..N`,
 /// `range(N)`, `while (c) : (i += 1)`) test it by construction and keep the
 /// `true` default.
-pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = false, bound_ident: ?[]const u8 = null, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, source_loc: ?SourceLocation = null };
+/// N-008: `cond_lhs_name` is the identifier the condition's left-hand side
+/// names, when it is one. Only the `.runar.zig` while parser sets it: there
+/// `var_name` becomes the reference's `__while_no_init` placeholder when no
+/// adjacent declaration folds in, and the reference's update rule still lets
+/// the update advance the variable the condition tests.
+pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, descending: bool = false, inclusive: bool = false, bound_is_const: bool = false, bound_ident: ?[]const u8 = null, init_is_const: bool = true, cond_tests_iter: bool = true, update: ?*const Statement = null, header_requires_update: bool = false, cond_lhs_name: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
 
 pub const Expression = union(enum) {

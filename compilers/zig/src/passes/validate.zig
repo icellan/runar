@@ -1653,7 +1653,11 @@ fn validateStatement(
             // records which of the two shapes produced the null, and only the
             // implied-step surfaces are exempt.
             if (f.update) |u| {
-                if (!isRepresentableForUpdate(f.var_name, u.*)) {
+                // N-008: as in the reference, the update may advance the
+                // declared iterator or the variable the condition tests (an
+                // unfolded `.runar.zig` while carries the placeholder iterator).
+                const via_cond = if (f.cond_lhs_name) |c| isRepresentableForUpdate(c, u.*) else false;
+                if (!isRepresentableForUpdate(f.var_name, u.*) and !via_cond) {
                     try errors.append(allocator, .{
                         .message = loop_update_diagnostic,
                         .severity = .@"error",
