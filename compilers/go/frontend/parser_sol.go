@@ -679,7 +679,7 @@ func (p *solParser) parseSolFixedArraySuffix(base TypeNode) TypeNode {
 func (p *solParser) parseSolConstructor(properties []PropertyNode) MethodNode {
 	loc := p.loc()
 	p.expectIdent("constructor")
-	params := p.parseSolParams()
+	params := p.parseSolParams(true)
 	body := p.parseSolBlock()
 
 	// Build proper constructor body with super() call and assignments
@@ -978,7 +978,7 @@ func (p *solParser) parseFunction() MethodNode {
 	nameTok := p.expect(solTokIdent)
 	name := nameTok.value
 
-	params := p.parseSolParams()
+	params := p.parseSolParams(false)
 
 	// Parse visibility modifiers
 	visibility := "private"
@@ -1022,7 +1022,7 @@ func (p *solParser) parseFunction() MethodNode {
 // Parameter parsing: (Type name, Type name, ...)
 // ---------------------------------------------------------------------------
 
-func (p *solParser) parseSolParams() []ParamNode {
+func (p *solParser) parseSolParams(stripUnderscore bool) []ParamNode {
 	p.expect(solTokLParen)
 	var params []ParamNode
 	for !p.check(solTokRParen) && !p.check(solTokEOF) {
@@ -1037,8 +1037,13 @@ func (p *solParser) parseSolParams() []ParamNode {
 
 		nameTok := p.expect(solTokIdent)
 		paramName := nameTok.value
-		// Strip leading underscore if present (Solidity convention)
-		cleanName := strings.TrimPrefix(paramName, "_")
+		// Strip leading underscore (Solidity convention) for CONSTRUCTOR
+		// params only, whose body parseSolConstructor renames. Method params
+		// keep their name verbatim, as in TS 01-parse-sol.ts (N-142).
+		cleanName := paramName
+		if stripUnderscore {
+			cleanName = strings.TrimPrefix(paramName, "_")
+		}
 
 		params = append(params, ParamNode{
 			Name: cleanName,

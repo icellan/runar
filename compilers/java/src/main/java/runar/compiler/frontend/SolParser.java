@@ -703,7 +703,7 @@ public final class SolParser {
         MethodNode parseSolConstructor(List<PropertyNode> properties) {
             SourceLocation location = loc();
             expectIdent("constructor");
-            List<ParamNode> params = parseSolParams();
+            List<ParamNode> params = parseSolParams(true);
             List<Statement> body = parseSolBlock();
 
             List<Statement> constructorBody = new ArrayList<>();
@@ -767,7 +767,7 @@ public final class SolParser {
             Token nameTok = expect(TOK_IDENT);
             String name = nameTok.value;
 
-            List<ParamNode> params = parseSolParams();
+            List<ParamNode> params = parseSolParams(false);
 
             Visibility visibility = Visibility.PRIVATE;
             while (checkIdent("public") || checkIdent("private")
@@ -798,7 +798,7 @@ public final class SolParser {
 
         // ---- Parameter list -------------------------------------------
 
-        List<ParamNode> parseSolParams() {
+        List<ParamNode> parseSolParams(boolean stripUnderscore) {
             expect(TOK_LPAREN);
             List<ParamNode> params = new ArrayList<>();
 
@@ -813,7 +813,11 @@ public final class SolParser {
 
                 Token nameTok = expect(TOK_IDENT);
                 String paramName = nameTok.value;
-                if (paramName.startsWith("_")) {
+                // Strip leading underscore (Solidity convention) for
+                // CONSTRUCTOR params only, whose body parseSolConstructor
+                // renames. Method params keep their name verbatim, as in TS
+                // 01-parse-sol.ts (N-142).
+                if (stripUnderscore && paramName.startsWith("_")) {
                     paramName = paramName.substring(1);
                 }
 

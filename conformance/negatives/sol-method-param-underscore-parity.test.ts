@@ -21,15 +21,13 @@ import { Tier, buildSourceTiers } from './tier-harness.js';
  *     different script came out;
  *   - INTER is both at once.
  *
- * Go, Zig and Java share that root cause (same unconditional strip in their
- * .sol param parser) and are queued as follow-ups outside F-200. They run
- * under `it.fails`, so the moment one is fixed its case goes red and must be
- * moved into the parity set by deleting it from QUEUED.
+ * Go, Zig and Java shared that root cause (same unconditional strip in their
+ * .sol param parser) and were fixed the same way under N-142, so every tier
+ * now runs as a plain `it`.
  *
- * What this proves: every available tier's CLI (fold-ON default) outside
- * QUEUED compiles all three shapes to the TS reference bytes, pinned by
- * sha256 / literal so the tiers drifting together still fails; each QUEUED
- * tier still diverges from those bytes.
+ * What this proves: every available tier's CLI (fold-ON default) compiles all
+ * three shapes to the TS reference bytes, pinned by sha256 / literal so the
+ * tiers drifting together still fails.
  * What it does NOT prove: on-chain spend behaviour of the bytes, fold-OFF
  * output, or the other eight surfaces (their parsers have no `_` convention).
  */
@@ -90,9 +88,6 @@ contract F200Inter is StatefulSmartContract {
   },
 };
 
-/** Tiers with the same unconditional strip, queued outside F-200. */
-const QUEUED = new Set(['go', 'zig', 'java']);
-
 function compileSha(tier: Tier, file: string): string {
   const r = spawnSync(tier.cmd!, [...tier.prefix, ...tier.argsFor(file)], {
     cwd: tier.cwd,
@@ -124,8 +119,7 @@ describe('F-200 .runar.sol method param leading underscore — seven-tier positi
 
   for (const [name, { src, sha256 }] of Object.entries(SHAPES)) {
     for (const tier of TIERS) {
-      const run = QUEUED.has(tier.id) ? it.fails : it;
-      run(`${tier.id} compiles ${name} to the TS reference bytes`, () => {
+      it(`${tier.id} compiles ${name} to the TS reference bytes`, () => {
         const p = join(dir, name);
         writeFileSync(p, src);
         expect(compileSha(tier, p)).toBe(sha256);

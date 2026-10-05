@@ -737,7 +737,7 @@ const Parser = struct {
 
     fn parseSolConstructor(self: *Parser, properties: []const PropertyNode) ConstructorNode {
         _ = self.bump(); // consume 'constructor'
-        const params = self.parseSolParams();
+        const params = self.parseSolParams(true);
         const body = self.parseBlock();
 
         // Build super_args from params
@@ -1114,7 +1114,7 @@ const Parser = struct {
             self.addError("expected function name");
         }
 
-        const params = self.parseSolParams();
+        const params = self.parseSolParams(false);
 
         // Parse visibility modifiers and skip 'returns (Type)' clauses
         var is_public = false;
@@ -1149,7 +1149,7 @@ const Parser = struct {
     // ---- Parameters: (Type name, Type name, ...) ----
     // Solidity style: type comes before name, strip leading underscores
 
-    fn parseSolParams(self: *Parser) []ParamNode {
+    fn parseSolParams(self: *Parser, strip_underscore: bool) []ParamNode {
         _ = self.expect(.lparen);
         var params: std.ArrayListUnmanaged(ParamNode) = .empty;
 
@@ -1176,8 +1176,10 @@ const Parser = struct {
             const name_tok = self.bump();
             const raw_name = name_tok.text;
 
-            // Strip leading underscore (Solidity convention)
-            const clean_name = if (raw_name.len > 1 and raw_name[0] == '_')
+            // Strip leading underscore (Solidity convention) for CONSTRUCTOR
+            // params only, whose body parseSolConstructor renames. Method
+            // params keep their name verbatim, as in TS 01-parse-sol.ts (N-142).
+            const clean_name = if (strip_underscore and raw_name.len > 1 and raw_name[0] == '_')
                 raw_name[1..]
             else
                 raw_name;

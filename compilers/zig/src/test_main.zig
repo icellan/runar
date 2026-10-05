@@ -83,6 +83,7 @@ test {
     _ = @import("tests/param_reassignment.zig");
     _ = @import("tests/shadowing_local_continuation_shape.zig");
     _ = @import("tests/sol_bare_property_write_continuation.zig");
+    _ = @import("tests/n142_sol_method_param_underscore.zig");
     _ = @import("tests/n059_fixed_array_write_continuation.zig");
     _ = @import("tests/r073_fixed_array_element_type.zig");
     _ = @import("tests/f110_affine_loop_consumption.zig");
