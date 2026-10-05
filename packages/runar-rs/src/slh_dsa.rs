@@ -945,6 +945,14 @@ pub fn slh_verify(params: &SlhParams, msg: &[u8], sig: &[u8], pk: &[u8]) -> bool
     let pk_seed = &pk[..n];
     let pk_root = &pk[n..2 * n];
 
+    // F-232: FIPS 205 fixes the signature length per parameter set at
+    // n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+    // enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+    // garbage or truncation) is rejected.
+    if sig.len() != n + k * (1 + a) * n + d * (len + hp) * n {
+        return false;
+    }
+
     // Parse signature
     let mut offset = 0;
     if sig.len() < n {
@@ -1018,6 +1026,9 @@ pub fn slh_verify(params: &SlhParams, msg: &[u8], sig: &[u8], pk: &[u8]) -> bool
 
         current_leaf_idx = (current_tree_idx & ((1u64 << hp) - 1)) as u32;
         current_tree_idx >>= hp;
+    }
+    if offset != sig.len() {
+        return false;
     }
 
     // Compare computed root to PK.root
@@ -1169,5 +1180,56 @@ mod tests {
         assert_eq!(kp.pk, pk, "keygen from the witness seeds must give the witness pubkey");
         let (msg, sig) = honest.unwrap();
         assert!(slh_sign(params, &msg, &kp.sk) == sig, "slh_sign must reproduce the witness signature");
+    }
+
+    /// F-232: `slh_verify` must accept ONLY a signature of the parameter set's
+    /// exact FIPS 205 length n + k*(1+a)*n + d*(len+h')*n, the same length the
+    /// on-chain verifier enforces with OP_SIZE <len> OP_EQUALVERIFY.
+    ///
+    /// Proves: for SLH-DSA-SHA2-128s (official NIST ACVP vector) and
+    /// SLH-DSA-SHA2-128f (self-signed), the honest signature verifies while the
+    /// same signature with one appended 0x00 byte, 32 appended bytes, or its
+    /// last byte removed is rejected. Before F-232 every length guard was a
+    /// lower bound, so the appended variants verified true.
+    ///
+    /// Does not prove: anything about the 192/256 parameter sets beyond sharing
+    /// the same guard, nor anything about the on-chain script.
+    #[test]
+    fn test_verify_rejects_non_canonical_signature_length() {
+        use crate::analyzer::script_parser::decode_hex;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/runtime-vectors/slh-dsa-acvp-kat.json");
+        let kat: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let v = kat["slh_dsa_acvp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["param_set"] == "SLH-DSA-SHA2-128s")
+            .expect("SLH-DSA-SHA2-128s ACVP vector");
+        let hx = |k: &str| decode_hex(v[k].as_str().unwrap()).unwrap();
+        let mut cases = vec![("128s-acvp", &SLH_SHA2_128S, hx("message"), hx("signature"), hx("pk"))];
+
+        let params = &SLH_SHA2_128F;
+        let seed: Vec<u8> = (0..3 * params.n as u8).collect();
+        let kp = slh_keygen(params, Some(&seed));
+        let msg = b"F-232 exact-length probe".to_vec();
+        let sig = slh_sign(params, &msg, &kp.sk);
+        cases.push(("128f-self", params, msg, sig, kp.pk));
+
+        let tail32: Vec<u8> = (0..32u32).map(|i| (0xA5 ^ (i * 37)) as u8).collect();
+        for (name, params, msg, sig, pk) in cases {
+            assert!(slh_verify(params, &msg, &sig, &pk), "{name}: honest signature rejected");
+            let mut with_byte = sig.clone();
+            with_byte.push(0x00);
+            assert!(!slh_verify(params, &msg, &with_byte, &pk), "{name}: accepted sig||0x00");
+            let mut with32 = sig.clone();
+            with32.extend_from_slice(&tail32);
+            assert!(!slh_verify(params, &msg, &with32, &pk), "{name}: accepted sig||32 bytes");
+            assert!(
+                !slh_verify(params, &msg, &sig[..sig.len() - 1], &pk),
+                "{name}: accepted a signature truncated by one byte"
+            );
+        }
     }
 }

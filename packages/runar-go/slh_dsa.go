@@ -759,6 +759,14 @@ func SLHVerify(params SLHParams, msg, sig, pk []byte) bool {
 	pkSeed := pk[:n]
 	pkRoot := pk[n : 2*n]
 
+	// F-232: FIPS 205 fixes the signature length per parameter set at
+	// n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+	// enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+	// garbage or truncation) is rejected.
+	if len(sig) != n+k*(1+a)*n+d*(l+hp)*n {
+		return false
+	}
+
 	// Parse signature
 	offset := 0
 	if len(sig) < n {
@@ -819,6 +827,9 @@ func SLHVerify(params SLHParams, msg, sig, pk []byte) bool {
 		currentMsg = slhXmssPkFromSig(currentLeafIdx, xmssSig, currentMsg, pkSeed, layerAdrs, params)
 		currentLeafIdx = int(currentTreeIdx & uint64((1<<uint(hp))-1))
 		currentTreeIdx = currentTreeIdx >> uint(hp)
+	}
+	if offset != len(sig) {
+		return false
 	}
 
 	// Compare computed root to PK.root

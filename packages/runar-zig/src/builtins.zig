@@ -830,7 +830,11 @@ pub fn verifySLHDSA_SHA2_256f(message: base.ByteString, sig: base.ByteString, pu
 
 fn slhVerifySha2(comptime params: SlhParams, message: []const u8, sig: []const u8, pub_key: []const u8) bool {
     if (pub_key.len != 2 * params.n) return false;
-    if (sig.len < params.sig_len) return false;
+    // F-232: FIPS 205 fixes the signature length per parameter set at
+    // n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+    // enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+    // garbage or truncation) is rejected.
+    if (sig.len != params.sig_len) return false;
 
     const pk_seed = pub_key[0..params.n];
     const pk_root = pub_key[params.n .. 2 * params.n];
@@ -882,6 +886,7 @@ fn slhVerifySha2(comptime params: SlhParams, message: []const u8, sig: []const u
         current_leaf_idx = @intCast(current_tree_idx & ((@as(u64, 1) << @intCast(params.hp)) - 1));
         current_tree_idx >>= @intCast(params.hp);
     }
+    if (offset != sig.len) return false;
 
     return std.mem.eql(u8, &current_msg, pk_root);
 }
@@ -2683,6 +2688,60 @@ test "verifySLHDSA_SHA2_128f accepts a real deterministic signature and rejects 
         23,
         &verifySLHDSA_SHA2_128f,
     );
+}
+
+// F-232: SLH-DSA verify must accept ONLY a signature of the parameter set's
+// exact FIPS 205 length n + k*(1+a)*n + d*(len+h')*n, the same length the
+// on-chain verifier enforces with OP_SIZE <len> OP_EQUALVERIFY.
+//
+// Proves: for SLH-DSA-SHA2-128s (official NIST ACVP vector tcId 422, copied from
+// conformance/runtime-vectors/slh-dsa-acvp-kat.json into fixtures/) and
+// SLH-DSA-SHA2-128f (fixture signature), the honest signature verifies while the
+// same signature with one appended 0x00 byte, 32 appended bytes, or its last byte
+// removed is rejected. Before F-232 the guard was `sig.len < sig_len`, a lower
+// bound, so the appended variants verified true.
+// Does not prove: anything about the 192/256 parameter sets beyond sharing the
+// same guard, nor anything about the on-chain script.
+fn expectSlhExactSigLength(
+    message: []const u8,
+    sig: []const u8,
+    pk: []const u8,
+    comptime verify_fn: *const fn (base.ByteString, base.ByteString, base.ByteString) bool,
+) !void {
+    const a = std.testing.allocator;
+    try std.testing.expect(verify_fn(message, sig, pk));
+
+    const with_byte = try std.mem.concat(a, u8, &.{ sig, &[_]u8{0x00} });
+    defer a.free(with_byte);
+    try std.testing.expect(!verify_fn(message, with_byte, pk));
+
+    var tail32: [32]u8 = undefined;
+    for (&tail32, 0..) |*b, i| b.* = @truncate(0xA5 ^ (i * 37));
+    const with32 = try std.mem.concat(a, u8, &.{ sig, &tail32 });
+    defer a.free(with32);
+    try std.testing.expect(!verify_fn(message, with32, pk));
+
+    try std.testing.expect(!verify_fn(message, sig[0 .. sig.len - 1], pk));
+}
+
+test "F-232: SLH-DSA verify rejects trailing or truncated signatures (128s ACVP, 128f)" {
+    const a = std.testing.allocator;
+    {
+        const pk = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128s-acvp-pk.hex"));
+        defer a.free(pk);
+        const sig = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128s-acvp-sig.hex"));
+        defer a.free(sig);
+        const msg = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128s-acvp-msg.hex"));
+        defer a.free(msg);
+        try expectSlhExactSigLength(msg, sig, pk, &verifySLHDSA_SHA2_128s);
+    }
+    {
+        const pk = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128f-pk.hex"));
+        defer a.free(pk);
+        const sig = try decodeEmbeddedHexAlloc(a, @embedFile("fixtures/slh-sha2-128f-sig.hex"));
+        defer a.free(sig);
+        try expectSlhExactSigLength("128f", sig, pk, &verifySLHDSA_SHA2_128f);
+    }
 }
 
 test "verifySLHDSA_SHA2_192s accepts a real deterministic signature and rejects tampering" {

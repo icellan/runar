@@ -643,6 +643,12 @@ public final class SlhDsa {
         byte[] pkSeed = Arrays.copyOfRange(pk, 0, n);
         byte[] pkRoot = Arrays.copyOfRange(pk, n, 2 * n);
 
+        // F-232: FIPS 205 fixes the signature length per parameter set at
+        // n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+        // enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+        // garbage or truncation) is rejected.
+        if (sig.length != n + k * (1 + a) * n + d * (len + hp) * n) return false;
+
         int offset = 0;
         if (sig.length < n) return false;
         byte[] R = Arrays.copyOfRange(sig, offset, offset + n);
@@ -695,6 +701,7 @@ public final class SlhDsa {
             currentLeafIdx = (int) (currentTreeIdx & ((1L << hp) - 1));
             currentTreeIdx = currentTreeIdx >>> hp;
         }
+        if (offset != sig.length) return false;
 
         return Arrays.equals(currentMsg, pkRoot);
     }

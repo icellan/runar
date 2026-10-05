@@ -710,6 +710,11 @@ module Runar
 
       sig = safe_hex_decode(sig_hex)
       return false if sig.nil?
+      # F-232: FIPS 205 fixes the signature length per parameter set at
+      # n + k*(1+a)*n + d*(len+h')*n, the same length the on-chain verifier
+      # enforces with OP_SIZE <len> OP_EQUALVERIFY. Any other length (trailing
+      # garbage or truncation) is rejected.
+      return false if sig.bytesize != n + (k * (1 + a) * n) + (d * (len + hp) * n)
 
       msg = safe_hex_decode(msg_hex)
       return false if msg.nil?
@@ -772,6 +777,7 @@ module Runar
         current_leaf_idx = current_tree_idx & ((1 << hp) - 1)
         current_tree_idx >>= hp
       end
+      return false if offset != sig.bytesize
 
       current_msg == pk_root
     end

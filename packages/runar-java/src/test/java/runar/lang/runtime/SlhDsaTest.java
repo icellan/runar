@@ -160,6 +160,55 @@ class SlhDsaTest {
             "256f: Java's deterministic signer must reproduce the independent witness signature");
     }
 
+    /**
+     * F-232: {@code SlhDsa.verify} must accept ONLY a signature of the parameter
+     * set's exact FIPS 205 length n + k*(1+a)*n + d*(len+h')*n, the same length
+     * the on-chain verifier enforces with OP_SIZE &lt;len&gt; OP_EQUALVERIFY.
+     *
+     * <p>Proves: for SLH-DSA-SHA2-128s (official NIST ACVP vector,
+     * conformance/runtime-vectors/slh-dsa-acvp-kat.json) and SLH-DSA-SHA2-128f
+     * (self-signed), the honest signature verifies while the same signature with
+     * one appended 0x00 byte, 32 appended bytes, or its last byte removed is
+     * rejected. Before F-232 every length guard was a lower bound, so the
+     * appended variants verified true.
+     *
+     * <p>Does not prove: anything about the 192/256 parameter sets beyond sharing
+     * the same guard, nor anything about the on-chain script.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void verifyRejectsNonCanonicalSignatureLength() throws Exception {
+        Path kp128s = Paths.get(System.getProperty("user.dir"), "..", "..", "conformance",
+            "runtime-vectors", "slh-dsa-acvp-kat.json");
+        Map<String, Object> kat = (Map<String, Object>) Json.parse(Files.readString(kp128s));
+        Map<String, Object> v = null;
+        for (Object o : (List<Object>) kat.get("slh_dsa_acvp")) {
+            Map<String, Object> m = (Map<String, Object>) o;
+            if ("SLH-DSA-SHA2-128s".equals(m.get("param_set"))) v = m;
+        }
+        assertNotNull(v, "SLH-DSA-SHA2-128s ACVP vector");
+        assertSigLengthExact("128s-acvp", SlhDsa.SHA2_128s,
+            ScriptUtils.hexToBytes((String) v.get("message")),
+            ScriptUtils.hexToBytes((String) v.get("signature")),
+            ScriptUtils.hexToBytes((String) v.get("pk")));
+
+        SlhDsa.Params p = SlhDsa.SHA2_128f;
+        SlhDsa.KeyPair kp = SlhDsa.keygen(p, deterministicSeed(p, 232));
+        byte[] msg = "F-232 exact-length probe".getBytes(StandardCharsets.UTF_8);
+        assertSigLengthExact("128f-self", p, msg, SlhDsa.sign(p, msg, kp.sk), kp.pk);
+    }
+
+    private static void assertSigLengthExact(String name, SlhDsa.Params p, byte[] msg, byte[] sig, byte[] pk) {
+        assertTrue(SlhDsa.verify(p, msg, sig, pk), name + ": honest signature rejected");
+        byte[] withByte = java.util.Arrays.copyOf(sig, sig.length + 1);
+        assertFalse(SlhDsa.verify(p, msg, withByte, pk), name + ": accepted sig||0x00");
+        byte[] with32 = java.util.Arrays.copyOf(sig, sig.length + 32);
+        for (int i = 0; i < 32; i++) with32[sig.length + i] = (byte) (0xA5 ^ (i * 37));
+        assertFalse(SlhDsa.verify(p, msg, with32, pk), name + ": accepted sig||32 bytes");
+        byte[] truncated = java.util.Arrays.copyOf(sig, sig.length - 1);
+        assertFalse(SlhDsa.verify(p, msg, truncated, pk), name + ": accepted a signature truncated by one byte");
+    }
+
     private static void runRoundTrip(SlhDsa.Params p) {
         byte[] seed = deterministicSeed(p, 7);
         SlhDsa.KeyPair kp = SlhDsa.keygen(p, seed);
