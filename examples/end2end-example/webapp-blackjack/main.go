@@ -222,6 +222,23 @@ func commitHash(game *GameState) string {
 	return ""
 }
 
+// N-118: new-game and new-round must refuse while any contract this session
+// deployed has not reached a recorded settle txid. game.Phase alone is not a
+// reliable proxy for "nothing is stranded": a deal that fails partway leaves
+// Phase "ready" with some players' contracts deployed but unsettled, and
+// handleDealer sets Phase "settlement" unconditionally even when a settle
+// call failed. A deployed contract's only key-free escape needs the current
+// player and house keys (see F-056), so new-game must not replace them, and
+// new-round must not drop game.Contracts, while one is still open.
+func hasUnsettledContract(game *GameState) bool {
+	for _, cs := range game.Contracts {
+		if cs.ContractTxid != "" && cs.SettleTxid == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func handleNewGame(w http.ResponseWriter, r *http.Request) {
 	// R-152: resolve this visitor's game. The package-level singleton is gone,
 	// so a handler that forgets this does not compile.
@@ -256,6 +273,12 @@ func handleNewGame(w http.ResponseWriter, r *http.Request) {
 	case "welcome", "setup", "ready", "settlement":
 	default:
 		jsonError(w, "cannot start a new game mid-round (phase: "+game.Phase+")", http.StatusConflict)
+		return
+	}
+	// N-118: phase alone does not catch a partial deal (Phase stays "ready")
+	// or a failed settle (Phase still advances to "settlement").
+	if hasUnsettledContract(game) {
+		jsonError(w, "cannot start a new game: a deployed contract has not settled", http.StatusConflict)
 		return
 	}
 
@@ -374,6 +397,16 @@ func handleDeal(w http.ResponseWriter, r *http.Request) {
 
 	if game.Phase != "ready" {
 		jsonError(w, "not ready to deal (phase: "+game.Phase+")", 400)
+		return
+	}
+	// N-118: a deal that fails partway can return with Phase still "ready"
+	// (see handleDeal's partial-failure returns below) while some players'
+	// contracts are deployed but not settled. A retried deal must not run
+	// `game.Contracts = make(...)` over that record — doing so would erase
+	// it, and with it the only thing the new-game/new-round guards above
+	// check for.
+	if hasUnsettledContract(game) {
+		jsonError(w, "cannot deal: a previously deployed contract has not settled", http.StatusConflict)
 		return
 	}
 
@@ -909,6 +942,13 @@ func handleNewRound(w http.ResponseWriter, r *http.Request) {
 
 	if game.Phase != "settlement" {
 		jsonError(w, "round not complete (phase: "+game.Phase+")", 400)
+		return
+	}
+	// N-118: Phase == "settlement" does not mean every contract settled —
+	// handleDealer reaches it even after a settle call failed. Wiping
+	// game.Contracts here would discard the only record of that contract.
+	if hasUnsettledContract(game) {
+		jsonError(w, "cannot start a new round: a deployed contract has not settled", http.StatusConflict)
 		return
 	}
 
