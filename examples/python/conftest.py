@@ -1,10 +1,20 @@
 """Import helper for .runar.py contract files."""
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Ensure `runar_compiler` (compilers/python) is importable for tests that
+# exercise `compile_check`, independent of what any other collected module
+# has already put on sys.path. Mirrors packages/runar-py/tests/conftest.py.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_COMPILER_PATH = os.path.join(_REPO_ROOT, "compilers", "python")
+
+if _COMPILER_PATH not in sys.path:
+    sys.path.insert(0, _COMPILER_PATH)
 
 
 def pytest_configure(config):
