@@ -429,6 +429,16 @@ func (e *typeEnv) lookup(name string) (string, bool) {
 	return "", false
 }
 
+// scopeIndexOf returns the index of the innermost scope binding name, or -1.
+func (e *typeEnv) scopeIndexOf(name string) int {
+	for i := len(e.scopes) - 1; i >= 0; i-- {
+		if _, ok := e.scopes[i][name]; ok {
+			return i
+		}
+	}
+	return -1
+}
+
 // ---------------------------------------------------------------------------
 // Type checker
 // ---------------------------------------------------------------------------
@@ -462,7 +472,13 @@ type typeChecker struct {
 	// affine origin it aliases. Populated when a variable_decl of
 	// affine type is initialized from another affine origin.
 	affineAliases    map[string]string
-	currentMethodLoc *SourceLocation
+	// repeatingLoopScopes holds, for every enclosing loop that may run two or
+	// more times, the env scope index its init/body bindings live at
+	// (innermost last). A bounded loop is unrolled count times, so consuming
+	// an affine value bound below the innermost index happens once per
+	// iteration (F-110).
+	repeatingLoopScopes []int
+	currentMethodLoc    *SourceLocation
 	currentStmtLoc   *SourceLocation
 	// sideEffects is computed lazily by methodEffects (F-075).
 	sideEffects SideEffectSummary
@@ -683,6 +699,8 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		}
 
 	case ForStmt:
+		loopScope := len(env.scopes)
+		repeats := loopMayRunTwice(s)
 		env.pushScope()
 		tc.checkStatement(s.Init, env)
 		condType := tc.inferExprType(s.Condition, env)
@@ -696,7 +714,14 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 		// restricts the clause to a unit-step advance; this is the type-level
 		// half of the same guard.
 		tc.checkStatement(s.Update, env)
+		// F-110: the body runs once per iteration; see repeatingLoopScopes.
+		if repeats {
+			tc.repeatingLoopScopes = append(tc.repeatingLoopScopes, loopScope)
+		}
 		tc.checkStatements(s.Body, env)
+		if repeats {
+			tc.repeatingLoopScopes = tc.repeatingLoopScopes[:len(tc.repeatingLoopScopes)-1]
+		}
 		env.popScope()
 
 	case ExpressionStmt:
@@ -1534,12 +1559,57 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 			label = "this." + pa.Property
 		}
 
-		if tc.consumedValues[origin] {
+		if tc.consumedValues[origin] || tc.consumedPerLoopIteration(origin, env) {
 			tc.addError(fmt.Sprintf("affine value '%s' has already been consumed", label))
 		} else {
 			tc.consumedValues[origin] = true
 		}
 	}
+}
+
+// consumedPerLoopIteration reports whether origin is bound outside the
+// innermost enclosing loop that may run two or more times, so this one
+// syntactic consumption executes once per iteration -- a double use. A
+// property, or a name the env does not bind (a bare-identifier property), is
+// always outside (F-110).
+func (tc *typeChecker) consumedPerLoopIteration(origin string, env *typeEnv) bool {
+	if len(tc.repeatingLoopScopes) == 0 {
+		return false
+	}
+	innermost := tc.repeatingLoopScopes[len(tc.repeatingLoopScopes)-1]
+	if strings.HasPrefix(origin, "prop:") {
+		return true
+	}
+	return env.scopeIndexOf(origin) < innermost
+}
+
+// loopMayRunTwice reports whether a for-statement may execute its body two or
+// more times. Mirrors the trip count extractLoopShape unrolls; a shape it
+// cannot resolve is refused elsewhere and is treated as repeating here (F-110).
+func loopMayRunTwice(s ForStmt) bool {
+	start := extractBigIntValue(s.Init.Init)
+	bin, ok := s.Condition.(BinaryExpr)
+	if start == nil || !ok {
+		return true
+	}
+	bound := extractBigIntValue(bin.Right)
+	if bound == nil {
+		return true
+	}
+	count := new(big.Int)
+	switch bin.Op {
+	case "<":
+		count.Sub(bound, start)
+	case "<=":
+		count.Sub(bound, start).Add(count, big.NewInt(1))
+	case ">":
+		count.Sub(start, bound)
+	case ">=":
+		count.Sub(start, bound).Add(count, big.NewInt(1))
+	default:
+		return true
+	}
+	return count.Cmp(big.NewInt(2)) >= 0
 }
 
 // affineOriginOfExpr returns the canonical origin key for affine

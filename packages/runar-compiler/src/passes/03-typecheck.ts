@@ -416,6 +416,19 @@ class TypeEnv {
     }
     return undefined;
   }
+
+  /** Index of the innermost scope that binds `name`, or -1 if none does. */
+  scopeIndexOf(name: string): number {
+    for (let i = this.scopes.length - 1; i >= 0; i--) {
+      if (this.scopes[i]!.has(name)) return i;
+    }
+    return -1;
+  }
+
+  /** Index the next `pushScope()` will occupy. */
+  get depth(): number {
+    return this.scopes.length;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +475,14 @@ class TypeChecker {
    * property access is encountered.
    */
   private affineAliases: Map<string, string> = new Map();
+
+  /**
+   * F-110: for every enclosing loop that may run two or more times, the env
+   * scope index its init/body bindings live at (innermost last). A bounded
+   * loop is unrolled `count` times, so consuming an affine value bound below
+   * the innermost such index is a consumption per iteration.
+   */
+  private repeatingLoopScopes: number[] = [];
 
   /** Lazily computed side-effect summary (follows private helpers). */
   private sideEffects: SideEffectSummary | null = null;
@@ -717,6 +738,8 @@ class TypeChecker {
       }
 
       case 'for_statement': {
+        const loopScope = env.depth;
+        const repeats = loopMayRunTwice(stmt);
         env.pushScope();
         // Check init
         this.checkStatement(stmt.init, env);
@@ -736,8 +759,11 @@ class TypeChecker {
         // separately restricts the clause to a unit-step advance; this is the
         // type-level half of the same guard.
         this.checkStatement(stmt.update, env);
-        // Check body
+        // Check body. F-110: the body runs once per iteration; see
+        // `repeatingLoopScopes`.
+        if (repeats) this.repeatingLoopScopes.push(loopScope);
         this.checkStatements(stmt.body, env, stmt.sourceLocation);
+        if (repeats) this.repeatingLoopScopes.pop();
         env.popScope();
         break;
       }
@@ -1966,7 +1992,7 @@ class TypeChecker {
         : arg.kind === 'property_access' ? `this.${arg.property}`
         : origin;
 
-      if (this.consumedValues.has(origin)) {
+      if (this.consumedValues.has(origin) || this.consumedPerLoopIteration(origin, env)) {
         this.errors.push(makeDiagnostic(
           `affine value '${label}' has already been consumed`,
           'error',
@@ -1976,6 +2002,19 @@ class TypeChecker {
         this.consumedValues.add(origin);
       }
     }
+  }
+
+  /**
+   * F-110: true when `origin` is bound outside the innermost enclosing loop
+   * that may run two or more times, so this one syntactic consumption is
+   * executed once per iteration — a double use. A property, or a name the env
+   * does not bind (a bare-identifier property), is always outside.
+   */
+  private consumedPerLoopIteration(origin: string, env: TypeEnv): boolean {
+    const innermost = this.repeatingLoopScopes[this.repeatingLoopScopes.length - 1];
+    if (innermost === undefined) return false;
+    if (origin.startsWith('prop:')) return true;
+    return env.scopeIndexOf(origin) < innermost;
   }
 
   /**
@@ -2014,6 +2053,36 @@ class TypeChecker {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * F-110: whether a for-statement may execute its body two or more times.
+ * Mirrors the trip count `extractLoopShape` (04-anf-lower) unrolls; a shape it
+ * cannot resolve is refused elsewhere and is treated as repeating here.
+ */
+function loopMayRunTwice(stmt: Extract<Statement, { kind: 'for_statement' }>): boolean {
+  const literal = (e: Expression): bigint | null => {
+    if (e.kind === 'bigint_literal') return e.value;
+    if (e.kind === 'unary_expr' && e.op === '-') {
+      const inner = literal(e.operand);
+      return inner === null ? null : -inner;
+    }
+    return null;
+  };
+  const start = literal(stmt.init.init);
+  const cond = stmt.condition;
+  if (start === null || cond.kind !== 'binary_expr') return true;
+  const bound = literal(cond.right);
+  if (bound === null) return true;
+  let count: bigint;
+  switch (cond.op) {
+    case '<': count = bound - start; break;
+    case '<=': count = bound - start + 1n; break;
+    case '>': count = start - bound; break;
+    case '>=': count = start - bound + 1n; break;
+    default: return true;
+  }
+  return count >= 2n;
+}
 
 function typeNodeToTType(node: TypeNode): TType {
   switch (node.kind) {

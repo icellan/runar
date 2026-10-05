@@ -2139,6 +2139,41 @@ class DoublePreimage extends SmartContract {
         )
 
 
+_F110_CASES = [
+    ("sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+    ("preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"),
+    ("sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"),
+    ("sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"),
+    ("sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+    ("sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", None),
+    ("sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", None),
+]
+
+
+@pytest.mark.parametrize("params,body,want", _F110_CASES)
+def test_f110_affine_consumption_in_repeating_loop(params, body, want):
+    """F-110: a bounded loop is unrolled ``count`` times, so an affine value
+    bound outside a loop that runs two or more times and consumed in its body
+    is consumed once per iteration and must get the same diagnostic as a
+    sequential double use. Single-iteration loops stay legal. Proves the type
+    checker's verdict only; consumption inside private helpers is out of scope
+    (the affine check is intra-method)."""
+    source = (
+        "class C extends SmartContract {\n"
+        "  readonly pk: PubKey;\n"
+        "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n"
+        f"  public m({params}) {{\n    {body}\n    assert(true);\n  }}\n"
+        "}\n"
+    )
+    result = parse_source(source, "C.runar.ts")
+    assert result.contract is not None, result.errors
+    msgs = [e.message for e in type_check(result.contract).errors]
+    if want is None:
+        assert msgs == []
+    else:
+        assert any(want in m for m in msgs), msgs
+
+
 # ---------------------------------------------------------------------------
 # Validator — gap rows V3, V4, V6, V7, V8, V10, V11, V12, V15, V21,
 #              V23, V24, V25, V26, V27

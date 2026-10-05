@@ -1,5 +1,6 @@
 package runar.compiler.passes;
 
+import java.math.BigInteger;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -238,6 +239,49 @@ public final class Typecheck {
             }
             return null;
         }
+
+        /** Index (outermost = 0) of the innermost scope binding {@code name}, or -1. */
+        int scopeIndexOf(String name) {
+            int i = scopes.size() - 1;
+            for (Map<String, String> scope : scopes) {
+                if (scope.containsKey(name)) return i;
+                i--;
+            }
+            return -1;
+        }
+
+        /** Index the next {@link #push()} will occupy. */
+        int depth() { return scopes.size(); }
+    }
+
+    /**
+     * F-110: whether a for-statement may execute its body two or more times.
+     * Mirrors the trip count AnfLower unrolls; a shape it cannot resolve is
+     * refused elsewhere and is treated as repeating here.
+     */
+    private static boolean loopMayRunTwice(ForStatement f) {
+        BigInteger start = f.init() == null ? null : loopLiteral(f.init().init());
+        if (start == null || !(f.condition() instanceof BinaryExpr b)) return true;
+        BigInteger bound = loopLiteral(b.right());
+        if (bound == null) return true;
+        BigInteger count;
+        switch (b.op()) {
+            case LT -> count = bound.subtract(start);
+            case LE -> count = bound.subtract(start).add(BigInteger.ONE);
+            case GT -> count = start.subtract(bound);
+            case GE -> count = start.subtract(bound).add(BigInteger.ONE);
+            default -> { return true; }
+        }
+        return count.compareTo(BigInteger.TWO) >= 0;
+    }
+
+    private static BigInteger loopLiteral(Expression e) {
+        if (e instanceof BigIntLiteral l) return l.value();
+        if (e instanceof UnaryExpr u && u.op() == Expression.UnaryOp.NEG) {
+            BigInteger inner = loopLiteral(u.operand());
+            return inner == null ? null : inner.negate();
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -279,6 +323,11 @@ public final class Typecheck {
         // Maps a local name to the canonical affine origin it
         // aliases. 2026-04-30 audit finding F6.
         Map<String, String> affineAliases = new HashMap<>();
+        // F-110: for every enclosing loop that may run two or more times, the
+        // env scope index its init/body bindings live at (innermost last). A
+        // bounded loop is unrolled `count` times, so consuming an affine value
+        // bound below the innermost index happens once per iteration.
+        final Deque<Integer> repeatingLoopScopes = new ArrayDeque<>();
 
         Checker(ContractNode contract) {
             this.contract = contract;
@@ -520,6 +569,8 @@ public final class Typecheck {
                     env.pop();
                 }
             } else if (s instanceof ForStatement f) {
+                int loopScope = env.depth();
+                boolean repeats = loopMayRunTwice(f);
                 env.push();
                 if (f.init() != null) {
                     checkStatement(f.init(), env);
@@ -542,7 +593,10 @@ public final class Typecheck {
                 if (f.update() != null) {
                     checkStatement(f.update(), env);
                 }
+                // F-110: the body runs once per iteration; see repeatingLoopScopes.
+                if (repeats) repeatingLoopScopes.push(loopScope);
                 checkStatements(f.body(), env);
+                if (repeats) repeatingLoopScopes.pop();
                 env.pop();
             } else if (s instanceof ExpressionStatement e) {
                 inferExpr(e.expression(), env);
@@ -1209,9 +1263,9 @@ public final class Typecheck {
                         // require 0 <= idx <= 1000 to keep the offset well
                         // under script-int max and reject obvious nonsense
                         // (negative or astronomically large).
-                        java.math.BigInteger v = lit.value();
-                        java.math.BigInteger min64 = java.math.BigInteger.valueOf(Long.MIN_VALUE);
-                        java.math.BigInteger max64 = java.math.BigInteger.valueOf(Long.MAX_VALUE);
+                        BigInteger v = lit.value();
+                        BigInteger min64 = BigInteger.valueOf(Long.MIN_VALUE);
+                        BigInteger max64 = BigInteger.valueOf(Long.MAX_VALUE);
                         if (v.compareTo(min64) < 0 || v.compareTo(max64) > 0) {
                             error(name + "() argument 1 (index) must fit in int64; got " + v);
                         } else {
@@ -1268,9 +1322,9 @@ public final class Typecheck {
                         // against a 32-byte SHA-256 hash. prefixLen < 32 is
                         // suspicious (the prefix doesn't cover a hash-sized
                         // chunk). prefixLen > 4 MiB exceeds MAX_SCRIPT_BYTES.
-                        java.math.BigInteger v = preLit.value();
-                        java.math.BigInteger min64 = java.math.BigInteger.valueOf(Long.MIN_VALUE);
-                        java.math.BigInteger max64 = java.math.BigInteger.valueOf(Long.MAX_VALUE);
+                        BigInteger v = preLit.value();
+                        BigInteger min64 = BigInteger.valueOf(Long.MIN_VALUE);
+                        BigInteger max64 = BigInteger.valueOf(Long.MAX_VALUE);
                         if (v.compareTo(min64) < 0 || v.compareTo(max64) > 0) {
                             error("extractPrevOutputScript() argument 3 (prefixLen) "
                                 + "must fit in int64; got " + v);
@@ -1353,12 +1407,26 @@ public final class Typecheck {
                 else if (arg instanceof PropertyAccessExpr pa) label = "this." + pa.property();
                 else label = origin;
 
-                if (Boolean.TRUE.equals(consumed.get(origin))) {
+                if (Boolean.TRUE.equals(consumed.get(origin)) || consumedPerLoopIteration(origin, env)) {
                     error("affine value '" + label + "' has already been consumed");
                 } else {
                     consumed.put(origin, true);
                 }
             }
+        }
+
+        /**
+         * F-110: true when {@code origin} is bound outside the innermost
+         * enclosing loop that may run two or more times, so this one syntactic
+         * consumption is executed once per iteration -- a double use. A
+         * property, or a name the env does not bind (a bare-identifier
+         * property), is always outside.
+         */
+        private boolean consumedPerLoopIteration(String origin, Env env) {
+            Integer innermost = repeatingLoopScopes.peek();
+            if (innermost == null) return false;
+            if (origin.startsWith("prop:")) return true;
+            return env.scopeIndexOf(origin) < innermost;
         }
 
         /** Resolve the canonical affine origin for an expression. */

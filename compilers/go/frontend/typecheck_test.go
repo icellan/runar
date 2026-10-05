@@ -2254,3 +2254,52 @@ class C extends SmartContract {
 		t.Fatalf("expected no type errors, got: %v", result.ErrorStrings())
 	}
 }
+
+// TestTypeCheck_F110_AffineConsumptionInRepeatingLoop: a bounded loop is
+// unrolled count times, so an affine value bound outside a loop that runs two
+// or more times and consumed in its body is consumed once per iteration. It
+// must get the same diagnostic as a sequential double use. Single-iteration
+// loops stay legal. Proves the type checker's verdict only; it does not cover
+// consumption inside private helpers (the affine check is intra-method).
+func TestTypeCheck_F110_AffineConsumptionInRepeatingLoop(t *testing.T) {
+	cases := []struct {
+		name, params, body, want string
+	}{
+		{"loop2", "sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"},
+		{"countdown3", "preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"},
+		{"aliasInBody", "sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"},
+		{"nestedInner1", "sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"},
+		{"priorThenLoop1", "sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"},
+		{"loop1", "sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", ""},
+		{"nestedSingle", "sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := `
+import { SmartContract, assert, Sig, SigHashPreimage, PubKey, checkSig, checkPreimage } from 'runar-lang';
+
+class C extends SmartContract {
+  readonly pk: PubKey;
+  constructor(pk: PubKey) { super(pk); this.pk = pk; }
+  public m(` + c.params + `) {
+    ` + c.body + `
+    assert(true);
+  }
+}
+`
+			res := TypeCheck(mustParseTS(t, source))
+			if c.want == "" {
+				if len(res.Errors) > 0 {
+					t.Fatalf("expected no type errors, got: %v", res.ErrorStrings())
+				}
+				return
+			}
+			for _, e := range res.Errors {
+				if strings.Contains(e.Message, c.want) {
+					return
+				}
+			}
+			t.Fatalf("expected %q, got: %v", c.want, res.ErrorStrings())
+		})
+	}
+}

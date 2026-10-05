@@ -751,4 +751,34 @@ class TestTypecheck < Minitest::Test
     errs = f063_type_errors("public unlock(s: Sig) { assert(checkMultiSig([s], [this.pk, this.pk])); }")
     assert_empty errs
   end
+
+  # F-110: a bounded loop is unrolled `count` times, so an affine value bound
+  # outside a loop that runs two or more times and consumed in its body is
+  # consumed once per iteration and must get the same diagnostic as a
+  # sequential double use. Single-iteration loops stay legal. Proves the type
+  # checker's verdict only; consumption inside private helpers is out of scope
+  # (the affine check is intra-method).
+  F110_CASES = [
+    ["sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"],
+    ["preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"],
+    ["sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"],
+    ["sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"],
+    ["sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"],
+    ["sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", nil],
+    ["sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", nil],
+  ].freeze
+
+  def test_f110_affine_consumption_in_repeating_loop
+    F110_CASES.each do |params, body, want|
+      source = "class C extends SmartContract {\n  readonly pk: PubKey;\n" \
+               "  constructor(pk: PubKey) { super(pk); this.pk = pk; }\n" \
+               "  public m(#{params}) {\n    #{body}\n    assert(true);\n  }\n}\n"
+      errs = typecheck_source(source).errors.map(&:message)
+      if want.nil?
+        assert_empty errs, body
+      else
+        assert errs.any? { |m| m.include?(want) }, "#{body}: #{errs.inspect}"
+      end
+    end
+  end
 end

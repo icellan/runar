@@ -349,7 +349,29 @@ const TypeEnv = struct {
         }
         return null;
     }
+
+    /// Index of the innermost scope binding `name`, or null if none does.
+    fn scopeIndexOf(self: *const TypeEnv, name: []const u8) ?usize {
+        var i = self.scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.scopes.items[i].contains(name)) return i;
+        }
+        return null;
+    }
 };
+
+/// F-110: whether a for-statement may execute its body two or more times.
+/// Mirrors the trip count `lowerForStatement` (anf_lower) unrolls; a shape it
+/// cannot resolve is refused elsewhere and is treated as repeating here.
+fn loopMayRunTwice(f: types.ForStmt) bool {
+    if (!f.bound_is_const or !f.init_is_const) return true;
+    const start: i128 = f.init_value;
+    const bound: i128 = f.bound;
+    const base: i128 = if (f.descending) start - bound else bound - start;
+    const count: i128 = if (f.inclusive) base + 1 else base;
+    return count >= 2;
+}
 
 // ============================================================================
 // Affine types
@@ -392,6 +414,11 @@ const TypeChecker = struct {
     /// aliases. Populated by `const_decl` / `let_decl` of an affine
     /// type whose initializer is itself an affine origin.
     affine_aliases: std.StringHashMapUnmanaged([]const u8),
+    /// F-110: for every enclosing loop that may run two or more times, the
+    /// env scope index its loop variable and body bindings live at (innermost
+    /// last). A bounded loop is unrolled `count` times, so consuming an affine
+    /// value bound below the innermost index happens once per iteration.
+    repeating_loop_scopes: std.ArrayListUnmanaged(usize) = .empty,
     /// Pre-allocated `prop:<name>` origin keys for each contract
     /// property, owned by this checker. Avoids per-lookup allocation
     /// in the affine consumption check.
@@ -453,6 +480,7 @@ const TypeChecker = struct {
         self.prop_elem_types.deinit(self.allocator);
         self.consumed_values.deinit(self.allocator);
         self.affine_aliases.deinit(self.allocator);
+        self.repeating_loop_scopes.deinit(self.allocator);
         var keys_it = self.prop_origin_keys.iterator();
         while (keys_it.next()) |entry| self.allocator.free(entry.value_ptr.*);
         self.prop_origin_keys.deinit(self.allocator);
@@ -748,6 +776,7 @@ const TypeChecker = struct {
                 }
             },
             .for_stmt => |for_s| {
+                const loop_scope = env.scopes.items.len;
                 env.pushScope() catch return;
                 env.define(for_s.var_name, .bigint);
                 // N-061 / R-065: the update clause used to be skipped entirely
@@ -758,7 +787,20 @@ const TypeChecker = struct {
                 // clause to a unit-step advance; this is the type-level half of
                 // the same guard.
                 if (for_s.update) |u| self.checkStatement(u.*, env);
+                // F-110: the body runs once per iteration; see
+                // `repeating_loop_scopes`. An allocation failure here would
+                // silently drop the guard, so it is reported, not swallowed.
+                var pushed = false;
+                if (loopMayRunTwice(for_s)) {
+                    self.repeating_loop_scopes.append(self.allocator, loop_scope) catch {
+                        self.addError("out of memory tracking loop scopes", .{});
+                        env.popScope();
+                        return;
+                    };
+                    pushed = true;
+                }
                 self.checkStatements(for_s.body, env);
+                if (pushed) _ = self.repeating_loop_scopes.pop();
                 env.popScope();
             },
             .expr_stmt => |expr| {
@@ -1572,18 +1614,31 @@ const TypeChecker = struct {
 
             // Diagnostic label (source-form) — derived inline from
             // the arg shape so we don't have to allocate.
-            if (self.consumed_values.get(origin)) |consumed| {
-                if (consumed) {
-                    switch (arg) {
-                        .identifier => |name| self.addError("affine value '{s}' has already been consumed", .{name}),
-                        .property_access => |pa| self.addError("affine value 'this.{s}' has already been consumed", .{pa.property}),
-                        else => self.addError("affine value '{s}' has already been consumed", .{origin}),
-                    }
-                    continue;
+            const consumed = (self.consumed_values.get(origin) orelse false) or
+                self.consumedPerLoopIteration(origin, env);
+            if (consumed) {
+                switch (arg) {
+                    .identifier => |name| self.addError("affine value '{s}' has already been consumed", .{name}),
+                    .property_access => |pa| self.addError("affine value 'this.{s}' has already been consumed", .{pa.property}),
+                    else => self.addError("affine value '{s}' has already been consumed", .{origin}),
                 }
+                continue;
             }
             self.consumed_values.put(self.allocator, origin, true) catch {};
         }
+    }
+
+    /// F-110: true when `origin` is bound outside the innermost enclosing loop
+    /// that may run two or more times, so this one syntactic consumption is
+    /// executed once per iteration — a double use. A property, or a name the
+    /// env does not bind (a bare-identifier property), is always outside.
+    fn consumedPerLoopIteration(self: *TypeChecker, origin: []const u8, env: *TypeEnv) bool {
+        const n = self.repeating_loop_scopes.items.len;
+        if (n == 0) return false;
+        const innermost = self.repeating_loop_scopes.items[n - 1];
+        if (std.mem.startsWith(u8, origin, "prop:")) return true;
+        const idx = env.scopeIndexOf(origin) orelse return true;
+        return idx < innermost;
     }
 
     /// Compute the canonical origin key for affine tracking. Returns

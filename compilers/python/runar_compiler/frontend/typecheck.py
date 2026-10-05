@@ -409,6 +409,51 @@ class _TypeEnv:
                 return scope[name], True
         return "", False
 
+    def scope_index_of(self, name: str) -> int:
+        """Index of the innermost scope binding ``name``, or -1 if none does."""
+        for i in range(len(self._scopes) - 1, -1, -1):
+            if name in self._scopes[i]:
+                return i
+        return -1
+
+    @property
+    def depth(self) -> int:
+        """Index the next ``push_scope()`` will occupy."""
+        return len(self._scopes)
+
+
+def _loop_may_run_twice(stmt: ForStmt) -> bool:
+    """F-110: whether a for-statement may execute its body two or more times.
+    Mirrors the trip count ``_extract_loop_shape`` (anf_lower) unrolls; a shape
+    it cannot resolve is refused elsewhere and is treated as repeating here."""
+    def literal(e) -> int | None:
+        if isinstance(e, BigIntLiteral):
+            return e.value
+        if isinstance(e, UnaryExpr) and e.op == "-":
+            inner = literal(e.operand)
+            return None if inner is None else -inner
+        return None
+
+    init = stmt.init.init if isinstance(stmt.init, VariableDeclStmt) else None
+    start = literal(init) if init is not None else None
+    cond = stmt.condition
+    if start is None or not isinstance(cond, BinaryExpr):
+        return True
+    bound = literal(cond.right)
+    if bound is None:
+        return True
+    if cond.op == "<":
+        count = bound - start
+    elif cond.op == "<=":
+        count = bound - start + 1
+    elif cond.op == ">":
+        count = start - bound
+    elif cond.op == ">=":
+        count = start - bound + 1
+    else:
+        return True
+    return count >= 2
+
 
 # ---------------------------------------------------------------------------
 # Affine types
@@ -440,6 +485,11 @@ class _TypeChecker:
         # it aliases. Populated when a VariableDeclStmt of affine
         # type is initialized from another affine origin.
         self.affine_aliases: dict[str, str] = {}
+        # F-110: for every enclosing loop that may run two or more times, the
+        # env scope index its init/body bindings live at (innermost last). A
+        # bounded loop is unrolled ``count`` times, so consuming an affine
+        # value bound below the innermost index happens once per iteration.
+        self._repeating_loop_scopes: list[int] = []
         self._current_method_loc: SourceLocation | None = None
         self._current_stmt_loc: SourceLocation | None = None
         # Lazily computed side-effect summary (F-075).
@@ -636,6 +686,8 @@ class _TypeChecker:
                 env.pop_scope()
 
         elif isinstance(stmt, ForStmt):
+            loop_scope = env.depth
+            repeats = _loop_may_run_twice(stmt)
             env.push_scope()
             self._check_statement(stmt.init, env)
             cond_type = self._infer_expr_type(stmt.condition, env)
@@ -650,7 +702,13 @@ class _TypeChecker:
             # validator.py separately restricts the clause to a unit-step
             # advance; this is the type-level half of the same guard.
             self._check_statement(stmt.update, env)
+            # F-110: the body runs once per iteration; see
+            # ``_repeating_loop_scopes``.
+            if repeats:
+                self._repeating_loop_scopes.append(loop_scope)
             self._check_statements(stmt.body, env)
+            if repeats:
+                self._repeating_loop_scopes.pop()
             env.pop_scope()
 
         elif isinstance(stmt, ExpressionStmt):
@@ -1428,12 +1486,23 @@ class _TypeChecker:
             else:
                 label = origin
 
-            if self.consumed_values.get(origin, False):
+            if self.consumed_values.get(origin, False) or self._consumed_per_loop_iteration(origin, env):
                 self._add_error(
                     f"affine value '{label}' has already been consumed"
                 )
             else:
                 self.consumed_values[origin] = True
+
+    def _consumed_per_loop_iteration(self, origin: str, env: _TypeEnv) -> bool:
+        """F-110: true when ``origin`` is bound outside the innermost enclosing
+        loop that may run two or more times, so this one syntactic consumption
+        is executed once per iteration -- a double use. A property, or a name
+        the env does not bind (a bare-identifier property), is always outside."""
+        if not self._repeating_loop_scopes:
+            return False
+        if origin.startswith("prop:"):
+            return True
+        return env.scope_index_of(origin) < self._repeating_loop_scopes[-1]
 
     def _affine_origin_of_expr(self, expr: Expression) -> str | None:
         """Resolve the canonical affine origin for an expression.

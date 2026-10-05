@@ -304,6 +304,48 @@ module RunarCompiler
         end
         ["", false]
       end
+
+      # Index of the innermost scope binding +name+, or -1 if none does.
+      def scope_index_of(name)
+        (@scopes.length - 1).downto(0) do |i|
+          return i if @scopes[i].key?(name)
+        end
+        -1
+      end
+
+      # Index the next +push_scope+ will occupy.
+      def depth
+        @scopes.length
+      end
+    end
+
+    # F-110: whether a for-statement may execute its body two or more times.
+    # Mirrors the trip count the ANF lowerer unrolls; a shape it cannot resolve
+    # is refused elsewhere and is treated as repeating here.
+    # @api private
+    def self.loop_may_run_twice?(stmt)
+      literal = lambda do |e|
+        if e.is_a?(BigIntLiteral)
+          e.value
+        elsif e.is_a?(UnaryExpr) && e.op == "-"
+          inner = literal.call(e.operand)
+          inner.nil? ? nil : -inner
+        end
+      end
+      start = stmt.init.is_a?(VariableDeclStmt) ? literal.call(stmt.init.init) : nil
+      cond = stmt.condition
+      return true if start.nil? || !cond.is_a?(BinaryExpr)
+      bound = literal.call(cond.right)
+      return true if bound.nil?
+      count =
+        case cond.op
+        when "<" then bound - start
+        when "<=" then bound - start + 1
+        when ">" then start - bound
+        when ">=" then start - bound + 1
+        else return true
+        end
+      count >= 2
     end
 
     # -------------------------------------------------------------------
@@ -333,6 +375,11 @@ module RunarCompiler
         @method_sigs = {}
         @consumed_values = {}
         @affine_aliases = {}
+        # F-110: for every enclosing loop that may run two or more times, the
+        # env scope index its init/body bindings live at (innermost last). A
+        # bounded loop is unrolled `count` times, so consuming an affine value
+        # bound below the innermost index happens once per iteration.
+        @repeating_loop_scopes = []
         @current_method_loc = nil
         @current_stmt_loc = nil
 
@@ -808,6 +855,8 @@ module RunarCompiler
           end
 
         when ForStmt
+          loop_scope = env.depth
+          repeats = Frontend.loop_may_run_twice?(stmt)
           env.push_scope
           check_statement(stmt.init, env)
           cond_type = infer_expr_type(stmt.condition, env)
@@ -821,7 +870,10 @@ module RunarCompiler
           # separately restricts the clause to a unit-step advance; this is the
           # type-level half of the same guard.
           check_statement(stmt.update, env) unless stmt.update.nil?
+          # F-110: the body runs once per iteration; see @repeating_loop_scopes.
+          @repeating_loop_scopes.push(loop_scope) if repeats
           check_statements(stmt.body, env)
+          @repeating_loop_scopes.pop if repeats
           env.pop_scope
 
         when ExpressionStmt
@@ -1449,12 +1501,23 @@ module RunarCompiler
               origin
             end
 
-          if @consumed_values[origin]
+          if @consumed_values[origin] || consumed_per_loop_iteration?(origin, env)
             add_error("affine value '#{label}' has already been consumed")
           else
             @consumed_values[origin] = true
           end
         end
+      end
+
+      # F-110: true when +origin+ is bound outside the innermost enclosing loop
+      # that may run two or more times, so this one syntactic consumption is
+      # executed once per iteration -- a double use. A property, or a name the
+      # env does not bind (a bare-identifier property), is always outside.
+      def consumed_per_loop_iteration?(origin, env)
+        return false if @repeating_loop_scopes.empty?
+        return true if origin.start_with?("prop:")
+
+        env.scope_index_of(origin) < @repeating_loop_scopes.last
       end
 
       # Resolve the canonical affine origin for an expression.

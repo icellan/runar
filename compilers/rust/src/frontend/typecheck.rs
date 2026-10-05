@@ -413,6 +413,48 @@ impl TypeEnv {
         }
         None
     }
+
+    /// Index of the innermost scope binding `name`, or -1 if none does.
+    fn scope_index_of(&self, name: &str) -> i64 {
+        for (i, scope) in self.scopes.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                return i as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// F-110: whether a for-statement may execute its body two or more times.
+/// Mirrors the trip count `extract_loop_shape` (anf_lower) unrolls; a shape it
+/// cannot resolve is refused elsewhere and is treated as repeating here.
+fn loop_may_run_twice(init: &Statement, condition: &Expression) -> bool {
+    fn literal(e: &Expression) -> Option<num_bigint::BigInt> {
+        match e {
+            Expression::BigIntLiteral { value } => Some(value.clone()),
+            Expression::UnaryExpr { op, operand } if *op == UnaryOp::Neg => literal(operand).map(|v| -v),
+            _ => None,
+        }
+    }
+    let start = match init {
+        Statement::VariableDecl { init: e, .. } => literal(e),
+        _ => None,
+    };
+    let (start, op, bound) = match (start, condition) {
+        (Some(s), Expression::BinaryExpr { op, right, .. }) => match literal(right) {
+            Some(b) => (s, op, b),
+            None => return true,
+        },
+        _ => return true,
+    };
+    let count = match op {
+        BinaryOp::Lt => bound - start,
+        BinaryOp::Le => bound - start + 1,
+        BinaryOp::Gt => start - bound,
+        BinaryOp::Ge => start - bound + 1,
+        _ => return true,
+    };
+    count >= num_bigint::BigInt::from(2)
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +492,11 @@ struct TypeChecker<'a> {
     /// aliases. Populated when a variable_decl of affine type is
     /// initialized from another affine origin.
     affine_aliases: HashMap<String, String>,
+    /// F-110: for every enclosing loop that may run two or more times, the
+    /// env scope index its init/body bindings live at (innermost last). A
+    /// bounded loop is unrolled `count` times, so consuming an affine value
+    /// bound below the innermost index happens once per iteration.
+    repeating_loop_scopes: Vec<i64>,
     current_method_loc: Option<SourceLocation>,
     /// Lazily computed side-effect summary (F-075).
     side_effects: Option<SideEffectSummary>,
@@ -490,6 +537,7 @@ impl<'a> TypeChecker<'a> {
             builtins: builtin_functions(),
             consumed_values: HashSet::new(),
             affine_aliases: HashMap::new(),
+            repeating_loop_scopes: Vec::new(),
             current_method_loc: None,
             side_effects: None,
         }
@@ -706,6 +754,8 @@ terminal (no state mutation)",
                 body,
                 ..
             } => {
+                let loop_scope = env.scopes.len() as i64;
+                let repeats = loop_may_run_twice(init, condition);
                 env.push_scope();
                 self.check_statement(init, env);
                 let cond_type = self.infer_expr_type(condition, env);
@@ -725,7 +775,15 @@ terminal (no state mutation)",
                 // what catches an unknown name on the `--ir`-adjacent paths
                 // that skip validation.
                 self.check_statement(update, env);
+                // F-110: the body runs once per iteration; see
+                // `repeating_loop_scopes`.
+                if repeats {
+                    self.repeating_loop_scopes.push(loop_scope);
+                }
                 self.check_statements(body, env);
+                if repeats {
+                    self.repeating_loop_scopes.pop();
+                }
                 env.pop_scope();
             }
 
@@ -1776,7 +1834,9 @@ terminal (no state mutation)",
                 _ => origin.clone(),
             };
 
-            if self.consumed_values.contains(&origin) {
+            if self.consumed_values.contains(&origin)
+                || self.consumed_per_loop_iteration(&origin, env)
+            {
                 self.add_error(format!(
                     "affine value '{}' has already been consumed",
                     label
@@ -1785,6 +1845,21 @@ terminal (no state mutation)",
                 self.consumed_values.insert(origin);
             }
         }
+    }
+
+    /// F-110: true when `origin` is bound outside the innermost enclosing loop
+    /// that may run two or more times, so this one syntactic consumption is
+    /// executed once per iteration -- a double use. A property, or a name the
+    /// env does not bind (a bare-identifier property), is always outside.
+    fn consumed_per_loop_iteration(&self, origin: &str, env: &TypeEnv) -> bool {
+        let innermost = match self.repeating_loop_scopes.last() {
+            Some(i) => *i,
+            None => return false,
+        };
+        if origin.starts_with("prop:") {
+            return true;
+        }
+        env.scope_index_of(origin) < innermost
     }
 
     /// Resolve the canonical origin key for affine tracking.
@@ -2391,5 +2466,36 @@ class C extends SmartContract {
 "#,
         );
         assert!(errs.is_empty(), "got: {:?}", errs);
+    }
+
+    /// F-110: a bounded loop is unrolled `count` times, so an affine value
+    /// bound outside a loop that runs two or more times and consumed in its
+    /// body is consumed once per iteration and must get the same diagnostic as
+    /// a sequential double use. Single-iteration loops stay legal. Proves the
+    /// type checker's verdict only; consumption inside private helpers is out
+    /// of scope (the affine check is intra-method).
+    #[test]
+    fn f110_affine_consumption_in_repeating_loop() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("sig: Sig", "for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+            ("preimage: SigHashPreimage", "for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }", "affine value 'preimage' has already been consumed"),
+            ("sig: Sig", "for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }", "affine value 's' has already been consumed"),
+            ("sig: Sig", "for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }", "affine value 'sig' has already been consumed"),
+            ("sig: Sig", "assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", "affine value 'sig' has already been consumed"),
+            ("sig: Sig", "for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }", ""),
+            ("sig: Sig", "for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }", ""),
+        ];
+        for (params, body, want) in cases {
+            let source = format!(
+                "class C extends SmartContract {{\n  readonly pk: PubKey;\n  constructor(pk: PubKey) {{ super(pk); this.pk = pk; }}\n  public m({}) {{\n    {}\n    assert(true);\n  }}\n}}\n",
+                params, body
+            );
+            let errs = f063_type_errors(&source);
+            if want.is_empty() {
+                assert!(errs.is_empty(), "{}: got: {:?}", body, errs);
+            } else {
+                assert!(errs.iter().any(|e| e.contains(want)), "{}: expected {:?}, got: {:?}", body, want, errs);
+            }
+        }
     }
 }

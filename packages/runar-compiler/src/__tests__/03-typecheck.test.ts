@@ -953,6 +953,86 @@ describe('Pass 3: Type-Check', () => {
       const result = typecheckSource(source);
       expect(result.errors).toEqual([]);
     });
+
+    // F-110: a bounded loop is unrolled `count` times (04-anf-lower
+    // `lowerForStatement`), so a consumption written once in the body is
+    // executed once per iteration. The checker used to walk the body once and
+    // accept a Sig consumed inside a 2-iteration loop while refusing the same
+    // two consumptions written out sequentially.
+    //
+    // Proves: a consumption inside a loop that runs two or more times, of an
+    // affine value bound OUTSIDE that loop (param, alias of a param, property),
+    // gets the same diagnostic as a sequential double use — including through a
+    // count-1 loop nested in a repeating one — while count-0/1 loops and
+    // per-iteration values (`sigs[i]`, a local bound inside the body) stay legal.
+    // Does not prove: anything about consumption inside private helpers called
+    // from the loop (the affine checker is intra-method; that is a separate gap),
+    // nor what the emitted script does at runtime.
+    describe('F-110: affine consumption inside repeating loops', () => {
+      const wrap = (params: string, body: string) => `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          public m(${params}) {
+            ${body}
+          }
+        }
+      `;
+
+      it('refuses a Sig consumed in a 2-iteration loop body', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i < 2n; i++) { assert(checkSig(sig, this.pk)); }'));
+        expect(hasError(result, "affine value 'sig' has already been consumed")).toBe(true);
+      });
+
+      it('refuses a SigHashPreimage consumed in a counting-down loop', () => {
+        const result = typecheckSource(wrap('preimage: SigHashPreimage',
+          'for (let i = 3n; i > 0n; i--) { assert(checkPreimage(preimage)); }'));
+        expect(hasError(result, "affine value 'preimage' has already been consumed")).toBe(true);
+      });
+
+      it('refuses an alias of an outer Sig declared inside the loop body', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i <= 1n; i++) { const s: Sig = sig; assert(checkSig(s, this.pk)); }'));
+        expect(hasError(result, "affine value 's' has already been consumed")).toBe(true);
+      });
+
+      it('refuses a count-1 inner loop nested in a 2-iteration outer loop', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i < 2n; i++) { for (let j = 0n; j < 1n; j++) { assert(checkSig(sig, this.pk)); } }'));
+        expect(hasError(result, "affine value 'sig' has already been consumed")).toBe(true);
+      });
+
+      it('allows a Sig consumed in a single-iteration loop', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows nested single-iteration loops', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'for (let i = 5n; i >= 5n; i--) { for (let j = 0n; j <= 0n; j++) { assert(checkSig(sig, this.pk)); } }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('still refuses a single-iteration loop that follows an earlier consumption', () => {
+        const result = typecheckSource(wrap('sig: Sig',
+          'assert(checkSig(sig, this.pk)); for (let i = 0n; i < 1n; i++) { assert(checkSig(sig, this.pk)); }'));
+        expect(hasError(result, "affine value 'sig' has already been consumed")).toBe(true);
+      });
+
+      it('allows a distinct Sig per iteration via an indexed array', () => {
+        const result = typecheckSource(wrap('sigs: FixedArray<Sig, 2>',
+          'for (let i = 0n; i < 2n; i++) { assert(checkSig(sigs[i], this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+
+      it('allows a Sig bound inside the loop body and consumed once per iteration', () => {
+        const result = typecheckSource(wrap('sigs: FixedArray<Sig, 2>',
+          'for (let i = 0n; i < 2n; i++) { const s: Sig = sigs[i]; assert(checkSig(s, this.pk)); }'));
+        expect(result.errors).toEqual([]);
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------
