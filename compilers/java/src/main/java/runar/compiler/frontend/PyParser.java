@@ -72,6 +72,13 @@ public final class PyParser {
     private PyParser() {}
 
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         PyParserImpl impl = new PyParserImpl(filename);
         List<String> lex = new ArrayList<>();
         List<Token> raw = tokenizeRaw(source, filename, lex);

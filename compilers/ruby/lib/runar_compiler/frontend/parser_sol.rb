@@ -1517,6 +1517,9 @@ module RunarCompiler
     # @return [ParseResult]
     def self.parse_sol(source, file_name = "contract.runar.sol")
       # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
       Frontend.with_lex_errors(_parse_sol_tokens(source, file_name, lex), lex)
     end

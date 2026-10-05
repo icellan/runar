@@ -30,6 +30,7 @@ const types = @import("../ir/types.zig");
 const identifier_collision = @import("identifier_collision.zig");
 
 const Allocator = std.mem.Allocator;
+const input_limits = @import("../frontend/input_limits.zig");
 const Expression = types.Expression;
 const Statement = types.Statement;
 const ContractNode = types.ContractNode;
@@ -73,6 +74,11 @@ pub const ParseResult = struct {
 };
 
 pub fn parsePython(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry,
+    // not just runPipeline's Pass 0. N-136.
+    if (input_limits.sourceSizeGuardErrors(allocator, source)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     var parser = Parser.init(allocator, source, file_name);
     const r = parser.parse();
     // F-011: report an unterminated literal (the tokenizer records it).

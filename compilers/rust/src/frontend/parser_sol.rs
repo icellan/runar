@@ -45,6 +45,15 @@ use super::parser::ParseResult;
 
 /// Parse a Solidity-format Rúnar contract source.
 pub fn parse_solidity(source: &str, file_name: Option<&str>) -> ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
     let file = file_name.unwrap_or("contract.runar.sol");
     let mut errors: Vec<Diagnostic> = Vec::new();
 

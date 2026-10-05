@@ -83,6 +83,11 @@ fn loopBoundLiteral(expr: types.Expression) ?i64 {
 }
 
 pub fn parseTs(allocator: Allocator, source: []const u8, file_name: []const u8) ParseResult {
+    // DoS-bound size guard, enforced at every exported parser entry,
+    // not just runPipeline's Pass 0. N-136.
+    if (input_limits.sourceSizeGuardErrors(allocator, source)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
     var parser = Parser.init(allocator, source, file_name);
     const r = parser.parse();
     // F-011: tokenize the whole source once more so an unterminated literal

@@ -114,6 +114,13 @@ public final class JavaParser {
 
     /** Parse Java source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         Unit unit = parseToTree(source, filename);
         ClassTree classTree = firstTopLevelClass(unit.cu(), filename);
         return convertClass(classTree, filename, unit);

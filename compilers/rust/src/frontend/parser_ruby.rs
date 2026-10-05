@@ -59,6 +59,15 @@ use std::collections::HashMap;
 pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
     use super::diagnostic::Diagnostic;
 
+    // DoS-bound size guard, enforced at every exported parser entry, not
+    // just parse_source. N-136.
+    if let Some(sse) = super::input_limits::assert_source_bytes_under_limit(source) {
+        return ParseResult {
+            contract: None,
+            errors: vec![Diagnostic::error(sse.to_string(), None)],
+            source_size_err: Some(sse),
+        };
+    }
     let file = file_name.unwrap_or("contract.runar.rb");
     let mut str_errors: Vec<String> = Vec::new();
 

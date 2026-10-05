@@ -1560,6 +1560,10 @@ def _parse_move_number(s: str) -> Expression:
 
 def parse_move(source: str, file_name: str) -> ParseResult:
     """F-011: run the parser below and keep its tokenizer's diagnostics."""
+    # DoS-bound size guard, enforced at every exported parser entry, not
+    # just parse_source. N-136.
+    from runar_compiler.frontend.input_limits import assert_source_bytes_under_limit
+    assert_source_bytes_under_limit(source)
     lex: list = []
     return with_lex_errors(_parse_move_tokens(source, file_name, lex), lex)
 

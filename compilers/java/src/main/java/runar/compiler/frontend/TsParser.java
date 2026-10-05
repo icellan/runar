@@ -66,6 +66,13 @@ public final class TsParser {
     // ---------------------------------------------------------------
 
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         List<CommentInfo> comments = new ArrayList<>();
         List<String> lex = new ArrayList<>();
         List<Token> tokens = tokenize(source, comments, filename, lex);

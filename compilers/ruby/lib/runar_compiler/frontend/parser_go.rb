@@ -1616,6 +1616,9 @@ module RunarCompiler
     # @return [ParseResult]
     def self.parse_go(source, file_name)
       # F-011: run the parser below and keep its tokenizer's diagnostics.
+      # DoS-bound size guard, enforced at every exported parser entry, not
+      # just _parse_source. N-136.
+      RunarCompiler::Frontend::InputLimits.assert_source_bytes_under_limit(source)
       lex = []
       Frontend.with_lex_errors(_parse_go_tokens(source, file_name, lex), lex)
     end

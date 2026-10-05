@@ -82,14 +82,23 @@ pub fn validateForFile(
 }
 
 /// Parse `source` by the format its `file_name` extension names, behind the
-/// two guards that apply to EVERY frontend entry: the caller's size check (see
-/// `runPipeline`'s pass 0) and the fail-closed directive guard below.
+/// two guards that apply to EVERY frontend entry: the size guard immediately
+/// below (N-136 — previously only `runPipeline`'s pass 0 enforced this, so a
+/// caller that reached `parseSource` directly, as `frontend_api.zig`
+/// re-exports it for, skipped the cap entirely) and the fail-closed directive
+/// guard below that.
 ///
 /// `pub` since R-093: the Zig SDK's `compileCheckSource` called `parseZig`
 /// directly and so ran neither guard, which made the SDK's "is this valid
 /// Runar?" answer disagree with the compiler's on the same input. There is one
 /// guarded parse entry now, and both callers use it.
 pub fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
+    // DoS-bound size guard, enforced here directly rather than relying on
+    // every caller (e.g. runPipeline's Pass 0) to check first. N-136.
+    if (input_limits.sourceSizeGuardErrors(work, source)) |errs| {
+        return .{ .contract = null, .errors = errs };
+    }
+
     const format = detectFormat(file_name);
 
     // Fail-closed guard: the `@sighash` (#123) / `@embedAlways` (#109) comment

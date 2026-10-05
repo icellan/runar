@@ -75,6 +75,13 @@ public final class SolParser {
 
     /** Parse Solidity-syntax source into a Rúnar contract AST. */
     public static ContractNode parse(String source, String filename) throws ParseException {
+        // DoS-bound size guard, enforced at every exported parser entry, not
+        // just ParserDispatch.parse. N-136.
+        try {
+            InputLimits.assertSourceBytesUnderLimit(source);
+        } catch (ParserDispatch.ParseException e) {
+            throw new ParseException(e.getMessage());
+        }
         Parser p = new Parser(filename);
         List<String> lex = new ArrayList<>();
         p.tokens = tokenize(source, filename, lex);

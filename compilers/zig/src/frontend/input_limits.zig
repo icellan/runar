@@ -62,3 +62,32 @@ pub fn unsupportedDirectiveError(source: []const u8) ?[]const u8 {
     if (containsDirectiveToken(source, "@embedAlways")) return EMBED_ALWAYS_DIRECTIVE_ERROR;
     return null;
 }
+
+// ---------------------------------------------------------------------------
+// N-136: the size guard above (`assertSourceBytesUnderLimit`) was reachable
+// only through `runPipeline`'s Pass 0. `compiler_api.parseSource` (the
+// format-dispatching entry) and every one of the nine per-format
+// `passes/parse_*.zig` functions it dispatches to are `pub fn` and
+// re-exported (directly, for `parseZig`; via `parseSource`, for the rest) by
+// `frontend_api.zig` for the Zig SDK's direct use — so a caller reaching any
+// of those ten entries without going through `runPipeline` got no DoS-bound
+// rejection at all. Each entry now calls `sourceSizeGuardErrors` first.
+// ---------------------------------------------------------------------------
+
+var source_size_exceeded_fallback = [_][]const u8{"source exceeds MAX_SOURCE_BYTES"};
+
+/// Returns an allocated one-element `[][]const u8` carrying the DoS-bound
+/// size-exceeded diagnostic when `source` exceeds `MAX_SOURCE_BYTES`, or
+/// `null` when it is within bounds (strictly: `source.len <=
+/// MAX_SOURCE_BYTES` is accepted, matching `assertSourceBytesUnderLimit`).
+pub fn sourceSizeGuardErrors(allocator: std.mem.Allocator, source: []const u8) ?[][]const u8 {
+    if (source.len <= MAX_SOURCE_BYTES) return null;
+    const text = std.fmt.allocPrint(
+        allocator,
+        "source exceeds MAX_SOURCE_BYTES (limit={d}, actual={d})",
+        .{ MAX_SOURCE_BYTES, source.len },
+    ) catch return source_size_exceeded_fallback[0..];
+    const out = allocator.alloc([]const u8, 1) catch return source_size_exceeded_fallback[0..];
+    out[0] = text;
+    return out;
+}
