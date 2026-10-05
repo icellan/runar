@@ -1709,10 +1709,12 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
             // Discard assignments `_ = expr` (the .runar.go blank identifier;
             // .runar.zig's `_ = expr;` is an expression statement by parse
             // time). N-053: the VALUE is discarded, not the evaluation -- a
-            // helper called for its asserts must keep them. Only a bare name
-            // is dropped: reading a name has no effect.
+            // helper called for its asserts must keep them. N-153: `_` is
+            // bound like any other name (TS `lowerAssignment`), bare names
+            // included, so the bytes match the reference.
             if (std.mem.eql(u8, assign.target, "_")) {
-                if (assign.value != .identifier) _ = try lowerExprToRef(ctx, assign.value);
+                const discard_ref = try lowerExprToRef(ctx, assign.value);
+                try ctx.emitNamed(ctx.localTarget(assign.target), makeLoadConstString(ctx.allocator, try refString(ctx.allocator, discard_ref)));
                 return;
             }
             const value_ref = try lowerExprToRef(ctx, assign.value);

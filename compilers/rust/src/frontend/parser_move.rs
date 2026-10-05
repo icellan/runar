@@ -1000,6 +1000,12 @@ impl<'a> MoveParser<'a> {
         self.expect(&Token::LBrace);
         let mut stmts = Vec::new();
         while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
+            // N-153: a stray `;` (an empty statement, or `};` after an
+            // if/while block) is a no-op, as in the TS reference.
+            if *self.peek() == Token::Semicolon {
+                self.advance();
+                continue;
+            }
             if let Some(stmt) = self.parse_statement() {
                 stmts.push(stmt);
             }

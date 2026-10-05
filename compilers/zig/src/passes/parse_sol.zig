@@ -1206,8 +1206,13 @@ const Parser = struct {
         if (self.expect(.lbrace) == null) return &.{};
         var stmts: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
-            self.skipSemicolons();
-            if (self.current.kind == .rbrace or self.current.kind == .eof) break;
+            // N-153: an empty statement `;` is refused, as in the TS reference
+            // (a statement's own trailing `;` is consumed by its handler).
+            if (self.current.kind == .semicolon) {
+                self.addError("Unexpected token in expression: ';'");
+                _ = self.bump();
+                continue;
+            }
             if (self.parseStatement()) |s| stmts.append(self.allocator, s) catch {};
         }
         _ = self.expect(.rbrace);
@@ -1292,7 +1297,7 @@ const Parser = struct {
             _ = self.parseExpression(); // discard error message
         }
         _ = self.expect(.rparen);
-        self.skipSemicolons();
+        _ = self.match(.semicolon);
         return .{ .assert_stmt = .{ .condition = cond, .source_loc = loc } };
     }
 
@@ -1302,7 +1307,7 @@ const Parser = struct {
         if (self.expect(.lparen) == null) return null;
         const cond = self.parseExpression() orelse return null;
         _ = self.expect(.rparen);
-        self.skipSemicolons();
+        _ = self.match(.semicolon);
         return .{ .assert_stmt = .{ .condition = cond, .source_loc = loc } };
     }
 
@@ -1411,7 +1416,7 @@ const Parser = struct {
             // Skip non-standard initializer
             while (self.current.kind != .semicolon and self.current.kind != .eof) _ = self.bump();
         }
-        self.skipSemicolons();
+        _ = self.match(.semicolon);
 
         // Condition: i < N
         if (self.current.kind != .semicolon) {
@@ -1440,7 +1445,7 @@ const Parser = struct {
                 }
             }
         }
-        self.skipSemicolons();
+        _ = self.match(.semicolon);
 
         // Update: `i++`, `i--`, … N-061: the clause used to be parsed and
         // discarded, so anything the unrolled loop model cannot represent was
@@ -1472,7 +1477,7 @@ const Parser = struct {
         }
 
         const expr = self.parseExpression();
-        self.skipSemicolons();
+        _ = self.match(.semicolon);
         return .{ .return_stmt = expr };
     }
 
@@ -1497,7 +1502,7 @@ const Parser = struct {
             val = .{ .literal_int = 0 };
         }
 
-        self.skipSemicolons();
+        _ = self.match(.semicolon);
 
         // Solidity variables are mutable (let_decl)
         const ti = resolveSolType(type_name);
@@ -1515,7 +1520,7 @@ const Parser = struct {
         if (self.current.kind == .assign) {
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
-            self.skipSemicolons();
+            _ = self.match(.semicolon);
             return self.buildAssignment(expr, rhs, loc);
         }
 
@@ -1524,13 +1529,13 @@ const Parser = struct {
             const op_kind = self.current.kind;
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
-            self.skipSemicolons();
+            _ = self.match(.semicolon);
             const bin_op = binOpFromCompoundAssign(op_kind);
             const compound_rhs = self.makeBinaryExpr(bin_op, expr, rhs) orelse return null;
             return self.buildAssignment(expr, compound_rhs, loc);
         }
 
-        self.skipSemicolons();
+        _ = self.match(.semicolon);
         return .{ .expr_stmt = .{ .expr = expr, .source_loc = loc } };
     }
 

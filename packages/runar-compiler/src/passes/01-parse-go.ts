@@ -873,6 +873,22 @@ class GoParser extends ParserCore<GoToken> {
   private parseStatement(): Statement {
     const location = this.loc();
 
+    // N-153: a `{` cannot start a statement. Rúnar has no block statement,
+    // and reading it as a brace composite literal accepted `{ x, f(x) }`
+    // (not Go) while refusing real Go blocks for unrelated reasons. Refuse
+    // it and skip the balanced braces. Composite literals in expression
+    // position are unaffected.
+    if (this.current().type === '{') {
+      this.errors.push(makeDiagnostic(`Unexpected token in expression: '{'`, 'error', location));
+      let depth = 0;
+      do {
+        const t = this.advance().type;
+        if (t === '{') depth++;
+        else if (t === '}') depth--;
+      } while (depth > 0 && this.current().type !== 'eof');
+      return { kind: 'expression_statement', expression: { kind: 'bigint_literal', value: 0n }, sourceLocation: location };
+    }
+
     // return
     if (this.current().type === 'return') {
       this.advance();

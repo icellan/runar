@@ -1362,9 +1362,27 @@ impl<'a> GoParser<'a> {
         let mut stmts = Vec::new();
 
         while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
-            self.skip_semis();
+            self.skip_statement_separators();
             if matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
                 break;
+            }
+            // N-153: a `{` cannot start a statement (no block statement, and
+            // not a brace composite literal). Refuse it, as the TS reference
+            // does, and skip the balanced braces.
+            if matches!(self.current().typ, TokenType::LBrace) {
+                self.errors.push(Diagnostic::error("Unexpected token in expression: '{'", Some(self.loc())));
+                let mut depth = 0usize;
+                loop {
+                    match self.advance().typ {
+                        TokenType::LBrace => depth += 1,
+                        TokenType::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 || matches!(self.current().typ, TokenType::Eof) {
+                        break;
+                    }
+                }
+                continue;
             }
             if let Some(s) = self.parse_statement() {
                 stmts.push(s);
@@ -1372,11 +1390,29 @@ impl<'a> GoParser<'a> {
                 // Skip unknown tokens to avoid infinite loop
                 self.advance();
             }
-            self.skip_semis();
+            self.skip_statement_separators();
         }
 
         self.match_tok(&TokenType::RBrace);
         stmts
+    }
+
+    /// N-153: a `;` that ends a statement on the same line separates it from
+    /// the next one (what go/parser accepts). Any other `;` — at the start of
+    /// a block, after another `;`, or on a later line than the statement it
+    /// would end (where Go has already inserted one) — is an EMPTY statement,
+    /// which the TS reference and the Go tier refuse.
+    fn skip_statement_separators(&mut self) {
+        while matches!(self.current().typ, TokenType::Semi) {
+            let separates = self.pos > 0 && {
+                let prev = &self.tokens[self.pos - 1];
+                !matches!(prev.typ, TokenType::LBrace | TokenType::Semi) && prev.line == self.current().line
+            };
+            if !separates {
+                self.errors.push(Diagnostic::error("Unexpected token in expression: ';'", Some(self.loc())));
+            }
+            self.advance();
+        }
     }
 
     // ---------------------------------------------------------------------------

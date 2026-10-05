@@ -1619,7 +1619,10 @@ module RunarCompiler
           return Identifier.new(name: name)
         end
 
-        # Fallback
+        # N-153: nothing in the .rs surface can start an expression with this
+        # token. Refuse it, as the TS reference does. Silently returning 0 let
+        # a bare block's `}` close the method and drop every statement after it.
+        add_error("Unexpected token in expression: '#{tok.value}'")
         advance
         BigIntLiteral.new(value: 0)
       end

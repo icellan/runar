@@ -1054,7 +1054,13 @@ const Parser = struct {
     // ==================================================================
 
     fn parseStatement(self: *Parser) ?Statement {
-        self.skipSemicolons();
+        // N-153: an empty statement `;` is refused, as in the TS reference (a
+        // statement's own trailing `;` is consumed by its handler).
+        if (self.current.kind == .semicolon) {
+            self.addError("Unexpected token in expression: ';'");
+            _ = self.bump();
+            return null;
+        }
         if (self.current.kind == .rbrace or self.current.kind == .eof) return null;
 
         // assert!(expr)
@@ -1081,10 +1087,6 @@ const Parser = struct {
 
         // Expression statement (including assignments and compound assignments)
         return self.parseExpressionStatement();
-    }
-
-    fn skipSemicolons(self: *Parser) void {
-        while (self.current.kind == .semicolon) _ = self.bump();
     }
 
     fn parseAssertMacro(self: *Parser) ?Statement {

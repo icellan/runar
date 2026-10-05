@@ -1036,6 +1036,21 @@ module RunarCompiler
       def parse_statement
         location = loc
 
+        # N-153: a `{` cannot start a statement (no block statement, and not a
+        # brace composite literal). Refuse it, as the TS reference does, and
+        # skip the balanced braces.
+        if check(TOK_LBRACE)
+          add_error("Unexpected token in expression: '{'")
+          depth = 0
+          loop do
+            kind = advance.kind
+            depth += 1 if kind == TOK_LBRACE
+            depth -= 1 if kind == TOK_RBRACE
+            break if depth <= 0 || check(TOK_EOF)
+          end
+          return ExpressionStmt.new(expr: BigIntLiteral.new(value: 0), source_location: location)
+        end
+
         # return
         if check_ident("return")
           advance

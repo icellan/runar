@@ -14,7 +14,6 @@
 //!   - Property access: `contract.field` maps to `this.field`
 //!   - `assert!(cond, code)` maps to `assert(cond)`
 //!   - `assert_eq!(a, b, code)` maps to `assert(a === b)`
-//!   - `abort 0` maps to `assert(false)`
 //!   - `==` maps to `===`, `!=` maps to `!==`
 //!   - `let` / `let mut` for variable declarations
 //!   - `if (cond) { ... } else { ... }` — conditions
@@ -1270,8 +1269,8 @@ const Parser = struct {
         // return expr;
         if (self.checkIdent("return")) return self.parseMoveReturn();
 
-        // abort code — maps to assert(false)
-        if (self.checkIdent("abort")) return self.parseMoveAbort();
+        // N-153: `abort` is not part of the Move surface; it parses as a name
+        // and is refused like any undefined one, as in the TS reference.
 
         // Expression statement or assignment
         return self.parseMoveExprStatement();
@@ -1575,19 +1574,6 @@ const Parser = struct {
         const expr = self.parseExpression();
         self.skipSemicolons();
         return .{ .return_stmt = expr };
-    }
-
-    fn parseMoveAbort(self: *Parser) ?Statement {
-        const loc = self.currentSourceLoc();
-        _ = self.bump(); // consume 'abort'
-        // Skip the error code
-        _ = self.parseExpression();
-        self.skipSemicolons();
-
-        // abort maps to assert(false)
-        const call = self.allocator.create(CallExpr) catch return null;
-        call.* = .{ .callee = "assert", .args = self.makeExprSlice(.{ .literal_bool = false }) };
-        return .{ .expr_stmt = .{ .expr = .{ .call = call }, .source_loc = loc } };
     }
 
     fn parseMoveExprStatement(self: *Parser) ?Statement {

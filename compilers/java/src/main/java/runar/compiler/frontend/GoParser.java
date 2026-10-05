@@ -1298,14 +1298,46 @@ public final class GoParser {
             expect(Tok.LBRACE);
             List<Statement> stmts = new ArrayList<>();
             while (!check(Tok.RBRACE) && !check(Tok.EOF)) {
-                skipSemicolons();
+                skipStatementSeparators();
                 if (check(Tok.RBRACE) || check(Tok.EOF)) break;
+                // N-153: a `{` cannot start a statement (no block statement,
+                // and not a brace composite literal). Refuse it, as the TS
+                // reference does, and skip the balanced braces.
+                if (check(Tok.LBRACE)) {
+                    addError("Unexpected token in expression: '{'");
+                    int depth = 0;
+                    do {
+                        Tok kind = advance().kind;
+                        if (kind == Tok.LBRACE) depth++;
+                        else if (kind == Tok.RBRACE) depth--;
+                    } while (depth > 0 && !check(Tok.EOF));
+                    continue;
+                }
                 Statement s = parseStatement();
                 if (s != null) stmts.add(s);
             }
             expect(Tok.RBRACE);
-            skipSemicolons();
+            skipStatementSeparators();
             return stmts;
+        }
+
+        /**
+         * N-153: a {@code ;} that ends a statement on the same line separates
+         * it from the next one (what go/parser accepts; an inserted newline
+         * {@code ;} always does). Any other {@code ;} -- at the start of a
+         * block, after another {@code ;}, or on a later line than the token
+         * before it -- is an EMPTY statement, which the TS reference and the
+         * Go tier refuse.
+         */
+        void skipStatementSeparators() {
+            while (check(Tok.SEMICOLON)) {
+                Token prev = pos > 0 ? tokens.get(pos - 1) : null;
+                boolean separates = prev != null
+                    && prev.kind != Tok.LBRACE && prev.kind != Tok.SEMICOLON
+                    && prev.line == peek().line;
+                if (!separates) addError("Unexpected token in expression: ';'");
+                advance();
+            }
         }
 
         Statement parseStatement() {
@@ -1386,7 +1418,7 @@ public final class GoParser {
             if (!check(Tok.SEMICOLON) && !check(Tok.RBRACE) && !check(Tok.EOF)) {
                 value = parseExpression();
             }
-            skipSemicolons();
+            match(Tok.SEMICOLON);
             return new ReturnStatement(value, loc);
         }
 
@@ -1402,7 +1434,7 @@ public final class GoParser {
             if (match(Tok.ASSIGN)) init = parseExpression();
             if (init == null) init = new BigIntLiteral(BigInteger.ZERO);
 
-            skipSemicolons();
+            match(Tok.SEMICOLON);
             return new VariableDeclStatement(varName, typeNode, init, loc);
         }
 
@@ -1417,7 +1449,7 @@ public final class GoParser {
             expect(Tok.ASSIGN);
             Expression init = parseExpression();
 
-            skipSemicolons();
+            match(Tok.SEMICOLON);
             return new VariableDeclStatement(varName, typeNode, init, loc);
         }
 
@@ -1426,7 +1458,7 @@ public final class GoParser {
             Expression expr = parseExpression();
             if (expr == null) {
                 advance();
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return null;
             }
 
@@ -1438,14 +1470,14 @@ public final class GoParser {
                     name = id.name();
                     if (targetTok.kind == Tok.IDENT) idents.declare(targetTok.value, name);
                 }
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new VariableDeclStatement(name, null, init, loc);
             }
 
             // Plain assignment
             if (match(Tok.ASSIGN)) {
                 Expression value = parseExpression();
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new AssignmentStatement(expr, value, loc);
             }
 
@@ -1458,7 +1490,7 @@ public final class GoParser {
             for (int i = 0; i < compoundTokens.length; i++) {
                 if (match(compoundTokens[i])) {
                     Expression right = parseExpression();
-                    if (consumeSemis) skipSemicolons();
+                    if (consumeSemis) match(Tok.SEMICOLON);
                     Expression value = new BinaryExpr(compoundOps[i], expr, right);
                     return new AssignmentStatement(expr, value, loc);
                 }
@@ -1466,15 +1498,15 @@ public final class GoParser {
 
             // Postfix increment/decrement
             if (match(Tok.PLUSPLUS)) {
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new ExpressionStatement(new IncrementExpr(expr, false), loc);
             }
             if (match(Tok.MINUSMINUS)) {
-                if (consumeSemis) skipSemicolons();
+                if (consumeSemis) match(Tok.SEMICOLON);
                 return new ExpressionStatement(new DecrementExpr(expr, false), loc);
             }
 
-            if (consumeSemis) skipSemicolons();
+            if (consumeSemis) match(Tok.SEMICOLON);
             return new ExpressionStatement(expr, loc);
         }
 

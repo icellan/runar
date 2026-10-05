@@ -1197,16 +1197,48 @@ class _GoParser:
         stmts: list[Statement] = []
 
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-            self.skip_semicolons()
+            self._skip_statement_separators()
             if self.check(TOK_RBRACE) or self.check(TOK_EOF):
                 break
+            # N-153: a `{` cannot start a statement (no block statement, and
+            # not a brace composite literal). Refuse it, as the TS reference
+            # does, and skip the balanced braces.
+            if self.check(TOK_LBRACE):
+                self.add_error("Unexpected token in expression: '{'")
+                depth = 0
+                while True:
+                    kind = self.advance().kind
+                    if kind == TOK_LBRACE:
+                        depth += 1
+                    elif kind == TOK_RBRACE:
+                        depth -= 1
+                    if depth <= 0 or self.check(TOK_EOF):
+                        break
+                continue
             stmt = self._parse_statement()
             if stmt is not None:
                 stmts.append(stmt)
 
         self.expect(TOK_RBRACE)
-        self.skip_semicolons()
+        self._skip_statement_separators()
         return stmts
+
+    def _skip_statement_separators(self) -> None:
+        """N-153: a ``;`` that ends a statement on the same line separates it
+        from the next one (what go/parser accepts; an inserted newline ``;``
+        always does). Any other ``;`` -- at the start of a block, after another
+        ``;``, or on a later line than the token before it -- is an EMPTY
+        statement, which the TS reference and the Go tier refuse."""
+        while self.check(TOK_SEMICOLON):
+            prev = self.tokens[self.pos - 1] if self.pos > 0 else None
+            separates = (
+                prev is not None
+                and prev.kind not in (TOK_LBRACE, TOK_SEMICOLON)
+                and prev.line == self.peek().line
+            )
+            if not separates:
+                self.add_error("Unexpected token in expression: ';'")
+            self.advance()
 
     def _parse_statement(self) -> Statement | None:
         location = self.loc()
@@ -1337,7 +1369,7 @@ class _GoParser:
         value: Expression | None = None
         if not self.check(TOK_SEMICOLON) and not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
             value = self._parse_expression()
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)
         return ReturnStmt(value=value, source_location=loc)
 
     def _parse_var_decl(self, loc: SourceLocation) -> Statement:
@@ -1356,7 +1388,7 @@ class _GoParser:
         if init is None:
             init = BigIntLiteral(value=0)
 
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)
         return VariableDeclStmt(
             name=var_name,
             type=type_node,
@@ -1377,7 +1409,7 @@ class _GoParser:
         self.expect(TOK_ASSIGN)
         init = self._parse_expression()
 
-        self.skip_semicolons()
+        self.match(TOK_SEMICOLON)
         return VariableDeclStmt(
             name=var_name,
             type=type_node,
@@ -1395,7 +1427,7 @@ class _GoParser:
         if expr is None:
             self.advance()
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return None
 
         # Short variable declaration: name := expr
@@ -1407,7 +1439,7 @@ class _GoParser:
                 if target_tok.kind == TOK_IDENT:
                     self.declared.append((target_tok.value, name))
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return VariableDeclStmt(
                 name=name,
                 mutable=True,
@@ -1419,7 +1451,7 @@ class _GoParser:
         if self.match(TOK_ASSIGN):
             value = self._parse_expression()
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return AssignmentStmt(target=expr, value=value, source_location=loc)
 
         # Compound assignments: +=, -=, *=, /=, %=
@@ -1434,28 +1466,28 @@ class _GoParser:
             if self.match(kind):
                 right = self._parse_expression()
                 if consume_semicolons:
-                    self.skip_semicolons()
+                    self.match(TOK_SEMICOLON)
                 value = BinaryExpr(op=bin_op, left=expr, right=right)
                 return AssignmentStmt(target=expr, value=value, source_location=loc)
 
         # Increment/decrement: expr++ or expr--
         if self.match(TOK_PLUSPLUS):
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return ExpressionStmt(
                 expr=IncrementExpr(operand=expr, prefix=False),
                 source_location=loc,
             )
         if self.match(TOK_MINUSMINUS):
             if consume_semicolons:
-                self.skip_semicolons()
+                self.match(TOK_SEMICOLON)
             return ExpressionStmt(
                 expr=DecrementExpr(operand=expr, prefix=False),
                 source_location=loc,
             )
 
         if consume_semicolons:
-            self.skip_semicolons()
+            self.match(TOK_SEMICOLON)
         return ExpressionStmt(expr=expr, source_location=loc)
 
     # -- Expression parsing --------------------------------------------------
