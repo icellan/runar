@@ -8,7 +8,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 import runar.compiler.ir.anf.AddDataOutput;
 import runar.compiler.ir.anf.AddOutput;
 import runar.compiler.ir.anf.AddRawOutput;
@@ -127,9 +126,6 @@ public final class AnfOptimize {
         out.append(hex);
         return out.toString();
     }
-
-    /** Module-level fresh-name counter; matches Python's global counter. */
-    private static final AtomicInteger FRESH_COUNTER = new AtomicInteger(0);
 
     private static final Set<String> EC_FUNCS = Set.of(
         "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecOnCurve",
@@ -331,7 +327,7 @@ public final class AnfOptimize {
                 BigInteger k1 = getConstInt(ic.args().get(1), vm);
                 if (k1 != null) {
                     BigInteger combined = k1.multiply(k2).mod(CURVE_N);
-                    String fresh = freshConstName(combined, vm, prelude, usedNames);
+                    String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(ic.args().get(0), fresh));
                 }
             }
@@ -346,7 +342,7 @@ public final class AnfOptimize {
                 BigInteger k2 = getConstInt(rc.args().get(0), vm);
                 if (k1 != null && k2 != null) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
-                    String fresh = freshConstName(combined, vm, prelude, usedNames);
+                    String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMulGen", List.of(fresh));
                 }
             }
@@ -362,7 +358,7 @@ public final class AnfOptimize {
                 BigInteger k2 = getConstInt(rc.args().get(1), vm);
                 if (k1 != null && k2 != null) {
                     BigInteger combined = k1.add(k2).mod(CURVE_N);
-                    String fresh = freshConstName(combined, vm, prelude, usedNames);
+                    String fresh = freshConstName(name, combined, vm, prelude, usedNames);
                     return new Call("ecMul", List.of(lc.args().get(0), fresh));
                 }
             }
@@ -495,23 +491,24 @@ public final class AnfOptimize {
     }
 
     /**
-     * Produce a fresh `__ec_opt_N` binding holding the integer constant
-     * {@code value} and prepend it to {@code prelude} so the rewritten call
-     * can reference it. Returns the fresh binding name.
+     * Bind the fused scalar {@code value} under a fresh name and append it to
+     * {@code prelude} so the rewritten call can reference it. Returns the name.
      *
-     * <p>The counter is module-level (matches Python's global counter) so
-     * names are stable across method boundaries.
+     * <p>F-185: the name is the TS {@code freshName(`${binding.name}_k`,
+     * usedNames)} of packages/runar-compiler/src/optimizer/anf-ec.ts —
+     * {@code <binding>_k}, else the first unused {@code <binding>_k_<i>}. It
+     * used to come from a JVM-global counter ({@code __ec_opt_N}) that was
+     * never reset, so identical {@code --daemon} requests emitted different
+     * ANF. The name now depends only on the method being optimised.
      *
-     * <p>F-086: the name skips every {@code __ec_opt_N} the method already
-     * uses ({@code usedNames}, see {@link #collectUsedNames}) and is reserved
-     * there.
+     * <p>F-086: the name skips every name the method already uses
+     * ({@code usedNames}, see {@link #collectUsedNames}) and is reserved there.
      */
-    private static String freshConstName(BigInteger value, Map<String, AnfValue> vm, List<AnfBinding> prelude,
-                                         Set<String> usedNames) {
-        String name = "__ec_opt_" + FRESH_COUNTER.incrementAndGet();
-        while (usedNames.contains(name)) {
-            name = "__ec_opt_" + FRESH_COUNTER.incrementAndGet();
-        }
+    private static String freshConstName(String bindingName, BigInteger value, Map<String, AnfValue> vm,
+                                         List<AnfBinding> prelude, Set<String> usedNames) {
+        String base = bindingName + "_k";
+        String name = base;
+        for (int i = 1; usedNames.contains(name); i++) name = base + "_" + i;
         usedNames.add(name);
         AnfValue v = new LoadConst(new BigIntConst(value));
         vm.put(name, v);

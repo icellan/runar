@@ -39,9 +39,12 @@ import runar.compiler.ir.anf.LoadConst;
  * their renamed twins. Does not prove: anything about names minted by stack
  * lowering ({@code _codePart}, {@code __param_*}, {@code __merge$*}).
  *
- * <p>The counter is JVM-global and cannot be reset, so each test first
- * observes the name the optimizer mints for the collision-free program and
- * then plants the NEXT one ({@code __ec_opt_<K+1>}) in the program under test.
+ * <p>Each test first observes the name the optimizer mints for the
+ * collision-free program and then plants exactly that name in the program
+ * under test. F-185: names are now the TS {@code freshName} ({@code s_k} here),
+ * a pure function of the method, so the observed name is the one the colliding
+ * program would mint absent the F-086 check. (They used to come from a
+ * JVM-global {@code __ec_opt_N} counter, and the test planted {@code N+1}.)
  */
 class F086EcFreshNameCollisionTest {
 
@@ -111,11 +114,11 @@ class F086EcFreshNameCollisionTest {
         }
     }
 
-    /** The `__ec_opt_N` the NEXT fusing rewrite will mint. */
+    /** The name the NEXT fusing rewrite would mint if nothing collided. */
     private static String nextMintedName() {
-        String last = fusedArg(optimizedUnlock(programJson(null, "k")));
-        assertTrue(last.startsWith("__ec_opt_"), last);
-        return "__ec_opt_" + (Integer.parseInt(last.substring("__ec_opt_".length())) + 1);
+        String minted = fusedArg(optimizedUnlock(programJson(null, "k")));
+        assertEquals("s_k", minted);
+        return minted;
     }
 
     private static String hex(String json) {
