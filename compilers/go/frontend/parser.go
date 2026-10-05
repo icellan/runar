@@ -1380,6 +1380,11 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		return p.parseStringLiteral(node)
 
 	case "template_string":
+		// Only a NoSubstitutionTemplateLiteral is a ByteString literal; one
+		// with `${...}` is a TemplateExpression the TS reference refuses.
+		if p.findChildByType(node, "template_substitution") != nil {
+			return p.unsupportedExpr(node, "TemplateExpression")
+		}
 		text := p.nodeText(node)
 		// Remove backticks
 		if len(text) >= 2 {
@@ -1420,9 +1425,113 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		}
 		return nil
 
+	case "undefined":
+		// ts-morph parses `undefined` as an Identifier, which the typechecker
+		// then refuses ("Undefined variable 'undefined'"). tree-sitter gives it
+		// its own node type.
+		return Identifier{Name: "undefined"}
+
+	case "sequence_expression":
+		// `a, b` is a BinaryExpression with a CommaToken in the TS reference.
+		return p.unsupportedBinaryOp(node, ",")
+
+	case "assignment_expression", "augmented_assignment_expression":
+		// Assignments are statements only (parseExpressionStatement and
+		// parseForUpdate intercept them first); in expression position the TS
+		// reference sees a BinaryExpression with an assignment operator.
+		op := "="
+		if opNode := node.ChildByFieldName("operator"); opNode != nil {
+			op = p.nodeText(opNode)
+		}
+		return p.unsupportedBinaryOp(node, op)
+
 	default:
-		return nil
+		// N-052: this arm used to return nil, which the binary / unary / update
+		// parsers turned into BigIntLiteral(0) — `(x, 0n)`, an arrow function or
+		// `null` compiled as 0. Anonymous tokens and comments are not
+		// expressions and still yield nil for the callers that skip them;
+		// every named node is an expression the TS reference refuses.
+		if !node.IsNamed() || node.Type() == "comment" {
+			return nil
+		}
+		return p.unsupportedExpr(node, tsExpressionKindName(node.Type()))
 	}
+}
+
+// tsExpressionKindName maps a tree-sitter expression node type onto the
+// ts.SyntaxKind name the TS reference reports for the same expression, so the
+// tiers share one "Unsupported expression kind: <name>" diagnostic.
+func tsExpressionKindName(t string) string {
+	switch t {
+	case "arrow_function":
+		return "ArrowFunction"
+	case "function_expression", "function", "generator_function":
+		return "FunctionExpression"
+	case "class":
+		return "ClassExpression"
+	case "new_expression":
+		return "NewExpression"
+	case "null":
+		return "NullKeyword"
+	case "regex":
+		return "RegularExpressionLiteral"
+	case "satisfies_expression":
+		return "SatisfiesExpression"
+	case "await_expression":
+		return "AwaitExpression"
+	case "yield_expression":
+		return "YieldExpression"
+	case "object":
+		return "ObjectLiteralExpression"
+	case "spread_element":
+		return "SpreadElement"
+	case "template_string":
+		return "TemplateExpression"
+	case "meta_property":
+		return "MetaProperty"
+	case "instantiation_expression":
+		return "ExpressionWithTypeArguments"
+	default:
+		return t
+	}
+}
+
+// unsupportedExpr emits the TS reference's
+// "Unsupported expression kind: <Kind> ('<text>')" diagnostic and, like the
+// reference, returns a 0 placeholder so parsing can continue and report more.
+func (p *parseContext) unsupportedExpr(node *sitter.Node, kind string) Expression {
+	text := []rune(p.nodeText(node))
+	if len(text) > 50 {
+		text = text[:50]
+	}
+	loc := p.loc(node)
+	p.errors = append(p.errors, MakeDiagnostic(
+		fmt.Sprintf("Unsupported expression kind: %s ('%s')", kind, string(text)),
+		SeverityError, &loc))
+	return BigIntLiteral{Value: big.NewInt(0)}
+}
+
+// unsupportedBinaryOp emits the TS reference's "Unsupported binary operator"
+// diagnostic at the operator token.
+func (p *parseContext) unsupportedBinaryOp(node *sitter.Node, op string) Expression {
+	loc := p.loc(node)
+	for i := 0; i < int(node.ChildCount()); i++ {
+		if c := node.Child(i); !c.IsNamed() && p.nodeText(c) == op {
+			loc = p.loc(c)
+			break
+		}
+	}
+	p.errors = append(p.errors, MakeDiagnostic(
+		fmt.Sprintf("Unsupported binary operator: '%s'", op), SeverityError, &loc))
+	return BigIntLiteral{Value: big.NewInt(0)}
+}
+
+// tsBinaryOps is the TS reference's OP_MAP (01-parse.ts parseBinaryExpression)
+// after the `==` / `!=` mapping.
+var tsBinaryOps = map[string]bool{
+	"+": true, "-": true, "*": true, "/": true, "%": true,
+	"===": true, "!==": true, "<": true, "<=": true, ">": true, ">=": true,
+	"&&": true, "||": true, "&": true, "|": true, "^": true, "<<": true, ">>": true,
 }
 
 func (p *parseContext) parseBinaryExpression(node *sitter.Node) Expression {
@@ -1464,6 +1573,9 @@ func (p *parseContext) parseBinaryExpression(node *sitter.Node) Expression {
 	if op == "!=" {
 		op = "!=="
 	}
+	if !tsBinaryOps[op] {
+		return p.unsupportedBinaryOp(node, op)
+	}
 
 	return BinaryExpr{Op: op, Left: left, Right: right}
 }
@@ -1492,6 +1604,23 @@ func (p *parseContext) parseUnaryExpression(node *sitter.Node) Expression {
 	op := ""
 	if opNode != nil {
 		op = p.nodeText(opNode)
+	}
+
+	// The TS reference's UNARY_MAP is `!`, `-`, `~`; ts-morph parses `typeof`,
+	// `void` and `delete` as their own expression kinds.
+	switch op {
+	case "!", "-", "~":
+	case "typeof":
+		return p.unsupportedExpr(node, "TypeOfExpression")
+	case "void":
+		return p.unsupportedExpr(node, "VoidExpression")
+	case "delete":
+		return p.unsupportedExpr(node, "DeleteExpression")
+	default:
+		loc := p.loc(node)
+		p.errors = append(p.errors, MakeDiagnostic(
+			"Unsupported unary prefix operator", SeverityError, &loc))
+		return BigIntLiteral{Value: big.NewInt(0)}
 	}
 
 	return UnaryExpr{Op: op, Operand: operand}
@@ -1552,6 +1681,12 @@ func (p *parseContext) parseCallExpression(node *sitter.Node) Expression {
 
 	if funcNode == nil {
 		return BigIntLiteral{Value: big.NewInt(0)}
+	}
+
+	// tree-sitter models a tagged template (foo`ab`) as a call whose
+	// arguments are a template_string.
+	if argsNode != nil && argsNode.Type() == "template_string" {
+		return p.unsupportedExpr(node, "TaggedTemplateExpression")
 	}
 
 	// Special-case asm({ body, in_arity?, out_arity? }) — normalise the
@@ -2000,7 +2135,7 @@ func (p *parseContext) parseParenExpression(node *sitter.Node) Expression {
 	// parenthesized_expression: "(" expression ")"
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() != "(" && child.Type() != ")" {
+		if child.Type() != "(" && child.Type() != ")" && child.Type() != "comment" {
 			return p.parseExpression(child)
 		}
 	}
