@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import warnings
 from typing import Sequence
+from runar._ripemd160 import ripemd160_digest
 from runar.sdk.types import (
     RunarArtifact, Utxo, TransactionData, TxOutput,
     DeployOptions, CallOptions, OutputSpec, TerminalOutput, PreparedCall,
@@ -774,9 +775,7 @@ class RunarContract:
         if is_stateful and method_needs_change:
             change_pub_key_hex = opts.change_pub_key or signer.get_public_key()
             pub_key_bytes = bytes.fromhex(change_pub_key_hex)
-            hash160_bytes = hashlib.new(
-                'ripemd160', hashlib.sha256(pub_key_bytes).digest()
-            ).digest()
+            hash160_bytes = ripemd160_digest(hashlib.sha256(pub_key_bytes).digest())
             change_pkh_hex = hash160_bytes.hex()
 
         # Pre-resolve intent-intrinsic witness hex (raises

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 
+from runar._ripemd160 import ripemd160_digest
 from runar.sdk.signer import Signer
 
 try:
@@ -82,9 +83,7 @@ class LocalSigner(Signer):
             self._pub_key_bytes = bytes([prefix]) + x.to_bytes(32, 'big')
             self._pub_key_hex = self._pub_key_bytes.hex()
             # Mainnet P2PKH address: Base58Check(0x00 || HASH160(pubkey))
-            pkh = hashlib.new(
-                'ripemd160', hashlib.sha256(self._pub_key_bytes).digest()
-            ).digest()
+            pkh = ripemd160_digest(hashlib.sha256(self._pub_key_bytes).digest())
             self._address = _base58check_encode(b'\x00' + pkh)
             return
 

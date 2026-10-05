@@ -44,6 +44,8 @@ import hashlib
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from runar._ripemd160 import ripemd160_digest
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -1432,9 +1434,9 @@ def _hash_fn(name: str, input_val: Any) -> str:
     if name == 'hash256':
         return hashlib.sha256(hashlib.sha256(data).digest()).hexdigest()
     if name == 'ripemd160':
-        return hashlib.new('ripemd160', data).hexdigest()
+        return ripemd160_digest(data).hex()
     if name == 'hash160':
-        return hashlib.new('ripemd160', hashlib.sha256(data).digest()).hexdigest()
+        return ripemd160_digest(hashlib.sha256(data).digest()).hex()
     return ''
 
 

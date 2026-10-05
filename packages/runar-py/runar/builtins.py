@@ -8,6 +8,7 @@ import hashlib
 import math
 import struct
 
+from runar._ripemd160 import ripemd160_digest
 from runar.ecdsa import ecdsa_verify, TEST_MESSAGE_DIGEST
 from runar.rabin_sig import rabin_verify as _rabin_verify_real
 from runar.wots import wots_verify as _wots_verify_real
@@ -536,7 +537,7 @@ def sha256_finalize(state: bytes, remaining: bytes, msg_bit_len: int) -> bytes:
 def hash160(data) -> bytes:
     """RIPEMD160(SHA256(data))"""
     data = _as_bytes(data)
-    return hashlib.new('ripemd160', hashlib.sha256(data).digest()).digest()
+    return ripemd160_digest(hashlib.sha256(data).digest())
 
 def hash256(data) -> bytes:
     """SHA256(SHA256(data))"""
@@ -556,7 +557,7 @@ def sha256_hash(data) -> bytes:
 
 def ripemd160(data) -> bytes:
     data = _as_bytes(data)
-    return hashlib.new('ripemd160', data).digest()
+    return ripemd160_digest(data)
 
 
 # -- Mock Preimage Extraction ------------------------------------------------

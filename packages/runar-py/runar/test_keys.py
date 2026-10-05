@@ -6,6 +6,7 @@ These keys match the TypeScript test-keys.ts exactly. All derived values
 
 import hashlib
 
+from runar._ripemd160 import ripemd160_digest
 from runar.ecdsa import sign_test_message, pub_key_from_priv_key
 
 
@@ -25,7 +26,7 @@ class TestKeyPair:
 
 def _hash160(data: bytes) -> bytes:
     """RIPEMD160(SHA256(data))"""
-    return hashlib.new('ripemd160', hashlib.sha256(data).digest()).digest()
+    return ripemd160_digest(hashlib.sha256(data).digest())
 
 
 def _make_key(name: str, priv_key_hex: str) -> TestKeyPair:

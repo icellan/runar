@@ -1,6 +1,7 @@
 """Transaction construction for contract deployment."""
 
 from __future__ import annotations
+from runar._ripemd160 import ripemd160_digest
 from runar.sdk.types import Utxo
 
 # P2PKH sizes for fee estimation
@@ -199,7 +200,7 @@ def build_p2pkh_script(address_or_pub_key: str) -> str:
         import hashlib
         pub_key_bytes = bytes.fromhex(address_or_pub_key)
         sha256_hash = hashlib.sha256(pub_key_bytes).digest()
-        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+        ripemd160_hash = ripemd160_digest(sha256_hash)
         pub_key_hash = ripemd160_hash.hex()
     else:
         pub_key_hash = _address_to_pubkey_hash(address_or_pub_key)

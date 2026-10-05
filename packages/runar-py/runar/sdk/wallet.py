@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from runar._ripemd160 import ripemd160_digest
 from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.types import TransactionData, TxInput, TxOutput, Utxo
@@ -404,7 +405,7 @@ class WalletSigner(Signer):
         pub_key_hex = self.get_public_key()
         pub_key_bytes = bytes.fromhex(pub_key_hex)
         sha256_hash = hashlib.sha256(pub_key_bytes).digest()
-        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+        ripemd160_hash = ripemd160_digest(sha256_hash)
         return ripemd160_hash.hex()
 
     def sign(
