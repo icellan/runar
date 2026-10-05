@@ -365,29 +365,97 @@ public final class PyParser {
     // Byte-string helpers
     // -----------------------------------------------------------------
 
-    /** Convert a Python byte-string content like {@code \xde\xad} to hex {@code "dead"}. */
-    static String pyByteStringToHex(String s) {
-        StringBuilder out = new StringBuilder();
-        int i = 0;
-        int n = s.length();
-        while (i < n) {
-            char c = s.charAt(i);
-            if (c == '\\' && i + 1 < n) {
-                char nc = s.charAt(i + 1);
-                if (nc == 'x' && i + 3 < n) {
-                    out.append(s, i + 2, i + 4);
-                    i += 4;
-                    continue;
-                } else if (nc == '0') {
-                    out.append("00");
-                    i += 2;
-                    continue;
-                }
-            }
-            out.append(String.format("%02x", (int) c));
-            i++;
+    /**
+     * F-203: the decoded body of a .runar.py quoted literal: its text, its
+     * bytes as hex (meaningful for bytes only) and the first refusal, or null.
+     */
+    record PyLiteral(String text, String hex, String error) {}
+
+    private static boolean isOctal(char c) {
+        return c >= '0' && c <= '7';
+    }
+
+    private static boolean isHexDigit(String s, int i) {
+        if (i >= s.length()) return false;
+        char c = s.charAt(i);
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    }
+
+    private static int simpleEscape(char e) {
+        switch (e) {
+            case '\\': return 0x5c;
+            case '\'': return 0x27;
+            case '"': return 0x22;
+            case 'a': return 0x07;
+            case 'b': return 0x08;
+            case 'f': return 0x0c;
+            case 'n': return 0x0a;
+            case 'r': return 0x0d;
+            case 't': return 0x09;
+            case 'v': return 0x0b;
+            default: return -1;
         }
-        return out.toString();
+    }
+
+    /**
+     * F-203: decode the body of a .runar.py quoted literal (the text between
+     * the quotes) the way CPython decodes a bytes ({@code bytes = true}) or str
+     * literal — the TS reference's decodePyLiteral. Defined escapes decode;
+     * any other (including str's backslash-N, -u and -U, which the surface does
+     * not support), a short or non-hex x escape and an octal escape above
+     * 0o377 are refused; a non-ASCII character in bytes is refused. A trailing
+     * lone backslash (only in an unterminated literal, already refused) is
+     * dropped. The two hex digits of an x escape are kept verbatim in hex.
+     */
+    static PyLiteral decodePyLiteral(String body, boolean bytes) {
+        StringBuilder text = new StringBuilder();
+        StringBuilder hex = new StringBuilder();
+        int i = 0;
+        int n = body.length();
+        while (i < n) {
+            char c = body.charAt(i);
+            if (bytes && c >= 0x80) return new PyLiteral(text.toString(), hex.toString(), LexDiag.PY_BYTES_NON_ASCII);
+            if (c != '\\') {
+                text.append(c);
+                if (bytes) hex.append(String.format("%02x", (int) c));
+                i++;
+                continue;
+            }
+            if (i + 1 >= n) break;
+            char e = body.charAt(i + 1);
+            int simple = simpleEscape(e);
+            if (simple >= 0) {
+                text.append((char) simple);
+                hex.append(String.format("%02x", simple));
+                i += 2;
+                continue;
+            }
+            if (isOctal(e)) {
+                int j = i + 1;
+                while (j < n && j < i + 4 && isOctal(body.charAt(j))) j++;
+                int v = Integer.parseInt(body.substring(i + 1, j), 8);
+                if (v > 0xff) {
+                    return new PyLiteral(text.toString(), hex.toString(), LexDiag.invalidEscapeSequence(body.substring(i, j)));
+                }
+                text.append((char) v);
+                hex.append(String.format("%02x", v));
+                i = j;
+                continue;
+            }
+            if (e == 'x') {
+                if (!isHexDigit(body, i + 2) || !isHexDigit(body, i + 3)) {
+                    return new PyLiteral(text.toString(), hex.toString(), LexDiag.invalidEscapeSequence("\\x"));
+                }
+                text.append((char) Integer.parseInt(body.substring(i + 2, i + 4), 16));
+                hex.append(body, i + 2, i + 4);
+                i += 4;
+                continue;
+            }
+            if (bytes && e >= 0x80) return new PyLiteral(text.toString(), hex.toString(), LexDiag.PY_BYTES_NON_ASCII);
+            String esc = "\\" + new String(Character.toChars(body.codePointAt(i + 1)));
+            return new PyLiteral(text.toString(), hex.toString(), LexDiag.invalidEscapeSequence(esc));
+        }
+        return new PyLiteral(text.toString(), hex.toString(), null);
     }
 
     // -----------------------------------------------------------------
@@ -476,7 +544,10 @@ public final class PyParser {
                 } else {
                     lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
-                tokens.add(new Token(TokKind.STRING, pyByteStringToHex(val), line, startCol));
+                // F-203: escapes decode as in a CPython bytes literal.
+                PyLiteral dec = decodePyLiteral(val, true);
+                if (dec.error() != null) lex.add(LexDiag.at(filename, line, startCol, dec.error()));
+                tokens.add(new Token(TokKind.STRING, dec.hex(), line, startCol));
                 continue;
             }
 
@@ -533,7 +604,10 @@ public final class PyParser {
                 } else {
                     lex.add(LexDiag.at(filename, line, startCol, LexDiag.UNTERMINATED_STRING_LITERAL));
                 }
-                tokens.add(new Token(TokKind.STRING, val, line, startCol));
+                // F-203: a str literal decodes the same escapes as CPython does.
+                PyLiteral dec = decodePyLiteral(val, false);
+                if (dec.error() != null) lex.add(LexDiag.at(filename, line, startCol, dec.error()));
+                tokens.add(new Token(TokKind.STRING, dec.text(), line, startCol));
                 continue;
             }
 

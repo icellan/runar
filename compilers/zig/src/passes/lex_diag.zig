@@ -8,6 +8,17 @@ const std = @import("std");
 /// strings, .runar.go backtick raw strings and .runar.ts template literals).
 pub const UNTERMINATED_STRING_LITERAL = "unterminated string literal";
 
+/// F-203: a .runar.py string or bytes literal escape CPython does not define
+/// for that literal kind, a `\x` without two hex digits, an octal escape above
+/// 0o377, or a str `\N` / `\u` / `\U` (the TS reference's
+/// invalidEscapeSequenceMessage). The argument is the backslash plus the
+/// escape letter, or the whole octal escape.
+pub const INVALID_ESCAPE_SEQUENCE_FMT = "invalid escape sequence '{s}'";
+
+/// F-203: a non-ASCII character inside a .runar.py b'..' literal (CPython's
+/// wording; the TS reference's PY_BYTES_NON_ASCII).
+pub const PY_BYTES_NON_ASCII = "bytes can only contain ASCII literal characters";
+
 /// F-026: a .runar.zig call argument list or array literal whose elements are
 /// not separated by commas (the TS reference's ZIG_LIST_COMMA).
 pub const ZIG_LIST_COMMA = "expected ',' between list elements";

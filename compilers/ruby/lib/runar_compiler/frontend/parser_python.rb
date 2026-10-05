@@ -216,25 +216,83 @@ module RunarCompiler
     # Byte string helpers
     # -----------------------------------------------------------------------
 
-    def self.py_byte_string_to_hex(s)
-      result = +""
-      i = 0
-      while i < s.length
-        if s[i] == "\\" && i + 1 < s.length
-          if s[i + 1] == "x" && i + 3 < s.length
-            result << s[i + 2, 2]
-            i += 4
-            next
-          elsif s[i + 1] == "0"
-            result << "00"
-            i += 2
-            next
-          end
-        end
-        result << format("%02x", s[i].ord)
-        i += 1
+    # F-203: the single-character escapes CPython defines for bytes and str.
+    PY_SIMPLE_ESCAPES = {
+      "\\" => 0x5c, "'" => 0x27, '"' => 0x22, "a" => 0x07, "b" => 0x08,
+      "f" => 0x0c, "n" => 0x0a, "r" => 0x0d, "t" => 0x09, "v" => 0x0b
+    }.freeze
+
+    def self.py_octal?(c)
+      !c.nil? && c >= "0" && c <= "7"
+    end
+
+    def self.py_hex_digit?(c)
+      !c.nil? && c.match?(/\A[0-9a-fA-F]\z/)
+    end
+
+    # F-203: decode the body of a .runar.py quoted literal (the text between
+    # the quotes) the way CPython decodes a bytes (`bytes` true) or str
+    # literal — the TS reference's decodePyLiteral. Returns
+    # [decoded text, bytes as hex (meaningful for bytes only), first refusal or
+    # nil]. A body ending in a lone backslash only arises for an unterminated
+    # literal, already refused; it is dropped. \xHH keeps its two hex digits
+    # verbatim in the hex so the literal's spelling reaches the IR unchanged.
+    def self.decode_py_literal(body, bytes)
+      # Decoded values >= 0x80 must join the text in an encoding that can hold
+      # them whether the source was read as UTF-8 or as raw bytes.
+      enc = body.encoding == Encoding::UTF_8 ? Encoding::UTF_8 : Encoding::ASCII_8BIT
+      text = String.new(encoding: enc)
+      hex = +""
+      push = lambda do |v|
+        text << v.chr(enc)
+        hex << format("%02x", v)
       end
-      result
+      i = 0
+      while i < body.length
+        c = body[i]
+        return [text, hex, PY_BYTES_NON_ASCII] if bytes && c.ord >= 0x80
+        if c != "\\"
+          text << (enc == Encoding::UTF_8 ? c : c.b)
+          hex << format("%02x", c.ord) if bytes
+          i += 1
+          next
+        end
+        break if i + 1 >= body.length
+
+        e = body[i + 1]
+        simple = PY_SIMPLE_ESCAPES[e]
+        if simple
+          push.call(simple)
+          i += 2
+          next
+        end
+        if py_octal?(e)
+          j = i + 1
+          j += 1 while j < body.length && j < i + 4 && py_octal?(body[j])
+          v = body[(i + 1)...j].to_i(8)
+          return [text, hex, Frontend.invalid_escape_sequence_message(body[i...j])] if v > 0xff
+
+          push.call(v)
+          i = j
+          next
+        end
+        if e == "x"
+          unless py_hex_digit?(body[i + 2]) && py_hex_digit?(body[i + 3])
+            return [text, hex, Frontend.invalid_escape_sequence_message("\\x")]
+          end
+
+          text << body[(i + 2), 2].to_i(16).chr(enc)
+          hex << body[(i + 2), 2]
+          i += 4
+          next
+        end
+        return [text, hex, PY_BYTES_NON_ASCII] if bytes && e.ord >= 0x80
+
+        # Anything else — including str's \N{..}, \u and \U, which the
+        # surface does not support — is refused.
+        return [text, hex, Frontend.invalid_escape_sequence_message("\\" + e)]
+      end
+      [text, hex, nil]
     end
 
     # -----------------------------------------------------------------------
@@ -382,7 +440,9 @@ module RunarCompiler
             else
               lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col)
             end
-            hex_val = py_byte_string_to_hex(val)
+            # F-203: escapes decode as in CPython.
+            _text, hex_val, err = decode_py_literal(val, true)
+            lex << Frontend.lex_error(err, file_name, line_num, col) if err
             tokens << PythonToken.new(kind: PythonTokens::TOK_HEXSTRING, value: hex_val, line: line_num, col: col)
             next
           end
@@ -406,21 +466,20 @@ module RunarCompiler
             # Single-quote string
             quote = ch
             pos += 1
-            val = +""
+            start = pos
             while pos < line.length && line[pos] != quote
-              if line[pos] == "\\" && pos + 1 < line.length
-                pos += 1
-                val << line[pos]
-              else
-                val << line[pos]
-              end
+              pos += 1 if line[pos] == "\\"
               pos += 1
             end
+            body = line[start...pos]
             if pos < line.length
               pos += 1
             else
               lex << Frontend.lex_error(UNTERMINATED_STRING_LITERAL, file_name, line_num, col) # F-011
             end
+            # F-203: a str literal decodes the same escapes as CPython does.
+            val, _hex, err = decode_py_literal(body, false)
+            lex << Frontend.lex_error(err, file_name, line_num, col) if err
             tokens << PythonToken.new(kind: PythonTokens::TOK_STRING, value: val, line: line_num, col: col)
             next
           end

@@ -117,6 +117,22 @@ export function bareJavaPropertyAssignmentMessage(name: string): string {
   return `bare assignment to property '${name}' is not allowed; write \`this.${name} = ...\``;
 }
 
+/**
+ * F-203: a .runar.py string or bytes literal escape that CPython does not
+ * define for that literal kind (`\q`; `\N`, `\u`, `\U` in bytes), a `\x` not
+ * followed by two hex digits, an octal escape above 0o377, or (in a plain
+ * string) a `\N{..}` / `\u` / `\U` escape the surface does not support.
+ * CPython keeps an unknown escape as a literal backslash with a warning; every
+ * tier refuses it instead. `escape` is the backslash plus the escape letter
+ * (`\q`, `\x`), or the whole octal escape (`\400`).
+ */
+export function invalidEscapeSequenceMessage(escape: string): string {
+  return `invalid escape sequence '${escape}'`;
+}
+
+/** F-203: CPython's refusal of a non-ASCII character inside b'..' / b"..". */
+export const PY_BYTES_NON_ASCII = 'bytes can only contain ASCII literal characters';
+
 /** F-026: prefix of a TypeScript syntactic diagnostic surfaced on .runar.ts. */
 export const TS_SYNTAX_ERROR_PREFIX = 'TypeScript syntax error: ';
 

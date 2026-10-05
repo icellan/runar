@@ -40,6 +40,21 @@ func (d Diagnostic) FormatMessage() string {
 // triple-quoted strings, which may span lines, only end of file counts.
 const UnterminatedStringLiteralMsg = "unterminated string literal"
 
+// InvalidEscapeSequenceMsg is F-203's refusal of a .runar.py string or bytes
+// literal escape CPython does not define for that literal kind (or, in a plain
+// string, \N{..} / \u / \U, which the surface does not support), a \x not
+// followed by two hex digits, or an octal escape above 0o377 (the TS
+// reference's invalidEscapeSequenceMessage). esc is the backslash plus the
+// escape letter, or the whole octal escape.
+func InvalidEscapeSequenceMsg(esc string) string {
+	return "invalid escape sequence '" + esc + "'"
+}
+
+// PyBytesNonASCIIMsg is F-203's (and CPython's) refusal of a non-ASCII
+// character inside a .runar.py b'..' literal (the TS reference's
+// PY_BYTES_NON_ASCII).
+const PyBytesNonASCIIMsg = "bytes can only contain ASCII literal characters"
+
 // ZigListCommaMsg is F-026's refusal of a .runar.zig call argument list or
 // array literal whose elements are not separated by commas (the TS reference's
 // ZIG_LIST_COMMA).

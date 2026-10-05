@@ -68,6 +68,18 @@ impl fmt::Display for Diagnostic {
 /// backtick raw strings, which may span lines, only end of file counts.
 pub const UNTERMINATED_STRING_LITERAL: &str = "unterminated string literal";
 
+/// F-203: a .runar.py string or bytes escape CPython does not define for that
+/// literal kind, a `\x` without two hex digits, an octal escape above 0o377,
+/// or a str `\N` / `\u` / `\U` escape the surface does not support (the TS
+/// reference's `invalidEscapeSequenceMessage`). `escape` is the backslash plus
+/// the escape letter, or the whole octal escape.
+pub fn invalid_escape_sequence_message(escape: &str) -> String {
+    format!("invalid escape sequence '{}'", escape)
+}
+
+/// F-203: CPython's refusal of a non-ASCII character inside b'..' / b"..".
+pub const PY_BYTES_NON_ASCII: &str = "bytes can only contain ASCII literal characters";
+
 /// F-026: a .runar.zig call argument list or array literal whose elements are
 /// not separated by commas (the TS reference's `ZIG_LIST_COMMA`).
 pub const ZIG_LIST_COMMA: &str = "expected ',' between list elements";

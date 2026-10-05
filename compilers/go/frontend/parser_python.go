@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -242,8 +243,11 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			} else {
 				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
-			// Convert Python byte string escapes to hex
-			hexVal := pyByteStringToHex(val)
+			// F-203: decode escapes as CPython does for a bytes literal.
+			_, hexVal, decErr := decodePyLiteral(val, true)
+			if decErr != "" {
+				p.errors = append(p.errors, lexDiag(decErr, p.fileName, line, startCol))
+			}
 			tokens = append(tokens, pyToken{kind: pyTokString, value: hexVal, line: line, col: startCol})
 			continue
 		}
@@ -304,7 +308,12 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			} else {
 				p.errors = append(p.errors, lexDiag(UnterminatedStringLiteralMsg, p.fileName, line, startCol))
 			}
-			tokens = append(tokens, pyToken{kind: pyTokString, value: val, line: line, col: startCol})
+			// F-203: a str literal decodes the same escapes as CPython does.
+			text, _, decErr := decodePyLiteral(val, false)
+			if decErr != "" {
+				p.errors = append(p.errors, lexDiag(decErr, p.fileName, line, startCol))
+			}
+			tokens = append(tokens, pyToken{kind: pyTokString, value: text, line: line, col: startCol})
 			continue
 		}
 
@@ -546,23 +555,95 @@ func (p *pyParser) insertIndentation(raw []pyToken) []pyToken {
 	return result
 }
 
-// pyByteStringToHex converts Python byte string content like \xde\xad to hex "dead".
-func pyByteStringToHex(s string) string {
-	var hex strings.Builder
-	i := 0
-	for i < len(s) {
-		if s[i] == '\\' && i+1 < len(s) {
-			if s[i+1] == 'x' && i+3 < len(s) {
-				hex.WriteString(s[i+2 : i+4])
-				i += 4
-				continue
-			}
+// pySimpleEscapes are the single-character escapes CPython defines for both
+// bytes and str literals (F-203).
+var pySimpleEscapes = map[byte]byte{
+	'\\': 0x5c, '\'': 0x27, '"': 0x22, 'a': 0x07, 'b': 0x08,
+	'f': 0x0c, 'n': 0x0a, 'r': 0x0d, 't': 0x09, 'v': 0x0b,
+}
+
+func pyIsOctal(c byte) bool { return c >= '0' && c <= '7' }
+
+func pyIsHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// decodePyLiteral decodes the body of a .runar.py quoted literal (the text
+// between the quotes) the way CPython decodes a bytes (bytes = true) or str
+// literal — the TS reference's decodePyLiteral (F-203). It returns the decoded
+// text, its bytes as hex (meaningful for bytes only; \xHH keeps its two hex
+// digits verbatim) and the first refusal, or "". A body ending in a lone
+// backslash only arises for an unterminated literal, which the tokenizer
+// already refuses; it is dropped.
+func decodePyLiteral(body string, bytes bool) (string, string, string) {
+	var text, hex strings.Builder
+	push := func(v int) {
+		if bytes {
+			text.WriteByte(byte(v))
+		} else {
+			text.WriteRune(rune(v))
 		}
-		// Non-escape byte: encode as hex
-		hex.WriteString(fmt.Sprintf("%02x", s[i]))
-		i++
+		fmt.Fprintf(&hex, "%02x", v)
 	}
-	return hex.String()
+	i := 0
+	for i < len(body) {
+		c := body[i]
+		if bytes && c >= 0x80 {
+			return text.String(), hex.String(), PyBytesNonASCIIMsg
+		}
+		if c != '\\' {
+			text.WriteByte(c)
+			if bytes {
+				fmt.Fprintf(&hex, "%02x", c)
+			}
+			i++
+			continue
+		}
+		if i+1 >= len(body) {
+			break
+		}
+		e := body[i+1]
+		if v, ok := pySimpleEscapes[e]; ok {
+			push(int(v))
+			i += 2
+			continue
+		}
+		if pyIsOctal(e) {
+			j := i + 1
+			for j < len(body) && j < i+4 && pyIsOctal(body[j]) {
+				j++
+			}
+			v, _ := strconv.ParseInt(body[i+1:j], 8, 32)
+			if v > 0xff {
+				return text.String(), hex.String(), InvalidEscapeSequenceMsg(body[i:j])
+			}
+			push(int(v))
+			i = j
+			continue
+		}
+		if e == 'x' {
+			if i+3 >= len(body) || !pyIsHexDigit(body[i+2]) || !pyIsHexDigit(body[i+3]) {
+				return text.String(), hex.String(), InvalidEscapeSequenceMsg(`\x`)
+			}
+			v, _ := strconv.ParseUint(body[i+2:i+4], 16, 8)
+			if bytes {
+				text.WriteByte(byte(v))
+			} else {
+				text.WriteRune(rune(v))
+			}
+			hex.WriteString(body[i+2 : i+4])
+			i += 4
+			continue
+		}
+		if bytes && e >= 0x80 {
+			return text.String(), hex.String(), PyBytesNonASCIIMsg
+		}
+		// Anything else — including str's \N{..}, \u and \U, which the
+		// surface does not support — is refused.
+		r, _ := utf8.DecodeRuneInString(body[i+1:])
+		return text.String(), hex.String(), InvalidEscapeSequenceMsg(`\` + string(r))
+	}
+	return text.String(), hex.String(), ""
 }
 
 func pyIsIdentStart(ch byte) bool {

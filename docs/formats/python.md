@@ -192,6 +192,15 @@ data = b'\xde\xad\xbe\xef'           # hex byte string
 data = bytes.fromhex("deadbeef")      # equivalent
 ```
 
+Escapes decode exactly as CPython decodes them, so pytest and the compiled
+script see the same bytes: `\\ \' \" \a \b \f \n \r \t \v`, octal `\0`–`\377`
+and `\xHH` (two hex digits). Any other escape (`\q`, `\u`, a short `\x`, an
+octal escape above `\377`) is a compile error,
+`invalid escape sequence '<escape>'`, where CPython would warn and keep the
+backslash. A non-ASCII character inside `b'..'` is refused as CPython refuses
+it. Only the plain `b` prefix is supported (`rb''`, `br''`, `B''` are refused),
+and a literal cannot continue onto the next line with a trailing backslash.
+
 ---
 
 ## Examples

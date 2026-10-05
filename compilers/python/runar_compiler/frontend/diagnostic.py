@@ -38,6 +38,18 @@ class Diagnostic:
 # raw strings, which may span lines, only end of file counts.
 UNTERMINATED_STRING_LITERAL = "unterminated string literal"
 
+# F-203 (the TS reference's invalidEscapeSequenceMessage): a .runar.py string
+# or bytes escape CPython does not define for that literal kind, a ``\x`` not
+# followed by two hex digits, an octal escape above 0o377, or (in a plain
+# string) ``\N{..}`` / ``\u`` / ``\U``, which the surface does not support.
+# ``escape`` is the backslash plus the escape letter, or the whole octal escape.
+def invalid_escape_sequence_message(escape: str) -> str:
+    return f"invalid escape sequence '{escape}'"
+
+
+# F-203: CPython's refusal of a non-ASCII character inside b'..' / b"..".
+PY_BYTES_NON_ASCII = "bytes can only contain ASCII literal characters"
+
 # F-026: a .runar.zig call argument list or array literal whose elements are
 # not separated by commas (the TS reference's ZIG_LIST_COMMA).
 ZIG_LIST_COMMA = "expected ',' between list elements"

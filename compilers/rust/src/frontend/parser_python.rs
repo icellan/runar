@@ -41,8 +41,9 @@ use super::ast::{
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::diagnostic::{
-    lex_error, static_method_message, unsupported_statement_message, Diagnostic,
-    PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL,
+    invalid_escape_sequence_message, lex_error, static_method_message,
+    unsupported_statement_message, Diagnostic, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK,
+    UNTERMINATED_STRING_LITERAL,
 };
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
@@ -386,6 +387,119 @@ fn py_token_text(tok: &Token) -> String {
     }
 }
 
+/// F-203: the single-character escapes CPython defines for bytes and str.
+fn py_simple_escape(c: char) -> Option<u32> {
+    Some(match c {
+        '\\' => 0x5c,
+        '\'' => 0x27,
+        '"' => 0x22,
+        'a' => 0x07,
+        'b' => 0x08,
+        'f' => 0x0c,
+        'n' => 0x0a,
+        'r' => 0x0d,
+        't' => 0x09,
+        'v' => 0x0b,
+        _ => return None,
+    })
+}
+
+/// F-203: decode the body of a .runar.py quoted literal the way CPython decodes
+/// a bytes (`bytes = true`) or str literal (the TS reference's
+/// `decodePyLiteral`). Returns the decoded text, its bytes as hex (meaningful
+/// for bytes only; `\xHH` keeps its digits verbatim) and the first refusal. A
+/// trailing lone backslash only arises for an unterminated literal, which the
+/// tokenizer already refuses; it is dropped.
+fn decode_py_literal(body: &[char], bytes: bool) -> (String, String, Option<String>) {
+    let mut text = String::new();
+    let mut hex = String::new();
+    let mut i = 0;
+    macro_rules! push {
+        ($v:expr) => {{
+            let v: u32 = $v;
+            text.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+            hex.push_str(&format!("{:02x}", v));
+        }};
+    }
+    while i < body.len() {
+        let c = body[i];
+        if bytes && (c as u32) >= 0x80 {
+            return (text, hex, Some(PY_BYTES_NON_ASCII.to_string()));
+        }
+        if c != '\\' {
+            text.push(c);
+            if bytes {
+                hex.push_str(&format!("{:02x}", c as u32));
+            }
+            i += 1;
+            continue;
+        }
+        if i + 1 >= body.len() {
+            break;
+        }
+        let e = body[i + 1];
+        if let Some(v) = py_simple_escape(e) {
+            push!(v);
+            i += 2;
+            continue;
+        }
+        if ('0'..='7').contains(&e) {
+            let mut j = i + 1;
+            while j < body.len() && j < i + 4 && ('0'..='7').contains(&body[j]) {
+                j += 1;
+            }
+            let digits: String = body[i + 1..j].iter().collect();
+            let v = u32::from_str_radix(&digits, 8).unwrap_or(0);
+            if v > 0xff {
+                let esc: String = body[i..j].iter().collect();
+                return (text, hex, Some(invalid_escape_sequence_message(&esc)));
+            }
+            push!(v);
+            i = j;
+            continue;
+        }
+        if e == 'x' {
+            let ok = i + 3 < body.len() && body[i + 2].is_ascii_hexdigit() && body[i + 3].is_ascii_hexdigit();
+            if !ok {
+                return (text, hex, Some(invalid_escape_sequence_message("\\x")));
+            }
+            let digits: String = body[i + 2..i + 4].iter().collect();
+            text.push(char::from_u32(u32::from_str_radix(&digits, 16).unwrap_or(0)).unwrap_or('\u{fffd}'));
+            hex.push_str(&digits);
+            i += 4;
+            continue;
+        }
+        if bytes && (e as u32) >= 0x80 {
+            return (text, hex, Some(PY_BYTES_NON_ASCII.to_string()));
+        }
+        // Anything else -- including str's \N{..}, \u and \U, which the surface
+        // does not support -- is refused.
+        return (text, hex, Some(invalid_escape_sequence_message(&format!("\\{}", e))));
+    }
+    (text, hex, None)
+}
+
+/// F-203: scan a single-line quoted literal starting just after its opening
+/// quote (the TS reference's `scanPyQuoted`). A backslash always takes the
+/// next character with it, so an escaped quote does not close the literal; a
+/// backslash at the line break leaves the literal unterminated. Returns the
+/// body, the index just past the scan, and whether the literal was closed.
+fn scan_py_quoted(chars: &[char], start: usize, quote: char) -> (&[char], usize, bool) {
+    let mut pos = start;
+    while pos < chars.len() && chars[pos] != quote {
+        pos += if chars[pos] == '\\' { 2 } else { 1 };
+    }
+    if pos > chars.len() {
+        pos = chars.len();
+    }
+    let body = &chars[start.min(pos)..pos];
+    if pos < chars.len() {
+        (body, pos + 1, true)
+    } else {
+        (body, pos, false)
+    }
+}
+
 fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
     let mut tokens = Vec::new();
     let lines: Vec<&str> = source.split('\n').collect();
@@ -690,38 +804,22 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 _ => {}
             }
 
-            // Hex byte string: b'\xde\xad' or b"\xde\xad"
+            // Byte string: b'..' or b".." -- escapes decode as in CPython (F-203).
             if ch == 'b'
                 && pos + 1 < chars.len()
                 && (chars[pos + 1] == '\'' || chars[pos + 1] == '"')
             {
-                let quote = chars[pos + 1];
                 let open_col = pos;
-                pos += 2; // skip b and opening quote
-                let mut hex = String::new();
-                while pos < chars.len() && chars[pos] != quote {
-                    if chars[pos] == '\\'
-                        && pos + 1 < chars.len()
-                        && chars[pos + 1] == 'x'
-                        && pos + 3 < chars.len()
-                    {
-                        // \xHH
-                        hex.push(chars[pos + 2]);
-                        hex.push(chars[pos + 3]);
-                        pos += 4;
-                    } else {
-                        // Non-hex byte -- encode as hex
-                        let byte = chars[pos] as u32;
-                        hex.push_str(&format!("{:02x}", byte));
-                        pos += 1;
-                    }
-                }
+                let (body, end, closed) = scan_py_quoted(&chars, pos + 2, chars[pos + 1]);
+                pos = end;
                 // F-011: a single-line literal that reaches the line break is
                 // unterminated; it must never run on into the next line.
-                if pos < chars.len() {
-                    pos += 1; // skip closing quote
-                } else {
+                if !closed {
                     errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
+                }
+                let (_, hex, err) = decode_py_literal(body, true);
+                if let Some(msg) = err {
+                    errors.push(lex_error(&msg, file, line_num, open_col));
                 }
                 tokens.push(Token::HexStringLit(hex));
                 continue;
@@ -757,23 +855,16 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                     }
                     continue;
                 }
-                pos += 1;
-                let mut val = String::new();
-                while pos < chars.len() && chars[pos] != quote {
-                    if chars[pos] == '\\' && pos + 1 < chars.len() {
-                        pos += 1; // skip backslash
-                        val.push(chars[pos]);
-                        pos += 1;
-                    } else {
-                        val.push(chars[pos]);
-                        pos += 1;
-                    }
-                }
-                if pos < chars.len() {
-                    pos += 1; // skip closing quote
-                } else {
+                let (body, end, closed) = scan_py_quoted(&chars, pos + 1, quote);
+                pos = end;
+                if !closed {
                     // F-011: reached the line break.
                     errors.push(lex_error(UNTERMINATED_STRING_LITERAL, file, line_num, open_col));
+                }
+                // F-203: a str literal decodes the same escapes as CPython does.
+                let (val, _, err) = decode_py_literal(body, false);
+                if let Some(msg) = err {
+                    errors.push(lex_error(&msg, file, line_num, open_col));
                 }
                 tokens.push(Token::StringLit(val));
                 continue;

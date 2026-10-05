@@ -20,8 +20,10 @@ from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
+    PY_BYTES_NON_ASCII,
     PY_STATEMENT_LINE_BREAK,
     UNTERMINATED_STRING_LITERAL,
+    invalid_escape_sequence_message,
     lex_error,
     with_lex_errors,
 )
@@ -236,23 +238,92 @@ def py_convert_name(name: str) -> str:
 # Byte string helpers
 # ---------------------------------------------------------------------------
 
-def _py_byte_string_to_hex(s: str) -> str:
-    """Convert Python byte string content like \\xde\\xad to hex 'dead'."""
-    result: list[str] = []
+# F-203: the single-character escapes CPython defines for bytes and str.
+_PY_SIMPLE_ESCAPES = {
+    "\\": 0x5C, "'": 0x27, '"': 0x22, "a": 0x07, "b": 0x08,
+    "f": 0x0C, "n": 0x0A, "r": 0x0D, "t": 0x09, "v": 0x0B,
+}
+_OCTAL = "01234567"
+_HEX = "0123456789abcdefABCDEF"
+
+
+def _decode_py_literal(body: str, is_bytes: bool) -> tuple[str, str, str | None]:
+    """F-203: decode the body of a .runar.py quoted literal the way CPython
+    decodes a bytes (``is_bytes``) or str literal -- the TS reference's
+    decodePyLiteral, implemented explicitly (no codecs).
+
+    Returns ``(text, hex, error)``: the decoded text, its bytes as hex
+    (meaningful for bytes only; ``\\xHH`` keeps its digits verbatim) and the
+    first refusal or None. A trailing lone backslash only arises for an
+    unterminated literal, which the tokenizer already refuses; it is dropped.
+    """
+    text: list[str] = []
+    hexs: list[str] = []
+
+    def push(v: int) -> None:
+        text.append(chr(v))
+        hexs.append(f"{v:02x}")
+
     i = 0
-    while i < len(s):
-        if s[i] == "\\" and i + 1 < len(s):
-            if s[i + 1] == "x" and i + 3 < len(s):
-                result.append(s[i + 2 : i + 4])
-                i += 4
-                continue
-            elif s[i + 1] == "0":
-                result.append("00")
-                i += 2
-                continue
-        result.append(f"{ord(s[i]):02x}")
+    n = len(body)
+    while i < n:
+        c = body[i]
+        if is_bytes and ord(c) >= 0x80:
+            return "".join(text), "".join(hexs), PY_BYTES_NON_ASCII
+        if c != "\\":
+            text.append(c)
+            if is_bytes:
+                hexs.append(f"{ord(c):02x}")
+            i += 1
+            continue
+        if i + 1 >= n:
+            break
+        e = body[i + 1]
+        if e in _PY_SIMPLE_ESCAPES:
+            push(_PY_SIMPLE_ESCAPES[e])
+            i += 2
+            continue
+        if e in _OCTAL:
+            j = i + 1
+            while j < n and j < i + 4 and body[j] in _OCTAL:
+                j += 1
+            v = int(body[i + 1 : j], 8)
+            if v > 0xFF:
+                return "".join(text), "".join(hexs), invalid_escape_sequence_message(body[i:j])
+            push(v)
+            i = j
+            continue
+        if e == "x":
+            if not (i + 3 < n and body[i + 2] in _HEX and body[i + 3] in _HEX):
+                return "".join(text), "".join(hexs), invalid_escape_sequence_message("\\x")
+            text.append(chr(int(body[i + 2 : i + 4], 16)))
+            hexs.append(body[i + 2 : i + 4])
+            i += 4
+            continue
+        if is_bytes and ord(e) >= 0x80:
+            return "".join(text), "".join(hexs), PY_BYTES_NON_ASCII
+        # Anything else -- including str's \\N{..}, \\u and \\U, which the
+        # surface does not support -- is refused.
+        return "".join(text), "".join(hexs), invalid_escape_sequence_message("\\" + e)
+    return "".join(text), "".join(hexs), None
+
+
+def _scan_py_quoted(source: str, i: int, quote: str) -> int:
+    """F-011/F-203: scan a single-line quoted literal from just after its
+    opening quote. A backslash always takes the next character with it (so an
+    escaped quote does not close the literal); a backslash at a line break or
+    end of file is a continuation, which this surface does not support -- the
+    literal is then unterminated. Returns the index of the closing quote, or
+    of the line break / end of file where the literal stops."""
+    n = len(source)
+    while i < n and source[i] != quote and source[i] not in "\r\n":
+        if source[i] == "\\":
+            if i + 1 >= n or source[i + 1] in "\r\n":
+                return i + 1
+            i += 2
+            continue
         i += 1
-    return "".join(result)
+    return i
 
 
 # ---------------------------------------------------------------------------
@@ -358,23 +429,18 @@ def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> 
             # F-011: a single-line literal that reaches a line break (escaped or
             # not) or end of file is unterminated; it must never run on into the
             # following lines.
-            while i < n and source[i] != quote and source[i] not in "\r\n":
-                if source[i] == "\\":
-                    if i + 1 >= n or source[i + 1] in "\r\n":
-                        i += 1
-                        col += 1
-                        break
-                    i += 1
-                    col += 1
-                i += 1
-                col += 1
+            i = _scan_py_quoted(source, i, quote)
+            col += i - start
             val = source[start:i]
             if i < n and source[i] == quote:
                 i += 1
                 col += 1
             else:
                 lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
-            hex_val = _py_byte_string_to_hex(val)
+            # F-203: escapes decode as in CPython bytes literals.
+            _, hex_val, esc_err = _decode_py_literal(val, True)
+            if esc_err is not None:
+                lex.append(lex_error(esc_err, file_name, line, start_col))
             tokens.append(Token(TOK_STRING, hex_val, line, start_col))
             continue
 
@@ -409,23 +475,19 @@ def _tokenize_raw(source: str, lex: list | None = None, file_name: str = "") -> 
             # F-011: a single-line literal that reaches a line break (escaped or
             # not) or end of file is unterminated; it must never run on into the
             # following lines.
-            while i < n and source[i] != quote and source[i] not in "\r\n":
-                if source[i] == "\\":
-                    if i + 1 >= n or source[i + 1] in "\r\n":
-                        i += 1
-                        col += 1
-                        break
-                    i += 1
-                    col += 1
-                i += 1
-                col += 1
+            i = _scan_py_quoted(source, i, quote)
+            col += i - start
             val = source[start:i]
             if i < n and source[i] == quote:
                 i += 1
                 col += 1
             else:
                 lex.append(lex_error(UNTERMINATED_STRING_LITERAL, file_name, line, start_col))
-            tokens.append(Token(TOK_STRING, val, line, start_col))
+            # F-203: a str literal decodes the same escapes as CPython does.
+            text_val, _, esc_err = _decode_py_literal(val, False)
+            if esc_err is not None:
+                lex.append(lex_error(esc_err, file_name, line, start_col))
+            tokens.append(Token(TOK_STRING, text_val, line, start_col))
             continue
 
         # Numbers (F-026): the whole glued [0-9A-Za-z_] run is one literal.

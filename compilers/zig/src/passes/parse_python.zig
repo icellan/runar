@@ -83,8 +83,11 @@ pub fn parsePython(allocator: Allocator, source: []const u8, file_name: []const 
     const r = parser.parse();
     // F-011: report an unterminated literal (the tokenizer records it).
     var unterminated: ?lex_diag.Pos = null;
-    _ = tokenizeRawLex(allocator, source, &unterminated);
-    return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, r.errors, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, unterminated) };
+    var escape: ?LiteralError = null;
+    _ = tokenizeRawLex(allocator, source, &unterminated, &escape);
+    // F-203: report the first literal refused for its escapes / characters.
+    const errs = if (escape) |e| lex_diag.prepend(allocator, r.errors, file_name, e.msg, e.pos) else r.errors;
+    return .{ .contract = r.contract, .errors = lex_diag.prepend(allocator, errs, file_name, lex_diag.UNTERMINATED_STRING_LITERAL, unterminated) };
 }
 
 
@@ -180,11 +183,16 @@ const Tokenizer = struct {
 /// Phase 1: produce raw tokens (including NEWLINE) without INDENT/DEDENT.
 fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
     var unterminated: ?lex_diag.Pos = null;
-    return tokenizeRawLex(allocator, source, &unterminated);
+    var escape: ?LiteralError = null;
+    return tokenizeRawLex(allocator, source, &unterminated, &escape);
 }
 
-/// `tokenizeRaw`, also recording the first unterminated literal (F-011).
-fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_diag.Pos) []Token {
+/// F-203: the first .runar.py literal refused by `decodePyLiteral`.
+const LiteralError = struct { pos: lex_diag.Pos, msg: []const u8 };
+
+/// `tokenizeRaw`, also recording the first unterminated literal (F-011) and
+/// the first literal refused for an escape or character (F-203).
+fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_diag.Pos, escape: *?LiteralError) []Token {
     var tokens = std.ArrayListUnmanaged(Token).empty;
     var i: usize = 0;
     var line: u32 = 1;
@@ -252,8 +260,12 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
             } else if (unterminated.* == null) {
                 unterminated.* = .{ .line = line, .col = start_col };
             }
-            const hex_val = pyByteStringToHex(allocator, val);
-            tokens.append(allocator, .{ .kind = .string_literal, .text = hex_val, .line = line, .col = start_col }) catch {};
+            // F-203: escapes decode as in CPython.
+            const dec = decodePyLiteral(allocator, val, true);
+            if (dec.err) |m| {
+                if (escape.* == null) escape.* = .{ .pos = .{ .line = line, .col = start_col }, .msg = m };
+            }
+            tokens.append(allocator, .{ .kind = .string_literal, .text = dec.text, .line = line, .col = start_col }) catch {};
             continue;
         }
 
@@ -310,7 +322,12 @@ fn tokenizeRawLex(allocator: Allocator, source: []const u8, unterminated: *?lex_
             } else if (unterminated.* == null) {
                 unterminated.* = .{ .line = line, .col = start_col };
             }
-            tokens.append(allocator, .{ .kind = .string_literal, .text = val, .line = line, .col = start_col }) catch {};
+            // F-203: a str literal decodes the same escapes as CPython does.
+            const dec = decodePyLiteral(allocator, val, false);
+            if (dec.err) |m| {
+                if (escape.* == null) escape.* = .{ .pos = .{ .line = line, .col = start_col }, .msg = m };
+            }
+            tokens.append(allocator, .{ .kind = .string_literal, .text = dec.text, .line = line, .col = start_col }) catch {};
             continue;
         }
 
@@ -519,27 +536,100 @@ fn isHexDigit(c: u8) bool {
     return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
 }
 
-/// Convert Python byte string content like `\xde\xad` to hex string "dead".
-fn pyByteStringToHex(allocator: Allocator, s: []const u8) []const u8 {
-    var hex = std.ArrayListUnmanaged(u8).empty;
+/// F-203: the result of decoding a .runar.py literal body.
+const PyLiteral = struct { text: []const u8, err: ?[]const u8 };
+
+fn isOctal(c: u8) bool {
+    return c >= '0' and c <= '7';
+}
+
+fn pySimpleEscape(c: u8) ?u8 {
+    return switch (c) {
+        '\\' => 0x5c,
+        '\'' => 0x27,
+        '"' => 0x22,
+        'a' => 0x07,
+        'b' => 0x08,
+        'f' => 0x0c,
+        'n' => 0x0a,
+        'r' => 0x0d,
+        't' => 0x09,
+        'v' => 0x0b,
+        else => null,
+    };
+}
+
+/// F-203: decode the body of a .runar.py quoted literal (the text between the
+/// quotes) the way CPython decodes a bytes (`bytes` = true; the result is
+/// lowercase hex, `\xHH` digits kept verbatim) or str literal (the result is
+/// the decoded text, an escape above 0x7f as its UTF-8 encoding). Mirrors the
+/// TS reference's decodePyLiteral; `err` is the first refusal. A body ending
+/// in a lone backslash only arises for an unterminated literal, which the
+/// tokenizer already refuses; it is dropped.
+fn decodePyLiteral(allocator: Allocator, s: []const u8, bytes: bool) PyLiteral {
+    var out = std.ArrayListUnmanaged(u8).empty;
+    const hex_chars = "0123456789abcdef";
     var i: usize = 0;
     while (i < s.len) {
-        if (s[i] == '\\' and i + 1 < s.len) {
-            if (s[i + 1] == 'x' and i + 3 < s.len) {
-                hex.append(allocator, s[i + 2]) catch {};
-                hex.append(allocator, s[i + 3]) catch {};
-                i += 4;
+        const c = s[i];
+        if (bytes and c >= 0x80) return .{ .text = out.items, .err = lex_diag.PY_BYTES_NON_ASCII };
+        var v: u21 = undefined;
+        if (c != '\\') {
+            if (!bytes) {
+                out.append(allocator, c) catch {};
+                i += 1;
                 continue;
             }
+            v = c;
+            i += 1;
+        } else {
+            if (i + 1 >= s.len) break;
+            const e = s[i + 1];
+            if (pySimpleEscape(e)) |sv| {
+                v = sv;
+                i += 2;
+            } else if (isOctal(e)) {
+                var j = i + 1;
+                var acc: u21 = 0;
+                while (j < s.len and j < i + 4 and isOctal(s[j])) : (j += 1) acc = acc * 8 + (s[j] - '0');
+                if (acc > 0xff) return .{ .text = out.items, .err = invalidEscape(allocator, s[i..j]) };
+                v = acc;
+                i = j;
+            } else if (e == 'x') {
+                if (i + 3 >= s.len or !isHexDigit(s[i + 2]) or !isHexDigit(s[i + 3])) {
+                    return .{ .text = out.items, .err = invalidEscape(allocator, "\\x") };
+                }
+                if (bytes) {
+                    out.append(allocator, s[i + 2]) catch {};
+                    out.append(allocator, s[i + 3]) catch {};
+                    i += 4;
+                    continue;
+                }
+                v = std.fmt.parseInt(u8, s[i + 2 .. i + 4], 16) catch 0;
+                i += 4;
+            } else {
+                if (bytes and e >= 0x80) return .{ .text = out.items, .err = lex_diag.PY_BYTES_NON_ASCII };
+                // Anything else, including str's \N{..}, \u and \U (which the
+                // surface does not support), is refused.
+                const len: usize = std.unicode.utf8ByteSequenceLength(e) catch 1;
+                const stop = @min(i + 1 + len, s.len);
+                return .{ .text = out.items, .err = invalidEscape(allocator, s[i..stop]) };
+            }
         }
-        // Non-escape byte: encode as two hex chars
-        const byte = s[i];
-        const hex_chars = "0123456789abcdef";
-        hex.append(allocator, hex_chars[byte >> 4]) catch {};
-        hex.append(allocator, hex_chars[byte & 0x0f]) catch {};
-        i += 1;
+        if (bytes) {
+            out.append(allocator, hex_chars[v >> 4]) catch {};
+            out.append(allocator, hex_chars[v & 0x0f]) catch {};
+        } else {
+            var buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(v, &buf) catch 0;
+            out.appendSlice(allocator, buf[0..n]) catch {};
+        }
     }
-    return hex.items;
+    return .{ .text = out.items, .err = null };
+}
+
+fn invalidEscape(allocator: Allocator, esc: []const u8) []const u8 {
+    return std.fmt.allocPrint(allocator, lex_diag.INVALID_ESCAPE_SEQUENCE_FMT, .{esc}) catch "invalid escape sequence";
 }
 
 // ============================================================================
@@ -2535,7 +2625,7 @@ test "python byte string to hex" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const result = pyByteStringToHex(allocator, "\\xde\\xad");
+    const result = decodePyLiteral(allocator, "\\xde\\xad", true).text;
     try std.testing.expectEqualStrings("dead", result);
 }
 

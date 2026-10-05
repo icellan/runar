@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { invalidEscapeSequenceMessage, makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, PY_BYTES_NON_ASCII, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -79,6 +79,80 @@ const PY_EXPRESSION_START: ReadonlySet<TokenType> = new Set<TokenType>([
   'number', 'string', 'hexstring', 'True', 'False', 'None',
   '(', '[', '-', '~', '!', 'not',
 ]);
+
+/** F-203: the single-character escapes CPython defines for bytes and str. */
+const PY_SIMPLE_ESCAPES: ReadonlyMap<string, number> = new Map([
+  ['\\', 0x5c], ["'", 0x27], ['"', 0x22], ['a', 0x07], ['b', 0x08],
+  ['f', 0x0c], ['n', 0x0a], ['r', 0x0d], ['t', 0x09], ['v', 0x0b],
+]);
+
+const isOctal = (c: string | undefined): boolean => c !== undefined && c >= '0' && c <= '7';
+const isHexDigit = (c: string | undefined): boolean => c !== undefined && /^[0-9a-fA-F]$/.test(c);
+
+/**
+ * F-203: decode the body of a .runar.py quoted literal (the text between the
+ * quotes) the way CPython decodes a bytes (`bytes = true`) or str literal.
+ * Returns the decoded text, its bytes as hex (meaningful for bytes only) and
+ * the first refusal, or null. A body ending in a lone backslash only arises for an
+ * unterminated literal, which the tokenizer already refuses; it is dropped.
+ * `\xHH` keeps its two hex digits verbatim in `hex` so the literal's spelling
+ * reaches the IR unchanged.
+ */
+function decodePyLiteral(body: string, bytes: boolean): { text: string; hex: string; error: string | null } {
+  let text = '';
+  let hex = '';
+  const push = (v: number): void => { text += String.fromCharCode(v); hex += v.toString(16).padStart(2, '0'); };
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i]!;
+    if (bytes && c.charCodeAt(0) >= 0x80) return { text, hex, error: PY_BYTES_NON_ASCII };
+    if (c !== '\\') { text += c; if (bytes) hex += c.charCodeAt(0).toString(16).padStart(2, '0'); i++; continue; }
+    if (i + 1 >= body.length) break;
+    const e = body[i + 1]!;
+    const simple = PY_SIMPLE_ESCAPES.get(e);
+    if (simple !== undefined) { push(simple); i += 2; continue; }
+    if (isOctal(e)) {
+      let j = i + 1;
+      while (j < body.length && j < i + 4 && isOctal(body[j])) j++;
+      const v = parseInt(body.slice(i + 1, j), 8);
+      if (v > 0xff) return { text, hex, error: invalidEscapeSequenceMessage(body.slice(i, j)) };
+      push(v);
+      i = j;
+      continue;
+    }
+    if (e === 'x') {
+      if (!isHexDigit(body[i + 2]) || !isHexDigit(body[i + 3])) {
+        return { text, hex, error: invalidEscapeSequenceMessage('\\x') };
+      }
+      text += String.fromCharCode(parseInt(body.slice(i + 2, i + 4), 16));
+      hex += body.slice(i + 2, i + 4);
+      i += 4;
+      continue;
+    }
+    if (bytes && e.charCodeAt(0) >= 0x80) return { text, hex, error: PY_BYTES_NON_ASCII };
+    // Anything else — including str's \N{..}, \u and \U, which the surface
+    // does not support — is refused.
+    return { text, hex, error: invalidEscapeSequenceMessage('\\' + String.fromCodePoint(body.codePointAt(i + 1)!)) };
+  }
+  return { text, hex, error: null };
+}
+
+/**
+ * F-203: scan a single-line quoted literal starting just after its opening
+ * quote. A backslash always takes the next character with it (so an escaped
+ * quote does not close the literal); a backslash at the line break is a
+ * continuation, which this surface does not support — the literal is then
+ * unterminated. Returns the body and the index just past the scan.
+ */
+function scanPyQuoted(line: string, start: number, quote: string): { body: string; end: number; closed: boolean } {
+  let pos = start;
+  while (pos < line.length && line[pos] !== quote) {
+    pos += line[pos] === '\\' ? 2 : 1;
+  }
+  if (pos > line.length) pos = line.length;
+  const body = line.slice(start, pos);
+  return pos < line.length ? { body, end: pos + 1, closed: true } : { body, end: pos, closed: false };
+}
 
 function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
   const tokens: Token[] = [];
@@ -286,27 +360,16 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
       if (ch === '*') { add('*', '*', lineNum, col); pos++; continue; }
       if (ch === '/') { add('/', '/', lineNum, col); pos++; continue; }
 
-      // Hex byte string: b'\xde\xad' or b"\xde\xad"
+      // Byte string: b'..' or b".." — escapes decode as in CPython (F-203).
       if (ch === 'b' && pos + 1 < line.length && (line[pos + 1] === '\'' || line[pos + 1] === '"')) {
-        const quote = line[pos + 1]!;
-        pos += 2; // skip b and opening quote
-        let hex = '';
-        while (pos < line.length && line[pos] !== quote) {
-          if (line[pos] === '\\' && pos + 1 < line.length && line[pos + 1] === 'x') {
-            // \xHH
-            hex += line.substring(pos + 2, pos + 4);
-            pos += 4;
-          } else {
-            // Non-hex byte — encode as hex
-            hex += line.charCodeAt(pos).toString(16).padStart(2, '0');
-            pos++;
-          }
-        }
+        const scan = scanPyQuoted(line, pos + 2, line[pos + 1]!);
+        pos = scan.end;
         // F-011: a single-line literal that reaches the line break is
         // unterminated; it must never run on into the next line.
-        if (pos < line.length) pos++; // skip closing quote
-        else unterminated(lineNum, col);
-        add('hexstring', hex, lineNum, col);
+        if (!scan.closed) unterminated(lineNum, col);
+        const dec = decodePyLiteral(scan.body, true);
+        if (dec.error !== null) errors.push(makeDiagnostic(dec.error, 'error', { file, line: lineNum, column: col }));
+        add('hexstring', dec.hex, lineNum, col);
         continue;
       }
 
@@ -329,22 +392,13 @@ function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): T
           continue; // triple-quoted strings are docstrings — skip, don't emit a token
         }
 
-        const quote = ch;
-        pos++;
-        let val = '';
-        while (pos < line.length && line[pos] !== quote) {
-          if (line[pos] === '\\' && pos + 1 < line.length) {
-            pos++; // skip backslash
-            val += line[pos];
-            pos++;
-          } else {
-            val += line[pos];
-            pos++;
-          }
-        }
-        if (pos < line.length) pos++; // skip closing quote
-        else unterminated(lineNum, col); // F-011: reached the line break
-        add('string', val, lineNum, col);
+        const scan = scanPyQuoted(line, pos + 1, ch);
+        pos = scan.end;
+        if (!scan.closed) unterminated(lineNum, col); // F-011: reached the line break
+        // F-203: a str literal decodes the same escapes as CPython does.
+        const dec = decodePyLiteral(scan.body, false);
+        if (dec.error !== null) errors.push(makeDiagnostic(dec.error, 'error', { file, line: lineNum, column: col }));
+        add('string', dec.text, lineNum, col);
         continue;
       }
 

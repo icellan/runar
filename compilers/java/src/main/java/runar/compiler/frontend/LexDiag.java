@@ -16,6 +16,21 @@ final class LexDiag {
     static final String UNTERMINATED_STRING_LITERAL = "unterminated string literal";
 
     /**
+     * F-203: a .runar.py string or bytes literal escape CPython does not define
+     * for that literal kind, a {@code \x} not followed by two hex digits, an
+     * octal escape above 0o377, or (in a plain string) a {@code \N} /
+     * backslash-u / backslash-U escape the surface does not support (the TS
+     * reference's invalidEscapeSequenceMessage). {@code escape} is the
+     * backslash plus the escape letter, or the whole octal escape.
+     */
+    static String invalidEscapeSequence(String escape) {
+        return "invalid escape sequence '" + escape + "'";
+    }
+
+    /** F-203: CPython's refusal of a non-ASCII character inside b'..' / b"..". */
+    static final String PY_BYTES_NON_ASCII = "bytes can only contain ASCII literal characters";
+
+    /**
      * F-026: a .runar.zig call argument list or array literal whose elements are
      * not separated by commas (the TS reference's ZIG_LIST_COMMA).
      */
