@@ -17,6 +17,8 @@
 
 require 'json'
 require 'open3'
+require 'tmpdir'
+require 'fileutils'
 require_relative 'test_helper'
 
 class ConformanceGoldensTest < Minitest::Test
@@ -27,6 +29,31 @@ class ConformanceGoldensTest < Minitest::Test
   # ------------------------------------------------------------------
   # Helpers
   # ------------------------------------------------------------------
+
+  # Read the optional per-fixture `compilers` allowlist from source.json.
+  #
+  # Mirrors `conformance/runner/runner.ts::readFixtureCompilerAllowlist`:
+  # when source.json declares a top-level "compilers" array, only the
+  # listed tiers are required to produce byte-identical IR/hex for this
+  # fixture (conformance/README.md "Per-fixture compiler allowlist"). A
+  # fixture whose allowlist excludes "ruby" is legitimately out of scope
+  # for this harness -- it may ship no .runar.rb source at all.
+  #
+  # Returns nil when the field is absent (= "all compilers"), else an
+  # Array<String> of allowed compiler ids.
+  def read_compiler_allowlist(test_dir)
+    config_path = File.join(test_dir, 'source.json')
+    return nil unless File.exist?(config_path)
+
+    begin
+      cfg = JSON.parse(File.read(config_path))
+    rescue JSON::ParserError, StandardError
+      return nil
+    end
+
+    list = cfg['compilers']
+    list.is_a?(Array) ? list : nil
+  end
 
   # Resolve the Ruby-format source file for a conformance fixture.
   #
@@ -108,27 +135,41 @@ class ConformanceGoldensTest < Minitest::Test
   end
 
   # ------------------------------------------------------------------
-  # The single conformance test that walks all fixtures.
+  # Core scan: walk `dirs` (conformance fixture directories) and classify
+  # each one. Extracted from the test body so the classification logic is
+  # directly unit-testable against synthetic fixture directories (F-151),
+  # without depending on or risking the real conformance corpus.
+  #
+  # Classification (F-151 fix):
+  #   - A fixture whose source.json `compilers` allowlist excludes "ruby"
+  #     is SKIPPED outright (ruby is not a required conformance target for
+  #     it -- conformance/README.md "Per-fixture compiler allowlist").
+  #   - Any other fixture with no resolvable .runar.rb source is a FAILURE.
+  #   - A fixture whose source compiles but ships no expected-ir.json or
+  #     no expected-script.hex is a FAILURE (this harness is the sole
+  #     check of Ruby's output; unlike the TS runner -- which also relies
+  #     on cross-tier comparison -- there is no other gate here).
+  #
+  # Returns { passed: [name...], skipped: [name...], failures: [[name, kind,
+  # expected, actual], ...] }.
   # ------------------------------------------------------------------
-
-  def test_conformance_goldens_ruby
-    assert File.directory?(CONFORMANCE_DIR), "missing conformance dir: #{CONFORMANCE_DIR}"
-    assert File.executable?(RUBY_CLI) || File.exist?(RUBY_CLI), "missing Ruby CLI: #{RUBY_CLI}"
-
-    dirs = Dir.children(CONFORMANCE_DIR)
-              .map { |n| File.join(CONFORMANCE_DIR, n) }
-              .select { |p| File.directory?(p) }
-              .sort
-
+  def scan_fixtures(dirs)
     passed = []
-    missing = []
+    skipped = []
     failures = []  # each entry: [name, kind, expected, actual]
 
     dirs.each do |test_dir|
       name = File.basename(test_dir)
+
+      allowlist = read_compiler_allowlist(test_dir)
+      if allowlist && !allowlist.include?('ruby')
+        skipped << name
+        next
+      end
+
       source = find_ruby_source(test_dir)
       if source.nil?
-        missing << name
+        failures << [name, 'missing-source', '', "no .runar.rb source found for fixture '#{name}'"]
         next
       end
 
@@ -156,33 +197,59 @@ class ConformanceGoldensTest < Minitest::Test
       end
 
       expected_ir_path = File.join(test_dir, 'expected-ir.json')
-      if File.exist?(expected_ir_path)
-        expected_ir = canonicalize_json(File.read(expected_ir_path))
-        if actual_ir != expected_ir
-          failures << [name, 'ir-mismatch', expected_ir, actual_ir]
-          next
-        end
+      unless File.exist?(expected_ir_path)
+        failures << [name, 'missing-golden-ir', '', "expected-ir.json not found for fixture '#{name}'"]
+        next
+      end
+      expected_ir = canonicalize_json(File.read(expected_ir_path))
+      if actual_ir != expected_ir
+        failures << [name, 'ir-mismatch', expected_ir, actual_ir]
+        next
       end
 
       expected_hex_path = File.join(test_dir, 'expected-script.hex')
-      if File.exist?(expected_hex_path)
-        expected_hex = File.read(expected_hex_path).gsub(/\s/, '').downcase
-        if actual_hex != expected_hex
-          failures << [name, 'script-mismatch', expected_hex, actual_hex]
-          next
-        end
+      unless File.exist?(expected_hex_path)
+        failures << [name, 'missing-golden-hex', '', "expected-script.hex not found for fixture '#{name}'"]
+        next
+      end
+      expected_hex = File.read(expected_hex_path).gsub(/\s/, '').downcase
+      if actual_hex != expected_hex
+        failures << [name, 'script-mismatch', expected_hex, actual_hex]
+        next
       end
 
       passed << name
     end
 
+    { passed: passed, skipped: skipped, failures: failures }
+  end
+
+  # ------------------------------------------------------------------
+  # The single conformance test that walks all fixtures.
+  # ------------------------------------------------------------------
+
+  def test_conformance_goldens_ruby
+    assert File.directory?(CONFORMANCE_DIR), "missing conformance dir: #{CONFORMANCE_DIR}"
+    assert File.executable?(RUBY_CLI) || File.exist?(RUBY_CLI), "missing Ruby CLI: #{RUBY_CLI}"
+
+    dirs = Dir.children(CONFORMANCE_DIR)
+              .map { |n| File.join(CONFORMANCE_DIR, n) }
+              .select { |p| File.directory?(p) }
+              .sort
+
+    result = scan_fixtures(dirs)
+    passed = result[:passed]
+    skipped = result[:skipped]
+    failures = result[:failures]
+
     total = dirs.length
     report = +''
     report << "\n=== Ruby conformance-goldens summary: #{passed.length} pass / "
-    report << "#{failures.length} fail / #{missing.length} missing-source (of #{total} fixtures) ===\n"
-    if missing.any?
-      report << "Missing .runar.rb source files:\n"
-      missing.each { |n| report << "  - #{n}\n" }
+    report << "#{failures.length} fail / #{skipped.length} skipped (compilers allowlist excludes ruby) " \
+              "(of #{total} fixtures) ===\n"
+    if skipped.any?
+      report << "Skipped (source.json \"compilers\" allowlist excludes ruby):\n"
+      skipped.each { |n| report << "  - #{n}\n" }
     end
     failures.first(5).each do |(name, kind, expected, actual)|
       report << "\n--- FAIL: #{name} (#{kind}) ---\n"
@@ -218,5 +285,89 @@ class ConformanceGoldensTest < Minitest::Test
 
     assert failures.empty?,
            "#{failures.length} of #{total} fixtures failed conformance-goldens; see stdout for details"
+  end
+
+  # ------------------------------------------------------------------
+  # F-151: the harness must FAIL on a fixture with no resolvable .runar.rb
+  # source and FAIL on a fixture with a missing golden, instead of
+  # silently dropping both into an unasserted bucket. These exercise
+  # `scan_fixtures` directly against synthetic, throwaway fixture
+  # directories (via Dir.mktmpdir) so they do not touch the real
+  # conformance corpus.
+  #
+  # What this proves: `scan_fixtures` classifies a missing-source fixture
+  # and a missing-golden fixture as FAILURES, not as silent passes or an
+  # unasserted "missing" bucket.
+  #
+  # What this does NOT prove: that the real conformance/tests corpus is
+  # free of the gap today -- see test_conformance_goldens_ruby for that.
+  # ------------------------------------------------------------------
+
+  MINIMAL_RUBY_SOURCE = <<~RUBY
+    require 'runar'
+
+    class F151Probe < Runar::SmartContract
+      prop :pub_key_hash, Addr
+
+      def initialize(pub_key_hash)
+        super(pub_key_hash)
+        @pub_key_hash = pub_key_hash
+      end
+
+      runar_public sig: Sig, pub_key: PubKey
+      def unlock(sig, pub_key)
+        assert hash160(pub_key) == @pub_key_hash
+        assert check_sig(sig, pub_key)
+      end
+    end
+  RUBY
+
+  def test_scan_fixtures_fails_on_missing_source
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'no-source-fixture')
+      FileUtils.mkdir_p(fixture_dir)
+      # No .runar.rb file and no source.json -> find_ruby_source returns nil.
+
+      result = scan_fixtures([fixture_dir])
+
+      failure = result[:failures].find { |(name, _k, _e, _a)| name == 'no-source-fixture' }
+      refute_nil failure,
+                 'a fixture with no .runar.rb source and no compilers allowlist must be ' \
+                 "reported as a failure, not silently dropped (got: #{result.inspect})"
+    end
+  end
+
+  def test_scan_fixtures_fails_on_missing_golden
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'no-golden-fixture')
+      FileUtils.mkdir_p(fixture_dir)
+      File.write(File.join(fixture_dir, 'Probe.runar.rb'), MINIMAL_RUBY_SOURCE)
+      # Source compiles cleanly, but deliberately no expected-ir.json /
+      # expected-script.hex.
+
+      result = scan_fixtures([fixture_dir])
+
+      failure = result[:failures].find { |(name, _k, _e, _a)| name == 'no-golden-fixture' }
+      refute_nil failure,
+                 'a fixture whose .runar.rb compiles but ships no expected-ir.json / ' \
+                 "expected-script.hex must be reported as a failure (got: #{result.inspect})"
+    end
+  end
+
+  def test_scan_fixtures_skips_allowlist_excluded_fixture_with_no_source
+    Dir.mktmpdir do |root|
+      fixture_dir = File.join(root, 'go-only-fixture')
+      FileUtils.mkdir_p(fixture_dir)
+      File.write(File.join(fixture_dir, 'source.json'), JSON.generate({ 'compilers' => ['go'] }))
+      # No .runar.rb source -- legitimate, since the allowlist excludes ruby
+      # for this fixture (conformance/README.md "Per-fixture compiler
+      # allowlist").
+
+      result = scan_fixtures([fixture_dir])
+
+      assert_empty result[:failures],
+                   "a ruby-excluded fixture must not be reported as a failure (got: #{result.inspect})"
+      assert_includes result[:skipped], 'go-only-fixture'
+    end
   end
 end
