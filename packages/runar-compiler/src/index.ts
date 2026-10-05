@@ -128,6 +128,7 @@ import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
+import { assertSyntheticArrayChains } from './ir/synthetic-array-chain.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
 import { assertIrStatefulScaffolding } from './passes/stateful-scaffold.js';
 import { InputLimits, CanonicalJsonError, STATE_FIELD_WIDTHS } from 'runar-ir-schema';
@@ -857,6 +858,9 @@ export function loadANFFromJSON(json: string): ANFProgram {
   coerceNumericBigInts(program as ANFProgram);
   assertAddOutputArity(program as ANFProgram);
   assertSuperOnlyInConstructor(program as ANFProgram);
+  // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+  // written (shared rule and diagnostic, 7 tiers).
+  assertSyntheticArrayChains(program as ANFProgram);
   return program as ANFProgram;
 }
 

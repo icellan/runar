@@ -170,6 +170,13 @@ const CHECK_PREIMAGE_POSITIVE_CONTROL = join(
  * `_newAmount` parameter is retyped ByteString.
  */
 
+/*
+ * `I57` (N-096, the syntheticArrayChain rule) reuses the `fixed-array-index`
+ * control with ONE field changed: `table__0`'s chain repeated to 1024 levels,
+ * one past the deepest chain the artifact regrouper can consume. Go panicked
+ * on such a chain (exit 2); Python, Java, Zig and TS compiled it.
+ */
+
 /** Every golden a fixture in this lane is derived from. */
 const POSITIVE_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['asm-raw-script', POSITIVE_CONTROL],

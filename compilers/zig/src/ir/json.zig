@@ -10,6 +10,7 @@ const unknown_anf_kind = @import("unknown_anf_kind.zig");
 const reserved_names = @import("../passes/reserved_names.zig");
 const sighash_directive = @import("../frontend/sighash_directive.zig");
 const stateful_scaffold = @import("stateful_scaffold.zig");
+const synthetic_array_chain = @import("synthetic_array_chain.zig");
 pub const required_fields = @import("required_fields.zig");
 
 const ParseError = error{
@@ -81,6 +82,10 @@ const ParseError = error{
     // parameters, prologue or state continuation differ from what the
     // frontend injects. Message in required_fields.lastDiagnostic().
     StatefulScaffoldMismatch,
+    // N-096: a syntheticArrayChain expand-fixed-arrays could not have written
+    // (too deep, an index out of range, names that do not derive, or sibling
+    // leaves that are not one expansion). Message in lastDiagnostic().
+    SyntheticArrayChainMalformed,
 };
 
 const max_parse_depth: u32 = 256;
@@ -487,6 +492,12 @@ fn parseProgram(allocator: std.mem.Allocator, root: std.json.Value) !types.ANFPr
             error.OutOfMemory => return error.OutOfMemory,
         };
     }
+    // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+    // written (shared rule and diagnostic, 7 tiers).
+    synthetic_array_chain.check(allocator, properties) catch |err| switch (err) {
+        error.SyntheticArrayChainMalformed => return ParseError.SyntheticArrayChainMalformed,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
 
     return types.ANFProgram{
         .contract_name = try allocator.dupe(u8, contract_name),

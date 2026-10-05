@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .required_fields import assert_required_ir_fields
 from .stateful_scaffold import stateful_scaffold_error
+from .synthetic_array_chain import assert_synthetic_array_chains
 from .types import (
     ANFBinding,
     ANFProgram,
@@ -128,6 +129,10 @@ def load_ir(source: str) -> ANFProgram:
     errors = validate_ir(program)
     if errors:
         raise ValueError(f"IR validation: {errors[0]}")
+
+    # N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+    # written (shared rule and diagnostic, 7 tiers).
+    assert_synthetic_array_chains(program)
 
     return program
 

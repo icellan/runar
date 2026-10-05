@@ -17,6 +17,7 @@ require_relative "input_limits"
 require_relative "required_fields"
 require_relative "../frontend/reserved_names"
 require_relative "stateful_scaffold"
+require_relative "synthetic_array_chain"
 
 module RunarCompiler
   module IR
@@ -110,6 +111,10 @@ module RunarCompiler
       unless errors.empty?
         raise ArgumentError, "IR validation: #{errors[0]}"
       end
+
+      # N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+      # written (shared rule and diagnostic, 7 tiers).
+      SyntheticArrayChain.assert!(program)
 
       program
     end

@@ -225,16 +225,23 @@ describe('R-289: a malformed synthetic-array run is refused, not silently ungrou
           `${tier.id} accepted a malformed synthetic-array run and emitted the wrong ABI shape`,
         ).toBe('refused');
 
-        // And it must refuse for THIS reason. There are two guards — a run
-        // whose head is missing, and a run that is short — and either one
-        // would catch this input, so a bare "it refused" assertion passes with
-        // the partial-run guard deleted. Pinning the wording keeps the guard
-        // under test the one this input is built for.
+        // And it must refuse for THIS reason. Several guards would catch this
+        // input, so a bare "it refused" assertion passes with the one it is
+        // built for deleted. Pinning the wording keeps that guard under test.
+        //
+        // N-096: since the shared syntheticArrayChain rule, the IR loader
+        // refuses this input before the regrouper sees it — the head declares
+        // 5 elements, so the next sibling (length 4) does not continue the
+        // expansion. The regrouper's own short-run guard ("declares 5 elements
+        // but the contiguous run has 1") is still there, now behind it.
         const said = `${badRun.stderr}\n${badRun.stdout}`;
         expect(
           said,
           `${tier.id} refused, but not with the short-run diagnostic this input is built to trigger`,
-        ).toMatch(/declares 5 elements but the contiguous run has 1/);
+        ).toContain(
+          "IR validation: malformed syntheticArrayChain on property 'table__1': " +
+            "'table' expects its element 'table__1' here (type bigint, level lengths [5])",
+        );
         expect(said, `${tier.id} refused without naming the array`).toMatch(/table/);
       } finally {
         rmSync(dir, { recursive: true, force: true });

@@ -34,11 +34,18 @@ fn p2pkh_ir_with_chain_depth(depth: usize) -> String {
     let mut ir: Value =
         serde_json::from_str(&std::fs::read_to_string(path).expect("read p2pkh IR"))
             .expect("parse p2pkh IR");
-    let chain: Vec<Value> = (0..depth)
-        .map(|_| json!({"base": "deep", "index": 0, "length": 1}))
-        .collect();
+    // N-096: the chain is the one expand-fixed-arrays writes for a
+    // `FixedArray<...<bigint, 1>..., 1>` named `deep` (each level's base is
+    // the previous `<base>__<index>`, the leaf is named after the innermost
+    // level), so the loader's chain rule refuses it for its DEPTH alone.
+    let mut base = "deep".to_string();
+    let mut chain: Vec<Value> = Vec::with_capacity(depth);
+    for _ in 0..depth {
+        chain.push(json!({"base": base, "index": 0, "length": 1}));
+        base.push_str("__0");
+    }
     ir["properties"].as_array_mut().expect("properties").push(json!({
-        "name": "deep",
+        "name": base,
         "type": "bigint",
         "readonly": true,
         "syntheticArrayChain": chain,

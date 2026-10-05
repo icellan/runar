@@ -7,6 +7,7 @@
 pub mod input_limits;
 pub mod loader;
 pub mod required_fields;
+pub mod synthetic_array_chain;
 pub mod unknown_anf_kind_error;
 
 pub use unknown_anf_kind_error::UnknownAnfKindError;

@@ -374,6 +374,10 @@ fn validate_ir(program: &ANFProgram) -> Result<(), String> {
         ));
     }
 
+    // N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+    // written (shared rule and diagnostic, 7 tiers).
+    super::synthetic_array_chain::assert_synthetic_array_chains(program)?;
+
     Ok(())
 }
 

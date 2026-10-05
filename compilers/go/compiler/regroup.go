@@ -160,8 +160,8 @@ func regroupOnePass(entries []regroupEntry) ([]regroupEntry, bool, error) {
 
 // regroupSyntheticRuns iteratively regroups entries until no entry has
 // any remaining chain. Each pass consumes one nesting level, innermost
-// first. Returns an error for a malformed chain (R-289) and panics if the
-// iteration cap is exceeded (pathological nesting).
+// first. Returns an error for a malformed chain (R-289) or one deeper than
+// the iteration cap (N-096: this used to panic, exit 2 on the --ir CLI).
 func regroupSyntheticRuns(entries []regroupEntry) ([]regroupEntry, error) {
 	current := entries
 	for iter := 0; iter < 1024; iter++ {
@@ -174,5 +174,5 @@ func regroupSyntheticRuns(entries []regroupEntry) ([]regroupEntry, error) {
 			return current, nil
 		}
 	}
-	panic("regroupSyntheticRuns: exceeded iteration cap (pathological chain nesting?)")
+	return nil, fmt.Errorf("regroupSyntheticRuns: exceeded iteration cap (pathological chain nesting?)")
 }

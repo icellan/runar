@@ -210,6 +210,9 @@ public final class AnfLoader {
         if ("StatefulSmartContract".equals(effectiveClass)) {
             StatefulScaffold.check(props, methods);
         }
+        // N-096: a syntheticArrayChain must be one expand-fixed-arrays could
+        // have written (shared rule and diagnostic, 7 tiers).
+        SyntheticArrayChain.check(props);
         return new AnfProgram(name, props, methods, parentClass);
     }
 

@@ -63,6 +63,12 @@ func LoadIRFromBytes(data []byte) (*ANFProgram, error) {
 		return nil, err
 	}
 
+	// N-096: a syntheticArrayChain must be one expand-fixed-arrays could have
+	// written (shared rule and diagnostic, 7 tiers).
+	if err := AssertSyntheticArrayChains(&program); err != nil {
+		return nil, err
+	}
+
 	return &program, nil
 }
 
