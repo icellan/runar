@@ -135,6 +135,35 @@ interface ExampleCase {
   sdkRefuses?: boolean;
 }
 
+type SpendOpts = Parameters<typeof runStatefulSpend>[0];
+type SpendResult = Awaited<ReturnType<typeof runStatefulSpend>>;
+
+/**
+ * F-134-FU: run one vector. Since F-134 the SDK's local ANF interpreter
+ * refuses a call whose script would abort (zero divisor, pow out of domain,
+ * ...), so for an `abort` vector the honest SDK may never build a transaction.
+ * When it refuses, pin that refusal (the fail-closed default must hold), then
+ * rebuild the call as an attacker who skips the pre-check and keeps the
+ * pre-call state (`attackerNewState: {}`), so the verdict comes from the
+ * engine again.
+ *
+ * Proves: every non-`sdkRefuses` abort vector is rejected BY THE SCRIPT on
+ * Spend, and every SDK refusal on the way is the interpreter's fail-closed one.
+ * Does not prove: that the attacker's chosen state is the only thing the
+ * script checks -- with the pre-call state a hashOutputs mismatch could also
+ * reject; the guard-discriminating rows live in
+ * conformance/witnesses/real-crypto/math-demo.json (R-169).
+ */
+async function runVector(label: string, c: ExampleCase, opts: SpendOpts): Promise<SpendResult> {
+  const honest = await runStatefulSpend(opts);
+  if (c.expect !== 'abort' || c.sdkRefuses || honest.reachedEngine) return honest;
+  expect(honest.vmAccepted, label).toBe(false);
+  expect(honest.vmError, `${label}: honest SDK refusal`).toMatch(
+    /the ANF interpreter could not evaluate the method body/,
+  );
+  return runStatefulSpend({ ...opts, attackerNewState: {} });
+}
+
 /**
  * An accepted spend must land on `expect`. An `abort` spend must be rejected
  * by the ENGINE (`reachedEngine`): a reject the SDK raised before the script
@@ -143,16 +172,22 @@ interface ExampleCase {
 function checkExampleVerdict(
   label: string,
   c: ExampleCase,
-  r: Awaited<ReturnType<typeof runStatefulSpend>>,
+  r: SpendResult,
   field: string,
 ): void {
   if (c.sdkRefuses) {
     // No spend exists to replay; pin the refusal reason so a different
     // failure cannot hide here. The engine verdict for the builtin itself is
-    // the stateless `mulDiv(1, 1, 0)` abort vector above.
+    // the stateless `mulDiv(1, 1, 0)` abort vector above. F-134 routes the
+    // zero divisor through the SDK's fail-closed interpreter refusal (it was
+    // a bare RangeError "Division by zero" before), so pin that channel and
+    // its cause.
     expect(c.expect).toBe('abort');
     expect(r.vmAccepted).toBe(false);
-    expect(r.vmError, label).toMatch(/Division by zero/);
+    expect(r.reachedEngine, label).toBe(false);
+    expect(r.vmError, label).toMatch(
+      /the ANF interpreter could not evaluate the method body[\s\S]*Cause: mulDiv: division by zero/,
+    );
     return;
   }
   if (c.expect === 'abort') {
@@ -171,7 +206,8 @@ describe('F-033: examples/zig math contracts — compiled script verdict on Spen
     const { cases } = readVectors<{ cases: ExampleCase[] }>('examples/zig/math-demo/onchain-vectors.json');
     expect(cases.length).toBeGreaterThan(0);
     for (const c of cases) {
-      const r = await runStatefulSpend({
+      const label = `MathDemo(${c.init}).${c.method}(${c.args.join(', ')})`;
+      const r = await runVector(label, c, {
         source,
         fileName: 'MathDemo.runar.zig',
         method: c.method,
@@ -179,7 +215,7 @@ describe('F-033: examples/zig math contracts — compiled script verdict on Spen
         constructorArgs: [c.init],
         signerKey: 'alice',
       });
-      checkExampleVerdict(`MathDemo(${c.init}).${c.method}(${c.args.join(', ')})`, c, r, 'value');
+      checkExampleVerdict(label, c, r, 'value');
     }
   }, 120_000);
 
@@ -192,7 +228,8 @@ describe('F-033: examples/zig math contracts — compiled script verdict on Spen
     expect(cases.length).toBeGreaterThan(0);
     const alice = testKey('alice');
     for (const c of cases) {
-      const r = await runStatefulSpend({
+      const label = `FunctionPatterns(${c.init}).${c.method}(${c.args.join(', ')})`;
+      const r = await runVector(label, c, {
         source,
         fileName: 'FunctionPatterns.runar.zig',
         method: c.method,
@@ -201,7 +238,7 @@ describe('F-033: examples/zig math contracts — compiled script verdict on Spen
         constructorArgs: [alice.pubKey, c.init],
         signerKey: 'alice',
       });
-      checkExampleVerdict(`FunctionPatterns(${c.init}).${c.method}(${c.args.join(', ')})`, c, r, 'balance');
+      checkExampleVerdict(label, c, r, 'balance');
     }
   }, 120_000);
 });

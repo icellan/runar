@@ -412,6 +412,44 @@ export interface StatefulSpendOptions {
    * `SIZE(_codePart)` equality pin can reject it.
    */
   truncatedCodePart?: { within: string; at: number };
+  /**
+   * F-134-FU near-miss: build the CALL as an attacker who does not run the
+   * SDK's local ANF interpreter and instead commits the continuation state
+   * named here (merged over the pre-call state; `{}` keeps it unchanged).
+   *
+   * Since F-134 the SDK interpreter refuses wherever the compiled script would
+   * abort (pow exponent > 32, zero divisor, ...), so `RunarContract.call`
+   * never builds such a transaction. That is the right default for users, but
+   * an attacker is not bound by our SDK, and a spec that wants the SCRIPT's
+   * own guard to be the thing that rejects needs the transaction to exist.
+   * Implemented by hiding `artifact.anf` for the duration of the call (the
+   * one input the SDK's pre-check reads) and passing the state as `newState`;
+   * the deploy is unaffected and `anf` is restored afterwards. Data/raw
+   * outputs the method would add are NOT built on this path. Choose the
+   * state the guard-less script would commit, so the guard is the only thing
+   * that can reject.
+   */
+  attackerNewState?: Record<string, unknown>;
+}
+
+/** Run `fn` with the artifact's ANF hidden from the SDK when `attacker` is
+ *  set (see `StatefulSpendOptions.attackerNewState`). */
+async function withoutLocalInterpreter<T>(
+  artifact: { anf?: unknown },
+  attacker: boolean,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!attacker) return fn();
+  const saved = artifact.anf;
+  if (saved === undefined) {
+    throw new Error('attackerNewState: artifact has no ANF, so there is no SDK pre-check to bypass');
+  }
+  artifact.anf = undefined;
+  try {
+    return await fn();
+  } finally {
+    artifact.anf = saved;
+  }
 }
 
 /** Run `fn` with the named STATE_FIELD_WIDTHS entries overridden (see
@@ -603,12 +641,15 @@ export async function runStatefulSpend(opts: StatefulSpendOptions): Promise<Real
       sequence?: number;
       satoshis?: number;
       dryRun?: boolean;
+      newState?: Record<string, unknown>;
     } = { dryRun: true };
+    if (opts.attackerNewState !== undefined) callOpts.newState = opts.attackerNewState;
     if (opts.lockTime !== undefined) callOpts.locktime = opts.lockTime;
     if (opts.sequence !== undefined) callOpts.sequence = opts.sequence;
     if (opts.satoshis !== undefined) callOpts.satoshis = opts.satoshis;
     await withAttackerFieldWidths(opts.attackerFieldWidths, () =>
-      contract.call(opts.method, opts.args, provider, signer, callOpts));
+      withoutLocalInterpreter(artifact, opts.attackerNewState !== undefined, () =>
+        contract.call(opts.method, opts.args, provider, signer, callOpts)));
     callTx = Transaction.fromHex(provider.getBroadcastedTxs()[1]!);
     // We have a broadcast call tx to validate: a subsequent reject is a genuine
     // script-guard rejection, not an SDK error before the guard ran (audit #12).

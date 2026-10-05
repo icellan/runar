@@ -73,6 +73,11 @@ interface SpendSpec {
   /** N-051: claim a truncated `_codePart` ending at a 0x6a inside a baked
    *  readonly value (see `truncatedCodePart` in real-crypto-execution.ts). */
   truncatedCodePart?: { within: string; at: number };
+  /** F-134-FU: build the call as an attacker who skips the SDK's local ANF
+   *  pre-check and commits this continuation state (see `attackerNewState` in
+   *  real-crypto-execution.ts). Only for a `cryptoNearMiss` reject: the row
+   *  also asserts the default SDK path still refuses the same call. */
+  attackerNewState?: Record<string, unknown>;
   /** Independent, hand-authored expected continuation state after an accepted
    *  stateful spend (audit #4). Property → scalar ("1n" | true | "0x.."). The
    *  on-chain state decoded from the call tx MUST equal this — accept/reject
@@ -249,7 +254,7 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
             }
             assertNearMissReachedEngine(spec.fixture, s, r);
           } else {
-            const r = await runStatefulSpend({
+            const spendOpts = {
               source,
               fileName,
               method: s.method,
@@ -263,7 +268,25 @@ describe('real-crypto execution (source vs real @bsv/sdk Spend, fold-ON)', () =>
               tamperOutput: s.tamperOutput,
               attackerFieldWidths: s.attackerFieldWidths,
               truncatedCodePart: s.truncatedCodePart,
-            });
+            };
+            let attackerNewState: Record<string, unknown> | undefined;
+            if (s.attackerNewState !== undefined) {
+              // The attacker path exists only to put a REJECTED spend in front
+              // of the engine; it must never manufacture an accept.
+              expect(
+                s.expect === 'reject' && s.cryptoNearMiss === true,
+                `${spec.fixture}.${s.method}: attackerNewState is only valid on a cryptoNearMiss reject`,
+              ).toBe(true);
+              attackerNewState = {};
+              for (const [k, v] of Object.entries(s.attackerNewState)) attackerNewState[k] = stateValue(v);
+              // F-134 default stays fail-closed: the honest SDK refuses this
+              // call before any transaction exists.
+              const honest = await runStatefulSpend(spendOpts);
+              expect(honest.vmAccepted).toBe(false);
+              expect(honest.reachedEngine, `honest SDK must refuse before the engine: ${honest.vmError}`).toBe(false);
+              expect(honest.vmError).toMatch(/the ANF interpreter could not evaluate the method body/);
+            }
+            const r = await runStatefulSpend({ ...spendOpts, attackerNewState });
             expect(r.vmAccepted, `real Spend: vmErr=${r.vmError}`).toBe(s.expect === 'accept');
             assertNearMissReachedEngine(spec.fixture, s, r);
             // Independent state-VALUE check (audit #4): accept/reject is blind to
