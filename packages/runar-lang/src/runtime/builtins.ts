@@ -359,6 +359,17 @@ function rabinBytesToUnsignedLE(bytes: number[]): bigint {
   return result;
 }
 
+/**
+ * Upper bound (exclusive) on the Rabin `padding` parameter.
+ *
+ * Mirrors the on-chain `RABIN_PADDING_LIMIT` emitted by `EmitVerifyRabinSig`
+ * (asserted via OP_WITHIN/OP_VERIFY) and the same bound already enforced by
+ * packages/runar-testing's `rabinVerify` and the Go SDK's `rabin.go`. Without
+ * it, sig=0 with padding=SHA256(msg) is a universal forgery: for ANY n,
+ * (0^2 + SHA256(msg)) mod n == SHA256(msg) mod n trivially.
+ */
+const RABIN_PADDING_LIMIT = 65536n;
+
 export function verifyRabinSig(
   msg: ByteString,
   sig: RabinSig,
@@ -371,6 +382,7 @@ export function verifyRabinSig(
   const hashBN = rabinBytesToUnsignedLE(hashArr);
   const padBytes = hexToBytes(padding as string);
   const padBN = rabinBytesToUnsignedLE(padBytes);
+  if (padBN >= RABIN_PADDING_LIMIT) return false;
   const lhs = ((sig * sig + padBN) % pubkey + pubkey) % pubkey;
   const rhs = (hashBN % pubkey + pubkey) % pubkey;
   return lhs === rhs;
