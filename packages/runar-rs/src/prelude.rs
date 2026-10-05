@@ -881,8 +881,12 @@ pub fn int_2_str(value: Int, byte_len: Int) -> ByteString {
 /// magnitude leaves zero and the push decodes as 0 rather than as -2^63.
 ///
 /// See [`num2bin_big`] for values past `i64`.
-pub fn num2bin(v: &Bigint, length: usize) -> ByteString {
-    num2bin_big(&BigintBig::from(*v), length)
+///
+/// `v` is taken by value or by reference (`num2bin(0, 1)` and `num2bin(&x, 1)`
+/// both compile), so a `.runar.rs` contract can spell the call either way and
+/// still be valid native Rust (F-057).
+pub fn num2bin(v: impl std::borrow::Borrow<Bigint>, length: usize) -> ByteString {
+    num2bin_big(&BigintBig::from(*v.borrow()), length)
 }
 
 /// The arbitrary-precision form of [`num2bin`].
@@ -928,8 +932,11 @@ pub fn num2bin_big(v: &BigintBig, length: usize) -> ByteString {
 /// the emitted opcodes accept it — so this decodes it and returns 1000.
 ///
 /// Use [`bin2num_big`] for the wide answer.
-pub fn bin2num(data: &[u8]) -> Bigint {
-    let r = bin2num_big(data);
+///
+/// `data` is anything byte-like, owned or borrowed, so `bin2num(cat(a, b))`
+/// compiles as native Rust as well as Rúnar (F-057).
+pub fn bin2num(data: impl AsRef<[u8]>) -> Bigint {
+    let r = bin2num_big(data.as_ref());
     i64::try_from(&r).unwrap_or_else(|_| {
         panic!(
             "runar: bin2num decoded {r}, which does not fit i64 — OP_BIN2NUM has no such \
@@ -962,9 +969,12 @@ pub fn bin2num_big(data: &[u8]) -> BigintBig {
 }
 
 /// Concatenates two byte strings.
-pub fn cat(a: &[u8], b: &[u8]) -> ByteString {
-    let mut result = a.to_vec();
-    result.extend_from_slice(b);
+///
+/// Either side may be owned or borrowed, so `cat(substr(x, 0, 1), pad)` compiles
+/// as native Rust as well as Rúnar (F-057).
+pub fn cat(a: impl AsRef<[u8]>, b: impl AsRef<[u8]>) -> ByteString {
+    let mut result = a.as_ref().to_vec();
+    result.extend_from_slice(b.as_ref());
     result
 }
 

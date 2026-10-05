@@ -83,6 +83,27 @@ fn add_output_intrinsics_exist_on_the_generated_struct() {
     assert_eq!(c.count, 1);
 }
 
+// F-057: `add_output` must RECORD its arguments. It used to discard them, so a
+// `#[path]` test could not see what a contract's outputs carried — and token-ft
+// / token-nft tested a hand-copied contract instead of the real one. Proves the
+// recorded satoshis and mutable fields round-trip in call order and that
+// `take_outputs` drains; does not prove anything about emitted Bitcoin Script.
+#[test]
+fn add_output_records_satoshis_and_mutable_fields() {
+    let mut c = RecordsOutputs { owner: vec![1], count: 4 };
+    c.bump();
+    c.bump();
+    let got = RecordsOutputs::take_outputs();
+    assert_eq!(
+        got,
+        vec![
+            RecordsOutputsOutput { satoshis: 0, count: 5 },
+            RecordsOutputsOutput { satoshis: 0, count: 6 },
+        ]
+    );
+    assert!(RecordsOutputs::take_outputs().is_empty(), "take_outputs drains the log");
+}
+
 // The compiler injects `tx_preimage` for checkPreimage. Native Rust still
 // declares it on the struct, but it is not a mutable state slot — parsers
 // omit it, and `add_output` must too, or token-ft's

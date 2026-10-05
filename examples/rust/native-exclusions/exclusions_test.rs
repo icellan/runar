@@ -66,7 +66,6 @@ use std::path::{Path, PathBuf};
 /// indistinguishable from the bare literal the other eight surfaces carry.
 const EXCLUDED: &[&str] = &[
     "branched-readonly-len/BranchedReadonlyLen.runar.rs",
-    "token-ft/FungibleTokenExample.runar.rs",
 ];
 
 /// The header every excluded contract must carry. A fixed marker, rather than
@@ -425,9 +424,9 @@ fn the_universe_is_not_empty() {
     assert_eq!(
         u.len(),
         // 9 -> 10: W8 companion-parent merge added `substr`/`cat`/`len` calls
-        // to token-ft, so it joined the byte-builtin universe. It is excluded
-        // (see EXCLUDED) rather than `#[path]`-included: native tests need
-        // recorded outputs, and the mock add_output discards them.
+        // to token-ft, so it joined the byte-builtin universe. F-057 wired it
+        // up: `#[runar::contract]`'s add_output now records its outputs, and
+        // FungibleToken_test.rs `#[path]`-includes the real contract.
         10,
         "the number of .runar.rs contracts calling one of the eight byte builtins moved \
          from 7 to {}. That is fine — but check that the scan is still finding calls and \

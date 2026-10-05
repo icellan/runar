@@ -67,18 +67,54 @@ fn expand_contract_like(item: TokenStream, name: &str) -> TokenStream {
     strip_readonly_from_fields(&mut s.fields);
 
     let field_args = mut_fields.iter().map(|(n, ty)| quote! { #n: #ty });
-    let field_uses = mut_fields.iter().map(|(n, _)| quote! { let _ = #n; });
+    let field_names: Vec<_> = mut_fields.iter().map(|(n, _)| n.clone()).collect();
+    let output_fields = mut_fields.iter().map(|(n, ty)| quote! { pub #n: #ty });
+    let vis = s.vis.clone();
+    let output_ident = quote::format_ident!("{}Output", ident);
+    let log_ident = quote::format_ident!("__RUNAR_{}_OUTPUTS", ident);
 
     // A second impl block is visible to the contract's own `impl` in the
     // same module (`#[path]` tests). Extra args match mutable properties
     // in declaration order — the same positional convention the compiler
     // uses for `this.addOutput(satoshis, ...)`.
+    //
+    // F-057: `add_output` RECORDS what it is given, on a thread-local log
+    // that `take_outputs()` drains, typed as `<Contract>Output` with one field
+    // per mutable property. It used to discard its arguments, so a native test
+    // of a contract that creates outputs could only assert on fields — which is
+    // why token-ft / token-nft tested a hand-copied struct instead of the real
+    // contract. The log is per thread, and libtest runs each `#[test]` on its
+    // own thread, so every test starts with an empty log.
     quote! {
         #s
+
+        /// One output recorded by the native `add_output` mock: the satoshis
+        /// and the mutable properties, positionally, under their field names.
+        #[allow(dead_code)]
+        #[derive(Debug, Clone, PartialEq)]
+        #vis struct #output_ident {
+            pub satoshis: i64,
+            #(#output_fields),*
+        }
+
+        ::std::thread_local! {
+            #[allow(non_upper_case_globals)]
+            static #log_ident: ::std::cell::RefCell<::std::vec::Vec<#output_ident>> =
+                ::std::cell::RefCell::new(::std::vec::Vec::new());
+        }
+
         impl #ident {
             #[allow(dead_code)]
-            fn add_output<S>(&mut self, _satoshis: S, #(#field_args),*) {
-                #(#field_uses)*
+            fn add_output(&mut self, satoshis: i64, #(#field_args),*) {
+                #log_ident.with(|log| {
+                    log.borrow_mut().push(#output_ident { satoshis, #(#field_names),* })
+                });
+            }
+            /// Drain the outputs this thread's `add_output` calls recorded, in
+            /// call order.
+            #[allow(dead_code)]
+            pub fn take_outputs() -> ::std::vec::Vec<#output_ident> {
+                #log_ident.with(|log| ::std::mem::take(&mut *log.borrow_mut()))
             }
             #[allow(dead_code)]
             fn add_raw_output<S, B: ::core::convert::AsRef<[u8]>>(
