@@ -88,12 +88,8 @@ func validateGroth16PublicInputs(pubs []*big.Int, numPubInputs int) error {
 				"scalars this output is meant to attest to",
 			numPubInputs, numPubInputs)
 	}
-	if numPubInputs != groth16MSMArity {
-		return fmt.Errorf(
-			"verifying key declares %d public inputs, but the on-chain MSM binding supports "+
-				"exactly %d (the SP1 Groth16 arity). Binding a different arity requires extending "+
-				"codegen.EmitGroth16VerifierWitnessAssistedWithMSM",
-			numPubInputs, groth16MSMArity)
+	if err := checkGroth16MSMArity(numPubInputs); err != nil {
+		return err
 	}
 	if len(pubs) != numPubInputs {
 		return fmt.Errorf("pinned %d public inputs but the verifying key declares %d", len(pubs), numPubInputs)
@@ -105,6 +101,22 @@ func validateGroth16PublicInputs(pubs []*big.Int, numPubInputs int) error {
 		if p.Sign() < 0 || p.Cmp(bn254ScalarR) >= 0 {
 			return fmt.Errorf("public input %d is outside the BN254 scalar field [0, r)", i)
 		}
+	}
+	return nil
+}
+
+// checkGroth16MSMArity refuses a verifying key whose public-input count is not
+// the arity the MSM binding supports. loadGroth16WAConfig calls it, so every
+// entry point (CompileGroth16WA and the CompileOptions.Groth16WAVKey library
+// path) shares the gate; validateGroth16PublicInputs calls it too, ahead of the
+// pinned-count comparison, so the arity is what gets reported.
+func checkGroth16MSMArity(numPubInputs int) error {
+	if numPubInputs != groth16MSMArity {
+		return fmt.Errorf(
+			"verifying key declares %d public inputs, but the on-chain MSM binding supports "+
+				"exactly %d (the SP1 Groth16 arity). Binding a different arity requires extending "+
+				"codegen.EmitGroth16VerifierWitnessAssistedWithMSM",
+			numPubInputs, groth16MSMArity)
 	}
 	return nil
 }
@@ -158,6 +170,11 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 	if err != nil {
 		return codegen.Groth16Config{}, fmt.Errorf("parse %s: %w", vkPath, err)
 	}
+	// F-184: cfg.IC has exactly 1+groth16MSMArity slots. Refuse any other
+	// arity rather than zero-filling missing points or dropping extra ones.
+	if err := checkGroth16MSMArity(len(vk.IC) - 1); err != nil {
+		return codegen.Groth16Config{}, err
+	}
 
 	alphaNegBetaFp12, err := bn254witness.PrecomputeAlphaNegBeta(vk.AlphaG1, vk.BetaNegG2)
 	if err != nil {
@@ -180,9 +197,8 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 
 	// Populate IC for the MSM-binding verifier variant. The raw variant
 	// ignores IC; the MSM variant requires exactly 6 points (IC[0] plus
-	// IC[1..5] for the 5 SP1 public inputs). When the VK carries fewer
-	// entries (non-SP1 circuits) or more, the unused slots default to
-	// (0, 0) — the MSM variant is only sound for 5-public-input circuits.
+	// IC[1..5] for the 5 SP1 public inputs). Any other count was refused
+	// by checkGroth16MSMArity above.
 	for i := 0; i < 6; i++ {
 		if i < len(vk.IC) && vk.IC[i] != nil {
 			cfg.IC[i] = [2]*big.Int{
