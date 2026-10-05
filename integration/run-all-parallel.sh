@@ -120,7 +120,7 @@ run_lang() {
         cd go && RPC_URL="$rpc_url" RPC_USER=bitcoin RPC_PASS=bitcoin go test -tags integration -v -timeout 1800s
         ;;
       rust)
-        cd rust && RPC_URL="$rpc_url" RPC_USER=bitcoin RPC_PASS=bitcoin cargo test --release -- --ignored
+        cd rust && RPC_URL="$rpc_url" RPC_USER=bitcoin RPC_PASS=bitcoin cargo test --release -- --include-ignored
         ;;
       python)
         cd python

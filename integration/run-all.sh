@@ -44,7 +44,7 @@ fi
 
 echo ""
 echo "=== Rust integration tests ==="
-if (cd rust && cargo test --release -- --ignored); then
+if (cd rust && cargo test --release -- --include-ignored); then
   echo "--- Rust: PASSED ---"
 else
   echo "--- Rust: FAILED ---"

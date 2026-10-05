@@ -1633,7 +1633,7 @@ jobs:
         run: cd integration/ts && npx vitest run
 
       - name: Rust integration tests
-        run: cd integration/rust && cargo test --release -- --ignored
+        run: cd integration/rust && cargo test --release -- --include-ignored
         timeout-minutes: 10
 
       - name: Python integration tests

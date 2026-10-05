@@ -59,7 +59,7 @@ cd integration/ts && npx vitest run
 Tests using the Rust compiler and SDK. All contracts use the SDK's Deploy + Call path.
 
 ```bash
-cd integration/rust && cargo test --release -- --ignored
+cd integration/rust && cargo test --release -- --include-ignored
 ```
 
 ### Python (`integration/python/`)

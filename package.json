@@ -69,7 +69,7 @@
     "integration:teranode:run": "cd integration && ./teranode.sh clean && ./teranode.sh start && cd go && NODE_TYPE=teranode go test -tags integration -v -timeout 600s; rc=$?; cd .. && ./teranode.sh stop; exit $rc",
     "integration:go": "cd integration/go && go test -tags integration -v -timeout 600s",
     "integration:ts": "cd integration/ts && npx vitest run",
-    "integration:rust": "cd integration/rust && cargo test --release -- --ignored",
+    "integration:rust": "cd integration/rust && cargo test --release -- --include-ignored",
     "integration:python": "cd integration/python && ([ -d .venv ] || (python3.13 -m venv .venv 2>/dev/null || python3 -m venv .venv) && .venv/bin/pip install -q -r requirements.txt) && PYTHONPATH=../../compilers/python:../../packages/runar-py .venv/bin/pytest -v",
     "integration:ruby": "cd integration/ruby && bundle exec rspec --format documentation",
     "integration:zig": "cd integration/zig && zig build test",
