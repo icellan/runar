@@ -3219,6 +3219,17 @@ fn lower_ternary_expr(
     lower_ternary_arm(alternate, &mut else_ctx);
     ctx.sync_counter(&else_ctx);
 
+    // N-049 backstop: an output intrinsic in an arm registered its ref on the
+    // arm's sub-context, which is dropped here, so the continuation hash would
+    // not commit to that output. `lower_to_anf` is public, so this cannot rely
+    // on the validator having run.
+    for arm_ctx in [&then_ctx, &else_ctx] {
+        if !arm_ctx.add_output_refs.is_empty() || !arm_ctx.add_data_output_refs.is_empty() {
+            let intrinsic = first_output_intrinsic(&arm_ctx.bindings).unwrap_or("addOutput");
+            panic!("{}", super::validator::ternary_output_intrinsic_msg(intrinsic, None));
+        }
+    }
+
     ctx.emit(ANFValue::If {
         cond: cond_ref,
         then: then_ctx.bindings,

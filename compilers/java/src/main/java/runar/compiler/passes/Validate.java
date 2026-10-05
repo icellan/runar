@@ -154,6 +154,22 @@ public final class Validate {
             + " produces is unspendable. Move the call out of the loop.";
     }
 
+    /**
+     * The N-049 diagnostic, shared verbatim with the other six tiers (TS
+     * reference: {@code ternaryOutputIntrinsicDiagnostic} in 02-validate.ts) and
+     * with the pass-4 backstop in {@code AnfLower.lowerTernaryExpr}.
+     */
+    static String ternaryOutputIntrinsicMessage(String intrinsic, String via) {
+        String viaClause =
+            via == null ? "" : " (reached through private method '" + via + "')";
+        return "Output intrinsic '" + intrinsic + "'" + viaClause
+            + " cannot be called inside a conditional (ternary) expression arm. A ternary arm"
+            + " lowers into its own scope whose declared outputs never reach the method's output"
+            + " list, so the continuation hash would commit to fewer outputs than the transaction"
+            + " actually creates: a spender can drop the output and the honest spend is rejected."
+            + " Use an if/else statement instead.";
+    }
+
     private static final class Ctx {
         final ContractNode contract;
         final List<String> errors = new ArrayList<>();
@@ -1088,6 +1104,25 @@ public final class Validate {
             error(loopOutputIntrinsicMsg(site.intrinsic(), site.via()), loc);
         }
 
+        /**
+         * Reject an output intrinsic in either arm of a ternary (N-049).
+         *
+         * <p>{@code AnfLower.lowerTernaryExpr} lowers each arm into a sub-context whose output
+         * refs are dropped — unlike the if-statement lowering, which merges each arm's refs into
+         * the parent — so the continuation hash would omit the arm's output (EXT-2 TernaryToll: a
+         * spend dropping the payout was accepted on every tier). Private helpers are followed
+         * because they are inlined into the arm. A ternary that only selects values is untouched.
+         */
+        private void validateNoOutputIntrinsicInTernaryArm(TernaryExpr te) {
+            for (Expression arm : new Expression[] {te.consequent(), te.alternate()}) {
+                IntrinsicSite site = findOutputIntrinsicInExpr(arm, null, new HashSet<>());
+                if (site != null) {
+                    error(ternaryOutputIntrinsicMessage(site.intrinsic(), site.via()), null);
+                    return;
+                }
+            }
+        }
+
         /** The property/function name a call names, or null. */
         private static String calleeName(Expression expr) {
             if (!(expr instanceof CallExpr call)) {
@@ -1288,6 +1323,7 @@ public final class Validate {
             } else if (e instanceof MemberExpr me) {
                 validateExpression(me.object());
             } else if (e instanceof TernaryExpr te) {
+                validateNoOutputIntrinsicInTernaryArm(te);
                 validateExpression(te.condition());
                 validateExpression(te.consequent());
                 validateExpression(te.alternate());

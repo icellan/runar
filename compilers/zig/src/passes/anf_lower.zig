@@ -109,6 +109,11 @@ pub const LowerError = error{
     /// refuses it with a located diagnostic; this is the backstop for callers
     /// that lower without validating (N-006).
     OutputIntrinsicInLoop,
+    /// An output intrinsic inside a ternary arm (N-049). Each arm lowers into a
+    /// sub-context whose output refs never reach the method's continuation
+    /// hash. `passes/validate.zig` refuses it first; this is the backstop for
+    /// callers that lower without validating.
+    OutputIntrinsicInTernaryArm,
 };
 
 /// Name set used for the "what does the code after this statement still read"
@@ -2934,6 +2939,17 @@ fn lowerTernaryExpr(ctx: *LowerCtx, t: *const types.Ternary) LowerError![]const 
     var else_ctx = try ctx.subContext();
     try lowerTernaryArm(&else_ctx, t.else_expr);
     ctx.syncCounter(&else_ctx);
+
+    // N-049 backstop: an output intrinsic in an arm registered its ref on the
+    // arm's sub-context, which is dropped here, so the continuation hash would
+    // not commit to that output.
+    for ([_]*LowerCtx{ &then_ctx, &else_ctx }) |arm_ctx| {
+        if (arm_ctx.getAddOutputRefs().len > 0 or arm_ctx.getAddDataOutputRefs().len > 0) {
+            const intrinsic = firstOutputIntrinsic(arm_ctx.bindings.items) orelse "addOutput";
+            ctx.setDiagnostic(validate.TERNARY_OUTPUT_INTRINSIC_FMT, .{ intrinsic, "" });
+            return LowerError.OutputIntrinsicInTernaryArm;
+        }
+    }
 
     const if_val = try ctx.allocator.create(types.ANFIf);
     if_val.* = .{

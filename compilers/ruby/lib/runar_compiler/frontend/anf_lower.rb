@@ -2269,6 +2269,17 @@ module RunarCompiler
         else_ctx._lower_ternary_arm(e.alternate)
         sync_counter(else_ctx)
 
+        # N-049 backstop: an output intrinsic in an arm registered its ref on
+        # the arm's sub-context, which is dropped here, so the continuation
+        # hash would not commit to that output. `Frontend.lower_to_anf` is
+        # public, so this cannot rely on the validator having run.
+        [then_ctx, else_ctx].each do |arm_ctx|
+          next unless arm_ctx.get_add_output_refs.any? || arm_ctx.get_add_data_output_refs.any?
+
+          intrinsic = Frontend._first_output_intrinsic(arm_ctx.bindings) || "addOutput"
+          raise ArgumentError, ValidationContext.ternary_output_intrinsic_msg(intrinsic, nil)
+        end
+
         emit(IR::ANFValue.new(kind: "if").tap do |v|
           v.cond = cond_ref
           v.then = then_ctx.bindings

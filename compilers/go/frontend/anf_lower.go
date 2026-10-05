@@ -2809,6 +2809,16 @@ func (ctx *lowerCtx) lowerTernaryExpr(e TernaryExpr) string {
 	elseCtx.lowerTernaryArm(e.Alternate)
 	ctx.syncCounter(elseCtx)
 
+	// N-049 backstop: an output intrinsic in an arm registered its ref on the
+	// arm's sub-context, which is dropped here, so the continuation hash would
+	// not commit to that output. LowerToANF is exported, so this cannot rely
+	// on validation having run.
+	for _, armCtx := range []*lowerCtx{thenCtx, elseCtx} {
+		if len(armCtx.getAddOutputRefs()) > 0 || len(armCtx.getAddDataOutputRefs()) > 0 {
+			panic(ternaryOutputIntrinsicMsg(firstOutputIntrinsic(armCtx.bindings), ""))
+		}
+	}
+
 	elseBindings2 := elseCtx.bindings
 	if elseBindings2 == nil {
 		elseBindings2 = []ir.ANFBinding{}

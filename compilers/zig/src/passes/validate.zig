@@ -1228,6 +1228,96 @@ pub const LOOP_OUTPUT_INTRINSIC_FMT =
     "transaction actually creates: the spend is rejected by every shipped SDK and " ++
     "any successor it produces is unspendable. Move the call out of the loop.";
 
+/// The N-049 diagnostic (`{intrinsic}`, `{via clause}`), shared verbatim with
+/// the other six tiers (TS reference: `ternaryOutputIntrinsicDiagnostic` in
+/// 02-validate.ts) and with the pass-4 backstop in `anf_lower.lowerTernaryExpr`.
+pub const TERNARY_OUTPUT_INTRINSIC_FMT =
+    "Output intrinsic '{s}'{s} cannot be called inside a conditional (ternary) expression arm. " ++
+    "A ternary arm lowers into its own scope whose declared outputs never reach the method's " ++
+    "output list, so the continuation hash would commit to fewer outputs than the transaction " ++
+    "actually creates: a spender can drop the output and the honest spend is rejected. " ++
+    "Use an if/else statement instead.";
+
+/// Reject an output intrinsic in either arm of any ternary inside `expr`
+/// (N-049). `anf_lower.lowerTernaryExpr` lowers each arm into a sub-context
+/// whose output refs are dropped -- unlike the if-statement lowering, which
+/// merges each arm's refs into the parent -- so the continuation hash would
+/// omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout was
+/// accepted on every tier). Private helpers are followed because they are
+/// inlined into the arm. A ternary that only selects values is untouched.
+fn validateNoOutputIntrinsicInTernaryArm(
+    allocator: Allocator,
+    contract: ContractNode,
+    expr: Expression,
+    loc: ?SourceLocation,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) Allocator.Error!void {
+    switch (expr) {
+        .ternary => |t| {
+            for ([_]Expression{ t.then_expr, t.else_expr }) |arm| {
+                var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+                defer seen.deinit(allocator);
+                if (try findOutputIntrinsicInExpr(allocator, contract, arm, loc, &seen)) |site| {
+                    const via_clause = if (site.via) |v|
+                        try std.fmt.allocPrint(allocator, " (reached through private method '{s}')", .{v})
+                    else
+                        try allocator.dupe(u8, "");
+                    defer allocator.free(via_clause);
+                    try errors.append(allocator, .{
+                        .owned_message = true,
+                        .message = try std.fmt.allocPrint(
+                            allocator,
+                            TERNARY_OUTPUT_INTRINSIC_FMT,
+                            .{ site.intrinsic, via_clause },
+                        ),
+                        .severity = .@"error",
+                        .location = loc,
+                    });
+                    break;
+                }
+            }
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, t.condition, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, t.then_expr, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, t.else_expr, loc, errors);
+        },
+        .call => |c| for (c.args) |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a, loc, errors),
+        .method_call => |mc| for (mc.args) |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a, loc, errors),
+        .binary_op => |b| {
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, b.left, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, b.right, loc, errors);
+        },
+        .unary_op => |u| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, u.operand, loc, errors),
+        .index_access => |ia| {
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, ia.object, loc, errors);
+            try validateNoOutputIntrinsicInTernaryArm(allocator, contract, ia.index, loc, errors);
+        },
+        .increment => |inc| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, inc.operand, loc, errors),
+        .decrement => |dec| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, dec.operand, loc, errors),
+        .array_literal => |els| for (els) |el| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, el, loc, errors),
+        else => {},
+    }
+}
+
+/// The N-049 check over the expressions a statement owns directly; nested
+/// bodies are reached through `validateStatement`'s own recursion.
+fn validateNoOutputIntrinsicInTernaryArmsOfStatement(
+    allocator: Allocator,
+    contract: ContractNode,
+    stmt: Statement,
+    errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
+) Allocator.Error!void {
+    switch (stmt) {
+        .expr_stmt => |e| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, e.expr, e.source_loc, errors),
+        .const_decl => |d| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, d.value, d.source_loc, errors),
+        .let_decl => |d| if (d.value) |v| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, v, d.source_loc, errors),
+        .assign => |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a.value, a.source_loc, errors),
+        .assert_stmt => |a| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, a.condition, a.source_loc, errors),
+        .return_stmt => |r| if (r) |v| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, v, null, errors),
+        .if_stmt => |i| try validateNoOutputIntrinsicInTernaryArm(allocator, contract, i.condition, i.source_loc, errors),
+        .for_stmt => {},
+    }
+}
+
 /// Reject an output intrinsic called inside a loop body (R-127).
 ///
 /// `anf_lower` lowers a loop body into its own sub-context, which starts with a
@@ -1536,6 +1626,7 @@ fn validateStatement(
     stmt: Statement,
     errors: *std.ArrayListUnmanaged(CompilerDiagnostic),
 ) !void {
+    try validateNoOutputIntrinsicInTernaryArmsOfStatement(allocator, contract, stmt, errors);
     switch (stmt) {
         .for_stmt => |f| {
             // The parser collapses a for-loop bound to a concrete i64, but a

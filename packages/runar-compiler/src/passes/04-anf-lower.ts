@@ -37,7 +37,7 @@ import type { SideEffectSummary } from './side-effect-summary.js';
 import { SIGHASH_DEFAULT } from './sighash-directive.js';
 import { emitStatefulContinuation, emitStatefulPrologue } from './stateful-scaffold.js';
 import { isByteStringFamilyType } from './03-typecheck.js';
-import { loopOutputIntrinsicMessage } from './02-validate.js';
+import { loopOutputIntrinsicMessage, ternaryOutputIntrinsicMessage } from './02-validate.js';
 import type { MethodNode, PropertyNode } from '../ir/runar-ast.js';
 import { UnknownANFKindError } from 'runar-ir-schema';
 
@@ -2783,6 +2783,16 @@ function lowerTernaryExpr(
   const elseCtx = ctx.subContext();
   lowerTernaryArm(expr.alternate, elseCtx);
   ctx.syncCounter(elseCtx);
+
+  // N-049 backstop: an output intrinsic in an arm registered its ref on the
+  // arm's sub-context, which is dropped here, so the continuation hash would
+  // not commit to that output. `lowerToANF` is a public export, so this cannot
+  // rely on the validator having run.
+  for (const armCtx of [thenCtx, elseCtx]) {
+    if (armCtx.getAddOutputRefs().length > 0 || armCtx.getAddDataOutputRefs().length > 0) {
+      throw new Error(ternaryOutputIntrinsicMessage(firstOutputIntrinsic(armCtx.bindings) || 'addOutput'));
+    }
+  }
 
   return ctx.emit({
     kind: 'if',

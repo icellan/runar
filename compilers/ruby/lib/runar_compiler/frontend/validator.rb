@@ -830,6 +830,38 @@ module RunarCompiler
           "and any successor it produces is unspendable. Move the call out of the loop."
       end
 
+      # Build the N-049 rejection. Shared verbatim with the other six tiers
+      # (TS reference: ternaryOutputIntrinsicDiagnostic in 02-validate.ts) and
+      # with the pass-4 backstop in anf_lower's _lower_ternary_expr.
+      def self.ternary_output_intrinsic_msg(intrinsic, via)
+        via_clause = via ? " (reached through private method '#{via}')" : ""
+        "Output intrinsic '#{intrinsic}'#{via_clause} cannot be called inside a conditional " \
+          "(ternary) expression arm. A ternary arm lowers into its own scope whose declared " \
+          "outputs never reach the method's output list, so the continuation hash would commit " \
+          "to fewer outputs than the transaction actually creates: a spender can drop the output " \
+          "and the honest spend is rejected. Use an if/else statement instead."
+      end
+
+      # Reject an output intrinsic in either arm of a ternary (N-049).
+      #
+      # `anf_lower`'s _lower_ternary_expr lowers each arm into a sub-context
+      # whose output refs are dropped -- unlike the if-statement lowering, which
+      # merges each arm's refs into the parent -- so the continuation hash would
+      # omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout
+      # was accepted on every tier). Private helpers are followed because they
+      # are inlined into the arm. A ternary that only selects values is
+      # untouched.
+      def validate_no_output_intrinsic_in_ternary_arm(expr)
+        [expr.consequent, expr.alternate].each do |arm|
+          found = find_output_intrinsic_in_expr(arm, nil, Set.new)
+          next if found.nil?
+
+          intrinsic, via, = found
+          add_error(self.class.ternary_output_intrinsic_msg(intrinsic, via))
+          return
+        end
+      end
+
       # Reject an output intrinsic called inside a loop body (R-127).
       #
       # `anf_lower` lowers a loop body into its own sub-context, which starts
@@ -1091,6 +1123,7 @@ module RunarCompiler
         when MemberExpr
           validate_expression(expr.object)
         when TernaryExpr
+          validate_no_output_intrinsic_in_ternary_arm(expr)
           validate_expression(expr.condition)
           validate_expression(expr.consequent)
           validate_expression(expr.alternate)

@@ -43,7 +43,11 @@ from runar_compiler.frontend.ast_nodes import (
     UnaryExpr,
     VariableDeclStmt,
 )
-from runar_compiler.frontend.validator import is_to_byte_string_literal, loop_output_intrinsic_msg
+from runar_compiler.frontend.validator import (
+    is_to_byte_string_literal,
+    loop_output_intrinsic_msg,
+    ternary_output_intrinsic_msg,
+)
 from runar_compiler.ir.types import (
     ANFBinding,
     ANFMethod,
@@ -2199,6 +2203,16 @@ class _LowerCtx:
         else_ctx = self.sub_context()
         else_ctx._lower_ternary_arm(e.alternate)
         self.sync_counter(else_ctx)
+
+        # N-049 backstop: an output intrinsic in an arm registered its ref on
+        # the arm's sub-context, which is dropped here, so the continuation
+        # hash would not commit to that output. ``lower_to_anf`` is public, so
+        # this cannot rely on the validator having run.
+        for arm_ctx in (then_ctx, else_ctx):
+            if arm_ctx.get_add_output_refs() or arm_ctx.get_add_data_output_refs():
+                raise ValueError(ternary_output_intrinsic_msg(
+                    _first_output_intrinsic(arm_ctx.bindings) or "addOutput"
+                ))
 
         return self.emit(ANFValue(
             kind="if",

@@ -2412,6 +2412,18 @@ public final class AnfLower {
             elseCtx.lowerTernaryArm(e.alternate());
             syncCounter(elseCtx);
 
+            // N-049 backstop: an output intrinsic in an arm registered its ref
+            // on the arm's sub-context, which is dropped here, so the
+            // continuation hash would not commit to that output. AnfLower.run
+            // is public, so this cannot rely on the validator having run.
+            for (LowerCtx armCtx : new LowerCtx[] {thenCtx, elseCtx}) {
+                if (!armCtx.addOutputRefs.isEmpty() || !armCtx.addDataOutputRefs.isEmpty()) {
+                    String intrinsic = firstOutputIntrinsic(armCtx.bindings);
+                    throw new IllegalStateException(Validate.ternaryOutputIntrinsicMessage(
+                        intrinsic != null ? intrinsic : "addOutput", null));
+                }
+            }
+
             return emit(new If(condRef, thenCtx.bindings, elseCtx.bindings));
         }
 

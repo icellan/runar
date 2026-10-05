@@ -595,6 +595,8 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
         }
     }
 
+    validate_no_output_intrinsic_in_ternary_arm(method, contract, errors);
+
     // `return` is a PRIVATE-helper construct only (NEW-012).
     if method.visibility == Visibility::Public {
         reject_return_in_public_method(method, errors);
@@ -1068,6 +1070,69 @@ pub(crate) fn loop_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> S
          Move the call out of the loop.",
         intrinsic, via_clause
     )
+}
+
+/// Build the N-049 rejection. Shared verbatim with the other six tiers (TS
+/// reference: `ternaryOutputIntrinsicDiagnostic` in 02-validate.ts) and with the
+/// pass-4 backstop in `anf_lower::lower_ternary_expr`.
+pub(crate) fn ternary_output_intrinsic_msg(intrinsic: &str, via: Option<&str>) -> String {
+    let via_clause = match via {
+        Some(v) => format!(" (reached through private method '{}')", v),
+        None => String::new(),
+    };
+    format!(
+        "Output intrinsic '{}'{} cannot be called inside a conditional (ternary) expression arm. \
+         A ternary arm lowers into its own scope whose declared outputs never reach the method's \
+         output list, so the continuation hash would commit to fewer outputs than the transaction \
+         actually creates: a spender can drop the output and the honest spend is rejected. \
+         Use an if/else statement instead.",
+        intrinsic, via_clause
+    )
+}
+
+/// Reject an output intrinsic in either arm of a ternary expression (N-049).
+///
+/// `anf_lower::lower_ternary_expr` lowers each arm into a sub-context whose
+/// output refs are dropped -- unlike the if-statement lowering, which merges
+/// each arm's refs into the parent -- so the continuation hash would omit the
+/// arm's output (EXT-2 TernaryToll: a spend dropping the payout was accepted on
+/// every tier). Private helpers are followed because they are inlined into the
+/// arm. A ternary that only selects values is untouched.
+fn validate_no_output_intrinsic_in_ternary_arm(
+    method: &MethodNode,
+    contract: &ContractNode,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for stmt in &method.body {
+        let loc = statement_location(stmt);
+        walk_expressions_in_statement(stmt, &mut |e| {
+            if let Expression::TernaryExpr { consequent, alternate, .. } = e {
+                for arm in [consequent.as_ref(), alternate.as_ref()] {
+                    let mut seen: Vec<String> = Vec::new();
+                    if let Some((intrinsic, via, _)) =
+                        find_output_intrinsic_in_expr(arm, loc, contract, &mut seen)
+                    {
+                        errors.push(Diagnostic::error(
+                            ternary_output_intrinsic_msg(&intrinsic, via.as_deref()),
+                            Some(loc.clone()),
+                        ));
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn statement_location(stmt: &Statement) -> &SourceLocation {
+    match stmt {
+        Statement::ExpressionStatement { source_location, .. }
+        | Statement::VariableDecl { source_location, .. }
+        | Statement::Assignment { source_location, .. }
+        | Statement::ReturnStatement { source_location, .. }
+        | Statement::IfStatement { source_location, .. }
+        | Statement::ForStatement { source_location, .. } => source_location,
+    }
 }
 
 /// Reject an output intrinsic called inside a loop body (R-127).

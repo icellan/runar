@@ -132,6 +132,24 @@ def loop_output_intrinsic_msg(intrinsic: str, via: str | None = None) -> str:
     )
 
 
+def ternary_output_intrinsic_msg(intrinsic: str, via: str | None = None) -> str:
+    """Build the N-049 rejection.
+
+    Shared verbatim with the other six tiers (TS reference:
+    ``ternaryOutputIntrinsicDiagnostic`` in 02-validate.ts) and with the pass-4
+    backstop in ``anf_lower._lower_ternary_expr``.
+    """
+    via_clause = f" (reached through private method '{via}')" if via else ""
+    return (
+        f"Output intrinsic '{intrinsic}'{via_clause} cannot be called inside a "
+        "conditional (ternary) expression arm. A ternary arm lowers into its own "
+        "scope whose declared outputs never reach the method's output list, so the "
+        "continuation hash would commit to fewer outputs than the transaction "
+        "actually creates: a spender can drop the output and the honest spend is "
+        "rejected. Use an if/else statement instead."
+    )
+
+
 @dataclass
 class _ValidationContext:
     contract: ContractNode
@@ -1028,6 +1046,24 @@ class _ValidationContext:
                 return found
         return None
 
+    def _validate_no_output_intrinsic_in_ternary_arm(self, expr: TernaryExpr) -> None:
+        """Reject an output intrinsic in either arm of a ternary (N-049).
+
+        ``anf_lower._lower_ternary_expr`` lowers each arm into a sub-context
+        whose output refs are dropped -- unlike the if-statement lowering, which
+        merges each arm's refs into the parent -- so the continuation hash would
+        omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout
+        was accepted on every tier). Private helpers are followed because they
+        are inlined into the arm. A ternary that only selects values is
+        untouched.
+        """
+        for arm in (expr.consequent, expr.alternate):
+            found = self._find_output_intrinsic_in_expr(arm, None, set())
+            if found is not None:
+                intrinsic, via, _ = found
+                self._add_error(ternary_output_intrinsic_msg(intrinsic, via))
+                return
+
     def _validate_for_update(self, stmt: ForStmt) -> None:
         """Reject any for-loop update clause the loop model cannot represent
         (R-065).
@@ -1104,6 +1140,7 @@ class _ValidationContext:
         elif isinstance(expr, MemberExpr):
             self._validate_expression(expr.object)
         elif isinstance(expr, TernaryExpr):
+            self._validate_no_output_intrinsic_in_ternary_arm(expr)
             self._validate_expression(expr.condition)
             self._validate_expression(expr.consequent)
             self._validate_expression(expr.alternate)

@@ -1158,33 +1158,45 @@ function findOutputIntrinsic(
   return undefined;
 }
 
+/**
+ * First output intrinsic reachable from `expr`, following calls to private
+ * methods; the site is reported at `location`.
+ */
+function findOutputIntrinsicInExpr(
+  expr: Expression,
+  ctx: ValidationContext,
+  seen: Set<string>,
+  location: SourceLocation | undefined,
+): OutputIntrinsicSite | undefined {
+  const intrinsic = outputIntrinsicCallName(expr);
+  if (intrinsic !== undefined) {
+    return { intrinsic, location };
+  }
+  const helper = privateMethodCallName(expr, ctx);
+  if (helper !== undefined && !seen.has(helper)) {
+    seen.add(helper);
+    const body = ctx.contract.methods.find((m) => m.name === helper)?.body ?? [];
+    const nested = findOutputIntrinsic(body, ctx, seen);
+    if (nested) {
+      return { intrinsic: nested.intrinsic, via: helper, location };
+    }
+  }
+  // Recurse into sub-expressions: an intrinsic can sit inside an argument
+  // list or an operand, not only as a bare expression statement.
+  for (const child of subExpressions(expr)) {
+    const found = findOutputIntrinsicInExpr(child, ctx, seen, location);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 function findOutputIntrinsicInStatement(
   stmt: Statement,
   ctx: ValidationContext,
   seen: Set<string>,
 ): OutputIntrinsicSite | undefined {
-  const fromExpr = (expr: Expression): OutputIntrinsicSite | undefined => {
-    const intrinsic = outputIntrinsicCallName(expr);
-    if (intrinsic !== undefined) {
-      return { intrinsic, location: stmt.sourceLocation };
-    }
-    const helper = privateMethodCallName(expr, ctx);
-    if (helper !== undefined && !seen.has(helper)) {
-      seen.add(helper);
-      const body = ctx.contract.methods.find((m) => m.name === helper)?.body ?? [];
-      const nested = findOutputIntrinsic(body, ctx, seen);
-      if (nested) {
-        return { intrinsic: nested.intrinsic, via: helper, location: stmt.sourceLocation };
-      }
-    }
-    // Recurse into sub-expressions: an intrinsic can sit inside an argument
-    // list or an operand, not only as a bare expression statement.
-    for (const child of subExpressions(expr)) {
-      const found = fromExpr(child);
-      if (found) return found;
-    }
-    return undefined;
-  };
+  const fromExpr = (expr: Expression): OutputIntrinsicSite | undefined =>
+    findOutputIntrinsicInExpr(expr, ctx, seen, stmt.sourceLocation);
 
   switch (stmt.kind) {
     case 'expression_statement':
@@ -1266,6 +1278,64 @@ function loopOutputIntrinsicDiagnostic(
 /** The R-127 message text, for the pass-4 backstop. */
 export function loopOutputIntrinsicMessage(intrinsic: string, via?: string): string {
   return loopOutputIntrinsicDiagnostic(intrinsic, via).message;
+}
+
+/**
+ * Reject any output intrinsic in either arm of a ternary expression (N-049).
+ *
+ * `lowerTernaryExpr` lowers each arm into `ctx.subContext()`, whose fresh
+ * `_addOutputRefs` is dropped when the arm is folded into the `if` binding --
+ * unlike `lowerIfStatement`, which merges each arm's outputs into one ref so
+ * the parent sees them. Measured on every tier before this check existed
+ * (EXT-2 TernaryToll): `c ? this.addRawOutput(p, payee) : this.addRawOutput(p,
+ * refund)` beside one top-level `addOutput` compiled to a continuation over the
+ * state output and the change only, so a spend that DROPS the payout was
+ * accepted and the honest spend rejected; without the top-level call the
+ * method died on the internal "_newAmount is not on the stack" error.
+ *
+ * Refusal rather than lowering (fail-closed, same shape as R-127): the
+ * if/else statement form already expresses a conditional output correctly,
+ * and no fixture or example wraps an output intrinsic in a ternary. Private
+ * helpers are followed because they are inlined into the arm at ANF time. A
+ * ternary that only selects VALUES (`addRawOutput(p, c ? a : b)`) is untouched.
+ */
+function validateNoOutputIntrinsicInTernaryArm(
+  expr: Extract<Expression, { kind: 'ternary_expr' }>,
+  ctx: ValidationContext,
+): void {
+  for (const arm of [expr.consequent, expr.alternate]) {
+    const site = findOutputIntrinsicInExpr(arm, ctx, new Set<string>(), expr.sourceLocation);
+    if (site === undefined) continue;
+    ctx.errors.push(ternaryOutputIntrinsicDiagnostic(site.intrinsic, site.via, site.location));
+    return;
+  }
+}
+
+/**
+ * The N-049 diagnostic, shared verbatim with the other six tiers and with the
+ * pass-4 backstop in `04-anf-lower.ts`. Inline template at the `makeDiagnostic`
+ * call for the diagnostic-coverage extractor, as R-127's.
+ */
+function ternaryOutputIntrinsicDiagnostic(
+  intrinsic: string,
+  via: string | undefined,
+  loc?: SourceLocation,
+): CompilerDiagnostic {
+  const viaClause = via !== undefined ? ` (reached through private method '${via}')` : '';
+  return makeDiagnostic(
+    `Output intrinsic '${intrinsic}'${viaClause} cannot be called inside a conditional (ternary) expression arm. `
+    + `A ternary arm lowers into its own scope whose declared outputs never reach the method's `
+    + `output list, so the continuation hash would commit to fewer outputs than the transaction `
+    + `actually creates: a spender can drop the output and the honest spend is rejected. `
+    + `Use an if/else statement instead.`,
+    'error',
+    loc,
+  );
+}
+
+/** The N-049 message text, for the pass-4 backstop. */
+export function ternaryOutputIntrinsicMessage(intrinsic: string, via?: string): string {
+  return ternaryOutputIntrinsicDiagnostic(intrinsic, via).message;
 }
 
 /**
@@ -1513,6 +1583,7 @@ function validateExpression(expr: Expression, ctx: ValidationContext): void {
       break;
 
     case 'ternary_expr':
+      validateNoOutputIntrinsicInTernaryArm(expr, ctx);
       validateExpression(expr.condition, ctx);
       validateExpression(expr.consequent, ctx);
       validateExpression(expr.alternate, ctx);

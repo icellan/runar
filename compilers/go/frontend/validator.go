@@ -1113,6 +1113,37 @@ func loopOutputIntrinsicMsg(intrinsic, via string) string {
 		"every shipped SDK and any successor it produces is unspendable. Move the call out of the loop."
 }
 
+// ternaryOutputIntrinsicMsg builds the N-049 rejection. Shared verbatim with
+// the other six tiers (TS reference: ternaryOutputIntrinsicDiagnostic in
+// packages/runar-compiler/src/passes/02-validate.ts).
+func ternaryOutputIntrinsicMsg(intrinsic, via string) string {
+	viaClause := ""
+	if via != "" {
+		viaClause = " (reached through private method '" + via + "')"
+	}
+	return "Output intrinsic '" + intrinsic + "'" + viaClause +
+		" cannot be called inside a conditional (ternary) expression arm. A ternary arm lowers " +
+		"into its own scope whose declared outputs never reach the method's output list, so the " +
+		"continuation hash would commit to fewer outputs than the transaction actually creates: " +
+		"a spender can drop the output and the honest spend is rejected. Use an if/else statement instead."
+}
+
+// validateNoOutputIntrinsicInTernaryArm rejects an output intrinsic in either
+// arm of a ternary expression (N-049). lowerTernaryExpr lowers each arm into a
+// sub-context whose output refs are dropped, unlike the if-statement lowering,
+// which merges each arm's refs into the parent — so the continuation hash would
+// omit the arm's output (EXT-2 TernaryToll: a spend dropping the payout was
+// accepted on every tier). Private helpers are followed because they are
+// inlined into the arm. A ternary that only selects values is untouched.
+func (ctx *validationContext) validateNoOutputIntrinsicInTernaryArm(e TernaryExpr) {
+	for _, arm := range []Expression{e.Consequent, e.Alternate} {
+		if intrinsic, via, _, found := ctx.findOutputIntrinsicInExpr(arm, nil, map[string]bool{}); found {
+			ctx.addError(ternaryOutputIntrinsicMsg(intrinsic, via))
+			return
+		}
+	}
+}
+
 // outputIntrinsicNames are the three intrinsics that register an output ref.
 var outputIntrinsicNames = map[string]bool{
 	"addOutput": true, "addRawOutput": true, "addDataOutput": true,
@@ -1456,6 +1487,7 @@ func (ctx *validationContext) validateExpression(expr Expression) {
 	case MemberExpr:
 		ctx.validateExpression(e.Object)
 	case TernaryExpr:
+		ctx.validateNoOutputIntrinsicInTernaryArm(e)
 		ctx.validateExpression(e.Condition)
 		ctx.validateExpression(e.Consequent)
 		ctx.validateExpression(e.Alternate)
