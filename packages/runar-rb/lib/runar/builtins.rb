@@ -223,6 +223,11 @@ module Runar
     # total message length in bits across all blocks. Returns a 32-byte hex string.
     def sha256_finalize(state, remaining, msg_bit_len)
       remaining_bytes = [remaining].pack('H*')
+      # The compiled script's two-block path pads to 120 bytes and aborts on a
+      # longer tail; a truncated digest here would never match it (F-142).
+      if remaining_bytes.bytesize > 119
+        raise ArgumentError, "sha256_finalize: remaining must be 0-119 bytes, got #{remaining_bytes.bytesize}"
+      end
 
       # Append the 0x80 padding byte
       padded = remaining_bytes + "\x80".b

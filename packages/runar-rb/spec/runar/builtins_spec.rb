@@ -131,6 +131,32 @@ RSpec.describe Runar::Builtins do
       expected = ctx.sha256(sha_empty)
       expect(ctx.hash256('')).to eq(expected)
     end
+
+    # F-142: the compiled script accepts 0..119 bytes of `remaining` (its
+    # two-block path pads to 120) and aborts on more. Proves the boundary
+    # lengths equal standard SHA-256 over a chained state and that 120 is
+    # refused instead of returning a digest the chain never reproduces.
+    # Does not prove anything about the compiled script itself.
+    describe 'sha256_finalize remaining-length band' do
+      let(:first) { (0...64).to_a.pack('C*') }
+      let(:state) do
+        ctx.sha256_compress('6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19',
+                            first.unpack1('H*'))
+      end
+
+      it 'matches standard SHA-256 at the boundary lengths 0..119' do
+        [0, 1, 55, 56, 63, 64, 65, 100, 118, 119].each do |n|
+          tail = (0...n).map { |i| (0xA0 + i) & 0xff }.pack('C*')
+          expect(ctx.sha256_finalize(state, tail.unpack1('H*'), (64 + n) * 8))
+            .to eq(Digest::SHA256.hexdigest(first + tail)), "remaining len #{n}"
+        end
+      end
+
+      it 'refuses 120 bytes like the compiled script' do
+        expect { ctx.sha256_finalize(state, '00' * 120, 184 * 8) }
+          .to raise_error(ArgumentError, /sha256_finalize: remaining must be 0-119 bytes/)
+      end
+    end
   end
 
   describe 'math functions' do

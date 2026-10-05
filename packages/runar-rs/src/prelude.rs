@@ -519,36 +519,26 @@ pub fn sha256_compress(state: &[u8], block: &[u8]) -> ByteString {
 /// append 64-bit big-endian bit length) and runs the final 1-2 compression rounds.
 pub fn sha256_finalize(state: &[u8], remaining: &[u8], msg_bit_len: i64) -> ByteString {
     assert!(state.len() == 32, "sha256_finalize: state must be 32 bytes");
-    assert!(remaining.len() <= 64, "sha256_finalize: remaining must be <= 64 bytes");
+    // The compiled script's two-block path pads to 120 bytes, so it accepts
+    // 0..=119 bytes of `remaining` and aborts on more (F-142).
+    assert!(remaining.len() <= 119, "sha256_finalize: remaining must be 0-119 bytes");
 
     let rem_len = remaining.len();
 
-    // Build padded buffer: remaining + 0x80 + zeros + 8-byte big-endian bit length
-    // If remaining + 1 (0x80) + 8 (bit length) <= 64, it fits in one block.
-    // Otherwise we need two blocks.
-    if rem_len < 56 {
-        // Fits in one 64-byte block
-        let mut block = [0u8; 64];
-        block[..rem_len].copy_from_slice(remaining);
-        block[rem_len] = 0x80;
-        // Last 8 bytes = bit length in big-endian
-        let bit_len = msg_bit_len as u64;
-        block[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        sha256_compress(state, &block)
-    } else {
-        // Needs two blocks
-        let mut block1 = [0u8; 64];
-        block1[..rem_len].copy_from_slice(remaining);
-        block1[rem_len] = 0x80;
-        // First block: remaining + 0x80 + zeros (no room for bit length)
-        let intermediate = sha256_compress(state, &block1);
+    // Padded buffer: remaining + 0x80 + zeros + 8-byte big-endian bit length.
+    // One 64-byte block if remaining + 1 + 8 <= 64, otherwise two.
+    let total = if rem_len < 56 { 64 } else { 128 };
+    let mut padded = [0u8; 128];
+    padded[..rem_len].copy_from_slice(remaining);
+    padded[rem_len] = 0x80;
+    let bit_len = msg_bit_len as u64;
+    padded[total - 8..total].copy_from_slice(&bit_len.to_be_bytes());
 
-        // Second block: all zeros except last 8 bytes = bit length
-        let mut block2 = [0u8; 64];
-        let bit_len = msg_bit_len as u64;
-        block2[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        sha256_compress(&intermediate, &block2)
+    let mut result = sha256_compress(state, &padded[..64]);
+    if total == 128 {
+        result = sha256_compress(&result, &padded[64..128]);
     }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1609,6 +1599,59 @@ mod tests {
             let hashed = sha256(msg.as_bytes());
             assert_eq!(finalized, hashed, "mismatch for {:?}", msg);
         }
+    }
+
+    // F-142: the compiled script accepts `remaining` of 0..=119 bytes (its
+    // two-block path pads to 120, `sha256-codegen.ts`), and every other tier
+    // matches it. Rust used to refuse 65..=119 and panic out of bounds at 64.
+    //
+    // Proves: for a non-trivial chained state (one compressed 64-byte block)
+    // and every boundary length of the tail, `sha256_finalize` equals standard
+    // SHA-256 of `first_block || tail` (the `sha2` crate), and 120 is refused
+    // like the script refuses it (OP_NUM2BIN with a negative size).
+    // Does not prove: anything about the compiled script itself. The pinned
+    // 64- and 100-byte digests were computed with Python's hashlib and
+    // confirmed against the TS interpreter's sha256Finalize and the compiled
+    // script (ScriptExecutionContract) for the same inputs, but that
+    // cross-check is not re-run by this test.
+    fn chained_state_and_first_block() -> (Vec<u8>, Vec<u8>) {
+        let iv = hex_decode("6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19");
+        let first: Vec<u8> = (0u8..64).collect();
+        (sha256_compress(&iv, &first), first)
+    }
+
+    #[test]
+    fn test_sha256_finalize_boundary_lengths_match_standard_sha256() {
+        let (state, first) = chained_state_and_first_block();
+        for &n in &[0usize, 1, 55, 56, 63, 64, 65, 100, 118, 119] {
+            let tail: Vec<u8> = (0..n).map(|i| (0xA0u8).wrapping_add(i as u8)).collect();
+            let got = sha256_finalize(&state, &tail, ((64 + n) * 8) as i64);
+            let mut whole = first.clone();
+            whole.extend_from_slice(&tail);
+            assert_eq!(hex_encode(&got), hex_encode(&sha256(&whole)), "remaining len {}", n);
+        }
+    }
+
+    #[test]
+    fn test_sha256_finalize_two_block_pinned_vectors() {
+        let (state, _) = chained_state_and_first_block();
+        let got64 = sha256_finalize(&state, &[0xAAu8; 64], (128 * 8) as i64);
+        assert_eq!(
+            hex_encode(&got64),
+            "9f6646b1217fe9821f199d32a46d850ce31d4feb3d2e29b1b911f24e8d5a5035"
+        );
+        let got100 = sha256_finalize(&state, &[0xDDu8; 100], (164 * 8) as i64);
+        assert_eq!(
+            hex_encode(&got100),
+            "a32228afd99c6b52f473666cdb10d2b22b9b4e10ce22cc14ba59a994c84e3029"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sha256_finalize: remaining must be 0-119 bytes")]
+    fn test_sha256_finalize_rejects_120_bytes() {
+        let (state, _) = chained_state_and_first_block();
+        sha256_finalize(&state, &[0u8; 120], (184 * 8) as i64);
     }
 
     // -- BLAKE3 single-block compression -------------------------------------

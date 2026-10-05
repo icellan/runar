@@ -686,6 +686,11 @@ func Sha256Finalize(state, remaining ByteString, msgBitLen int64) ByteString {
 	if len(state) != 32 {
 		panic("Sha256Finalize: state must be 32 bytes")
 	}
+	// The compiled script's two-block path pads to 120 bytes and aborts on a
+	// longer tail; returning a truncated digest here would never match it (F-142).
+	if len(remaining) > 119 {
+		panic("Sha256Finalize: remaining must be 0-119 bytes")
+	}
 
 	// Start padding: append 0x80
 	padded := append([]byte(nil), []byte(remaining)...)
