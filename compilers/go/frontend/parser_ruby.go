@@ -15,6 +15,11 @@ import (
 // ParseRuby parses a Ruby-syntax Rúnar contract (.runar.rb) and produces
 // the standard AST.
 func ParseRuby(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	p := &rbParser{
 		fileName: fileName,
 	}

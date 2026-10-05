@@ -34,6 +34,11 @@ import (
 //     Point, P256Point, P384Point, SigHashPreimage, RabinSig, RabinPubKey,
 //     OpCodeType); FixedArray<T, N> with integer-literal N.
 func ParseJava(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	tokens, lexErrors := javaTokenize(string(source), fileName)
 	p := &javaParser{
 		tokens:   tokens,

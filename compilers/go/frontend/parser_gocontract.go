@@ -26,6 +26,11 @@ func bytesToHex(b []byte) string {
 // ParseGoContract parses a Go contract syntax (.runar.go) source file and
 // produces the standard Rúnar AST. Uses Go's built-in go/parser.
 func ParseGoContract(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	// F-026: every number token, extended over the [0-9A-Za-z_] characters
 	// glued to it, must be a Go integer literal. go/parser would refuse most
 	// malformed ones with its own words; this gives them the shared text.

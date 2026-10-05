@@ -37,3 +37,24 @@ func assertSourceBytesUnderLimit(source []byte) error {
 	}
 	return nil
 }
+
+// sourceSizeGuardResult returns a *ParseResult carrying a
+// SourceSizeExceededError when source exceeds MaxSourceBytes, or nil when
+// the source is within bounds. Every exported parser entry point (Parse,
+// ParseSolidity, ParseMove, ParseGoContract, ParsePython, ParseRustMacro,
+// ParseRuby, ParseZig, ParseJava — not just ParseSource) calls this first,
+// so a caller that invokes a per-format parser directly still gets the same
+// DoS-bound rejection ParseSource already guarantees (F-177).
+func sourceSizeGuardResult(source []byte) *ParseResult {
+	if err := assertSourceBytesUnderLimit(source); err != nil {
+		sse := err.(*SourceSizeExceededError)
+		return &ParseResult{
+			Errors: []Diagnostic{{
+				Message:  sse.Error(),
+				Severity: SeverityError,
+			}},
+			SourceSizeErr: sse,
+		}
+	}
+	return nil
+}

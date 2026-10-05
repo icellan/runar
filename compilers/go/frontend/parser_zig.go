@@ -14,6 +14,11 @@ import (
 // ParseZig parses a Zig-syntax Rúnar contract (.runar.zig) and produces
 // the standard AST.
 func ParseZig(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	p := &zigParser{
 		fileName:             fileName,
 		selfNames:            make(map[string]bool),

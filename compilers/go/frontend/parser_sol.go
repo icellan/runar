@@ -13,6 +13,11 @@ import (
 
 // ParseSolidity parses a Solidity-like Rúnar contract and produces the standard AST.
 func ParseSolidity(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	p := &solParser{
 		fileName: fileName,
 	}

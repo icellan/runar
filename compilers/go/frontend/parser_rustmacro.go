@@ -16,6 +16,11 @@ import (
 // produces the standard Rúnar AST. Uses a hand-written tokenizer and
 // recursive descent parser.
 func ParseRustMacro(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	tokens, lexErrors := rustTokenize(string(source), fileName)
 	p := &rustMacroParser{
 		tokens:   tokens,

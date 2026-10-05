@@ -151,6 +151,12 @@ func unsupportedDirectiveError(source []byte, surfaceName string) string {
 
 // Parse parses a TypeScript source string and extracts the Rúnar contract AST.
 func Parse(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard. Reject oversized source BEFORE the tokenizer
+	// touches it, even when Parse is called directly instead of via
+	// ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	parser := sitter.NewParser()
 	parser.SetLanguage(typescript.GetLanguage())
 

@@ -15,6 +15,11 @@ import (
 // ParsePython parses a Python-syntax Rúnar contract (.runar.py) and produces
 // the standard AST.
 func ParsePython(source []byte, fileName string) *ParseResult {
+	// DoS-bound size guard, enforced at every exported parser entry, not
+	// just ParseSource. F-177.
+	if res := sourceSizeGuardResult(source); res != nil {
+		return res
+	}
 	p := &pyParser{
 		fileName: fileName,
 	}
