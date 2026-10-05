@@ -168,6 +168,18 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 	game.mu.Lock()
 	defer game.mu.Unlock()
 
+	// F-056: a deployed PriceBet commits to the current Alice/Bob pubkeys and
+	// only their private keys (held nowhere but here) can spend it. Replacing
+	// them mid-round strands the contract UTXO for good, so re-init is allowed
+	// only from the idle/settled phases. "funding" is reachable only after an
+	// init that failed part-way, before any contract exists.
+	switch game.Phase {
+	case "init", "funding", "ready", "complete":
+	default:
+		jsonError(w, "cannot re-initialize mid-round (phase: "+game.Phase+")", http.StatusConflict)
+		return
+	}
+
 	game.Lang = normalizeLang(req.Lang)
 
 	alice, err := newWallet()

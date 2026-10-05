@@ -246,6 +246,19 @@ func handleNewGame(w http.ResponseWriter, r *http.Request) {
 	game.mu.Lock()
 	defer game.mu.Unlock()
 
+	// F-056: each deployed BlackjackBet bakes in the current oracle pubkey, and
+	// its only key-free escape (cancel) needs the current player and house
+	// keys, all held nowhere but here. Replacing them mid-round strands every
+	// unsettled contract UTXO for good, so a new game is allowed only from the
+	// idle/settled phases. "setup" is reachable only after a new-game that
+	// failed part-way, before any contract exists.
+	switch game.Phase {
+	case "welcome", "setup", "ready", "settlement":
+	default:
+		jsonError(w, "cannot start a new game mid-round (phase: "+game.Phase+")", http.StatusConflict)
+		return
+	}
+
 	game.Phase = "setup"
 	game.NumPlayers = req.NumPlayers
 	game.Round = 0
