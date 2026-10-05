@@ -39,10 +39,15 @@ var sourceLangs = map[string]sourceLang{
 	"py":   {key: "py", filename: "PriceBet.runar.py", dirs: []string{"../python", "."}},
 	"rb":   {key: "rb", filename: "PriceBet.runar.rb", dirs: []string{"../ruby", "."}},
 	"zig":  {key: "zig", filename: "PriceBet.runar.zig", dirs: []string{"../zig", "."}},
-	// Java: no external PriceBet.runar.java yet (milestone 12 / examples/java
-	// ports are separate from examples/end2end-example). The webapp carries
-	// its own copy alongside main.go so the Java compile path works without
-	// reaching outside this directory.
+	// Java: an external canonical copy DOES exist, at
+	// examples/end2end-example/java/src/main/java/runar/end2end/PriceBet.runar.java
+	// — but it lives inside that example's Gradle source layout, not as a flat
+	// file next to this directory, so the "../java" entry below can never
+	// resolve to it. The webapp instead serves its own copy (kept deliberately
+	// NOT byte-identical to the reference, so tests/r277-webapp-contract-copy-
+	// in-sync.test.ts still guards real drift, but required to compile under
+	// real javac — see F-190 / CL-BUG-256) so the Java compile path works
+	// without reaching into that nested tree.
 	"java": {key: "java", filename: "PriceBet.runar.java", dirs: []string{".", "../java"}},
 }
 

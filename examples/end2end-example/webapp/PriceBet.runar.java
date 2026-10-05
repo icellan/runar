@@ -54,12 +54,12 @@ class PriceBet extends SmartContract {
 
     @Public
     void settle(Bigint price, RabinSig rabinSig, ByteString padding, Sig aliceSig, Sig bobSig) {
-        ByteString msg = num2bin(price, 8);
+        ByteString msg = num2bin(price.value(), java.math.BigInteger.valueOf(8));
         assertThat(verifyRabinSig(msg, rabinSig, padding, oraclePubKey));
 
-        assertThat(price > 0);
+        assertThat(price.gt(Bigint.of(0)));
 
-        if (price > strikePrice) {
+        if (price.gt(strikePrice)) {
             // bobSig is present in the unlocking script for stack alignment but is
             // intentionally not checked in this branch -- only alice (the winner) signs.
             assertThat(checkSig(aliceSig, alicePubKey));
