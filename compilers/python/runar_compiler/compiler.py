@@ -885,7 +885,23 @@ def _assemble_artifact(
             }
         state_fields.append(sf)
 
-    is_stateful = len(state_fields) > 0
+    # F-192: parent_class is the authoritative stateful signal (see
+    # ir/types.py ANFProgram.parent_class) -- a StatefulSmartContract with
+    # zero mutable fields still needs is_terminal / the ANF snapshot even
+    # though state_fields is empty. len(state_fields) > 0 was a proxy that
+    # happened to agree with parent_class whenever a contract had mutable
+    # state, but silently disagreed for an all-readonly StatefulSmartContract.
+    # Fall back to the old proxy only when parent_class is unset (IR loaded
+    # without the F-038 field, e.g. pre-parentClass --ir input), mirroring
+    # the N-087 fail-closed inference in ir/loader.py's
+    # _effective_parent_class -- a mutable property there requires
+    # parent_class to already be "StatefulSmartContract", so this fallback
+    # never disagrees with that inference for IR that passed validation.
+    is_stateful = (
+        program.parent_class == "StatefulSmartContract"
+        if program.parent_class
+        else len(state_fields) > 0
+    )
 
     # Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
     methods: list[ABIMethod] = []
