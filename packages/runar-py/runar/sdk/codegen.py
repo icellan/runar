@@ -403,7 +403,7 @@ _PYTHON_TEMPLATE = (
     '\n'
     '    def _to_call_options(self) -> CallOptions:\n'
     '        return CallOptions(\n'
-    '            satoshis=self.satoshis or None,\n'
+    '            satoshis=self.satoshis,\n'
     '            change_address=self.change_address or None,\n'
     '            change_pub_key=self.change_pub_key or None,\n'
     '            new_state=self.new_state,\n'

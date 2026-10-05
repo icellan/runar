@@ -953,7 +953,11 @@ class RunarContract:
                 if len(anf_ordered_outputs) == 1 and len(anf_state_entries) == 1
                 else None
             )
-            if opts.satoshis > 0:
+            # None (e.g. a hand-built CallOptions, or a pre-fix codegen
+            # wrapper) is "unspecified", same as the declared default 0 --
+            # matches the TS SDK's `options?.satoshis ?? ...` fallback
+            # (F-239).
+            if opts.satoshis and opts.satoshis > 0:
                 new_satoshis = opts.satoshis
             elif single_explicit_state_sats is not None:
                 new_satoshis = single_explicit_state_sats
