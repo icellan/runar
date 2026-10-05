@@ -118,7 +118,7 @@ import { validate } from './passes/02-validate.js';
 import { typecheck, isBigintFamilyType, isByteStringFamilyType } from './passes/03-typecheck.js';
 import { expandFixedArrays } from './passes/03b-expand-fixed-arrays.js';
 import { lowerToANF } from './passes/04-anf-lower.js';
-import { lowerToStack } from './passes/05-stack-lower.js';
+import { lowerToStack, bakedPropPushOrigin } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
 import { optimizeStackIR } from './optimizer/peephole.js';
 import { optimizeEC } from './optimizer/anf-ec.js';
@@ -126,7 +126,7 @@ import { foldConstants } from './optimizer/constant-fold.js';
 import { eliminateDeadBindings } from './optimizer/dce.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
-import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact } from './ir/index.js';
+import type { ContractNode, ANFProgram, ANFBinding, RunarArtifact, StackOp } from './ir/index.js';
 import { assertRequiredIrFields } from './ir/anf-required-fields.js';
 import { assertSyntheticArrayChains } from './ir/synthetic-array-chain.js';
 import { isReservedIrName, reservedNameMessage } from './passes/reserved-names.js';
@@ -510,12 +510,15 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     const emitResult = emit(stackProgram);
 
     // requireBaked belt-and-braces: in template mode every required prop
-    // without a compile-time value must have produced a constructor slot.
+    // without a compile-time value must have produced a constructor slot; in
+    // baked mode its value push must have survived all optimization (F-111).
     if (opts.requireBaked && opts.requireBaked.length > 0) {
       const slotErrors = findRequireBakedMissingSlots(
         optimizedAnf,
         opts.requireBaked,
         emitResult.constructorSlots,
+        // Only public methods are emitted (06-emit drops the constructor).
+        stackProgram.methods.filter(m => m.name !== 'constructor').map(m => m.ops),
       );
       if (slotErrors.length > 0) {
         for (const msg of slotErrors) {
@@ -1373,38 +1376,55 @@ function validateRequireBaked(anf: ANFProgram, names: string[]): string[] {
 }
 
 /**
- * Post-emit requireBaked cross-check (template mode): every required prop
- * that has no compile-time value must map to at least one emitted
- * constructor slot. Guards against any optimizer pass dropping a reference
- * AFTER the ANF-level check.
+ * Post-emit requireBaked cross-check, run on the FINAL (post-fold, post-EC/DCE,
+ * post-peephole) Stack IR that is emitted. The pre-fold `validateRequireBaked`
+ * only proves a reference existed before optimization; folding can erase it
+ * (F-111: `assert(this.source * 0n === 0n)` folds to `OP_0 OP_0 ...`).
  *
- * SCOPE / KNOWN LIMITATION: this belt-and-braces check covers TEMPLATE mode
- * only — baked props (`initialValue !== undefined`) are skipped because they
- * carry no constructor slot. In baked mode the guarantee rests solely on the
- * pre-fold `validateRequireBaked` reference check. A baked required prop whose
- * ONLY reference constant-folds to a tautology (e.g. `assert(this.source >= 1n)`
- * with `source` baked to `1n` → `assert(true)`, then eliminated) can therefore
- * be dropped from the emitted code with no diagnostic, because folding runs
- * after the reference check and the folded literal is indistinguishable from an
- * eliminated one. A robust baked-mode check would require tracking the baked
- * value's survival through fold+emit; until then, authors relying on
- * requireBaked in baked mode should confirm the value is present in the emitted
- * artifact. Template mode (the documented deploy path) is fully covered.
+ *  - Template mode (no compile-time value): the prop must map to at least one
+ *    emitted constructor slot.
+ *  - Baked mode (`initialValue !== undefined`): at least one `push` op that
+ *    lowering emitted for a `load_prop` of the prop (tracked by identity in
+ *    `bakedPropPushOrigin`) must survive into the emitted ops. A push that
+ *    was folded into another constant (`OP_1 OP_1ADD` → `OP_2`) or dropped
+ *    no longer carries the value, so the script has no commitment to it.
  */
 function findRequireBakedMissingSlots(
   anf: ANFProgram,
   names: string[],
   constructorSlots: { paramIndex: number; byteOffset: number }[],
+  methodOps: StackOp[][],
 ): string[] {
   const ctorProps = anf.properties.filter(p => p.initialValue === undefined);
   const slotNames = new Set(
     constructorSlots.map(s => ctorProps[s.paramIndex]?.name).filter(n => n !== undefined),
   );
+  const bakedPushNames = new Set<string>();
+  const collect = (ops: StackOp[]): void => {
+    for (const op of ops) {
+      const origin = bakedPropPushOrigin.get(op);
+      if (origin !== undefined) bakedPushNames.add(origin);
+      if (op.op === 'if') {
+        collect(op.then);
+        if (op.else) collect(op.else);
+      }
+    }
+  };
+  for (const ops of methodOps) collect(ops);
   const errors: string[] = [];
   for (const name of names) {
     const prop = anf.properties.find(p => p.name === name);
     if (!prop || !prop.readonly) continue; // reported by validateRequireBaked
-    if (prop.initialValue !== undefined) continue; // baked at compile time
+    if (prop.initialValue !== undefined) {
+      if (!bakedPushNames.has(name)) {
+        errors.push(
+          `requireBaked property '${name}' has no on-chain commitment after optimization — ` +
+            `every reference to its baked value was folded or eliminated, so the value ` +
+            `does not appear in the emitted script and could not be verified on-chain.`,
+        );
+      }
+      continue;
+    }
     if (!slotNames.has(name)) {
       errors.push(
         `requireBaked: readonly property '${name}' produced no constructor slot in the ` +

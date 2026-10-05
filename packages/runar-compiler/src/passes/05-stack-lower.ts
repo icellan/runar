@@ -1720,6 +1720,9 @@ class LoweringContext {
       this.stackMap.pop();
     } else if (prop && prop.initialValue !== undefined) {
       this.pushValue(prop.initialValue);
+      // F-111: remember which push carries a baked property value so the
+      // requireBaked check can confirm it survived peephole optimization.
+      bakedPropPushOrigin.set(this.ops[this.ops.length - 1]!, propName);
     } else {
       // Property value will be provided at deployment time; emit a placeholder.
       // The emitter records byte offsets so the SDK can splice in real values.
@@ -6550,6 +6553,16 @@ function hexToBytes(hex: string): Uint8Array {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * F-111 (requireBaked): identity side-table mapping each `push` op that
+ * materialises a compile-time-baked property value (`load_prop` of a property
+ * with `initialValue`) to that property's name. Kept off the op object itself
+ * so Stack IR serialization and emitted bytes are unchanged. A peephole rule
+ * that folds or drops the push yields new/no op objects, so absence of a
+ * tagged op after optimization means the baked value has no commitment left.
+ */
+export const bakedPropPushOrigin = new WeakMap<StackOp, string>();
 
 /**
  * Lower an ANF program to Stack IR.
