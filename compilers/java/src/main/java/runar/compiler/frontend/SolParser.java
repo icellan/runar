@@ -1534,7 +1534,19 @@ public final class SolParser {
                 rewriteBareProps(ia.index(), propNames, paramNames, methodNames)
             );
         }
-        // MemberExpr, PropertyAccessExpr, literals, increment/decrement: leave alone
+        // N-137: mirror TS resolvePropertyAccess — recurse into a member's
+        // object and an increment/decrement operand, or `count++` keeps a bare
+        // Identifier and a stateful contract drops the state write.
+        if (expr instanceof MemberExpr me) {
+            return new MemberExpr(rewriteBareProps(me.object(), propNames, paramNames, methodNames), me.property());
+        }
+        if (expr instanceof IncrementExpr ie) {
+            return new IncrementExpr(rewriteBareProps(ie.operand(), propNames, paramNames, methodNames), ie.prefix());
+        }
+        if (expr instanceof DecrementExpr de) {
+            return new DecrementExpr(rewriteBareProps(de.operand(), propNames, paramNames, methodNames), de.prefix());
+        }
+        // PropertyAccessExpr, literals: leave alone
         return expr;
     }
 
