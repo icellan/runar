@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic, staticMethodMessage, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -68,6 +68,16 @@ const KEYWORDS = new Map<string, TokenType>([
   ['None', 'None'], ['and', 'and'], ['or', 'or'], ['not', 'not'],
   ['self', 'self'], ['super', 'super'], ['from', 'from'], ['import', 'import'],
   ['assert', 'assert'],
+]);
+
+/**
+ * N-053: the tokens that can begin an expression and are not already a
+ * statement form of their own. A statement starting with one of these is an
+ * expression statement; a statement starting with anything else is refused.
+ */
+const PY_EXPRESSION_START: ReadonlySet<TokenType> = new Set<TokenType>([
+  'number', 'string', 'hexstring', 'True', 'False', 'None',
+  '(', '[', '-', '~', '!', 'not',
 ]);
 
 function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
@@ -1071,8 +1081,14 @@ class PyParser {
       return this.parseIdentStatement(loc);
     }
 
-    // Skip unknown
-    this.advance();
+    // N-053: a token that can begin an expression begins an expression
+    // statement; any other token (a stray `elif`, `from`, `@`, an unexpected
+    // indent, ...) is refused. Skipping it silently dropped the token.
+    if (PY_EXPRESSION_START.has(this.peek().type)) {
+      return { kind: 'expression_statement', expression: this.parseExpression(), sourceLocation: loc };
+    }
+    const tok = this.advance();
+    this.errors.push(makeDiagnostic(unsupportedStatementMessage(tok.value || tok.type), 'error', loc));
     return null;
   }
 

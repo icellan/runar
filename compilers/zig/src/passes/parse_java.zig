@@ -1136,6 +1136,11 @@ const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) ?Statement {
+        // N-053: an empty statement `;` is a no-op, as in the TS reference.
+        if (self.current.kind == .semicolon) {
+            _ = self.bump();
+            return null;
+        }
         // if (cond) { ... } else { ... }
         if (self.checkIdent("if")) return self.parseIfStmt();
         // for (init; cond; update) { ... }

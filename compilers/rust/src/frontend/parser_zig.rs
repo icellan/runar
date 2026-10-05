@@ -1102,15 +1102,25 @@ impl<'a> ZigParser<'a> {
             return Some(self.parse_variable_decl());
         }
 
-        // _ = expr; (discard expression)
+        // _ = expr; (discard). N-053: Zig's discard drops the VALUE, not the
+        // evaluation -- a helper called for its asserts must keep them, so
+        // `expr` lowers as an expression statement. Only a bare name (the
+        // unused-binding idiom `_ = self;` / `_ = param;`) is dropped:
+        // reading a name has no effect.
         if matches!(self.peek(), Token::Ident(ref n) if n == "_")
             && *self.peek_at(1) == Token::Eq
         {
             self.advance(); // _
             self.advance(); // =
-            self.parse_expression();
+            let expression = self.parse_expression();
             self.match_tok(&Token::Semicolon);
-            return None;
+            if matches!(expression, Expression::Identifier { .. }) {
+                return None;
+            }
+            return Some(Statement::ExpressionStatement {
+                expression,
+                source_location: self.loc(),
+            });
         }
 
         // while

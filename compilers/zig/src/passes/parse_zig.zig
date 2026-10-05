@@ -1165,6 +1165,15 @@ const Parser = struct {
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
             _ = self.expect(.semicolon);
+            // N-053: Zig's discard `_ = expr;` drops the VALUE, not the
+            // evaluation -- a helper called for its asserts must keep them, so
+            // `expr` lowers as an expression statement. Only a bare name (the
+            // unused-binding idiom `_ = self;` / `_ = param;`) is dropped:
+            // reading a name has no effect.
+            if (expr == .identifier and std.mem.eql(u8, expr.identifier, "_")) {
+                if (rhs == .identifier) return null;
+                return Statement{ .expr_stmt = .{ .expr = rhs, .source_loc = loc } };
+            }
             const target_name = extractAssignTarget(expr);
             // `self.arr[idx] = value` — carry the index-access target on
             // the Assign so `expand_fixed_arrays.zig` can rewrite it into

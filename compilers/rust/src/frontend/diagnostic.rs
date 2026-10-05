@@ -79,6 +79,13 @@ pub const PY_STATEMENT_LINE_BREAK: &str = "expected a line break between stateme
 /// The TS reference's refusal of a Java char literal.
 pub const JAVA_CHAR_LITERAL: &str = "char literals are unsupported in Rúnar Java contracts";
 
+/// N-053's refusal of a .runar.rb / .runar.py statement whose first token can
+/// begin neither a statement nor an expression (the TS reference's
+/// `unsupportedStatementMessage`). `token` is the token's source text.
+pub fn unsupported_statement_message(token: &str) -> String {
+    format!("Unsupported statement starting with '{}'", token)
+}
+
 /// N-050's refusal of a static or class-level method (the TS reference's
 /// `staticMethodMessage`): `static` on .runar.ts / .runar.java,
 /// `@staticmethod` / `@classmethod` on .runar.py, `def self.m` on .runar.rb,

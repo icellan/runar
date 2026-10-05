@@ -1020,15 +1020,21 @@ class _ZigParser:
         if self._current().kind in (TOK_CONST, TOK_VAR):
             return self._parse_variable_decl()
 
-        # _ = expr; (discard)
+        # _ = expr; (discard). N-053: Zig's discard drops the VALUE, not the
+        # evaluation -- a helper called for its asserts must keep them, so
+        # `expr` lowers as an expression statement. Only a bare name (the
+        # unused-binding idiom `_ = self;` / `_ = param;`) is dropped:
+        # reading a name has no effect.
         if (self._current().kind == TOK_IDENT
                 and self._current().value == "_"
                 and self._peek_ahead(1).kind == TOK_ASSIGN):
             self._advance()  # '_'
             self._advance()  # '='
-            self._parse_expression()
+            expr = self._parse_expression()
             self._match(TOK_SEMICOLON)
-            return None
+            if isinstance(expr, Identifier):
+                return None
+            return ExpressionStmt(expr=expr, source_location=loc)
 
         # while loop
         if self._current().kind == TOK_WHILE:

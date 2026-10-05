@@ -85,6 +85,17 @@ export const ZIG_LIST_COMMA = "expected ',' between list elements";
 export const PY_STATEMENT_LINE_BREAK = 'expected a line break between statements';
 
 /**
+ * N-053: a .runar.rb / .runar.py statement whose first token can begin neither
+ * a statement nor an expression. The dispatchers used to skip such a token and
+ * carry on, which dropped keywords, `!` and parentheses out of a statement
+ * (inverting a Ruby helper's implicit return). Every tier refuses it with this
+ * diagnostic; `token` is the token's source text.
+ */
+export function unsupportedStatementMessage(token: string): string {
+  return `Unsupported statement starting with '${token}'`;
+}
+
+/**
  * N-050: a static or class-level method is not a contract method, and must
  * never become a spending entry point. Every tier refuses each surface's
  * spelling of one (`static`, `@staticmethod` / `@classmethod`, `def self.m`,

@@ -1082,7 +1082,19 @@ public final class RbParser {
                 case SUPER -> parseSuperCall(l);
                 case IVAR -> parseIvarStatement(l);
                 case IDENT -> parseIdentStatement(l);
-                default -> { advance(); yield null; }
+                // N-053: a token that can begin an expression begins an
+                // expression statement (a private helper's last one is its
+                // implicit return value). Skipping it dropped `!` / `(` /
+                // literals.
+                case NUMBER, STRING, HEXSTRING, TRUE, FALSE, NIL,
+                     LPAREN, LBRACKET, MINUS, TILDE, BANG, NOT ->
+                    new ExpressionStatement(parseExpression(), l);
+                // N-053: any other token is refused.
+                default -> {
+                    Token t = advance();
+                    errors.add(file + ":" + t.line + ":" + t.col + ": " + LexDiag.unsupportedStatement(t.value));
+                    yield null;
+                }
             };
         }
 
@@ -1277,6 +1289,7 @@ public final class RbParser {
         }
 
         Statement parseIvarStatement(SourceLocation l) {
+            int start = pos;
             Token ivarTok = advance();
             String propName = snakeToCamel(ivarTok.value);
             Expression target = new PropertyAccessExpr(propName);
@@ -1303,9 +1316,13 @@ public final class RbParser {
                 return new AssignmentStatement(target, value, l);
             }
 
-            // Bare expression starting with @ivar (e.g. @x.method(...))
-            Expression expr = parsePostfixFrom(target);
-            return new ExpressionStatement(expr, l);
+            // Bare expression starting with @ivar (@x on its own line,
+            // @x.method(...), or a private helper's implicit return such as
+            // `@x + 1`). N-053: re-parse from the ivar as a whole expression;
+            // continuing only the postfix chain left `+ 1` behind, and the
+            // statement dispatcher skipped it.
+            pos = start;
+            return new ExpressionStatement(parseExpression(), l);
         }
 
         Statement parseIdentStatement(SourceLocation l) {

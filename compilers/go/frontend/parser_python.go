@@ -1372,8 +1372,51 @@ func (p *pyParser) parsePyStatement() Statement {
 		return nil
 	}
 
+	// N-053: a statement must start with a name or a token that can begin an
+	// expression; anything else (a stray `elif`, `from`, `@`, an unexpected
+	// indent, ...) is refused with the shared diagnostic.
+	if tok := p.peek(); (tok.kind == pyTokIdent && pyNonExprKeywords[tok.value]) ||
+		(tok.kind != pyTokIdent && !pyExprStartKinds[tok.kind]) {
+		p.advance()
+		p.errors = append(p.errors, lexDiag(UnsupportedStatementMsg(pyTokenText(tok)), p.fileName, tok.line, tok.col))
+		return nil
+	}
+
 	// Variable declarations or expression statements
 	return p.parsePyExprOrAssignStatement(loc)
+}
+
+// pyExprStartKinds are the non-name tokens that can begin an expression
+// (N-053, mirrors the TS reference's PY_EXPRESSION_START).
+var pyExprStartKinds = map[pyTokenKind]bool{
+	pyTokNumber: true, pyTokString: true, pyTokLParen: true, pyTokLBracket: true,
+	pyTokMinus: true, pyTokTilde: true, pyTokBang: true,
+}
+
+// pyNonExprKeywords are the keywords the TS reference lexes as their own
+// tokens and that begin neither a statement form nor an expression (N-053).
+var pyNonExprKeywords = map[string]bool{
+	"class": true, "def": true, "elif": true, "else": true, "in": true,
+	"range": true, "from": true, "import": true,
+}
+
+// pyTokenText is a token's source text for a diagnostic.
+func pyTokenText(tok pyToken) string {
+	switch tok.kind {
+	case pyTokIndent:
+		return "INDENT"
+	case pyTokDedent:
+		return "DEDENT"
+	case pyTokNewline:
+		return "NEWLINE"
+	case pyTokEOF:
+		return "eof"
+	case pyTokAmpAmp:
+		return "and"
+	case pyTokPipePipe:
+		return "or"
+	}
+	return tok.value
 }
 
 func (p *pyParser) parsePyAssert(loc SourceLocation) Statement {

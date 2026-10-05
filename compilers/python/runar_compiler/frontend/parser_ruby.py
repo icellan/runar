@@ -36,6 +36,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     UNTERMINATED_STRING_LITERAL,
     lex_error,
     static_method_message,
+    unsupported_statement_message,
     with_lex_errors,
 )
 
@@ -112,6 +113,13 @@ TOK_SUPER = 66
 TOK_REQUIRE = 67
 TOK_ASSERT = 68
 TOK_DO = 69
+
+# N-053: the tokens that can begin an expression and are not already a
+# statement form of their own (mirrors the TS reference's RB_EXPRESSION_START).
+_RB_EXPR_START_KINDS = frozenset({
+    TOK_NUMBER, TOK_STRING, TOK_HEXSTRING, TOK_TRUE, TOK_FALSE, TOK_NIL,
+    TOK_LPAREN, TOK_LBRACKET, TOK_MINUS, TOK_TILDE, TOK_BANG, TOK_NOT,
+})
 
 _KEYWORDS: dict[str, int] = {
     "class": TOK_CLASS,
@@ -1208,8 +1216,14 @@ class _RbParser:
         if kind == TOK_IDENT:
             return self._parse_ident_statement(loc)
 
-        # Skip unrecognized token
-        self._advance()
+        # N-053: a token that can begin an expression begins an expression
+        # statement (a private helper's last one is its implicit return
+        # value); any other token is refused. Skipping it dropped `!` / `(` /
+        # literals.
+        if kind in _RB_EXPR_START_KINDS:
+            return ExpressionStmt(expr=self._parse_expression(), source_location=loc)
+        tok = self._advance()
+        self._errors.append(unsupported_statement_message(tok.value))
         return None
 
     def _parse_assert_statement(self, loc: SourceLocation) -> Statement:
@@ -1431,6 +1445,7 @@ class _RbParser:
 
     def _parse_ivar_statement(self, loc: SourceLocation) -> Statement:
         """Parse ``@var = expr``, ``@var[i] = expr``, ``@var += expr``, or ``@var`` as expression."""
+        start = self._pos
         ivar_tok = self._advance()  # ivar token
         raw_name = ivar_tok.value
         prop_name = _snake_to_camel(raw_name)
@@ -1457,10 +1472,12 @@ class _RbParser:
             value = BinaryExpr(op=_COMPOUND_OPS[op_kind], left=target, right=right)
             return AssignmentStmt(target=target, value=value, source_location=loc)
 
-        # Expression statement: bare ``@var`` (e.g. followed by ``.method(...)``)
-        expr: Expression = target
-        expr = self._parse_postfix_from(expr)
-        return ExpressionStmt(expr=expr, source_location=loc)
+        # Expression statement: bare ``@var``, ``@var.method(...)``, or a
+        # private helper's implicit return such as ``@x + 1``. N-053: re-parse
+        # from the ivar as a whole expression; continuing only the postfix
+        # chain left ``+ 1`` behind, and the statement dispatcher skipped it.
+        self._pos = start
+        return ExpressionStmt(expr=self._parse_expression(), source_location=loc)
 
     def _parse_ident_statement(self, loc: SourceLocation) -> Statement | None:
         """Parse a statement starting with an identifier."""

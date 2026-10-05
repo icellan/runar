@@ -52,6 +52,14 @@ const PyStatementLineBreakMsg = "expected a line break between statements"
 // JavaCharLiteralMsg is the TS reference's refusal of a Java char literal.
 const JavaCharLiteralMsg = "char literals are unsupported in Rúnar Java contracts"
 
+// UnsupportedStatementMsg is N-053's refusal of a .runar.rb / .runar.py
+// statement whose first token can begin neither a statement nor an expression
+// (the TS reference's unsupportedStatementMessage). `token` is the token's
+// source text.
+func UnsupportedStatementMsg(token string) string {
+	return fmt.Sprintf("Unsupported statement starting with '%s'", token)
+}
+
 // StaticMethodMsg is N-050's refusal of a static or class-level method (the
 // TS reference's staticMethodMessage): `static` on .runar.ts / .runar.java,
 // `@staticmethod` / `@classmethod` on .runar.py, `def self.m` on .runar.rb,

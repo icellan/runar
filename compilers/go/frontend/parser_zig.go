@@ -1138,13 +1138,20 @@ func (p *zigParser) parseStatement() Statement {
 		return p.parseVariableDecl(loc)
 	}
 
-	// Discard pattern: `_ = expr;`
+	// Discard pattern: `_ = expr;`. N-053: Zig's discard drops the VALUE, not
+	// the evaluation — a helper called for its asserts must keep them, so
+	// `expr` lowers as an expression statement. Only a bare name (the
+	// unused-binding idiom `_ = self;` / `_ = param;`) is dropped: reading a
+	// name has no effect.
 	if p.checkIdent("_") && p.peekAt(1).kind == zigTokAssign {
 		p.advance() // '_'
 		p.advance() // '='
-		p.parseExpression()
+		expr := p.parseExpression()
 		p.match(zigTokSemicolon)
-		return nil
+		if _, ok := expr.(Identifier); ok {
+			return nil
+		}
+		return ExpressionStmt{Expr: expr, SourceLocation: loc}
 	}
 
 	// while statement

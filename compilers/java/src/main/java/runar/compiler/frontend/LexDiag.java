@@ -31,6 +31,15 @@ final class LexDiag {
     static final String JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java contracts";
 
     /**
+     * N-053: a .runar.rb / .runar.py statement whose first token can begin
+     * neither a statement nor an expression (the TS reference's
+     * unsupportedStatementMessage). {@code token} is the token's source text.
+     */
+    static String unsupportedStatement(String token) {
+        return "Unsupported statement starting with '" + token + "'";
+    }
+
+    /**
      * N-050: a static or class-level method (the TS reference's
      * staticMethodMessage): {@code static} on .runar.ts / .runar.java,
      * {@code @staticmethod} / {@code @classmethod} on .runar.py,

@@ -1273,8 +1273,16 @@ func (p *rbParser) parseStatement() Statement {
 		return p.parseIdentStatement(loc)
 	}
 
-	// Skip unknown
-	p.advance()
+	// N-053: a token that can begin an expression begins an expression
+	// statement (a private helper's last one is its implicit return value);
+	// any other token is refused. Skipping it dropped `!` / `(` / literals.
+	switch p.peek().kind {
+	case rbTokNumber, rbTokString, rbTokHexString, rbTokTrue, rbTokFalse, rbTokNil,
+		rbTokLParen, rbTokLBracket, rbTokMinus, rbTokTilde, rbTokBang, rbTokNot:
+		return ExpressionStmt{Expr: p.parseExpression(), SourceLocation: loc}
+	}
+	tok := p.advance()
+	p.errors = append(p.errors, lexDiag(UnsupportedStatementMsg(tok.value), p.fileName, tok.line, tok.col))
 	return nil
 }
 
@@ -1535,6 +1543,7 @@ func (p *rbParser) parseSuperCall(loc SourceLocation) Statement {
 }
 
 func (p *rbParser) parseIvarStatement(loc SourceLocation) Statement {
+	start := p.pos
 	ivarTok := p.advance() // ivar token
 	rawName := ivarTok.value
 	propName := rbConvertName(rawName)
@@ -1575,10 +1584,12 @@ func (p *rbParser) parseIvarStatement(loc SourceLocation) Statement {
 		}
 	}
 
-	// Expression statement (e.g. @var.method(...))
-	expr := p.parsePostfixFrom(target)
-
-	return ExpressionStmt{Expr: expr, SourceLocation: loc}
+	// Expression statement (@var on its own line, @var.method(...), or a
+	// private helper's implicit return such as `@x + 1`). N-053: re-parse
+	// from the ivar as a whole expression; continuing only the postfix chain
+	// left `+ 1` behind, and the statement dispatcher skipped it.
+	p.pos = start
+	return ExpressionStmt{Expr: p.parseExpression(), SourceLocation: loc}
 }
 
 func (p *rbParser) parseIdentStatement(loc SourceLocation) Statement {

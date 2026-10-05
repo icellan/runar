@@ -46,7 +46,9 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{
+    lex_error, static_method_message, unsupported_statement_message, UNTERMINATED_STRING_LITERAL,
+};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 use std::collections::HashMap;
@@ -330,6 +332,61 @@ enum Token {
 
     // Special
     Eof,
+}
+
+/// A token's source text, for a diagnostic (N-053).
+fn rb_token_text(tok: &Token) -> String {
+    match tok {
+        Token::Class => "class".into(),
+        Token::Def => "def".into(),
+        Token::If => "if".into(),
+        Token::Elsif => "elsif".into(),
+        Token::Else => "else".into(),
+        Token::Unless => "unless".into(),
+        Token::For => "for".into(),
+        Token::In => "in".into(),
+        Token::End => "end".into(),
+        Token::Return => "return".into(),
+        Token::And => "and".into(),
+        Token::Or => "or".into(),
+        Token::Require => "require".into(),
+        Token::Do => "do".into(),
+        Token::Symbol(name) => name.clone(),
+        Token::Plus => "+".into(),
+        Token::Star => "*".into(),
+        Token::Slash => "/".into(),
+        Token::Percent => "%".into(),
+        Token::DoubleStar => "**".into(),
+        Token::EqEq => "==".into(),
+        Token::NotEq => "!=".into(),
+        Token::Lt => "<".into(),
+        Token::Le => "<=".into(),
+        Token::Gt => ">".into(),
+        Token::Ge => ">=".into(),
+        Token::LShift => "<<".into(),
+        Token::RShift => ">>".into(),
+        Token::AndAnd => "&&".into(),
+        Token::OrOr => "||".into(),
+        Token::BitAnd => "&".into(),
+        Token::BitOr => "|".into(),
+        Token::BitXor => "^".into(),
+        Token::Eq => "=".into(),
+        Token::PlusEq => "+=".into(),
+        Token::MinusEq => "-=".into(),
+        Token::StarEq => "*=".into(),
+        Token::SlashEq => "/=".into(),
+        Token::PercentEq => "%=".into(),
+        Token::DotDotDot => "...".into(),
+        Token::DotDot => "..".into(),
+        Token::Question => "?".into(),
+        Token::ColonColon => "::".into(),
+        Token::RParen => ")".into(),
+        Token::RBracket => "]".into(),
+        Token::Colon => ":".into(),
+        Token::Comma => ",".into(),
+        Token::Dot => ".".into(),
+        other => format!("{:?}", other),
+    }
 }
 
 fn tokenize(source: &str, file: &str, errors: &mut Vec<super::diagnostic::Diagnostic>) -> Vec<Token> {
@@ -1385,8 +1442,29 @@ impl<'a> RbParser<'a> {
             // Variable declaration or expression statement
             Token::Ident(_) => Some(self.parse_ident_statement()),
 
-            _ => {
+            // N-053: a token that can begin an expression begins an
+            // expression statement (a private helper's last one is its
+            // implicit return value). Skipping it dropped `!` / `(` / literals.
+            Token::NumberLit(_)
+            | Token::StringLit(_)
+            | Token::HexStringLit(_)
+            | Token::TrueLit
+            | Token::FalseLit
+            | Token::NilLit
+            | Token::LParen
+            | Token::LBracket
+            | Token::Minus
+            | Token::Tilde
+            | Token::Bang
+            | Token::Not => Some(Statement::ExpressionStatement {
+                expression: self.parse_expression(),
+                source_location: self.loc(),
+            }),
+
+            // N-053: any other token is refused.
+            tok => {
                 self.advance();
+                self.errors.push(unsupported_statement_message(&rb_token_text(&tok)));
                 None
             }
         }
@@ -1656,6 +1734,7 @@ impl<'a> RbParser<'a> {
 
     fn parse_ivar_statement(&mut self) -> Statement {
         // @var = expr | @var[i] = expr | @var += expr | @var as expression
+        let start = self.pos;
         let raw_name = match self.advance() {
             Token::Ivar(name) => name,
             _ => "_error".to_string(),
@@ -1712,11 +1791,14 @@ impl<'a> RbParser<'a> {
             };
         }
 
-        // Expression statement (e.g. @var.method(...))
-        let expr = self.parse_postfix_from(target);
-
+        // Expression statement (@var on its own line, @var.method(...), or a
+        // private helper's implicit return such as `@x + 1`). N-053: re-parse
+        // from the ivar as a whole expression; continuing only the postfix
+        // chain left `+ 1` behind, and the statement dispatcher skipped it.
+        drop(target);
+        self.pos = start;
         Statement::ExpressionStatement {
-            expression: expr,
+            expression: self.parse_expression(),
             source_location: self.loc(),
         }
     }

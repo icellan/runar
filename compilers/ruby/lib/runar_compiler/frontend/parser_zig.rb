@@ -1026,15 +1026,20 @@ module RunarCompiler
           return parse_variable_decl
         end
 
-        # _ = expr; (discard)
+        # _ = expr; (discard). N-053: Zig's discard drops the VALUE, not the
+        # evaluation -- a helper called for its asserts must keep them, so
+        # `expr` lowers as an expression statement. Only a bare name (the
+        # unused-binding idiom `_ = self;` / `_ = param;`) is dropped:
+        # reading a name has no effect.
         if check(TOK_IDENT) &&
            peek.value == "_" &&
            peek_at(1).kind == TOK_ASSIGN
           advance
           advance
-          parse_expression
+          expr = parse_expression
           match_tok(TOK_SEMICOLON)
-          return nil
+          return nil if expr.is_a?(Identifier)
+          return ExpressionStmt.new(expr: expr, source_location: source_location)
         end
 
         # while

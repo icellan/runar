@@ -978,6 +978,12 @@ module RunarCompiler
       def parse_statement
         location = loc
 
+        # N-053: an empty statement `;` is a no-op, as in the TS reference.
+        if check(TOK_SEMI)
+          advance
+          return nil
+        end
+
         # return [expr];
         if check(TOK_RETURN)
           advance

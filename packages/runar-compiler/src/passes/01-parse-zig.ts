@@ -752,14 +752,19 @@ class ZigParser extends ParserCore<ZigToken> {
       return this.parseVariableDecl();
     }
 
+    // N-053: Zig's discard `_ = expr;` drops the VALUE, not the evaluation —
+    // a helper called for its asserts must keep them, so lower `expr` as an
+    // expression statement. Only a bare name (the unused-binding idiom
+    // `_ = self;` / `_ = param;`) is dropped: reading a name has no effect.
     if (this.current().type === 'ident' &&
         this.current().value === '_' &&
         this.tokens[this.pos + 1]?.type === '=') {
       this.advance();
       this.advance();
-      this.parseExpression();
+      const expression = this.parseExpression();
       if (this.current().type === ';') this.advance();
-      return null;
+      if (expression.kind === 'identifier') return null;
+      return { kind: 'expression_statement', expression, sourceLocation };
     }
 
     if (this.current().type === 'while') {

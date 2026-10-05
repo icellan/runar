@@ -1706,8 +1706,15 @@ fn lowerStatementWithReads(ctx: *LowerCtx, stmt: Statement, reads_after: *const 
             }
         },
         .assign => |assign| {
-            // Skip Zig discard assignments: _ = self; _ = expr;
-            if (std.mem.eql(u8, assign.target, "_")) return;
+            // Discard assignments `_ = expr` (the .runar.go blank identifier;
+            // .runar.zig's `_ = expr;` is an expression statement by parse
+            // time). N-053: the VALUE is discarded, not the evaluation -- a
+            // helper called for its asserts must keep them. Only a bare name
+            // is dropped: reading a name has no effect.
+            if (std.mem.eql(u8, assign.target, "_")) {
+                if (assign.value != .identifier) _ = try lowerExprToRef(ctx, assign.value);
+                return;
+            }
             const value_ref = try lowerExprToRef(ctx, assign.value);
             // Does this assignment write a contract property?
             //

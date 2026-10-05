@@ -1383,8 +1383,42 @@ const Parser = struct {
             return null;
         }
 
+        // N-053: a statement must start with a name or a token that can begin
+        // an expression; anything else (a stray `elif`, `from`, `@`, an
+        // unexpected indent, ...) is refused with the shared diagnostic.
+        const tok = self.current;
+        const refused = switch (tok.kind) {
+            .ident => isPyNonExprKeyword(tok.text),
+            .number, .string_literal, .lparen, .lbracket, .minus, .tilde, .bang => false,
+            else => true,
+        };
+        if (refused) {
+            const text: []const u8 = switch (tok.kind) {
+                .indent => "INDENT",
+                .dedent => "DEDENT",
+                .newline => "NEWLINE",
+                .eof => "eof",
+                .amp_amp => "and",
+                .pipe_pipe => "or",
+                else => tok.text,
+            };
+            self.addErrorFmt(lex_diag.UNSUPPORTED_STATEMENT_FMT, .{text});
+            _ = self.bump();
+            return null;
+        }
+
         // Variable declaration or expression statement
         return self.parsePyExprOrAssign();
+    }
+
+    /// N-053: the keywords the TS reference lexes as their own tokens that
+    /// begin neither a statement form nor an expression.
+    fn isPyNonExprKeyword(text: []const u8) bool {
+        const kws = [_][]const u8{ "class", "def", "elif", "else", "in", "range", "from", "import" };
+        for (kws) |kw| {
+            if (std.mem.eql(u8, text, kw)) return true;
+        }
+        return false;
     }
 
     fn parsePyAssert(self: *Parser) ?Statement {

@@ -998,13 +998,20 @@ class _JavaParser:
         self.expect(TOK_LBRACE, "'{'")
         stmts: list[Statement] = []
         while not self.check(TOK_RBRACE) and not self.check(TOK_EOF):
-            stmts.append(self._parse_statement())
+            stmt = self._parse_statement()
+            if stmt is not None:
+                stmts.append(stmt)
         self.expect(TOK_RBRACE, "'}'")
         return stmts
 
-    def _parse_statement(self) -> Statement:
+    def _parse_statement(self) -> Statement | None:
         loc = self.loc()
         tok = self.peek()
+
+        # N-053: an empty statement `;` is a no-op, as in the TS reference.
+        if tok.kind == TOK_SEMI:
+            self.advance()
+            return None
 
         # Block → flatten single block to its statements sequence. The Java
         # reference parser rejects nested blocks; we follow suit.
@@ -1133,7 +1140,8 @@ class _JavaParser:
     def _parse_stmt_or_block(self) -> list[Statement]:
         if self.check(TOK_LBRACE):
             return self._parse_block()
-        return [self._parse_statement()]
+        stmt = self._parse_statement()
+        return [stmt] if stmt is not None else []
 
     def _parse_for(self, loc: SourceLocation) -> Statement:
         self.expect(TOK_FOR, "'for'")

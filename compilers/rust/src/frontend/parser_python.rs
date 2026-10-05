@@ -40,7 +40,10 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, Diagnostic, PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{
+    lex_error, static_method_message, unsupported_statement_message, Diagnostic,
+    PY_STATEMENT_LINE_BREAK, UNTERMINATED_STRING_LITERAL,
+};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::identifier_collision::DeclaredIdents;
 use super::parser::ParseResult;
@@ -329,6 +332,58 @@ enum Token {
 
     // Special
     Eof,
+}
+
+/// A token's source text, for a diagnostic (N-053).
+fn py_token_text(tok: &Token) -> String {
+    match tok {
+        Token::Class => "class".into(),
+        Token::Def => "def".into(),
+        Token::Elif => "elif".into(),
+        Token::Else => "else".into(),
+        Token::In => "in".into(),
+        Token::Range => "range".into(),
+        Token::And => "and".into(),
+        Token::Or => "or".into(),
+        Token::From => "from".into(),
+        Token::Import => "import".into(),
+        Token::At => "@".into(),
+        Token::Plus => "+".into(),
+        Token::Star => "*".into(),
+        Token::Slash => "/".into(),
+        Token::IntDiv => "//".into(),
+        Token::Percent => "%".into(),
+        Token::DoubleStar => "**".into(),
+        Token::EqEq => "==".into(),
+        Token::NotEq => "!=".into(),
+        Token::Lt => "<".into(),
+        Token::Le => "<=".into(),
+        Token::Gt => ">".into(),
+        Token::Ge => ">=".into(),
+        Token::LShift => "<<".into(),
+        Token::RShift => ">>".into(),
+        Token::BitAnd => "&".into(),
+        Token::BitOr => "|".into(),
+        Token::BitXor => "^".into(),
+        Token::Eq => "=".into(),
+        Token::PlusEq => "+=".into(),
+        Token::MinusEq => "-=".into(),
+        Token::StarEq => "*=".into(),
+        Token::SlashEq => "/=".into(),
+        Token::IntDivEq => "//=".into(),
+        Token::PercentEq => "%=".into(),
+        Token::Arrow => "->".into(),
+        Token::RParen => ")".into(),
+        Token::RBracket => "]".into(),
+        Token::Colon => ":".into(),
+        Token::Comma => ",".into(),
+        Token::Dot => ".".into(),
+        Token::Indent => "INDENT".into(),
+        Token::Dedent => "DEDENT".into(),
+        Token::Newline => "NEWLINE".into(),
+        Token::Eof => "eof".into(),
+        other => format!("{:?}", other),
+    }
 }
 
 fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token> {
@@ -1321,8 +1376,32 @@ impl<'a> PyParser<'a> {
             // Variable declaration or expression statement
             Token::Ident(_) => Some(self.parse_ident_statement()),
 
-            _ => {
+            // N-053: a token that can begin an expression begins an
+            // expression statement.
+            Token::NumberLit(_)
+            | Token::StringLit(_)
+            | Token::HexStringLit(_)
+            | Token::TrueLit
+            | Token::FalseLit
+            | Token::NoneLit
+            | Token::LParen
+            | Token::LBracket
+            | Token::Minus
+            | Token::Tilde
+            | Token::Bang
+            | Token::Not => Some(Statement::ExpressionStatement {
+                expression: self.parse_expression(),
+                source_location: self.loc(),
+            }),
+
+            // N-053: any other token (a stray `elif`, `from`, `@`, an
+            // unexpected indent, ...) is refused; skipping it dropped it.
+            tok => {
                 self.advance();
+                self.errors.push(Diagnostic::error(
+                    unsupported_statement_message(&py_token_text(&tok)),
+                    None,
+                ));
                 None
             }
         }

@@ -31,7 +31,7 @@ import type {
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
 import { identifierCollisionMessage, snakeToCamelCore } from './snake-to-camel.js';
-import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import { makeDiagnostic, staticMethodMessage, unsupportedStatementMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 import { invalidIntegerLiteral, parseIntLiteral, scanNumberEnd } from './int-literal.js';
@@ -67,6 +67,16 @@ const KEYWORDS = new Map<string, TokenType>([
   ['end', 'end'], ['return', 'return'], ['true', 'true'], ['false', 'false'],
   ['nil', 'nil'], ['and', 'and'], ['or', 'or'], ['not', 'not'],
   ['super', 'super'], ['require', 'require'], ['assert', 'assert'], ['do', 'do'],
+]);
+
+/**
+ * N-053: the tokens that can begin an expression and are not already a
+ * statement form of their own. A statement starting with one of these is an
+ * expression statement; a statement starting with anything else is refused.
+ */
+const RB_EXPRESSION_START: ReadonlySet<TokenType> = new Set<TokenType>([
+  'number', 'string', 'hexstring', 'true', 'false', 'nil',
+  '(', '[', '-', '~', '!', 'not',
 ]);
 
 function tokenize(source: string, file: string, errors: CompilerDiagnostic[]): Token[] {
@@ -1166,8 +1176,14 @@ class RbParser {
       return this.parseIdentStatement(loc);
     }
 
-    // Skip unknown
-    this.advance();
+    // N-053: a token that can begin an expression begins an expression
+    // statement (a private helper's last one is its implicit return value);
+    // any other token is refused. Skipping it dropped `!` / `(` / literals.
+    if (RB_EXPRESSION_START.has(this.peek().type)) {
+      return { kind: 'expression_statement', expression: this.parseExpression(), sourceLocation: loc };
+    }
+    const tok = this.advance();
+    this.errors.push(makeDiagnostic(unsupportedStatementMessage(tok.value || tok.type), 'error', loc));
     return null;
   }
 
@@ -1428,6 +1444,7 @@ class RbParser {
 
   private parseIvarStatement(loc: SourceLocation): Statement {
     // @var = expr | @var += expr | @var[idx] = expr | @var.field = expr | @var as expression
+    const start = this.pos;
     const ivarTok = this.advance(); // ivar token
     const rawName = ivarTok.value;
     const propName = snakeToCamel(rawName);
@@ -1470,13 +1487,12 @@ class RbParser {
       }
     }
 
-    // Expression statement (rare: just @var on its own line, or @var.method(...))
-    // Continue parsing any remaining postfix operations (e.g. method calls)
-    // that are not valid on the LHS of an assignment.
-    let expr: Expression = target;
-    expr = this.parsePostfixFrom(expr);
-
-    return { kind: 'expression_statement', expression: expr, sourceLocation: loc };
+    // Expression statement (@var on its own line, @var.method(...), or a
+    // private helper's implicit return such as `@x + 1`). N-053: re-parse
+    // from the ivar as a whole expression; continuing only the postfix chain
+    // left `+ 1` behind, and the statement dispatcher skipped it.
+    this.pos = start;
+    return { kind: 'expression_statement', expression: this.parseExpression(), sourceLocation: loc };
   }
 
   private parseIdentStatement(loc: SourceLocation): Statement | null {

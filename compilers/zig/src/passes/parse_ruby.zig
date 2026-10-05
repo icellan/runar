@@ -1497,7 +1497,21 @@ const Parser = struct {
         // Variable declaration or expression statement starting with ident
         if (self.check(.ident) or self.check(.kw_self)) return self.parseIdentStatement();
 
-        // Skip unknown
+        // N-053: a token that can begin an expression begins an expression
+        // statement (a private helper's last one is its implicit return
+        // value); any other token is refused. Skipping it dropped `!` / `(` /
+        // literals.
+        switch (self.peek().kind) {
+            .number, .string_literal, .hex_string, .kw_true, .kw_false, .kw_nil,
+            .lparen, .lbracket, .minus, .tilde, .bang, .kw_not,
+            => {
+                const loc = self.currentSourceLoc();
+                const expr = self.parseExpression() orelse return null;
+                return .{ .expr_stmt = .{ .expr = expr, .source_loc = loc } };
+            },
+            else => {},
+        }
+        self.addErrorFmt(lex_diag.UNSUPPORTED_STATEMENT_FMT, .{self.peek().text});
         _ = self.bump();
         return null;
     }
@@ -1748,6 +1762,7 @@ const Parser = struct {
     }
 
     fn parseIvarStatement(self: *Parser) ?Statement {
+        const start = self.pos;
         const ivar_tok = self.bump(); // ivar token
         const loc = self.tokenSourceLoc(ivar_tok);
         const prop_name = rbConvertName(self.allocator, ivar_tok.text);
@@ -1784,8 +1799,12 @@ const Parser = struct {
             return self.buildAssignment(target_expr, compound_rhs, loc);
         }
 
-        // Expression statement (e.g. @var.method(...))
-        const expr = self.parsePostfixFrom(target_expr);
+        // Expression statement (@var on its own line, @var.method(...), or a
+        // private helper's implicit return such as `@x + 1`). N-053: re-parse
+        // from the ivar as a whole expression; continuing only the postfix
+        // chain left `+ 1` behind, and the statement dispatcher skipped it.
+        self.pos = start;
+        const expr = self.parseExpression() orelse return null;
         return .{ .expr_stmt = .{ .expr = expr, .source_loc = loc } };
     }
 

@@ -9,6 +9,7 @@ import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.CompoundAssignmentTree;
 import com.sun.source.tree.ConditionalExpressionTree;
+import com.sun.source.tree.EmptyStatementTree;
 import com.sun.source.tree.ExpressionStatementTree;
 import com.sun.source.tree.ExpressionTree;
 import com.sun.source.tree.ForLoopTree;
@@ -552,6 +553,8 @@ public final class JavaParser {
     private static List<Statement> convertStatements(List<? extends StatementTree> stmts, String filename, Unit cu) {
         List<Statement> out = new ArrayList<>(stmts.size());
         for (StatementTree s : stmts) {
+            // N-053: an empty statement `;` is a no-op, as in the TS reference.
+            if (s instanceof EmptyStatementTree) continue;
             out.add(convertStatement(s, filename, cu));
         }
         return out;
@@ -625,6 +628,7 @@ public final class JavaParser {
         if (s instanceof BlockTree bt) {
             return convertStatements(bt.getStatements(), filename, cu);
         }
+        if (s instanceof EmptyStatementTree) return List.of(); // N-053: `if (c) ;`
         return List.of(convertStatement(s, filename, cu));
     }
 

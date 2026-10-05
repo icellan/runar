@@ -100,6 +100,14 @@ module RunarCompiler
       TOK_ASSERT  = 68
       TOK_DO      = 69
 
+      # N-053: the tokens that can begin an expression and are not already a
+      # statement form of their own (mirrors the TS reference's
+      # RB_EXPRESSION_START).
+      RB_EXPR_START_KINDS = [
+        TOK_NUMBER, TOK_STRING, TOK_HEXSTRING, TOK_TRUE, TOK_FALSE, TOK_NIL,
+        TOK_LPAREN, TOK_LBRACKET, TOK_MINUS, TOK_TILDE, TOK_BANG, TOK_NOT
+      ].freeze
+
       KEYWORDS = {
         "class"   => TOK_CLASS,
         "def"     => TOK_DEF,
@@ -1210,8 +1218,15 @@ module RunarCompiler
         return parse_ivar_statement(current_loc)    if kind == TOK_IVAR
         return parse_ident_statement(current_loc)   if kind == TOK_IDENT
 
-        # Skip unrecognized token
-        advance
+        # N-053: a token that can begin an expression begins an expression
+        # statement (a private helper's last one is its implicit return
+        # value); any other token is refused. Skipping it dropped `!` / `(` /
+        # literals.
+        if RB_EXPR_START_KINDS.include?(kind)
+          return ExpressionStmt.new(expr: parse_expression, source_location: current_loc)
+        end
+        tok = advance
+        @errors << "#{@file}:#{tok.line}:#{tok.col}: #{Frontend.unsupported_statement_message(tok.value)}"
         nil
       end
 
@@ -1465,6 +1480,7 @@ module RunarCompiler
       def parse_ivar_statement(current_loc)
         # Parse +@var = expr+, +@var[i] = expr+, +@var += expr+, or
         # +@var+ as expression.
+        start = @pos
         ivar_tok = advance # ivar token
         raw_name = ivar_tok.value
         prop_name = Frontend.snake_to_camel(raw_name)
@@ -1498,9 +1514,12 @@ module RunarCompiler
           return AssignmentStmt.new(target: target, value: value, source_location: current_loc)
         end
 
-        # Expression statement: bare +@var+ (e.g. followed by +.method(...)+)
-        expr = parse_postfix_from(target)
-        ExpressionStmt.new(expr: expr, source_location: current_loc)
+        # Expression statement: bare +@var+, +@var.method(...)+, or a private
+        # helper's implicit return such as +@x + 1+. N-053: re-parse from the
+        # ivar as a whole expression; continuing only the postfix chain left
+        # +' + 1'+ behind, and the statement dispatcher skipped it.
+        @pos = start
+        ExpressionStmt.new(expr: parse_expression, source_location: current_loc)
       end
 
       def parse_ident_statement(current_loc)

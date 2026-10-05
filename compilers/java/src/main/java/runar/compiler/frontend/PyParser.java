@@ -3,6 +3,7 @@ package runar.compiler.frontend;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -1192,8 +1193,40 @@ public final class PyParser {
                     + kw + " — Rúnar does not support loop early-exit");
                 return null;
             }
+            // N-053: a statement must start with a name or a token that can
+            // begin an expression; anything else (a stray `elif`, `from`,
+            // `@`, an unexpected indent, ...) is refused with the shared
+            // diagnostic.
+            Token tok = peek();
+            boolean refused = tok.kind == TokKind.IDENT
+                ? PY_NON_EXPR_KEYWORDS.contains(tok.value)
+                : !PY_EXPR_START_KINDS.contains(tok.kind);
+            if (refused) {
+                advance();
+                String text = switch (tok.kind) {
+                    case INDENT -> "INDENT";
+                    case DEDENT -> "DEDENT";
+                    case NEWLINE -> "NEWLINE";
+                    case EOF -> "eof";
+                    default -> tok.value;
+                };
+                addError("line " + tok.line + ": " + LexDiag.unsupportedStatement(text));
+                return null;
+            }
             return parseExprOrAssign(location);
         }
+
+        /** N-053: the non-name tokens that can begin an expression. */
+        private static final Set<TokKind> PY_EXPR_START_KINDS = EnumSet.of(
+            TokKind.NUMBER, TokKind.STRING, TokKind.LPAREN, TokKind.LBRACKET,
+            TokKind.MINUS, TokKind.TILDE, TokKind.BANG);
+
+        /**
+         * N-053: the keywords the TS reference lexes as their own tokens that
+         * begin neither a statement form nor an expression.
+         */
+        private static final Set<String> PY_NON_EXPR_KEYWORDS = Set.of(
+            "class", "def", "elif", "else", "in", "range", "from", "import");
 
         Statement parseAssert(SourceLocation location) {
             Token tok = advance();

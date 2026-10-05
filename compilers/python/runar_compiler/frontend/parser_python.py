@@ -25,7 +25,7 @@ from runar_compiler.frontend.diagnostic import (  # F-011
     lex_error,
     with_lex_errors,
 )
-from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity, static_method_message, unsupported_statement_message
 from runar_compiler.frontend.identifier_collision import collision_diagnostics
 
 
@@ -80,6 +80,23 @@ TOK_RSHIFT = 43
 TOK_INDENT = 44
 TOK_DEDENT = 45
 TOK_NEWLINE = 46
+
+# N-053: the non-name tokens that can begin an expression (mirrors the TS
+# reference's PY_EXPRESSION_START), and the keywords the TS reference lexes as
+# their own tokens that begin neither a statement form nor an expression.
+_PY_EXPR_START_KINDS = frozenset({
+    TOK_NUMBER, TOK_STRING, TOK_LPAREN, TOK_LBRACKET, TOK_MINUS, TOK_TILDE, TOK_BANG,
+})
+_PY_NON_EXPR_KEYWORDS = frozenset({
+    "class", "def", "elif", "else", "in", "range", "from", "import",
+})
+
+
+def _py_token_text(tok) -> str:
+    """A token's source text, for a diagnostic (N-053)."""
+    names = {TOK_INDENT: "INDENT", TOK_DEDENT: "DEDENT", TOK_NEWLINE: "NEWLINE",
+             TOK_EOF: "eof", TOK_AMPAMP: "and", TOK_PIPEPIPE: "or"}
+    return names.get(tok.kind, tok.value)
 
 
 class Token:
@@ -1029,6 +1046,17 @@ class _PyParser:
                 severity=Severity.ERROR,
                 loc=location,
             ))
+            return None
+
+        # N-053: a statement must start with a name or a token that can begin
+        # an expression; anything else (a stray `elif`, `from`, `@`, an
+        # unexpected indent, ...) is refused with the shared diagnostic.
+        tok = self.peek()
+        if ((tok.kind == TOK_IDENT and tok.value in _PY_NON_EXPR_KEYWORDS)
+                or (tok.kind != TOK_IDENT and tok.kind not in _PY_EXPR_START_KINDS)):
+            self.advance()
+            self.errors.append(lex_error(
+                unsupported_statement_message(_py_token_text(tok)), self.file_name, tok.line, tok.col))
             return None
 
         return self._parse_expr_or_assign(location)

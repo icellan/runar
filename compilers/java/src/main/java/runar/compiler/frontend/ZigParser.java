@@ -985,14 +985,21 @@ public final class ZigParser {
             if (current().kind == Kind.CONST || current().kind == Kind.VAR) {
                 return parseVariableDecl();
             }
-            // _ = expr;
+            // _ = expr; (discard). N-053: Zig's discard drops the VALUE, not
+            // the evaluation -- a helper called for its asserts must keep
+            // them, so `expr` lowers as an expression statement. Only a bare
+            // name (the unused-binding idiom `_ = self;` / `_ = param;`) is
+            // dropped: reading a name has no effect.
             if (current().kind == Kind.IDENT && "_".equals(current().value)
                     && peekAhead(1).kind == Kind.ASSIGN) {
                 advance(); // _
                 advance(); // =
-                parseExpression();
+                Expression discarded = parseExpression();
                 match(Kind.SEMICOLON);
-                return null;
+                if (discarded instanceof Identifier) {
+                    return null;
+                }
+                return new ExpressionStatement(discarded, l);
             }
             if (current().kind == Kind.WHILE) {
                 return parseWhileStatement();

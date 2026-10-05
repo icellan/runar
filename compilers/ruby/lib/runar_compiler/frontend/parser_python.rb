@@ -78,6 +78,19 @@ module RunarCompiler
       TOK_INDENT      = 43
       TOK_DEDENT      = 44
       TOK_NEWLINE     = 45
+
+      # N-053: the non-name tokens that can begin an expression (mirrors the
+      # TS reference's PY_EXPRESSION_START), the keywords the TS reference
+      # lexes as their own tokens that begin neither a statement form nor an
+      # expression, and the source text of tokens that have none.
+      PY_EXPR_START_KINDS = [
+        TOK_NUMBER, TOK_STRING, TOK_HEXSTRING, TOK_LPAREN, TOK_LBRACKET,
+        TOK_MINUS, TOK_TILDE, TOK_BANG
+      ].freeze
+      PY_NON_EXPR_KEYWORDS = %w[class def elif else in range from import].freeze
+      PY_TOKEN_NAMES = {
+        TOK_INDENT => "INDENT", TOK_DEDENT => "DEDENT", TOK_NEWLINE => "NEWLINE", TOK_EOF => "eof"
+      }.freeze
     end
 
     # A single token produced by the Python tokenizer.
@@ -1078,14 +1091,26 @@ module RunarCompiler
           return parse_self_statement(location)
         end
 
+        # N-053: a statement must start with a name or a token that can begin
+        # an expression; anything else (a stray `elif`, `from`, `@`, an
+        # unexpected indent, ...) is refused with the shared diagnostic.
+        tok = peek
+        if (tok.kind == TOK_IDENT && PY_NON_EXPR_KEYWORDS.include?(tok.value)) ||
+           (tok.kind != TOK_IDENT && !PY_EXPR_START_KINDS.include?(tok.kind))
+          advance
+          text = PY_TOKEN_NAMES.fetch(tok.kind, tok.value)
+          @errors << Frontend.lex_error(Frontend.unsupported_statement_message(text), @file_name, tok.line, tok.col)
+          return nil
+        end
+
         # Variable declaration or expression statement
         if check(TOK_IDENT)
           return parse_ident_statement(location)
         end
 
-        # Skip unknown
-        advance
-        nil
+        # N-053: a token that can begin an expression begins an expression
+        # statement.
+        ExpressionStmt.new(expr: parse_expression, source_location: location)
       end
 
       def parse_assert_statement(location)

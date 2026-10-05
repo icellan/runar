@@ -26,6 +26,11 @@ pub const JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java cont
 /// method name as written in the source.
 pub const STATIC_METHOD_FMT = "static methods are not allowed in Rúnar contracts; method '{s}' is declared static";
 
+/// N-053: a .runar.rb / .runar.py statement whose first token can begin
+/// neither a statement nor an expression (the TS reference's
+/// unsupportedStatementMessage). The argument is the token's source text.
+pub const UNSUPPORTED_STATEMENT_FMT = "Unsupported statement starting with '{s}'";
+
 /// 1-based line / 1-based column of an opening quote.
 /// N-023's (R49) refusal, on the .runar.java surface, of an assignment (=,
 /// op=, ++, --) to a bare property name that no local or parameter shadows
