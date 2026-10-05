@@ -145,7 +145,7 @@ each implementation.
 | `check_preimage` | **skipped** (`anf-interpreter.ts:255`) | **skipped** | **skipped** (`AnfInterpreter.java:56`) |
 | `deserialize_state` | **skipped** (`anf-interpreter.ts:256`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
 | `get_state_script` | **skipped** (`anf-interpreter.ts:257`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
-| `array_literal` | **default-undefined** — no explicit case in the switch; consumers receive arrays through `args` instead (`anf-interpreter.ts:261-262`) | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` | **default-undefined** — `array_literal` is listed in `CHAIN_ONLY_KINDS` and falls through to the no-op skip (`AnfInterpreter.java:370-372`) |
+| `array_literal` | **undefined** — explicit allowlisted case (F-145: every other unmodelled kind now throws); consumers receive arrays through `args` instead (`anf-interpreter.ts`, `case 'array_literal'`) | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` | **default-undefined** — `array_literal` is listed in `CHAIN_ONLY_KINDS` and falls through to the no-op skip (`AnfInterpreter.java:370-372`) |
 
 ### Raw stack bytes must follow the value across an ALIAS (NEW-006)
 

@@ -635,8 +635,34 @@ function evalValue(
     case 'get_state_script':
       return undefined;
 
-    default:
+    // F-145 allowlist (formerly reached the blanket default). Its only
+    // consumer is `checkMultiSig`, which lenient mode mocks to true and
+    // real-crypto mode refuses (verifyMultiSig requires real arrays), so
+    // `undefined` never reaches state. Refusing it would break every
+    // stateful multisig call.
+    case 'array_literal':
       return undefined;
+
+    // F-145: an opaque asm span. With out_arity 0 it produces no value
+    // (a check, like a lenient-mode assert); with out_arity >= 1 its result
+    // cannot be computed off-chain, so it falls through to the refusal.
+    case 'raw_script':
+      if (value.out_arity === 0) return undefined;
+      throw new Error(
+        `ANF interpreter does not model the ANF binding kind 'raw_script' (binding '${bindingName}', ` +
+          `out_arity ${value.out_arity}). Its result cannot be computed off-chain.`,
+      );
+
+    default:
+      // F-145: FAIL CLOSED. Returning `undefined` here let an ANF kind this
+      // interpreter does not model (including opaque `raw_script` spans)
+      // flow silently into state, so the `try/catch` guard in `contract.ts`
+      // could never fire and the call built a continuation the covenant
+      // rejects.
+      throw new Error(
+        `ANF interpreter does not model the ANF binding kind '${(value as { kind: string }).kind}' ` +
+          `(binding '${bindingName}'). Its result cannot be computed off-chain.`,
+      );
   }
 }
 
@@ -827,8 +853,15 @@ function evalBinOp(
     case '+': return l + r;
     case '-': return l - r;
     case '*': return l * r;
-    case '/': return r === 0n ? 0n : l / r;
-    case '%': return r === 0n ? 0n : l % r;
+    // F-145: OP_DIV / OP_MOD abort the script on a zero divisor, so there is
+    // no post-state to compute. Returning 0n here serialised a state the
+    // deployed script can never produce.
+    case '/':
+      if (r === 0n) throw new Error('OP_DIV: division by zero (the script aborts here)');
+      return l / r;
+    case '%':
+      if (r === 0n) throw new Error('OP_MOD: modulo by zero (the script aborts here)');
+      return l % r;
     case '==': case '===': return l === r;
     case '!=': case '!==': return l !== r;
     case '<': return l < r;
@@ -842,7 +875,9 @@ function evalBinOp(
     case '^': return scriptNumberBitwise('^', l, r);
     case '<<': return scriptNumberShift('<<', l, r);
     case '>>': return scriptNumberShift('>>', l, r);
-    default: return 0n;
+    default:
+      // F-145: fail closed instead of inventing 0n.
+      throw new Error(`ANF interpreter does not model the binary operator '${op}' on numeric operands`);
   }
 }
 
@@ -855,7 +890,8 @@ function evalBytesBinOp(op: string, left: string, right: string): unknown {
     case '!=': case '!==':
       return left !== right;
     default:
-      return '';
+      // F-145: fail closed instead of inventing ''.
+      throw new Error(`ANF interpreter does not model the binary operator '${op}' on ByteString operands`);
   }
 }
 
@@ -872,7 +908,8 @@ function evalUnaryOp(op: string, operand: unknown, resultType?: string): unknown
       for (let i = 0; i < bytes.length; i++) bytes[i] = ~bytes[i]! & 0xff;
       return Utils.toHex(bytes);
     }
-    return operand;
+    // F-145: fail closed instead of passing the operand through unchanged.
+    throw new Error(`ANF interpreter does not model the unary operator '${op}' on ByteString operands`);
   }
 
   const val = toBigInt(operand);
@@ -880,7 +917,9 @@ function evalUnaryOp(op: string, operand: unknown, resultType?: string): unknown
     case '-': return -val;
     case '!': return !isTruthy(operand);
     case '~': return scriptNumberInvert(val);
-    default: return val;
+    default:
+      // F-145: fail closed instead of passing the operand through unchanged.
+      throw new Error(`ANF interpreter does not model the unary operator '${op}' on numeric operands`);
   }
 }
 
@@ -1199,7 +1238,11 @@ function evalMethodCall(
       return undefined;
     }
   }
-  return undefined;
+  // F-145: fail closed. No private method of that name exists in the ANF, so
+  // its return value and any state it would mutate are unknown.
+  throw new Error(
+    `ANF interpreter cannot resolve method_call '${methodName}': no private method of that name in the ANF IR`,
+  );
 }
 
 // ---------------------------------------------------------------------------
