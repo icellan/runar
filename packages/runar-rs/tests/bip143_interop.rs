@@ -126,10 +126,10 @@ impl WalletClient for KeyOneWallet {
         Ok(sig.to_der().as_bytes().to_vec())
     }
     fn create_action(&self, _d: &str, _o: &[WalletActionOutput]) -> Result<WalletActionResult, String> {
-        unimplemented!()
+        Err("KeyOneWallet: create_action not used by this test".into())
     }
     fn list_outputs(&self, _b: &str, _t: &[&str], _l: usize) -> Result<Vec<WalletOutput>, String> {
-        unimplemented!()
+        Err("KeyOneWallet: list_outputs not used by this test".into())
     }
 }
 
