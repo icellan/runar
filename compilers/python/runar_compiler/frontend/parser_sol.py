@@ -1268,6 +1268,13 @@ def _rewrite_bare_props(
         return TernaryExpr(condition=rw(expr.condition), consequent=rw(expr.consequent), alternate=rw(expr.alternate))
     if isinstance(expr, IndexAccessExpr):
         return IndexAccessExpr(object=rw(expr.object), index=rw(expr.index))
+    # F-201: as TS resolvePropertyAccess — `count++` / `count.x` reach the property.
+    if isinstance(expr, MemberExpr):
+        return MemberExpr(object=rw(expr.object), property=expr.property)
+    if isinstance(expr, IncrementExpr):
+        return IncrementExpr(operand=rw(expr.operand), prefix=expr.prefix)
+    if isinstance(expr, DecrementExpr):
+        return DecrementExpr(operand=rw(expr.operand), prefix=expr.prefix)
     return expr
 
 
