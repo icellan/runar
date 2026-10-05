@@ -55,14 +55,6 @@ _OFFICIAL_VECTORS = [
 ]
 
 
-def _hashlib_has_ripemd160() -> bool:
-    try:
-        hashlib.new('ripemd160')
-        return True
-    except ValueError:
-        return False
-
-
 @pytest.mark.parametrize('msg,expected', _OFFICIAL_VECTORS)
 def test_pure_python_official_vectors(msg, expected):
     assert _ripemd160_pure(msg).hex() == expected
@@ -72,12 +64,19 @@ def test_pure_python_one_million_a():
     assert _ripemd160_pure(b'a' * 1_000_000).hex() == '52783243c1697bdbe16d37f97f68f08325dc1528'
 
 
-@pytest.mark.skipif(not _hashlib_has_ripemd160(), reason='hashlib has no ripemd160 on this host')
-def test_pure_python_matches_hashlib_across_padding_boundaries():
-    # Lengths 0..200 cross every padding case (55/56/63/64/119/120/...).
-    for n in range(201):
+def test_pure_python_matches_frozen_oracle_across_padding_boundaries():
+    # Lengths 0..200 cross every padding case (55/56/63/64/119/120/...). The
+    # expected digests are a frozen snapshot of hashlib.new('ripemd160')
+    # output, captured once on a host with the OpenSSL legacy provider (see
+    # tests/testdata/ripemd160_padding_vectors.json), so this test runs
+    # unconditionally instead of skipping on hosts whose hashlib lacks
+    # ripemd160 (F-135-FU).
+    vectors_path = _PKG_ROOT / 'tests' / 'testdata' / 'ripemd160_padding_vectors.json'
+    digests = json.loads(vectors_path.read_text())['digests']
+    assert len(digests) == 201
+    for n, expected in enumerate(digests):
         msg = bytes((i * 7 + n) & 0xFF for i in range(n))
-        assert _ripemd160_pure(msg) == hashlib.new('ripemd160', msg).digest(), n
+        assert _ripemd160_pure(msg).hex() == expected, n
 
 
 def test_helper_returns_official_digest():
