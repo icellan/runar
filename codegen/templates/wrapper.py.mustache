@@ -44,7 +44,7 @@ class {{contractName}}StatefulCallOptions:
 
     def _to_call_options(self) -> CallOptions:
         return CallOptions(
-            satoshis=self.satoshis or None,
+            satoshis=self.satoshis,
             change_address=self.change_address or None,
             change_pub_key=self.change_pub_key or None,
             new_state=self.new_state,
