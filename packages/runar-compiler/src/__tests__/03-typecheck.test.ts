@@ -1085,6 +1085,25 @@ describe('Pass 3: Type-Check', () => {
       expect(hasError(result, "Unknown function 'someRandomFunc'")).toBe(true);
     });
 
+    // F-208: Rúnar has no first-class functions. A bound local variable used
+    // as a callee used to fall into the "local variable" branch and return
+    // '<unknown>' with NO diagnostic, silently accepting the call.
+    it('rejects a local variable used as a function call', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly a: bigint;
+          constructor(a: bigint) { super(a); this.a = a; }
+          public m(a: bigint) {
+            const f: bigint = a;
+            const r = f(a, a, a);
+            assert(this.a >= 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, "is not callable")).toBe(true);
+    });
+
     it('allows known Rúnar builtins', () => {
       const source = `
         class C extends SmartContract {

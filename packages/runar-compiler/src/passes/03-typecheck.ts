@@ -1216,9 +1216,17 @@ class TypeChecker {
         return this.checkCallArgs(callee.name, methodSig, args, env);
       }
 
-      // Check if it's a local variable in the environment
+      // Check if it's a local variable in the environment -- F-208: Rúnar
+      // has no first-class functions, so a bound local can never be called.
+      // This used to return '<unknown>' with NO diagnostic, silently
+      // accepting `const f: bigint = a; const r = f(a, a, a);`.
       const localType = env.lookup(callee.name);
       if (localType) {
+        this.errors.push(makeDiagnostic(
+          `Local variable '${callee.name}' is not callable. Rúnar has no first-class functions; only built-in functions and contract methods can be called.`,
+          'error',
+          expr.sourceLocation,
+        ));
         for (const arg of args) {
           this.inferExprType(arg, env);
         }

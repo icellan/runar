@@ -1174,8 +1174,12 @@ const TypeChecker = struct {
             return self.checkCallArgs(name, method_sig, call.args, env);
         }
 
-        // Local variable (callable)
+        // Local variable (callable) -- F-208: Rúnar has no first-class
+        // functions, so a bound local can never be called. This used to
+        // return .unknown with no diagnostic, silently accepting
+        // `const f: bigint = a; const r = f(a, a, a);`.
         if (env.lookup(name) != null) {
+            self.addError("local variable '{s}' is not callable -- Runar has no first-class functions; only built-in functions and contract methods can be called", .{name});
             for (call.args) |arg| _ = self.inferExprType(arg, env);
             return .unknown;
         }
@@ -2083,6 +2087,51 @@ test "typeCheck: unknown function error" {
     defer result.deinit(allocator);
     try std.testing.expectEqual(1, result.errors.len);
     try std.testing.expect(std.mem.indexOf(u8, result.errors[0], "unknown function") != null);
+}
+
+// F-208: Rúnar has no first-class functions. A bound local variable used as
+// a callee used to fall into the "local variable" branch and return
+// `.unknown` with NO diagnostic, silently accepting the call:
+//   const f: bigint = a; const r = f(a, a, a);
+test "typeCheck: local variable called as function is rejected" {
+    const allocator = std.testing.allocator;
+
+    const args = try allocator.alloc(Expression, 3);
+    defer allocator.free(args);
+    args[0] = .{ .identifier = "a" };
+    args[1] = .{ .identifier = "a" };
+    args[2] = .{ .identifier = "a" };
+    const call = try allocator.create(types.CallExpr);
+    defer allocator.destroy(call);
+    call.* = .{ .callee = "f", .args = args };
+
+    const stmts = try allocator.alloc(Statement, 2);
+    defer allocator.free(stmts);
+    stmts[0] = .{ .const_decl = .{ .name = "f", .value = .{ .identifier = "a" } } };
+    stmts[1] = .{ .const_decl = .{ .name = "r", .value = .{ .call = call } } };
+
+    const params = try allocator.alloc(types.ParamNode, 1);
+    defer allocator.free(params);
+    params[0] = .{ .name = "a", .type_info = .bigint };
+
+    const methods = try allocator.alloc(MethodNode, 1);
+    defer allocator.free(methods);
+    methods[0] = .{ .name = "check", .is_public = true, .params = params, .body = stmts };
+
+    const contract = ContractNode{
+        .name = "TestContract",
+        .parent_class = .smart_contract,
+        .properties = &.{},
+        .constructor = .{ .params = &.{}, .super_args = &.{}, .assignments = &.{} },
+        .methods = methods,
+    };
+    const result = try typeCheck(allocator, contract);
+    defer result.deinit(allocator);
+    var found = false;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e, "not callable") != null) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "typeCheck: valid builtin call sha256" {

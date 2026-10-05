@@ -1425,8 +1425,15 @@ terminal (no state mutation)",
                 return self.check_call_args(name, &param_strs, &return_type, args, env);
             }
 
-            // Check if it's a local variable
+            // Check if it's a local variable -- F-208: Rúnar has no
+            // first-class functions, so a bound local can never be called.
+            // This used to return "<unknown>" with no diagnostic, silently
+            // accepting `const f: bigint = a; const r = f(a, a, a);`.
             if env.lookup(name).is_some() {
+                self.add_error(format!(
+                    "local variable '{}' is not callable — Rúnar has no first-class functions; only built-in functions and contract methods can be called",
+                    name
+                ));
                 for arg in args {
                     self.infer_expr_type(arg, env);
                 }
@@ -2395,6 +2402,38 @@ class Bad extends SmartContract {
         }
         // If parse itself fails (e.g. because the parser rejects member calls on unknown objects),
         // that also counts as rejection — just not at the typecheck level
+    }
+
+    // -----------------------------------------------------------------------
+    // F-208: Rúnar has no first-class functions. A bound local variable used
+    // as a callee used to fall into the "local variable" branch and return
+    // "<unknown>" with NO diagnostic, silently accepting the call.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn f208_local_variable_called_as_function_rejected() {
+        let source = r#"
+class C extends SmartContract {
+    readonly a: bigint;
+    constructor(a: bigint) { super(a); this.a = a; }
+    public check(a: bigint) {
+        const f: bigint = a;
+        const r = f(a, a, a);
+        assert(this.a >= 0n);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            !result.errors.is_empty(),
+            "expected typecheck errors for calling local variable 'f' as a function"
+        );
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("not callable")),
+            "expected 'not callable' error, got: {:?}",
+            result.errors
+        );
     }
 
     // -----------------------------------------------------------------------

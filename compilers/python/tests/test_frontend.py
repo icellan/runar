@@ -1093,6 +1093,40 @@ class Bad extends SmartContract {
             f"expected 'unknown' in error message, got: {tc_result.errors}"
         )
 
+    def test_typecheck_local_variable_called_as_function_rejected(self):
+        """F-208: Rúnar has no first-class functions. A bound local variable
+        used as a callee used to fall into the "local variable" branch and
+        return "<unknown>" with NO diagnostic, silently accepting the call."""
+        source = """
+import { SmartContract, assert } from 'runar-lang';
+
+class Bad extends SmartContract {
+  readonly a: bigint;
+
+  constructor(a: bigint) {
+    super(a);
+    this.a = a;
+  }
+
+  public check(a: bigint): void {
+    const f: bigint = a;
+    const r = f(a, a, a);
+    assert(this.a >= 0n);
+  }
+}
+"""
+        result = parse_source(source, "Bad.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+
+        tc_result = type_check(result.contract)
+        assert len(tc_result.errors) > 0, (
+            "expected type error for calling local variable 'f' as a function"
+        )
+        assert any("not callable" in e.message.lower() for e in tc_result.errors), (
+            f"expected 'not callable' in error message, got: {tc_result.errors}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # ANF lowering

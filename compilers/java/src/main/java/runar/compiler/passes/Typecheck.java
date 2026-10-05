@@ -907,8 +907,15 @@ public final class Typecheck {
                 }
                 String local = env.lookup(name);
                 if (local != null) {
-                    // Local variable shaped like a callable — ambiguous,
-                    // evaluate args and give up.
+                    // F-208: Rúnar has no first-class functions, so a bound
+                    // local can never be called. This used to evaluate args
+                    // and give up with NO diagnostic, silently accepting
+                    // `const f: bigint = a; const r = f(a, a, a);`.
+                    error(
+                        "local variable '" + name + "' is not callable — Rúnar has no "
+                            + "first-class functions; only built-in functions and "
+                            + "contract methods can be called"
+                    );
                     for (Expression a : e.args()) inferExpr(a, env);
                     return "<unknown>";
                 }

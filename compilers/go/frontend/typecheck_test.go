@@ -506,6 +506,76 @@ func TestTypeCheck_UnknownStandaloneFunction(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: F-208 — a bound local variable used as a callee is rejected
+//
+// Rúnar has no first-class functions. `const f: bigint = a; const r =
+// f(a, a, a);` used to fall into the "local variable" branch and return
+// "<unknown>" with NO diagnostic, silently accepting the call.
+// ---------------------------------------------------------------------------
+
+func TestTypeCheck_LocalVariableCalledAsFunction(t *testing.T) {
+	contract := &ContractNode{
+		Name:        "Bad",
+		ParentClass: "SmartContract",
+		Properties:  []PropertyNode{},
+		Constructor: MethodNode{
+			Name:   "constructor",
+			Params: []ParamNode{},
+			Body: []Statement{
+				ExpressionStmt{
+					Expr: CallExpr{
+						Callee: Identifier{Name: "super"},
+						Args:   nil,
+					},
+				},
+			},
+		},
+		Methods: []MethodNode{
+			{
+				Name:       "check",
+				Visibility: "public",
+				Params:     []ParamNode{{Name: "a", Type: PrimitiveType{Name: "bigint"}}},
+				Body: []Statement{
+					// const f: bigint = a;
+					VariableDeclStmt{
+						Name: "f",
+						Type: PrimitiveType{Name: "bigint"},
+						Init: Identifier{Name: "a"},
+					},
+					// const r = f(a, a, a);
+					VariableDeclStmt{
+						Name: "r",
+						Init: CallExpr{
+							Callee: Identifier{Name: "f"},
+							Args:   []Expression{Identifier{Name: "a"}, Identifier{Name: "a"}, Identifier{Name: "a"}},
+						},
+					},
+					ExpressionStmt{
+						Expr: CallExpr{
+							Callee: Identifier{Name: "assert"},
+							Args:   []Expression{BoolLiteral{Value: true}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tcResult := TypeCheck(contract)
+
+	found := false
+	for _, e := range tcResult.Errors {
+		if strings.Contains(e.Message, "not callable") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected type check error for calling local variable 'f' as a function, got: %v", tcResult.Errors)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: ByteString arithmetic subtraction produces type error
 // ---------------------------------------------------------------------------
 

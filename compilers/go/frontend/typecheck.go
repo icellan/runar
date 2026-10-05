@@ -1233,8 +1233,13 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 		if sig, ok := tc.methodSigs[id.Name]; ok {
 			return tc.checkCallArgs(id.Name, sig, e.Args, env)
 		}
-		// Check if it's a local variable
+		// Check if it's a local variable -- F-208: Rúnar has no
+		// first-class functions, so a bound local can never be called.
+		// This used to return "<unknown>" with no diagnostic, silently
+		// accepting `const f: bigint = a; const r = f(a, a, a);`.
 		if _, found := env.lookup(id.Name); found {
+			tc.addError(fmt.Sprintf(
+				"local variable '%s' is not callable — Rúnar has no first-class functions; only built-in functions and contract methods can be called", id.Name))
 			for _, arg := range e.Args {
 				tc.inferExprType(arg, env)
 			}

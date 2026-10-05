@@ -132,6 +132,39 @@ class TypecheckTest {
     }
 
     @Test
+    void rejectsLocalVariableCalledAsFunction() {
+        // F-208: Rúnar has no first-class functions. A bound local variable
+        // used as a callee used to fall into the "local variable" branch and
+        // return "<unknown>" with NO diagnostic, silently accepting the call.
+        String src = """
+            class Bad extends SmartContract {
+                @Readonly Bigint a;
+
+                Bad(Bigint a) {
+                    super(a);
+                    this.a = a;
+                }
+
+                @Public
+                void check(Bigint a) {
+                    Bigint f = a;
+                    Bigint r = f(a, a, a);
+                    assertThat(this.a.compareTo(BigInteger.ZERO) >= 0);
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "Bad.runar.java");
+        Typecheck.TypeCheckException e = assertThrows(
+            Typecheck.TypeCheckException.class,
+            () -> Typecheck.run(c)
+        );
+        assertTrue(
+            e.errors().stream().anyMatch(m -> m.contains("not callable")),
+            "expected 'not callable' error for calling local variable 'f', got " + e.errors()
+        );
+    }
+
+    @Test
     void rejectsWrongArgCountOnBuiltin() {
         String src = """
             class Bad extends SmartContract {

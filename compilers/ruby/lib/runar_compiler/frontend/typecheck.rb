@@ -1218,9 +1218,17 @@ module RunarCompiler
           if @method_sigs.key?(name)
             return check_call_args(name, @method_sigs[name], expr.args, env)
           end
-          # Check if it's a local variable
+          # Check if it's a local variable -- F-208: Rúnar has no
+          # first-class functions, so a bound local can never be called.
+          # This used to return "<unknown>" with no diagnostic, silently
+          # accepting `const f: bigint = a; const r = f(a, a, a);`.
           _, found = env.lookup(name)
           if found
+            add_error(
+              "local variable '#{name}' is not callable -- Runar has no " \
+              "first-class functions; only built-in functions and contract " \
+              "methods can be called"
+            )
             expr.args.each { |arg| infer_expr_type(arg, env) }
             return "<unknown>"
           end

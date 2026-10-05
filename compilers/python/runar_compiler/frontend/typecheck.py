@@ -1048,9 +1048,17 @@ class _TypeChecker:
             # Check if it's a known contract method
             if name in self.method_sigs:
                 return self._check_call_args(name, self.method_sigs[name], e.args, env)
-            # Check if it's a local variable
+            # Check if it's a local variable -- F-208: Rúnar has no
+            # first-class functions, so a bound local can never be called.
+            # This used to return "<unknown>" with no diagnostic, silently
+            # accepting `const f: bigint = a; const r = f(a, a, a);`.
             _, found = env.lookup(name)
             if found:
+                self._add_error(
+                    f"local variable '{name}' is not callable -- Runar has "
+                    f"no first-class functions; only built-in functions and "
+                    f"contract methods can be called"
+                )
                 for arg in e.args:
                     self._infer_expr_type(arg, env)
                 return "<unknown>"
