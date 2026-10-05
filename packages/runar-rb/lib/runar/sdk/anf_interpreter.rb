@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'digest'
+require 'set'
 require_relative '../ecdsa'
 
 # Lightweight ANF interpreter for auto-computing state transitions.
@@ -390,6 +391,15 @@ module Runar
         # recorded here — data outputs are always emitted after every
         # state-class output, in their own +data_outputs+ list.
         ordered_outputs = []
+        # F-164 (round 2): compute the mocked-prologue-assert identity set
+        # once per method, for plain strict mode only (on-chain mode keeps
+        # enforcing both prologue asserts for real, unchanged).
+        Thread.current[:runar_mocked_prologue_asserts] =
+          if strict_method_name && !real_crypto_ctx
+            detect_auto_injected_prologue_asserts(Array(method['body']))
+          else
+            Set.new
+          end
         eval_bindings(Array(method['body']), env, state_delta, data_outputs, raw_outputs, ordered_outputs, anf)
 
         [current_state.merge(state_delta), data_outputs, raw_outputs, ordered_outputs]
@@ -398,6 +408,7 @@ module Runar
         Thread.current[:runar_strict_method] = nil
         Thread.current[:runar_real_crypto] = nil
         Thread.current[:runar_script_bytes] = nil
+        Thread.current[:runar_mocked_prologue_asserts] = nil
       end
 
       # Walk a list of ANF bindings, updating env with each result.
@@ -671,6 +682,16 @@ module Runar
                check_preimage_assert?(value['value'])
               return nil
             end
+            # F-164 (round 2): the auto-injected prologue's checkPreimage
+            # assert and sighash-type assert (detected structurally -- see
+            # detect_auto_injected_prologue_asserts) are mocked in plain
+            # strict mode, matching PROTOCOL.md's documented "crypto
+            # built-ins still mock-return true" contract. Never populated
+            # for execute_on_chain_authoritative (run_method only sets it
+            # when real_crypto_ctx is nil), so on-chain mode keeps
+            # enforcing both for real.
+            mocked = Thread.current[:runar_mocked_prologue_asserts]
+            return nil if mocked && mocked.include?(value.object_id)
 
             pred = env[value['value']]
             unless is_truthy(pred)
@@ -754,7 +775,18 @@ module Runar
           ordered_outputs << { kind: :raw, satoshis: sats || 0, script: script_hex }
           nil
 
-        when 'check_preimage', 'deserialize_state', 'get_state_script'
+        when 'check_preimage'
+          # F-164: mirrors the 'checkPreimage' call-path case above (mock
+          # true unless a real-crypto context is active) — same mock/real
+          # split, regardless of whether a witness context is also present.
+          real_crypto = Thread.current[:runar_real_crypto]
+          if real_crypto
+            verify_preimage_real(env[value['preimage']], real_crypto.sighash)
+          else
+            true
+          end
+
+        when 'deserialize_state', 'get_state_script'
           # On-chain-only operations — skip in simulation.
           nil
 
@@ -1735,6 +1767,65 @@ module Runar
 
         pred = idx_map[pred_ref]
         pred.is_a?(Hash) && pred['kind'] == 'check_preimage'
+      end
+
+      # F-164 (round 2): Ruby port of the TS reference's
+      # +detectAutoInjectedPrologueAsserts+
+      # (packages/runar-sdk/src/anf-interpreter.ts) -- see that function's
+      # doc comment for the full rationale. Structural (shape/position-
+      # based, NOT binding-name-based) detection of the fixed 8-binding
+      # sequence +compilers/ruby/lib/runar_compiler/frontend/anf_lower.rb+'s
+      # stateful-prologue emitter injects at the START of every public
+      # StatefulSmartContract method:
+      #
+      #   [0] load_param txPreimage
+      #   [1] check_preimage(preimage: [0])
+      #   [2] assert([1])                              <- mocked in strict mode
+      #   [3] load_param txPreimage
+      #   [4] call extractSigHashType([3])
+      #   [5] load_const <declared sighash mode>
+      #   [6] bin_op === ([4], [5])
+      #   [7] assert([6])                              <- mocked in strict mode
+      #
+      # This sequence can only appear at index 0 of a method body -- the
+      # compiler emits it before a single line of developer code, so a
+      # user-written assert (even one that also calls
+      # +extractSigHashType+) is lowered AFTER it, at a later index, and is
+      # never matched here.
+      #
+      # We don't mark these two ANF nodes with the existing
+      # +isAutoInjectedStateCheck+ field the way the exit-time
+      # continuation-hash assert is marked: that field is part of the
+      # serialized ANF IR, and setting it on the prologue asserts would add
+      # a key to +conformance/tests/*/expected-ir.json+ for every stateful
+      # fixture -- a compiler-golden move this item must not cause.
+      #
+      # @param body [Array<Hash>] the method's top-level binding list
+      # @return [Set] identity set (by +object_id+ -- Ruby Hashes compare
+      #   by value with +==+, so this is the identity-equivalent of the TS
+      #   reference's +Set<ANFValue>+ object-reference check) of the two
+      #   mocked assert VALUE hashes
+      def detect_auto_injected_prologue_asserts(body)
+        return Set.new if body.length < 8
+
+        b0, b1, b2, b3, b4, b5, b6, b7 = body[0..7]
+        is_load_tx_preimage = lambda do |b|
+          b['value']['kind'] == 'load_param' && b['value']['name'] == 'txPreimage'
+        end
+        return Set.new unless is_load_tx_preimage.call(b0)
+
+        v1, v2, v3, v4, v5, v6, v7 = [b1, b2, b3, b4, b5, b6, b7].map { |b| b['value'] }
+        return Set.new unless v1['kind'] == 'check_preimage' && v1['preimage'] == b0['name']
+        return Set.new unless v2['kind'] == 'assert' && v2['value'] == b1['name']
+        return Set.new unless is_load_tx_preimage.call(b3)
+        return Set.new unless v4['kind'] == 'call' && v4['func'] == 'extractSigHashType' &&
+                               Array(v4['args']).first == b3['name']
+        return Set.new unless v5['kind'] == 'load_const'
+        return Set.new unless v6['kind'] == 'bin_op' && v6['op'] == '===' &&
+                               v6['left'] == b4['name'] && v6['right'] == b5['name']
+        return Set.new unless v7['kind'] == 'assert' && v7['value'] == b6['name']
+
+        Set.new([v2.object_id, v7.object_id])
       end
 
       # Detect whether an assert predicate ref is the auto-emitted

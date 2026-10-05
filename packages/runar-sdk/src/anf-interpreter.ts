@@ -13,13 +13,19 @@
  *     skips `assert` predicates so the SDK can pre-compute the post-state
  *     even when arguments wouldn't actually pass the on-chain script. This
  *     is the canonical use: auto-deriving `newState` for the next call.
- *  2. **Strict** (`executeStrict`) — evaluates every `assert` predicate and
- *     throws `AssertionFailureError` (carrying the contract method + ANF
- *     binding name of the failing predicate) on the first false assert. Use
- *     for "will this call go through?" / "would the asserts hold" smoke
- *     tests off-chain before paying broadcast fees. Crypto built-ins
- *     (`checkSig`, `checkMultiSig`, `checkPreimage`) still mock-return
- *     `true` — only explicit `assert(...)` predicates are enforced.
+ *  2. **Strict** (`executeStrict`) — evaluates every developer-written
+ *     `assert` predicate and throws `AssertionFailureError` (carrying the
+ *     contract method + ANF binding name of the failing predicate) on the
+ *     first false assert. Use for "will this call go through?" / "would
+ *     the asserts hold" smoke tests off-chain before paying broadcast
+ *     fees. Crypto built-ins (`checkSig`, `checkMultiSig`, `checkPreimage`)
+ *     still mock-return `true` — and so does the compiler's own
+ *     auto-injected stateful-method prologue (the `checkPreimage` assert
+ *     and the sighash-type assert `emitStatefulPrologue` puts at the start
+ *     of every public `StatefulSmartContract` method, detected
+ *     structurally by {@link detectAutoInjectedPrologueAsserts} — F-164).
+ *     Only explicit, developer-written `assert(...)` predicates — anywhere
+ *     outside that fixed prologue shape — are enforced.
  *  3. **On-chain authoritative** (`executeOnChainAuthoritative`) — strict
  *     assert enforcement PLUS real ECDSA / SHA-256 preimage verification
  *     against a caller-supplied `sighash`. The signature shape requires the
@@ -195,8 +201,10 @@ export class AssertionFailureError extends Error {
  * `assert(predicate)` whose predicate evaluates to a falsy value. Use this
  * before broadcasting a transaction to surface guard failures off-chain
  * instead of relying on a node rejection. Crypto built-ins (`checkSig`,
- * `checkMultiSig`, `checkPreimage`) still mock-return `true` — strict mode
- * only enforces explicit `assert(...)` predicates.
+ * `checkMultiSig`, `checkPreimage`) still mock-return `true`, and so does
+ * the compiler's own auto-injected stateful-method prologue (F-164) —
+ * strict mode only enforces explicit, developer-written `assert(...)`
+ * predicates outside that fixed prologue shape.
  */
 export function executeStrict(
   anf: ANFProgram,
@@ -264,6 +272,74 @@ interface StrictCtx {
   methodName: string;
   /** When set, crypto built-ins verify against this 32-byte sighash. */
   realCrypto?: { sighash: number[] };
+  /**
+   * F-164 (round 2): the specific `assert` ANFValue objects (by reference)
+   * that are the auto-injected stateful-method prologue's own asserts
+   * (checkPreimage's assert + the sighash-type assert) — see
+   * {@link detectAutoInjectedPrologueAsserts}. Mocked (skipped) in plain
+   * strict mode; left enforced in `executeOnChainAuthoritative` (unchanged).
+   */
+  mockedPrologueAsserts?: Set<ANFValue>;
+}
+
+/**
+ * F-164 (round 2): structural (shape-based, NOT binding-name-based)
+ * detection of the fixed sequence `emitStatefulPrologue` (stateful-
+ * scaffold.ts) injects at the START of every public `StatefulSmartContract`
+ * method's body:
+ *
+ *   [0] load_param txPreimage
+ *   [1] check_preimage(preimage: [0])
+ *   [2] assert([1])                              <- mocked in strict mode
+ *   [3] load_param txPreimage
+ *   [4] call extractSigHashType([3])
+ *   [5] load_const <declared sighash mode>
+ *   [6] bin_op === ([4], [5])
+ *   [7] assert([6])                              <- mocked in strict mode
+ *
+ * This exact 8-binding sequence can ONLY appear at index 0 of a method
+ * body: the compiler emits it unconditionally, before lowering a single
+ * line of the developer's own code, for every public stateful method — so
+ * user code can never occupy these positions. A developer who writes their
+ * own `assert(checkPreimage(...))` or `assert(extractSigHashType(...) ===
+ * ...)` has that code lowered AFTER this prologue, at a LATER index, so it
+ * is never matched here and remains fully enforced (see the
+ * "user-written-assert-not-mocked" test in anf-interpreter-strict.spec.ts).
+ *
+ * We cannot mark these two ANF nodes with the existing
+ * `isAutoInjectedStateCheck` field the way the exit-time continuation-hash
+ * assert is marked (stateful-scaffold.ts:171,188): that field is part of
+ * the serialized ANF IR, and setting it on the prologue asserts would add
+ * a key to each fixture's `conformance/tests/<fixture>/expected-ir.json`
+ * golden — a compiler-golden move this item must not cause. This function
+ * is the interpreter-only equivalent of that marker.
+ */
+function detectAutoInjectedPrologueAsserts(body: ANFBinding[]): Set<ANFValue> {
+  const result = new Set<ANFValue>();
+  if (body.length < 8) return result;
+  const [b0, b1, b2, b3, b4, b5, b6, b7] = body;
+  const isLoadTxPreimage = (b: ANFBinding): boolean =>
+    b.value.kind === 'load_param' && (b.value as { name: string }).name === 'txPreimage';
+  if (!isLoadTxPreimage(b0!)) return result;
+  if (b1!.value.kind !== 'check_preimage' || (b1!.value as { preimage: string }).preimage !== b0!.name) return result;
+  if (b2!.value.kind !== 'assert' || (b2!.value as { value: string }).value !== b1!.name) return result;
+  if (!isLoadTxPreimage(b3!)) return result;
+  if (
+    b4!.value.kind !== 'call' ||
+    (b4!.value as { func: string }).func !== 'extractSigHashType' ||
+    (b4!.value as { args: string[] }).args[0] !== b3!.name
+  ) return result;
+  if (b5!.value.kind !== 'load_const') return result;
+  if (
+    b6!.value.kind !== 'bin_op' ||
+    (b6!.value as { op: string }).op !== '===' ||
+    (b6!.value as { left: string }).left !== b4!.name ||
+    (b6!.value as { right: string }).right !== b5!.name
+  ) return result;
+  if (b7!.value.kind !== 'assert' || (b7!.value as { value: string }).value !== b6!.name) return result;
+  result.add(b2!.value);
+  result.add(b7!.value);
+  return result;
 }
 
 function normalizeSighash(sighash: string | Uint8Array): number[] {
@@ -352,8 +428,15 @@ function runMethod(
   // Ordered state-class outputs (state continuation + raw) in source order.
   const outputs: OrderedOutputEntry[] = [];
 
+  // F-164 (round 2): compute the mocked-prologue-assert set once per method,
+  // for plain strict mode only (on-chain mode keeps enforcing both asserts
+  // for real, unchanged).
+  const strictWithPrologue: StrictCtx | null = (strict && !strict.realCrypto)
+    ? { ...strict, mockedPrologueAsserts: detectAutoInjectedPrologueAsserts(method.body) }
+    : strict;
+
   // Walk bindings
-  evalBindings(method.body, env, stateDelta, dataOutputs, rawOutputs, outputs, anf, strict);
+  evalBindings(method.body, env, stateDelta, dataOutputs, rawOutputs, outputs, anf, strictWithPrologue);
 
   return { state: { ...currentState, ...stateDelta }, dataOutputs, rawOutputs, outputs };
 }
@@ -560,6 +643,16 @@ function evalValue(
         if ((value as { isAutoInjectedStateCheck?: boolean }).isAutoInjectedStateCheck === true) {
           return undefined;
         }
+        // F-164 (round 2): the auto-injected prologue's checkPreimage assert
+        // and sighash-type assert (detected structurally — see
+        // detectAutoInjectedPrologueAsserts) are mocked in plain strict
+        // mode, matching PROTOCOL.md's documented "crypto built-ins still
+        // mock-return true" contract. Never set for executeOnChainAuthoritative
+        // (runMethod only populates mockedPrologueAsserts when realCrypto is
+        // absent), so on-chain mode keeps enforcing both for real.
+        if (strict.mockedPrologueAsserts?.has(value)) {
+          return undefined;
+        }
         const predicate = env[value.value];
         if (!isTruthy(predicate)) {
           throw new AssertionFailureError(strict.methodName, bindingName);
@@ -629,9 +722,26 @@ function evalValue(
       return undefined;
     }
 
+    // F-164: the auto-injected stateful-method prologue
+    // (`emitStatefulPrologue` in stateful-scaffold.ts) emits
+    // `check_preimage` immediately followed by an UN-marked `assert` on
+    // its result — unlike the exit-time continuation-hash assert, this one
+    // carries no `isAutoInjectedStateCheck` flag, so strict mode enforces
+    // it. PROTOCOL.md and this module's own doc comments promise that
+    // `checkPreimage` (along with `checkSig` / `checkMultiSig`) still
+    // mock-returns `true` in strict mode and only performs real
+    // verification in `executeOnChainAuthoritative` — mirror the mock/real
+    // split `evalCall`'s `checkPreimage` builtin case already uses below,
+    // instead of unconditionally returning `undefined` (which `isTruthy`
+    // treats as false and trips the un-marked assert on every stateful
+    // method).
+    case 'check_preimage': {
+      if (!strict?.realCrypto) return true;
+      return verifyPreimage(env[value.preimage], strict.realCrypto.sighash);
+    }
+
     // On-chain-only operations — skip in simulation. These ANF kinds are
     // markers consumed by the codegen, not by the off-chain interpreter.
-    case 'check_preimage':
     case 'deserialize_state':
     case 'get_state_script':
       return undefined;

@@ -536,6 +536,7 @@ Goldens are **self-produced** by the very implementation under test — `pnpm ru
 - `conformance/sdk-vertical/artifacts/*.json` (the compiled artifacts those cases splice; `constructorSlots[].byteOffset` and `codeSeparatorIndices` live here)
 - `conformance/analyzer/**/expected-analyzer-report.json`
 - `conformance/source-map/**/expected-source-map.json`
+- `conformance/anf-interpreter/expected-strict/*.json` (strict-mode ANF-interpreter execution goldens, registered F-164 round 2)
 - `conformance/script-size-baseline.json`
 - `packages/decompiler/coverage-baseline.json`
 

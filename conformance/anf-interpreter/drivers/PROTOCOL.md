@@ -106,7 +106,13 @@ non-zero with a stderr message.
   Used for state-transition simulation.
 - **strict**: asserts enforced (raises `AssertionFailureError` on first
   falsy predicate); crypto built-ins still mocked. Used for pre-broadcast
-  guard checks.
+  guard checks. This also covers the compiler's own auto-injected
+  stateful-method prologue (the `checkPreimage` call and the sighash-type
+  check every public `StatefulSmartContract` method starts with): both are
+  mocked exactly like `checkSig`/`checkMultiSig`/`checkPreimage`, detected
+  by the prologue's fixed structural shape rather than by binding name, so
+  a developer-written `assert(...)` anywhere else in the method body is
+  still fully enforced (F-164).
 - **on-chain**: asserts enforced AND crypto built-ins perform real
   verification against the supplied `sighash`:
   - `checkSig(sig, pk)` → ECDSA-verify(sighash, sig, pk) using SEC1

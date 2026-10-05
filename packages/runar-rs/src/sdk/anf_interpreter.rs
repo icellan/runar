@@ -270,6 +270,104 @@ pub(crate) struct StrictCtx {
     /// AST-interpreter intent-intrinsic semantics into the Rust ANF
     /// interpreter.
     pub(crate) witness: Option<IntentWitnessContext>,
+    /// F-164 (round 2): identity set (by raw pointer address of the
+    /// binding's `serde_json::Value` — `Value` doesn't implement `Hash`/
+    /// `Eq` in a way that distinguishes structurally-identical-but-distinct
+    /// nodes, so this is the identity-equivalent of the TS reference's
+    /// `Set<ANFValue>` object-reference check) of the auto-injected
+    /// prologue's two assert VALUE nodes (checkPreimage's assert + the
+    /// sighash-type assert). Populated by `run_method` only in plain
+    /// strict mode (`real_crypto.is_none()`); left empty for
+    /// `execute_on_chain_authoritative`, which keeps enforcing both for
+    /// real. Safe only while the owning `ANFMethod.body` outlives the
+    /// walk and is never reallocated — true for every call site here.
+    pub(crate) mocked_prologue_asserts: std::collections::HashSet<usize>,
+}
+
+/// Rust port of the TS reference's `detectAutoInjectedPrologueAsserts`
+/// (packages/runar-sdk/src/anf-interpreter.ts) — see that function's doc
+/// comment for the full rationale. Structural (shape/position-based, NOT
+/// binding-name-based) detection of the fixed 8-binding sequence
+/// `compilers/rust/src/frontend/anf_lower.rs`'s stateful-prologue emitter
+/// injects at the START of every public StatefulSmartContract method:
+///
+/// ```text
+/// [0] load_param txPreimage
+/// [1] check_preimage(preimage: [0])
+/// [2] assert([1])                              <- mocked in strict mode
+/// [3] load_param txPreimage
+/// [4] call extractSigHashType([3])
+/// [5] load_const <declared sighash mode>
+/// [6] bin_op === ([4], [5])
+/// [7] assert([6])                              <- mocked in strict mode
+/// ```
+///
+/// This sequence can only appear at index 0 of a method body — the compiler
+/// emits it before a single line of developer code, so a user-written
+/// assert (even one that also calls `extractSigHashType`) is lowered AFTER
+/// it, at a later index, and is never matched here.
+///
+/// We don't mark these two ANF nodes with the existing
+/// `isAutoInjectedStateCheck` field the way the exit-time continuation-hash
+/// assert is marked: that field is part of the serialized ANF IR, and
+/// setting it on the prologue asserts would add a key to
+/// `conformance/tests/*/expected-ir.json` for every stateful fixture — a
+/// compiler-golden move this item must not cause.
+fn detect_auto_injected_prologue_asserts(body: &[ANFBinding]) -> std::collections::HashSet<usize> {
+    let mut result = std::collections::HashSet::new();
+    if body.len() < 8 {
+        return result;
+    }
+    let (b0, b1, b2, b3, b4, b5, b6, b7) = (
+        &body[0], &body[1], &body[2], &body[3], &body[4], &body[5], &body[6], &body[7],
+    );
+    fn str_field<'a>(v: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+        v.get(field).and_then(|x| x.as_str())
+    }
+    fn kind_of(v: &serde_json::Value) -> Option<&str> {
+        str_field(v, "kind")
+    }
+    fn is_load_tx_preimage(b: &ANFBinding) -> bool {
+        kind_of(&b.value) == Some("load_param") && str_field(&b.value, "name") == Some("txPreimage")
+    }
+    if !is_load_tx_preimage(b0) {
+        return result;
+    }
+    if kind_of(&b1.value) != Some("check_preimage") || str_field(&b1.value, "preimage") != Some(b0.name.as_str()) {
+        return result;
+    }
+    if kind_of(&b2.value) != Some("assert") || str_field(&b2.value, "value") != Some(b1.name.as_str()) {
+        return result;
+    }
+    if !is_load_tx_preimage(b3) {
+        return result;
+    }
+    let args4_ok = b4
+        .value
+        .get("args")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.first())
+        .and_then(|a| a.as_str())
+        == Some(b3.name.as_str());
+    if kind_of(&b4.value) != Some("call") || str_field(&b4.value, "func") != Some("extractSigHashType") || !args4_ok {
+        return result;
+    }
+    if kind_of(&b5.value) != Some("load_const") {
+        return result;
+    }
+    if kind_of(&b6.value) != Some("bin_op")
+        || str_field(&b6.value, "op") != Some("===")
+        || str_field(&b6.value, "left") != Some(b4.name.as_str())
+        || str_field(&b6.value, "right") != Some(b5.name.as_str())
+    {
+        return result;
+    }
+    if kind_of(&b7.value) != Some("assert") || str_field(&b7.value, "value") != Some(b6.name.as_str()) {
+        return result;
+    }
+    result.insert(&b2.value as *const serde_json::Value as usize);
+    result.insert(&b7.value as *const serde_json::Value as usize);
+    result
 }
 
 /// Per-method witness bytes + mock preimage fields consumed by the
@@ -485,6 +583,7 @@ pub fn execute_strict(
         method_name: method_name.to_string(),
         real_crypto: None,
         witness: None,
+        mocked_prologue_asserts: std::collections::HashSet::new(),
     };
     match run_method(
         anf,
@@ -524,6 +623,7 @@ pub fn execute_on_chain_authoritative(
         method_name: method_name.to_string(),
         real_crypto: Some(ctx.clone()),
         witness: None,
+        mocked_prologue_asserts: std::collections::HashSet::new(),
     };
     match run_method(
         anf,
@@ -668,6 +768,7 @@ pub fn execute_with_witness(
         method_name: method_name.to_string(),
         real_crypto: None,
         witness: Some(witness.clone()),
+        mocked_prologue_asserts: std::collections::HashSet::new(),
     };
     match run_method(
         &anf_clone,
@@ -782,6 +883,22 @@ fn run_method(
     // is unaffected. Mirrors the TS SDK interpreter's `scriptBytes` map.
     let mut script_bytes: HashMap<String, Vec<u8>> = HashMap::new();
 
+    // F-164 (round 2): compute the mocked-prologue-assert identity set once
+    // per method, for plain strict mode only (on-chain mode keeps enforcing
+    // both prologue asserts for real, unchanged). Each `StrictCtx` is
+    // freshly constructed per top-level call (execute_strict et al.), so
+    // cloning + overwriting the field here is safe.
+    let strict_with_prologue: Option<StrictCtx> = strict.and_then(|s| {
+        if s.real_crypto.is_none() {
+            let mut c = s.clone();
+            c.mocked_prologue_asserts = detect_auto_injected_prologue_asserts(&method.body);
+            Some(c)
+        } else {
+            None
+        }
+    });
+    let effective_strict: Option<&StrictCtx> = strict_with_prologue.as_ref().or(strict);
+
     // Walk bindings — strict-mode assert failures bubble up through `?`.
     eval_bindings(
         &method.body,
@@ -791,7 +908,7 @@ fn run_method(
         &mut raw_outputs,
         &mut ordered_outputs,
         anf,
-        strict,
+        effective_strict,
         &mut script_bytes,
     )?;
 
@@ -1158,6 +1275,42 @@ fn eval_value(
             // Strict mode: enforce — falsy predicate returns
             // AssertionFailureError, propagated up via `?`.
             if let Some(ctx) = strict {
+                // Marker-based skip: the auto-injected stateful-continuation
+                // `assert(hash256(_) === extractOutputHash(_))` carries
+                // `isAutoInjectedStateCheck: true` (set in
+                // `compilers/rust/src/frontend/anf_lower.rs`). The on-chain
+                // VM is authoritative for that check; off-chain we have no
+                // realistic continuation hash. Developer-written covenant
+                // asserts with the identical IR shape carry no marker and
+                // ARE enforced (see BUG-002). Pre-existing gap found while
+                // fixing F-164 (round 2): this plain-strict path never
+                // checked the marker at all (only `execute_with_witness`
+                // did, via a clone-and-pop-last-binding trick) — invisible
+                // until round 2 unblocked the entry prologue far enough to
+                // actually reach this exit assert. TS/Go/Python already
+                // check it here; this ports the same check to Rust.
+                if value
+                    .get("isAutoInjectedStateCheck")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    return Ok(Val::Undefined);
+                }
+                // F-164 (round 2): the auto-injected prologue's
+                // checkPreimage assert and sighash-type assert (detected
+                // structurally — see detect_auto_injected_prologue_asserts)
+                // are mocked in plain strict mode, matching PROTOCOL.md's
+                // documented "crypto built-ins still mock-return true"
+                // contract. Never populated for
+                // execute_on_chain_authoritative (run_method only sets it
+                // when real_crypto is None), so on-chain mode keeps
+                // enforcing both for real.
+                let is_mocked_prologue_assert = ctx
+                    .mocked_prologue_asserts
+                    .contains(&(value as *const serde_json::Value as usize));
+                if is_mocked_prologue_assert {
+                    return Ok(Val::Undefined);
+                }
                 let pred_ref = str_field(value, "value");
                 let predicate = env.get(&pred_ref).cloned().unwrap_or(Val::Undefined);
                 if !predicate.is_truthy() {
@@ -1238,17 +1391,17 @@ fn eval_value(
             Val::Undefined
         }
 
-        // On-chain-only operations — skip in simulation. When a witness
-        // context is active (i.e. `execute_with_witness`), `check_preimage`
-        // mocks success so the auto-injected `assert(check_preimage(...))`
-        // at every stateful-method entry doesn't trip a spurious assertion
-        // failure. Mirrors the TS reference, which mocks `checkPreimage`
-        // to `true` in the AST interpreter.
+        // F-164: mirrors the "checkPreimage" call-path case above (mock
+        // true unless a real-crypto context is active) — same mock/real
+        // split, regardless of whether a witness context is also present.
         "check_preimage" => {
-            if strict.and_then(|c| c.witness.as_ref()).is_some() {
-                Val::Bool(true)
-            } else {
-                Val::Undefined
+            match strict.and_then(|c| c.real_crypto.as_ref()) {
+                Some(rc) => {
+                    let pre_ref = str_field(value, "preimage");
+                    let pre = env.get(&pre_ref).cloned().unwrap_or(Val::Undefined);
+                    Val::Bool(verify_preimage_real(&pre, &rc.sighash))
+                }
+                None => Val::Bool(true),
             }
         }
         "deserialize_state" | "get_state_script" => Val::Undefined,

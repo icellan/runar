@@ -197,6 +197,16 @@ const StrictCtx = struct {
     method_name: []const u8,
     last_binding_name: []const u8 = "<anonymous>",
     real_crypto: ?*const RealCryptoCtx = null,
+    /// F-164 (round 2): set by `evalBindings` immediately before evaluating
+    /// EACH binding — true only when that specific binding is one of the
+    /// two auto-injected prologue asserts (checkPreimage's assert + the
+    /// sighash-type assert), detected structurally (see
+    /// `detectAutoInjectedPrologue`) on the CURRENT `bindings` slice. Reset
+    /// every iteration, so a nested if/loop body's own (unrelated) walk
+    /// never sees a stale value from an outer scope. Left false whenever
+    /// `real_crypto` is non-null, so `executeOnChainAuthoritative` keeps
+    /// enforcing both for real.
+    mock_this_prologue_assert: bool = false,
 };
 
 /// Bag of optional contexts threaded through evaluation. Kept as a
@@ -756,6 +766,58 @@ fn isImplicitParam(name: []const u8) bool {
 // Binding evaluation
 // ---------------------------------------------------------------------------
 
+/// F-164 (round 2): Zig port of the TS reference's
+/// `detectAutoInjectedPrologueAsserts` (packages/runar-sdk/src/anf-interpreter.ts)
+/// — see that function's doc comment for the full rationale. Structural
+/// (shape/position-based, NOT binding-name-based) detection of the fixed
+/// 8-binding sequence `compilers/zig/src/passes/anf_lower.zig`'s
+/// stateful-prologue emitter injects at the START of every public
+/// StatefulSmartContract method:
+///
+///   [0] load_param txPreimage
+///   [1] check_preimage(preimage: [0])
+///   [2] assert([1])                              <- mocked in strict mode
+///   [3] load_param txPreimage
+///   [4] call extractSigHashType([3])
+///   [5] load_const <declared sighash mode>
+///   [6] bin_op === ([4], [5])
+///   [7] assert([6])                              <- mocked in strict mode
+///
+/// This sequence can only appear at index 0 of a bindings slice — the
+/// compiler emits it before a single line of developer code, so a
+/// user-written assert (even one that also calls `extractSigHashType`) is
+/// lowered AFTER it, at a later index, and is never matched here.
+///
+/// We don't mark these two ANF nodes with the existing
+/// `is_auto_injected_state_check` field the way the exit-time
+/// continuation-hash assert is marked: that field is part of the
+/// serialized ANF IR, and setting it on the prologue asserts would add a
+/// key to `conformance/tests/*/expected-ir.json` for every stateful
+/// fixture — a compiler-golden move this item must not cause.
+fn detectAutoInjectedPrologue(bindings: []const ANFBinding) bool {
+    if (bindings.len < 8) return false;
+    const b0 = bindings[0];
+    const b1 = bindings[1];
+    const b2 = bindings[2];
+    const b3 = bindings[3];
+    const b4 = bindings[4];
+    const b5 = bindings[5];
+    const b6 = bindings[6];
+    const b7 = bindings[7];
+    if (b0.value != .load_param or !std.mem.eql(u8, b0.value.load_param.name, "txPreimage")) return false;
+    if (b1.value != .check_preimage) return false;
+    if (b2.value != .assert_node or !std.mem.eql(u8, b2.value.assert_node.value, b1.name)) return false;
+    if (b3.value != .load_param or !std.mem.eql(u8, b3.value.load_param.name, "txPreimage")) return false;
+    if (b4.value != .call or !std.mem.eql(u8, b4.value.call.func, "extractSigHashType")) return false;
+    if (b4.value.call.args.len == 0 or !std.mem.eql(u8, b4.value.call.args[0], b3.name)) return false;
+    if (b5.value != .load_const) return false;
+    if (b6.value != .bin_op) return false;
+    const bo = b6.value.bin_op;
+    if (!std.mem.eql(u8, bo.op, "===") or !std.mem.eql(u8, bo.left, b4.name) or !std.mem.eql(u8, bo.right, b5.name)) return false;
+    if (b7.value != .assert_node or !std.mem.eql(u8, b7.value.assert_node.value, b6.name)) return false;
+    return true;
+}
+
 fn evalBindings(
     allocator: std.mem.Allocator,
     bindings: []const ANFBinding,
@@ -766,8 +828,15 @@ fn evalBindings(
     anf: *const ANFProgram,
     eval_ctx: EvalCtx,
 ) error{ OutOfMemory, AssertionFailure, MissingWitness, ScriptNumberError }!void {
-    for (bindings) |binding| {
-        if (eval_ctx.strict) |ctx| ctx.last_binding_name = binding.name;
+    // F-164 (round 2): computed ONCE per bindings slice (cheap — bails out
+    // at the first mismatched binding for every non-prologue slice,
+    // including every nested if/loop body). See detectAutoInjectedPrologue.
+    const is_prologue = detectAutoInjectedPrologue(bindings);
+    for (bindings, 0..) |binding, idx| {
+        if (eval_ctx.strict) |ctx| {
+            ctx.last_binding_name = binding.name;
+            ctx.mock_this_prologue_assert = is_prologue and ctx.real_crypto == null and (idx == 2 or idx == 7);
+        }
         const val = try evalNode(allocator, binding.value, binding.name, env, state_delta, data_outputs, raw_outputs, anf, eval_ctx);
         try env.put(binding.name, val);
     }
@@ -974,8 +1043,18 @@ fn evalNode(
             // have no realistic continuation hash. Developer-written
             // covenant asserts with the identical IR shape carry no
             // marker and ARE enforced (see BUG-002).
-            if (strict_ctx != null) {
+            if (strict_ctx) |ctx| {
                 if (an.is_auto_injected_state_check) return anf_none;
+                // F-164 (round 2): the auto-injected prologue's
+                // checkPreimage assert and sighash-type assert (detected
+                // structurally — see detectAutoInjectedPrologue, set per
+                // binding by evalBindings) are mocked in plain strict
+                // mode, matching PROTOCOL.md's documented "crypto
+                // built-ins still mock-return true" contract. Always
+                // false when real_crypto is set, so
+                // executeOnChainAuthoritative keeps enforcing both for
+                // real.
+                if (ctx.mock_this_prologue_assert) return anf_none;
                 if (an.value.len > 0) {
                     const predicate = env.get(an.value) orelse anf_none;
                     if (!isTruthy(predicate)) return error.AssertionFailure;
@@ -1052,8 +1131,19 @@ fn evalNode(
             try eval_ctx.ordered_outputs.append(allocator, .{ .kind = .raw, .satoshis = sats, .script = script_bytes });
             return anf_none;
         },
-        // On-chain-only operations — skip
-        .check_preimage, .deserialize_state, .get_state_script => {
+        // F-164: mirrors evalCall's "checkPreimage" case (mock true unless
+        // a real-crypto context is active). The ANFValue.check_preimage
+        // variant carries no `preimage` ref field (unlike the manual
+        // `call(checkPreimage, ...)` path above), so real verification
+        // isn't modelled here — only the mock/lenient split, which is all
+        // any existing test or conformance golden exercises for this
+        // auto-injected node kind.
+        .check_preimage => {
+            const real_crypto = if (strict_ctx) |sc| sc.real_crypto else null;
+            if (real_crypto != null) return anf_none;
+            return .{ .boolean = true };
+        },
+        .deserialize_state, .get_state_script => {
             return anf_none;
         },
         .array_literal => |al| {

@@ -136,7 +136,7 @@ class _StrictCtx:
     authoritative mode used by :func:`execute_on_chain_authoritative`).
     """
 
-    __slots__ = ("method_name", "real_crypto")
+    __slots__ = ("method_name", "real_crypto", "mocked_prologue_asserts")
 
     def __init__(
         self,
@@ -145,6 +145,83 @@ class _StrictCtx:
     ) -> None:
         self.method_name = method_name
         self.real_crypto = real_crypto
+        # F-164 (round 2): identity set (by ``id()`` -- dicts aren't
+        # hashable, so this is the identity-equivalent of the TS
+        # reference's ``Set<ANFValue>`` object-reference check) of the
+        # auto-injected prologue's two assert VALUE dicts (checkPreimage's
+        # assert + the sighash-type assert). Populated by ``_run_method``
+        # only in plain strict mode (``real_crypto is None``); left empty
+        # for ``execute_on_chain_authoritative``, which keeps enforcing
+        # both for real.
+        self.mocked_prologue_asserts: set = set()
+
+
+def _detect_auto_injected_prologue_asserts(body: List[dict]) -> set:
+    """Python port of the TS reference's
+    ``detectAutoInjectedPrologueAsserts`` (packages/runar-sdk/src/anf-interpreter.ts)
+    -- see that function's doc comment for the full rationale. Structural
+    (shape/position-based, NOT binding-name-based) detection of the fixed
+    8-binding sequence ``compilers/python/runar_compiler/frontend/anf_lower.py``'s
+    stateful-prologue emitter injects at the START of every public
+    StatefulSmartContract method::
+
+        [0] load_param txPreimage
+        [1] check_preimage(preimage: [0])
+        [2] assert([1])                              <- mocked in strict mode
+        [3] load_param txPreimage
+        [4] call extractSigHashType([3])
+        [5] load_const <declared sighash mode>
+        [6] bin_op === ([4], [5])
+        [7] assert([6])                              <- mocked in strict mode
+
+    This sequence can only appear at index 0 of a method body -- the
+    compiler emits it before a single line of developer code, so a
+    user-written assert (even one that also calls ``extractSigHashType``)
+    is lowered AFTER it, at a later index, and is never matched here.
+
+    We don't mark these two ANF nodes with the existing
+    ``isAutoInjectedStateCheck`` field the way the exit-time
+    continuation-hash assert is marked: that field is part of the
+    serialized ANF IR, and setting it on the prologue asserts would add a
+    key to ``conformance/tests/*/expected-ir.json`` for every stateful
+    fixture -- a compiler-golden move this item must not cause.
+    """
+    if len(body) < 8:
+        return set()
+    b0, b1, b2, b3, b4, b5, b6, b7 = body[0:8]
+
+    def is_load_tx_preimage(b: dict) -> bool:
+        v = b.get('value', {})
+        return v.get('kind') == 'load_param' and v.get('name') == 'txPreimage'
+
+    if not is_load_tx_preimage(b0):
+        return set()
+    v1, v2, v3, v4, v5, v6, v7 = (b.get('value', {}) for b in (b1, b2, b3, b4, b5, b6, b7))
+    if v1.get('kind') != 'check_preimage' or v1.get('preimage') != b0['name']:
+        return set()
+    if v2.get('kind') != 'assert' or v2.get('value') != b1['name']:
+        return set()
+    if not is_load_tx_preimage(b3):
+        return set()
+    if (
+        v4.get('kind') != 'call'
+        or v4.get('func') != 'extractSigHashType'
+        or not v4.get('args')
+        or v4['args'][0] != b3['name']
+    ):
+        return set()
+    if v5.get('kind') != 'load_const':
+        return set()
+    if (
+        v6.get('kind') != 'bin_op'
+        or v6.get('op') != '==='
+        or v6.get('left') != b4['name']
+        or v6.get('right') != b5['name']
+    ):
+        return set()
+    if v7.get('kind') != 'assert' or v7.get('value') != b6['name']:
+        return set()
+    return {id(v2), id(v7)}
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +690,16 @@ def _run_method(
     data_outputs: List[dict] = []
     raw_outputs: List[dict] = []
 
+    # F-164 (round 2): compute the mocked-prologue-assert identity set once
+    # per method, for plain strict mode only (on-chain mode keeps enforcing
+    # both prologue asserts for real, unchanged). Each _StrictCtx is
+    # freshly constructed per top-level call (execute_strict et al.), so
+    # mutating it here is safe.
+    if strict is not None and strict.real_crypto is None:
+        strict.mocked_prologue_asserts = _detect_auto_injected_prologue_asserts(
+            method.get('body', []),
+        )
+
     # Walk bindings. In strict mode an AssertionFailureError raised from any
     # nested if/loop/private-method call propagates up out of this function
     # to the caller — there is no special unwind logic needed in Python.
@@ -983,6 +1070,16 @@ def _eval_value(
         if strict is not None:
             if value.get('isAutoInjectedStateCheck') is True:
                 return None
+            # F-164 (round 2): the auto-injected prologue's checkPreimage
+            # assert and sighash-type assert (detected structurally -- see
+            # _detect_auto_injected_prologue_asserts) are mocked in plain
+            # strict mode, matching PROTOCOL.md's documented "crypto
+            # built-ins still mock-return true" contract. Never populated
+            # for execute_on_chain_authoritative (_run_method only sets it
+            # when real_crypto is None), so on-chain mode keeps enforcing
+            # both for real.
+            if id(value) in strict.mocked_prologue_asserts:
+                return None
             pred_ref = value.get('value', '')
             pred = env.get(pred_ref)
             if not _is_truthy(pred):
@@ -1055,17 +1152,19 @@ def _eval_value(
             ordered_outputs.append({'kind': 'raw', 'satoshis': sats, 'script': script_hex})
         return None
 
-    # On-chain-only operations -- skip in simulation. ``check_preimage`` can
-    # only be mocked once the caller supplies an intent/witness context (i.e.
-    # is genuinely simulating a concrete spend): then mock-return ``True`` so
-    # the strict-mode ``assert(check_preimage(...))`` the stateful-contract
-    # prologue emits doesn't trip. With no witness context the preimage is
-    # unverifiable off-chain, so return a falsy value and let strict mode
-    # report the failure at the prologue assert -- matching the
-    # TS/Go/Rust/Ruby/Zig tiers (and the pinned cross-interpreter strict
-    # goldens). Real verification belongs in ``execute_on_chain_authoritative``.
+    # F-164: mirrors the ``checkPreimage`` call-path case (mock True unless a
+    # real-crypto context is active) -- same mock/real split, regardless of
+    # whether an intent/witness context is also present. PROTOCOL.md and the
+    # TS reference's doc comments document that ``checkPreimage`` (along
+    # with ``checkSig`` / ``checkMultiSig``) mock-returns ``True`` in strict
+    # mode; only ``execute_on_chain_authoritative`` performs real
+    # verification.
     if kind == 'check_preimage':
-        return True if intent is not None else None
+        real_crypto = strict.real_crypto if strict is not None else None
+        if real_crypto is None:
+            return True
+        pre_ref = value.get('preimage', '')
+        return _verify_preimage(env.get(pre_ref), real_crypto.sighash)
     if kind in ('deserialize_state', 'get_state_script'):
         return None
 

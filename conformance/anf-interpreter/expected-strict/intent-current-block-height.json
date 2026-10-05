@@ -1,5 +1,8 @@
 {
-  "error": "AssertionFailureError",
-  "methodName": "spend",
-  "bindingName": "t2"
+  "state": {
+    "deadline": "1000n",
+    "count": "6n"
+  },
+  "dataOutputs": [],
+  "rawOutputs": []
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"reflect"
 	"strings"
 
 	"golang.org/x/crypto/ripemd160"
@@ -83,6 +84,98 @@ func (e *AssertionFailureError) Error() string {
 type strictCtx struct {
 	methodName string
 	realCrypto *RealCryptoCtx
+	// F-164 (round 2): identity set (via reflect.Value.Pointer() of the
+	// binding's Value map — Go maps aren't comparable, so this is the
+	// identity-equivalent of TS's `Set<ANFValue>` object-reference check)
+	// of the auto-injected prologue's two asserts (checkPreimage + sighash-
+	// type). See anfDetectAutoInjectedPrologueAsserts. Populated by
+	// runMethod only in plain strict mode (realCrypto == nil); left nil for
+	// ExecuteOnChainAuthoritative, which keeps enforcing both for real.
+	mockedPrologueAsserts map[uintptr]bool
+}
+
+// anfDetectAutoInjectedPrologueAsserts is the Go port of the TS reference's
+// detectAutoInjectedPrologueAsserts (packages/runar-sdk/src/anf-interpreter.ts) —
+// see that function's doc comment for the full rationale. Structural
+// (shape/position-based, NOT binding-name-based) detection of the fixed
+// 8-binding sequence `compilers/go/frontend/anf_lower.go`'s stateful-prologue
+// emitter injects at the START of every public StatefulSmartContract method:
+//
+//	[0] load_param txPreimage
+//	[1] check_preimage(preimage: [0])
+//	[2] assert([1])                              <- mocked in strict mode
+//	[3] load_param txPreimage
+//	[4] call extractSigHashType([3])
+//	[5] load_const <declared sighash mode>
+//	[6] bin_op === ([4], [5])
+//	[7] assert([6])                              <- mocked in strict mode
+//
+// This sequence can only appear at index 0 of a method body — the compiler
+// emits it before a single line of developer code, so a user-written assert
+// (even one that also calls extractSigHashType) is lowered AFTER it, at a
+// later index, and is never matched here.
+//
+// We don't mark these two ANF nodes with the existing isAutoInjectedStateCheck
+// field the way the exit-time continuation-hash assert is marked
+// (compilers/go/frontend/anf_lower.go): that field is part of the serialized
+// ANF IR, and setting it on the prologue asserts would add a key to
+// conformance/tests/*/expected-ir.json for every stateful fixture — a
+// compiler-golden move this item must not cause.
+func anfDetectAutoInjectedPrologueAsserts(body []ANFBinding) map[uintptr]bool {
+	result := make(map[uintptr]bool)
+	if len(body) < 8 {
+		return result
+	}
+	b0, b1, b2, b3, b4, b5, b6, b7 := body[0], body[1], body[2], body[3], body[4], body[5], body[6], body[7]
+	isLoadTxPreimage := func(b ANFBinding) bool {
+		k, _ := b.Value["kind"].(string)
+		n, _ := b.Value["name"].(string)
+		return k == "load_param" && n == "txPreimage"
+	}
+	kindOf := func(b ANFBinding) string {
+		k, _ := b.Value["kind"].(string)
+		return k
+	}
+	strField := func(b ANFBinding, field string) string {
+		v, _ := b.Value[field].(string)
+		return v
+	}
+	if !isLoadTxPreimage(b0) {
+		return result
+	}
+	if kindOf(b1) != "check_preimage" || strField(b1, "preimage") != b0.Name {
+		return result
+	}
+	if kindOf(b2) != "assert" || strField(b2, "value") != b1.Name {
+		return result
+	}
+	if !isLoadTxPreimage(b3) {
+		return result
+	}
+	if kindOf(b4) != "call" {
+		return result
+	}
+	funcName, _ := b4.Value["func"].(string)
+	args4 := anfGetStringSlice(b4.Value["args"])
+	if funcName != "extractSigHashType" || len(args4) == 0 || args4[0] != b3.Name {
+		return result
+	}
+	if kindOf(b5) != "load_const" {
+		return result
+	}
+	if kindOf(b6) != "bin_op" {
+		return result
+	}
+	op, _ := b6.Value["op"].(string)
+	if op != "===" || strField(b6, "left") != b4.Name || strField(b6, "right") != b5.Name {
+		return result
+	}
+	if kindOf(b7) != "assert" || strField(b7, "value") != b6.Name {
+		return result
+	}
+	result[reflect.ValueOf(b2.Value).Pointer()] = true
+	result[reflect.ValueOf(b7.Value).Pointer()] = true
+	return result
 }
 
 // IntentIntrinsicError signals a runtime failure inside one of the three
@@ -581,6 +674,14 @@ func runMethod(
 	// stays pure (decoded *big.Int values) so state serialization is
 	// unaffected. See anfEvalValue's bin_op/unary_op cases.
 	scriptBytes := make(map[string][]byte)
+	// F-164 (round 2): compute the mocked-prologue-assert identity set once
+	// per method, for plain strict mode only (on-chain mode keeps enforcing
+	// both prologue asserts for real, unchanged). Each strictCtx passed in
+	// is freshly constructed per call site (ExecuteStrict et al.) so
+	// mutating it here is safe — it's never shared across calls.
+	if strict != nil && strict.realCrypto == nil {
+		strict.mockedPrologueAsserts = anfDetectAutoInjectedPrologueAsserts(method.Body)
+	}
 	anfEvalBindings(anf, method.Body, env, stateDelta, &dataOutputs, &rawOutputs, orderedOutputs, strict, fixture, scriptBytes)
 
 	// Merge delta into current state
@@ -888,6 +989,17 @@ func anfEvalValue(
 			if marker, ok := value["isAutoInjectedStateCheck"].(bool); ok && marker {
 				return nil
 			}
+			// F-164 (round 2): the auto-injected prologue's checkPreimage
+			// assert and sighash-type assert (detected structurally — see
+			// anfDetectAutoInjectedPrologueAsserts) are mocked in plain
+			// strict mode, matching PROTOCOL.md's documented "crypto
+			// built-ins still mock-return true" contract. Never populated
+			// for ExecuteOnChainAuthoritative (runMethod only sets it when
+			// realCrypto is nil), so on-chain mode keeps enforcing both for
+			// real.
+			if strict.mockedPrologueAsserts != nil && strict.mockedPrologueAsserts[reflect.ValueOf(value).Pointer()] {
+				return nil
+			}
 			predRef, _ := value["value"].(string)
 			pred := env[predRef]
 			if !anfIsTruthy(pred) {
@@ -982,8 +1094,17 @@ func anfEvalValue(
 		}
 		return nil
 
+	// F-164: mirrors evalCall's "checkPreimage" case (mock true unless a
+	// real-crypto context is active).
+	case "check_preimage":
+		if strict == nil || strict.realCrypto == nil {
+			return true
+		}
+		preRef, _ := value["preimage"].(string)
+		return anfVerifyPreimage(env[preRef], strict.realCrypto.Sighash[:])
+
 	// On-chain-only operations — skip
-	case "check_preimage", "deserialize_state", "get_state_script":
+	case "deserialize_state", "get_state_script":
 		return nil
 	}
 

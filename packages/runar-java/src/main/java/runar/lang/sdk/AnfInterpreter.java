@@ -609,7 +609,91 @@ public final class AnfInterpreter {
         // so each private method gets its own map — matching the TS/Go/Python
         // references, which pass no scriptBytes across the private-method
         // boundary.
-        evalBindings(anf, bindings, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, new java.util.HashSet<>(), new HashMap<>());
+        // F-164 (round 2): compute the mocked-prologue-assert identity set
+        // once per bindings list (fresh for the top-level method body AND
+        // for each private-method-call body — both route through this
+        // overload), for plain strict mode only (on-chain mode keeps
+        // enforcing both prologue asserts for real, unchanged).
+        java.util.Set<Map<String, Object>> mockedPrologueAsserts = (strict && realCrypto == null)
+            ? detectAutoInjectedPrologueAsserts(bindings)
+            : java.util.Collections.emptySet();
+        evalBindings(anf, bindings, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, new java.util.HashSet<>(), new HashMap<>(), mockedPrologueAsserts);
+    }
+
+    /**
+     * F-164 (round 2): Java port of the TS reference's
+     * {@code detectAutoInjectedPrologueAsserts}
+     * (packages/runar-sdk/src/anf-interpreter.ts) — see that function's doc
+     * comment for the full rationale. Structural (shape/position-based,
+     * NOT binding-name-based) detection of the fixed 8-binding sequence
+     * {@code compilers/java/.../passes/AnfLower.java}'s stateful-prologue
+     * emitter injects at the START of every public StatefulSmartContract
+     * method:
+     *
+     * <pre>
+     * [0] load_param txPreimage
+     * [1] check_preimage(preimage: [0])
+     * [2] assert([1])                              &lt;- mocked in strict mode
+     * [3] load_param txPreimage
+     * [4] call extractSigHashType([3])
+     * [5] load_const &lt;declared sighash mode&gt;
+     * [6] bin_op === ([4], [5])
+     * [7] assert([6])                              &lt;- mocked in strict mode
+     * </pre>
+     *
+     * This sequence can only appear at index 0 of a bindings list — the
+     * compiler emits it before a single line of developer code, so a
+     * user-written assert (even one that also calls
+     * {@code extractSigHashType}) is lowered AFTER it, at a later index,
+     * and is never matched here.
+     *
+     * <p>We don't mark these two ANF nodes with the existing
+     * {@code isAutoInjectedStateCheck} field the way the exit-time
+     * continuation-hash assert is marked: that field is part of the
+     * serialized ANF IR, and setting it on the prologue asserts would add
+     * a key to {@code conformance/tests/*&#47;expected-ir.json} for every
+     * stateful fixture — a compiler-golden move this item must not cause.
+     * An {@link java.util.IdentityHashMap}-backed set is used so membership
+     * is by object REFERENCE, not by structural equality (two developer-
+     * written asserts with identical content must never collide with the
+     * prologue's own nodes).
+     */
+    private static java.util.Set<Map<String, Object>> detectAutoInjectedPrologueAsserts(
+        List<Map<String, Object>> body
+    ) {
+        java.util.Set<Map<String, Object>> result =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        if (body.size() < 8) return result;
+        Map<String, Object> b0 = body.get(0);
+        Map<String, Object> b1 = body.get(1);
+        Map<String, Object> b2 = body.get(2);
+        Map<String, Object> b3 = body.get(3);
+        Map<String, Object> b4 = body.get(4);
+        Map<String, Object> b5 = body.get(5);
+        Map<String, Object> b6 = body.get(6);
+        Map<String, Object> b7 = body.get(7);
+        Map<String, Object> v0 = asObject(b0.get("value"));
+        Map<String, Object> v1 = asObject(b1.get("value"));
+        Map<String, Object> v2 = asObject(b2.get("value"));
+        Map<String, Object> v3 = asObject(b3.get("value"));
+        Map<String, Object> v4 = asObject(b4.get("value"));
+        Map<String, Object> v5 = asObject(b5.get("value"));
+        Map<String, Object> v6 = asObject(b6.get("value"));
+        Map<String, Object> v7 = asObject(b7.get("value"));
+        if (v0 == null || !"load_param".equals(v0.get("kind")) || !"txPreimage".equals(v0.get("name"))) return result;
+        if (v1 == null || !"check_preimage".equals(v1.get("kind"))) return result;
+        if (v2 == null || !"assert".equals(v2.get("kind")) || !b1.get("name").equals(v2.get("value"))) return result;
+        if (v3 == null || !"load_param".equals(v3.get("kind")) || !"txPreimage".equals(v3.get("name"))) return result;
+        if (v4 == null || !"call".equals(v4.get("kind")) || !"extractSigHashType".equals(v4.get("func"))) return result;
+        List<String> args4 = stringList(v4.get("args"));
+        if (args4.isEmpty() || !args4.get(0).equals(b3.get("name"))) return result;
+        if (v5 == null || !"load_const".equals(v5.get("kind"))) return result;
+        if (v6 == null || !"bin_op".equals(v6.get("kind")) || !"===".equals(v6.get("op"))
+            || !b4.get("name").equals(v6.get("left")) || !b5.get("name").equals(v6.get("right"))) return result;
+        if (v7 == null || !"assert".equals(v7.get("kind")) || !b6.get("name").equals(v7.get("value"))) return result;
+        result.add(v2);
+        result.add(v7);
+        return result;
     }
 
     /**
@@ -639,12 +723,19 @@ public final class AnfInterpreter {
         // non-minimal) length of a prior op's result instead of re-minimising
         // its numeric value. `env` stays pure (decoded values) so state
         // serialization is unaffected.
-        Map<String, byte[]> scriptBytes
+        Map<String, byte[]> scriptBytes,
+        // F-164 (round 2): identity set of the auto-injected prologue's two
+        // assert VALUE nodes (checkPreimage's assert + the sighash-type
+        // assert) — see detectAutoInjectedPrologueAsserts. Computed once
+        // per bindings list by the short evalBindings overload; threaded
+        // unchanged through nested if/loop recursion here so object
+        // identity keeps working regardless of nesting depth.
+        java.util.Set<Map<String, Object>> mockedPrologueAsserts
     ) {
         for (Map<String, Object> binding : bindings) {
             String bindingName = (String) binding.get("name");
             Map<String, Object> valueNode = asObject(binding.get("value"));
-            Object val = evalValue(anf, valueNode, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, bindingName, continuationTaint, scriptBytes);
+            Object val = evalValue(anf, valueNode, env, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, bindingName, continuationTaint, scriptBytes, mockedPrologueAsserts);
             env.put(bindingName, val);
             if (isContinuationOrigin(valueNode) || refsTainted(valueNode, continuationTaint)) {
                 continuationTaint.add(bindingName);
@@ -718,7 +809,8 @@ public final class AnfInterpreter {
         String methodName,
         String bindingName,
         java.util.Set<String> continuationTaint,
-        Map<String, byte[]> scriptBytes
+        Map<String, byte[]> scriptBytes,
+        java.util.Set<Map<String, Object>> mockedPrologueAsserts
     ) {
         String kind = String.valueOf(value.getOrDefault("kind", ""));
 
@@ -873,7 +965,7 @@ public final class AnfInterpreter {
                     ? listOfObjects(value.get("then"))
                     : listOfObjects(value.get("else"));
                 Map<String, Object> childEnv = new LinkedHashMap<>(env);
-                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes);
+                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes, mockedPrologueAsserts);
                 env.putAll(childEnv);
                 if (!branch.isEmpty()) {
                     String lastName = (String) branch.get(branch.size() - 1).get("name");
@@ -897,7 +989,7 @@ public final class AnfInterpreter {
                 for (long i = 0; i < count; i++) {
                     env.put(iterVar, start.add(step.multiply(BigInteger.valueOf(i))));
                     Map<String, Object> loopEnv = new LinkedHashMap<>(env);
-                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes);
+                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, outputs, strict, realCrypto, witness, methodName, continuationTaint, scriptBytes, mockedPrologueAsserts);
                     env.putAll(loopEnv);
                     if (!body.isEmpty()) {
                         String lastName = (String) body.get(body.size() - 1).get("name");
@@ -925,6 +1017,19 @@ public final class AnfInterpreter {
                     if (Boolean.TRUE.equals(value.get("isAutoInjectedStateCheck"))) {
                         return null;
                     }
+                    // F-164 (round 2): the auto-injected prologue's
+                    // checkPreimage assert and sighash-type assert
+                    // (detected structurally — see
+                    // detectAutoInjectedPrologueAsserts) are mocked in
+                    // plain strict mode, matching PROTOCOL.md's documented
+                    // "crypto built-ins still mock-return true" contract.
+                    // Always empty when realCrypto is set (computed by the
+                    // short evalBindings overload), so
+                    // executeOnChainAuthoritative keeps enforcing both for
+                    // real.
+                    if (mockedPrologueAsserts.contains(value)) {
+                        return null;
+                    }
                     String predRef = (String) value.get("value");
                     Object cond = env.get(predRef);
                     if (!isTruthy(cond)) {
@@ -934,18 +1039,13 @@ public final class AnfInterpreter {
                 return null;
             }
             case "check_preimage": {
-                // On-chain-only: the on-chain script enforces sighash
-                // equality. Off-chain we can only mock it once the caller has
-                // supplied witness bytes (i.e. is genuinely simulating a
-                // concrete spend) — then mock-return TRUE so the wrapping
-                // `assert(check_preimage(...))` in the stateful-contract
-                // prologue doesn't trip strict mode. With no WitnessContext
-                // the preimage is unverifiable off-chain, so we return a
-                // falsy value and let strict mode report the failure at the
-                // prologue assert — matching the TS/Go/Rust/Ruby/Zig tiers
-                // (and the pinned cross-interpreter strict goldens). Real
-                // preimage verification belongs in executeOnChainAuthoritative.
-                return witness != null ? Boolean.TRUE : null;
+                // F-164: mirrors the "checkPreimage" call-path case below
+                // (mock TRUE unless a real-crypto context is active) — same
+                // mock/real split, regardless of whether a WitnessContext
+                // is also present.
+                if (realCrypto == null) return Boolean.TRUE;
+                String preRef = (String) value.get("preimage");
+                return verifyPreimageReal(env.get(preRef), realCrypto.sighash());
             }
             case "update_prop": {
                 String pname = (String) value.get("name");

@@ -107,6 +107,17 @@ const GOLDEN_MATCHERS = [
   (p) => /^conformance\/analyzer\/[^/]+\/expected-analyzer-report\.json$/.test(p),
   // Source-map goldens (per-tier).
   (p) => /^conformance\/source-map\/[^/]+\/[^/]+\/expected-source-map\.json$/.test(p),
+  // ANF-interpreter strict-mode execution goldens (F-164 round 2, new
+  // family — registered per the README's "Introducing a NEW golden
+  // family" procedure). `cross-interpreter-strict.test.ts` stamps these
+  // from the TS reference's `executeStrict` and then requires all other
+  // built per-tier drivers to reproduce them byte-for-byte, so a silent
+  // hand-edit here is exactly the issue-#122 risk: nothing but the TS
+  // reference's own (possibly buggy) output would ever check it. Scoped
+  // to `expected-strict/` only — the lenient `expected/` and
+  // `expected-real-crypto/` families are a separate registration should a
+  // future change need to move them.
+  (p) => /^conformance\/anf-interpreter\/expected-strict\/[^/]+\.json$/.test(p),
   // Decompiler baseline (self-produced coverage/idiom baseline).
   (p) => p === 'packages/decompiler/coverage-baseline.json',
   // Script-size regression baseline. The size gate compares each fixture's
