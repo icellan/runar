@@ -10,6 +10,7 @@ const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const envelope_sign = @import("sdk_envelope_sign.zig");
+const der_mod = @import("sdk_der.zig");
 
 // ---------------------------------------------------------------------------
 // Value tree — minimal JSON-shaped value used by the canonical serializer.
@@ -667,6 +668,8 @@ fn readI64(value: ?std.json.Value) ?i64 {
 
 fn verifyRawEcdsa(digest: [32]u8, der_sig: []const u8, sec1_pubkey: []const u8) !bool {
     const pub_key = Ecdsa.PublicKey.fromSec1(sec1_pubkey) catch return false;
+    // F-242: one signature, one byte string — strict DER before parsing.
+    if (!der_mod.isStrictDerSignature(der_sig)) return false;
     const sig = Ecdsa.Signature.fromDer(der_sig) catch return false;
     sig.verifyPrehashed(digest, pub_key) catch return false;
     return true;

@@ -118,10 +118,13 @@ module Runar
     # @param low_s     [Boolean] enforce BIP-62's low-S rule (default true).
     #                  Pass false for protocols that are not Bitcoin script —
     #                  the signed envelope accepts high-S like the TS reference.
+    # @param sighash_byte [Boolean] accept one trailing sighash type byte
+    #                  (default true, the OP_CHECKSIG convention). The signed
+    #                  envelope passes false: its signature is bare DER.
     # @return [Boolean]
     # rubocop:disable Metrics/MethodLength, Metrics/AbcSize, Metrics/CyclomaticComplexity
-    def ecdsa_verify(sig_bytes, pk_bytes, msg_hash, low_s: true)
-      parsed = parse_der_signature_bytes(sig_bytes)
+    def ecdsa_verify(sig_bytes, pk_bytes, msg_hash, low_s: true, sighash_byte: true)
+      parsed = parse_der_signature_bytes(sig_bytes, sighash_byte: sighash_byte)
       return false if parsed.nil?
 
       sig_r, sig_s = parsed
@@ -187,58 +190,50 @@ module Runar
     #
     # DER format: 0x30 [total_len] 0x02 [r_len] [r_bytes] 0x02 [s_len] [s_bytes]
     #
+    # Strict DER, the BIP66 rule a node applies to every OP_CHECKSIG signature
+    # (F-242): the SEQUENCE length covers exactly r and s, both INTEGERs are
+    # non-empty, non-negative (top bit clear unless behind a 0x00 pad) and
+    # minimally encoded, and nothing follows s. Any other encoding of the same
+    # (r, s) is refused, so one signature has exactly one byte string.
+    #
+    # @param sighash_byte [Boolean] accept (and drop) one trailing sighash type
+    #   byte after the SEQUENCE, the OP_CHECKSIG convention. Pass false for
+    #   bare DER, e.g. a signed envelope.
     # rubocop:disable Metrics/MethodLength, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
-    def parse_der_signature_bytes(der_bytes)
+    def parse_der_signature_bytes(der_bytes, sighash_byte: true)
       bytes = der_bytes.bytes
-      return nil if bytes.length < 8
-      return nil if bytes[0] != 0x30
-
-      declared_len      = bytes[1]
-      expected_pure_der = declared_len + 2
+      return nil if bytes.length < 2
 
       # Strip trailing sighash byte if present (Bitcoin convention)
-      if bytes.length == expected_pure_der + 1
-        bytes = bytes[0, expected_pure_der]
-      elsif bytes.length != expected_pure_der
-        return nil
-      end
+      bytes = bytes[0, bytes.length - 1] if sighash_byte && bytes.length == bytes[1] + 3
 
-      idx = 2
+      n = bytes.length
+      return nil if n < 8 || n > 72
+      return nil if bytes[0] != 0x30 || bytes[1] != n - 2
 
-      # Parse r
-      return nil if idx >= bytes.length || bytes[idx] != 0x02
+      r_len = bytes[3]
+      return nil if bytes[2] != 0x02 || r_len.zero? || 5 + r_len >= n
 
-      idx   += 1
-      r_len  = bytes[idx]
-      idx   += 1
-      return nil if r_len.zero?
-      return nil if idx + r_len > bytes.length
+      s_len = bytes[5 + r_len]
+      return nil if bytes[4 + r_len] != 0x02 || s_len.zero?
+      return nil if r_len + s_len + 6 != n
 
-      r_component = bytes[idx, r_len]
-      # Non-minimal encoding: leading 0x00 when the next byte's high bit is clear
-      return nil if r_len > 1 && r_component[0] == 0x00 && r_component[1] & 0x80 == 0
+      r_component = bytes[4, r_len]
+      s_component = bytes[6 + r_len, s_len]
+      return nil unless canonical_der_integer?(r_component) && canonical_der_integer?(s_component)
 
-      parsed_r  = r_component.pack('C*').unpack1('H*').to_i(16)
-      idx      += r_len
-
-      # Parse s
-      return nil if idx >= bytes.length || bytes[idx] != 0x02
-
-      idx   += 1
-      s_len  = bytes[idx]
-      idx   += 1
-      return nil if s_len.zero?
-      return nil if idx + s_len > bytes.length
-
-      s_component = bytes[idx, s_len]
-      # Non-minimal encoding: leading 0x00 when the next byte's high bit is clear
-      return nil if s_len > 1 && s_component[0] == 0x00 && s_component[1] & 0x80 == 0
-
-      parsed_s = s_component.pack('C*').unpack1('H*').to_i(16)
-
-      [parsed_r, parsed_s]
+      [r_component.pack('C*').unpack1('H*').to_i(16), s_component.pack('C*').unpack1('H*').to_i(16)]
     end
     # rubocop:enable Metrics/MethodLength, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+    # A DER INTEGER body is canonical for an unsigned value when it is not
+    # negative (top bit clear) and carries no superfluous leading 0x00.
+    def canonical_der_integer?(component)
+      return false if component[0] & 0x80 != 0
+      return false if component.length > 1 && component[0].zero? && component[1] & 0x80 == 0
+
+      true
+    end
 
     # Encode r and s integers as a binary DER ECDSA signature.
     #

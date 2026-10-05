@@ -4,6 +4,7 @@ const base = @import("base.zig");
 const hex = @import("hex.zig");
 const test_keys = @import("test_keys.zig");
 const wots = @import("wots_helpers.zig");
+const der_mod = @import("sdk_der.zig");
 
 const Sha256Hasher = std.crypto.hash.sha2.Sha256;
 const test_message = "runar-test-message-v1";
@@ -1463,19 +1464,12 @@ fn parseFixturePrivateKey(priv_key_hex: []const u8) !bsvz.crypto.PrivateKey {
 }
 
 fn parseChecksigDer(sig: []const u8) ?bsvz.crypto.DerSignature {
-    if (sig.len < 2 or sig[0] != 0x30) {
-        return bsvz.crypto.DerSignature.fromDer(sig) catch null;
-    }
-
-    const pure_der_len = @as(usize, sig[1]) + 2;
-    if (sig.len == pure_der_len + 1) {
-        const tx_sig = bsvz.crypto.TxSignature.fromChecksigFormat(sig) catch return null;
-        return tx_sig.der;
-    }
-    if (sig.len == pure_der_len) {
-        return bsvz.crypto.DerSignature.fromDer(sig) catch null;
-    }
-    return null;
+    if (sig.len < 2) return null;
+    // One trailing sighash type byte (OP_CHECKSIG convention) is dropped.
+    const pure = if (sig.len == @as(usize, sig[1]) + 3) sig[0 .. sig.len - 1] else sig;
+    // F-242: strict DER (BIP66), as OP_CHECKSIG on a node.
+    if (!der_mod.isStrictDerSignature(pure)) return null;
+    return bsvz.crypto.DerSignature.fromDer(pure) catch null;
 }
 
 fn dupeBytes(bytes: []const u8) []const u8 {
@@ -2786,6 +2780,70 @@ test "verifySLHDSA_SHA2_256f accepts a real deterministic signature and rejects 
         47,
         &verifySLHDSA_SHA2_256f,
     );
+}
+
+// F-242 (CL-BUG-160): strict DER (BIP66). checkSig parsed through the Zig std
+// ECDSA fromDer, which left-pads each INTEGER into a 32-byte buffer and checks
+// the sign bit of that BUFFER: for an r or s shorter than 32 bytes the check
+// sees a pad zero, so a missing 0x00 sign pad or a superfluous 0x00 passed,
+// and two byte strings verified as one signature. The conformance/sdk-der
+// vectors for this shape are signed over other digests, and checkSig only
+// verifies the test message, so this test finds keys whose test-message
+// signature has such a component and re-encodes it.
+//
+// Proves: for both shapes (31-byte component given a superfluous 0x00;
+// 0x00-padded component with the pad removed) the canonical signature
+// verifies and the re-encoding does not. Does not prove anything about other
+// verify paths (see sdk_anf_interpreter.zig and the envelope interop test).
+test "checkSig refuses non-canonical DER INTEGERs shorter than 32 bytes (F-242)" {
+    var found_short: usize = 0;
+    var found_pad: usize = 0;
+    var k: u16 = 1;
+    while (k < 4000 and (found_short == 0 or found_pad == 0)) : (k += 1) {
+        var priv_bytes = [_]u8{0x11} ** 32;
+        priv_bytes[30] = @intCast(k >> 8);
+        priv_bytes[31] = @intCast(k & 0xff);
+        const priv = try bsvz.crypto.PrivateKey.fromBytes(priv_bytes);
+        const pub_key = try priv.publicKey();
+        const sig = try priv.signSha256(test_message);
+        const der = sig.asSlice();
+        try std.testing.expect(checkSig(der, &pub_key.bytes));
+
+        const r_len: usize = der[3];
+        const r = der[4 .. 4 + r_len];
+        const s = der[6 + r_len ..];
+        for ([_]bool{ true, false }) |is_r| {
+            const c = if (is_r) r else s;
+            var buf: [80]u8 = undefined;
+            var nc: [34]u8 = undefined;
+            var new_c: []const u8 = undefined;
+            if (c.len == 31 and c[0] & 0x80 == 0) {
+                nc[0] = 0;
+                @memcpy(nc[1 .. 1 + c.len], c);
+                new_c = nc[0 .. c.len + 1];
+                found_short += 1;
+            } else if (c.len == 32 and c[0] == 0 and c[1] & 0x80 != 0) {
+                new_c = c[1..];
+                found_pad += 1;
+            } else continue;
+            const nr = if (is_r) new_c else r;
+            const ns = if (is_r) s else new_c;
+            buf[0] = 0x30;
+            buf[1] = @intCast(4 + nr.len + ns.len);
+            buf[2] = 0x02;
+            buf[3] = @intCast(nr.len);
+            @memcpy(buf[4 .. 4 + nr.len], nr);
+            buf[4 + nr.len] = 0x02;
+            buf[5 + nr.len] = @intCast(ns.len);
+            @memcpy(buf[6 + nr.len .. 6 + nr.len + ns.len], ns);
+            const malformed = buf[0 .. 6 + nr.len + ns.len];
+            if (checkSig(malformed, &pub_key.bytes)) {
+                std.debug.print("F-242: key {d}: non-canonical {s} re-encoding verified\n", .{ k, if (is_r) "r" else "s" });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    try std.testing.expect(found_short > 0 and found_pad > 0);
 }
 
 test "non-SLH PQ stubs still fail closed" {

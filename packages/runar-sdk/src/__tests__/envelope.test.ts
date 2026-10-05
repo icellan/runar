@@ -578,3 +578,54 @@ describe('verifyEnvelope malleability vectors (F-138)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-242 (CL-BUG-160): strict-DER envelope signatures.
+//
+// The fixture's `der-*` rejection vectors each re-encode a validly signed
+// envelope's signature (`_canonical_sig`) without changing (r, s): a missing
+// 0x00 sign pad, a superfluous 0x00, bytes inside or after the SEQUENCE, BER
+// long-form lengths. TS delegated to @bsv/sdk `Signature.fromDER`, which
+// accepts an INTEGER whose top bit is set without the sign pad, so TS verified
+// three of them as ok; the six other tiers replay the same vectors through
+// their generic rejection_vectors loop. TS replays them here with Date.now()
+// pinned, since its verify has no injectable clock.
+//
+// Proves: every `der-*` vector's control envelope verifies, and the re-encoded
+// one is bad-sig. Does not prove anything about checkSig / the ANF interpreter
+// (der-strict.test.ts) or about high-S, which stays accepted (F-138).
+// ---------------------------------------------------------------------------
+
+describe('verifyEnvelope strict-DER vectors (F-242)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('accepts each control signature and refuses its re-encoding as bad-sig', () => {
+    const fixturePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../conformance/sdk-envelope/fixtures.json',
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      verify_now_ms: number;
+      rejection_vectors: Array<{
+        _vector_id?: string;
+        _canonical_sig?: string;
+        reason: string;
+        envelope: SignedEnvelope;
+      }>;
+    };
+    vi.spyOn(Date, 'now').mockReturnValue(fixture.verify_now_ms);
+
+    const derVectors = fixture.rejection_vectors.filter((v) => v._vector_id?.startsWith('der-'));
+    expect(derVectors.length).toBeGreaterThan(0);
+    for (const v of derVectors) {
+      const control = verifyEnvelope({ envelope: { ...v.envelope, sig: v._canonical_sig! } });
+      expect(control.ok, `${v._vector_id}: control reason=${control.reason}`).toBe(true);
+
+      const r = verifyEnvelope({ envelope: v.envelope });
+      expect(r.ok, `${v._vector_id}: re-encoded signature must not verify`).toBe(false);
+      expect(r.reason, v._vector_id).toBe(v.reason);
+    }
+  });
+});

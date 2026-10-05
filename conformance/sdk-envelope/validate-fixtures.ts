@@ -221,7 +221,31 @@ function main(): void {
     }
   }
 
-  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors validate against the TS reference.`);
+  // 6. F-242 strict-DER rejection vectors. Each `der-*` vector must re-encode
+  //    a signature (`_canonical_sig`) that really verifies for its payload, so
+  //    the encoding is the only thing a tier can reject it for.
+  const derVectors = (fixture.rejection_vectors as Array<{
+    _vector_id?: string;
+    _canonical_sig?: string;
+    reason: string;
+    envelope: { payload: string; sig: string; pubkey: string };
+  }>).filter((v) => v._vector_id?.startsWith('der-'));
+  if (derVectors.length === 0) fail('rejection_vectors carries no der-* (F-242) vectors');
+  for (const v of derVectors) {
+    if (v.reason !== 'bad-sig') fail(`${v._vector_id}: reason must be bad-sig`);
+    if (!v._canonical_sig || v._canonical_sig === v.envelope.sig) {
+      fail(`${v._vector_id}: _canonical_sig missing or identical to the re-encoded sig`);
+    }
+    const d = Hash.sha256(Utils.toArray(v.envelope.payload, 'utf8'));
+    const ok = ecdsaVerifyRaw(
+      new BigNumber(d),
+      Signature.fromDER(Utils.toArray(v._canonical_sig, 'hex')),
+      PublicKey.fromDER(Utils.toArray(v.envelope.pubkey, 'hex')),
+    );
+    if (!ok) fail(`${v._vector_id}: _canonical_sig does not verify for the payload`);
+  }
+
+  console.log(`OK: ${vectors.length} canonical-JSON vectors + valid envelope signature + ${signingVectors.length} signing vectors + ${depthVectors.length} depth vectors + ${malleabilityVectors.length} malleability vectors + ${derVectors.length} strict-DER controls validate against the TS reference.`);
 }
 
 main();

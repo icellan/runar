@@ -1602,6 +1602,10 @@ public final class AnfInterpreter {
                 der = Arrays.copyOf(der, declared);
             }
         }
+        // F-242: strict DER (BIP66), as OP_CHECKSIG on a node.
+        if (!StrictDer.isStrictDerSignature(der)) {
+            return false;
+        }
         try {
             ECPoint q = LocalSigner.DOMAIN.getCurve().decodePoint(pkBytes);
             ECPublicKeyParameters params = new ECPublicKeyParameters(q, LocalSigner.DOMAIN);

@@ -4,6 +4,7 @@
 
 import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
 import { hasLoneSurrogate } from './lone-surrogate.js';
+import { isStrictDerSignature } from './der.js';
 import { verify as ecdsaVerifyRaw } from '@bsv/sdk/primitives/ECDSA';
 import { canonicalJsonStringify, InputLimits } from 'runar-ir-schema';
 
@@ -260,9 +261,12 @@ export function verifyEnvelope(opts: VerifyEnvelopeOpts): VerifyEnvelopeResult {
     const digest = Hash.sha256(Utils.toArray(env.payload, 'utf8'));
     const sigBytes = Utils.toArray(env.sig, 'hex');
     const pkBytes = Utils.toArray(env.pubkey, 'hex');
-    const sig = Signature.fromDER(sigBytes);
-    const pubKey = PublicKey.fromDER(pkBytes);
-    sigValid = ecdsaVerifyRaw(new BigNumber(digest), sig, pubKey);
+    // F-242: one signature, one byte string — strict DER before parsing.
+    if (isStrictDerSignature(sigBytes)) {
+      const sig = Signature.fromDER(sigBytes);
+      const pubKey = PublicKey.fromDER(pkBytes);
+      sigValid = ecdsaVerifyRaw(new BigNumber(digest), sig, pubKey);
+    }
   } catch {
     sigValid = false;
   }

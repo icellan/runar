@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'json'
 
 # Test vectors generated from the Python reference implementation (runar/ecdsa.py).
 # All expected values were produced by running packages/runar-py with the same keys.
@@ -104,6 +105,43 @@ RSpec.describe Runar::ECDSA do
       expect(result).not_to be_nil
       r, = result
       expect(r).to eq(0xe2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df0)
+    end
+  end
+
+  # -------------------------------------------------------------------------
+  # F-242 (CL-BUG-160): strict DER (BIP66). The parser used to accept bytes
+  # left over inside the SEQUENCE and an INTEGER whose top bit is set without
+  # the 0x00 sign pad, so several byte strings verified as one signature.
+  # conformance/sdk-der/vectors.json holds the cross-tier vectors: every
+  # ok=false entry re-encodes a valid signature's (r, s), so only the encoding
+  # can make it fail.
+  #
+  # Proves: parse_der_signature returns nil for every malformed encoding and
+  # the canonical (r, s) for every control, and ECDSA.verify reaches the
+  # fixture verdict. Does not prove: anything about the curve arithmetic, or
+  # about P-256/P-384 (nist_ecdsa.rb parses DER through OpenSSL).
+  # -------------------------------------------------------------------------
+  describe 'strict DER (F-242)' do
+    der_vectors_path = File.expand_path('../../../../../conformance/sdk-der/vectors.json', __FILE__)
+    der_fixture = JSON.parse(File.read(der_vectors_path))
+
+    it 'carries both accepted controls and refused encodings' do
+      oks = der_fixture['vectors'].map { |v| v['ok'] }
+      expect(oks).to include(true)
+      expect(oks).to include(false)
+    end
+
+    der_fixture['vectors'].each do |v|
+      it "#{v['ok'] ? 'accepts' : 'refuses'} #{v['id']}" do
+        parsed = described_class.parse_der_signature(v['sig'])
+        if v['ok']
+          expect(parsed).to eq(described_class.parse_der_signature(v['canonical_sig']))
+          expect(parsed).not_to be_nil
+        else
+          expect(parsed).to be_nil, "#{v['id']}: parsed to #{parsed.inspect}"
+        end
+        expect(described_class.verify(v['digest'], v['sig'], der_fixture['pubkey'])).to be(v['ok'])
+      end
     end
   end
 

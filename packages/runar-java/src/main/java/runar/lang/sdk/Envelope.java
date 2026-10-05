@@ -647,6 +647,10 @@ public final class Envelope {
         try {
             byte[] sigBytes = fromHex(env.sig);
             byte[] pkBytes = fromHex(env.pubkey);
+            // F-242: one signature, one byte string — strict DER before parsing.
+            if (!StrictDer.isStrictDerSignature(sigBytes)) {
+                return new VerifyEnvelopeResult(false, VerifyEnvelopeReason.BAD_SIG, parsed);
+            }
             ECPoint q = LocalSigner.DOMAIN.getCurve().decodePoint(pkBytes);
             ECPublicKeyParameters params = new ECPublicKeyParameters(q, LocalSigner.DOMAIN);
             ECDSASigner verifier = new ECDSASigner();

@@ -730,6 +730,10 @@ func VerifyEnvelope(opts VerifyEnvelopeOpts) VerifyEnvelopeResult {
 	if err != nil {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadSig, Data: parsed}
 	}
+	// F-242: one signature, one byte string — strict DER before parsing.
+	if !isStrictDERSignature(sigBytes) {
+		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadSig, Data: parsed}
+	}
 	sig, err := ec.FromDER(sigBytes)
 	if err != nil {
 		return VerifyEnvelopeResult{OK: false, Reason: ReasonBadSig, Data: parsed}

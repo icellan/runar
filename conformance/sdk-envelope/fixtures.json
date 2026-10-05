@@ -238,6 +238,188 @@
         "nonce": 1700000000000,
         "expiresAt": 1700000030000
       }
+    },
+    {
+      "_vector_id": "der-trailing-byte-inside-sequence",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with its signature re-encoded: the SEQUENCE length counts one extra 0x00 byte after s. Same (r, s) as _canonical_sig; strict DER refuses it.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3046022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c3100",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-extra-integer-inside-sequence",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with its signature re-encoded: a third INTEGER (02 01 01) inside the SEQUENCE after s. Same (r, s) as _canonical_sig; strict DER refuses it.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3048022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31020101",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-trailing-bytes-after-sequence",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with its signature re-encoded: two bytes (00 00) after the end of the SEQUENCE. Same (r, s) as _canonical_sig; strict DER refuses it.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c310000",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-extra-zero-r",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with its signature re-encoded: r carries a superfluous leading 0x00. Same (r, s) as _canonical_sig; strict DER refuses it.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "304602220000c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-extra-zero-s",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with its signature re-encoded: s carries a superfluous leading 0x00. Same (r, s) as _canonical_sig; strict DER refuses it.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3046022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e520221001cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-long-form-sequence-length",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with its signature re-encoded: the SEQUENCE length is in BER long form (81 xx). Same (r, s) as _canonical_sig; strict DER refuses it.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "308145022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-long-form-integer-length",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with its signature re-encoded: r's length is in BER long form (81 xx). Same (r, s) as _canonical_sig; strict DER refuses it.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "304602812100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-trailing-byte-after-sequence",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope's signature followed by one extra byte. An envelope signature is bare DER (no sighash type), so the checkSig convention of stripping one trailing byte does not apply.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c3141",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-unprefixed-high-bit-r",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "valid_envelope with r's 0x00 sign pad removed (a negative INTEGER in DER). Same (r, s) as _canonical_sig.",
+      "_canonical_sig": "3045022100c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":7,\"nonce\":1700000000000}",
+        "sig": "30440220c038da9733f2f50b3ed1a85ecb1d55f90a585452a2061d55548eae5372d70e5202201cf82154d3787b4efba49cf86d157c0e35fcfda78de712aab804c135c5e41c31",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-unprefixed-high-bit-short-r",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "A validly signed envelope (priv=1, its _canonical_sig verifies) re-encoded: r is 32 bytes with its top bit set but the 0x00 sign pad is missing. Same (r, s) as _canonical_sig. Catches a parser that left-pads every INTEGER to 32 bytes and checks the sign bit of the padded buffer.",
+      "_canonical_sig": "3044022000acf21f6236b11f0d229f7e51ef4bae96e1a10982e433e566c7c7d17b0e31bb02202eb88e78679b958381f8180e82b59eecd3adc0fa4ab718b59bdac6b4e3651f77",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":394,\"nonce\":1700000000000}",
+        "sig": "3043021facf21f6236b11f0d229f7e51ef4bae96e1a10982e433e566c7c7d17b0e31bb02202eb88e78679b958381f8180e82b59eecd3adc0fa4ab718b59bdac6b4e3651f77",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-unprefixed-high-bit-short-s",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "A validly signed envelope (priv=1, its _canonical_sig verifies) re-encoded: s is 32 bytes with its top bit set but the 0x00 sign pad is missing. Same (r, s) as _canonical_sig. Catches a parser that left-pads every INTEGER to 32 bytes and checks the sign bit of the padded buffer.",
+      "_canonical_sig": "304402204de7cf585be520cf27e9f93ea2673fb409acf61ca4b7108dcff1e8e3399518aa022000e5322f5fa3d6fdc4fd799459ee9b46147281b30fecac9e4340bcd280273c66",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":35,\"nonce\":1700000000000}",
+        "sig": "304302204de7cf585be520cf27e9f93ea2673fb409acf61ca4b7108dcff1e8e3399518aa021fe5322f5fa3d6fdc4fd799459ee9b46147281b30fecac9e4340bcd280273c66",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-non-minimal-zero-short-r",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "A validly signed envelope (priv=1, its _canonical_sig verifies) re-encoded: a 31-byte r carries a superfluous leading 0x00. Same (r, s) as _canonical_sig. Catches a parser that left-pads every INTEGER to 32 bytes and checks the sign bit of the padded buffer.",
+      "_canonical_sig": "3043021f5d1b8ee35b24dfd394ade5c8c511e069198f53a1030b3c8e35fbfb4b8e154c02200d39edf9b057144ee1c76c67a96267af127225294a6b3eac36d0963e63bcd64b",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":488,\"nonce\":1700000000000}",
+        "sig": "30440220005d1b8ee35b24dfd394ade5c8c511e069198f53a1030b3c8e35fbfb4b8e154c02200d39edf9b057144ee1c76c67a96267af127225294a6b3eac36d0963e63bcd64b",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
+    },
+    {
+      "_vector_id": "der-non-minimal-zero-short-s",
+      "_audit_ref": "F-242 / CL-BUG-160",
+      "_notes": "A validly signed envelope (priv=1, its _canonical_sig verifies) re-encoded: a 31-byte s carries a superfluous leading 0x00. Same (r, s) as _canonical_sig. Catches a parser that left-pads every INTEGER to 32 bytes and checks the sign bit of the padded buffer.",
+      "_canonical_sig": "3044022100fc0d59d5bad6e1285cb0ca6f76f1f8a0d415bc169c8be7504d4c2e139c64b8f6021f081466a78996133ad86f08a21366b9f702c57f8f1ddc3e21d0ac20daf3ffdc",
+      "reason": "bad-sig",
+      "envelope": {
+        "payload": "{\"expiresAt\":1700000030000,\"kind\":\"hello\",\"n\":211,\"nonce\":1700000000000}",
+        "sig": "3045022100fc0d59d5bad6e1285cb0ca6f76f1f8a0d415bc169c8be7504d4c2e139c64b8f6022000081466a78996133ad86f08a21366b9f702c57f8f1ddc3e21d0ac20daf3ffdc",
+        "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "nonce": 1700000000000,
+        "expiresAt": 1700000030000
+      }
     }
   ],
   "note_on_pubkey_not_allowed": "pubkey-not-allowed cannot be expressed in a tier-agnostic fixture: it depends on caller-supplied expected_keys. Each tier verifies this reason in its own unit tests by passing a non-matching allowlist; the wire bytes are independent.",

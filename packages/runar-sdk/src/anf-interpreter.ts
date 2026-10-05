@@ -47,6 +47,7 @@ import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
 // the BIP-143 sighash directly with no extra hashing.
 import { verify as ecdsaVerifyRaw } from '@bsv/sdk/primitives/ECDSA';
 import { decodeScriptNumber } from './script-utils.js';
+import { isStrictDerSignature } from './der.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1380,6 +1381,9 @@ function parseDerSignatureMaybeWithSighashByte(bytes: number[]): InstanceType<ty
   } else {
     pure = bytes;
   }
+  // F-242: strict DER (BIP66), as OP_CHECKSIG on a node. Signature.fromDER
+  // alone accepts an unpadded high-bit INTEGER.
+  if (!isStrictDerSignature(pure)) return null;
   try {
     return Signature.fromDER(pure);
   } catch {

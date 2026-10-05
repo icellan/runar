@@ -528,7 +528,7 @@ def verify_envelope(
     except ValueError:
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_SIG, parsed)
     digest = hashlib.sha256(envelope.payload.encode("utf-8")).digest()
-    if not ecdsa_verify(sig_bytes, pk_bytes, digest):
+    if not ecdsa_verify(sig_bytes, pk_bytes, digest, sighash_byte=False):
         return VerifyEnvelopeResult(False, VerifyEnvelopeReason.BAD_SIG, parsed)
 
     # 6. Allowlist.

@@ -1,5 +1,6 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
+const der_mod = @import("sdk_der.zig");
 
 // ---------------------------------------------------------------------------
 // ANF Interpreter — compute state transitions from ANF IR
@@ -1933,6 +1934,9 @@ fn verifyEcdsaReal(
         }
     }
 
+    // F-242: strict DER (BIP66), as OP_CHECKSIG on a node. bsvz's relaxed
+    // reader alone strips leading zeros and ignores trailing bytes.
+    if (!der_mod.isStrictDerSignature(der_slice)) return false;
     return bsvz.crypto.verifyDigest256RelaxedSec1(pk_bytes, sighash, der_slice) catch false;
 }
 
@@ -3483,6 +3487,66 @@ test "executeOnChainAuthoritative — checkSig fails with a corrupted signature"
         .{ .sighash = sighash },
     );
     try std.testing.expectError(StrictError.AssertionFailure, result);
+}
+
+// F-242 (CL-BUG-160): strict DER (BIP66). conformance/sdk-der/vectors.json
+// is the cross-tier vector set: every ok=false entry re-encodes a valid
+// signature's (r, s), so only the encoding can make it fail. This path parsed
+// through bsvz's lax DER reader, which strips any number of leading 0x00
+// bytes, ignores the sign bit and ignores bytes after the SEQUENCE.
+//
+// Proves: executeOnChainAuthoritative's checkSig reaches the fixture verdict
+// on every vector. Does not prove builtins.checkSig (tested in builtins.zig)
+// or the envelope path (sdk_envelope_interop_test.zig replays the der-*
+// rejection vectors).
+test "executeOnChainAuthoritative — checkSig applies strict DER to every sdk-der vector (F-242)" {
+    const allocator = std.testing.allocator;
+    const anf = buildSigGuardAnf();
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "../../conformance/sdk-der/vectors.json", allocator, .limited(1024 * 1024));
+    defer allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    const pk_hex = parsed.value.object.get("pubkey").?.string;
+    const vectors = parsed.value.object.get("vectors").?.array;
+    try std.testing.expect(vectors.items.len > 0);
+
+    for (vectors.items) |v| {
+        const id = v.object.get("id").?.string;
+        const want_ok = v.object.get("ok").?.bool;
+        var sighash: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&sighash, v.object.get("digest").?.string);
+
+        var current_state = std.StringHashMap(ANFValue).init(allocator);
+        defer current_state.deinit();
+        try current_state.put("value", .{ .int = 0 });
+        var args = std.StringHashMap(ANFValue).init(allocator);
+        defer args.deinit();
+        try args.put("sig", .{ .bytes = v.object.get("sig").?.string });
+        try args.put("pk", .{ .bytes = pk_hex });
+
+        const result = executeOnChainAuthoritative(
+            allocator, &anf, "unlock", current_state, args, &.{},
+            .{ .sighash = sighash },
+        );
+        if (result) |res| {
+            var state = res.state;
+            defer state.deinit();
+            for (res.data_outputs) |d| allocator.free(d.script);
+            allocator.free(res.data_outputs);
+            for (res.raw_outputs) |d| allocator.free(d.script);
+            allocator.free(res.raw_outputs);
+            if (!want_ok) {
+                std.debug.print("F-242: {s} verified, want refused\n", .{id});
+                return error.TestUnexpectedResult;
+            }
+        } else |err| {
+            if (want_ok or err != StrictError.AssertionFailure) {
+                std.debug.print("F-242: {s} -> {s}, want ok={}\n", .{ id, @errorName(err), want_ok });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
 }
 
 test "executeOnChainAuthoritative — checkPreimage passes when hash256(preimage) == sighash" {

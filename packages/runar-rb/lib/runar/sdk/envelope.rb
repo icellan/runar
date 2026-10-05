@@ -411,7 +411,7 @@ module Runar
         digest = Digest::SHA256.digest(envelope.payload)
         # F-138: plain ECDSA, no BIP-62 low-S rule — the TS reference (and
         # every other tier) accepts a high-S envelope signature.
-        unless Runar::ECDSA.ecdsa_verify(sig_bytes, pk_bytes, digest, low_s: false)
+        unless Runar::ECDSA.ecdsa_verify(sig_bytes, pk_bytes, digest, low_s: false, sighash_byte: false)
           return { ok: false, reason: 'bad-sig', data: parsed }
         end
 

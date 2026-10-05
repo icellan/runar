@@ -14,6 +14,7 @@
  */
 
 import { PrivateKey, PublicKey, Signature } from '@bsv/sdk';
+import { isStrictDerSignature } from 'runar-sdk';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -143,5 +144,8 @@ function parseDERSignature(bytes: Uint8Array): InstanceType<typeof Signature> | 
     derBytes = Array.from(bytes);
   }
 
+  // F-242: strict DER (BIP66), as OP_CHECKSIG on a node. Signature.fromDER
+  // alone accepts an unpadded high-bit INTEGER.
+  if (!isStrictDerSignature(derBytes)) return null;
   return Signature.fromDER(derBytes);
 }

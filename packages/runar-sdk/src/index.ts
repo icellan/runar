@@ -92,6 +92,7 @@ export type {
 
 // Signed-envelope wire protocol for overlay apps
 export { canonicalJson, signEnvelope, verifyEnvelope } from './envelope.js';
+export { isStrictDerSignature } from './der.js';
 export type {
   SignedEnvelope,
   SignEnvelopeOpts,
