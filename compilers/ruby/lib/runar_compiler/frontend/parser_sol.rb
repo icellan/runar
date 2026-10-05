@@ -616,7 +616,7 @@ module RunarCompiler
       def parse_sol_constructor(properties)
         location = loc
         expect_ident("constructor")
-        params = parse_sol_params
+        params = parse_sol_params(strip_underscore: true)
         body = parse_sol_block
 
         # Build proper constructor body with super() call and assignments
@@ -712,7 +712,7 @@ module RunarCompiler
 
       # -- Parameter parsing: (Type name, Type name, ...) -------------------
 
-      def parse_sol_params
+      def parse_sol_params(strip_underscore: false)
         expect(TOK_LPAREN)
         params = []
 
@@ -727,8 +727,10 @@ module RunarCompiler
 
           name_tok = expect(TOK_IDENT)
           param_name = name_tok.value
-          # Strip leading underscore (Solidity convention)
-          param_name = param_name[1..] if param_name.start_with?("_")
+          # Strip leading underscore (Solidity convention) for CONSTRUCTOR
+          # params only, whose body parse_sol_constructor renames. Method
+          # params keep their name verbatim, as in TS 01-parse-sol.ts (F-200).
+          param_name = param_name[1..] if strip_underscore && param_name.start_with?("_")
 
           params << ParamNode.new(
             name: param_name,

@@ -545,7 +545,7 @@ class _SolParser:
     def parse_sol_constructor(self, properties: list[PropertyNode]) -> MethodNode:
         location = self.loc()
         self.expect_ident("constructor")
-        params = self.parse_sol_params()
+        params = self.parse_sol_params(strip_underscore=True)
         body = self.parse_sol_block()
 
         # Build proper constructor body with super() call and assignments
@@ -645,7 +645,7 @@ class _SolParser:
 
     # -- Parameter parsing: (Type name, Type name, ...) ---------------------
 
-    def parse_sol_params(self) -> list[ParamNode]:
+    def parse_sol_params(self, strip_underscore: bool = False) -> list[ParamNode]:
         self.expect(TOK_LPAREN)
         params: list[ParamNode] = []
 
@@ -664,8 +664,10 @@ class _SolParser:
 
             name_tok = self.expect(TOK_IDENT)
             param_name = name_tok.value
-            # Strip leading underscore if present (Solidity convention)
-            if param_name.startswith("_"):
+            # Strip leading underscore (Solidity convention) for CONSTRUCTOR
+            # params only, whose body parse_sol_constructor renames. Method
+            # params keep their name verbatim, as in TS 01-parse-sol.ts (F-200).
+            if strip_underscore and param_name.startswith("_"):
                 param_name = param_name[1:]
 
             params.append(
