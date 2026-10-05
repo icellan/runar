@@ -63,6 +63,15 @@ export function computeOpPushTx(
     lockingScript: out.lockingScript,
   }));
 
+  // N-041: the subscript is the locking script of the UTXO being spent (e.g.
+  // a provider's contract UTXO). An empty one can never match the script the
+  // node executes, so refuse it.
+  if (!subscript) {
+    throw new Error(
+      `computeOpPushTx: refusing to build a preimage for input ${inputIndex} with an empty subscript (scriptCode)`,
+    );
+  }
+
   // If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
   // The separator byte itself (0xab) is excluded from the scriptCode.
   let scriptCode = subscript;

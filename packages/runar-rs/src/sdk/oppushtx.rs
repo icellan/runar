@@ -67,6 +67,15 @@ pub fn compute_op_push_tx_with_code_sep_sighash(
     // UNTRIMMED and sign it anyway — a wrong scriptCode, with no error, from a
     // fund-moving primitive. Reject it instead: there is no correct signature
     // for a separator offset that is not in the script.
+    // N-041: the subscript is the locking script of the UTXO being spent (e.g.
+    // a provider's contract UTXO). An empty one can never match the script the
+    // node executes, so refuse it.
+    if subscript.is_empty() {
+        return Err(format!(
+            "compute_op_push_tx: refusing to build a preimage for input {} with an empty subscript (scriptCode)",
+            input_index
+        ));
+    }
     let mut effective_subscript = subscript.to_string();
     if code_separator_index >= 0 {
         let trim_pos = ((code_separator_index as usize) + 1) * 2;
@@ -583,5 +592,16 @@ mod tests {
         let (sig_with_sep, _) = compute_op_push_tx_with_code_sep(&tx_hex, 0, "ab51", 1000, 0).unwrap();
         let (sig_plain, _) = compute_op_push_tx(&tx_hex, 0, "51", 1000).unwrap();
         assert_eq!(sig_with_sep, sig_plain, "trimmed subscript must produce same signature as plain subscript");
+    }
+
+    /// N-041: an empty subscript can never match the script the node
+    /// executes, so building a preimage over it is refused. Does not cover a
+    /// non-empty subscript whose separator is its last byte (still accepted).
+    #[test]
+    fn n041_empty_subscript_is_refused() {
+        let tx_hex = minimal_tx_hex();
+        let err = compute_op_push_tx(&tx_hex, 0, "", 1000).unwrap_err();
+        assert!(err.contains("empty subscript"), "{}", err);
+        assert!(compute_op_push_tx_with_code_sep(&tx_hex, 0, "51ab51", 1000, 1).is_ok());
     }
 }

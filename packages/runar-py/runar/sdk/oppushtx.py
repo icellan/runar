@@ -45,6 +45,14 @@ def compute_op_push_tx(
     byte. Defaults to 0x41 (ALL|FORKID); it must match the method's declared
     ``@sighash`` mode or the on-chain OP_PUSH_TX binding fails to verify.
     """
+    # N-041: the subscript is the locking script of the UTXO being spent (e.g.
+    # a provider's contract UTXO). An empty one can never match the script the
+    # node executes, so refuse it.
+    if not subscript:
+        raise ValueError(
+            f"compute_op_push_tx: refusing to build a preimage for input {input_index} "
+            "with an empty subscript (scriptCode)"
+        )
     # If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
     effective_subscript = subscript
     if code_separator_index >= 0:

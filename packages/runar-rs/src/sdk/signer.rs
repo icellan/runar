@@ -245,6 +245,14 @@ impl Signer for ExternalSigner {
         satoshis: i64,
         sig_hash_type: Option<u32>,
     ) -> Result<String, String> {
+        // N-041: the subscript is the BIP-143 scriptCode. An empty one yields
+        // a signature no OP_CHECKSIG accepts, so refuse it before calling out.
+        if subscript.is_empty() {
+            return Err(format!(
+                "ExternalSigner.sign: refusing to sign input {} with an empty subscript (scriptCode); pass the locking script of the UTXO being spent",
+                input_index
+            ));
+        }
         (self.sign_fn)(tx_hex, input_index, subscript, satoshis, sig_hash_type)
     }
 }
@@ -493,5 +501,25 @@ mod tests {
         assert_eq!(signer.get_public_key().unwrap(), "02aabb");
         assert_eq!(signer.get_address().unwrap(), "myaddr");
         assert_eq!(signer.sign("tx", 0, "51", 100, None).unwrap(), "sig_hex");
+    }
+
+    // N-041: ExternalSigner passed an empty subscript (BIP-143 scriptCode)
+    // straight to its callback. Proves it now refuses one without calling out;
+    // does not prove anything about what the external signer does.
+    #[test]
+    fn n041_external_signer_refuses_empty_subscript() {
+        let called = std::rc::Rc::new(std::cell::Cell::new(false));
+        let c = called.clone();
+        let signer = ExternalSigner::new(
+            || Ok("02aabb".to_string()),
+            || Ok("myaddr".to_string()),
+            move |_tx, _idx, _sub, _sats, _sht| {
+                c.set(true);
+                Ok("sig_hex".to_string())
+            },
+        );
+        let err = signer.sign("tx", 0, "", 100, None).unwrap_err();
+        assert!(err.contains("empty subscript"), "{}", err);
+        assert!(!called.get(), "callback invoked with an empty subscript");
     }
 }

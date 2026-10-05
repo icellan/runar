@@ -3109,7 +3109,9 @@ func TestExternalSigner_Sign_DelegatesToCallback(t *testing.T) {
 	)
 
 	txHex := "0100000001" + strings.Repeat("00", 32) + "00000000ffffffff00ffffffff0100000000000000001976a914" + strings.Repeat("00", 20) + "88ac00000000"
-	sig, err := signer.Sign(txHex, 2, "", 50000, nil)
+	// N-041: ExternalSigner now refuses an empty subscript, so pass a real
+	// P2PKH scriptCode instead of "".
+	sig, err := signer.Sign(txHex, 2, "76a914"+strings.Repeat("00", 20)+"88ac", 50000, nil)
 	if err != nil {
 		t.Fatalf("Sign error: %v", err)
 	}

@@ -1251,9 +1251,9 @@ WhatsOnChainProvider provider = new WhatsOnChainProvider("mainnet");   // or "te
 String hex = provider.getRawTransaction(txid);
 ```
 
-Endpoints used: `/address/{addr}/unspent`, `/tx/raw`,
-`/tx/hash/{txid}`, `/tx/{txid}/hex`. The unspent listing does not
-include the locking script — fetch via `getUtxo(...)` when needed.
+Endpoints used: `/address/{addr}/unspent`, `/tx/raw`, `/tx/{txid}/hex`.
+The unspent listing does not include the locking script, so `listUtxos` and
+`getUtxo(...)` read it from the hash-verified `/tx/{txid}/hex` (F-040, N-041).
 
 The network must be exactly `"mainnet"` or `"testnet"`. `null`, the empty
 string, and any typo throw `IllegalArgumentException` rather than defaulting,

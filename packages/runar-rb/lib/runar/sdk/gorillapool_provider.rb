@@ -52,7 +52,7 @@ module Runar
           raise "GorillaPool getTransaction: txid mismatch: response body hashes to #{body_txid}, requested #{txid}"
         end
 
-        decode_raw_tx(body_txid, raw)
+        self.class.decode_raw_tx(body_txid, raw)
       end
 
       # Broadcast a raw transaction hex to the network.
@@ -292,12 +292,13 @@ module Runar
 
       # Decode a serialized transaction into TransactionData, keeping the input
       # scripts. The SDK's other raw-tx parsers (Bip143 / OpPushTx) discard
-      # scriptSigs, so this one is local.
+      # scriptSigs, so this one is local. A class method so
+      # WhatsOnChainProvider can share it (N-041).
       #
       # @param txid [String]
       # @param raw [String] binary transaction bytes
       # @return [TransactionData]
-      def decode_raw_tx(txid, raw)
+      def self.decode_raw_tx(txid, raw)
         pos = 0
         read = lambda do |n|
           raise 'GorillaPool getTransaction: truncated transaction' if pos + n > raw.bytesize

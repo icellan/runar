@@ -50,6 +50,13 @@ final class OpPushTx {
     static byte[] preimage(RawTx tx, int inputIndex, byte[] scriptCode, long satoshis, int sigHashFlag) {
         if (tx == null) throw new IllegalArgumentException("OpPushTx.preimage: tx is null");
         if (scriptCode == null) throw new IllegalArgumentException("OpPushTx.preimage: scriptCode is null");
+        // N-041: the scriptCode is what the preimage commits to. An empty one can
+        // never match the script the node executes, so refuse it.
+        if (scriptCode.length == 0) {
+            throw new IllegalArgumentException(
+                "OpPushTx.preimage: refusing to build a preimage for input " + inputIndex
+                    + " with an empty subscript (scriptCode)");
+        }
         if (inputIndex < 0 || inputIndex >= tx.inputs.size()) {
             throw new IllegalArgumentException(
                 "OpPushTx.preimage: inputIndex " + inputIndex

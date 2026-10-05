@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 
@@ -50,32 +49,6 @@ func NewWhatsOnChainProvider(network string) (*WhatsOnChainProvider, error) {
 // WoC API response shapes
 // ---------------------------------------------------------------------------
 
-type wocTxVin struct {
-	Txid      string `json:"txid"`
-	Vout      int    `json:"vout"`
-	ScriptSig struct {
-		Hex string `json:"hex"`
-	} `json:"scriptSig"`
-	Sequence uint32 `json:"sequence"`
-}
-
-type wocTxVout struct {
-	Value        float64 `json:"value"`
-	N            int     `json:"n"`
-	ScriptPubKey struct {
-		Hex string `json:"hex"`
-	} `json:"scriptPubKey"`
-}
-
-type wocTxResponse struct {
-	Txid     string      `json:"txid"`
-	Version  int         `json:"version"`
-	Vin      []wocTxVin  `json:"vin"`
-	Vout     []wocTxVout `json:"vout"`
-	Locktime int         `json:"locktime"`
-	Hex      string      `json:"hex,omitempty"`
-}
-
 type wocUtxoEntry struct {
 	TxHash string `json:"tx_hash"`
 	TxPos  int    `json:"tx_pos"`
@@ -88,50 +61,77 @@ type wocUtxoEntry struct {
 // ---------------------------------------------------------------------------
 
 // GetTransaction fetches a transaction by its txid from WhatsOnChain.
+//
+// N-041: GET /tx/hash/{txid} has no "hex" field and reports values as float
+// BTC, so Raw was always empty. The serialized tx is fetched via
+// GET /tx/{txid}/hex instead, its double-SHA256 must equal the txid, and
+// inputs/outputs (with integer satoshis) are parsed from those bytes.
 func (p *WhatsOnChainProvider) GetTransaction(txid string) (*TransactionData, error) {
-	url := fmt.Sprintf("%s/tx/hash/%s", p.baseURL, txid)
-	resp, err := p.client.Get(url)
+	tx, rawHex, err := p.fetchVerifiedTx(txid, "getTransaction")
 	if err != nil {
-		return nil, fmt.Errorf("WoC getTransaction request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("WoC getTransaction failed (%d): %s", resp.StatusCode, string(body))
+		return nil, err
 	}
 
-	var data wocTxResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("WoC getTransaction JSON decode failed: %w", err)
-	}
-
-	inputs := make([]TxInput, len(data.Vin))
-	for i, vin := range data.Vin {
+	inputs := make([]TxInput, len(tx.Inputs))
+	for i, inp := range tx.Inputs {
+		var scriptHex string
+		if inp.UnlockingScript != nil {
+			scriptHex = hex.EncodeToString(*inp.UnlockingScript)
+		}
 		inputs[i] = TxInput{
-			Txid:        vin.Txid,
-			OutputIndex: vin.Vout,
-			Script:      vin.ScriptSig.Hex,
-			Sequence:    vin.Sequence,
+			Txid:        inp.SourceTXID.String(),
+			OutputIndex: int(inp.SourceTxOutIndex),
+			Script:      scriptHex,
+			Sequence:    inp.SequenceNumber,
 		}
 	}
 
-	outputs := make([]TxOutput, len(data.Vout))
-	for i, vout := range data.Vout {
+	outputs := make([]TxOutput, len(tx.Outputs))
+	for i, out := range tx.Outputs {
+		var scriptHex string
+		if out.LockingScript != nil {
+			scriptHex = hex.EncodeToString(*out.LockingScript)
+		}
 		outputs[i] = TxOutput{
-			Satoshis: int64(math.Round(vout.Value * 1e8)),
-			Script:   vout.ScriptPubKey.Hex,
+			Satoshis: int64(out.Satoshis),
+			Script:   scriptHex,
 		}
 	}
 
 	return &TransactionData{
-		Txid:     data.Txid,
-		Version:  data.Version,
+		Txid:     strings.ToLower(txid),
+		Version:  int(tx.Version),
 		Inputs:   inputs,
 		Outputs:  outputs,
-		Locktime: data.Locktime,
-		Raw:      data.Hex,
+		Locktime: int(tx.LockTime),
+		Raw:      rawHex,
 	}, nil
+}
+
+// fetchVerifiedTx fetches GET /tx/{txid}/hex and requires its double-SHA256
+// (reversed) to equal txid before parsing it (F-040 / N-041).
+func (p *WhatsOnChainProvider) fetchVerifiedTx(txid, context string) (*transaction.Transaction, string, error) {
+	rawHex, err := p.GetRawTransaction(txid)
+	if err != nil {
+		return nil, "", fmt.Errorf("WoC %s: fetching tx %s: %w", context, txid, err)
+	}
+	raw, err := hex.DecodeString(rawHex)
+	if err != nil {
+		return nil, "", fmt.Errorf("WoC %s: /tx/%s/hex body is not hex: %w", context, txid, err)
+	}
+	first := sha256.Sum256(raw)
+	second := sha256.Sum256(first[:])
+	for a, b := 0, len(second)-1; a < b; a, b = a+1, b-1 {
+		second[a], second[b] = second[b], second[a]
+	}
+	if got := hex.EncodeToString(second[:]); got != strings.ToLower(txid) {
+		return nil, "", fmt.Errorf("WoC %s: txid mismatch: /tx/%s/hex body hashes to %s", context, txid, got)
+	}
+	tx, err := transaction.NewTransactionFromBytes(raw)
+	if err != nil {
+		return nil, "", fmt.Errorf("WoC %s: parsing tx %s: %w", context, txid, err)
+	}
+	return tx, hex.EncodeToString(raw), nil
 }
 
 // Broadcast sends a transaction to the network via WhatsOnChain.
@@ -171,6 +171,9 @@ func (p *WhatsOnChainProvider) Broadcast(tx *transaction.Transaction) (string, e
 // must equal the txid, and tx_pos must be an output whose value equals the
 // listed value. Any failure is an error; no UTXO is returned with an empty
 // script.
+//
+// Note: WoC caps this legacy listing at about 1000 entries, so an address
+// holding more UTXOs is returned truncated.
 func (p *WhatsOnChainProvider) GetUtxos(address string) ([]UTXO, error) {
 	url := fmt.Sprintf("%s/address/%s/unspent", p.baseURL, address)
 	resp, err := p.client.Get(url)
@@ -194,25 +197,10 @@ func (p *WhatsOnChainProvider) GetUtxos(address string) ([]UTXO, error) {
 	for i, e := range entries {
 		tx, ok := txs[e.TxHash]
 		if !ok {
-			rawHex, err := p.GetRawTransaction(e.TxHash)
+			var err error
+			tx, _, err = p.fetchVerifiedTx(e.TxHash, "getUtxos")
 			if err != nil {
-				return nil, fmt.Errorf("WoC getUtxos: fetching tx %s: %w", e.TxHash, err)
-			}
-			raw, err := hex.DecodeString(rawHex)
-			if err != nil {
-				return nil, fmt.Errorf("WoC getUtxos: /tx/%s/hex body is not hex: %w", e.TxHash, err)
-			}
-			first := sha256.Sum256(raw)
-			second := sha256.Sum256(first[:])
-			for a, b := 0, len(second)-1; a < b; a, b = a+1, b-1 {
-				second[a], second[b] = second[b], second[a]
-			}
-			if got := hex.EncodeToString(second[:]); got != strings.ToLower(e.TxHash) {
-				return nil, fmt.Errorf("WoC getUtxos: txid mismatch: /tx/%s/hex body hashes to %s", e.TxHash, got)
-			}
-			tx, err = transaction.NewTransactionFromBytes(raw)
-			if err != nil {
-				return nil, fmt.Errorf("WoC getUtxos: parsing tx %s: %w", e.TxHash, err)
+				return nil, err
 			}
 			txs[e.TxHash] = tx
 		}
@@ -248,6 +236,13 @@ func (p *WhatsOnChainProvider) GetUtxos(address string) ([]UTXO, error) {
 
 // GetContractUtxo finds a UTXO by its script hash from WhatsOnChain.
 // Returns nil if no UTXO is found with the given script hash.
+//
+// N-041: WoC's GET /script/{scriptHash}/unspent listing (a legacy array, or a
+// {script, result} object on the /unspent/all family) carries outpoints and
+// values but no locking script. The first entry's tx is fetched via
+// GET /tx/{txid}/hex and hash-verified; tx_pos must be an output whose value
+// equals the listed value, whose script is non-empty and hashes (sha256,
+// reversed: WoC's scripthash) to scriptHash. Any failure is an error.
 func (p *WhatsOnChainProvider) GetContractUtxo(scriptHash string) (*UTXO, error) {
 	url := fmt.Sprintf("%s/script/%s/unspent", p.baseURL, scriptHash)
 	resp, err := p.client.Get(url)
@@ -264,8 +259,23 @@ func (p *WhatsOnChainProvider) GetContractUtxo(scriptHash string) (*UTXO, error)
 		return nil, fmt.Errorf("WoC getContractUtxo failed (%d): %s", resp.StatusCode, string(body))
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("WoC getContractUtxo read failed: %w", err)
+	}
 	var entries []wocUtxoEntry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+	if trimmed := strings.TrimSpace(string(body)); strings.HasPrefix(trimmed, "{") {
+		var obj struct {
+			Result *[]wocUtxoEntry `json:"result"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return nil, fmt.Errorf("WoC getContractUtxo JSON decode failed: %w", err)
+		}
+		if obj.Result == nil {
+			return nil, fmt.Errorf("WoC getContractUtxo: unexpected listing shape for %s", scriptHash)
+		}
+		entries = *obj.Result
+	} else if err := json.Unmarshal(body, &entries); err != nil {
 		return nil, fmt.Errorf("WoC getContractUtxo JSON decode failed: %w", err)
 	}
 
@@ -274,21 +284,44 @@ func (p *WhatsOnChainProvider) GetContractUtxo(scriptHash string) (*UTXO, error)
 	}
 
 	first := entries[0]
-	utxo := &UTXO{
+	tx, _, err := p.fetchVerifiedTx(first.TxHash, "getContractUtxo")
+	if err != nil {
+		return nil, err
+	}
+	if first.TxPos < 0 || first.TxPos >= len(tx.Outputs) {
+		return nil, fmt.Errorf("WoC getContractUtxo: no output %d in tx %s (%d outputs)", first.TxPos, first.TxHash, len(tx.Outputs))
+	}
+	out := tx.Outputs[first.TxPos]
+	if first.Value < 0 || uint64(first.Value) != out.Satoshis {
+		return nil, fmt.Errorf("WoC getContractUtxo: value mismatch for %s:%d: listing says %d, tx says %d", first.TxHash, first.TxPos, first.Value, out.Satoshis)
+	}
+	var script []byte
+	if out.LockingScript != nil {
+		script = *out.LockingScript
+	}
+	if len(script) == 0 {
+		return nil, fmt.Errorf("WoC getContractUtxo: empty locking script for %s:%d", first.TxHash, first.TxPos)
+	}
+	h := sha256.Sum256(script)
+	for a, b := 0, len(h)-1; a < b; a, b = a+1, b-1 {
+		h[a], h[b] = h[b], h[a]
+	}
+	if got := hex.EncodeToString(h[:]); got != strings.ToLower(scriptHash) {
+		return nil, fmt.Errorf("WoC getContractUtxo: script hash mismatch for %s:%d: output script hashes to %s, requested %s", first.TxHash, first.TxPos, got, scriptHash)
+	}
+	scriptHex := hex.EncodeToString(script)
+	if err := assertScriptHexUnderLimit(
+		scriptHex, MaxScriptBytes,
+		fmt.Sprintf("WhatsOnChainProvider.GetContractUtxo(%s)", scriptHash),
+	); err != nil {
+		return nil, err
+	}
+	return &UTXO{
 		Txid:        first.TxHash,
 		OutputIndex: first.TxPos,
 		Satoshis:    first.Value,
-		Script:      "",
-	}
-	if utxo.Script != "" {
-		if err := assertScriptHexUnderLimit(
-			utxo.Script, MaxScriptBytes,
-			fmt.Sprintf("WhatsOnChainProvider.GetContractUtxo(%s)", scriptHash),
-		); err != nil {
-			return nil, err
-		}
-	}
-	return utxo, nil
+		Script:      scriptHex,
+	}, nil
 }
 
 // GetNetwork returns the network this provider is connected to.

@@ -89,6 +89,14 @@ module Runar
     # @return [Array(String, String)] [sig_hex, preimage_hex]
     def compute_op_push_tx(tx_hex, input_index, subscript_hex, satoshis, code_separator_index = -1,
                            sighash_type = SIGHASH_ALL_FORKID)
+      # N-041: the subscript is the locking script of the UTXO being spent
+      # (e.g. a provider's contract UTXO). An empty one can never match the
+      # script the node executes, so refuse it.
+      if subscript_hex.nil? || subscript_hex.empty?
+        raise ArgumentError,
+              "compute_op_push_tx: refusing to build a preimage for input #{input_index} " \
+              'with an empty subscript (scriptCode)'
+      end
       effective_subscript = get_subscript(subscript_hex, code_separator_index)
       preimage_hex = compute_preimage(tx_hex, input_index, effective_subscript, satoshis, sighash_type)
       sig_hex = sign_preimage_k1(preimage_hex, sighash_type)

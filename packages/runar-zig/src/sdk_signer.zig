@@ -232,6 +232,9 @@ pub const ExternalSigner = struct {
 
     fn signImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, subscript: []const u8, satoshis: i64, sighash_type: ?u32) SignerError![]u8 {
         const self: *ExternalSigner = @ptrCast(@alignCast(ctx));
+        // N-041: the subscript is the BIP-143 scriptCode. An empty one yields
+        // a signature no OP_CHECKSIG accepts, so refuse it before calling out.
+        if (subscript.len == 0) return error.EmptySubscript;
         return self.sign_fn(allocator, tx_hex, input_index, subscript, satoshis, sighash_type);
     }
 };
@@ -314,4 +317,34 @@ test "F-040 LocalSigner refuses an empty subscript" {
     } else |err| {
         try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
     }
+}
+
+// N-041: ExternalSigner passed an empty subscript (BIP-143 scriptCode)
+// straight to its callback. Proves it now refuses one with EmptySubscript
+// without calling out, and still delegates a non-empty one; does not prove
+// anything about what the external signer does.
+var n041_external_calls: usize = 0;
+
+fn n041ExternalSign(allocator: std.mem.Allocator, _: []const u8, _: usize, _: []const u8, _: i64, _: ?u32) SignerError![]u8 {
+    n041_external_calls += 1;
+    return allocator.dupe(u8, "deadbeef") catch return error.OutOfMemory;
+}
+
+test "N-041 ExternalSigner refuses an empty subscript" {
+    const allocator = std.testing.allocator;
+    n041_external_calls = 0;
+    var ext = ExternalSigner{ .pub_key = "02aabb", .address = "addr", .sign_fn = n041ExternalSign };
+    var s = ext.signer();
+    if (s.sign(allocator, "00", 0, "", 1000, null)) |sig| {
+        allocator.free(sig);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
+    }
+    try std.testing.expectEqual(@as(usize, 0), n041_external_calls);
+
+    const sig = try s.sign(allocator, "00", 0, "51", 1000, null);
+    defer allocator.free(sig);
+    try std.testing.expectEqualStrings("deadbeef", sig);
+    try std.testing.expectEqual(@as(usize, 1), n041_external_calls);
 }

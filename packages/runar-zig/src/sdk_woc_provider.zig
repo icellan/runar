@@ -139,109 +139,76 @@ pub const WhatsOnChainProvider = struct {
     // VTable implementations
     // -----------------------------------------------------------------------
 
+    /// N-041: GET /tx/hash/{txid} has no "hex" field and reports values as
+    /// float BTC, so raw was always empty. The serialized tx is fetched via
+    /// GET /tx/{txid}/hex instead, its double-SHA256 must equal the txid, and
+    /// inputs/outputs (with integer satoshis) are parsed from those bytes. A
+    /// hash mismatch or an unparseable body is NetworkError.
     fn getTransactionImpl(ctx: *anyopaque, allocator: std.mem.Allocator, txid: []const u8) provider_mod.ProviderError!types.TransactionData {
         const self: *WhatsOnChainProvider = @ptrCast(@alignCast(ctx));
 
-        const path = std.fmt.allocPrint(self.allocator, "/tx/hash/{s}", .{txid}) catch return provider_mod.ProviderError.OutOfMemory;
-        defer self.allocator.free(path);
+        const raw = try self.fetchVerifiedRaw(allocator, txid);
+        defer allocator.free(raw);
+        const tx = bsvz.transaction.Transaction.parse(allocator, raw) catch |err| switch (err) {
+            error.OutOfMemory => return provider_mod.ProviderError.OutOfMemory,
+            else => return provider_mod.ProviderError.NetworkError,
+        };
+        defer tx.deinit(allocator);
 
-        const body = try self.httpGet(allocator, path);
-        defer allocator.free(body);
-
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return provider_mod.ProviderError.NetworkError;
-        defer parsed.deinit();
-
-        const root = parsed.value.object;
-        const tx_txid = if (root.get("txid")) |v| (if (v == .string) v.string else txid) else txid;
-        const version: i32 = if (root.get("version")) |v| (if (v == .integer) @as(i32, @intCast(v.integer)) else 1) else 1;
-        const locktime: u32 = if (root.get("locktime")) |v| (if (v == .integer) @as(u32, @intCast(v.integer)) else 0) else 0;
-
-        // Parse inputs
-        var inputs: []types.TxInput = &.{};
-        if (root.get("vin")) |vin_val| {
-            if (vin_val == .array) {
-                const items = vin_val.array.items;
-                var inp_list = allocator.alloc(types.TxInput, items.len) catch return provider_mod.ProviderError.OutOfMemory;
-                for (items, 0..) |item, i| {
-                    if (item == .object) {
-                        const obj = item.object;
-                        const in_txid = if (obj.get("txid")) |v| (if (v == .string) v.string else "") else "";
-                        const vout: i32 = if (obj.get("vout")) |v| (if (v == .integer) @as(i32, @intCast(v.integer)) else 0) else 0;
-                        var script_hex: []const u8 = "";
-                        if (obj.get("scriptSig")) |ss| {
-                            if (ss == .object) {
-                                if (ss.object.get("hex")) |h| {
-                                    if (h == .string) script_hex = h.string;
-                                }
-                            }
-                        }
-                        const seq: u32 = if (obj.get("sequence")) |v| (if (v == .integer) @as(u32, @intCast(v.integer)) else 0xffffffff) else 0xffffffff;
-                        inp_list[i] = .{
-                            .txid = allocator.dupe(u8, in_txid) catch return provider_mod.ProviderError.OutOfMemory,
-                            .output_index = vout,
-                            .script = allocator.dupe(u8, script_hex) catch return provider_mod.ProviderError.OutOfMemory,
-                            .sequence = seq,
-                        };
-                    } else {
-                        inp_list[i] = .{};
-                    }
-                }
-                inputs = inp_list;
-            }
+        const inputs = allocator.alloc(types.TxInput, tx.inputs.len) catch return provider_mod.ProviderError.OutOfMemory;
+        for (tx.inputs, 0..) |input, i| {
+            var prev = input.previous_outpoint.txid.bytes;
+            std.mem.reverse(u8, &prev);
+            const prev_hex = std.fmt.bytesToHex(prev, .lower);
+            inputs[i] = .{
+                .txid = allocator.dupe(u8, &prev_hex) catch return provider_mod.ProviderError.OutOfMemory,
+                .output_index = @bitCast(input.previous_outpoint.index),
+                .script = try hexAlloc(allocator, input.unlocking_script.bytes),
+                .sequence = input.sequence,
+            };
         }
 
-        // Parse outputs
-        var outputs: []types.TxOutput = &.{};
-        if (root.get("vout")) |vout_val| {
-            if (vout_val == .array) {
-                const items = vout_val.array.items;
-                var out_list = allocator.alloc(types.TxOutput, items.len) catch return provider_mod.ProviderError.OutOfMemory;
-                for (items, 0..) |item, i| {
-                    if (item == .object) {
-                        const obj = item.object;
-                        // value is in BTC (float), convert to satoshis
-                        var sats: i64 = 0;
-                        if (obj.get("value")) |v| {
-                            if (v == .float) {
-                                sats = @intFromFloat(@round(v.float * 1e8));
-                            } else if (v == .integer) {
-                                sats = @intCast(v.integer);
-                            }
-                        }
-                        var script_hex: []const u8 = "";
-                        if (obj.get("scriptPubKey")) |sp| {
-                            if (sp == .object) {
-                                if (sp.object.get("hex")) |h| {
-                                    if (h == .string) script_hex = h.string;
-                                }
-                            }
-                        }
-                        out_list[i] = .{
-                            .satoshis = sats,
-                            .script = allocator.dupe(u8, script_hex) catch return provider_mod.ProviderError.OutOfMemory,
-                        };
-                    } else {
-                        out_list[i] = .{};
-                    }
-                }
-                outputs = out_list;
-            }
+        const outputs = allocator.alloc(types.TxOutput, tx.outputs.len) catch return provider_mod.ProviderError.OutOfMemory;
+        for (tx.outputs, 0..) |output, i| {
+            outputs[i] = .{
+                .satoshis = output.satoshis,
+                .script = try hexAlloc(allocator, output.locking_script.bytes),
+            };
         }
 
-        // Raw hex
-        var raw: []const u8 = &.{};
-        if (root.get("hex")) |v| {
-            if (v == .string) raw = allocator.dupe(u8, v.string) catch return provider_mod.ProviderError.OutOfMemory;
-        }
-
+        const txid_lower = std.ascii.allocLowerString(allocator, txid) catch return provider_mod.ProviderError.OutOfMemory;
         return .{
-            .txid = allocator.dupe(u8, tx_txid) catch return provider_mod.ProviderError.OutOfMemory,
-            .version = version,
+            .txid = txid_lower,
+            .version = tx.version,
             .inputs = inputs,
             .outputs = outputs,
-            .locktime = locktime,
-            .raw = raw,
+            .locktime = tx.lock_time,
+            .raw = try hexAlloc(allocator, raw),
         };
+    }
+
+    fn hexAlloc(allocator: std.mem.Allocator, bytes: []const u8) provider_mod.ProviderError![]u8 {
+        const out = allocator.alloc(u8, bytes.len * 2) catch return provider_mod.ProviderError.OutOfMemory;
+        _ = bsvz.primitives.hex.encodeLower(bytes, out) catch unreachable;
+        return out;
+    }
+
+    /// GET /tx/{txid}/hex and require its double-SHA256 (reversed) to equal
+    /// txid (F-040 / N-041). Returns the owned raw bytes.
+    fn fetchVerifiedRaw(self: *WhatsOnChainProvider, allocator: std.mem.Allocator, txid: []const u8) provider_mod.ProviderError![]u8 {
+        const raw_hex = try getRawTransactionImpl(@ptrCast(self), allocator, txid);
+        defer allocator.free(raw_hex);
+        const raw = bsvz.primitives.hex.decode(allocator, raw_hex) catch |err| switch (err) {
+            error.OutOfMemory => return provider_mod.ProviderError.OutOfMemory,
+            else => return provider_mod.ProviderError.NetworkError,
+        };
+        errdefer allocator.free(raw);
+
+        var digest = bsvz.crypto.hash.hash256(raw).bytes;
+        std.mem.reverse(u8, &digest);
+        const body_txid = std.fmt.bytesToHex(digest, .lower);
+        if (!std.ascii.eqlIgnoreCase(&body_txid, txid)) return provider_mod.ProviderError.NetworkError;
+        return raw;
     }
 
     fn broadcastImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8) provider_mod.ProviderError![]u8 {
@@ -273,6 +240,9 @@ pub const WhatsOnChainProvider = struct {
     /// entry, a hash mismatch, a missing output, a value mismatch or an empty
     /// script is NetworkError (the provider's decode-failure error); no UTXO
     /// is returned with an empty script.
+    ///
+    /// Note: WoC caps this legacy listing at about 1000 entries, so an
+    /// address holding more UTXOs is returned truncated.
     fn getUtxosImpl(ctx: *anyopaque, allocator: std.mem.Allocator, address: []const u8) provider_mod.ProviderError![]types.UTXO {
         const self: *WhatsOnChainProvider = @ptrCast(@alignCast(ctx));
 
@@ -328,18 +298,8 @@ pub const WhatsOnChainProvider = struct {
     /// GET /tx/{txid}/hex, verify it hashes to txid, and return output
     /// `index`'s locking script as owned hex (F-040).
     fn fetchOutputScript(self: *WhatsOnChainProvider, allocator: std.mem.Allocator, txid: []const u8, index: usize, value: i64) provider_mod.ProviderError![]u8 {
-        const raw_hex = try getRawTransactionImpl(@ptrCast(self), allocator, txid);
-        defer allocator.free(raw_hex);
-        const raw = bsvz.primitives.hex.decode(allocator, raw_hex) catch |err| switch (err) {
-            error.OutOfMemory => return provider_mod.ProviderError.OutOfMemory,
-            else => return provider_mod.ProviderError.NetworkError,
-        };
+        const raw = try self.fetchVerifiedRaw(allocator, txid);
         defer allocator.free(raw);
-
-        var digest = bsvz.crypto.hash.hash256(raw).bytes;
-        std.mem.reverse(u8, &digest);
-        const body_txid = std.fmt.bytesToHex(digest, .lower);
-        if (!std.ascii.eqlIgnoreCase(&body_txid, txid)) return provider_mod.ProviderError.NetworkError;
 
         const tx = bsvz.transaction.Transaction.parse(allocator, raw) catch |err| switch (err) {
             error.OutOfMemory => return provider_mod.ProviderError.OutOfMemory,
@@ -357,6 +317,14 @@ pub const WhatsOnChainProvider = struct {
         return hex_out;
     }
 
+    /// N-041: WoC's GET /script/{scriptHash}/unspent listing (a legacy
+    /// array, or a {script, result} object on the /unspent/all family)
+    /// carries outpoints and values but no locking script. The first entry's
+    /// tx is fetched via GET /tx/{txid}/hex and hash-verified; tx_pos must be
+    /// an output whose value equals the listed value, whose script is
+    /// non-empty and hashes (sha256, reversed: WoC's scripthash) to
+    /// `script_hash`. A malformed listing or any of those failures is
+    /// NetworkError; an empty listing or a 404 listing is null.
     fn getContractUtxoImpl(ctx: *anyopaque, allocator: std.mem.Allocator, script_hash: []const u8) provider_mod.ProviderError!?types.UTXO {
         const self: *WhatsOnChainProvider = @ptrCast(@alignCast(ctx));
 
@@ -372,23 +340,52 @@ pub const WhatsOnChainProvider = struct {
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return provider_mod.ProviderError.NetworkError;
         defer parsed.deinit();
 
-        if (parsed.value != .array) return null;
-        const items = parsed.value.array.items;
+        const items = switch (parsed.value) {
+            .array => |a| a.items,
+            .object => |o| blk: {
+                const r = o.get("result") orelse return provider_mod.ProviderError.NetworkError;
+                if (r != .array) return provider_mod.ProviderError.NetworkError;
+                break :blk r.array.items;
+            },
+            else => return provider_mod.ProviderError.NetworkError,
+        };
         if (items.len == 0) return null;
 
         const first = items[0];
-        if (first != .object) return null;
+        if (first != .object) return provider_mod.ProviderError.NetworkError;
         const obj = first.object;
+        const tx_hash_v = obj.get("tx_hash") orelse return provider_mod.ProviderError.NetworkError;
+        const tx_pos_v = obj.get("tx_pos") orelse return provider_mod.ProviderError.NetworkError;
+        const value_v = obj.get("value") orelse return provider_mod.ProviderError.NetworkError;
+        if (tx_hash_v != .string or tx_pos_v != .integer or value_v != .integer) return provider_mod.ProviderError.NetworkError;
+        if (tx_pos_v.integer < 0 or tx_pos_v.integer > std.math.maxInt(i32)) return provider_mod.ProviderError.NetworkError;
+        const tx_hash = tx_hash_v.string;
+        const tx_pos: usize = @intCast(tx_pos_v.integer);
+        const value: i64 = value_v.integer;
 
-        const tx_hash = if (obj.get("tx_hash")) |v| (if (v == .string) v.string else "") else "";
-        const tx_pos: i32 = if (obj.get("tx_pos")) |v| (if (v == .integer) @as(i32, @intCast(v.integer)) else 0) else 0;
-        const value: i64 = if (obj.get("value")) |v| (if (v == .integer) @as(i64, @intCast(v.integer)) else 0) else 0;
+        const script = try self.fetchOutputScript(allocator, tx_hash, tx_pos, value);
+        errdefer allocator.free(script);
+
+        const script_bytes = bsvz.primitives.hex.decode(allocator, script) catch |err| switch (err) {
+            error.OutOfMemory => return provider_mod.ProviderError.OutOfMemory,
+            else => return provider_mod.ProviderError.NetworkError,
+        };
+        defer allocator.free(script_bytes);
+        var h: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(script_bytes, &h, .{});
+        std.mem.reverse(u8, &h);
+        const got = std.fmt.bytesToHex(h, .lower);
+        if (!std.ascii.eqlIgnoreCase(&got, script_hash)) return provider_mod.ProviderError.NetworkError;
+
+        const c = std.fmt.allocPrint(allocator, "WhatsOnChainProvider.getContractUtxo({s})", .{script_hash}) catch return provider_mod.ProviderError.OutOfMemory;
+        defer allocator.free(c);
+        errors_mod.assertScriptHexUnderLimit(script, errors_mod.MAX_SCRIPT_BYTES, c) catch return provider_mod.ProviderError.ScriptSizeExceeded;
 
         return .{
             .txid = allocator.dupe(u8, tx_hash) catch return provider_mod.ProviderError.OutOfMemory,
-            .output_index = tx_pos,
+            .output_index = @intCast(tx_pos),
             .satoshis = value,
-            .script = allocator.dupe(u8, "") catch return provider_mod.ProviderError.OutOfMemory,
+            .script = script,
         };
     }
 
@@ -656,6 +653,242 @@ test "F-040 getUtxos rejection vectors" {
             for (utxos) |*u| u.deinit(allocator);
             allocator.free(utxos);
             std.debug.print("F-040 {s}: expected {s}, got UTXOs\n", .{ name, @errorName(want) });
+            return error.TestExpectedError;
+        } else |err| {
+            try std.testing.expectEqual(want, err);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N-041: getContractUtxo returned script "" (WoC's /script/{h}/unspent
+// listing has no locking script) and getTransaction read /tx/hash/{txid},
+// whose JSON has no "hex" field (raw was always empty) and float values.
+// Proves, with conformance/sdk-woc/contract-utxo-tx-vectors.json and a stub
+// transport: getContractUtxo returns the real script for the legacy array and
+// the {script,result} object listing, null for an empty listing / 404, and a
+// txid mismatch, a missing output, a value mismatch, a script hashing to
+// another scripthash and an empty script fail with NetworkError (the
+// provider's decode-failure error) and an unavailable tx with NotFound;
+// getTransaction returns the hash-verified hex as raw, parses inputs/outputs
+// from it with exact 21e14-scale satoshis, and refuses a body for another
+// txid. Does NOT prove the live API keeps these shapes (recorded 2026-09-29),
+// nor which NetworkError cause fired (Zig errors carry no message).
+// ---------------------------------------------------------------------------
+
+const N041_VECTORS_REL_PATH = "../../conformance/sdk-woc/contract-utxo-tx-vectors.json";
+
+fn n041LoadVectors(allocator: std.mem.Allocator) !std.json.Parsed(std.json.Value) {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, N041_VECTORS_REL_PATH, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(bytes);
+    return std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .allocate = .alloc_always });
+}
+
+/// Serves `listing` at /script/{script_hash}/unspent (when non-null), each raw
+/// tx at /tx/{txid}/hex, and `hash_body` at /tx/hash/{hash_txid}; NotFound
+/// otherwise.
+const N041RoutingTransport = struct {
+    script_hash: []const u8 = "",
+    listing: ?[]const u8 = null,
+    raw_tx_hex: ?std.json.ObjectMap = null,
+    hex_txid: []const u8 = "",
+    hex_body: ?[]const u8 = null,
+    hash_body: ?[]const u8 = null,
+
+    fn getFn(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8) provider_mod.ProviderError![]u8 {
+        const self: *N041RoutingTransport = @ptrCast(@alignCast(ctx));
+        const base = "https://api.whatsonchain.com/v1/bsv/main";
+        if (!std.mem.startsWith(u8, url, base)) return provider_mod.ProviderError.NotFound;
+        const path = url[base.len..];
+        if (self.listing) |l| {
+            if (std.mem.startsWith(u8, path, "/script/") and std.mem.endsWith(u8, path, "/unspent") and
+                std.mem.eql(u8, path["/script/".len .. path.len - "/unspent".len], self.script_hash))
+            {
+                return allocator.dupe(u8, l) catch provider_mod.ProviderError.OutOfMemory;
+            }
+        }
+        if (std.mem.startsWith(u8, path, "/tx/hash/")) {
+            if (self.hash_body) |h| {
+                if (std.mem.eql(u8, path["/tx/hash/".len..], self.hex_txid))
+                    return allocator.dupe(u8, h) catch provider_mod.ProviderError.OutOfMemory;
+            }
+            return provider_mod.ProviderError.NotFound;
+        }
+        if (std.mem.startsWith(u8, path, "/tx/") and std.mem.endsWith(u8, path, "/hex")) {
+            const txid = path["/tx/".len .. path.len - "/hex".len];
+            if (self.raw_tx_hex) |m| {
+                if (m.get(txid)) |v| return allocator.dupe(u8, v.string) catch provider_mod.ProviderError.OutOfMemory;
+            }
+            if (self.hex_body) |h| {
+                if (std.mem.eql(u8, txid, self.hex_txid))
+                    return allocator.dupe(u8, h) catch provider_mod.ProviderError.OutOfMemory;
+            }
+        }
+        return provider_mod.ProviderError.NotFound;
+    }
+
+    fn postFn(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) provider_mod.ProviderError![]u8 {
+        return provider_mod.ProviderError.NetworkError;
+    }
+
+    fn transport(self: *N041RoutingTransport) HttpTransport {
+        return .{ .ctx = @ptrCast(self), .get = N041RoutingTransport.getFn, .post = N041RoutingTransport.postFn };
+    }
+};
+
+fn n041OptString(v: ?std.json.Value) ?[]const u8 {
+    const x = v orelse return null;
+    return if (x == .string) x.string else null;
+}
+
+fn n041FreeTx(allocator: std.mem.Allocator, tx: *types.TransactionData) void {
+    for (tx.inputs) |inp| {
+        allocator.free(inp.txid);
+        allocator.free(inp.script);
+    }
+    for (tx.outputs) |out| allocator.free(out.script);
+    tx.deinit(allocator);
+}
+
+test "N-041 getContractUtxo returns the real locking script" {
+    const allocator = std.testing.allocator;
+    var parsed = try n041LoadVectors(allocator);
+    defer parsed.deinit();
+    const cu = parsed.value.object.get("contractUtxo").?.object;
+    const sh = cu.get("scriptHash").?.string;
+
+    const cases = [_][2][]const u8{
+        .{ "legacyBody", "expectedLegacy" },
+        .{ "objectBody", "expectedObject" },
+    };
+    for (cases) |c| {
+        var routes = N041RoutingTransport{
+            .script_hash = sh,
+            .listing = cu.get(c[0]).?.string,
+            .raw_tx_hex = cu.get("rawTxHex").?.object,
+        };
+        var woc = WhatsOnChainProvider.init(allocator, .mainnet);
+        defer woc.deinit();
+        woc.setTransport(routes.transport());
+
+        var u = (try woc.provider().getContractUtxo(allocator, sh)) orelse return error.TestExpectedUtxo;
+        defer u.deinit(allocator);
+        const e = cu.get(c[1]).?.object;
+        try std.testing.expectEqualStrings(e.get("txid").?.string, u.txid);
+        try std.testing.expectEqual(e.get("outputIndex").?.integer, @as(i64, u.output_index));
+        try std.testing.expectEqual(e.get("satoshis").?.integer, u.satoshis);
+        try std.testing.expectEqualStrings(e.get("script").?.string, u.script);
+    }
+
+    for (cu.get("null_vectors").?.array.items) |nv| {
+        var routes = N041RoutingTransport{ .script_hash = sh, .listing = n041OptString(nv.object.get("body")) };
+        var woc = WhatsOnChainProvider.init(allocator, .mainnet);
+        defer woc.deinit();
+        woc.setTransport(routes.transport());
+        if (try woc.provider().getContractUtxo(allocator, sh)) |got| {
+            var g = got;
+            g.deinit(allocator);
+            std.debug.print("N-041 {s}: expected null\n", .{nv.object.get("name").?.string});
+            return error.TestExpectedNull;
+        }
+    }
+}
+
+test "N-041 getContractUtxo rejection vectors" {
+    const allocator = std.testing.allocator;
+    var parsed = try n041LoadVectors(allocator);
+    defer parsed.deinit();
+    const cu = parsed.value.object.get("contractUtxo").?.object;
+
+    for (cu.get("rejection_vectors").?.array.items) |rv| {
+        const name = rv.object.get("name").?.string;
+        const sh = rv.object.get("scriptHash").?.string;
+        var routes = N041RoutingTransport{
+            .script_hash = sh,
+            .listing = rv.object.get("body").?.string,
+            .raw_tx_hex = rv.object.get("rawTxHex").?.object,
+        };
+        var woc = WhatsOnChainProvider.init(allocator, .mainnet);
+        defer woc.deinit();
+        woc.setTransport(routes.transport());
+
+        const want: provider_mod.ProviderError = if (std.mem.eql(u8, name, "raw-tx-unavailable"))
+            provider_mod.ProviderError.NotFound
+        else
+            provider_mod.ProviderError.NetworkError;
+        if (woc.provider().getContractUtxo(allocator, sh)) |got| {
+            if (got) |u| {
+                var g = u;
+                g.deinit(allocator);
+            }
+            std.debug.print("N-041 {s}: expected {s}, got a result\n", .{ name, @errorName(want) });
+            return error.TestExpectedError;
+        } else |err| {
+            try std.testing.expectEqual(want, err);
+        }
+    }
+}
+
+test "N-041 getTransaction parses the hash-verified raw tx" {
+    const allocator = std.testing.allocator;
+    var parsed = try n041LoadVectors(allocator);
+    defer parsed.deinit();
+    const gt = parsed.value.object.get("getTransaction").?.object;
+
+    for (gt.get("cases").?.array.items) |c| {
+        const txid = c.object.get("txid").?.string;
+        var routes = N041RoutingTransport{
+            .hex_txid = txid,
+            .hex_body = c.object.get("rawTxHex").?.string,
+            .hash_body = c.object.get("hashBody").?.string,
+        };
+        var woc = WhatsOnChainProvider.init(allocator, .mainnet);
+        defer woc.deinit();
+        woc.setTransport(routes.transport());
+
+        var tx = try woc.provider().getTransaction(allocator, txid);
+        defer n041FreeTx(allocator, &tx);
+        const e = c.object.get("expected").?.object;
+        try std.testing.expectEqualStrings(e.get("txid").?.string, tx.txid);
+        try std.testing.expectEqual(e.get("version").?.integer, @as(i64, tx.version));
+        try std.testing.expectEqual(e.get("locktime").?.integer, @as(i64, tx.locktime));
+        try std.testing.expectEqualStrings(e.get("raw").?.string, tx.raw);
+        const ins = e.get("inputs").?.array.items;
+        try std.testing.expectEqual(ins.len, tx.inputs.len);
+        for (ins, tx.inputs) |ei, i| {
+            try std.testing.expectEqualStrings(ei.object.get("txid").?.string, i.txid);
+            try std.testing.expectEqual(ei.object.get("outputIndex").?.integer, @as(i64, i.output_index));
+            try std.testing.expectEqualStrings(ei.object.get("script").?.string, i.script);
+            try std.testing.expectEqual(ei.object.get("sequence").?.integer, @as(i64, i.sequence));
+        }
+        const outs = e.get("outputs").?.array.items;
+        try std.testing.expectEqual(outs.len, tx.outputs.len);
+        for (outs, tx.outputs) |eo, o| {
+            try std.testing.expectEqual(eo.object.get("satoshis").?.integer, o.satoshis);
+            try std.testing.expectEqualStrings(eo.object.get("script").?.string, o.script);
+        }
+    }
+
+    for (gt.get("rejection_vectors").?.array.items) |rv| {
+        const name = rv.object.get("name").?.string;
+        const txid = rv.object.get("txid").?.string;
+        var routes = N041RoutingTransport{
+            .hex_txid = txid,
+            .hex_body = n041OptString(rv.object.get("rawTxHex")),
+            .hash_body = n041OptString(rv.object.get("hashBody")),
+        };
+        var woc = WhatsOnChainProvider.init(allocator, .mainnet);
+        defer woc.deinit();
+        woc.setTransport(routes.transport());
+
+        const want: provider_mod.ProviderError = if (std.mem.eql(u8, name, "raw-tx-unavailable"))
+            provider_mod.ProviderError.NotFound
+        else
+            provider_mod.ProviderError.NetworkError;
+        if (woc.provider().getTransaction(allocator, txid)) |got| {
+            var t = got;
+            n041FreeTx(allocator, &t);
+            std.debug.print("N-041 {s}: expected {s}, got a tx\n", .{ name, @errorName(want) });
             return error.TestExpectedError;
         } else |err| {
             try std.testing.expectEqual(want, err);

@@ -211,6 +211,11 @@ func (s *ExternalSigner) GetAddress() (string, error) {
 
 // Sign delegates to the callback function.
 func (s *ExternalSigner) Sign(txHex string, inputIndex int, subscript string, satoshis int64, sigHashType *int) (string, error) {
+	// N-041: the subscript is the BIP-143 scriptCode. An empty one yields a
+	// signature no OP_CHECKSIG accepts, so refuse it before calling out.
+	if subscript == "" {
+		return "", fmt.Errorf("ExternalSigner.Sign: refusing to sign input %d with an empty subscript (scriptCode); pass the locking script of the UTXO being spent", inputIndex)
+	}
 	return s.signFn(txHex, inputIndex, subscript, satoshis, sigHashType)
 }
 

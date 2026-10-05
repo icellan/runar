@@ -50,6 +50,9 @@ pub const OpPushTxError = error{
     InvalidEncoding,
     /// R-178: the code-separator offset is past the end of the subscript.
     InvalidCodeSeparatorIndex,
+    /// N-041: the subscript is empty; no preimage over it can match the
+    /// script the node executes.
+    EmptySubscript,
     OutOfMemory,
 };
 
@@ -114,6 +117,11 @@ pub fn computeOpPushTxWithSigHash(
     defer tx.deinit(allocator);
 
     if (input_index >= tx.inputs.len) return OpPushTxError.InvalidTransaction;
+
+    // N-041: the subscript is the locking script of the UTXO being spent (e.g.
+    // a provider's contract UTXO). An empty one can never match the script the
+    // node executes, so refuse it.
+    if (subscript_hex.len == 0) return OpPushTxError.EmptySubscript;
 
     // If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
     var script_code_hex = subscript_hex;
@@ -288,4 +296,32 @@ test "R-178: an in-range code separator index still trims" {
     // Trimming the subscript must change the preimage, which is what makes the
     // old silent fallthrough a wrong answer rather than a harmless one.
     try std.testing.expect(!std.mem.eql(u8, trimmed.preimage_hex, untrimmed.preimage_hex));
+}
+
+// N-041: an empty subscript can never match the script the node executes, so
+// building a preimage over it is refused with EmptySubscript. Does not cover a
+// non-empty subscript whose separator is its last byte (still accepted).
+test "N-041: an empty subscript is refused" {
+    const allocator = std.testing.allocator;
+
+    const tx_hex = "01000000" ++
+        "01" ++
+        "1111111111111111111111111111111111111111111111111111111111111111" ++
+        "00000000" ++
+        "00" ++
+        "ffffffff" ++
+        "01" ++
+        "e803000000000000" ++
+        "01" ++ "51" ++
+        "00000000";
+
+    if (computeOpPushTx(allocator, tx_hex, 0, "", 1000, -1)) |r| {
+        var res = r;
+        res.deinit(allocator);
+        return error.TestExpectedError;
+    } else |err| try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
+
+    var ok = try computeOpPushTx(allocator, tx_hex, 0, "51ab51", 1000, 1);
+    defer ok.deinit(allocator);
+    try std.testing.expect(ok.preimage_hex.len > 0);
 }

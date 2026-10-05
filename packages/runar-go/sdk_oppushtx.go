@@ -73,6 +73,13 @@ func ComputeOpPushTxWithSigHash(txHex string, inputIndex int, subscript string, 
 		return nil, nil, fmt.Errorf("input index %d out of range (%d inputs)", inputIndex, len(tx.Inputs))
 	}
 
+	// N-041: the subscript is the locking script of the UTXO being spent (e.g.
+	// a provider's contract UTXO). An empty one can never match the script the
+	// node executes, so refuse it.
+	if subscript == "" {
+		return nil, nil, fmt.Errorf("compute_op_push_tx: refusing to build a preimage for input %d with an empty subscript (scriptCode)", inputIndex)
+	}
+
 	// If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
 	scriptCode := subscript
 	if codeSeparatorIndex >= 0 {

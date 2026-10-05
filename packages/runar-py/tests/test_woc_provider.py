@@ -9,8 +9,8 @@ direct unit test asserting URL shape + response parsing. This file closes
 that gap by:
 
   1. Pinning the exact URL (path + base) for each endpoint.
-  2. Asserting the parser correctly converts WoC's BSV-denominated values to
-     satoshis (round() of value*1e8, matching the implementation).
+  2. Asserting get_transaction parses the hash-verified raw tx (N-041: it
+     no longer reads /tx/hash/{txid}'s float BSV values).
   3. Asserting the broadcast endpoint sends a JSON ``{"txhex": ...}`` body
      and parses the JSON-encoded txid response.
   4. Asserting the mainnet vs testnet base URL switch works.
@@ -71,87 +71,68 @@ class TestWoCInit:
 # ---------------------------------------------------------------------------
 
 class TestGetTransaction:
-    def test_url_shape_uses_tx_hash_path(self):
-        provider = WhatsOnChainProvider("mainnet")
-        body = json.dumps({
-            "txid": "aa" * 32,
-            "version": 1,
-            "vin": [],
-            "vout": [],
-            "locktime": 0,
-            "hex": "deadbeef",
-        }).encode()
+    # N-041: get_transaction read GET /tx/hash/{txid}, whose JSON has no
+    # ``hex`` field (raw was always '') and float BSV values. These tests
+    # served synthetic /tx/hash bodies with an invented ``hex`` field; they
+    # now serve the raw tx at /tx/{txid}/hex from
+    # conformance/sdk-woc/contract-utxo-tx-vectors.json and check the same
+    # fields (plus raw).
 
+    def test_url_shape_uses_tx_hex_path(self):
+        from test_n041_woc_contract_utxo_tx import VECTORS as N041
+
+        case = N041["getTransaction"]["cases"][0]
+        provider = WhatsOnChainProvider("mainnet")
         with patch("runar.sdk.woc_provider.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            provider.get_transaction("aa" * 32)
+            mock_urlopen.return_value = _make_response(case["rawTxHex"].encode())
+            provider.get_transaction(case["txid"])
 
         # Inspect the Request object passed to urlopen
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == (
-            f"https://api.whatsonchain.com/v1/bsv/main/tx/hash/{'aa' * 32}"
+            f"https://api.whatsonchain.com/v1/bsv/main/tx/{case['txid']}/hex"
         )
         assert req.get_method() == "GET"
 
-    def test_parses_inputs_outputs_and_satoshi_conversion(self):
-        """WoC returns BSV-denominated values; the parser must convert via
-        ``round(value * 1e8)`` to satoshis.
+    def test_parses_inputs_outputs_and_exact_satoshis(self):
+        """Inputs/outputs come from the raw tx; satoshis are the exact 8-byte
+        integer values, not a float BSV conversion.
         """
+        from test_n041_woc_contract_utxo_tx import VECTORS as N041
+
+        case = N041["getTransaction"]["cases"][0]
         provider = WhatsOnChainProvider("mainnet")
-        body = json.dumps({
-            "txid": "bb" * 32,
-            "version": 2,
-            "vin": [
-                {
-                    "txid": "cc" * 32,
-                    "vout": 0,
-                    "scriptSig": {"hex": "47304402..."},
-                    "sequence": 0xFFFFFFFE,
-                }
-            ],
-            "vout": [
-                {"value": 0.0001, "scriptPubKey": {"hex": "76a914...88ac"}},
-                {"value": 1.5,    "scriptPubKey": {"hex": "6a..."}},
-            ],
-            "locktime": 12345,
-            "hex": "01000000...",
-        }).encode()
-
         with patch("runar.sdk.woc_provider.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            tx = provider.get_transaction("bb" * 32)
+            mock_urlopen.return_value = _make_response(case["rawTxHex"].encode())
+            tx = provider.get_transaction(case["txid"])
 
-        assert tx.txid == "bb" * 32
-        assert tx.version == 2
-        assert tx.locktime == 12345
-        assert tx.raw == "01000000..."
+        exp = case["expected"]
+        assert tx.txid == case["txid"]
+        assert tx.version == 1
+        assert tx.locktime == 0
+        assert tx.raw == case["rawTxHex"]
 
-        assert len(tx.inputs) == 1
-        assert tx.inputs[0].txid == "cc" * 32
+        assert len(tx.inputs) == 2
+        assert tx.inputs[0].txid == exp["inputs"][0]["txid"]
         assert tx.inputs[0].output_index == 0
-        assert tx.inputs[0].script == "47304402..."
-        assert tx.inputs[0].sequence == 0xFFFFFFFE
+        assert tx.inputs[0].script == exp["inputs"][0]["script"]
+        assert tx.inputs[0].sequence == 0xFFFFFFFF
 
         assert len(tx.outputs) == 2
-        # 0.0001 BSV = 10_000 sats (round of 10000.000000000002 etc).
-        assert tx.outputs[0].satoshis == 10_000
-        assert tx.outputs[0].script == "76a914...88ac"
-        # 1.5 BSV = 150_000_000 sats.
-        assert tx.outputs[1].satoshis == 150_000_000
-        assert tx.outputs[1].script == "6a..."
+        assert tx.outputs[0].satoshis == 1
+        assert tx.outputs[0].script == exp["outputs"][0]["script"]
+        assert tx.outputs[1].satoshis == 99_575
+        assert tx.outputs[1].script == exp["outputs"][1]["script"]
 
-    def test_handles_missing_optional_fields(self):
-        """vin entries missing scriptSig / sequence must default cleanly."""
+    def test_handles_empty_scriptsig(self):
+        """An input with an empty scriptSig parses to script '' with its sequence."""
+        from test_n041_woc_contract_utxo_tx import VECTORS as N041
+
+        case = N041["getTransaction"]["cases"][1]
         provider = WhatsOnChainProvider("mainnet")
-        body = json.dumps({
-            "txid": "dd" * 32,
-            "vin": [{"txid": "ee" * 32, "vout": 1}],
-            "vout": [{"value": 0.0, "scriptPubKey": {"hex": ""}}],
-        }).encode()
-
         with patch("runar.sdk.woc_provider.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            tx = provider.get_transaction("dd" * 32)
+            mock_urlopen.return_value = _make_response(case["rawTxHex"].encode())
+            tx = provider.get_transaction(case["txid"])
 
         assert tx.inputs[0].script == ""
         assert tx.inputs[0].sequence == 0xFFFFFFFF
@@ -251,19 +232,23 @@ class TestGetContractUtxo:
         )
 
     def test_returns_first_utxo_when_multiple_present(self):
+        # N-041: the listing has no locking script, so get_contract_utxo also
+        # fetches /tx/{txid}/hex. This test used synthetic txids with no raw tx
+        # behind them; it now replays the recorded two-entry listing.
+        from test_n041_woc_contract_utxo_tx import VECTORS as N041, _routes, _serve
+
+        cu = N041["contractUtxo"]
         provider = WhatsOnChainProvider("mainnet")
-        body = json.dumps([
-            {"tx_hash": "11" * 32, "tx_pos": 2, "value": 1000},
-            {"tx_hash": "22" * 32, "tx_pos": 3, "value": 2000},
-        ]).encode()
-        with patch("runar.sdk.woc_provider.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_response(body)
-            utxo = provider.get_contract_utxo("scripthash")
+        listing = f"/script/{cu['scriptHash']}/unspent"
+        assert len(json.loads(cu["legacyBody"])) == 2
+        with _serve(_routes(listing, cu["legacyBody"], cu["rawTxHex"])):
+            utxo = provider.get_contract_utxo(cu["scriptHash"])
 
         assert utxo is not None
-        assert utxo.txid == "11" * 32
-        assert utxo.output_index == 2
-        assert utxo.satoshis == 1000
+        assert utxo.txid == cu["expectedLegacy"]["txid"]
+        assert utxo.output_index == 0
+        assert utxo.satoshis == 1
+        assert utxo.script == cu["expectedLegacy"]["script"]
 
     def test_returns_none_for_empty_response(self):
         provider = WhatsOnChainProvider("mainnet")
@@ -295,11 +280,13 @@ class TestGetRawTransaction:
 # ---------------------------------------------------------------------------
 
 def test_testnet_uses_test_path_for_get_transaction():
+    from test_n041_woc_contract_utxo_tx import VECTORS as N041
+
+    case = N041["getTransaction"]["cases"][0]
     provider = WhatsOnChainProvider("testnet")
-    body = json.dumps({"txid": "00" * 32, "vin": [], "vout": []}).encode()
     with patch("runar.sdk.woc_provider.urlopen") as mock_urlopen:
-        mock_urlopen.return_value = _make_response(body)
-        provider.get_transaction("00" * 32)
+        mock_urlopen.return_value = _make_response(case["rawTxHex"].encode())
+        provider.get_transaction(case["txid"])
 
     req = mock_urlopen.call_args[0][0]
     assert "/v1/bsv/test/" in req.full_url

@@ -7,7 +7,7 @@ require 'digest'
 require_relative 'provider'
 require_relative 'types'
 require_relative 'errors'
-require_relative 'bip143'
+require_relative 'gorillapool_provider'
 
 # WhatsOnChainProvider — HTTP-based BSV API provider.
 #
@@ -32,36 +32,15 @@ module Runar
 
       # Fetch a TransactionData by its txid.
       #
+      # N-041: GET /tx/hash/{txid} has no "hex" field and reports values as
+      # float BSV, so raw was always ''. The serialized tx is fetched via
+      # GET /tx/{txid}/hex instead, its double-SHA256 must equal the txid, and
+      # inputs/outputs (with integer satoshis) are parsed from those bytes.
+      #
       # @param txid [String] transaction id (64 hex chars)
       # @return [TransactionData]
       def get_transaction(txid)
-        data = api_get("/tx/hash/#{txid}")
-
-        inputs = Array(data['vin']).map do |vin|
-          TxInput.new(
-            txid: vin['txid'],
-            output_index: vin['vout'],
-            script: vin.dig('scriptSig', 'hex') || '',
-            sequence: vin['sequence'] || 0xFFFFFFFF
-          )
-        end
-
-        outputs = Array(data['vout']).map do |vout|
-          satoshis = (vout['value'].to_f * 1e8).round
-          TxOutput.new(
-            satoshis: satoshis,
-            script: vout.dig('scriptPubKey', 'hex') || ''
-          )
-        end
-
-        TransactionData.new(
-          txid: data['txid'],
-          version: data['version'] || 1,
-          inputs: inputs,
-          outputs: outputs,
-          locktime: data['locktime'] || 0,
-          raw: data['hex'] || ''
-        )
+        fetch_verified_tx(txid, 'getTransaction')
       end
 
       # Broadcast a raw transaction hex to the network.
@@ -96,6 +75,9 @@ module Runar
       # must be an output whose value equals the listed value. Any failure
       # raises; no UTXO is returned with an empty script.
       #
+      # Note: WoC caps this legacy listing at about 1000 entries, so an
+      # address holding more UTXOs is returned truncated.
+      #
       # @param address [String] BSV address
       # @return [Array<Utxo>]
       def get_utxos(address)
@@ -107,18 +89,18 @@ module Runar
           txid = e['tx_hash']
           tx_pos = e['tx_pos']
           value = e['value']
-          txs[txid] ||= fetch_verified_tx(txid)
-          outputs = txs[txid][:outputs]
+          txs[txid] ||= fetch_verified_tx(txid, 'getUtxos')
+          outputs = txs[txid].outputs
           unless tx_pos.is_a?(Integer) && tx_pos >= 0 && tx_pos < outputs.length
             raise "WoC getUtxos: no output #{tx_pos} in tx #{txid} (#{outputs.length} outputs)"
           end
 
           out = outputs[tx_pos]
-          unless out[:satoshis] == value
-            raise "WoC getUtxos: value mismatch for #{txid}:#{tx_pos}: listing says #{value}, tx says #{out[:satoshis]}"
+          unless out.satoshis == value
+            raise "WoC getUtxos: value mismatch for #{txid}:#{tx_pos}: listing says #{value}, tx says #{out.satoshis}"
           end
 
-          script = out[:script].unpack1('H*')
+          script = out.script
           raise "WoC getUtxos: empty locking script for #{txid}:#{tx_pos}" if script.empty?
 
           SDK.assert_script_hex_under_limit(
@@ -129,33 +111,64 @@ module Runar
         end
       end
 
-      # Find a contract UTXO by its script hash.
+      # Find a contract UTXO by its script hash, with its real locking script.
+      #
+      # N-041: WoC's GET /script/{scriptHash}/unspent listing (a legacy array,
+      # or a {script, result} object on the /unspent/all family) carries
+      # outpoints and values but no locking script. The first entry's tx is
+      # fetched via GET /tx/{txid}/hex and hash-verified; tx_pos must be an
+      # output whose value equals the listed value, whose script is non-empty
+      # and hashes (sha256, reversed: WoC's scripthash) to script_hash. Any
+      # failure raises.
       #
       # @param script_hash [String] hex-encoded script hash
       # @return [Utxo, nil]
       def get_contract_utxo(script_hash)
-        entries = api_get("/script/#{script_hash}/unspent")
-        return nil unless entries.is_a?(Array) && !entries.empty?
+        begin
+          listing = api_get("/script/#{script_hash}/unspent")
+        rescue RuntimeError => e
+          # 404 simply means no UTXO found
+          return nil if e.message.include?('404')
+
+          raise
+        end
+        entries = if listing.is_a?(Array)
+                    listing
+                  elsif listing.is_a?(Hash) && listing['result'].is_a?(Array)
+                    listing['result']
+                  else
+                    raise "WoC getContractUtxo: unexpected listing shape for #{script_hash}"
+                  end
+        return nil if entries.empty?
 
         first = entries[0]
-        utxo = Utxo.new(
-          txid: first['tx_hash'],
-          output_index: first['tx_pos'],
-          satoshis: first['value'],
-          script: ''
-        )
-        if utxo.script && !utxo.script.empty?
-          SDK.assert_script_hex_under_limit(
-            utxo.script, SDK::MAX_SCRIPT_BYTES,
-            "WhatsOnChainProvider.get_contract_utxo(#{script_hash})"
-          )
+        txid = first['tx_hash']
+        tx_pos = first['tx_pos']
+        value = first['value']
+        outputs = fetch_verified_tx(txid, 'getContractUtxo').outputs
+        unless tx_pos.is_a?(Integer) && tx_pos >= 0 && tx_pos < outputs.length
+          raise "WoC getContractUtxo: no output #{tx_pos} in tx #{txid} (#{outputs.length} outputs)"
         end
-        utxo
-      rescue RuntimeError => e
-        # 404 simply means no UTXO found
-        return nil if e.message.include?('404')
 
-        raise
+        out = outputs[tx_pos]
+        unless out.satoshis == value
+          raise "WoC getContractUtxo: value mismatch for #{txid}:#{tx_pos}: listing says #{value}, tx says #{out.satoshis}"
+        end
+
+        script = out.script
+        raise "WoC getContractUtxo: empty locking script for #{txid}:#{tx_pos}" if script.empty?
+
+        got = Digest::SHA256.digest([script].pack('H*')).reverse.unpack1('H*')
+        unless got == script_hash.downcase
+          raise "WoC getContractUtxo: script hash mismatch for #{txid}:#{tx_pos}: " \
+                "output script hashes to #{got}, requested #{script_hash}"
+        end
+
+        SDK.assert_script_hex_under_limit(
+          script, SDK::MAX_SCRIPT_BYTES,
+          "WhatsOnChainProvider.get_contract_utxo(#{script_hash})"
+        )
+        Utxo.new(txid: txid, output_index: tx_pos, satoshis: value, script: script)
       end
 
       # Return the network this provider is connected to.
@@ -193,23 +206,28 @@ module Runar
 
       private
 
-      # Fetch GET /tx/{txid}/hex and parse it, requiring the body to hash to txid (F-040).
+      # Fetch GET /tx/{txid}/hex and parse it, requiring the body to hash to
+      # txid (F-040 / N-041). Parsed with GorillaPool's bounds-checked decoder
+      # (F-027), which keeps scriptSigs and reads exact 8-byte values.
       #
       # @param txid [String]
-      # @return [Hash] BIP143.parse_raw_tx result
-      def fetch_verified_tx(txid)
+      # @param context [String] caller name for error messages
+      # @return [TransactionData]
+      def fetch_verified_tx(txid, context)
         raw_hex = get_raw_transaction(txid)
-        raise "WoC getUtxos: /tx/#{txid}/hex body is not hex" unless raw_hex.match?(/\A(?:[0-9a-fA-F]{2})*\z/)
+        raise "WoC #{context}: /tx/#{txid}/hex body is not hex" unless raw_hex.match?(/\A(?:[0-9a-fA-F]{2})*\z/)
 
         raw = [raw_hex].pack('H*')
         body_txid = Digest::SHA256.digest(Digest::SHA256.digest(raw)).reverse.unpack1('H*')
         unless body_txid == txid.downcase
-          raise "WoC getUtxos: txid mismatch: /tx/#{txid}/hex body hashes to #{body_txid}"
+          raise "WoC #{context}: txid mismatch: /tx/#{txid}/hex body hashes to #{body_txid}"
         end
 
-        BIP143.parse_raw_tx(raw)
-      rescue ArgumentError => e
-        raise "WoC getUtxos: parsing tx #{txid}: #{e.message}"
+        begin
+          GorillaPoolProvider.decode_raw_tx(body_txid, raw)
+        rescue RuntimeError => e
+          raise "WoC #{context}: parsing tx #{txid}: #{e.message}"
+        end
       end
 
       # Perform an HTTP GET request against the WoC API and parse the JSON response.
