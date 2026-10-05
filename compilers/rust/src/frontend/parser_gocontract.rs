@@ -600,6 +600,61 @@ fn go_foreign_receiver_message(method: &str, receiver_type: &str, contract: &str
     )
 }
 
+// ---------------------------------------------------------------------------
+// N-056 — ambiguous operator precedence (mirrors 01-parse-go.ts)
+// ---------------------------------------------------------------------------
+//
+// Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C ladder
+// (this parser): MulDiv > AddSub > Shift > Comparison > Equality > BitAnd >
+// BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups left iff
+// prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class) pairs on which
+// the schemes disagree: 23 class pairs, 72 operator pairs. `&^` lexes as `&`
+// over a prefix `^`, i.e. `&`.
+
+const GO_AMBIGUOUS_PRECEDENCE_PAIRS: &[(&str, &str)] = &[
+    ("shift", "mul"), ("shift", "add"),
+    ("and", "mul"), ("and", "shift"), ("and", "add"), ("and", "rel"), ("and", "eq"),
+    ("add", "shift"), ("add", "and"),
+    ("or", "add"), ("or", "xor"), ("or", "rel"), ("or", "eq"),
+    ("xor", "add"), ("xor", "rel"), ("xor", "eq"),
+    ("rel", "and"), ("rel", "or"), ("rel", "xor"),
+    ("eq", "and"), ("eq", "or"), ("eq", "xor"), ("eq", "rel"),
+];
+
+fn go_precedence_class(op: &BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => "mul",
+        BinaryOp::Shl | BinaryOp::Shr => "shift",
+        BinaryOp::BitAnd => "and",
+        BinaryOp::Add | BinaryOp::Sub => "add",
+        BinaryOp::BitOr => "or",
+        BinaryOp::BitXor => "xor",
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => "rel",
+        BinaryOp::StrictEq | BinaryOp::StrictNe => "eq",
+        BinaryOp::And => "land",
+        BinaryOp::Or => "lor",
+    }
+}
+
+fn is_go_ambiguous_precedence(first: &BinaryOp, second: &BinaryOp) -> bool {
+    let pair = (go_precedence_class(first), go_precedence_class(second));
+    GO_AMBIGUOUS_PRECEDENCE_PAIRS.contains(&pair)
+}
+
+fn go_ambiguous_precedence_message(first: &BinaryOp, second: &BinaryOp) -> String {
+    let go = |op: &BinaryOp| match op {
+        BinaryOp::StrictEq => "==",
+        BinaryOp::StrictNe => "!=",
+        other => other.as_str(),
+    };
+    format!(
+        "ambiguous operator precedence in .runar.go: `a {} b {} c` groups differently \
+         under Go precedence than in Rúnar's other surfaces; add parentheses",
+        go(first),
+        go(second)
+    )
+}
+
 struct GoParser<'a> {
     tokens: Vec<Token>,
     pos: usize,
@@ -609,6 +664,8 @@ struct GoParser<'a> {
     receiver_name: String,
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: super::identifier_collision::DeclaredIdents,
+    /// N-056: top-level unparenthesised operator of the last parsed operand.
+    ladder_top: Option<BinaryOp>,
 }
 
 impl<'a> GoParser<'a> {
@@ -620,6 +677,7 @@ impl<'a> GoParser<'a> {
             errors,
             receiver_name: "c".to_string(),
             idents: Default::default(),
+            ladder_top: None,
         }
     }
 
@@ -1738,12 +1796,31 @@ impl<'a> GoParser<'a> {
         self.parse_or()
     }
 
+    /// N-056: build `left op right`, refusing an unparenthesised operand edge
+    /// whose grouping differs between Go precedence and the C ladder.
+    /// `left_top` / `self.ladder_top` hold each operand's top-level
+    /// unparenthesised operator (None for an atom: primary, call, `( … )`).
+    fn go_bin(&mut self, op: BinaryOp, left: Expression, left_top: Option<BinaryOp>, right: Expression) -> Expression {
+        let right_top = self.ladder_top.take();
+        let edge = match (left_top, right_top) {
+            (Some(l), _) if is_go_ambiguous_precedence(&l, &op) => Some((l, op.clone())),
+            (_, Some(r)) if is_go_ambiguous_precedence(&op, &r) => Some((op.clone(), r)),
+            _ => None,
+        };
+        if let Some((first, second)) = edge {
+            self.errors.push(Diagnostic::error(go_ambiguous_precedence_message(&first, &second), None));
+        }
+        self.ladder_top = Some(op.clone());
+        Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) }
+    }
+
     fn parse_or(&mut self) -> Option<Expression> {
         let mut left = self.parse_and()?;
         while matches!(self.current().typ, TokenType::PipePipe) {
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_and()?;
-            left = Expression::BinaryExpr { op: BinaryOp::Or, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(BinaryOp::Or, left, left_top, right);
         }
         Some(left)
     }
@@ -1751,9 +1828,10 @@ impl<'a> GoParser<'a> {
     fn parse_and(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitor()?;
         while matches!(self.current().typ, TokenType::AmpAmp) {
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_bitor()?;
-            left = Expression::BinaryExpr { op: BinaryOp::And, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(BinaryOp::And, left, left_top, right);
         }
         Some(left)
     }
@@ -1761,9 +1839,10 @@ impl<'a> GoParser<'a> {
     fn parse_bitor(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitxor()?;
         while matches!(self.current().typ, TokenType::Pipe) {
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_bitxor()?;
-            left = Expression::BinaryExpr { op: BinaryOp::BitOr, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(BinaryOp::BitOr, left, left_top, right);
         }
         Some(left)
     }
@@ -1771,9 +1850,10 @@ impl<'a> GoParser<'a> {
     fn parse_bitxor(&mut self) -> Option<Expression> {
         let mut left = self.parse_bitand()?;
         while matches!(self.current().typ, TokenType::Caret) {
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_bitand()?;
-            left = Expression::BinaryExpr { op: BinaryOp::BitXor, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(BinaryOp::BitXor, left, left_top, right);
         }
         Some(left)
     }
@@ -1781,9 +1861,10 @@ impl<'a> GoParser<'a> {
     fn parse_bitand(&mut self) -> Option<Expression> {
         let mut left = self.parse_equality()?;
         while matches!(self.current().typ, TokenType::Amp) {
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_equality()?;
-            left = Expression::BinaryExpr { op: BinaryOp::BitAnd, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(BinaryOp::BitAnd, left, left_top, right);
         }
         Some(left)
     }
@@ -1796,9 +1877,10 @@ impl<'a> GoParser<'a> {
                 TokenType::BangEq => BinaryOp::StrictNe,
                 _ => break,
             };
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_relational()?;
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
     }
@@ -1813,9 +1895,10 @@ impl<'a> GoParser<'a> {
                 TokenType::GtEq => BinaryOp::Ge,
                 _ => break,
             };
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_shift()?;
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
     }
@@ -1828,9 +1911,10 @@ impl<'a> GoParser<'a> {
                 TokenType::Shr => BinaryOp::Shr,
                 _ => break,
             };
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_additive()?;
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
     }
@@ -1843,15 +1927,17 @@ impl<'a> GoParser<'a> {
                 TokenType::Minus => BinaryOp::Sub,
                 _ => break,
             };
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_multiplicative()?;
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
     }
 
     fn parse_multiplicative(&mut self) -> Option<Expression> {
         let mut left = self.parse_unary()?;
+        self.ladder_top = None; // N-056: a unary/primary operand is an atom
         loop {
             let op = match self.current().typ {
                 TokenType::Star => BinaryOp::Mul,
@@ -1859,9 +1945,11 @@ impl<'a> GoParser<'a> {
                 TokenType::Percent => BinaryOp::Mod,
                 _ => break,
             };
+            let left_top = self.ladder_top.take();
             self.advance();
             let right = self.parse_unary()?;
-            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+            self.ladder_top = None;
+            left = self.go_bin(op, left, left_top, right);
         }
         Some(left)
     }

@@ -683,6 +683,64 @@ fn isTypeConversion(name: []const u8) bool {
 // Parser
 // ============================================================================
 
+// ============================================================================
+// N-056 — ambiguous operator precedence (mirrors 01-parse-go.ts)
+// ============================================================================
+//
+// Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C ladder
+// (this parser): MulDiv > AddSub > Shift > Comparison > Equality > BitAnd >
+// BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups left iff
+// prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class) pairs on which
+// the schemes disagree: 23 class pairs, 72 operator pairs. `&^` lexes as `&`
+// over a prefix `^`, i.e. `&`.
+
+const GoPrecClass = enum { mul, shift, @"and", add, @"or", xor, rel, eq, land, lor };
+
+const go_ambiguous_precedence_pairs = [_][2]GoPrecClass{
+    .{ .shift, .mul },  .{ .shift, .add },
+    .{ .@"and", .mul }, .{ .@"and", .shift }, .{ .@"and", .add }, .{ .@"and", .rel }, .{ .@"and", .eq },
+    .{ .add, .shift },  .{ .add, .@"and" },
+    .{ .@"or", .add },  .{ .@"or", .xor },    .{ .@"or", .rel },  .{ .@"or", .eq },
+    .{ .xor, .add },    .{ .xor, .rel },      .{ .xor, .eq },
+    .{ .rel, .@"and" }, .{ .rel, .@"or" },    .{ .rel, .xor },
+    .{ .eq, .@"and" },  .{ .eq, .@"or" },     .{ .eq, .xor },     .{ .eq, .rel },
+};
+
+fn goPrecClass(op: BinOperator) GoPrecClass {
+    return switch (op) {
+        .mul, .div, .mod => .mul,
+        .lshift, .rshift => .shift,
+        .bitand => .@"and",
+        .add, .sub => .add,
+        .bitor => .@"or",
+        .bitxor => .xor,
+        .lt, .lte, .gt, .gte => .rel,
+        .eq, .neq => .eq,
+        .and_op => .land,
+        .or_op => .lor,
+    };
+}
+
+fn isGoAmbiguousPrecedence(first: BinOperator, second: BinOperator) bool {
+    const a = goPrecClass(first);
+    const b = goPrecClass(second);
+    for (go_ambiguous_precedence_pairs) |pair| {
+        if (pair[0] == a and pair[1] == b) return true;
+    }
+    return false;
+}
+
+fn goSpelling(op: BinOperator) []const u8 {
+    return switch (op) {
+        .eq => "==",
+        .neq => "!=",
+        else => op.toTsString(),
+    };
+}
+
+const go_ambiguous_precedence_fmt = "ambiguous operator precedence in .runar.go: `a {s} b {s} c` groups differently " ++
+    "under Go precedence than in Rúnar's other surfaces; add parentheses";
+
 const Parser = struct {
     allocator: Allocator,
     tokenizer: Tokenizer,
@@ -694,6 +752,9 @@ const Parser = struct {
     contract_name: []const u8, // the contract struct name
     /// F-017: declared (spelling, Rúnar name) pairs.
     idents: identifier_collision.DeclaredIdents = .{},
+    /// N-056: binary nodes that are expression operands (parenthesised
+    /// groups, BigintBig rewrites) and so are atoms to the precedence check.
+    go_atoms: std.AutoHashMapUnmanaged(*BinaryOp, void) = .empty,
 
     const max_depth: u32 = 256;
 
@@ -1802,7 +1863,36 @@ const Parser = struct {
             self.addError("expression nesting depth exceeds maximum (256)");
             return null;
         }
-        return self.parseLogicalOr();
+        const expr = self.parseLogicalOr() orelse return null;
+        self.checkGoPrecedence(expr);
+        return expr;
+    }
+
+    /// N-056: refuse an unparenthesised operand edge that groups differently
+    /// under Go precedence; nested ( ... ) groups were checked by their own
+    /// parseExpression call and are atoms here.
+    fn checkGoPrecedence(self: *Parser, expr: Expression) void {
+        var work: std.ArrayListUnmanaged(*BinaryOp) = .empty;
+        defer work.deinit(self.allocator);
+        if (expr != .binary_op or self.go_atoms.contains(expr.binary_op)) return;
+        work.append(self.allocator, expr.binary_op) catch return;
+        while (work.pop()) |e| {
+            const sides = [_]struct { child: Expression, left_side: bool }{
+                .{ .child = e.left, .left_side = true },
+                .{ .child = e.right, .left_side = false },
+            };
+            for (sides) |side| {
+                if (side.child != .binary_op or self.go_atoms.contains(side.child.binary_op)) continue;
+                const c = side.child.binary_op;
+                const first = if (side.left_side) c.op else e.op;
+                const second = if (side.left_side) e.op else c.op;
+                if (isGoAmbiguousPrecedence(first, second)) {
+                    self.addErrorFmt(go_ambiguous_precedence_fmt, .{ goSpelling(first), goSpelling(second) });
+                    return;
+                }
+                work.append(self.allocator, c) catch return;
+            }
+        }
     }
 
     fn parseLogicalOr(self: *Parser) ?Expression {
@@ -1955,7 +2045,10 @@ const Parser = struct {
             uop.* = .{ .op = .bitnot, .operand = o };
             return .{ .unary_op = uop };
         }
-        return self.parsePostfix();
+        const expr = self.parsePostfix() orelse return null;
+        // N-056: an operand is an atom to the precedence check.
+        if (expr == .binary_op) self.go_atoms.put(self.allocator, expr.binary_op, {}) catch {};
+        return expr;
     }
 
     fn parsePostfix(self: *Parser) ?Expression {

@@ -122,6 +122,7 @@ test {
     _ = @import("tests/r290_void_sentinel.zig");
     _ = @import("tests/n006_loop_output_lowering_backstop.zig");
     _ = @import("tests/n049_ternary_output_intrinsic.zig");
+    _ = @import("tests/n056_go_ambiguous_precedence.zig");
     _ = @import("tests/loop_update_clause.zig");
     _ = @import("tests/library_cli_parity.zig");
     _ = @import("tests/n034_ec_fusing_rules.zig");

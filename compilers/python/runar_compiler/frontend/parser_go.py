@@ -566,6 +566,9 @@ class _GoParser:
         self.receiver_name: str = ""
         # F-017: (source spelling, Rúnar name) of every declared identifier.
         self.declared: list[tuple[str, str]] = []
+        # N-056: id() -> node of every expression operand (atoms); holding the
+        # node keeps its id() from being reused.
+        self._go_atoms: dict[int, Expression] = {}
 
     def declare(self, raw: str) -> str:
         """Convert a DECLARED identifier and record it for the F-017
@@ -1458,7 +1461,27 @@ class _GoParser:
     # -- Expression parsing --------------------------------------------------
 
     def _parse_expression(self) -> Expression:
-        return self._parse_or()
+        expr = self._parse_or()
+        # N-056: refuse an unparenthesised operand edge that groups differently
+        # under Go precedence; nested ( ... ) groups were checked by their own
+        # _parse_expression call and are atoms here.
+        atoms = self._go_atoms
+        work = [expr]
+        while work:
+            e = work.pop()
+            if not isinstance(e, BinaryExpr) or id(e) in atoms:
+                continue
+            edges = []
+            if isinstance(e.left, BinaryExpr) and id(e.left) not in atoms:
+                edges.append((e.left, e.left.op, e.op))
+            if isinstance(e.right, BinaryExpr) and id(e.right) not in atoms:
+                edges.append((e.right, e.op, e.right.op))
+            for child, first, second in edges:
+                if is_go_ambiguous_precedence(first, second):
+                    self.add_error(go_ambiguous_precedence_message(first, second))
+                    return expr
+                work.append(child)
+        return expr
 
     def _parse_or(self) -> Expression:
         left = self._parse_and()
@@ -1580,7 +1603,9 @@ class _GoParser:
             # Go uses ^ as bitwise NOT (unary)
             operand = self._parse_unary()
             return UnaryExpr(op="~", operand=operand)
-        return self._parse_postfix()
+        expr = self._parse_postfix()
+        self._go_atoms[id(expr)] = expr  # N-056: an operand is an atom
+        return expr
 
     def _parse_postfix(self) -> Expression:
         expr = self._parse_primary()
@@ -1874,6 +1899,53 @@ def go_foreign_receiver_message(method: str, receiver_type: str, contract: str) 
     return (
         f"method '{method}' has receiver type '{receiver_type}', not the contract type "
         f"'{contract}'; methods on other types are not allowed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N-056 -- ambiguous operator precedence (mirrors 01-parse-go.ts)
+# ---------------------------------------------------------------------------
+#
+# Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C ladder
+# (this parser): MulDiv > AddSub > Shift > Comparison > Equality > BitAnd >
+# BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups left iff
+# prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class) pairs on which the
+# schemes disagree: 23 class pairs, 72 operator pairs. `&^` lexes as `&` over a
+# prefix `^`, i.e. `&`.
+
+_GO_PRECEDENCE_CLASS = {
+    "*": "mul", "/": "mul", "%": "mul",
+    "<<": "shift", ">>": "shift",
+    "&": "and",
+    "+": "add", "-": "add",
+    "|": "or", "^": "xor",
+    "<": "rel", "<=": "rel", ">": "rel", ">=": "rel",
+    "===": "eq", "!==": "eq",
+    "&&": "land", "||": "lor",
+}
+
+GO_AMBIGUOUS_PRECEDENCE_PAIRS = frozenset({
+    ("shift", "mul"), ("shift", "add"),
+    ("and", "mul"), ("and", "shift"), ("and", "add"), ("and", "rel"), ("and", "eq"),
+    ("add", "shift"), ("add", "and"),
+    ("or", "add"), ("or", "xor"), ("or", "rel"), ("or", "eq"),
+    ("xor", "add"), ("xor", "rel"), ("xor", "eq"),
+    ("rel", "and"), ("rel", "or"), ("rel", "xor"),
+    ("eq", "and"), ("eq", "or"), ("eq", "xor"), ("eq", "rel"),
+})
+
+
+def is_go_ambiguous_precedence(first: str, second: str) -> bool:
+    pair = (_GO_PRECEDENCE_CLASS.get(first), _GO_PRECEDENCE_CLASS.get(second))
+    return pair in GO_AMBIGUOUS_PRECEDENCE_PAIRS
+
+
+def go_ambiguous_precedence_message(first: str, second: str) -> str:
+    go = {"===": "==", "!==": "!="}
+    return (
+        f"ambiguous operator precedence in .runar.go: `a {go.get(first, first)} b "
+        f"{go.get(second, second)} c` groups differently under Go precedence than in "
+        f"Rúnar's other surfaces; add parentheses"
     )
 
 

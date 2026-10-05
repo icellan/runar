@@ -1,10 +1,15 @@
 package runar.compiler.frontend;
 
 import java.math.BigInteger;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import runar.compiler.ir.ast.ArrayLiteralExpr;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
@@ -645,11 +650,67 @@ public final class GoParser {
     // Parser state
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // N-056 -- ambiguous operator precedence (mirrors 01-parse-go.ts)
+    // ------------------------------------------------------------------
+    //
+    // Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C
+    // ladder (this parser): MulDiv > AddSub > Shift > Comparison > Equality >
+    // BitAnd > BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups
+    // left iff prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class)
+    // pairs on which the schemes disagree: 23 class pairs, 72 operator pairs.
+    // `&^` lexes as `&` over a prefix `^`, i.e. `&`.
+
+    static final Set<String> GO_AMBIGUOUS_PRECEDENCE_PAIRS = Set.of(
+        "shift mul", "shift add",
+        "and mul", "and shift", "and add", "and rel", "and eq",
+        "add shift", "add and",
+        "or add", "or xor", "or rel", "or eq",
+        "xor add", "xor rel", "xor eq",
+        "rel and", "rel or", "rel xor",
+        "eq and", "eq or", "eq xor", "eq rel"
+    );
+
+    private static String goPrecedenceClass(Expression.BinaryOp op) {
+        return switch (op) {
+            case MUL, DIV, MOD -> "mul";
+            case SHL, SHR -> "shift";
+            case BIT_AND -> "and";
+            case ADD, SUB -> "add";
+            case BIT_OR -> "or";
+            case BIT_XOR -> "xor";
+            case LT, LE, GT, GE -> "rel";
+            case EQ, NEQ -> "eq";
+            case AND -> "land";
+            case OR -> "lor";
+        };
+    }
+
+    static boolean isGoAmbiguousPrecedence(Expression.BinaryOp first, Expression.BinaryOp second) {
+        return GO_AMBIGUOUS_PRECEDENCE_PAIRS.contains(goPrecedenceClass(first) + " " + goPrecedenceClass(second));
+    }
+
+    static String goAmbiguousPrecedenceMessage(Expression.BinaryOp first, Expression.BinaryOp second) {
+        return "ambiguous operator precedence in .runar.go: `a " + goSpelling(first) + " b "
+            + goSpelling(second) + " c` groups differently under Go precedence than in "
+            + "Rúnar's other surfaces; add parentheses";
+    }
+
+    private static String goSpelling(Expression.BinaryOp op) {
+        return switch (op) {
+            case EQ -> "==";
+            case NEQ -> "!=";
+            default -> op.canonical();
+        };
+    }
+
     private static final class ParserState {
         final String fileName;
         final List<Token> tokens;
         int pos = 0;
         final List<String> errors = new ArrayList<>();
+        /** N-056: expression operands (primaries, calls, parenthesised groups). */
+        final Set<Expression> goAtoms = Collections.newSetFromMap(new IdentityHashMap<>());
         String receiverName = "";
         /** F-017: declared (spelling, Rúnar name) pairs. */
         final IdentifierCollision.Declared idents = new IdentifierCollision.Declared();
@@ -1413,7 +1474,30 @@ public final class GoParser {
         // -- Expressions --------------------------------------------------
 
         Expression parseExpression() {
-            return parseOr();
+            Expression expr = parseOr();
+            // N-056: refuse an unparenthesised operand edge that groups
+            // differently under Go precedence; nested ( ... ) groups were
+            // checked by their own parseExpression call and are atoms here.
+            Deque<Expression> work = new ArrayDeque<>();
+            work.push(expr);
+            while (!work.isEmpty()) {
+                if (!(work.pop() instanceof BinaryExpr e) || goAtoms.contains(e)) continue;
+                if (e.left() instanceof BinaryExpr l && !goAtoms.contains(l)) {
+                    if (isGoAmbiguousPrecedence(l.op(), e.op())) {
+                        addError(goAmbiguousPrecedenceMessage(l.op(), e.op()));
+                        return expr;
+                    }
+                    work.push(l);
+                }
+                if (e.right() instanceof BinaryExpr r && !goAtoms.contains(r)) {
+                    if (isGoAmbiguousPrecedence(e.op(), r.op())) {
+                        addError(goAmbiguousPrecedenceMessage(e.op(), r.op()));
+                        return expr;
+                    }
+                    work.push(r);
+                }
+            }
+            return expr;
         }
 
         Expression parseOr() {
@@ -1561,7 +1645,9 @@ public final class GoParser {
                 // Go uses ^ as unary bitwise NOT.
                 return new UnaryExpr(Expression.UnaryOp.BIT_NOT, parseUnary());
             }
-            return parsePostfix();
+            Expression expr = parsePostfix();
+            goAtoms.add(expr); // N-056: an operand is an atom
+            return expr;
         }
 
         Expression parsePostfix() {

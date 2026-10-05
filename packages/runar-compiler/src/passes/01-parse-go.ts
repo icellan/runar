@@ -1126,6 +1126,39 @@ class GoParser extends ParserCore<GoToken> {
   // Expression parsing — ParserCore abstract methods
   // -----------------------------------------------------------------------
 
+  /** N-056: operands returned by parseUnary (parenthesised groups, calls). */
+  private goAtoms = new WeakSet<Expression>();
+
+  /**
+   * N-056: ParserCore builds the C ladder; go/parser (the Go tier) builds Go
+   * precedence. Refuse any unparenthesised parent/child operator edge on which
+   * the two schemes group differently, so every tier compiles the same tree.
+   * Nested parenthesised groups are checked by their own parseExpression call.
+   */
+  protected parseExpression(): Expression {
+    const expr = super.parseExpression();
+    const work: Expression[] = [expr];
+    while (work.length > 0) {
+      const e = work.pop()!;
+      if (e.kind !== 'binary_expr' || this.goAtoms.has(e)) continue;
+      const edges: Array<[Expression, string, string]> = [];
+      if (e.left.kind === 'binary_expr' && !this.goAtoms.has(e.left)) edges.push([e.left, e.left.op, e.op]);
+      if (e.right.kind === 'binary_expr' && !this.goAtoms.has(e.right)) edges.push([e.right, e.op, e.right.op]);
+      for (const [child, first, second] of edges) {
+        if (isGoAmbiguousPrecedence(first, second)) {
+          this.errors.push(makeDiagnostic(
+            goAmbiguousPrecedenceMessage(first, second),
+            'error',
+            e.sourceLocation,
+          ));
+          return expr;
+        }
+        work.push(child);
+      }
+    }
+    return expr;
+  }
+
   /**
    * Override parsePostfixChain to apply goToCamel conversion on member
    * access properties. When the object is the receiver (self), the
@@ -1189,6 +1222,7 @@ class GoParser extends ParserCore<GoToken> {
 
     let expr = this.parsePrimary();
     expr = this.parsePostfixChain(expr, this.selfNames);
+    this.goAtoms.add(expr);
     return expr;
   }
 
@@ -1397,6 +1431,50 @@ export function goMultipleContractsMessage(first: string, second: string): strin
 export function goForeignReceiverMessage(method: string, receiverType: string, contract: string): string {
   return `method '${method}' has receiver type '${receiverType}', not the contract type '${contract}'; ` +
     'methods on other types are not allowed';
+}
+
+// ---------------------------------------------------------------------------
+// N-056 — ambiguous operator precedence on .runar.go (every tier, verbatim)
+// ---------------------------------------------------------------------------
+//
+// Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`.
+// C ladder (every other surface): MulDiv > AddSub > Shift > Comparison >
+// Equality > BitAnd > BitXor > BitOr > And > Or.
+// For `x OP1 y OP2 z` a scheme groups left iff prec(OP1) >= prec(OP2). The
+// ordered (OP1 class, OP2 class) pairs on which the schemes disagree are
+// below: 23 class pairs, 72 operator pairs. `&^` is `&` over `~` in both.
+
+const GO_PRECEDENCE_CLASS: Record<string, string> = {
+  '*': 'mul', '/': 'mul', '%': 'mul',
+  '<<': 'shift', '>>': 'shift',
+  '&': 'and',
+  '+': 'add', '-': 'add',
+  '|': 'or', '^': 'xor',
+  '<': 'rel', '<=': 'rel', '>': 'rel', '>=': 'rel',
+  '==': 'eq', '!=': 'eq', '===': 'eq', '!==': 'eq',
+  '&&': 'land', '||': 'lor',
+};
+
+export const GO_AMBIGUOUS_PRECEDENCE_PAIRS: ReadonlySet<string> = new Set([
+  'shift mul', 'shift add',
+  'and mul', 'and shift', 'and add', 'and rel', 'and eq',
+  'add shift', 'add and',
+  'or add', 'or xor', 'or rel', 'or eq',
+  'xor add', 'xor rel', 'xor eq',
+  'rel and', 'rel or', 'rel xor',
+  'eq and', 'eq or', 'eq xor', 'eq rel',
+]);
+
+export function isGoAmbiguousPrecedence(first: string, second: string): boolean {
+  const a = GO_PRECEDENCE_CLASS[first];
+  const b = GO_PRECEDENCE_CLASS[second];
+  return a !== undefined && b !== undefined && GO_AMBIGUOUS_PRECEDENCE_PAIRS.has(`${a} ${b}`);
+}
+
+export function goAmbiguousPrecedenceMessage(first: string, second: string): string {
+  const go = (op: string) => (op === '===' ? '==' : op === '!==' ? '!=' : op);
+  return `ambiguous operator precedence in .runar.go: \`a ${go(first)} b ${go(second)} c\` ` +
+    `groups differently under Go precedence than in Rúnar's other surfaces; add parentheses`;
 }
 
 // ---------------------------------------------------------------------------

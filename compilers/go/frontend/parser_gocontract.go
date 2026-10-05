@@ -780,6 +780,10 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 		return CallExpr{Callee: callee, Args: args}
 
 	case *ast.BinaryExpr:
+		if msg, ambiguous := goAmbiguousPrecedenceMessage(e); ambiguous {
+			p.addError(msg) // N-056: see go_precedence.go
+			return nil
+		}
 		left := p.convertExpression(e.X)
 		right := p.convertExpression(e.Y)
 		if left == nil || right == nil {

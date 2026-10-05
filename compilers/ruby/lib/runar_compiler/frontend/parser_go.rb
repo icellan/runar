@@ -541,6 +541,49 @@ module RunarCompiler
         "methods on other types are not allowed"
     end
 
+    # -------------------------------------------------------------------------
+    # N-056 -- ambiguous operator precedence (mirrors 01-parse-go.ts)
+    # -------------------------------------------------------------------------
+    #
+    # Go: `* / % << >> & &^` > `+ - | ^` > comparisons > `&&` > `||`. C ladder
+    # (this parser): MulDiv > AddSub > Shift > Comparison > Equality > BitAnd >
+    # BitXor > BitOr > And > Or. For `x OP1 y OP2 z` a scheme groups left iff
+    # prec(OP1) >= prec(OP2). The ordered (OP1 class, OP2 class) pairs on which
+    # the schemes disagree: 23 class pairs, 72 operator pairs. `&^` lexes as
+    # `&` over a prefix `^`, i.e. `&`.
+
+    GO_PRECEDENCE_CLASS = {
+      "*" => "mul", "/" => "mul", "%" => "mul",
+      "<<" => "shift", ">>" => "shift",
+      "&" => "and",
+      "+" => "add", "-" => "add",
+      "|" => "or", "^" => "xor",
+      "<" => "rel", "<=" => "rel", ">" => "rel", ">=" => "rel",
+      "===" => "eq", "!==" => "eq",
+      "&&" => "land", "||" => "lor"
+    }.freeze
+
+    GO_AMBIGUOUS_PRECEDENCE_PAIRS = Set[
+      %w[shift mul], %w[shift add],
+      %w[and mul], %w[and shift], %w[and add], %w[and rel], %w[and eq],
+      %w[add shift], %w[add and],
+      %w[or add], %w[or xor], %w[or rel], %w[or eq],
+      %w[xor add], %w[xor rel], %w[xor eq],
+      %w[rel and], %w[rel or], %w[rel xor],
+      %w[eq and], %w[eq or], %w[eq xor], %w[eq rel]
+    ].freeze
+
+    def self.go_ambiguous_precedence?(first, second)
+      GO_AMBIGUOUS_PRECEDENCE_PAIRS.include?([GO_PRECEDENCE_CLASS[first], GO_PRECEDENCE_CLASS[second]])
+    end
+
+    def self.go_ambiguous_precedence_message(first, second)
+      go = { "===" => "==", "!==" => "!=" }
+      "ambiguous operator precedence in .runar.go: `a #{go.fetch(first, first)} b " \
+        "#{go.fetch(second, second)} c` groups differently under Go precedence than in " \
+        "Rúnar's other surfaces; add parentheses"
+    end
+
     class GoParser
       include GoTokens
 
@@ -551,6 +594,7 @@ module RunarCompiler
         @errors = []
         @self_names = Set.new
         @contract_name = ""
+        @go_atoms = {}.compare_by_identity # N-056: expression operands
       end
 
       attr_accessor :tokens, :pos, :errors
@@ -1197,7 +1241,28 @@ module RunarCompiler
       # -- Expression parsing (precedence climbing) -------------------------
 
       def parse_expression
-        parse_or
+        expr = parse_or
+        # N-056: refuse an unparenthesised operand edge that groups differently
+        # under Go precedence; nested ( ... ) groups were checked by their own
+        # parse_expression call and are atoms here.
+        atoms = @go_atoms
+        work = [expr]
+        until work.empty?
+          e = work.pop
+          next if !e.is_a?(BinaryExpr) || atoms.key?(e)
+
+          edges = []
+          edges << [e.left, e.left.op, e.op] if e.left.is_a?(BinaryExpr) && !atoms.key?(e.left)
+          edges << [e.right, e.op, e.right.op] if e.right.is_a?(BinaryExpr) && !atoms.key?(e.right)
+          edges.each do |child, first, second|
+            if Frontend.go_ambiguous_precedence?(first, second)
+              add_error(Frontend.go_ambiguous_precedence_message(first, second))
+              return expr
+            end
+            work << child
+          end
+        end
+        expr
       end
 
       def parse_or
@@ -1333,8 +1398,9 @@ module RunarCompiler
           return UnaryExpr.new(op: "~", operand: parse_unary)
         end
 
-        expr = parse_primary
-        parse_postfix_chain(expr)
+        expr = parse_postfix_chain(parse_primary)
+        @go_atoms[expr] = true # N-056: an operand is an atom
+        expr
       end
 
       def parse_postfix_chain(expr)
