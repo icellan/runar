@@ -14,9 +14,13 @@
  *   - the provenance gate job carries no `if:` that restricts it to one event;
  *   - the gate's base-resolution shell, run for real against a scratch git
  *     repo with a stub `node`, hands check-golden-provenance.mjs the right base
- *     for each event: the PR base SHA, the merge-group base SHA, the pushed-over
- *     tip, and HEAD^ when the push has no usable `before` (all-zero SHA on a new
- *     branch or tag, or a force-pushed-away commit that is not in the clone).
+ *     for each event: for pull_request, the LIVE tip of the branch the PR
+ *     merges into (resolved from base.ref at run time, not the stale captured
+ *     base.sha -- F-163, the same staleness hazard the sibling wire-format
+ *     gate documents and avoids the same way); the merge-group base SHA; the
+ *     pushed-over tip; and HEAD^ when the push has no usable `before`
+ *     (all-zero SHA on a new branch or tag, or a force-pushed-away commit that
+ *     is not in the clone).
  *
  * What it does not prove: GitHub Actions cannot run here, so nothing shows the
  * workflows actually start on those events, that GitHub populates the event
@@ -102,7 +106,11 @@ describe('F-053: the strongest gates run on push to main and on merge_group', ()
 
   it('ci.yml golden-provenance-gate maps every event payload into env', () => {
     const env = checkScript().env.join('\n');
-    expect(env).toMatch(/PR_BASE_SHA:\s*\$\{\{\s*github\.event\.pull_request\.base\.sha\s*\}\}/);
+    // PR_BASE_REF, not PR_BASE_SHA: base.sha is the base tip as of the PR's
+    // last sync and goes stale when another PR merges into the target branch
+    // in the meantime (F-163) -- the same hazard the sibling wire-format gate
+    // documents and avoids by resolving the live branch ref at run time.
+    expect(env).toMatch(/PR_BASE_REF:\s*\$\{\{\s*github\.event\.pull_request\.base\.ref\s*\}\}/);
     expect(env).toMatch(/MERGE_GROUP_BASE:\s*\$\{\{\s*github\.event\.merge_group\.base_sha\s*\}\}/);
     expect(env).toMatch(/PUSH_BEFORE:\s*\$\{\{\s*github\.event\.before\s*\}\}/);
   });
@@ -123,6 +131,11 @@ describe('F-053: the strongest gates run on push to main and on merge_group', ()
       const a = git('rev-parse', 'HEAD');
       git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'b');
       const b = git('rev-parse', 'HEAD');
+      // Simulate actions/checkout@v4 (fetch-depth: 0) having already fetched
+      // origin/main at its CURRENT tip (b) -- later than the PR's
+      // last-synced base.sha (a), exactly as happens when another PR merges
+      // into main in the meantime (F-163).
+      git('update-ref', 'refs/remotes/origin/main', b);
 
       // Stub `node` so the script's final call reports the base it was given.
       const bin = join(dir, 'stub-bin');
@@ -146,7 +159,13 @@ describe('F-053: the strongest gates run on push to main and on merge_group', ()
 
       const zero = '0'.repeat(40);
       const missing = 'f'.repeat(40);
-      expect(run({ PR_BASE_SHA: a }), 'pull_request').toBe(a);
+      // F-163 regression: `a` stands in for the PR's captured base.sha, now
+      // stale -- origin/main has since moved to `b` (another PR merged in the
+      // meantime). The gate must hand the checker a ref that re-resolves to
+      // the CURRENT tip (origin/main), not the stale sha `a`.
+      expect(run({ PR_BASE_SHA: a, PR_BASE_REF: 'main' }), 'pull_request (stale base.sha)').toBe(
+        'origin/main',
+      );
       expect(run({ MERGE_GROUP_BASE: a }), 'merge_group').toBe(a);
       expect(run({ PUSH_BEFORE: a }), 'push').toBe(a);
       expect(run({ PUSH_BEFORE: zero }), 'push, new branch / tag').toBe(git('rev-parse', `${b}^`));

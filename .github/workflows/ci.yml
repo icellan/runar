@@ -101,10 +101,10 @@ jobs:
     # still fails the run, which makes an unjustified golden on main loud even
     # though it has already landed.
     #
-    # Security note: the only github.event.* values consumed are base commit
-    # SHAs, passed via `env:` (never interpolated into the shell) and used
-    # solely as git refs for the three-dot diff. No untrusted event text
-    # reaches a `run:` block.
+    # Security note: the only github.event.* values consumed are the base
+    # branch NAME and base commit SHAs, passed via `env:` (never interpolated
+    # into the shell) and used solely as git refs for the three-dot diff. No
+    # untrusted event text reaches a `run:` block.
     name: Lint — golden-regeneration provenance gate
     runs-on: ubuntu-latest
     steps:
@@ -119,16 +119,26 @@ jobs:
       - name: Check golden/vector provenance (changed set vs merge-base)
         env:
           # The script diffs `<base>...HEAD` (three-dot = merge-base). Base per
-          # event: pull_request -> base.sha (tip of the branch the PR merges
-          # into); merge_group -> the queue's base SHA; push -> the tip before
-          # this push. Same resolution order as wire-format-must-move-golden.
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # event: pull_request -> the LIVE tip of the branch the PR merges
+          # into, resolved at run time from base.ref (F-163: base.sha is the
+          # base tip as of the PR's last sync and goes stale when another PR
+          # merges into the target branch in the meantime -- the same hazard
+          # documented below for wire-format-must-move-golden, resolved the
+          # same way); merge_group -> the queue's base SHA; push -> the tip
+          # before this push. Same resolution order as
+          # wire-format-must-move-golden.
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          if [ -n "${PR_BASE_SHA:-}" ]; then
-            base="${PR_BASE_SHA}"
+          if [ -n "${PR_BASE_REF:-}" ]; then
+            base="origin/${PR_BASE_REF}"
+            # fetch-depth: 0 already creates this ref; fetch it explicitly if a
+            # future checkout change ever stops doing so, so the gate keeps
+            # working instead of hard-failing every PR.
+            git rev-parse --verify -q "${base}^{commit}" >/dev/null \
+              || git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
           elif [ -n "${MERGE_GROUP_BASE:-}" ]; then
             base="${MERGE_GROUP_BASE}"
           elif [ -n "${PUSH_BEFORE:-}" ] \
