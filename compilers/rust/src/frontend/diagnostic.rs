@@ -88,6 +88,14 @@ pub fn static_method_message(name: &str) -> String {
     format!("static methods are not allowed in Rúnar contracts; method '{}' is declared static", name)
 }
 
+/// N-023's (R49) refusal, on the .runar.java surface, of an assignment (=,
+/// op=, ++, --) to a bare property name that no local or parameter shadows
+/// (the TS reference's `bareJavaPropertyAssignmentMessage`). In Java that bare
+/// name IS the field.
+pub fn bare_java_property_assignment_message(name: &str) -> String {
+    format!("bare assignment to property '{name}' is not allowed; write `this.{name} = ...`")
+}
+
 /// A tokenizer diagnostic at 1-based `line` / 0-based `column` of `file`.
 pub fn lex_error(message: &str, file: &str, line: usize, column: usize) -> Diagnostic {
     Diagnostic::error(

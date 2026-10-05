@@ -557,6 +557,10 @@ const Parser = struct {
             return .{ .contract = null, .errors = self.errors.items };
         }
 
+        // N-023 (R49): refuse a bare property write before the user
+        // constructor is folded into a ConstructorNode.
+        self.checkBarePropertyAssignments(properties.items, constructor_method, methods.items);
+
         // Build ConstructorNode from a user-supplied constructor if present,
         // otherwise auto-generate from non-initialized properties.
         const constructor: ConstructorNode = if (constructor_method) |cm|
@@ -575,6 +579,143 @@ const Parser = struct {
             .errors = self.errors.items,
         };
     }
+
+    // ==================================================================
+    // N-023 (R49): bare property assignment
+    // ==================================================================
+
+    /// In Java a bare name inside a method that no local or parameter shadows
+    /// IS the field, so `count = ...`, `count += ...`, `count++` and `--count`
+    /// write contract state. Lowering them as a local rebind dropped the state
+    /// write silently, so the bare form is refused (mirrors the TS reference's
+    /// checkBarePropertyAssignments). Shadowing follows Java block scope:
+    /// parameters, a local from its declaration to the end of its block, a
+    /// for-loop variable inside the loop. Bare reads are not touched.
+    ///
+    /// Limit: this AST keeps neither a for-loop's init expression nor its
+    /// condition, so a `++`/`--` nested inside those is not seen here. Such a
+    /// header is already refused by validate.zig (non-literal start, or a
+    /// condition that does not test the iterator).
+    fn checkBarePropertyAssignments(self: *Parser, properties: []const PropertyNode, ctor: ?MethodNode, methods: []const MethodNode) void {
+        if (properties.len == 0) return;
+        var w: BareWalker = .{ .parser = self, .properties = properties, .scope = .empty };
+        if (ctor) |c| w.method(c);
+        for (methods) |m| w.method(m);
+    }
+
+    const BareWalker = struct {
+        parser: *Parser,
+        properties: []const PropertyNode,
+        /// Every name currently in scope; a block truncates back to its mark.
+        scope: std.ArrayListUnmanaged([]const u8),
+
+        fn isProperty(w: *const BareWalker, name: []const u8) bool {
+            for (w.properties) |p| {
+                if (std.mem.eql(u8, p.name, name)) return true;
+            }
+            return false;
+        }
+
+        fn shadowed(w: *const BareWalker, name: []const u8) bool {
+            for (w.scope.items) |n| {
+                if (std.mem.eql(u8, n, name)) return true;
+            }
+            return false;
+        }
+
+        fn declare(w: *BareWalker, name: []const u8) void {
+            w.scope.append(w.parser.allocator, name) catch {};
+        }
+
+        fn checkName(w: *BareWalker, name: []const u8, loc: ?types.SourceLocation) void {
+            if (!w.isProperty(name) or w.shadowed(name)) return;
+            const p = w.parser;
+            const msg = std.fmt.allocPrint(p.allocator, lex_diag.BARE_JAVA_PROPERTY_ASSIGNMENT_FMT, .{ name, name }) catch return;
+            const line = if (loc) |l| l.line else p.current.line;
+            const col = if (loc) |l| l.column else p.current.col;
+            const f = std.fmt.allocPrint(p.allocator, "{s}:{d}:{d}: {s}", .{ p.file_name, line, col, msg }) catch return;
+            p.errors.append(p.allocator, f) catch {};
+        }
+
+        fn method(w: *BareWalker, m: MethodNode) void {
+            w.scope.clearRetainingCapacity();
+            for (m.params) |param| w.declare(param.name);
+            w.block(m.body, m.source_loc);
+        }
+
+        fn block(w: *BareWalker, body: []const Statement, loc: ?types.SourceLocation) void {
+            const mark = w.scope.items.len;
+            defer w.scope.shrinkRetainingCapacity(mark);
+            for (body) |s| w.stmt(s, loc);
+        }
+
+        fn stmt(w: *BareWalker, s: Statement, outer_loc: ?types.SourceLocation) void {
+            switch (s) {
+                .const_decl => |d| {
+                    w.expr(d.value, d.source_loc orelse outer_loc);
+                    w.declare(d.name);
+                },
+                .let_decl => |d| {
+                    if (d.value) |v| w.expr(v, d.source_loc orelse outer_loc);
+                    w.declare(d.name);
+                },
+                .assign => |a| {
+                    const loc = a.source_loc orelse outer_loc;
+                    if (!a.target_is_property and a.index_target == null) w.checkName(a.target, loc);
+                    if (a.index_target) |ia| w.expr(.{ .index_access = ia }, loc);
+                    w.expr(a.value, loc);
+                },
+                .if_stmt => |i| {
+                    const loc = i.source_loc orelse outer_loc;
+                    w.expr(i.condition, loc);
+                    w.block(i.then_body, loc);
+                    if (i.else_body) |e| w.block(e, loc);
+                },
+                .for_stmt => |f| {
+                    const loc = f.source_loc orelse outer_loc;
+                    const mark = w.scope.items.len;
+                    defer w.scope.shrinkRetainingCapacity(mark);
+                    w.declare(f.var_name);
+                    if (f.update) |u| w.stmt(u.*, loc);
+                    w.block(f.body, loc);
+                },
+                .expr_stmt => |e| w.expr(e.expr, e.source_loc orelse outer_loc),
+                .assert_stmt => |a| w.expr(a.condition, a.source_loc orelse outer_loc),
+                .return_stmt => |r| if (r) |v| w.expr(v, outer_loc),
+            }
+        }
+
+        fn expr(w: *BareWalker, e: Expression, loc: ?types.SourceLocation) void {
+            switch (e) {
+                .increment => |x| {
+                    if (x.operand == .identifier) w.checkName(x.operand.identifier, loc);
+                    w.expr(x.operand, loc);
+                },
+                .decrement => |x| {
+                    if (x.operand == .identifier) w.checkName(x.operand.identifier, loc);
+                    w.expr(x.operand, loc);
+                },
+                .binary_op => |x| {
+                    w.expr(x.left, loc);
+                    w.expr(x.right, loc);
+                },
+                .unary_op => |x| w.expr(x.operand, loc),
+                .call => |x| for (x.args) |a| w.expr(a, loc),
+                .method_call => |x| for (x.args) |a| w.expr(a, loc),
+                .ternary => |x| {
+                    w.expr(x.condition, loc);
+                    w.expr(x.then_expr, loc);
+                    w.expr(x.else_expr, loc);
+                },
+                .index_access => |x| {
+                    w.expr(x.object, loc);
+                    w.expr(x.index, loc);
+                },
+                .array_literal => |xs| for (xs) |x| w.expr(x, loc),
+                else => {},
+            }
+        }
+    };
 
     fn skipPackageDecl(self: *Parser) void {
         if (!self.checkIdent("package")) return;
@@ -2582,4 +2723,96 @@ fn loopStartLiteral(expr: types.Expression) ?i64 {
         },
         else => null,
     };
+}
+
+// N-023 (R49): on the .runar.java surface a bare name that no local or
+// parameter shadows IS the field, so `count = ...` writes state in Java. The
+// parser used to lower it as a local rebind: a stateful contract compiled with
+// no update_prop and its state never changed. Every tier refuses the bare form
+// with the TS reference's diagnostic.
+//
+// Proves: the Zig Java parser refuses each assignment spelling (=, op=, ++/--,
+// statement or nested, any method incl. the constructor) on an unshadowed
+// property, and accepts this.x writes plus local / parameter / for-variable
+// shadowing, honouring Java block scope.
+// Does not prove: other tiers (conformance/negatives N166 covers them), or
+// anything about bare reads, which R49 leaves alone.
+const n023_bare_msg = "bare assignment to property 'count' is not allowed; write `this.count = ...`";
+
+fn n023Source(allocator: Allocator, body: []const u8, params: []const u8, ctor_param: []const u8, ctor_body: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator,
+        \\package p;
+        \\import runar.lang.StatefulSmartContract;
+        \\import runar.lang.annotations.Public;
+        \\import runar.lang.types.Bigint;
+        \\import static runar.lang.Builtins.assertThat;
+        \\
+        \\class BareCounter extends StatefulSmartContract {{
+        \\    Bigint count;
+        \\
+        \\    BareCounter(Bigint {s}) {{
+        \\        {s}
+        \\    }}
+        \\
+        \\    @Public
+        \\    void increment({s}) {{
+        \\        {s}
+        \\    }}
+        \\}}
+        \\
+    , .{ ctor_param, ctor_body, params, body });
+}
+
+fn n023HasBareError(errors: [][]const u8) bool {
+    for (errors) |e| {
+        if (std.mem.indexOf(u8, e, n023_bare_msg) != null) return true;
+    }
+    return false;
+}
+
+const n023_default_ctor = "super(count);\n        this.count = count;";
+
+test "N-023: bare property assignment is refused (Java)" {
+    const bodies = [_][]const u8{
+        "count = count.plus(Bigint.ONE);",
+        "count += Bigint.ONE;",
+        "count++;",
+        "--count;",
+        "if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }",
+        "for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }",
+        "assertThat((count++).gt(Bigint.ZERO));",
+        "if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;",
+        "count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;",
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (bodies) |body| {
+        const r = parseJava(a, try n023Source(a, body, "", "count", n023_default_ctor), "BareCounter.runar.java");
+        if (!n023HasBareError(r.errors)) {
+            std.debug.print("N-023: not refused: {s}\n", .{body});
+            return error.BareAssignmentNotRefused;
+        }
+    }
+    const ctor = parseJava(a, try n023Source(a, "this.count = this.count.plus(Bigint.ONE);", "", "c", "super(c);\n        count = c;"), "BareCounter.runar.java");
+    try std.testing.expect(n023HasBareError(ctor.errors));
+}
+
+test "N-023: shadowed or explicit property assignment is accepted (Java)" {
+    const Case = struct { body: []const u8, params: []const u8 };
+    const cases = [_]Case{
+        .{ .body = "this.count = this.count.plus(Bigint.ONE);", .params = "" },
+        .{ .body = "Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;", .params = "" },
+        .{ .body = "count = count.plus(Bigint.ONE);\n        this.count = count;", .params = "Bigint count" },
+        .{ .body = "for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n        this.count = this.count.plus(Bigint.ONE);", .params = "" },
+        .{ .body = "this.count = count.plus(Bigint.ONE);", .params = "" },
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (cases) |c| {
+        const r = parseJava(a, try n023Source(a, c.body, c.params, "count", n023_default_ctor), "BareCounter.runar.java");
+        for (r.errors) |err| std.debug.print("N-023 control '{s}': {s}\n", .{ c.body, err });
+        try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    }
 }

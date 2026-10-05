@@ -95,6 +95,17 @@ export function staticMethodMessage(name: string): string {
   return `static methods are not allowed in Rúnar contracts; method '${name}' is declared static`;
 }
 
+/**
+ * N-023 (R49): on the .runar.java surface a bare name that no local or
+ * parameter shadows refers to the field, so `count = ...` (or `count += ...`,
+ * `count++`, `--count`) is a state write in Java. Rúnar requires the explicit
+ * `this.count = ...` form; every tier's Java parser refuses the bare form with
+ * this diagnostic. `name` is the property name.
+ */
+export function bareJavaPropertyAssignmentMessage(name: string): string {
+  return `bare assignment to property '${name}' is not allowed; write \`this.${name} = ...\``;
+}
+
 /** F-026: prefix of a TypeScript syntactic diagnostic surfaced on .runar.ts. */
 export const TS_SYNTAX_ERROR_PREFIX = 'TypeScript syntax error: ';
 

@@ -610,3 +610,86 @@ class TestTypeMapping:
         assert prop.type == PrimitiveType(name="boolean")
         assert isinstance(prop.initializer, BoolLiteral)
         assert prop.initializer.value is True
+
+
+# ---------------------------------------------------------------------------
+# N-023 (R49): a bare assignment to a property name is refused
+# ---------------------------------------------------------------------------
+#
+# On the .runar.java surface a bare name that no local or parameter shadows IS
+# the field, so `count = ...` writes state in Java. The parser used to lower it
+# as a local rebind: a stateful contract compiled with no update_prop and its
+# state never changed. Every tier refuses the bare form with the TS reference's
+# diagnostic.
+#
+# Proves: the Python Java parser refuses each assignment spelling (=, op=,
+# ++/--, statement or nested, any method incl. the constructor) on an
+# unshadowed property, and accepts this.x writes plus local / parameter /
+# for-variable shadowing, honouring Java block scope.
+# Does not prove: other tiers (conformance/negatives N166 covers them), or
+# anything about bare reads, which R49 leaves alone.
+
+_BARE_MSG = "bare assignment to property 'count' is not allowed; write `this.count = ...`"
+_BARE_CTOR = "super(count);\n        this.count = count;"
+
+
+def _bare_counter(body: str, params: str = "", ctor_param: str = "count", ctor_body: str = _BARE_CTOR) -> str:
+    return f"""
+package p;
+import runar.lang.StatefulSmartContract;
+import runar.lang.annotations.Public;
+import runar.lang.types.Bigint;
+import static runar.lang.Builtins.assertThat;
+
+class BareCounter extends StatefulSmartContract {{
+    Bigint count;
+
+    BareCounter(Bigint {ctor_param}) {{
+        {ctor_body}
+    }}
+
+    @Public
+    void increment({params}) {{
+        {body}
+    }}
+}}
+"""
+
+
+def _bare_errors(src: str) -> list[str]:
+    r = parse_source(src, "BareCounter.runar.java")
+    return [e.message for e in r.errors if e.severity == "error"]
+
+
+@pytest.mark.parametrize("body", [
+    "count = count.plus(Bigint.ONE);",
+    "count += Bigint.ONE;",
+    "count++;",
+    "--count;",
+    "if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }",
+    "for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }",
+    "assertThat((count++).gt(Bigint.ZERO));",
+    "if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;",
+    "count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;",
+], ids=["plain", "compound", "postfix-inc", "prefix-dec", "if-arm", "for-update", "nested",
+        "after-if-scoped-local", "before-shadowing-local"])
+def test_n023_refuses_bare_property_assignment(body: str) -> None:
+    assert _BARE_MSG in _bare_errors(_bare_counter(body))
+
+
+def test_n023_refuses_bare_property_assignment_in_constructor() -> None:
+    src = _bare_counter("this.count = this.count.plus(Bigint.ONE);", ctor_param="c",
+                        ctor_body="super(c);\n        count = c;")
+    assert _BARE_MSG in _bare_errors(src)
+
+
+@pytest.mark.parametrize("body,params", [
+    ("this.count = this.count.plus(Bigint.ONE);", ""),
+    ("Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;", ""),
+    ("count = count.plus(Bigint.ONE);\n        this.count = count;", "Bigint count"),
+    ("for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n"
+     "        this.count = this.count.plus(Bigint.ONE);", ""),
+    ("this.count = count.plus(Bigint.ONE);", ""),
+], ids=["this-form", "local-shadow", "param-shadow", "for-var-shadow", "bare-read"])
+def test_n023_accepts_shadowed_or_explicit_assignment(body: str, params: str) -> None:
+    assert _bare_errors(_bare_counter(body, params)) == []

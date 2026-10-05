@@ -40,6 +40,7 @@ from runar_compiler.frontend.parser_dispatch import ParseResult
 from runar_compiler.frontend.int_literal import invalid_integer_literal, lex_number  # F-026
 from runar_compiler.frontend.diagnostic import (  # F-011
     JAVA_CHAR_LITERAL,
+    bare_java_property_assignment_message,
     UNTERMINATED_STRING_LITERAL,
     lex_error,
     with_lex_errors,
@@ -600,7 +601,7 @@ class _JavaParser:
         if constructor is None:
             constructor = self._synthetic_constructor(properties, class_loc)
 
-        return ContractNode(
+        contract = ContractNode(
             name=class_name,
             parent_class=parent_class,
             properties=properties,
@@ -608,6 +609,91 @@ class _JavaParser:
             methods=methods,
             source_file=self.file_name,
         )
+        self._check_bare_property_assignments(contract)
+        return contract
+
+    def _check_bare_property_assignments(self, contract: ContractNode) -> None:
+        """N-023 (R49). In Java a bare name inside a method that no local or
+        parameter shadows IS the field, so ``count = ...``, ``count += ...``,
+        ``count++`` and ``--count`` write contract state. Lowering them as a
+        local rebind dropped the state write silently, so the bare form is
+        refused (mirrors the TS reference's checkBarePropertyAssignments).
+        Shadowing follows Java block scope: parameters, a local from its
+        declaration to the end of its block, a for-loop variable inside the
+        loop. Bare reads are not touched."""
+        props = {p.name for p in contract.properties}
+        if not props:
+            return
+
+        def check_target(e, scope: list[set[str]], loc) -> None:
+            if isinstance(e, Identifier) and e.name in props \
+                    and not any(e.name in s for s in scope):
+                self.errors.append(Diagnostic(
+                    message=bare_java_property_assignment_message(e.name),
+                    severity=Severity.ERROR, loc=loc))
+
+        def walk_expr(e, scope: list[set[str]], loc) -> None:
+            if e is None:
+                return
+            if isinstance(e, (IncrementExpr, DecrementExpr)):
+                check_target(e.operand, scope, loc)
+                walk_expr(e.operand, scope, loc)
+            elif isinstance(e, BinaryExpr):
+                walk_expr(e.left, scope, loc)
+                walk_expr(e.right, scope, loc)
+            elif isinstance(e, UnaryExpr):
+                walk_expr(e.operand, scope, loc)
+            elif isinstance(e, CallExpr):
+                walk_expr(e.callee, scope, loc)
+                for a in e.args:
+                    walk_expr(a, scope, loc)
+            elif isinstance(e, MemberExpr):
+                walk_expr(e.object, scope, loc)
+            elif isinstance(e, TernaryExpr):
+                walk_expr(e.condition, scope, loc)
+                walk_expr(e.consequent, scope, loc)
+                walk_expr(e.alternate, scope, loc)
+            elif isinstance(e, IndexAccessExpr):
+                walk_expr(e.object, scope, loc)
+                walk_expr(e.index, scope, loc)
+            elif isinstance(e, ArrayLiteralExpr):
+                for el in e.elements:
+                    walk_expr(el, scope, loc)
+
+        def walk_stmt(s, scope: list[set[str]]) -> None:
+            if s is None:
+                return
+            loc = s.source_location
+            if isinstance(s, VariableDeclStmt):
+                walk_expr(s.init, scope, loc)
+                scope[-1].add(s.name)
+            elif isinstance(s, AssignmentStmt):
+                check_target(s.target, scope, loc)
+                walk_expr(s.target, scope, loc)
+                walk_expr(s.value, scope, loc)
+            elif isinstance(s, IfStmt):
+                walk_expr(s.condition, scope, loc)
+                walk_block(s.then, scope)
+                if s.else_:
+                    walk_block(s.else_, scope)
+            elif isinstance(s, ForStmt):
+                loop = scope + [set()]
+                walk_stmt(s.init, loop)
+                walk_expr(s.condition, loop, loc)
+                walk_stmt(s.update, loop)
+                walk_block(s.body, loop)
+            elif isinstance(s, ReturnStmt):
+                walk_expr(s.value, scope, loc)
+            elif isinstance(s, ExpressionStmt):
+                walk_expr(s.expr, scope, loc)
+
+        def walk_block(body: list, outer: list[set[str]]) -> None:
+            scope = outer + [set()]
+            for s in body:
+                walk_stmt(s, scope)
+
+        for m in [contract.constructor, *contract.methods]:
+            walk_block(m.body, [{p.name for p in m.params}])
 
     # -- Annotations ---------------------------------------------------------
 

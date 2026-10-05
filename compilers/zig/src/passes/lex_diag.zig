@@ -27,6 +27,12 @@ pub const JAVA_CHAR_LITERAL = "char literals are unsupported in Rúnar Java cont
 pub const STATIC_METHOD_FMT = "static methods are not allowed in Rúnar contracts; method '{s}' is declared static";
 
 /// 1-based line / 1-based column of an opening quote.
+/// N-023's (R49) refusal, on the .runar.java surface, of an assignment (=,
+/// op=, ++, --) to a bare property name that no local or parameter shadows
+/// (the TS reference's bareJavaPropertyAssignmentMessage). In Java that bare
+/// name IS the field. Format args: the property name, twice.
+pub const BARE_JAVA_PROPERTY_ASSIGNMENT_FMT = "bare assignment to property '{s}' is not allowed; write `this.{s} = ...`";
+
 pub const Pos = struct { line: u32, col: u32 };
 
 var fallback = [_][]const u8{UNTERMINATED_STRING_LITERAL};

@@ -651,13 +651,136 @@ func (p *javaParser) parseClass() *ContractNode {
 		constructor = &ctor
 	}
 
-	return &ContractNode{
+	contract := &ContractNode{
 		Name:        className,
 		ParentClass: parentClass,
 		Properties:  properties,
 		Constructor: *constructor,
 		Methods:     methods,
 		SourceFile:  p.fileName,
+	}
+	p.checkBarePropertyAssignments(contract)
+	return contract
+}
+
+// checkBarePropertyAssignments is N-023 (R49). In Java a bare name inside a
+// method that no local or parameter shadows IS the field, so `count = ...`,
+// `count += ...`, `count++` and `--count` write contract state. Lowering them
+// as a local rebind dropped the state write silently, so the bare form is
+// refused (mirrors the TS reference's checkBarePropertyAssignments). Shadowing
+// follows Java block scope: parameters, a local from its declaration to the
+// end of its block, a for-loop variable inside the loop. Bare reads are not
+// touched.
+func (p *javaParser) checkBarePropertyAssignments(c *ContractNode) {
+	props := map[string]bool{}
+	for _, pr := range c.Properties {
+		props[pr.Name] = true
+	}
+	if len(props) == 0 {
+		return
+	}
+	type scope []map[string]bool
+	shadowed := func(sc scope, name string) bool {
+		for _, s := range sc {
+			if s[name] {
+				return true
+			}
+		}
+		return false
+	}
+	report := func(name string, loc SourceLocation) {
+		l := loc
+		p.errors = append(p.errors, Diagnostic{Message: BareJavaPropertyAssignmentMsg(name), Severity: SeverityError, Loc: &l})
+	}
+	checkTarget := func(e Expression, sc scope, loc SourceLocation) {
+		if id, ok := e.(Identifier); ok && props[id.Name] && !shadowed(sc, id.Name) {
+			report(id.Name, loc)
+		}
+	}
+	var walkExpr func(e Expression, sc scope, loc SourceLocation)
+	walkExpr = func(e Expression, sc scope, loc SourceLocation) {
+		switch x := e.(type) {
+		case IncrementExpr:
+			checkTarget(x.Operand, sc, loc)
+			walkExpr(x.Operand, sc, loc)
+		case DecrementExpr:
+			checkTarget(x.Operand, sc, loc)
+			walkExpr(x.Operand, sc, loc)
+		case BinaryExpr:
+			walkExpr(x.Left, sc, loc)
+			walkExpr(x.Right, sc, loc)
+		case UnaryExpr:
+			walkExpr(x.Operand, sc, loc)
+		case CallExpr:
+			walkExpr(x.Callee, sc, loc)
+			for _, a := range x.Args {
+				walkExpr(a, sc, loc)
+			}
+		case MemberExpr:
+			walkExpr(x.Object, sc, loc)
+		case TernaryExpr:
+			walkExpr(x.Condition, sc, loc)
+			walkExpr(x.Consequent, sc, loc)
+			walkExpr(x.Alternate, sc, loc)
+		case IndexAccessExpr:
+			walkExpr(x.Object, sc, loc)
+			walkExpr(x.Index, sc, loc)
+		case ArrayLiteralExpr:
+			for _, el := range x.Elements {
+				walkExpr(el, sc, loc)
+			}
+		}
+	}
+	var walkBlock func(body []Statement, outer scope)
+	var walkStmt func(s Statement, sc scope)
+	walkStmt = func(s Statement, sc scope) {
+		switch x := s.(type) {
+		case VariableDeclStmt:
+			if x.Init != nil {
+				walkExpr(x.Init, sc, x.SourceLocation)
+			}
+			sc[len(sc)-1][x.Name] = true
+		case AssignmentStmt:
+			checkTarget(x.Target, sc, x.SourceLocation)
+			walkExpr(x.Target, sc, x.SourceLocation)
+			walkExpr(x.Value, sc, x.SourceLocation)
+		case IfStmt:
+			walkExpr(x.Condition, sc, x.SourceLocation)
+			walkBlock(x.Then, sc)
+			if x.Else != nil {
+				walkBlock(x.Else, sc)
+			}
+		case ForStmt:
+			loop := append(append(scope{}, sc...), map[string]bool{})
+			walkStmt(x.Init, loop)
+			if x.Condition != nil {
+				walkExpr(x.Condition, loop, x.SourceLocation)
+			}
+			if x.Update != nil {
+				walkStmt(x.Update, loop)
+			}
+			walkBlock(x.Body, loop)
+		case ReturnStmt:
+			if x.Value != nil {
+				walkExpr(x.Value, sc, x.SourceLocation)
+			}
+		case ExpressionStmt:
+			walkExpr(x.Expr, sc, x.SourceLocation)
+		}
+	}
+	walkBlock = func(body []Statement, outer scope) {
+		sc := append(append(scope{}, outer...), map[string]bool{})
+		for _, s := range body {
+			walkStmt(s, sc)
+		}
+	}
+	methods := append([]MethodNode{c.Constructor}, c.Methods...)
+	for _, m := range methods {
+		params := map[string]bool{}
+		for _, pr := range m.Params {
+			params[pr.Name] = true
+		}
+		walkBlock(m.Body, scope{params})
 	}
 }
 

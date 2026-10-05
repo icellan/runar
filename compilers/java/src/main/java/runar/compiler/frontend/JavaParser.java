@@ -40,9 +40,11 @@ import java.math.BigInteger;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
@@ -255,7 +257,113 @@ public final class JavaParser {
             methods.add(convertMethod(mt, filename, cu, className));
         }
 
+        checkBarePropertyAssignments(properties, constructor, methods);
         return new ContractNode(className, parentClass, properties, constructor, methods, filename);
+    }
+
+    // ---------------------------------------------------------------
+    // N-023 (R49): bare property assignment
+    // ---------------------------------------------------------------
+
+    /**
+     * In Java a bare name inside a method that no local or parameter shadows
+     * IS the field, so {@code count = ...}, {@code count++} and
+     * {@code --count} write contract state. Lowering them as a local rebind
+     * dropped the state write silently, so the bare form is refused (mirrors
+     * the TS reference's checkBarePropertyAssignments). Shadowing follows
+     * Java block scope: parameters, a local from its declaration to the end
+     * of its block, a for-loop variable inside the loop. Bare reads are not
+     * touched. (Compound {@code op=} never reaches here: this tier refuses
+     * every compound assignment during conversion.)
+     */
+    private static void checkBarePropertyAssignments(
+        List<PropertyNode> properties, MethodNode constructor, List<MethodNode> methods
+    ) {
+        Set<String> props = new HashSet<>();
+        for (PropertyNode p : properties) props.add(p.name());
+        if (props.isEmpty()) return;
+        List<MethodNode> all = new ArrayList<>();
+        all.add(constructor);
+        all.addAll(methods);
+        for (MethodNode m : all) {
+            List<Set<String>> scope = new ArrayList<>();
+            Set<String> params = new HashSet<>();
+            for (ParamNode p : m.params()) params.add(p.name());
+            scope.add(params);
+            bareBlock(m.body(), scope, props);
+        }
+    }
+
+    private static void bareTarget(Expression e, List<Set<String>> scope, Set<String> props) {
+        if (e instanceof Identifier id && props.contains(id.name())) {
+            for (Set<String> s : scope) {
+                if (s.contains(id.name())) return;
+            }
+            throw new ParseException(LexDiag.bareJavaPropertyAssignment(id.name()));
+        }
+    }
+
+    private static void bareBlock(List<Statement> body, List<Set<String>> outer, Set<String> props) {
+        if (body == null) return;
+        List<Set<String>> scope = new ArrayList<>(outer);
+        scope.add(new HashSet<>());
+        for (Statement s : body) bareStmt(s, scope, props);
+    }
+
+    private static void bareStmt(Statement s, List<Set<String>> scope, Set<String> props) {
+        if (s instanceof VariableDeclStatement v) {
+            bareExpr(v.init(), scope, props);
+            scope.get(scope.size() - 1).add(v.name());
+        } else if (s instanceof AssignmentStatement a) {
+            bareTarget(a.target(), scope, props);
+            bareExpr(a.target(), scope, props);
+            bareExpr(a.value(), scope, props);
+        } else if (s instanceof IfStatement i) {
+            bareExpr(i.condition(), scope, props);
+            bareBlock(i.thenBody(), scope, props);
+            bareBlock(i.elseBody(), scope, props);
+        } else if (s instanceof ForStatement f) {
+            List<Set<String>> loop = new ArrayList<>(scope);
+            loop.add(new HashSet<>());
+            if (f.init() != null) bareStmt(f.init(), loop, props);
+            bareExpr(f.condition(), loop, props);
+            if (f.update() != null) bareStmt(f.update(), loop, props);
+            bareBlock(f.body(), loop, props);
+        } else if (s instanceof ReturnStatement r) {
+            bareExpr(r.value(), scope, props);
+        } else if (s instanceof ExpressionStatement es) {
+            bareExpr(es.expression(), scope, props);
+        }
+    }
+
+    private static void bareExpr(Expression e, List<Set<String>> scope, Set<String> props) {
+        if (e == null) return;
+        if (e instanceof IncrementExpr x) {
+            bareTarget(x.operand(), scope, props);
+            bareExpr(x.operand(), scope, props);
+        } else if (e instanceof DecrementExpr x) {
+            bareTarget(x.operand(), scope, props);
+            bareExpr(x.operand(), scope, props);
+        } else if (e instanceof BinaryExpr x) {
+            bareExpr(x.left(), scope, props);
+            bareExpr(x.right(), scope, props);
+        } else if (e instanceof UnaryExpr x) {
+            bareExpr(x.operand(), scope, props);
+        } else if (e instanceof CallExpr x) {
+            bareExpr(x.callee(), scope, props);
+            for (Expression a : x.args()) bareExpr(a, scope, props);
+        } else if (e instanceof MemberExpr x) {
+            bareExpr(x.object(), scope, props);
+        } else if (e instanceof TernaryExpr x) {
+            bareExpr(x.condition(), scope, props);
+            bareExpr(x.consequent(), scope, props);
+            bareExpr(x.alternate(), scope, props);
+        } else if (e instanceof IndexAccessExpr x) {
+            bareExpr(x.object(), scope, props);
+            bareExpr(x.index(), scope, props);
+        } else if (e instanceof ArrayLiteralExpr x) {
+            for (Expression el : x.elements()) bareExpr(el, scope, props);
+        }
     }
 
     private static ParentClass determineParentClass(ClassTree cls, String filename) {

@@ -42,6 +42,16 @@ final class LexDiag {
         return "static methods are not allowed in Rúnar contracts; method '" + name + "' is declared static";
     }
 
+    /**
+     * N-023 (R49): an assignment ({@code =}, op=, {@code ++}, {@code --}) on
+     * the .runar.java surface to a bare property name that no local or
+     * parameter shadows (the TS reference's
+     * bareJavaPropertyAssignmentMessage). In Java that bare name IS the field.
+     */
+    static String bareJavaPropertyAssignment(String name) {
+        return "bare assignment to property '" + name + "' is not allowed; write `this." + name + " = ...`";
+    }
+
     /** {@code file:line:col: message}. */
     static String at(String file, int line, int col, String message) {
         return file + ":" + line + ":" + col + ": " + message;

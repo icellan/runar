@@ -42,7 +42,12 @@ import type {
   BinaryOp,
 } from '../ir/index.js';
 import type { CompilerDiagnostic } from '../errors.js';
-import { makeDiagnostic, staticMethodMessage, UNTERMINATED_STRING_LITERAL } from '../errors.js';
+import {
+  bareJavaPropertyAssignmentMessage,
+  makeDiagnostic,
+  staticMethodMessage,
+  UNTERMINATED_STRING_LITERAL,
+} from '../errors.js';
 import type { ParseResult } from './01-parse.js';
 import { assertSourceWithinLimits } from './source-limits.js';
 
@@ -449,6 +454,8 @@ class JavaParser {
     };
     // Note: classLoc is captured but ContractNode doesn't carry a sourceLocation.
     void classLoc;
+
+    checkBarePropertyAssignments(contract, this.errors);
 
     return { contract, errors: this.errors };
   }
@@ -1630,6 +1637,93 @@ function foldBigIntegerConstant(name: string): Expression | null {
 // ---------------------------------------------------------------------------
 // Synthetic constructor (when the contract omits one)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// N-023 (R49): bare property assignment
+// ---------------------------------------------------------------------------
+
+/**
+ * In Java a bare name inside a method that no local or parameter shadows IS
+ * the field, so `count = ...`, `count += ...`, `count++` and `--count` write
+ * contract state. Lowering them as a local rebind (the old behaviour) dropped
+ * the state write silently, so the bare form is refused; the author writes
+ * `this.count = ...`. Shadowing follows Java block scope: parameters, a local
+ * from its declaration to the end of its block, a for-loop variable inside
+ * the loop. Bare READS are not touched.
+ */
+function checkBarePropertyAssignments(contract: ContractNode, errors: CompilerDiagnostic[]): void {
+  const props = new Set(contract.properties.map(p => p.name));
+  if (props.size === 0) return;
+
+  const report = (name: string, loc: SourceLocation | undefined) => {
+    errors.push(makeDiagnostic(bareJavaPropertyAssignmentMessage(name), 'error', loc));
+  };
+  const isBareProp = (e: Expression, scope: Set<string>[]): e is Extract<Expression, { kind: 'identifier' }> =>
+    e.kind === 'identifier' && props.has(e.name) && !scope.some(s => s.has(e.name));
+
+  const walkExpr = (e: Expression, scope: Set<string>[], loc: SourceLocation | undefined): void => {
+    switch (e.kind) {
+      case 'increment_expr':
+      case 'decrement_expr':
+        if (isBareProp(e.operand, scope)) report(e.operand.name, e.sourceLocation ?? loc);
+        walkExpr(e.operand, scope, loc);
+        return;
+      case 'binary_expr': walkExpr(e.left, scope, loc); walkExpr(e.right, scope, loc); return;
+      case 'unary_expr': walkExpr(e.operand, scope, loc); return;
+      case 'call_expr': walkExpr(e.callee, scope, loc); e.args.forEach(a => walkExpr(a, scope, loc)); return;
+      case 'member_expr': walkExpr(e.object, scope, loc); return;
+      case 'ternary_expr':
+        walkExpr(e.condition, scope, loc); walkExpr(e.consequent, scope, loc); walkExpr(e.alternate, scope, loc);
+        return;
+      case 'index_access': walkExpr(e.object, scope, loc); walkExpr(e.index, scope, loc); return;
+      case 'array_literal': e.elements.forEach(x => walkExpr(x, scope, loc)); return;
+      default: return;
+    }
+  };
+
+  const walkStmt = (s: Statement, scope: Set<string>[]): void => {
+    const loc = s.sourceLocation;
+    switch (s.kind) {
+      case 'variable_decl':
+        if (s.init) walkExpr(s.init, scope, loc);
+        scope[scope.length - 1]!.add(s.name);
+        return;
+      case 'assignment':
+        if (isBareProp(s.target, scope)) report(s.target.name, loc);
+        walkExpr(s.target, scope, loc);
+        walkExpr(s.value, scope, loc);
+        return;
+      case 'if_statement':
+        walkExpr(s.condition, scope, loc);
+        walkBlock(s.then, scope);
+        if (s.else) walkBlock(s.else, scope);
+        return;
+      case 'for_statement': {
+        const loopScope = [...scope, new Set<string>()];
+        walkStmt(s.init, loopScope);
+        walkExpr(s.condition, loopScope, loc);
+        walkStmt(s.update, loopScope);
+        walkBlock(s.body, loopScope);
+        return;
+      }
+      case 'return_statement':
+        if (s.value) walkExpr(s.value, scope, loc);
+        return;
+      case 'expression_statement':
+        walkExpr(s.expression, scope, loc);
+        return;
+    }
+  };
+
+  const walkBlock = (body: Statement[], outer: Set<string>[]): void => {
+    const scope = [...outer, new Set<string>()];
+    for (const s of body) walkStmt(s, scope);
+  };
+
+  for (const m of [contract.constructor, ...contract.methods]) {
+    walkBlock(m.body, [new Set(m.params.map(p => p.name))]);
+  }
+}
 
 function syntheticConstructor(properties: PropertyNode[], file: string): MethodNode {
   const loc: SourceLocation = { file, line: 1, column: 1 };

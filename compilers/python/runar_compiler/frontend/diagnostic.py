@@ -59,6 +59,14 @@ def static_method_message(name: str) -> str:
     return f"static methods are not allowed in Rúnar contracts; method '{name}' is declared static"
 
 
+def bare_java_property_assignment_message(name: str) -> str:
+    """N-023's (R49) refusal, on the .runar.java surface, of an assignment
+    (=, op=, ++, --) to a bare property name that no local or parameter
+    shadows (the TS reference's bareJavaPropertyAssignmentMessage). In Java
+    that bare name IS the field."""
+    return f"bare assignment to property '{name}' is not allowed; write `this.{name} = ...`"
+
+
 def lex_error(message: str, file: str, line: int, column: int) -> Diagnostic:
     """A tokenizer diagnostic located at line:column of file."""
     return Diagnostic(message=message, severity=Severity.ERROR,

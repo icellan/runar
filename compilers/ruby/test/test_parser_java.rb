@@ -348,4 +348,86 @@ class TestParserJava < Minitest::Test
     refute_nil result.contract
     assert_equal "P2PKH", result.contract.name
   end
+  # ---------------------------------------------------------------------------
+  # N-023 (R49): a bare assignment to a property name is refused
+  # ---------------------------------------------------------------------------
+  #
+  # On the .runar.java surface a bare name that no local or parameter shadows
+  # IS the field, so `count = ...` writes state in Java. The parser used to
+  # lower it as a local rebind: a stateful contract compiled with no
+  # update_prop and its state never changed. Every tier refuses the bare form
+  # with the TS reference's diagnostic.
+  #
+  # Proves: the Ruby Java parser refuses each assignment spelling (=, op=,
+  # ++/--, statement or nested, any method incl. the constructor) on an
+  # unshadowed property, and accepts this.x writes plus local / parameter /
+  # for-variable shadowing, honouring Java block scope.
+  # Does not prove: other tiers (conformance/negatives N166 covers them), or
+  # anything about bare reads, which R49 leaves alone.
+
+  N023_MSG = "bare assignment to property 'count' is not allowed; write `this.count = ...`"
+  N023_CTOR = "super(count);\n        this.count = count;"
+
+  def n023_source(body, params: "", ctor_param: "count", ctor_body: N023_CTOR)
+    <<~JAVA
+      package p;
+      import runar.lang.StatefulSmartContract;
+      import runar.lang.annotations.Public;
+      import runar.lang.types.Bigint;
+      import static runar.lang.Builtins.assertThat;
+
+      class BareCounter extends StatefulSmartContract {
+          Bigint count;
+
+          BareCounter(Bigint #{ctor_param}) {
+              #{ctor_body}
+          }
+
+          @Public
+          void increment(#{params}) {
+              #{body}
+          }
+      }
+    JAVA
+  end
+
+  def n023_errors(src)
+    parse(src, "BareCounter.runar.java").errors
+      .select { |e| e.severity == RunarCompiler::Frontend::Severity::ERROR }
+      .map(&:message)
+  end
+
+  N023_REFUSED = [
+    "count = count.plus(Bigint.ONE);",
+    "count += Bigint.ONE;",
+    "count++;",
+    "--count;",
+    "if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }",
+    "for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }",
+    "assertThat((count++).gt(Bigint.ZERO));",
+    "if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;",
+    "count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;",
+  ].freeze
+
+  def test_n023_refuses_bare_property_assignment
+    N023_REFUSED.each do |body|
+      assert_includes n023_errors(n023_source(body)), N023_MSG, "not refused: #{body}"
+    end
+    src = n023_source("this.count = this.count.plus(Bigint.ONE);",
+                      ctor_param: "c", ctor_body: "super(c);\n        count = c;")
+    assert_includes n023_errors(src), N023_MSG, "constructor bare write not refused"
+  end
+
+  def test_n023_accepts_shadowed_or_explicit_assignment
+    [
+      ["this.count = this.count.plus(Bigint.ONE);", ""],
+      ["Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;", ""],
+      ["count = count.plus(Bigint.ONE);\n        this.count = count;", "Bigint count"],
+      ["for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n" \
+       "        this.count = this.count.plus(Bigint.ONE);", ""],
+      ["this.count = count.plus(Bigint.ONE);", ""],
+    ].each do |body, params|
+      assert_empty n023_errors(n023_source(body, params: params)), "control refused: #{body}"
+    end
+  end
 end

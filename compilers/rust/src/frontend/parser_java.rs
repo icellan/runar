@@ -46,7 +46,10 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
-use super::diagnostic::{lex_error, static_method_message, Diagnostic, JAVA_CHAR_LITERAL, UNTERMINATED_STRING_LITERAL};
+use super::diagnostic::{
+    bare_java_property_assignment_message, lex_error, static_method_message, Diagnostic, JAVA_CHAR_LITERAL,
+    UNTERMINATED_STRING_LITERAL,
+};
 use super::int_literal::{invalid_integer_literal, parse_int_literal, scan_number_end};
 use super::parser::ParseResult;
 
@@ -656,14 +659,16 @@ impl<'a> JavaParser<'a> {
 
         let ctor = constructor.unwrap_or_else(|| synthesize_constructor(&properties, &self.file));
 
-        Some(ContractNode {
+        let contract = ContractNode {
             name: class_name,
             parent_class,
             properties,
             constructor: ctor,
             methods,
             source_file: self.file.clone(),
-        })
+        };
+        check_bare_property_assignments(&contract, self.errors);
+        Some(contract)
     }
 
     fn skip_qualified_name(&mut self) {
@@ -2353,6 +2358,131 @@ fn is_comparison_op(op: BinaryOp) -> bool {
 // Synthetic constructor (same shape as the other parsers)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// N-023 (R49): bare property assignment
+// ---------------------------------------------------------------------------
+
+/// In Java a bare name inside a method that no local or parameter shadows IS
+/// the field, so `count = ...`, `count += ...`, `count++` and `--count` write
+/// contract state. Lowering them as a local rebind dropped the state write
+/// silently, so the bare form is refused (mirrors the TS reference's
+/// `checkBarePropertyAssignments`). Shadowing follows Java block scope:
+/// parameters, a local from its declaration to the end of its block, a
+/// for-loop variable inside the loop. Bare reads are not touched.
+fn check_bare_property_assignments(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
+    use std::collections::HashSet;
+    let props: HashSet<&str> = contract.properties.iter().map(|p| p.name.as_str()).collect();
+    if props.is_empty() {
+        return;
+    }
+
+    struct Walker<'c> {
+        props: HashSet<&'c str>,
+        errors: Vec<Diagnostic>,
+    }
+
+    impl<'c> Walker<'c> {
+        fn check_target(&mut self, e: &Expression, scope: &[HashSet<String>], loc: &SourceLocation) {
+            if let Expression::Identifier { name } = e {
+                if self.props.contains(name.as_str()) && !scope.iter().any(|s| s.contains(name)) {
+                    self.errors.push(Diagnostic::error(
+                        bare_java_property_assignment_message(name),
+                        Some(loc.clone()),
+                    ));
+                }
+            }
+        }
+
+        fn expr(&mut self, e: &Expression, scope: &[HashSet<String>], loc: &SourceLocation) {
+            match e {
+                Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+                    self.check_target(operand, scope, loc);
+                    self.expr(operand, scope, loc);
+                }
+                Expression::BinaryExpr { left, right, .. } => {
+                    self.expr(left, scope, loc);
+                    self.expr(right, scope, loc);
+                }
+                Expression::UnaryExpr { operand, .. } => self.expr(operand, scope, loc),
+                Expression::CallExpr { callee, args, .. } => {
+                    self.expr(callee, scope, loc);
+                    for a in args {
+                        self.expr(a, scope, loc);
+                    }
+                }
+                Expression::MemberExpr { object, .. } => self.expr(object, scope, loc),
+                Expression::TernaryExpr { condition, consequent, alternate } => {
+                    self.expr(condition, scope, loc);
+                    self.expr(consequent, scope, loc);
+                    self.expr(alternate, scope, loc);
+                }
+                Expression::IndexAccess { object, index } => {
+                    self.expr(object, scope, loc);
+                    self.expr(index, scope, loc);
+                }
+                Expression::ArrayLiteral { elements } => {
+                    for el in elements {
+                        self.expr(el, scope, loc);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn stmt(&mut self, s: &Statement, scope: &mut Vec<HashSet<String>>) {
+            match s {
+                Statement::VariableDecl { name, init, source_location, .. } => {
+                    self.expr(init, scope, source_location);
+                    scope.last_mut().expect("scope").insert(name.clone());
+                }
+                Statement::Assignment { target, value, source_location } => {
+                    self.check_target(target, scope, source_location);
+                    self.expr(target, scope, source_location);
+                    self.expr(value, scope, source_location);
+                }
+                Statement::IfStatement { condition, then_branch, else_branch, source_location } => {
+                    self.expr(condition, scope, source_location);
+                    self.block(then_branch, scope);
+                    if let Some(e) = else_branch {
+                        self.block(e, scope);
+                    }
+                }
+                Statement::ForStatement { init, condition, update, body, source_location } => {
+                    let mut loop_scope = scope.clone();
+                    loop_scope.push(HashSet::new());
+                    self.stmt(init, &mut loop_scope);
+                    self.expr(condition, &loop_scope, source_location);
+                    self.stmt(update, &mut loop_scope);
+                    self.block(body, &loop_scope);
+                }
+                Statement::ReturnStatement { value, source_location } => {
+                    if let Some(v) = value {
+                        self.expr(v, scope, source_location);
+                    }
+                }
+                Statement::ExpressionStatement { expression, source_location } => {
+                    self.expr(expression, scope, source_location);
+                }
+            }
+        }
+
+        fn block(&mut self, body: &[Statement], outer: &[HashSet<String>]) {
+            let mut scope = outer.to_vec();
+            scope.push(HashSet::new());
+            for s in body {
+                self.stmt(s, &mut scope);
+            }
+        }
+    }
+
+    let mut w = Walker { props, errors: Vec::new() };
+    for m in std::iter::once(&contract.constructor).chain(contract.methods.iter()) {
+        let params: HashSet<String> = m.params.iter().map(|p| p.name.clone()).collect();
+        w.block(&m.body, &[params]);
+    }
+    errors.extend(w.errors);
+}
+
 fn synthesize_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
     let loc = JavaParser::loc_at(file, 0, 0);
     let mut params: Vec<ParamNode> = Vec::new();
@@ -2828,5 +2958,81 @@ mod tests {
         let c = result.contract.unwrap();
         assert_eq!(c.name, "P2PKH");
         assert_eq!(c.parent_class, "SmartContract");
+    }
+    // N-023 (R49): on the .runar.java surface a bare name that no local or
+    // parameter shadows IS the field, so `count = ...` writes state in Java.
+    // The parser used to lower it as a local rebind: a stateful contract
+    // compiled with no update_prop and its state never changed. Every tier
+    // refuses the bare form with the TS reference's diagnostic.
+    //
+    // Proves: the Rust Java parser refuses each assignment spelling (=, op=,
+    // ++/--, statement or nested, any method incl. the constructor) on an
+    // unshadowed property, and accepts this.x writes plus local / parameter /
+    // for-variable shadowing, honouring Java block scope.
+    // Does not prove: other tiers (conformance/negatives N166 covers them), or
+    // anything about bare reads, which R49 leaves alone.
+    const BARE_JAVA_MSG: &str =
+        "bare assignment to property 'count' is not allowed; write `this.count = ...`";
+    const BARE_DEFAULT_CTOR: &str = "super(count);\n        this.count = count;";
+
+    fn bare_counter(body: &str, params: &str, ctor_param: &str, ctor_body: &str) -> String {
+        format!(
+            "package p;\nimport runar.lang.StatefulSmartContract;\nimport runar.lang.annotations.Public;\n\
+             import runar.lang.types.Bigint;\nimport static runar.lang.Builtins.assertThat;\n\n\
+             class BareCounter extends StatefulSmartContract {{\n    Bigint count;\n\n\
+             \x20   BareCounter(Bigint {ctor_param}) {{\n        {ctor_body}\n    }}\n\n\
+             \x20   @Public\n    void increment({params}) {{\n        {body}\n    }}\n}}\n"
+        )
+    }
+
+    fn bare_errors(src: &str) -> Vec<String> {
+        parse_java(src, Some("BareCounter.runar.java"))
+            .errors
+            .iter()
+            .filter(|d| matches!(d.severity, super::super::diagnostic::Severity::Error))
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn n023_refuses_bare_property_assignment() {
+        let cases: &[(&str, &str)] = &[
+            ("plain =", "count = count.plus(Bigint.ONE);"),
+            ("compound +=", "count += Bigint.ONE;"),
+            ("postfix ++", "count++;"),
+            ("prefix --", "--count;"),
+            ("inside an if arm", "if (this.count.gt(Bigint.ZERO)) { count = Bigint.ONE; }"),
+            ("in a for update", "for (Bigint i = Bigint.ZERO; i.lt(Bigint.TWO); count++) { assertThat(true); }"),
+            ("nested in an expression", "assertThat((count++).gt(Bigint.ZERO));"),
+            ("after an if-scoped local",
+             "if (this.count.gt(Bigint.ZERO)) { Bigint count = Bigint.ONE; this.count = count; }\n        count = Bigint.TWO;"),
+            ("before the shadowing local",
+             "count = Bigint.ONE;\n        Bigint count = Bigint.TWO;\n        this.count = count;"),
+        ];
+        for (label, body) in cases {
+            let errs = bare_errors(&bare_counter(body, "", "count", BARE_DEFAULT_CTOR));
+            assert!(errs.iter().any(|e| e == BARE_JAVA_MSG), "{label}: expected {BARE_JAVA_MSG:?}, got {errs:?}");
+        }
+        let errs = bare_errors(&bare_counter(
+            "this.count = this.count.plus(Bigint.ONE);", "", "c", "super(c);\n        count = c;",
+        ));
+        assert!(errs.iter().any(|e| e == BARE_JAVA_MSG), "constructor: got {errs:?}");
+    }
+
+    #[test]
+    fn n023_accepts_shadowed_or_explicit_property_assignment() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("this.count = ...", "this.count = this.count.plus(Bigint.ONE);", ""),
+            ("local shadow",
+             "Bigint count = this.count;\n        count = count.plus(Bigint.ONE);\n        this.count = count;", ""),
+            ("parameter shadow", "count = count.plus(Bigint.ONE);\n        this.count = count;", "Bigint count"),
+            ("for-variable shadow",
+             "for (Bigint count = Bigint.ZERO; count.lt(Bigint.TWO); count++) { assertThat(true); }\n        this.count = this.count.plus(Bigint.ONE);", ""),
+            ("bare read", "this.count = count.plus(Bigint.ONE);", ""),
+        ];
+        for (label, body, params) in cases {
+            let errs = bare_errors(&bare_counter(body, params, "count", BARE_DEFAULT_CTOR));
+            assert!(errs.is_empty(), "{label}: expected no errors, got {errs:?}");
+        }
     }
 }

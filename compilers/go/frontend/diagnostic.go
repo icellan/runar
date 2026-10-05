@@ -61,6 +61,14 @@ func StaticMethodMsg(name string) string {
 	return "static methods are not allowed in Rúnar contracts; method '" + name + "' is declared static"
 }
 
+// BareJavaPropertyAssignmentMsg is N-023's (R49) refusal, on the .runar.java
+// surface, of an assignment (=, op=, ++, --) to a bare property name that no
+// local or parameter shadows (the TS reference's
+// bareJavaPropertyAssignmentMessage). In Java that bare name IS the field.
+func BareJavaPropertyAssignmentMsg(name string) string {
+	return "bare assignment to property '" + name + "' is not allowed; write `this." + name + " = ...`"
+}
+
 // lexDiag builds a tokenizer diagnostic located at line:col of file.
 func lexDiag(msg, file string, line, col int) Diagnostic {
 	return Diagnostic{Message: msg, Severity: SeverityError, Loc: &SourceLocation{File: file, Line: line, Column: col}}

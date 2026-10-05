@@ -592,7 +592,7 @@ module RunarCompiler
 
         constructor = constructor_method || synthetic_constructor(properties)
 
-        ContractNode.new(
+        contract = ContractNode.new(
           name: @contract_name,
           parent_class: parent_class,
           properties: properties,
@@ -600,6 +600,94 @@ module RunarCompiler
           methods: methods,
           source_file: @file_name
         )
+        check_bare_property_assignments(contract)
+        contract
+      end
+
+      # N-023 (R49). In Java a bare name inside a method that no local or
+      # parameter shadows IS the field, so `count = ...`, `count += ...`,
+      # `count++` and `--count` write contract state. Lowering them as a local
+      # rebind dropped the state write silently, so the bare form is refused
+      # (mirrors the TS reference's checkBarePropertyAssignments). Shadowing
+      # follows Java block scope: parameters, a local from its declaration to
+      # the end of its block, a for-loop variable inside the loop. Bare reads
+      # are not touched.
+      def check_bare_property_assignments(contract)
+        props = contract.properties.map(&:name)
+        return if props.empty?
+
+        ([contract.constructor] + contract.methods).each do |m|
+          bare_walk_block(m.body || [], [(m.params || []).map(&:name)], props)
+        end
+      end
+
+      def bare_check_target(expr, scope, props, loc)
+        return unless expr.is_a?(Identifier) && props.include?(expr.name)
+        return if scope.any? { |s| s.include?(expr.name) }
+
+        @errors << Diagnostic.new(message: Frontend.bare_java_property_assignment_message(expr.name),
+                                  severity: Severity::ERROR, loc: loc)
+      end
+
+      def bare_walk_block(body, outer, props)
+        scope = outer + [[]]
+        body.each { |s| bare_walk_stmt(s, scope, props) }
+      end
+
+      def bare_walk_stmt(stmt, scope, props)
+        return if stmt.nil?
+
+        loc = stmt.respond_to?(:source_location) ? stmt.source_location : nil
+        case stmt
+        when VariableDeclStmt
+          bare_walk_expr(stmt.init, scope, props, loc)
+          scope.last << stmt.name
+        when AssignmentStmt
+          bare_check_target(stmt.target, scope, props, loc)
+          bare_walk_expr(stmt.target, scope, props, loc)
+          bare_walk_expr(stmt.value, scope, props, loc)
+        when IfStmt
+          bare_walk_expr(stmt.condition, scope, props, loc)
+          bare_walk_block(stmt.then || [], scope, props)
+          bare_walk_block(stmt.else_, scope, props) if stmt.else_
+        when ForStmt
+          loop_scope = scope + [[]]
+          bare_walk_stmt(stmt.init, loop_scope, props)
+          bare_walk_expr(stmt.condition, loop_scope, props, loc)
+          bare_walk_stmt(stmt.update, loop_scope, props)
+          bare_walk_block(stmt.body || [], loop_scope, props)
+        when ReturnStmt
+          bare_walk_expr(stmt.value, scope, props, loc)
+        when ExpressionStmt
+          bare_walk_expr(stmt.expr, scope, props, loc)
+        end
+      end
+
+      def bare_walk_expr(expr, scope, props, loc)
+        case expr
+        when IncrementExpr, DecrementExpr
+          bare_check_target(expr.operand, scope, props, loc)
+          bare_walk_expr(expr.operand, scope, props, loc)
+        when BinaryExpr
+          bare_walk_expr(expr.left, scope, props, loc)
+          bare_walk_expr(expr.right, scope, props, loc)
+        when UnaryExpr
+          bare_walk_expr(expr.operand, scope, props, loc)
+        when CallExpr
+          bare_walk_expr(expr.callee, scope, props, loc)
+          (expr.args || []).each { |a| bare_walk_expr(a, scope, props, loc) }
+        when MemberExpr
+          bare_walk_expr(expr.object, scope, props, loc)
+        when TernaryExpr
+          bare_walk_expr(expr.condition, scope, props, loc)
+          bare_walk_expr(expr.consequent, scope, props, loc)
+          bare_walk_expr(expr.alternate, scope, props, loc)
+        when IndexAccessExpr
+          bare_walk_expr(expr.object, scope, props, loc)
+          bare_walk_expr(expr.index, scope, props, loc)
+        when ArrayLiteralExpr
+          (expr.elements || []).each { |e| bare_walk_expr(e, scope, props, loc) }
+        end
       end
 
       # -- Package and imports ---------------------------------------------
