@@ -126,6 +126,11 @@ const (
 	javaTokMinusMinus // --
 	javaTokShl       // <<
 	javaTokShr       // >>
+	javaTokShlEq     // <<=
+	javaTokShrEq     // >>=
+	javaTokAmpEq     // &=
+	javaTokPipeEq    // |=
+	javaTokCaretEq   // ^=
 )
 
 type javaToken struct {
@@ -221,8 +226,21 @@ func javaTokenize(source, fileName string) ([]javaToken, []Diagnostic) {
 			continue
 		}
 
-		// Three-char operator: none we care about (>>> could be here but
-		// unsigned right-shift is not supported). Fall through to two-char.
+		// Three-char operators: <<= and >>= (N-134). `>>>` / `>>>=` are not
+		// supported and fall through to two-char tokens, as before.
+		if pos+2 < len(chars) {
+			three := string(chars[pos : pos+3])
+			if three == "<<=" || three == ">>=" {
+				kind := javaTokShlEq
+				if three == ">>=" {
+					kind = javaTokShrEq
+				}
+				tokens = append(tokens, javaToken{kind: kind, line: l, col: c})
+				pos += 3
+				col += 3
+				continue
+			}
+		}
 
 		// Two-char operators
 		if pos+1 < len(chars) {
@@ -252,6 +270,12 @@ func javaTokenize(source, fileName string) ([]javaToken, []Diagnostic) {
 				kind = javaTokSlashEq
 			case "%=":
 				kind = javaTokPercentEq
+			case "&=":
+				kind = javaTokAmpEq
+			case "|=":
+				kind = javaTokPipeEq
+			case "^=":
+				kind = javaTokCaretEq
 			case "++":
 				kind = javaTokPlusPlus
 			case "--":
@@ -1300,23 +1324,12 @@ func (p *javaParser) parseStatement() Statement {
 		value := p.parseExpression()
 		p.match(javaTokSemi)
 		return AssignmentStmt{Target: expr, Value: value, SourceLocation: loc}
-	case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq:
+	case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq,
+		javaTokAmpEq, javaTokPipeEq, javaTokCaretEq, javaTokShlEq, javaTokShrEq:
 		opTok := p.advance()
 		rhs := p.parseExpression()
 		p.match(javaTokSemi)
-		op := ""
-		switch opTok.kind {
-		case javaTokPlusEq:
-			op = "+"
-		case javaTokMinusEq:
-			op = "-"
-		case javaTokStarEq:
-			op = "*"
-		case javaTokSlashEq:
-			op = "/"
-		case javaTokPercentEq:
-			op = "%"
-		}
+		op := javaCompoundOps[opTok.kind]
 		return AssignmentStmt{
 			Target:         expr,
 			Value:          BinaryExpr{Op: op, Left: expr, Right: rhs},
@@ -1326,6 +1339,15 @@ func (p *javaParser) parseStatement() Statement {
 
 	p.match(javaTokSemi)
 	return ExpressionStmt{Expr: expr, SourceLocation: loc}
+}
+
+// javaCompoundOps maps each compound assignment token to its binary operator:
+// exactly TS's ten (01-parse-java.ts finishExpressionStatement). `t op= e`
+// lowers to `t = t op e`.
+var javaCompoundOps = map[javaTokKind]string{
+	javaTokPlusEq: "+", javaTokMinusEq: "-", javaTokStarEq: "*", javaTokSlashEq: "/",
+	javaTokPercentEq: "%", javaTokAmpEq: "&", javaTokPipeEq: "|", javaTokCaretEq: "^",
+	javaTokShlEq: "<<", javaTokShrEq: ">>",
 }
 
 // isVariableDeclStart looks ahead to distinguish a typed local declaration
@@ -1500,22 +1522,11 @@ func (p *javaParser) parseFor(loc SourceLocation) Statement {
 			p.advance()
 			value := p.parseExpression()
 			update = AssignmentStmt{Target: updateExpr, Value: value, SourceLocation: updateLoc}
-		case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq:
+		case javaTokPlusEq, javaTokMinusEq, javaTokStarEq, javaTokSlashEq, javaTokPercentEq,
+			javaTokAmpEq, javaTokPipeEq, javaTokCaretEq, javaTokShlEq, javaTokShrEq:
 			opTok := p.advance()
 			rhs := p.parseExpression()
-			op := ""
-			switch opTok.kind {
-			case javaTokPlusEq:
-				op = "+"
-			case javaTokMinusEq:
-				op = "-"
-			case javaTokStarEq:
-				op = "*"
-			case javaTokSlashEq:
-				op = "/"
-			case javaTokPercentEq:
-				op = "%"
-			}
+			op := javaCompoundOps[opTok.kind]
 			update = AssignmentStmt{
 				Target:         updateExpr,
 				Value:          BinaryExpr{Op: op, Left: updateExpr, Right: rhs},

@@ -430,4 +430,81 @@ class TestParserJava < Minitest::Test
       assert_empty n023_errors(n023_source(body, params: params)), "control refused: #{body}"
     end
   end
+
+  # N-134: TS's ten compound assignment operators (+ - * / % & | ^ << >>)
+  # lower `t op= e` to `t = t op e`, as a statement and in a for-header
+  # update slot (where the loop rule, not the parser, refuses a non-unit
+  # step). Before N-134 Ruby refused `<<= >>= &= |= ^=` everywhere and
+  # `*= /= %=` in a for update. Proves the parsed shape for all ten on a
+  # local, a bigint property and a ByteString property, and in a for update.
+  # Does not prove byte parity with the other tiers
+  # (conformance/negatives/java-compound-assign-parity.test.ts pins that).
+  N134_OPS = [["+=", "+"], ["-=", "-"], ["*=", "*"], ["/=", "/"], ["%=", "%"],
+              ["<<=", "<<"], [">>=", ">>"], ["&=", "&"], ["|=", "|"], ["^=", "^"]].freeze
+
+  def n134_name(e)
+    return e.name if e.is_a?(Identifier)
+    assert_kind_of PropertyAccessExpr, e
+    e.property
+  end
+
+  def n134_assert_compound(stmt, target, op)
+    assert_kind_of AssignmentStmt, stmt
+    assert_equal target, n134_name(stmt.target)
+    assert_kind_of BinaryExpr, stmt.value
+    assert_equal op, stmt.value.op
+    assert_equal target, n134_name(stmt.value.left)
+  end
+
+  def test_n134_compound_assignment_all_ten_operators
+    lines = ["Bigint t = d;"]
+    want = []
+    N134_OPS.each do |tok, op|
+      lines << "t #{tok} 3;" << "this.count #{tok} t;"
+      want << ["t", op] << ["count", op]
+    end
+    N134_OPS[7..].each do |tok, op|
+      lines << "this.tag #{tok} m;"
+      want << ["tag", op]
+    end
+    src = <<~JAVA
+      package p;
+      import runar.lang.StatefulSmartContract;
+      import runar.lang.annotations.Public;
+      import runar.lang.types.Bigint;
+      import runar.lang.types.ByteString;
+
+      class C extends StatefulSmartContract {
+          Bigint count;
+          ByteString tag;
+
+          C(Bigint count, ByteString tag) {
+              super(count, tag);
+              this.count = count;
+              this.tag = tag;
+          }
+
+          @Public
+          void step(Bigint d, ByteString m) {
+              #{lines.join("\n        ")}
+          }
+      }
+    JAVA
+    r = parse(src, "C.runar.java")
+    assert_empty r.errors.map(&:message)
+    stmts = r.contract.methods[0].body
+    assert_equal want.size + 1, stmts.size
+    want.each_with_index { |(target, op), i| n134_assert_compound(stmts[i + 1], target, op) }
+  end
+
+  def test_n134_compound_assignment_in_for_update
+    N134_OPS.each do |tok, op|
+      r = parse(n023_source("for (Bigint i = Bigint.ZERO; i < 2; i #{tok} 2) { assertThat(true); }"),
+                "BareCounter.runar.java")
+      assert_empty r.errors.map(&:message), "#{tok} refused"
+      f = r.contract.methods[0].body[0]
+      assert_kind_of ForStmt, f
+      n134_assert_compound(f.update, "i", op)
+    end
+  end
 end

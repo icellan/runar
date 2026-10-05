@@ -96,6 +96,11 @@ TOK_PLUSPLUS = 40
 TOK_MINUSMINUS = 41
 TOK_LSHIFT = 42
 TOK_RSHIFT = 43
+TOK_LSHIFTEQ = 44
+TOK_RSHIFTEQ = 45
+TOK_AMPEQ = 46
+TOK_PIPEEQ = 47
+TOK_CARETEQ = 48
 
 # Keywords
 TOK_PACKAGE = 60
@@ -303,8 +308,14 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
         l = line
         c = col
 
-        # Three-character operators: none that matter for our subset
-        # (>>> right-shift-unsigned, <<= etc. not supported).
+        # Three-character operators: <<= and >>= (N-134). `>>>` / `>>>=` are
+        # not supported and fall through to two-character tokens, as before.
+        three = source[pos:pos + 3]
+        if three in ("<<=", ">>="):
+            tokens.append(Token(TOK_LSHIFTEQ if three == "<<=" else TOK_RSHIFTEQ, three, l, c))
+            pos += 3
+            col += 3
+            continue
 
         # Two-character operators
         if pos + 1 < n:
@@ -321,6 +332,9 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
                 "*=": TOK_STAREQ,
                 "/=": TOK_SLASHEQ,
                 "%=": TOK_PERCENTEQ,
+                "&=": TOK_AMPEQ,
+                "|=": TOK_PIPEEQ,
+                "^=": TOK_CARETEQ,
                 "++": TOK_PLUSPLUS,
                 "--": TOK_MINUSMINUS,
                 "<<": TOK_LSHIFT,
@@ -457,6 +471,23 @@ def _tokenize(source: str, lex: list | None = None, file_name: str = "") -> list
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
+
+
+# N-134: compound assignment token -> binary operator, exactly TS's ten
+# (01-parse-java.ts finishExpressionStatement). `t op= e` lowers to
+# `t = t op e`.
+_COMPOUND_OPS = {
+    TOK_PLUSEQ: "+",
+    TOK_MINUSEQ: "-",
+    TOK_STAREQ: "*",
+    TOK_SLASHEQ: "/",
+    TOK_PERCENTEQ: "%",
+    TOK_AMPEQ: "&",
+    TOK_PIPEEQ: "|",
+    TOK_CARETEQ: "^",
+    TOK_LSHIFTEQ: "<<",
+    TOK_RSHIFTEQ: ">>",
+}
 
 
 class _JavaParseError(Exception):
@@ -1140,22 +1171,13 @@ class _JavaParser:
                 update_stmt = AssignmentStmt(
                     target=target, value=rhs, source_location=update_loc
                 )
-            elif self.check(TOK_PLUSEQ):
-                self.advance()
+            elif self.peek().kind in _COMPOUND_OPS:
+                op = _COMPOUND_OPS[self.advance().kind]
                 rhs = self._parse_expression()
                 target = self._to_assign_target(update_expr)
                 update_stmt = AssignmentStmt(
                     target=target,
-                    value=BinaryExpr(op="+", left=target, right=rhs),
-                    source_location=update_loc,
-                )
-            elif self.check(TOK_MINUSEQ):
-                self.advance()
-                rhs = self._parse_expression()
-                target = self._to_assign_target(update_expr)
-                update_stmt = AssignmentStmt(
-                    target=target,
-                    value=BinaryExpr(op="-", left=target, right=rhs),
+                    value=BinaryExpr(op=op, left=target, right=rhs),
                     source_location=update_loc,
                 )
             else:
@@ -1191,14 +1213,7 @@ class _JavaParser:
             return AssignmentStmt(target=target, value=value, source_location=loc)
 
         # Compound assignments map to `target = target <op> rhs`.
-        compound_map = {
-            TOK_PLUSEQ: "+",
-            TOK_MINUSEQ: "-",
-            TOK_STAREQ: "*",
-            TOK_SLASHEQ: "/",
-            TOK_PERCENTEQ: "%",
-        }
-        for tok_kind, op in compound_map.items():
+        for tok_kind, op in _COMPOUND_OPS.items():
             if self.check(tok_kind):
                 self.advance()
                 rhs = self._parse_expression()

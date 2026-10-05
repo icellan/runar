@@ -132,6 +132,11 @@ const TokenKind = enum {
     star_eq,
     slash_eq,
     percent_eq,
+    lshift_eq,
+    rshift_eq,
+    amp_eq,
+    pipe_eq,
+    caret_eq,
     plus_plus,
     minus_minus,
 };
@@ -286,7 +291,10 @@ const Tokenizer = struct {
             '?' => .{ .kind = .question, .text = t, .line = sl, .col = sc },
             '@' => .{ .kind = .at, .text = t, .line = sl, .col = sc },
             '~' => .{ .kind = .tilde, .text = t, .line = sl, .col = sc },
-            '^' => .{ .kind = .caret, .text = t, .line = sl, .col = sc },
+            '^' => if (c2 == '=') blk: {
+                _ = self.advance();
+                break :blk .{ .kind = .caret_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
+            } else .{ .kind = .caret, .text = t, .line = sl, .col = sc },
             '=' => if (c2 == '=') blk: {
                 _ = self.advance();
                 break :blk .{ .kind = .eqeq, .text = self.source[start..self.pos], .line = sl, .col = sc };
@@ -300,6 +308,10 @@ const Tokenizer = struct {
                 break :blk .{ .kind = .lt_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else if (c2 == '<') blk2: {
                 _ = self.advance();
+                if (self.peek() == '=') {
+                    _ = self.advance();
+                    break :blk2 .{ .kind = .lshift_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
+                }
                 break :blk2 .{ .kind = .lshift, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else .{ .kind = .lt, .text = t, .line = sl, .col = sc },
             '>' => if (c2 == '=') blk: {
@@ -307,6 +319,10 @@ const Tokenizer = struct {
                 break :blk .{ .kind = .gt_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else if (c2 == '>') blk2: {
                 _ = self.advance();
+                if (self.peek() == '=') {
+                    _ = self.advance();
+                    break :blk2 .{ .kind = .rshift_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
+                }
                 break :blk2 .{ .kind = .rshift, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else .{ .kind = .gt, .text = t, .line = sl, .col = sc },
             '+' => if (c2 == '=') blk: {
@@ -338,10 +354,16 @@ const Tokenizer = struct {
             '&' => if (c2 == '&') blk: {
                 _ = self.advance();
                 break :blk .{ .kind = .amp_amp, .text = self.source[start..self.pos], .line = sl, .col = sc };
+            } else if (c2 == '=') blk2: {
+                _ = self.advance();
+                break :blk2 .{ .kind = .amp_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else .{ .kind = .ampersand, .text = t, .line = sl, .col = sc },
             '|' => if (c2 == '|') blk: {
                 _ = self.advance();
                 break :blk .{ .kind = .pipe_pipe, .text = self.source[start..self.pos], .line = sl, .col = sc };
+            } else if (c2 == '=') blk2: {
+                _ = self.advance();
+                break :blk2 .{ .kind = .pipe_eq, .text = self.source[start..self.pos], .line = sl, .col = sc };
             } else .{ .kind = .pipe, .text = t, .line = sl, .col = sc },
             else => .{ .kind = .ident, .text = t, .line = sl, .col = sc },
         };
@@ -2366,8 +2388,14 @@ fn parseFixedArrayLen(text: []const u8) u32 {
     return std.fmt.parseInt(u32, buf[0..len], 0) catch 0;
 }
 
+// N-134: exactly TS's ten compound assignment operators
+// (01-parse-java.ts finishExpressionStatement); `t op= e` lowers to
+// `t = t op e`.
 fn isCompoundAssignOp(k: TokenKind) bool {
-    return k == .plus_eq or k == .minus_eq or k == .star_eq or k == .slash_eq or k == .percent_eq;
+    return switch (k) {
+        .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq, .amp_eq, .pipe_eq, .caret_eq, .lshift_eq, .rshift_eq => true,
+        else => false,
+    };
 }
 
 fn binOpFromCompoundAssign(k: TokenKind) BinOperator {
@@ -2377,6 +2405,11 @@ fn binOpFromCompoundAssign(k: TokenKind) BinOperator {
         .star_eq => .mul,
         .slash_eq => .div,
         .percent_eq => .mod,
+        .amp_eq => .bitand,
+        .pipe_eq => .bitor,
+        .caret_eq => .bitxor,
+        .lshift_eq => .lshift,
+        .rshift_eq => .rshift,
         else => .add,
     };
 }
@@ -2834,5 +2867,103 @@ test "N-023: shadowed or explicit property assignment is accepted (Java)" {
         const r = parseJava(a, try n023Source(a, c.body, c.params, "count", n023_default_ctor), "BareCounter.runar.java");
         for (r.errors) |err| std.debug.print("N-023 control '{s}': {s}\n", .{ c.body, err });
         try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    }
+}
+
+// N-134: TS's ten compound assignment operators (+ - * / % & | ^ << >>) lower
+// `t op= e` to `t = t op e`, as a statement and in a for-header update slot
+// (where the loop rule, not the parser, refuses a non-unit step). Before N-134
+// Zig refused `<<= >>= &= |= ^=` ("unexpected token: '='").
+//
+// Proves: the parsed shape for all ten operators on a local, a bigint
+// property and a ByteString property, and in a for update.
+// Does not prove: byte parity with the other tiers
+// (conformance/negatives/java-compound-assign-parity.test.ts pins that).
+const N134Op = struct { tok: []const u8, op: BinOperator };
+const n134_ops = [_]N134Op{
+    .{ .tok = "+=", .op = .add },     .{ .tok = "-=", .op = .sub },
+    .{ .tok = "*=", .op = .mul },     .{ .tok = "/=", .op = .div },
+    .{ .tok = "%=", .op = .mod },     .{ .tok = "<<=", .op = .lshift },
+    .{ .tok = ">>=", .op = .rshift }, .{ .tok = "&=", .op = .bitand },
+    .{ .tok = "|=", .op = .bitor },   .{ .tok = "^=", .op = .bitxor },
+};
+
+fn n134ExpectCompound(stmt: Statement, target: []const u8, op: BinOperator) !void {
+    const as = switch (stmt) {
+        .assign => |a| a,
+        else => return error.NotAnAssignment,
+    };
+    try std.testing.expectEqualStrings(target, as.target);
+    const b = switch (as.value) {
+        .binary_op => |b| b,
+        else => return error.NotABinaryOp,
+    };
+    try std.testing.expectEqual(op, b.op);
+    const left = switch (b.left) {
+        .identifier => |id| id,
+        .property_access => |pa| pa.property,
+        else => return error.UnexpectedLeftOperand,
+    };
+    try std.testing.expectEqualStrings(target, left);
+}
+
+test "N-134: all ten compound assignment operators lower to t = t op e (Java)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    try body.appendSlice(a, "Bigint t = d;\n");
+    for (n134_ops) |o| try body.print(a, "        t {s} 3;\n        this.count {s} t;\n", .{ o.tok, o.tok });
+    for (n134_ops[7..]) |o| try body.print(a, "        this.tag {s} m;\n", .{o.tok});
+    const src = try std.fmt.allocPrint(a,
+        \\package p;
+        \\import runar.lang.StatefulSmartContract;
+        \\import runar.lang.annotations.Public;
+        \\import runar.lang.types.Bigint;
+        \\import runar.lang.types.ByteString;
+        \\
+        \\class C extends StatefulSmartContract {{
+        \\    Bigint count;
+        \\    ByteString tag;
+        \\
+        \\    C(Bigint count, ByteString tag) {{
+        \\        super(count, tag);
+        \\        this.count = count;
+        \\        this.tag = tag;
+        \\    }}
+        \\
+        \\    @Public
+        \\    void step(Bigint d, ByteString m) {{
+        \\        {s}
+        \\    }}
+        \\}}
+        \\
+    , .{body.items});
+    const r = parseJava(a, src, "C.runar.java");
+    for (r.errors) |err| std.debug.print("N-134: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const stmts = r.contract.?.methods[0].body;
+    try std.testing.expectEqual(@as(usize, 1 + 2 * n134_ops.len + 3), stmts.len);
+    for (n134_ops, 0..) |o, i| {
+        try n134ExpectCompound(stmts[1 + 2 * i], "t", o.op);
+        try n134ExpectCompound(stmts[2 + 2 * i], "count", o.op);
+    }
+    for (n134_ops[7..], 0..) |o, i| try n134ExpectCompound(stmts[1 + 2 * n134_ops.len + i], "tag", o.op);
+}
+
+test "N-134: compound assignment in a for update parses (Java)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (n134_ops) |o| {
+        const body = try std.fmt.allocPrint(a, "for (Bigint i = Bigint.ZERO; i < 2; i {s} 2) {{ assertThat(true); }}", .{o.tok});
+        const r = parseJava(a, try n023Source(a, body, "", "count", n023_default_ctor), "BareCounter.runar.java");
+        for (r.errors) |err| std.debug.print("N-134 for '{s}': {s}\n", .{ o.tok, err });
+        try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+        const f = switch (r.contract.?.methods[0].body[0]) {
+            .for_stmt => |f| f,
+            else => return error.NotAForStmt,
+        };
+        try n134ExpectCompound(f.update.?.*, "i", o.op);
     }
 }

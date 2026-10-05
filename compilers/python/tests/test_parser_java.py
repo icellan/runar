@@ -693,3 +693,82 @@ def test_n023_refuses_bare_property_assignment_in_constructor() -> None:
 ], ids=["this-form", "local-shadow", "param-shadow", "for-var-shadow", "bare-read"])
 def test_n023_accepts_shadowed_or_explicit_assignment(body: str, params: str) -> None:
     assert _bare_errors(_bare_counter(body, params)) == []
+
+
+# ---------------------------------------------------------------------------
+# N-134: TS's ten compound assignment operators (+ - * / % & | ^ << >>) lower
+# `t op= e` to `t = t op e`, as a statement and in a for-header update slot
+# (where the loop rule, not the parser, refuses a non-unit step). Before N-134
+# Python refused `<<= >>= &= |= ^=` ("unexpected token '='") and `*= /= %=`
+# in a for update. Proves the parsed shape for all ten on a local, a bigint
+# property and a ByteString property, and in a for update. Does not prove
+# byte parity with the other tiers (conformance/negatives/
+# java-compound-assign-parity.test.ts pins that).
+# ---------------------------------------------------------------------------
+
+_N134_OPS = [("+=", "+"), ("-=", "-"), ("*=", "*"), ("/=", "/"), ("%=", "%"),
+             ("<<=", "<<"), (">>=", ">>"), ("&=", "&"), ("|=", "|"), ("^=", "^")]
+
+
+def _n134_name(e) -> str:
+    if isinstance(e, Identifier):
+        return e.name
+    assert isinstance(e, PropertyAccessExpr), e
+    return e.property
+
+
+def _n134_assert_compound(stmt, target: str, op: str) -> None:
+    assert isinstance(stmt, AssignmentStmt), stmt
+    assert _n134_name(stmt.target) == target
+    assert isinstance(stmt.value, BinaryExpr) and stmt.value.op == op, stmt.value
+    assert _n134_name(stmt.value.left) == target
+
+
+def test_n134_compound_assignment_all_ten_operators() -> None:
+    lines = ["Bigint t = d;"]
+    want = []
+    for tok, op in _N134_OPS:
+        lines += [f"t {tok} 3;", f"this.count {tok} t;"]
+        want += [("t", op), ("count", op)]
+    for tok, op in _N134_OPS[7:]:
+        lines.append(f"this.tag {tok} m;")
+        want.append(("tag", op))
+    body = "\n        ".join(lines)
+    src = f"""package p;
+import runar.lang.StatefulSmartContract;
+import runar.lang.annotations.Public;
+import runar.lang.types.Bigint;
+import runar.lang.types.ByteString;
+
+class C extends StatefulSmartContract {{
+    Bigint count;
+    ByteString tag;
+
+    C(Bigint count, ByteString tag) {{
+        super(count, tag);
+        this.count = count;
+        this.tag = tag;
+    }}
+
+    @Public
+    void step(Bigint d, ByteString m) {{
+        {body}
+    }}
+}}
+"""
+    r = parse_source(src, "C.runar.java")
+    assert [e.message for e in r.errors] == []
+    stmts = r.contract.methods[0].body
+    assert len(stmts) == len(want) + 1
+    for stmt, (target, op) in zip(stmts[1:], want):
+        _n134_assert_compound(stmt, target, op)
+
+
+@pytest.mark.parametrize("tok,op", _N134_OPS, ids=[t for t, _ in _N134_OPS])
+def test_n134_compound_assignment_in_for_update(tok: str, op: str) -> None:
+    src = _bare_counter(f"for (Bigint i = Bigint.ZERO; i < 2; i {tok} 2) {{ assertThat(true); }}")
+    r = parse_source(src, "BareCounter.runar.java")
+    assert [e.message for e in r.errors] == []
+    f = r.contract.methods[0].body[0]
+    assert isinstance(f, ForStmt), f
+    _n134_assert_compound(f.update, "i", op)

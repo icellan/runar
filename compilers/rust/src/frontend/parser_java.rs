@@ -168,6 +168,11 @@ enum TokenType {
     StarEq,   // *=
     SlashEq,  // /=
     PercentEq, // %=
+    ShlEq,    // <<=
+    ShrEq,    // >>=
+    AmpEq,    // &=
+    PipeEq,   // |=
+    CaretEq,  // ^=
     PlusPlus, // ++
     MinusMinus, // --
     // Literals
@@ -179,6 +184,25 @@ enum TokenType {
     StringLit(String),
     // End
     Eof,
+}
+
+/// N-134: the binary operator of a compound assignment token -- exactly TS's
+/// ten (01-parse-java.ts finishExpressionStatement). `t op= e` lowers to
+/// `t = t op e`.
+fn compound_op(t: &TokenType) -> Option<BinaryOp> {
+    match t {
+        TokenType::PlusEq => Some(BinaryOp::Add),
+        TokenType::MinusEq => Some(BinaryOp::Sub),
+        TokenType::StarEq => Some(BinaryOp::Mul),
+        TokenType::SlashEq => Some(BinaryOp::Div),
+        TokenType::PercentEq => Some(BinaryOp::Mod),
+        TokenType::AmpEq => Some(BinaryOp::BitAnd),
+        TokenType::PipeEq => Some(BinaryOp::BitOr),
+        TokenType::CaretEq => Some(BinaryOp::BitXor),
+        TokenType::ShlEq => Some(BinaryOp::Shl),
+        TokenType::ShrEq => Some(BinaryOp::Shr),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +340,16 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
             continue;
         }
 
+        // Three-char operators: <<= and >>= (N-134). `>>>` / `>>>=` are not
+        // supported and fall through to two-char tokens, as before.
+        if pos + 2 < chars.len() && chars[pos + 2] == '=' && chars[pos + 1] == ch && (ch == '<' || ch == '>') {
+            let typ = if ch == '<' { TokenType::ShlEq } else { TokenType::ShrEq };
+            tokens.push(Token { typ, line: l, col: c });
+            pos += 3;
+            col += 3;
+            continue;
+        }
+
         // Two-char operators
         if pos + 1 < chars.len() {
             let two = (ch, chars[pos + 1]);
@@ -331,6 +365,9 @@ fn tokenize(source: &str, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Token
                 ('*', '=') => Some(TokenType::StarEq),
                 ('/', '=') => Some(TokenType::SlashEq),
                 ('%', '=') => Some(TokenType::PercentEq),
+                ('&', '=') => Some(TokenType::AmpEq),
+                ('|', '=') => Some(TokenType::PipeEq),
+                ('^', '=') => Some(TokenType::CaretEq),
                 ('+', '+') => Some(TokenType::PlusPlus),
                 ('-', '-') => Some(TokenType::MinusMinus),
                 ('<', '<') => Some(TokenType::Shl),
@@ -1274,72 +1311,13 @@ impl<'a> JavaParser<'a> {
                     source_location: loc,
                 })
             }
-            TokenType::PlusEq => {
+            ref t if compound_op(t).is_some() => {
+                let op = compound_op(t).unwrap();
                 self.advance();
                 let rhs = self.parse_expr()?;
                 self.match_tok(&TokenType::Semi);
                 let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Add,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::MinusEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Sub,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::StarEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Mul,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::SlashEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Div,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::PercentEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                self.match_tok(&TokenType::Semi);
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Mod,
+                    op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
                 };
@@ -1434,25 +1412,12 @@ impl<'a> JavaParser<'a> {
                     source_location: loc,
                 })
             }
-            TokenType::PlusEq => {
+            ref t if compound_op(t).is_some() => {
+                let op = compound_op(t).unwrap();
                 self.advance();
                 let rhs = self.parse_expr()?;
                 let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Add,
-                    left: Box::new(lhs.clone()),
-                    right: Box::new(rhs),
-                };
-                Some(Statement::Assignment {
-                    target: lhs,
-                    value: new_val,
-                    source_location: loc,
-                })
-            }
-            TokenType::MinusEq => {
-                self.advance();
-                let rhs = self.parse_expr()?;
-                let new_val = Expression::BinaryExpr {
-                    op: BinaryOp::Sub,
+                    op,
                     left: Box::new(lhs.clone()),
                     right: Box::new(rhs),
                 };
@@ -3042,6 +3007,88 @@ mod tests {
         for (label, body, params) in cases {
             let errs = bare_errors(&bare_counter(body, params, "count", BARE_DEFAULT_CTOR));
             assert!(errs.is_empty(), "{label}: expected no errors, got {errs:?}");
+        }
+    }
+
+    // N-134: TS's ten compound assignment operators (+ - * / % & | ^ << >>)
+    // lower `t op= e` to `t = t op e`, as a statement and in a for-header
+    // update slot (where the loop rule, not the parser, refuses a non-unit
+    // step). Before N-134 Rust refused `<<= >>= &= |= ^=` everywhere
+    // ("unsupported expression token Eq") and `*= /= %=` in a for update.
+    // Proves: the parsed shape for all ten operators on a local, a bigint
+    // property and a ByteString property, and in a for update. Does not prove:
+    // byte parity with the other tiers (conformance/negatives/
+    // java-compound-assign-parity.test.ts pins that).
+    const N134_OPS: &[(&str, &str)] = &[
+        ("+=", "+"), ("-=", "-"), ("*=", "*"), ("/=", "/"), ("%=", "%"),
+        ("<<=", "<<"), (">>=", ">>"), ("&=", "&"), ("|=", "|"), ("^=", "^"),
+    ];
+
+    fn n134_target_name(e: &Expression) -> String {
+        match e {
+            Expression::Identifier { name } => name.clone(),
+            Expression::PropertyAccess { property } => property.clone(),
+            other => panic!("unexpected compound target {:?}", other),
+        }
+    }
+
+    fn n134_assert_compound(stmt: &Statement, target: &str, op: &str) {
+        match stmt {
+            Statement::Assignment { target: t, value, .. } => {
+                assert_eq!(n134_target_name(t), target);
+                match value {
+                    Expression::BinaryExpr { op: o, left, .. } => {
+                        assert_eq!(o.as_str(), op);
+                        assert_eq!(n134_target_name(left), target);
+                    }
+                    other => panic!("expected BinaryExpr {op}, got {:?}", other),
+                }
+            }
+            other => panic!("expected Assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn n134_compound_assignment_all_ten_operators() {
+        let mut body = String::from("Bigint t = d;\n");
+        let mut want: Vec<(&str, &str)> = Vec::new();
+        for (tok, op) in N134_OPS {
+            body.push_str(&format!("        t {tok} 3;\n        this.count {tok} t;\n"));
+            want.push(("t", op));
+            want.push(("count", op));
+        }
+        for (tok, op) in &N134_OPS[7..] {
+            body.push_str(&format!("        this.tag {tok} m;\n"));
+            want.push(("tag", op));
+        }
+        let src = format!(
+            "package p;\nimport runar.lang.StatefulSmartContract;\nimport runar.lang.annotations.Public;\n\
+             import runar.lang.types.Bigint;\nimport runar.lang.types.ByteString;\n\n\
+             class C extends StatefulSmartContract {{\n    Bigint count;\n    ByteString tag;\n\n\
+             \x20   C(Bigint count, ByteString tag) {{\n        super(count, tag);\n        this.count = count;\n        this.tag = tag;\n    }}\n\n\
+             \x20   @Public\n    void step(Bigint d, ByteString m) {{\n        {body}    }}\n}}\n"
+        );
+        let r = parse_java(&src, Some("C.runar.java"));
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        let c = r.contract.unwrap();
+        let stmts = &c.methods[0].body;
+        assert_eq!(stmts.len(), want.len() + 1);
+        for (i, (target, op)) in want.iter().enumerate() {
+            n134_assert_compound(&stmts[i + 1], target, op);
+        }
+    }
+
+    #[test]
+    fn n134_compound_assignment_in_for_update() {
+        for (tok, op) in N134_OPS {
+            let body = format!("for (Bigint i = Bigint.ZERO; i < 2; i {tok} 2) {{ assertThat(true); }}");
+            let r = parse_java(&bare_counter(&body, "", "count", BARE_DEFAULT_CTOR), Some("BareCounter.runar.java"));
+            assert!(r.errors.is_empty(), "{tok}: errors: {:?}", r.errors);
+            let c = r.contract.unwrap();
+            match &c.methods[0].body[0] {
+                Statement::ForStatement { update, .. } => n134_assert_compound(update, "i", op),
+                other => panic!("{tok}: expected ForStatement, got {:?}", other),
+            }
         }
     }
 }

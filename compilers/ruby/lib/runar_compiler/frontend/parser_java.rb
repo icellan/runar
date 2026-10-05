@@ -84,6 +84,11 @@ module RunarCompiler
       TOK_MINUSMINUS  = 42  # --
       TOK_LSHIFT      = 43  # <<
       TOK_RSHIFT      = 44  # >>
+      TOK_LSHIFTEQ    = 45  # <<=
+      TOK_RSHIFTEQ    = 46  # >>=
+      TOK_AMPEQ       = 47  # &=
+      TOK_PIPEEQ      = 48  # |=
+      TOK_CARETEQ     = 49  # ^=
       # Keywords
       TOK_PACKAGE          = 60
       TOK_IMPORT           = 61
@@ -348,6 +353,17 @@ module RunarCompiler
           next
         end
 
+        # Three-character operators: <<= and >>= (N-134). `>>>` / `>>>=` are
+        # not supported and fall through to two-character tokens, as before.
+        three = source[i, 3]
+        if three == "<<=" || three == ">>="
+          kind = three == "<<=" ? JavaTokens::TOK_LSHIFTEQ : JavaTokens::TOK_RSHIFTEQ
+          tokens << JavaToken.new(kind: kind, value: three, line: start_line, col: start_col)
+          i += 3
+          col += 3
+          next
+        end
+
         # Two-character operators (check longer first)
         if i + 1 < n
           two = source[i, 2]
@@ -363,6 +379,9 @@ module RunarCompiler
                      when "*=" then JavaTokens::TOK_STAREQ
                      when "/=" then JavaTokens::TOK_SLASHEQ
                      when "%=" then JavaTokens::TOK_PERCENTEQ
+                     when "&=" then JavaTokens::TOK_AMPEQ
+                     when "|=" then JavaTokens::TOK_PIPEEQ
+                     when "^=" then JavaTokens::TOK_CARETEQ
                      when "++" then JavaTokens::TOK_PLUSPLUS
                      when "--" then JavaTokens::TOK_MINUSMINUS
                      when "<<" then JavaTokens::TOK_LSHIFT
@@ -1072,6 +1091,22 @@ module RunarCompiler
         )
       end
 
+      # N-134: compound assignment token -> binary operator, exactly TS's ten
+      # (01-parse-java.ts finishExpressionStatement). `t op= e` lowers to
+      # `t = t op e`.
+      COMPOUND_OPS = {
+        TOK_PLUSEQ    => "+",
+        TOK_MINUSEQ   => "-",
+        TOK_STAREQ    => "*",
+        TOK_SLASHEQ   => "/",
+        TOK_PERCENTEQ => "%",
+        TOK_AMPEQ     => "&",
+        TOK_PIPEEQ    => "|",
+        TOK_CARETEQ   => "^",
+        TOK_LSHIFTEQ  => "<<",
+        TOK_RSHIFTEQ  => ">>",
+      }.freeze
+
       # Turn a top-level expression into a statement, handling assignments
       # and postfix ++/-- as statement forms.
       def build_expression_stmt(expr, location)
@@ -1085,14 +1120,7 @@ module RunarCompiler
         end
 
         # Compound assignments
-        compound_ops = {
-          TOK_PLUSEQ    => "+",
-          TOK_MINUSEQ   => "-",
-          TOK_STAREQ    => "*",
-          TOK_SLASHEQ   => "/",
-          TOK_PERCENTEQ => "%",
-        }
-        compound_ops.each do |kind, bin_op|
+        COMPOUND_OPS.each do |kind, bin_op|
           if match_tok(kind)
             rhs = parse_expression
             expect(TOK_SEMI, "';'")
@@ -1196,18 +1224,12 @@ module RunarCompiler
           update = AssignmentStmt.new(
             target: update_expr, value: rhs, source_location: update_loc
           )
-        elsif match_tok(TOK_PLUSEQ)
+        elsif (bin_op = COMPOUND_OPS[peek.kind])
+          advance
           rhs = parse_expression
           update = AssignmentStmt.new(
             target: update_expr,
-            value: BinaryExpr.new(op: "+", left: update_expr, right: rhs),
-            source_location: update_loc
-          )
-        elsif match_tok(TOK_MINUSEQ)
-          rhs = parse_expression
-          update = AssignmentStmt.new(
-            target: update_expr,
-            value: BinaryExpr.new(op: "-", left: update_expr, right: rhs),
+            value: BinaryExpr.new(op: bin_op, left: update_expr, right: rhs),
             source_location: update_loc
           )
         else
