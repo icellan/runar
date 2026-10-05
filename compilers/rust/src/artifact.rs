@@ -208,7 +208,14 @@ pub fn assemble_artifact(
             fixed_array: e.fixed_array.clone(),
         })
         .collect();
-    let is_stateful = !state_fields.is_empty();
+    // N-139: statefulness follows parent_class (the TS reference rule for
+    // isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+    // keeps both. An IR input without parentClass falls back to state_fields.
+    let is_stateful = if program.parent_class.is_empty() {
+        !state_fields.is_empty()
+    } else {
+        program.parent_class == "StatefulSmartContract"
+    };
 
     // Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
     let methods: Vec<ABIMethod> = program
@@ -276,7 +283,7 @@ pub fn assemble_artifact(
         Some(code_separator_indices)
     };
 
-    let anf = if include_anf {
+    let anf = if include_anf && is_stateful {
         Some(program.clone())
     } else {
         None

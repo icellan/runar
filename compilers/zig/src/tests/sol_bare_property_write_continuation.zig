@@ -113,11 +113,12 @@ const settle_continuation =
     "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}]," ++
     "\"isPublic\":true,\"usesCodePart\":true";
 
-/// The terminal ABI: no continuation parameters, and no `_codePart` witness.
+/// The terminal ABI: no continuation parameters, no `_codePart` witness, and
+/// (N-139, matching TS) the explicit `isTerminal` flag.
 const settle_terminal =
     "\"name\":\"settle\",\"params\":[" ++
     "{\"name\":\"amount\",\"type\":\"bigint\"}," ++
-    "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}],\"isPublic\":true}";
+    "{\"name\":\"txPreimage\",\"type\":\"SigHashPreimage\"}],\"isPublic\":true,\"isTerminal\":true}";
 
 test "a bare Solidity state-variable write declares the state continuation" {
     const allocator = std.testing.allocator;

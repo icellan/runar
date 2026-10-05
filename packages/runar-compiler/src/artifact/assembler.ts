@@ -896,8 +896,12 @@ export function assembleArtifact(
   // State fields (only if the contract has mutable state)
   if (stateFields.length > 0) {
     artifact.stateFields = stateFields;
-    // Always include ANF IR for stateful contracts — the SDK uses it
-    // to auto-compute state transitions without requiring manual newState.
+  }
+  // Always include ANF IR for stateful contracts — the SDK uses it
+  // to auto-compute state transitions without requiring manual newState.
+  // N-139: statefulness follows parentClass (as isTerminal does), so a
+  // StatefulSmartContract with zero mutable fields still carries its ANF.
+  if (contract.parentClass === 'StatefulSmartContract') {
     artifact.anf = anfProgram;
   }
 

@@ -738,6 +738,19 @@ pub fn emitArtifact(
         try w.writeByte(',');
     }
 
+    // N-139: statefulness follows parentClass (the TS reference rule for
+    // isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+    // keeps both. An IR input without parentClass falls back to "has a
+    // mutable property" (the loader requires parentClass for any of those).
+    const is_stateful = if (anf_program.parent_class) |pc|
+        pc == .stateful_smart_contract
+    else blk: {
+        for (anf_program.properties) |prop| {
+            if (!prop.readonly) break :blk true;
+        }
+        break :blk false;
+    };
+
     // abi
     try w.writeAll("\"abi\":{");
 
@@ -783,6 +796,18 @@ pub fn emitArtifact(
             }
             try w.writeAll("],\"isPublic\":");
             try w.writeAll(if (method.is_public) "true" else "false");
+            // Stateful public methods without a _changePKH param are terminal
+            // (they build no state continuation output).
+            if (is_stateful and method.is_public) {
+                var has_change = false;
+                for (method.params) |param| {
+                    if (std.mem.eql(u8, param.name, "_changePKH")) {
+                        has_change = true;
+                        break;
+                    }
+                }
+                if (!has_change) try w.writeAll(",\"isTerminal\":true");
+            }
             // usesCodePart: unlocking script is prefixed with _codePart (#100).
             if (stack_lower.methodUsesCodePartFull(stack_lower.methodBindings(method), anf_program.properties, anf_program.methods)) {
                 try w.writeAll(",\"usesCodePart\":true");
@@ -907,9 +932,11 @@ pub fn emitArtifact(
         try w.writeAll("]}");
     }
 
-    // anf — full ANF IR for SDK auto-state computation
-    try w.writeAll(",\"anf\":");
-    try emitANFProgramJson(w, anf_program);
+    // anf — full ANF IR for SDK auto-state computation (stateful only)
+    if (is_stateful) {
+        try w.writeAll(",\"anf\":");
+        try emitANFProgramJson(w, anf_program);
+    }
 
     try w.writeByte('}');
 

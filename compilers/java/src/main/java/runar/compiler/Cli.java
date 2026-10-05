@@ -456,7 +456,14 @@ public final class Cli {
                 sf.append('}');
                 stateFieldJson.add(sf.toString());
             }
-            boolean isStateful = !stateFieldJson.isEmpty();
+            boolean hasStateFields = !stateFieldJson.isEmpty();
+            // N-139: statefulness follows parentClass (the TS reference rule for
+            // isTerminal and anf), so a StatefulSmartContract with zero mutable
+            // fields keeps both. An IR input without parentClass falls back to
+            // the state fields (the loader requires parentClass for any of those).
+            boolean isStateful = (parentClass == null || parentClass.isEmpty())
+                ? hasStateFields
+                : "StatefulSmartContract".equals(parentClass);
 
             Map<String, AnfMethod> privateMethods = StackLower.privateMethodMap(anf);
             List<String> methodJson = new ArrayList<>();
@@ -512,7 +519,7 @@ public final class Cli {
             appendJoined(b, methodJson);
             b.append("]\n  },\n");
             b.append("  \"script\": ").append(jsonString(emit.scriptHex())).append(",\n");
-            if (isStateful) {
+            if (hasStateFields) {
                 b.append("  \"stateFields\": [");
                 appendJoined(b, stateFieldJson);
                 b.append("],\n");

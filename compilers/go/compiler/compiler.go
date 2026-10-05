@@ -384,7 +384,14 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, const
 		stateFields = append(stateFields, sf)
 	}
 
+	// N-139: statefulness follows parentClass (the TS reference rule for
+	// isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+	// keeps both. An IR input without parentClass falls back to stateFields
+	// (the loader already requires parentClass for any mutable property).
 	isStateful := len(stateFields) > 0
+	if program.ParentClass != "" {
+		isStateful = program.ParentClass == "StatefulSmartContract"
+	}
 	// Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
 	var methods []ABIMethod
 	for _, method := range program.Methods {

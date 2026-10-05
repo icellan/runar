@@ -963,7 +963,15 @@ module RunarCompiler
       sf
     end
 
-    is_stateful = !state_fields.empty?
+    # N-139: statefulness follows parent_class (the TS reference rule for
+    # isTerminal and anf), so a StatefulSmartContract with zero mutable fields
+    # keeps both. An IR input without parentClass falls back to state_fields.
+    is_stateful =
+      if program.parent_class.nil? || program.parent_class.empty?
+        !state_fields.empty?
+      else
+        program.parent_class == "StatefulSmartContract"
+      end
 
     # Build method ABIs (exclude constructor -- it's in abi.constructor, not methods)
     methods = []
