@@ -73,10 +73,9 @@ function compileExample(example: ExampleContract): ReturnType<typeof compile> {
  * The four per-example tests below used to open with
  * `if (!r.success || !r.anf || !r.contract) return;`. Every shipped example
  * compiles today, so the bail never fired — but a single compiler regression
- * would have turned 4 x N tests green-and-empty in one shot, and the
- * `compiles through the TS compiler` sibling deliberately TOLERATES failure
- * (it only asserts that a failed compile carries diagnostics), so nothing
- * else in this file would have gone red either.
+ * would have turned 4 x N tests green-and-empty in one shot. The
+ * `compiles through the TS compiler` test also asserts through this helper,
+ * so a broken example fails every per-example test.
  */
 function requireCompiled(result: ReturnType<typeof compile>, fileName: string) {
   const errors = result.diagnostics
@@ -108,20 +107,13 @@ describe('Example contracts: end-to-end compilation', () => {
         expect(result.diagnostics).toBeDefined();
         expect(Array.isArray(result.diagnostics)).toBe(true);
 
-        if (result.success) {
-          // When successful, contract and ANF must be present
-          expect(result.contract).not.toBeNull();
-          expect(result.anf).not.toBeNull();
-        } else {
-          // When it fails, diagnostics should explain why
-          const errors = result.diagnostics.filter(d => d.severity === 'error');
-          expect(errors.length).toBeGreaterThan(0);
-          // Each error should have a message
-          for (const err of errors) {
-            expect(err.message).toBeDefined();
-            expect(typeof err.message).toBe('string');
-          }
-        }
+        // Every shipped example is expected to compile. This test used to
+        // accept `success === false` as long as diagnostics were present, so
+        // an example that stopped compiling stayed green here (F-161). It now
+        // fails with the diagnostics. It proves the full frontend (parse,
+        // validate, typecheck, ANF) accepts each example; it does not prove
+        // the emitted script is correct or spendable.
+        requireCompiled(result, example.fileName);
       });
 
       it('produces a valid artifact structure', () => {
