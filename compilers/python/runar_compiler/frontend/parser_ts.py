@@ -1164,6 +1164,13 @@ class _TsParser:
         update_loc = self.loc()
         update: Statement
         if self.check(TOK_RPAREN):
+            # N-132: the TS reference refuses an empty update slot; the
+            # placeholder below only keeps the AST well-formed.
+            self.errors.append(Diagnostic(
+                message="For loop must have an update expression",
+                severity=Severity.ERROR,
+                loc=loc,
+            ))
             update = ExpressionStmt(
                 expr=BigIntLiteral(value=0), source_location=update_loc
             )

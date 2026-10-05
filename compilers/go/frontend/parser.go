@@ -1202,6 +1202,10 @@ func (p *parseContext) parseForStatement(node *sitter.Node) Statement {
 	if updateNode != nil {
 		update = p.parseForUpdate(updateNode, loc)
 	} else {
+		// N-132: the TS reference refuses an empty update slot; the
+		// placeholder below only keeps the AST well-formed.
+		updLoc := loc
+		p.errors = append(p.errors, MakeDiagnostic("For loop must have an update expression", SeverityError, &updLoc))
 		update = ExpressionStmt{Expr: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc}
 	}
 

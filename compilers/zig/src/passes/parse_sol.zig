@@ -1440,6 +1440,10 @@ const Parser = struct {
         var update: ?*const Statement = null;
         if (self.current.kind != .rparen) {
             if (self.parseExpression()) |e| update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
+        } else {
+            // N-132: the TS reference's Solidity parser always parses an
+            // update expression here, so an empty slot is refused at the `)`.
+            self.addError("Unexpected token in expression: ')'");
         }
         if (self.expect(.rparen) == null) return null;
 

@@ -1262,6 +1262,13 @@ module RunarCompiler
         # Update
         update_loc = loc
         if check(TOK_RPAREN)
+          # N-132: the TS reference refuses an empty update slot; the
+          # placeholder below only keeps the AST well-formed.
+          @errors << Diagnostic.new(
+            message: "For loop must have an update expression",
+            severity: Severity::ERROR,
+            loc: location
+          )
           update = ExpressionStmt.new(
             expr: BigIntLiteral.new(value: 0),
             source_location: update_loc

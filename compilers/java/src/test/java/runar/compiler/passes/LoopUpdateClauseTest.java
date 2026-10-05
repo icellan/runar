@@ -228,4 +228,28 @@ class LoopUpdateClauseTest {
             }""";
         PipelineTestSupport.hex(src, "Countdown.runar.ts");
     }
+
+    // -----------------------------------------------------------------------
+    // N-132: an EMPTY update slot on the C-style `.runar.ts` header
+    // -----------------------------------------------------------------------
+
+    /**
+     * N-132: {@code for (let i = 0n; i < 3n; )} never advances {@code i} in the source, yet this
+     * tier filled the empty slot with a {@code 0n} placeholder and the unrolled loop advanced it
+     * anyway (938 hex chars, byte-identical to {@code i++}). The TS reference refuses it in its
+     * parser with the text asserted below.
+     *
+     * <p>Proves: the Java tier's {@code .runar.ts} parser refuses an empty update slot with the
+     * reference's text. Does not prove: anything about other surfaces (their empty-update shapes
+     * are pinned by the conformance negatives N180/N181).
+     */
+    @Test
+    void n132EmptyTsUpdateIsRejected() {
+        String err = compileError(tsWithUpdate(""), "UpdateProbe.runar.ts");
+        if (err == null) {
+            fail("an empty for-update must not compile");
+        }
+        assertTrue(err.contains("For loop must have an update expression"),
+            "rejection must carry the TS reference diagnostic, got: " + err);
+    }
 }

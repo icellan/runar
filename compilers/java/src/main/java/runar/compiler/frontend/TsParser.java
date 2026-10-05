@@ -1295,6 +1295,10 @@ public final class TsParser {
             SourceLocation updateLoc = loc();
             Statement update;
             if (check(TOK_RPAREN)) {
+                // N-132: the TS reference refuses an empty update slot; the
+                // placeholder below only keeps the AST well-formed.
+                addError(LexDiag.at(fileName, locArg.line(), locArg.column(),
+                    "For loop must have an update expression"));
                 update = new ExpressionStatement(new BigIntLiteral(BigInteger.ZERO), updateLoc);
             } else {
                 Expression updateExpr = parseExpression();

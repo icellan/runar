@@ -542,3 +542,35 @@ test "N-128 CONTROL: unit-step .runar.java for-updates keep the bounded-loop byt
         };
     }
 }
+
+// ---------------------------------------------------------------------------
+// N-132: an EMPTY update slot on the C-style .runar.ts / .runar.sol headers
+// ---------------------------------------------------------------------------
+//
+// `for (let i = 0n; i < 3n; )` never advances `i` in the source, yet both
+// parsers left `update == null` without setting `header_requires_update`, so
+// validate.zig read the C-style header as an implied-step surface and the
+// unrolled loop advanced `i` anyway (byte-identical to `i++`). The TS reference
+// refuses both shapes in its parsers: `.runar.ts` with "For loop must have an
+// update expression", `.runar.sol` with "Unexpected token in expression: ')'"
+// (its Solidity parser always parses an update expression).
+//
+// What these tests prove: each parser refuses the empty slot with the
+// reference's text. What they do not prove: anything about the other surfaces
+// (pinned by the conformance negatives N180/N181 across all seven tiers).
+
+test "N-132: an empty .runar.ts for-update is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try tsWithUpdate(alloc, "");
+    try expectRejectedWithDiagnostic(alloc, src, "UpdateProbe.runar.ts", "For loop must have an update expression");
+}
+
+test "N-132: an empty .runar.sol for-update is rejected with the reference diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const src = try std.mem.replaceOwned(u8, alloc, src_sol, "i < 5; i++)", "i < 5; )");
+    try expectRejectedWithDiagnostic(alloc, src, "BoundedLoop.runar.sol", "Unexpected token in expression: ')'");
+}

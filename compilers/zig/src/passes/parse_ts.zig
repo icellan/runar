@@ -1360,7 +1360,7 @@ const Parser = struct {
 
     fn parseForStmt(self: *Parser) ?Statement {
         const loc = self.currentSourceLoc();
-        _ = self.bump(); // consume 'for'
+        const for_tok = self.bump(); // consume 'for'
         if (self.expect(.lparen) == null) return null;
 
         // For now, parse C-style for loops: for (let i = 0; i < N; i++)
@@ -1465,6 +1465,9 @@ const Parser = struct {
         var update: ?*const Statement = null;
         if (self.current.kind != .rparen) {
             if (self.parseExpression()) |e| update = self.storeUpdateStmt(.{ .expr_stmt = .{ .expr = e } });
+        } else {
+            // N-132: the TS reference refuses an empty update slot in its parser.
+            self.addErrorAt(for_tok, "For loop must have an update expression");
         }
         if (self.expect(.rparen) == null) return null;
 

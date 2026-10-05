@@ -217,4 +217,18 @@ class TestLoopUpdateClause < Minitest::Test
     ok, _hex, msg = compile_source(source, "Countdown.runar.ts")
     assert ok, "a countdown loop must still compile: #{msg}"
   end
+
+  # N-132: `for (let i = 0n; i < 3n; )` never advances `i` in the source, yet
+  # this tier filled the empty slot with a `0n` placeholder and the unrolled
+  # loop advanced it anyway (938 hex chars, byte-identical to `i++`). The TS
+  # reference refuses it in its parser with the text below.
+  #
+  # Proves: the Ruby `.runar.ts` parser refuses an empty update slot with the
+  # reference's text. Does not prove: anything about other surfaces (their
+  # empty-update shapes are pinned by the conformance negatives N180/N181).
+  def test_n132_empty_ts_update_is_rejected
+    ok, hex, msg = compile_source(ts_with_update(""), "UpdateProbe.runar.ts")
+    refute ok, "an empty for-update must not compile (#{hex.length} hex chars emitted)"
+    assert_includes msg, "For loop must have an update expression"
+  end
 end
