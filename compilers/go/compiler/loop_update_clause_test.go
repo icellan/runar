@@ -117,13 +117,19 @@ class UpdateProbe extends StatefulSmartContract {
 // `.runar.ts` surface. Pre-fix this compiled to byte-identical output with the
 // `i++` loop — five iterations over 0,1,2,3,4 where the source says three over
 // 0,2,4.
+//
+// N-133: the refusal now happens in the parser, with the TS reference's own
+// diagnostic for an assignment operator in the for-update slot, exactly as
+// the other six tiers refuse it on this surface (previously the Go parser
+// desugared `+=` and let the validator refuse only non-unit steps, so `i += 1n`
+// compiled on this tier alone).
 func TestNonUnitStepIsRejectedNotCoerced_TS(t *testing.T) {
 	hex, diags, ok := compileHex(tsWithUpdate("i += 2n"), "UpdateProbe.runar.ts")
 	if ok {
 		t.Fatalf("`i += 2n` must not compile: it silently unrolled with step 1 (%d hex chars)", len(hex))
 	}
-	if !strings.Contains(diags, loopUpdateDiagnostic) {
-		t.Fatalf("rejection must carry the shared cross-tier diagnostic, got: %s", diags)
+	if !strings.Contains(diags, "Unsupported binary operator: '+='") {
+		t.Fatalf("rejection must carry the TS reference's diagnostic, got: %s", diags)
 	}
 }
 

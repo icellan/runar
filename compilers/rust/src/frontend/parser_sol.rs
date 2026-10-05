@@ -1168,49 +1168,15 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_for_update(&mut self) -> Statement {
+        // N-133: the TS reference's Solidity parser takes one expression
+        // here (with an optional postfix `++`/`--`) and then expects `)`, so
+        // `i += 1`, `i -= 1` and `i = i + 1` are refused at the `)`. Leave the
+        // assignment token unconsumed so the caller's `expect(RParen)` refuses
+        // them the same way instead of desugaring them into an Assignment.
         let expr = self.parse_expression();
-
-        // Check for assignment
-        match self.peek() {
-            Token::Eq => {
-                self.advance();
-                let value = self.parse_expression();
-                Statement::Assignment {
-                    target: expr,
-                    value,
-                    source_location: self.loc(),
-                }
-            }
-            Token::PlusEq => {
-                self.advance();
-                let rhs = self.parse_expression();
-                Statement::Assignment {
-                    target: expr.clone(),
-                    value: Expression::BinaryExpr {
-                        op: BinaryOp::Add,
-                        left: Box::new(expr),
-                        right: Box::new(rhs),
-                    },
-                    source_location: self.loc(),
-                }
-            }
-            Token::MinusEq => {
-                self.advance();
-                let rhs = self.parse_expression();
-                Statement::Assignment {
-                    target: expr.clone(),
-                    value: Expression::BinaryExpr {
-                        op: BinaryOp::Sub,
-                        left: Box::new(expr),
-                        right: Box::new(rhs),
-                    },
-                    source_location: self.loc(),
-                }
-            }
-            _ => Statement::ExpressionStatement {
-                expression: expr,
-                source_location: self.loc(),
-            },
+        Statement::ExpressionStatement {
+            expression: expr,
+            source_location: self.loc(),
         }
     }
 

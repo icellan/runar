@@ -1246,25 +1246,13 @@ func (p *parseContext) parseVariableDeclFromForInit(node *sitter.Node) *Variable
 }
 
 func (p *parseContext) parseForUpdate(node *sitter.Node, loc SourceLocation) Statement {
-	// R-065: `parseExpression` has no case for `assignment_expression` or
-	// `augmented_assignment_expression`, so `i = i + 2n` and `i += 2n` both
-	// returned nil and fell through to the no-op sentinel below -- the update
-	// clause was DISCARDED at parse time and the loop then unrolled with the
-	// step the comparison direction implied. Route both through the same
-	// desugaring an assignment in statement position gets (`i += 2n` becomes
-	// `i = i + 2n`), so the validator sees the real update and can accept the
-	// unit step / reject everything else.
-	switch node.Type() {
-	case "assignment_expression":
-		if stmt := p.parseAssignment(node, loc); stmt != nil {
-			return stmt
-		}
-	case "augmented_assignment_expression":
-		if stmt := p.parseAugmentedAssignment(node, loc); stmt != nil {
-			return stmt
-		}
-	}
-
+	// N-133: the TS reference's parseForUpdate accepts only `++`/`--` here
+	// and hands everything else to parseExpression, which refuses an
+	// assignment (`i = i + 1n`, `i += 1n`) or a comma sequence with
+	// "Unsupported binary operator: '<op>'". parseExpression's
+	// assignment / sequence arms emit that same diagnostic, so route every
+	// update through it rather than desugaring assignments into statements
+	// (which compiled the unit-step spellings on this tier alone).
 	expr := p.parseExpression(node)
 	if expr == nil {
 		return ExpressionStmt{Expr: BigIntLiteral{Value: big.NewInt(0)}, SourceLocation: loc}
@@ -1436,8 +1424,8 @@ func (p *parseContext) parseExpression(node *sitter.Node) Expression {
 		return p.unsupportedBinaryOp(node, ",")
 
 	case "assignment_expression", "augmented_assignment_expression":
-		// Assignments are statements only (parseExpressionStatement and
-		// parseForUpdate intercept them first); in expression position the TS
+		// Assignments are statements only (parseExpressionStatement intercepts
+		// them first); in expression position -- including a for-update -- the TS
 		// reference sees a BinaryExpression with an assignment operator.
 		op := "="
 		if opNode := node.ChildByFieldName("operator"); opNode != nil {
