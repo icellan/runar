@@ -22,6 +22,7 @@ from runar.sdk.provider import Provider
 from runar.sdk.signer import Signer
 from runar.sdk.types import TransactionData, TxInput, TxOutput, Utxo
 from runar.sdk.deployment import build_p2pkh_script
+from runar.sdk.local_signer import _base58check_encode
 
 
 # ---------------------------------------------------------------------------
@@ -402,12 +403,12 @@ class WalletSigner(Signer):
         return pub_key
 
     def get_address(self) -> str:
-        """Return the hash160 of the public key as 40-char hex."""
+        """Return the mainnet Base58Check P2PKH address, like LocalSigner (F-146)."""
         pub_key_hex = self.get_public_key()
         pub_key_bytes = bytes.fromhex(pub_key_hex)
         sha256_hash = hashlib.sha256(pub_key_bytes).digest()
         ripemd160_hash = ripemd160_digest(sha256_hash)
-        return ripemd160_hash.hex()
+        return _base58check_encode(b'\x00' + ripemd160_hash)
 
     def sign(
         self,

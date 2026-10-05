@@ -27,6 +27,7 @@ require_relative 'types'
 require_relative 'provider'
 require_relative 'signer'
 require_relative 'deployment'
+require_relative 'bip143'
 require_relative 'oppushtx'
 require_relative 'state'
 
@@ -335,11 +336,12 @@ module Runar
 
       def get_address
         pub_key_hex = get_public_key
-        # hash160 of the compressed public key = 40-char hex pub key hash
+        # Signer contract: Base58Check P2PKH address, mainnet (0x00) like
+        # LocalSigner (F-146; was the raw 40-hex hash160).
         pub_key_bytes = [pub_key_hex].pack('H*')
         sha = Digest::SHA256.digest(pub_key_bytes)
         ripemd = Digest::RMD160.digest(sha)
-        ripemd.unpack1('H*')
+        BIP143.base58check_encode("\x00".b + ripemd)
       end
 
       # Sign a transaction input via the BRC-100 wallet.

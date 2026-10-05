@@ -376,6 +376,8 @@ pub const WalletSigner = struct {
     protocol_id: ProtocolID,
     key_id: []const u8,
     cached_pub_key: ?[]const u8 = null,
+    /// Address network for getAddress; mainnet by default, like LocalSigner.
+    network: @import("bsvz").primitives.network.Network = .mainnet,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -432,24 +434,17 @@ pub const WalletSigner = struct {
     fn getAddressImpl(ctx: *anyopaque, allocator: std.mem.Allocator) signer_mod.SignerError![]u8 {
         const self: *WalletSigner = @ptrCast(@alignCast(ctx));
 
-        // Get public key and compute hash160 to use as address
         const pub_key_hex = try getPublicKeyImpl(@ptrCast(self), allocator);
         defer allocator.free(pub_key_hex);
 
-        // For the wallet signer, the "address" is the hash160 of the public key
-        // (20 bytes = 40 hex chars), consistent with how the SDK uses addresses
-        // as raw hash160 values internally.
+        // Signer contract: the Base58Check P2PKH address on `network`, as
+        // LocalSigner returns (F-146; was the raw 40-hex hash160).
         const pub_key_bytes = state_mod.hexToBytes(allocator, pub_key_hex) catch return signer_mod.SignerError.InvalidEncoding;
         defer allocator.free(pub_key_bytes);
 
         const bsvz = @import("bsvz");
         const ripe_hash = bsvz.crypto.hash.hash160(pub_key_bytes);
-        const hex_buf = allocator.alloc(u8, 40) catch return signer_mod.SignerError.OutOfMemory;
-        _ = bsvz.primitives.hex.encodeLower(&ripe_hash.bytes, hex_buf) catch {
-            allocator.free(hex_buf);
-            return signer_mod.SignerError.InvalidEncoding;
-        };
-        return hex_buf;
+        return bsvz.compat.address.encodeP2pkh(allocator, self.network, ripe_hash) catch return signer_mod.SignerError.OutOfMemory;
     }
 
     fn signImpl(ctx: *anyopaque, allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, subscript_hex: []const u8, satoshis: i64, sighash_type: ?u32) signer_mod.SignerError![]u8 {
@@ -738,4 +733,45 @@ test "F-040 WalletSigner refuses an empty subscript" {
     } else |err| {
         try std.testing.expectEqualStrings("EmptySubscript", @errorName(err));
     }
+}
+
+// F-146: Signer.getAddress is the BSV address. WalletSigner returned the raw
+// 40-hex hash160 instead, which providers keying UTXOs by address (WhatsOnChain
+// /address/{address}/unspent, MockProvider) never match.
+// Proves: for the same key (G, private key 1) WalletSigner yields exactly the
+// mainnet Base58Check address LocalSigner yields, and it decodes back to the
+// key's hash160. Does not prove: anything about a live provider lookup.
+test "F-146 WalletSigner.getAddress is LocalSigner's Base58Check address" {
+    const allocator = std.testing.allocator;
+    const g_hex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const GWallet = struct {
+        fn getPublicKey(_: *anyopaque, a: std.mem.Allocator, _: ProtocolID, _: []const u8) WalletError![]u8 {
+            return a.dupe(u8, g_hex) catch return WalletError.OutOfMemory;
+        }
+        const vtable = WalletClient.VTable{
+            .getPublicKey = getPublicKey,
+            .createSignature = MockWalletClient.createSignatureImpl,
+            .createAction = MockWalletClient.createActionImpl,
+            .listOutputs = MockWalletClient.listOutputsImpl,
+        };
+    };
+    var mock = MockWalletClient.init(allocator);
+    defer mock.deinit();
+    const wc = WalletClient{ .ptr = @ptrCast(&mock), .vtable = &GWallet.vtable };
+    var ws = WalletSigner.init(allocator, wc, .{ .level = 2, .name = "test" }, "1");
+    defer ws.deinit();
+
+    const addr = try ws.signer().getAddress(allocator);
+    defer allocator.free(addr);
+
+    var local = try signer_mod.LocalSigner.fromHex("00" ** 31 ++ "01");
+    const local_addr = try local.signer().getAddress(allocator);
+    defer allocator.free(local_addr);
+
+    try std.testing.expectEqualStrings(local_addr, addr);
+    try std.testing.expectEqualStrings("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH", addr);
+
+    const script = try deploy_mod.buildP2PKHScript(allocator, addr);
+    defer allocator.free(script);
+    try std.testing.expectEqualStrings("76a914751e76e8199196d454941c45d1b3a323f1433bd688ac", script);
 }

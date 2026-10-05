@@ -566,8 +566,11 @@ impl<W: WalletClient> Signer for WalletSigner<W> {
         let sha_hash = Sha256::digest(&pub_key_bytes);
         let pkh = Ripemd160::digest(sha_hash);
 
-        // Return as 40-char hex (raw pubkey hash)
-        Ok(bytes_to_hex(&pkh))
+        // Signer contract: Base58Check P2PKH address, mainnet (0x00) like
+        // LocalSigner (F-146; was the raw 40-hex hash160).
+        let mut payload = vec![0x00u8];
+        payload.extend_from_slice(&pkh);
+        Ok(bs58::encode(&payload).with_check().into_string())
     }
 
     fn sign(
@@ -1022,9 +1025,18 @@ mod tests {
         let wallet = MockWalletClient::new();
         let signer = WalletSigner::new(wallet, (2, "test".to_string()), "1".to_string());
         let addr = signer.get_address().unwrap();
-        // Address is a 40-char hex pubkey hash
-        assert_eq!(addr.len(), 40);
-        assert!(addr.chars().all(|c| c.is_ascii_hexdigit()));
+        // F-146: Signer::get_address is the Base58Check P2PKH address, the same
+        // mainnet address LocalSigner gives for the same key (the mock's key is
+        // G = private key 1). It used to be the raw 40-hex hash160, which an
+        // address-keyed provider never matches. Proves equality with LocalSigner
+        // and the hash160 round-trip; does not prove a live provider lookup.
+        let local = super::super::signer::LocalSigner::new(&format!("{}01", "00".repeat(31))).unwrap();
+        assert_eq!(addr, local.get_address().unwrap());
+        assert_eq!(addr, "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH");
+        assert_eq!(
+            build_p2pkh_script(&addr),
+            "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"
+        );
     }
 
     // F-040: WalletSigner computes the BIP-143 digest locally, so an empty

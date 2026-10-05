@@ -141,10 +141,18 @@ RSpec.describe Runar::SDK::WalletSigner do
     expect(wallet.calls.count { |c| c.first == :get_public_key }).to eq(1)
   end
 
-  it 'computes a BSV address from the cached public key' do
+  # F-146: Signer#get_address is the Base58Check P2PKH address, the same
+  # mainnet address LocalSigner gives for the same key (the mock's key is
+  # G = private key 1). It used to be the raw 40-hex hash160, which an
+  # address-keyed provider never matches. Proves equality with LocalSigner and
+  # the hash160 round-trip; does not prove a live provider lookup.
+  it 'returns the same Base58Check P2PKH address as LocalSigner for the same key' do
+    require 'runar/sdk/local_signer'
     addr = signer.get_address
-    expect(addr).to be_a(String)
-    expect(addr.length).to eq(40) # 20-byte RIPEMD160 as hex
+    local = Runar::SDK::LocalSigner.new(('00' * 31) + '01')
+    expect(addr).to eq(local.get_address)
+    expect(addr).to eq('1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH')
+    expect(Runar::SDK.build_p2pkh_script(addr)).to eq('76a914751e76e8199196d454941c45d1b3a323f1433bd688ac')
   end
 
   it 'sign_hash delegates to the wallet (no sighash-type byte appended)' do

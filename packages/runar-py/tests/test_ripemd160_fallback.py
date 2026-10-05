@@ -144,7 +144,10 @@ def test_import_and_hash_paths_work_without_hashlib_ripemd160():
     from runar.test_keys import ALICE
     alice_pkh = _ripemd160_pure(hashlib.sha256(ALICE.pub_key).digest()).hex()
     assert out['alice_pkh'] == alice_pkh
-    assert out['wallet_address'] == alice_pkh
+    # F-146: WalletSigner.get_address is now a Base58Check address; decoding
+    # it must still yield exactly the fallback-computed hash160.
+    from runar.sdk.deployment import build_p2pkh_script
+    assert build_p2pkh_script(out['wallet_address']) == '76a914' + alice_pkh + '88ac'
     assert out['p2pkh'] == '76a914' + alice_pkh + '88ac'
     assert out['anf_ripemd160'] == '8eb208f7e05d987a9b044a8e98c6b087f15a0bfc'
     assert out['anf_hash160'] == expected_h160_test

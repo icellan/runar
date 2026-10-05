@@ -156,17 +156,26 @@ class TestWalletSignerGetPublicKey:
 # ---------------------------------------------------------------------------
 
 class TestWalletSignerGetAddress:
-    def test_returns_hash160_of_pubkey(self):
-        """get_address returns hash160 of the public key as 40-char hex."""
+    def test_returns_base58check_address_matching_local_signer(self):
+        """F-146: get_address returns the Base58Check P2PKH address (Signer
+        contract), the same mainnet address LocalSigner gives for the same key.
+
+        Proves: the address equals LocalSigner's for key 1 (MOCK_PUB_KEY = G)
+        and decodes back to the key's hash160. Does not prove: anything about a
+        live provider lookup by address.
+        """
+        from runar.sdk.local_signer import LocalSigner
+
         wallet = MockWalletClient()
         signer = WalletSigner(wallet, protocol_id=(2, 'test'), key_id='1')
 
         address = signer.get_address()
 
-        expected = _mock_pub_key_hash()
-        assert address == expected
-        assert len(address) == 40
-        assert all(c in '0123456789abcdef' for c in address)
+        local = LocalSigner('00' * 31 + '01')
+        assert local.get_public_key() == MOCK_PUB_KEY
+        assert address == local.get_address()
+        assert address == '1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH'
+        assert build_p2pkh_script(address) == '76a914' + _mock_pub_key_hash() + '88ac'
 
 
 # ---------------------------------------------------------------------------

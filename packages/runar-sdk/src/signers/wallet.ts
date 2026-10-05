@@ -16,6 +16,7 @@ import {
   Script,
   Hash,
   Utils,
+  PublicKey,
   type SecurityLevel,
 } from '@bsv/sdk';
 
@@ -53,10 +54,10 @@ export class WalletSigner implements Signer {
   }
 
   async getAddress(): Promise<string> {
+    // Signer contract: Base58Check P2PKH address, mainnet like LocalSigner
+    // (F-146; was the raw hex hash160, which address-keyed providers miss).
     const pubKeyHex = await this.getPublicKey();
-    const pubKeyBytes = Utils.toArray(pubKeyHex, 'hex');
-    const hash160 = Hash.hash160(pubKeyBytes);
-    return Utils.toHex(hash160);
+    return PublicKey.fromString(pubKeyHex).toAddress();
   }
 
   async sign(
